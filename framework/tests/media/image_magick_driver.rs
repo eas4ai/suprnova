@@ -349,6 +349,146 @@ fn hardening_an_mvg_document_is_refused_before_the_real_binary_runs() {
     );
 }
 
+#[test]
+#[serial_test::serial]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn hardening_autodetected_input_meets_the_framework_policy_in_the_real_binary() {
+    // Under the opt-in, ImageMagick reads PostScript and PDF by their
+    // magic and hands them to Ghostscript. The framework's policy denies
+    // both coders, so ImageMagick refuses them by policy before it starts
+    // anything, on a host whose own policy is silent on them.
+    let _config = crate::image_processing::ConfigGuard::set(
+        suprnova::ImageConfig::default().magick_autodetect(true),
+    );
+    let documents: [(&str, &[u8]); 2] = [
+        (
+            "an EPS document",
+            b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 1 1\nshowpage\n",
+        ),
+        (
+            "a PDF document",
+            b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
+              2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
+              3 0 obj<</Type/Page/MediaBox[0 0 1 1]/Parent 2 0 R>>endobj\n\
+              trailer<</Root 1 0 R>>\n%%EOF\n",
+        ),
+    ];
+    for (what, bytes) in documents {
+        let err = driver()
+            .process(bytes, &pipeline(Vec::new(), OutputFormat::Png))
+            .expect_err(&format!("{what} is refused"));
+        assert!(
+            err.to_string().contains("security policy"),
+            "{what} is refused by the policy: {err}"
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn hardening_the_installed_policy_in_effect_passes_the_check() {
+    // The driver reads `magick -list policy` before its first run, then
+    // runs an MVG probe that the installed ImageMagick's policy must
+    // refuse, and refuses every run unless both pass, so a run that
+    // succeeds is the listing passing and the probe refused.
+    let _config = crate::image_processing::ConfigGuard::set(suprnova::ImageConfig::default());
+    assert_eq!(
+        driver()
+            .dimensions(RED_PNG_1X1)
+            .expect("the policy in effect on this host passes the framework's check"),
+        (1, 1)
+    );
+}
+
+/// The host policies the grant test starts its children under, and what
+/// each child expects.
+const HOST_GRANTS: [&str; 3] = ["operator", "user", "stealth"];
+
+#[test]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn hardening_a_host_grant_is_refused_in_the_real_binary() {
+    let scratch =
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("hardening-magick-host-grant");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let grant = "<policymap>\n  <policy domain=\"coder\" rights=\"read|write\" pattern=\"MVG\" />\n</policymap>\n";
+    // ImageMagick applies a stealth entry and leaves it out of
+    // `magick -list policy`.
+    let stealth = grant.replace(" />", " stealth=\"true\" />");
+    let operator = scratch.join("operator");
+    let user = scratch.join("user").join("ImageMagick");
+    let hidden = scratch.join("stealth").join("ImageMagick");
+    for (dir, policy) in [
+        (&operator, grant),
+        (&user, grant),
+        (&hidden, stealth.as_str()),
+    ] {
+        std::fs::create_dir_all(dir).expect("create the policy directory");
+        std::fs::write(dir.join("policy.xml"), policy).expect("write the grant");
+    }
+    for case in HOST_GRANTS {
+        let output = {
+            let _env = crate::env_lock::lock_env();
+            let mut child = crate::own_process::child_command(
+                "image_magick_driver::hardening_a_host_grant_is_refused_in_the_real_binary_child",
+            );
+            child.env("HARDENING_MAGICK_GRANT", case);
+            match case {
+                // On the operator's configure path, between the framework's
+                // directory and the framework's directory again.
+                "operator" => child.env("MAGICK_CONFIGURE_PATH", &operator),
+                // In the user's ImageMagick directory, which ImageMagick
+                // reads after every directory on the configure path.
+                "user" => child.env("XDG_CONFIG_HOME", scratch.join("user")),
+                // The same, marked stealth, so the listing passes.
+                _ => child.env("XDG_CONFIG_HOME", scratch.join("stealth")),
+            };
+            child.output().expect("the child runs")
+        };
+        crate::own_process::assert_child_passed(&output);
+    }
+}
+
+/// Runs only in the child process the grant test starts, under a host
+/// policy that grants the MVG coder.
+#[test]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn hardening_a_host_grant_is_refused_in_the_real_binary_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _config = crate::image_processing::ConfigGuard::set(suprnova::ImageConfig::default());
+    let result = driver().dimensions(RED_PNG_1X1);
+    match std::env::var("HARDENING_MAGICK_GRANT").as_deref() {
+        // The framework's directory comes last on the configure path, so
+        // the operator's grant is outranked and the check passes.
+        Ok("operator") => assert_eq!(result.expect("the grant is outranked"), (1, 1)),
+        Ok("user") => {
+            let err = result
+                .expect_err("a user policy that grants MVG refuses the run")
+                .to_string();
+            assert!(err.contains("the MVG coder"), "{err}");
+            assert!(err.contains("ImageMagick/policy.xml"), "{err}");
+        }
+        // The listing does not show the grant, and the probe catches it.
+        Ok("stealth") => {
+            let err = result
+                .expect_err("a stealth grant of MVG refuses the run")
+                .to_string();
+            assert!(
+                err.contains("cannot be shown to deny the MVG coder"),
+                "{err}"
+            );
+            assert!(
+                err.contains("ImageMagick read an MVG probe script"),
+                "{err}"
+            );
+            assert!(err.contains("stealth"), "{err}");
+        }
+        other => panic!("unknown case {other:?}"),
+    }
+}
+
 /// Runs alone in a child process (see `own_process`). The facade's default
 /// driver is installed once per process, by whichever test first reaches
 /// the facade, and most tests in this binary go through the facade with the

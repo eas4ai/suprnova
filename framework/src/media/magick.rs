@@ -21,16 +21,31 @@
 //! transform that applies an orientation the framework read. A custom
 //! transformation contributes no argument at all: it runs on the pixels,
 //! in Rust, between two ImageMagick runs. The image bytes go over stdin and
-//! come back over stdout; the driver writes no temporary file, so there is
-//! no path to traverse and nothing to clean up. (ImageMagick itself copies
-//! stdin into its own temporary directory before it decodes, and removes
-//! the copy when it exits.)
+//! come back over stdout; the driver writes the image to no file, so there
+//! is no path an input names and nothing of it to clean up. (ImageMagick
+//! itself copies stdin into its own temporary directory before it decodes,
+//! and removes the copy when it exits.)
 //!
 //! The input argument always names the coder (`png:-`, `heic:-`), so
 //! ImageMagick never chooses one from the bytes of an upload. Bytes the
 //! framework cannot name are refused before ImageMagick starts, unless the
 //! application opts into autodetection with `IMAGE_MAGICK_AUTODETECT`; see
 //! [`input_spec`].
+//!
+//! # Policy
+//!
+//! Every run reads the framework's own ImageMagick security policy,
+//! [`MagickCliDriver::POLICY`], whether or not autodetection is on (HRD-010).
+//! The driver writes it as `policy.xml` into a directory of its own, one a
+//! process under the system's temporary directory, checks the file before
+//! each run and writes it again when it differs, and starts ImageMagick
+//! with `MAGICK_CONFIGURE_PATH` naming that directory first and last. It is
+//! the one file the driver writes. Because ImageMagick applies the last
+//! entry that matches, and reads its own configuration directory and the
+//! user's after that path, the driver also checks the policy in effect with
+//! `magick -list policy`, once a process. A run whose policy cannot be put
+//! in place, or whose policy in effect reopens a denial, is refused before
+//! ImageMagick starts for it.
 //!
 //! # Two-tier limits
 //!
@@ -48,9 +63,11 @@
 //!    spills the pixel cache to disk and the memory cap stops being a cap.
 
 use std::borrow::Cow;
+use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc;
+use std::sync::{Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::config::env_optional;
@@ -107,6 +124,12 @@ const MIN_OUTPUT_READ: usize = 8 * 1024;
 /// refused before the binary starts, unless `IMAGE_MAGICK_AUTODETECT` lets
 /// ImageMagick choose the coder.
 ///
+/// Every run reads the framework's ImageMagick policy, [`Self::POLICY`],
+/// which denies the network, script, text and Ghostscript coders, every
+/// delegate, and indirect `@file` reads. The host's own policy still
+/// applies beside it, and the driver refuses to run when the policy in
+/// effect reopens any of those denials.
+///
 /// Output formats are whatever the host's delegates can write. WebP goes
 /// through libwebp, and [`OutputFormat::WebP`] hands it the pipeline's
 /// quality for a lossy encode, with one difference from the built-in
@@ -145,6 +168,92 @@ impl MagickCliDriver {
     pub fn binary(&self) -> &str {
         &self.binary
     }
+
+    /// The ImageMagick security policy every run of this driver reads
+    /// (HRD-010).
+    ///
+    /// Before each run the driver writes this text as `policy.xml` into a
+    /// directory of its own and starts ImageMagick with
+    /// `MAGICK_CONFIGURE_PATH` naming that directory first and last,
+    /// whether or not `IMAGE_MAGICK_AUTODETECT` is on. A named coder
+    /// (`png:-`) already keeps an upload away from the coders below; this
+    /// policy is what keeps them closed to input under the autodetection
+    /// opt-in, which ImageMagick reads as whatever its bytes say.
+    ///
+    /// Every entry denies, with `rights="none"`:
+    ///
+    /// - `URL`, `HTTP`, `HTTPS`, `FTP`: the coders that fetch from the
+    ///   network. Input that names one, such as `url:http://...`, would make
+    ///   the server send a request the uploader chose.
+    /// - `MVG`, `MSL`: ImageMagick's drawing language and its scripting
+    ///   language. Both read and write other files and URLs by name, which
+    ///   turns an upload into a program (the ImageTragick class of bug).
+    /// - `TEXT`, `LABEL`, `CAPTION`, `PANGO`: the coders that draw text.
+    ///   They read a file their input names (`text:/etc/passwd`,
+    ///   `label:@file`) and draw it into the image the server sends back.
+    /// - `SCREENSHOT`, `X`: the coders that read the server's display.
+    /// - `EPHEMERAL`: reads a file and then deletes it.
+    /// - `PS`, `PS2`, `PS3`, `EPS`, `PDF`, `XPS`: the formats ImageMagick
+    ///   hands to Ghostscript, an interpreter with its own record of sandbox
+    ///   escapes. They are denied by coder as well as by delegate, so the
+    ///   refusal comes before ImageMagick chooses how to run Ghostscript,
+    ///   as an external program or as a library it links.
+    /// - `domain="delegate" pattern="*"`: every external program ImageMagick
+    ///   would start for a format, such as Ghostscript or ffmpeg. A format
+    ///   the host's ImageMagick reads through a library it links (libheif
+    ///   for HEIC, libtiff, libwebp) uses no delegate and still reads.
+    /// - `domain="path" pattern="@*"`: indirect reads, where an argument that
+    ///   starts with `@` names a file for ImageMagick to read in its place.
+    ///
+    /// A pattern without a wildcard names one coder: `PS` leaves `PSD`
+    /// alone, and `TEXT` leaves `TXT`, the pixel listing `dominant_color`
+    /// writes, alone.
+    ///
+    /// ImageMagick reads every `policy.xml` it finds: the directories of
+    /// `MAGICK_CONFIGURE_PATH` in order, then its own configuration
+    /// directory, then the user's (`$XDG_CONFIG_HOME/ImageMagick` or
+    /// `~/.config/ImageMagick`). Where two entries match, it applies the one
+    /// it read last. The driver names its directory both first and last on
+    /// `MAGICK_CONFIGURE_PATH`, so no entry on the operator's path outranks
+    /// this policy, while the host's denials still apply. ImageMagick's own
+    /// directory and the user's are read after it, though, and a grant
+    /// there, such as `rights="read|write" pattern="MVG"` or a grant on
+    /// `pattern="*"`, would outrank it. So the driver checks the result:
+    /// before the first run of a process it reads the policy in effect with
+    /// `magick -list policy`, and refuses every run when any of these
+    /// denials is reopened or missing. The listing leaves out an entry
+    /// marked `stealth="true"`, so the check also runs one MVG probe that
+    /// the policy in effect must refuse.
+    pub const POLICY: &'static str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Suprnova's magick image driver writes this file and checks it before
+  every ImageMagick run, so an edit here does not last. Put your own policy
+  in ImageMagick's configuration directory: ImageMagick reads both.
+-->
+<policymap>
+  <policy domain="coder" rights="none" pattern="URL" />
+  <policy domain="coder" rights="none" pattern="HTTP" />
+  <policy domain="coder" rights="none" pattern="HTTPS" />
+  <policy domain="coder" rights="none" pattern="FTP" />
+  <policy domain="coder" rights="none" pattern="MVG" />
+  <policy domain="coder" rights="none" pattern="MSL" />
+  <policy domain="coder" rights="none" pattern="TEXT" />
+  <policy domain="coder" rights="none" pattern="LABEL" />
+  <policy domain="coder" rights="none" pattern="CAPTION" />
+  <policy domain="coder" rights="none" pattern="PANGO" />
+  <policy domain="coder" rights="none" pattern="SCREENSHOT" />
+  <policy domain="coder" rights="none" pattern="X" />
+  <policy domain="coder" rights="none" pattern="EPHEMERAL" />
+  <policy domain="coder" rights="none" pattern="PS" />
+  <policy domain="coder" rights="none" pattern="PS2" />
+  <policy domain="coder" rights="none" pattern="PS3" />
+  <policy domain="coder" rights="none" pattern="EPS" />
+  <policy domain="coder" rights="none" pattern="PDF" />
+  <policy domain="coder" rights="none" pattern="XPS" />
+  <policy domain="delegate" rights="none" pattern="*" />
+  <policy domain="path" rights="none" pattern="@*" />
+</policymap>
+"#;
 
     /// Name the input, and apply the framework-tier limits to input we can
     /// parse ourselves.
@@ -189,6 +298,68 @@ impl MagickCliDriver {
         config: &ImageConfig,
         room: usize,
     ) -> Result<Vec<u8>, FrameworkError> {
+        // HRD-010: the policy goes in place and the policy in effect is
+        // checked first, so a run that cannot have it is refused before
+        // ImageMagick is started for it. Every ImageMagick run passes
+        // through here, the probes included.
+        let operator = operator_configure_path();
+        let configure_path = prepare_policy(operator.as_deref())?;
+        self.verify_policy(&configure_path, operator, config)?;
+        self.execute(args, input, config, room, &configure_path)
+    }
+
+    /// Start the binary with `args` under `configure_path`, stream `input`
+    /// in, and collect stdout, keeping `room` bytes of capacity past it.
+    /// A run that exits with a failure, or writes nothing, is an error.
+    ///
+    /// The caller has put the framework's policy in place on
+    /// `configure_path` and, for a run on an image, checked the policy in
+    /// effect.
+    fn execute(
+        &self,
+        args: &[String],
+        input: &[u8],
+        config: &ImageConfig,
+        room: usize,
+        configure_path: &OsStr,
+    ) -> Result<Vec<u8>, FrameworkError> {
+        let Finished {
+            status,
+            stdout,
+            stderr,
+        } = self.finish(args, input, config, room, configure_path)?;
+        if !status.success() {
+            let stderr = String::from_utf8_lossy(&stderr);
+            let detail = match sanitise_stderr(&stderr) {
+                Some(detail) => detail,
+                None => format!("exited with {status}"),
+            };
+            // A failure here is usually a bad or unsupported input, so this
+            // is caller-facing (4xx) rather than an internal fault.
+            return Err(FrameworkError::param(format!(
+                "image processing failed in ImageMagick: {detail}"
+            )));
+        }
+        if stdout.is_empty() {
+            return Err(FrameworkError::param(
+                "image processing failed in ImageMagick: it produced no output",
+            ));
+        }
+        Ok(stdout)
+    }
+
+    /// [`Self::execute`] up to the child's exit: the exit status and both
+    /// streams, whatever the status. An error here means the child could not
+    /// be started, waited for, or finished within the deadline, so there is
+    /// no exit status to judge.
+    fn finish(
+        &self,
+        args: &[String],
+        input: &[u8],
+        config: &ImageConfig,
+        room: usize,
+        configure_path: &OsStr,
+    ) -> Result<Finished, FrameworkError> {
         // The driver makes the stdin pipe itself, rather than through
         // `Stdio::piped()`, to keep a read end of its own: see the writer
         // below.
@@ -203,6 +374,7 @@ impl MagickCliDriver {
         let mut command = Command::new(&self.binary);
         command
             .args(args)
+            .env("MAGICK_CONFIGURE_PATH", configure_path)
             .stdin(stdin_reader)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -295,25 +467,11 @@ impl MagickCliDriver {
         // otherwise extend the call past the deadline it just met.
         let stdout = out_rx.recv_timeout(READER_DRAIN_GRACE).unwrap_or_default();
         let stderr = err_rx.recv_timeout(READER_DRAIN_GRACE).unwrap_or_default();
-
-        if !status.success() {
-            let stderr = String::from_utf8_lossy(&stderr);
-            let detail = match sanitise_stderr(&stderr) {
-                Some(detail) => detail,
-                None => format!("exited with {status}"),
-            };
-            // A failure here is usually a bad or unsupported input, so this
-            // is caller-facing (4xx) rather than an internal fault.
-            return Err(FrameworkError::param(format!(
-                "image processing failed in ImageMagick: {detail}"
-            )));
-        }
-        if stdout.is_empty() {
-            return Err(FrameworkError::param(
-                "image processing failed in ImageMagick: it produced no output",
-            ));
-        }
-        Ok(stdout)
+        Ok(Finished {
+            status,
+            stdout,
+            stderr,
+        })
     }
 
     /// The error a wall-clock kill produces.
@@ -411,6 +569,729 @@ impl MagickCliDriver {
         // Reap, or the zombie outlives the request.
         let _ = child.wait();
     }
+}
+
+/// The file ImageMagick looks for in each directory of its configure path.
+const POLICY_FILE: &str = "policy.xml";
+
+/// The start of the name of a process's policy directory. The process id
+/// and a random suffix follow: the id so an operator can tell which process
+/// a directory belongs to, and the suffix so nobody can guess the name and
+/// make the directory first.
+const POLICY_DIR_PREFIX: &str = "suprnova-magick-policy-";
+
+/// ImageMagick's separator between the directories of
+/// `MAGICK_CONFIGURE_PATH`, its `DirectoryListSeparator`: `;` on Windows
+/// and `:` everywhere else.
+const CONFIGURE_PATH_SEPARATOR: &str = if cfg!(windows) { ";" } else { ":" };
+
+/// This process's policy directory, made by the first run that needs one.
+///
+/// A mutex rather than a `OnceLock`, because the slot changes after it is
+/// first filled: a directory that cannot be made at one run may be made at
+/// the next, and one removed under the process is replaced. Holding the lock
+/// while the policy is checked and written also keeps two runs of this
+/// process from writing the file at the same time.
+static POLICY_DIR: Mutex<Option<PolicyDir>> = Mutex::new(None);
+
+/// The directory a process keeps its ImageMagick policy in (HRD-010).
+///
+/// One a process, under [`std::env::temp_dir`]: the framework has no
+/// temporary directory of its own, and the system's is the one place every
+/// process can expect to write. The directory is made in one `mkdir` that
+/// fails if the name exists, with a name nobody can guess and, on unix, mode
+/// `0700`. So no other user can make it first, put a file in it, or replace
+/// the policy in it; the only users who can are this process's own and root,
+/// which can change what ImageMagick runs anyway.
+///
+/// It stays after the process exits, because Rust runs no destructor for a
+/// static. It holds one small file, and the system's temporary-file cleanup
+/// removes it in time.
+struct PolicyDir {
+    path: PathBuf,
+    /// The user that owned the directory when this process made it: this
+    /// process's user, read back from the directory, because std has no
+    /// portable call that names it.
+    #[cfg(unix)]
+    owner: u32,
+}
+
+impl PolicyDir {
+    /// Make a new policy directory under the system's temporary directory.
+    fn create() -> Result<Self, FrameworkError> {
+        let parent = std::env::temp_dir();
+        // ImageMagick splits `MAGICK_CONFIGURE_PATH` at the separator and
+        // has no way to quote one, so a directory whose path holds it would
+        // be read as two other directories.
+        if parent
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .any(|byte| CONFIGURE_PATH_SEPARATOR.as_bytes().contains(byte))
+        {
+            return Err(policy_error(
+                &parent,
+                format!(
+                    "the path holds `{CONFIGURE_PATH_SEPARATOR}`, which ImageMagick reads as the \
+                     end of a directory in MAGICK_CONFIGURE_PATH; point TMPDIR at a path \
+                     without it"
+                ),
+            ));
+        }
+        let prefix = format!("{POLICY_DIR_PREFIX}{}-", std::process::id());
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(&prefix);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // tempfile makes a directory with mode 0777 less the umask
+            // unless told otherwise.
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let path = builder
+            .tempdir_in(&parent)
+            .map_err(|e| policy_error(&parent, format!("could not make a directory in it: {e}")))?
+            .keep();
+        #[cfg(unix)]
+        let owner = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::symlink_metadata(&path)
+                .map_err(|e| policy_error(&path, format!("could not read the directory: {e}")))?
+                .uid()
+        };
+        Ok(Self {
+            path,
+            #[cfg(unix)]
+            owner,
+        })
+    }
+
+    /// Whether the directory is still the one this process made: a
+    /// directory, not a link to one, owned by the user that made it, and
+    /// closed to everyone else. One that a temporary-file cleaner removed,
+    /// or that was replaced or opened up, is not, and the caller makes a new
+    /// one rather than trust it.
+    fn is_intact(&self) -> bool {
+        let Ok(meta) = std::fs::symlink_metadata(&self.path) else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            if meta.uid() != self.owner || meta.permissions().mode() & 0o077 != 0 {
+                return false;
+            }
+        }
+        meta.is_dir()
+    }
+
+    /// Leave the framework's policy in the directory: check the file, write
+    /// it again when it is missing or differs, and check it again after the
+    /// write, so a run starts only on a file known to hold the policy.
+    fn ensure_policy(&self) -> Result<(), FrameworkError> {
+        let file = self.path.join(POLICY_FILE);
+        match check_policy(&file) {
+            Ok(PolicyFile::Same) => return Ok(()),
+            // A new directory, or one whose file a cleaner removed.
+            Ok(PolicyFile::Missing) => {}
+            Ok(PolicyFile::Different) | Err(_) => {
+                tracing::warn!(
+                    path = %file.display(),
+                    "image: the magick driver's ImageMagick policy is not the framework's; \
+                     writing it again"
+                );
+            }
+        }
+        write_policy(&self.path, &file)
+            .map_err(|e| policy_error(&file, format!("could not write it: {e}")))?;
+        match check_policy(&file) {
+            Ok(PolicyFile::Same) => Ok(()),
+            Ok(PolicyFile::Missing | PolicyFile::Different) => Err(policy_error(
+                &file,
+                "it does not hold the framework's policy after the driver wrote it",
+            )),
+            Err(e) => Err(policy_error(&file, format!("could not read it back: {e}"))),
+        }
+    }
+}
+
+/// What a policy file holds, against [`MagickCliDriver::POLICY`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PolicyFile {
+    /// No file by that name.
+    Missing,
+    /// A file holding exactly the framework's policy.
+    Same,
+    /// Anything else: other bytes, or a link or a directory by that name.
+    Different,
+}
+
+/// Check the file at `path` against the framework's policy.
+///
+/// A link counts as different whatever it points to, because ImageMagick
+/// would follow it and its target can change after the check. The read stops
+/// one byte past the policy's length, which is enough to tell a longer file
+/// apart, so a large file costs no more to check than the policy.
+fn check_policy(path: &Path) -> std::io::Result<PolicyFile> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(PolicyFile::Missing),
+        Err(e) => return Err(e),
+    };
+    if !meta.is_file() {
+        return Ok(PolicyFile::Different);
+    }
+    let policy = MagickCliDriver::POLICY.as_bytes();
+    let mut held = Vec::with_capacity(policy.len() + 1);
+    std::fs::File::open(path)?
+        .take(policy.len() as u64 + 1)
+        .read_to_end(&mut held)?;
+    Ok(if held == policy {
+        PolicyFile::Same
+    } else {
+        PolicyFile::Different
+    })
+}
+
+/// Write the framework's policy to `file` in `dir`, whole or not at all.
+///
+/// The bytes go to a new file in the same directory, which then replaces
+/// `file` in one rename, a link by that name included. An ImageMagick run
+/// this process started earlier can be reading the policy at that moment,
+/// and it reads the old file or the new one, never a half-written one that
+/// ends before the entries that matter. There is no `sync_all`: ImageMagick
+/// reads the file through the page cache, so the rename is enough for it to
+/// see every byte, and after a crash the next run checks the file again.
+fn write_policy(dir: &Path, file: &Path) -> std::io::Result<()> {
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".policy-")
+        .tempfile_in(dir)?;
+    temporary.write_all(MagickCliDriver::POLICY.as_bytes())?;
+    // A failed rename drops the temporary file, which removes it.
+    temporary.persist(file).map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// The error that refuses a run whose policy cannot be put in place.
+///
+/// An `internal` (5xx) error: the cause is the host, such as a temporary
+/// directory the process cannot write, not the request, and an operator
+/// watches server errors. It names the path and the cause, and never the
+/// policy's bytes.
+fn policy_error(path: &Path, cause: impl std::fmt::Display) -> FrameworkError {
+    FrameworkError::internal(format!(
+        "image: the magick driver could not put its ImageMagick policy in place at `{}`: \
+         {cause}. ImageMagick was not started.",
+        path.display()
+    ))
+}
+
+/// The operator's own `MAGICK_CONFIGURE_PATH`, when it names anything. An
+/// empty value adds no directory, so it counts as unset.
+fn operator_configure_path() -> Option<OsString> {
+    std::env::var_os("MAGICK_CONFIGURE_PATH").filter(|value| !value.is_empty())
+}
+
+/// Put the framework's policy in place for one run, and return the
+/// `MAGICK_CONFIGURE_PATH` the run starts with.
+///
+/// A poisoned lock is taken as it stands: the slot holds a path, and
+/// nothing a panic could leave half done is trusted, since every run checks
+/// the directory and the file again.
+fn prepare_policy(operator: Option<&OsStr>) -> Result<OsString, FrameworkError> {
+    let mut slot = POLICY_DIR.lock().unwrap_or_else(PoisonError::into_inner);
+    let dir = match slot.take() {
+        Some(dir) if dir.is_intact() => dir,
+        previous => {
+            if let Some(previous) = previous {
+                tracing::warn!(
+                    path = %previous.path.display(),
+                    "image: the magick driver's ImageMagick policy directory was removed or \
+                     changed; making a new one"
+                );
+            }
+            PolicyDir::create()?
+        }
+    };
+    let dir = slot.insert(dir);
+    dir.ensure_policy()?;
+    Ok(configure_path(&dir.path, operator))
+}
+
+/// The `MAGICK_CONFIGURE_PATH` a run starts with: the policy directory,
+/// the operator's own value unchanged, and the policy directory again.
+///
+/// ImageMagick reads the `policy.xml` of every directory on the path, in
+/// order, and where two entries match it applies the one it read last. With
+/// the framework's directory last as well as first, no entry on the
+/// operator's path can outrank the framework's, while the operator's
+/// denials, and the other configuration files the operator keeps there,
+/// still apply. The operator's value is kept byte for byte rather than split
+/// and joined again, so a directory list ImageMagick accepted before reads
+/// the same after. With no operator value the one directory is both first
+/// and last.
+fn configure_path(dir: &Path, operator: Option<&OsStr>) -> OsString {
+    let mut value = dir.as_os_str().to_owned();
+    if let Some(operator) = operator {
+        value.push(CONFIGURE_PATH_SEPARATOR);
+        value.push(operator);
+        value.push(CONFIGURE_PATH_SEPARATOR);
+        value.push(dir);
+    }
+    value
+}
+
+/// The verdict on the policy in effect, for each binary and operator
+/// configure path this process has run ImageMagick with (HRD-010).
+///
+/// ImageMagick reads its own configuration directory and the user's after
+/// every directory on `MAGICK_CONFIGURE_PATH`, so a grant there outranks the
+/// framework's policy wherever the driver puts it. The driver therefore
+/// asks ImageMagick for the policy it applies, once a process for each pair,
+/// and keeps the verdict: the host's policy files do not change under a
+/// running process in any way the driver is meant to follow. A vector, not
+/// a map, because a process runs one binary under one configure path in
+/// practice. The lock is held while ImageMagick lists its policy, so two
+/// first runs ask once.
+static POLICY_VERDICTS: Mutex<Vec<PolicyVerdict>> = Mutex::new(Vec::new());
+
+/// What the check of the policy in effect found for one binary and one
+/// operator configure path.
+struct PolicyVerdict {
+    binary: String,
+    operator: Option<OsString>,
+    /// Why the policy in effect fails the check, or `None` when it passes.
+    refusal: Option<String>,
+}
+
+impl MagickCliDriver {
+    /// Check that the policy ImageMagick applies under `configure_path`
+    /// denies everything the framework's policy denies, asking it once a
+    /// process for this binary and `operator` value.
+    ///
+    /// The check reads `<binary> -list policy`, started under the same
+    /// environment as the runs, and when the listing passes, runs one MVG
+    /// probe ([`Self::probe_mvg`]) under it too. A listing that shows any of
+    /// the framework's denials reopened, or missing, or that the driver
+    /// cannot read, and a probe that ImageMagick does not refuse by its
+    /// policy, refuse the run and every later one with this binary and
+    /// operator value. A listing or probe that could not be had at all (the
+    /// binary is missing, or the listing failed or either timed out)
+    /// refuses the run but is not kept: that is a fault of the moment, such
+    /// as ImageMagick installed after the process started, and the next run
+    /// asks again.
+    fn verify_policy(
+        &self,
+        configure_path: &OsStr,
+        operator: Option<OsString>,
+        config: &ImageConfig,
+    ) -> Result<(), FrameworkError> {
+        let mut verdicts = POLICY_VERDICTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(found) = verdicts
+            .iter()
+            .find(|verdict| verdict.binary == self.binary && verdict.operator == operator)
+        {
+            return match &found.refusal {
+                None => Ok(()),
+                Some(cause) => Err(policy_refusal(cause)),
+            };
+        }
+        let args = ["-list".to_string(), "policy".to_string()];
+        let listing = self
+            .execute(&args, b"", config, 0, configure_path)
+            .map_err(|e| {
+                policy_refusal(&format!(
+                    "`{} -list policy` failed, so the policy in effect cannot be verified: {}",
+                    self.binary,
+                    e.message()
+                ))
+            })?;
+        let mut refusal = parse_listing(&String::from_utf8_lossy(&listing))
+            .and_then(|entries| judge_listing(&entries))
+            .err();
+        if refusal.is_none() {
+            refusal = self.probe_mvg(configure_path, config)?;
+        }
+        verdicts.push(PolicyVerdict {
+            binary: self.binary.clone(),
+            operator,
+            refusal: refusal.clone(),
+        });
+        match refusal {
+            None => Ok(()),
+            Some(cause) => Err(policy_refusal(&cause)),
+        }
+    }
+}
+
+/// The MVG script the probe hands ImageMagick: one line, a one-pixel
+/// canvas with nothing drawn on it, so a policy that lets it through costs
+/// nothing and reads no file.
+const MVG_PROBE: &[u8] = b"viewbox 0 0 1 1\n";
+
+impl MagickCliDriver {
+    /// Ask ImageMagick to read an MVG script under `configure_path`, and
+    /// check that its security policy refuses it. Returns why the policy in
+    /// effect fails the check, or `None` when the refusal came.
+    ///
+    /// `magick -list policy` leaves out an entry marked `stealth="true"`, so
+    /// a stealth grant in the host's policy passes [`judge_listing`]. The
+    /// probe sees what ImageMagick does rather than what it lists, for MVG,
+    /// the script coder an upload most often abuses. Its arguments are
+    /// fixed: the limits of every run, `-format %w` with `info:`, which
+    /// writes the width to stdout and no file, and `mvg:-`, which names the
+    /// coder. The refusal counts only as a failed exit whose stderr names the
+    /// security policy and `MVG`: ImageMagick 7.1 writes "not authorized by
+    /// the security policy", and earlier releases "not allowed". A probe
+    /// that cannot be run at all is an error, which the caller does not
+    /// keep. The error never repeats what the probe wrote.
+    fn probe_mvg(
+        &self,
+        configure_path: &OsStr,
+        config: &ImageConfig,
+    ) -> Result<Option<String>, FrameworkError> {
+        let mut args = limit_args(config);
+        args.extend(["-format", "%w", "mvg:-", "info:"].map(String::from));
+        let finished = self
+            .finish(&args, MVG_PROBE, config, 0, configure_path)
+            .map_err(|e| {
+                policy_refusal(&format!(
+                    "the MVG probe of `{}` could not be run, so the policy in effect cannot be \
+                     verified: {}",
+                    self.binary,
+                    e.message()
+                ))
+            })?;
+        let stderr = String::from_utf8_lossy(&finished.stderr);
+        let refused = !finished.status.success()
+            && stderr.contains("security policy")
+            && (stderr.contains("not authorized") || stderr.contains("not allowed"))
+            && stderr.contains("`MVG'");
+        if refused {
+            return Ok(None);
+        }
+        let outcome = if finished.status.success() {
+            "ImageMagick read an MVG probe script"
+        } else {
+            "ImageMagick failed an MVG probe script for a reason other than its security policy"
+        };
+        Ok(Some(format!(
+            "the policy in effect cannot be shown to deny the MVG coder: {outcome}, so either a \
+             policy entry that `magick -list policy` does not show (one marked \
+             `stealth=\"true\"`) reopened it, or ImageMagick refused it in words the driver \
+             does not recognise"
+        )))
+    }
+}
+
+/// The error that refuses a run because the policy in effect fails the
+/// check.
+///
+/// The same `internal` (5xx) class as [`policy_error`]: the cause is the
+/// host's ImageMagick configuration, not the request. It names the entry and
+/// the file it came from, and never the bytes of a policy.
+fn policy_refusal(cause: &str) -> FrameworkError {
+    FrameworkError::internal(format!(
+        "image: the magick driver refused to run ImageMagick: {cause}"
+    ))
+}
+
+/// One entry of `magick -list policy`, in the order ImageMagick applies
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListedEntry {
+    /// The `Path:` line above the entry: the file it came from, or
+    /// `[built-in]`.
+    source: String,
+    /// The `Policy:` line: `Coder`, `Delegate`, `Path`, `Resource`, and so on.
+    domain: String,
+    /// The rights, for a domain that has them: `None`, or any of `Read`,
+    /// `Write` and `Execute`.
+    rights: Option<String>,
+    pattern: Option<String>,
+}
+
+impl ListedEntry {
+    fn is(&self, domain: &str) -> bool {
+        self.domain.eq_ignore_ascii_case(domain)
+    }
+
+    /// Whether the entry grants any right. An entry without rights grants
+    /// none: [`parse_listing`] refuses a coder, delegate or path entry
+    /// without them.
+    fn grants(&self) -> bool {
+        self.rights
+            .as_deref()
+            .is_some_and(|rights| rights != "None")
+    }
+
+    /// The entry as an error names it.
+    fn describe(&self) -> String {
+        format!(
+            "the entry with pattern `{}` and rights {} in {}",
+            self.pattern.as_deref().unwrap_or(""),
+            self.rights.as_deref().unwrap_or("None"),
+            self.source
+        )
+    }
+}
+
+/// Read a `magick -list policy` listing into its entries.
+///
+/// ImageMagick prints a `Path:` line for each file, then each entry as a
+/// `  Policy:` line followed by indented `name: value` fields; for the
+/// domains that carry rights, a `rights:` field (`None`, or any of `Read`,
+/// `Write` and `Execute`) and a `pattern:` field. The reading is strict, so
+/// a listing in any other shape is refused rather than guessed at: an
+/// unverifiable policy is not a verified one. A field this function does not
+/// know is skipped, so a later ImageMagick that prints one more still reads.
+/// An error names the line, never its text, which is the host's.
+fn parse_listing(listing: &str) -> Result<Vec<ListedEntry>, String> {
+    let unreadable = |line: usize, what: &str| {
+        format!(
+            "line {line} of `magick -list policy` {what}, so the policy in effect cannot be \
+             verified"
+        )
+    };
+    let mut source: Option<String> = None;
+    let mut entries: Vec<ListedEntry> = Vec::new();
+    // Whether the last entry belongs to the current `Path:` line, so a
+    // field line can only ever fill in the entry above it.
+    let mut open = false;
+    for (index, line) in listing.lines().enumerate() {
+        let number = index + 1;
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("Path: ") {
+            source = Some(path.to_string());
+            open = false;
+            continue;
+        }
+        if let Some(domain) = line.strip_prefix("  Policy: ") {
+            let Some(source) = source.clone() else {
+                return Err(unreadable(number, "is an entry before any `Path:` line"));
+            };
+            entries.push(ListedEntry {
+                source,
+                domain: domain.trim().to_string(),
+                rights: None,
+                pattern: None,
+            });
+            open = true;
+            continue;
+        }
+        let field = line
+            .strip_prefix("    ")
+            .and_then(|field| field.split_once(':'));
+        let (Some((name, value)), Some(entry), true) = (field, entries.last_mut(), open) else {
+            return Err(unreadable(number, "is not a line ImageMagick writes"));
+        };
+        let value = value.trim();
+        match name {
+            "rights" => {
+                let known = value
+                    .split_whitespace()
+                    .all(|right| matches!(right, "None" | "Read" | "Write" | "Execute"));
+                if value.is_empty() || !known {
+                    return Err(unreadable(
+                        number,
+                        "names a right ImageMagick does not have",
+                    ));
+                }
+                entry.rights = Some(value.split_whitespace().collect::<Vec<_>>().join(" "));
+            }
+            "pattern" => entry.pattern = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    if entries.is_empty() {
+        return Err(
+            "`magick -list policy` listed no entries, so the policy in effect cannot be verified"
+                .to_string(),
+        );
+    }
+    if let Some(entry) = entries.iter().find(|entry| {
+        ["coder", "delegate", "path"]
+            .iter()
+            .any(|domain| entry.is(domain))
+            && (entry.rights.is_none() || entry.pattern.is_none())
+    }) {
+        return Err(format!(
+            "`magick -list policy` lists a {} entry in {} without its rights or pattern, so the \
+             policy in effect cannot be verified",
+            entry.domain, entry.source
+        ));
+    }
+    Ok(entries)
+}
+
+/// The coders the framework's policy denies, read from
+/// [`MagickCliDriver::POLICY`] itself, so the check can never fall out of
+/// step with the file it checks.
+fn denied_coders() -> impl Iterator<Item = &'static str> {
+    MagickCliDriver::POLICY.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix(r#"<policy domain="coder" rights="none" pattern=""#)?
+            .strip_suffix(r#"" />"#)
+    })
+}
+
+/// Check the policy in effect, as listed, against the framework's denials.
+///
+/// ImageMagick applies the last entry that matches, so for each coder the
+/// framework denies, the last entry whose pattern matches it must deny it.
+/// ImageMagick 7.1.2 matches patterns with case, but the check does not rely
+/// on that: an entry that grants and matches ignoring case reopens the
+/// coder, and only a denial that matches with case closes it. A coder no
+/// entry names is open, since ImageMagick then did not read the framework's
+/// policy at all. Every delegate stays denied when no delegate entry after
+/// the last `*` denial grants anything, and indirect reads stay denied when
+/// no path entry after the last `@*` denial grants a pattern that could
+/// match a path starting with `@`.
+fn judge_listing(entries: &[ListedEntry]) -> Result<(), String> {
+    for coder in denied_coders() {
+        let mut denied = false;
+        for entry in entries.iter().rev().filter(|entry| entry.is("coder")) {
+            let pattern = entry.pattern.as_deref().unwrap_or("").as_bytes();
+            if !glob_matches(pattern, coder.as_bytes(), true) {
+                continue;
+            }
+            if entry.grants() {
+                return Err(format!(
+                    "the policy in effect grants the {coder} coder, which the framework's \
+                     policy denies: {} outranks the framework's, because ImageMagick applies \
+                     the last entry that matches. Remove that grant from the host's policy",
+                    entry.describe()
+                ));
+            }
+            if glob_matches(pattern, coder.as_bytes(), false) {
+                denied = true;
+                break;
+            }
+        }
+        if !denied {
+            return Err(format!(
+                "the policy in effect does not deny the {coder} coder: no entry of `magick \
+                 -list policy` denies it, so ImageMagick did not apply the framework's policy"
+            ));
+        }
+    }
+    let later_grant = |domain: &str, denial: &str, reaches: &dyn Fn(&str) -> bool| {
+        let Some(last) = entries.iter().rposition(|entry| {
+            entry.is(domain) && entry.pattern.as_deref() == Some(denial) && !entry.grants()
+        }) else {
+            return Err(format!(
+                "the policy in effect has no {domain} entry that denies `{denial}`, so \
+                 ImageMagick did not apply the framework's policy"
+            ));
+        };
+        match entries[last + 1..].iter().find(|entry| {
+            entry.is(domain) && entry.grants() && reaches(entry.pattern.as_deref().unwrap_or(""))
+        }) {
+            Some(entry) => Err(format!(
+                "the policy in effect reopens what the framework's `{domain}` entry `{denial}` \
+                 denies: {} outranks the framework's, because ImageMagick applies the last \
+                 entry that matches. Remove that grant from the host's policy",
+                entry.describe()
+            )),
+            None => Ok(()),
+        }
+    };
+    later_grant("delegate", "*", &|_| true)?;
+    later_grant("path", "@*", &may_match_indirect)?;
+    Ok(())
+}
+
+/// Whether a path pattern could match a path that starts with `@`, an
+/// indirect read. Only a pattern that starts with a plain character other
+/// than `@` is known not to; any other start, a wildcard, a class, a set of
+/// alternatives or an escape, counts as reaching it.
+fn may_match_indirect(pattern: &str) -> bool {
+    match pattern.as_bytes().first() {
+        None | Some(b'@' | b'*' | b'?' | b'[' | b'{' | b'\\') => true,
+        Some(_) => false,
+    }
+}
+
+/// Whether `pattern` matches all of `text`, as ImageMagick's glob reads a
+/// policy pattern: `*` for any run of characters, `?` for one, `[...]` for
+/// one of a set (with ranges, and `!` or `^` to negate), `{a,b}` for one of
+/// several alternatives, and `\` to take the next character as it is. With
+/// `fold`, letters match regardless of case. A `[` or `{` that is never
+/// closed is a plain character. The patterns come from the host's
+/// configuration and the texts are coder names, so the recursion stays
+/// shallow.
+fn glob_matches(pattern: &[u8], text: &[u8], fold: bool) -> bool {
+    let same = |a: u8, b: u8| {
+        if fold {
+            a.eq_ignore_ascii_case(&b)
+        } else {
+            a == b
+        }
+    };
+    let Some((&first, rest)) = pattern.split_first() else {
+        return text.is_empty();
+    };
+    match first {
+        b'*' => (0..=text.len()).any(|skip| glob_matches(rest, &text[skip..], fold)),
+        b'?' => !text.is_empty() && glob_matches(rest, &text[1..], fold),
+        b'\\' if !rest.is_empty() => {
+            text.first().is_some_and(|&c| same(rest[0], c))
+                && glob_matches(&rest[1..], &text[1..], fold)
+        }
+        b'[' if rest.contains(&b']') => {
+            let Some(close) = rest
+                .iter()
+                .skip(1)
+                .position(|&c| c == b']')
+                .map(|at| at + 1)
+            else {
+                return false;
+            };
+            let (negated, set) = match rest[..close].split_first() {
+                Some((b'!' | b'^', set)) => (true, set),
+                _ => (false, &rest[..close]),
+            };
+            let Some(&c) = text.first() else {
+                return false;
+            };
+            let mut inside = false;
+            let mut at = 0;
+            while at < set.len() {
+                if at + 2 < set.len() && set[at + 1] == b'-' {
+                    let (low, high) = (set[at], set[at + 2]);
+                    inside |= (low..=high).any(|member| same(member, c));
+                    at += 3;
+                } else {
+                    inside |= same(set[at], c);
+                    at += 1;
+                }
+            }
+            inside != negated && glob_matches(&rest[close + 1..], &text[1..], fold)
+        }
+        b'{' if rest.contains(&b'}') => {
+            let Some(close) = rest.iter().position(|&c| c == b'}') else {
+                return false;
+            };
+            rest[..close].split(|&c| c == b',').any(|alternative| {
+                let mut joined = alternative.to_vec();
+                joined.extend_from_slice(&rest[close + 1..]);
+                glob_matches(&joined, text, fold)
+            })
+        }
+        c => text.first().is_some_and(|&t| same(c, t)) && glob_matches(rest, &text[1..], fold),
+    }
+}
+
+/// A child that exited on its own: its status and what it wrote.
+struct Finished {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
 }
 
 /// What the driver tells ImageMagick to read the input as.
@@ -1267,7 +2148,7 @@ fn sharpen_amount(amount: u32) -> Option<f32> {
 /// A bare `-` lets ImageMagick choose the decoder from the bytes it is handed,
 /// which is the ImageTragick shape: a file whose magic says MVG or MSL is read
 /// as a *script*, no matter what the application believed it was accepting,
-/// with the host's `policy.xml` as the only thing standing in the way. So the
+/// with only a `policy.xml` standing in the way. So the
 /// driver names the coder for every format the sniffer names, the five the
 /// framework reads and the ones only ImageMagick reads - `png:-` decodes as
 /// PNG or fails, and `heic:-` as HEIC, and neither can be talked into
@@ -1275,8 +2156,9 @@ fn sharpen_amount(amount: u32) -> Option<f32> {
 ///
 /// Bytes the sniffer cannot name never get here by default: the driver
 /// refuses them before ImageMagick starts. Only an application that opts
-/// into autodetection hands them over on a bare `-`, and then its
-/// `policy.xml` is the only barrier again.
+/// into autodetection hands them over on a bare `-`, and then the
+/// framework's policy ([`MagickCliDriver::POLICY`]), with the host's beside
+/// it, is what keeps them from the script and network coders.
 fn input_spec(source: Source) -> String {
     match source {
         Source::Read(format) => format!("{}:-", format.magick_coder()),
@@ -1571,6 +2453,14 @@ mod tests {
 
     /// A format the framework names but does not read.
     const HEIC: Source = Source::Delegated(sniff::DelegatedFormat::Heic);
+
+    /// The configure path the tests of the process plumbing start their
+    /// stand-ins with. They call [`MagickCliDriver::execute`], below the
+    /// policy and its check: `sh`, `sleep`, `true` and `cat` are not
+    /// ImageMagick and would fail its `-list policy`.
+    fn no_configure_path() -> &'static OsStr {
+        OsStr::new("")
+    }
 
     fn config() -> ImageConfig {
         ImageConfig {
@@ -1993,7 +2883,7 @@ mod tests {
     #[test]
     fn hardening_bare_stdin_is_the_autodetection_opt_in_alone() {
         // The one input argument that lets ImageMagick choose the coder,
-        // which the host's policy.xml then has to cover.
+        // which the framework's policy then has to cover.
         assert_eq!(input_spec(Source::Autodetected), "-");
     }
 
@@ -2143,10 +3033,12 @@ mod tests {
         let driver = MagickCliDriver::new("sh");
         let started = Instant::now();
         let err = driver
-            .run(
+            .execute(
                 &["-c".to_string(), "sleep 120 & wait".to_string()],
                 b"",
                 &config,
+                0,
+                no_configure_path(),
             )
             .expect_err("an orphaned grandchild must not hold the call open");
         let elapsed = started.elapsed();
@@ -2176,7 +3068,7 @@ mod tests {
         let driver = MagickCliDriver::new("sleep");
         let started = Instant::now();
         let err = driver
-            .run(&["120".to_string()], b"", &config)
+            .execute(&["120".to_string()], b"", &config, 0, no_configure_path())
             .expect_err("a stalled child must not hang");
         let elapsed = started.elapsed();
 
@@ -2205,7 +3097,13 @@ mod tests {
         let (done, finished) = mpsc::channel();
         std::thread::spawn(move || {
             let input = vec![b'x'; 4 * 1024 * 1024];
-            let result = MagickCliDriver::new("true").run(&[], &input, &ImageConfig::default());
+            let result = MagickCliDriver::new("true").execute(
+                &[],
+                &input,
+                &ImageConfig::default(),
+                0,
+                no_configure_path(),
+            );
             let _ = done.send(result);
         });
         let result = finished
@@ -2224,7 +3122,13 @@ mod tests {
         let payload = vec![b'x'; 4 * 1024 * 1024];
         let driver = MagickCliDriver::new("cat");
         let out = driver
-            .run(&[], &payload, &ImageConfig::default())
+            .execute(
+                &[],
+                &payload,
+                &ImageConfig::default(),
+                0,
+                no_configure_path(),
+            )
             .expect("cat must echo the payload back");
         assert_eq!(out.len(), payload.len(), "every byte must survive");
     }

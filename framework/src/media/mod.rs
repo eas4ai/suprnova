@@ -213,8 +213,9 @@ pub struct ImageConfig {
     /// framework recognises (`png:-`, `heic:-`, `tiff:-`) and refuses other
     /// bytes before ImageMagick starts. With this on, ImageMagick reads such
     /// bytes as whatever their magic says, an MVG or MSL script included,
-    /// and the host's `policy.xml` is the only barrier. Only the `magick`
-    /// driver reads it.
+    /// and the framework's ImageMagick policy, [`MagickCliDriver::POLICY`],
+    /// with the host's beside it, is what keeps them from the script and
+    /// network coders. Only the `magick` driver reads it.
     pub magick_autodetect: bool,
 }
 
@@ -355,8 +356,9 @@ impl ImageConfig {
     /// as `IMAGE_MAGICK_AUTODETECT` does.
     ///
     /// Opting in hands the coder choice for any input the framework cannot
-    /// name to ImageMagick, so the host's `policy.xml` is then the only
-    /// barrier between an upload and coders such as MVG, MSL and `url:`.
+    /// name to ImageMagick, so the framework's ImageMagick policy,
+    /// [`MagickCliDriver::POLICY`], is then what stands between an upload
+    /// and coders such as MVG, MSL and `url:`.
     #[must_use]
     pub fn magick_autodetect(mut self, enabled: bool) -> Self {
         self.magick_autodetect = enabled;

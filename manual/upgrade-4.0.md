@@ -2555,8 +2555,8 @@ refuses any other input before ImageMagick starts, with a 4xx
 
 **Do:** Nothing to do unless your application reads, through
 ImageMagick, a format outside that list, such as PPM or JPEG XL. To keep
-reading it, opt into autodetection, and harden the host's `policy.xml`
-first, because it is then the only barrier again:
+reading it, opt into autodetection. Such input then reaches ImageMagick
+under the framework's [policy](images.md#policy):
 
 ```env
 IMAGE_MAGICK_AUTODETECT=true
@@ -2619,6 +2619,46 @@ global_middleware!(suprnova::TimeoutMiddleware::default());
 An API project adds it to `register`, before `BearerTokenMiddleware`. A
 route that takes uploads longer than 30 seconds needs a longer value; see
 [Request Timeouts](timeout.md#global-is-a-ceiling-per-route-can-only-tighten).
+
+### The `magick` driver runs ImageMagick under the framework's own policy.
+
+**Before:** 3.2.1's `magick` driver started ImageMagick under the host's
+`policy.xml` alone. On a host with ImageMagick's default policy, which
+denies nothing, PostScript or PDF on a bare `-` started Ghostscript, and
+the MVG, MSL, URL and text coders and every delegate were open.
+
+**Now:** Every run reads a policy the framework writes and checks before
+the run, from a directory of its own under the system's temporary
+directory, named first and last in `MAGICK_CONFIGURE_PATH`, with a
+`MAGICK_CONFIGURE_PATH` you set between the two. It denies the URL, HTTP,
+HTTPS, FTP, MVG, MSL, TEXT, LABEL, CAPTION, PANGO, SCREENSHOT, X,
+EPHEMERAL, PS, PS2, PS3, EPS, PDF and XPS coders, every delegate, and
+`@file` reads, with or without `IMAGE_MAGICK_AUTODETECT`. Your own
+`policy.xml` still applies. ImageMagick applies the last entry that
+matches, and reads its own configuration directory and the user's after
+that path, so before the first run of each process the driver reads the
+policy in effect with `magick -list policy`, then runs one MVG probe that
+ImageMagick's policy must refuse, since the listing leaves out an entry
+marked `stealth="true"`. When a host entry grants one of those denials
+back, every run is refused with a 5xx `FrameworkError` that names the
+coder and the file that granted it. A listing that is missing a denial,
+cannot be read, or cannot be had refuses the run too. So do a probe the
+policy does not refuse, a policy directory the driver cannot make, and a
+policy it cannot write and check.
+
+**Do:** Nothing, in most applications. Run `magick -list policy` on the
+host: if your ImageMagick policy grants one of those coders, a delegate,
+or an `@` read, for example `rights="read|write" pattern="*"`, remove the
+grant, or the driver refuses every run. A grant of MVG marked
+`stealth="true"` is missing from that listing, but the driver's probe
+finds it and refuses every run as well, so remove it too. If your
+application reads PostScript, EPS, PDF, XPS, or another of those formats
+through the `magick` driver under `IMAGE_MAGICK_AUTODETECT`, those reads
+now fail with a security policy error, and nothing reopens them: convert
+such files before they reach the driver. The process must be able to make
+a directory in its temporary directory: in a container with a read-only
+root file system, mount a writable `/tmp` or set `TMPDIR` to a writable
+path. For details, see [Policy](images.md#policy).
 
 ## Fixes with no upgrade step
 
