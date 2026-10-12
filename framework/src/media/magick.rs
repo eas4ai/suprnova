@@ -36,22 +36,27 @@
 //!
 //! Every run reads the framework's own ImageMagick security policy,
 //! [`MagickCliDriver::POLICY`], whether or not autodetection is on (HRD-010).
-//! The driver writes it as `policy.xml` into a directory of its own, one a
-//! process under the system's temporary directory, checks the file before
-//! each run and writes it again when it differs, and starts ImageMagick
-//! with `MAGICK_CONFIGURE_PATH` naming that directory first and last. It is
-//! the one file the driver writes. A run whose policy cannot be put in
-//! place is refused before ImageMagick starts for it, with or without
-//! autodetection.
+//! The driver keeps a directory of its own, one a process under the system's
+//! temporary directory, and writes the policy into it as
+//! `.config/ImageMagick/policy.xml`. It checks the file before each run and
+//! writes it again when it differs. It starts ImageMagick with `HOME`
+//! naming that directory, and with `MAGICK_CONFIGURE_PATH` naming the
+//! directory that holds the file first and last, around the operator's own
+//! value. ImageMagick applies the last entry that matches, and it reads
+//! `$HOME/.config/ImageMagick` after every other policy file: the operator's
+//! path, its own configuration directory, and `$XDG_CONFIG_HOME`. So the
+//! framework's policy is the last ImageMagick reads, and it outranks every
+//! other policy on the host. It is the one file the driver writes. A run
+//! whose policy cannot be put in place is refused before ImageMagick starts
+//! for it, with or without autodetection.
 //!
-//! Because ImageMagick applies the last entry that matches, and reads its
-//! own configuration directory and the user's after that path, the driver
-//! also checks the policy in effect with `magick -list policy`, once a
-//! process. Under autodetection the policy in effect is the only barrier
-//! between an upload and the coders it denies, so a policy in effect that
-//! reopens a denial refuses every run. Without autodetection the driver
-//! names the coder for every input, so no input can reach such a grant: the
-//! driver logs it once and the runs proceed.
+//! The driver also checks the order on the binary it runs, once a process:
+//! `magick -list policy` must show the last entry that matches each of the
+//! framework's denials denying, and the framework's file as the last one
+//! ImageMagick read, and one MVG probe must be refused. A check that fails
+//! refuses every run, with or without autodetection, until the host is
+//! fixed and the process restarts. A listing or probe that cannot be had at
+//! all refuses the run, and the next run asks again.
 //!
 //! # Two-tier limits
 //!
@@ -132,11 +137,12 @@ const MIN_OUTPUT_READ: usize = 8 * 1024;
 ///
 /// Every run reads the framework's ImageMagick policy, [`Self::POLICY`],
 /// which denies the network, script, text and Ghostscript coders, every
-/// delegate, and indirect `@file` reads. The host's own policy still
-/// applies beside it. When the policy in effect reopens any of those
-/// denials, the driver refuses every run under `IMAGE_MAGICK_AUTODETECT`,
-/// and otherwise logs it once and runs, because it then names the coder
-/// for every input itself.
+/// delegate, and indirect `@file` reads. The driver starts ImageMagick with
+/// `HOME` naming its policy directory, so that policy is the last
+/// ImageMagick reads and outranks every other policy on the host. The
+/// host's own denials still apply beside it. When the check of the policy
+/// in effect fails, the driver refuses every run, with or without
+/// `IMAGE_MAGICK_AUTODETECT`.
 ///
 /// Output formats are whatever the host's delegates can write. WebP goes
 /// through libwebp, and [`OutputFormat::WebP`] hands it the pipeline's
@@ -180,13 +186,15 @@ impl MagickCliDriver {
     /// The ImageMagick security policy every run of this driver reads
     /// (HRD-010).
     ///
-    /// Before each run the driver writes this text as `policy.xml` into a
-    /// directory of its own and starts ImageMagick with
-    /// `MAGICK_CONFIGURE_PATH` naming that directory first and last,
-    /// whether or not `IMAGE_MAGICK_AUTODETECT` is on. A named coder
-    /// (`png:-`) already keeps an upload away from the coders below; this
-    /// policy is what keeps them closed to input under the autodetection
-    /// opt-in, which ImageMagick reads as whatever its bytes say.
+    /// Before each run the driver writes this text as
+    /// `.config/ImageMagick/policy.xml` into a directory of its own, and
+    /// starts ImageMagick with `HOME` naming that directory and
+    /// `MAGICK_CONFIGURE_PATH` naming the directory that holds the file
+    /// first and last, whether or not `IMAGE_MAGICK_AUTODETECT` is on. A
+    /// named coder (`png:-`) already keeps an upload away from the coders
+    /// below; this policy is what keeps them closed to input under the
+    /// autodetection opt-in, which ImageMagick reads as whatever its bytes
+    /// say.
     ///
     /// Every entry denies, with `rights="none"`:
     ///
@@ -219,35 +227,28 @@ impl MagickCliDriver {
     ///
     /// ImageMagick reads every `policy.xml` it finds: the directories of
     /// `MAGICK_CONFIGURE_PATH` in order, then its own configuration
-    /// directory, then the user's (`$XDG_CONFIG_HOME/ImageMagick` or
-    /// `~/.config/ImageMagick`). Where two entries match, it applies the one
-    /// it read last. The driver names its directory both first and last on
-    /// `MAGICK_CONFIGURE_PATH`, so no entry on the operator's path outranks
-    /// this policy, while the host's denials still apply. ImageMagick's own
-    /// directory and the user's are read after it, though, and a grant
-    /// there, such as `rights="read|write" pattern="MVG"` or a grant on
-    /// `pattern="*"`, would outrank it. So the driver checks the result:
-    /// before the first run of a process it reads the policy in effect with
-    /// `magick -list policy`, and the check fails when any of these denials
-    /// is reopened or missing. The listing leaves out an entry marked
-    /// `stealth="true"`, so the check also runs one MVG probe that the
-    /// policy in effect must refuse.
+    /// directory, then `$XDG_CONFIG_HOME/ImageMagick`, then
+    /// `$HOME/.config/ImageMagick`. Where two entries match, it applies the
+    /// one it read last. The driver's `HOME` is its policy directory, so this
+    /// policy is the last ImageMagick reads, and it outranks every other
+    /// policy on the host: the operator's path, ImageMagick's own directory
+    /// and the user's, an entry marked `stealth="true"` included. The host's
+    /// denials still apply. With `HOME` changed, a `policy.xml` in the
+    /// account's own `~/.config/ImageMagick` is not read at all; a policy of
+    /// the operator's own goes on `MAGICK_CONFIGURE_PATH` or in
+    /// `$XDG_CONFIG_HOME/ImageMagick`.
     ///
-    /// What a failed check does depends on `IMAGE_MAGICK_AUTODETECT`,
-    /// because this policy carries a different weight in each mode. Under
-    /// autodetection ImageMagick chooses the coder from the bytes of an
-    /// upload, and this policy is the only barrier between an MVG script or
-    /// a PDF and its coder, so a failed check refuses every run until the
-    /// host's policy is fixed and the process restarts. Without it the
-    /// driver names the coder for every input and refuses bytes it cannot
-    /// name before ImageMagick starts, so no input reaches a coder this
-    /// policy denies, whatever the host grants. Refusing every run there
-    /// would take image processing away from a host whose own policy grants
-    /// PDF or PS to another program, and buy nothing, so the driver logs the
-    /// failed check once a process at `warn` and the runs proceed. The file
-    /// itself is written and checked before every run in both modes: a
-    /// policy that cannot be put in place refuses the run either way, since
-    /// where nothing on the host reopens a denial, the file is what holds it.
+    /// The driver checks that order on the binary it runs, before the first
+    /// run of a process: it reads `magick -list policy`, which must show the
+    /// last entry that matches each of these denials denying, and this file
+    /// as the last ImageMagick read; and it runs one MVG probe that the
+    /// policy in effect must refuse. The check guards against a binary that
+    /// reads a policy file after `$HOME/.config/ImageMagick`. A check that
+    /// fails refuses every run, with or without autodetection, until the
+    /// host is fixed and the process restarts; a listing or probe that
+    /// cannot be had at all refuses the run, and the next run asks again.
+    /// The file itself is written and checked before every run: a policy
+    /// that cannot be put in place refuses the run too.
     pub const POLICY: &'static str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!--
   Suprnova's magick image driver writes this file and checks it before
@@ -323,36 +324,36 @@ impl MagickCliDriver {
         room: usize,
     ) -> Result<Vec<u8>, FrameworkError> {
         // HRD-010: the policy goes in place first, so a run that cannot
-        // have it is refused before ImageMagick is started for it, in both
-        // modes. Then the policy in effect is checked, which refuses the run
-        // under autodetection when the check fails. Every ImageMagick run
-        // passes through here, the probes included.
+        // have it is refused before ImageMagick is started for it. Then the
+        // policy in effect is checked, which refuses the run when the check
+        // fails. Both hold with and without autodetection. Every ImageMagick
+        // run on an image passes through here, the size and colour probes
+        // included.
         let operator = operator_configure_path();
-        let configure_path = prepare_policy(operator.as_deref())?;
-        self.verify_policy(&configure_path, operator, config)?;
-        self.execute(args, input, config, room, &configure_path)
+        let env = prepare_policy(operator.as_deref())?;
+        self.verify_policy(&env, operator, config)?;
+        self.execute(args, input, config, room, &env)
     }
 
-    /// Start the binary with `args` under `configure_path`, stream `input`
-    /// in, and collect stdout, keeping `room` bytes of capacity past it.
-    /// A run that exits with a failure, or writes nothing, is an error.
+    /// Start the binary with `args` under `env`, stream `input` in, and
+    /// collect stdout, keeping `room` bytes of capacity past it. A run that
+    /// exits with a failure, or writes nothing, is an error.
     ///
-    /// The caller has put the framework's policy in place on
-    /// `configure_path` and, for a run on an image, checked the policy in
-    /// effect.
+    /// The caller has put the framework's policy in place for `env` and,
+    /// for a run on an image, checked the policy in effect.
     fn execute(
         &self,
         args: &[String],
         input: &[u8],
         config: &ImageConfig,
         room: usize,
-        configure_path: &OsStr,
+        env: &PolicyEnv,
     ) -> Result<Vec<u8>, FrameworkError> {
         let Finished {
             status,
             stdout,
             stderr,
-        } = self.finish(args, input, config, room, configure_path)?;
+        } = self.finish(args, input, config, room, env)?;
         if !status.success() {
             let stderr = String::from_utf8_lossy(&stderr);
             let detail = match sanitise_stderr(&stderr) {
@@ -383,7 +384,7 @@ impl MagickCliDriver {
         input: &[u8],
         config: &ImageConfig,
         room: usize,
-        configure_path: &OsStr,
+        env: &PolicyEnv,
     ) -> Result<Finished, FrameworkError> {
         // The driver makes the stdin pipe itself, rather than through
         // `Stdio::piped()`, to keep a read end of its own: see the writer
@@ -399,7 +400,8 @@ impl MagickCliDriver {
         let mut command = Command::new(&self.binary);
         command
             .args(args)
-            .env("MAGICK_CONFIGURE_PATH", configure_path)
+            .env("HOME", &env.home)
+            .env("MAGICK_CONFIGURE_PATH", &env.configure_path)
             .stdin(stdin_reader)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -599,6 +601,16 @@ impl MagickCliDriver {
 /// The file ImageMagick looks for in each directory of its configure path.
 const POLICY_FILE: &str = "policy.xml";
 
+/// The directory under `HOME` whose `policy.xml` ImageMagick reads last,
+/// after the directories of `MAGICK_CONFIGURE_PATH`, its own configuration
+/// directory and `$XDG_CONFIG_HOME/ImageMagick`: `.config`, and in it
+/// `ImageMagick`.
+const HOME_CONFIG_DIRS: [&str; 2] = [".config", "ImageMagick"];
+
+/// How `magick -list policy` names ImageMagick's built-in policy, which it
+/// lists after every file.
+const BUILT_IN_POLICY: &str = "[built-in]";
+
 /// The start of the name of a process's policy directory. The process id
 /// and a random suffix follow: the id so an operator can tell which process
 /// a directory belongs to, and the suffix so nobody can guess the name and
@@ -629,10 +641,16 @@ static POLICY_DIR: Mutex<Option<PolicyDir>> = Mutex::new(None);
 /// the policy in it; the only users who can are this process's own and root,
 /// which can change what ImageMagick runs anyway.
 ///
+/// Every run starts with `HOME` naming the directory, so ImageMagick reads
+/// the policy at `.config/ImageMagick/policy.xml` in it after every other
+/// policy file on the host. The two directories on that path are made the
+/// same way, inside it, and checked the same way before every run.
+///
 /// It stays after the process exits, because Rust runs no destructor for a
 /// static. It holds one small file, and the system's temporary-file cleanup
 /// removes it in time.
 struct PolicyDir {
+    /// The directory itself, which every run gets as `HOME`.
     path: PathBuf,
     /// The user that owned the directory when this process made it: this
     /// process's user, read back from the directory, because std has no
@@ -642,7 +660,8 @@ struct PolicyDir {
 }
 
 impl PolicyDir {
-    /// Make a new policy directory under the system's temporary directory.
+    /// Make a new policy directory under the system's temporary directory,
+    /// with `.config/ImageMagick` in it.
     fn create() -> Result<Self, FrameworkError> {
         let parent = std::env::temp_dir();
         // ImageMagick splits `MAGICK_CONFIGURE_PATH` at the separator and
@@ -673,10 +692,18 @@ impl PolicyDir {
             // unless told otherwise.
             builder.permissions(std::fs::Permissions::from_mode(0o700));
         }
-        let path = builder
+        // Until it is kept, the directory is removed when this returns
+        // early, so a failure below leaves nothing behind.
+        let made = builder
             .tempdir_in(&parent)
-            .map_err(|e| policy_error(&parent, format!("could not make a directory in it: {e}")))?
-            .keep();
+            .map_err(|e| policy_error(&parent, format!("could not make a directory in it: {e}")))?;
+        let mut inner = made.path().to_path_buf();
+        for name in HOME_CONFIG_DIRS {
+            inner.push(name);
+            make_closed_dir(&inner)
+                .map_err(|e| policy_error(&inner, format!("could not make the directory: {e}")))?;
+        }
+        let path = made.keep();
         #[cfg(unix)]
         let owner = {
             use std::os::unix::fs::MetadataExt;
@@ -691,13 +718,35 @@ impl PolicyDir {
         })
     }
 
-    /// Whether the directory is still the one this process made: a
-    /// directory, not a link to one, owned by the user that made it, and
-    /// closed to everyone else. One that a temporary-file cleaner removed,
-    /// or that was replaced or opened up, is not, and the caller makes a new
+    /// The directory that holds the policy file: `.config/ImageMagick` in
+    /// the policy directory.
+    fn config_dir(&self) -> PathBuf {
+        HOME_CONFIG_DIRS
+            .iter()
+            .fold(self.path.clone(), |dir, name| dir.join(name))
+    }
+
+    /// Whether the directory is still the one this process made: it, its
+    /// `.config` and its `.config/ImageMagick` each a directory, not a link
+    /// to one, owned by the user that made it, and closed to everyone else.
+    /// One that a temporary-file cleaner removed, or that was replaced or
+    /// opened up anywhere on that path, is not, and the caller makes a new
     /// one rather than trust it.
     fn is_intact(&self) -> bool {
-        let Ok(meta) = std::fs::symlink_metadata(&self.path) else {
+        let mut dir = self.path.clone();
+        if !self.is_closed(&dir) {
+            return false;
+        }
+        HOME_CONFIG_DIRS.iter().all(|name| {
+            dir.push(name);
+            self.is_closed(&dir)
+        })
+    }
+
+    /// Whether `dir` is a directory, not a link to one, owned by the user
+    /// that made the policy directory, and closed to everyone else.
+    fn is_closed(&self, dir: &Path) -> bool {
+        let Ok(meta) = std::fs::symlink_metadata(dir) else {
             return false;
         };
         #[cfg(unix)]
@@ -714,7 +763,8 @@ impl PolicyDir {
     /// it again when it is missing or differs, and check it again after the
     /// write, so a run starts only on a file known to hold the policy.
     fn ensure_policy(&self) -> Result<(), FrameworkError> {
-        let file = self.path.join(POLICY_FILE);
+        let dir = self.config_dir();
+        let file = dir.join(POLICY_FILE);
         match check_policy(&file) {
             Ok(PolicyFile::Same) => return Ok(()),
             // A new directory, or one whose file a cleaner removed.
@@ -727,7 +777,7 @@ impl PolicyDir {
                 );
             }
         }
-        write_policy(&self.path, &file)
+        write_policy(&dir, &file)
             .map_err(|e| policy_error(&file, format!("could not write it: {e}")))?;
         match check_policy(&file) {
             Ok(PolicyFile::Same) => Ok(()),
@@ -738,6 +788,19 @@ impl PolicyDir {
             Err(e) => Err(policy_error(&file, format!("could not read it back: {e}"))),
         }
     }
+}
+
+/// Make the directory `path`, which must not exist, closed to everyone but
+/// its owner: mode `0700` on unix, less the umask, which only takes rights
+/// away.
+fn make_closed_dir(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
 }
 
 /// What a policy file holds, against [`MagickCliDriver::POLICY`].
@@ -817,13 +880,37 @@ fn operator_configure_path() -> Option<OsString> {
     std::env::var_os("MAGICK_CONFIGURE_PATH").filter(|value| !value.is_empty())
 }
 
+/// The environment the driver starts every ImageMagick process with
+/// (HRD-010), the checks of the policy in effect included.
+struct PolicyEnv {
+    /// `HOME`: the policy directory. ImageMagick reads
+    /// `$HOME/.config/ImageMagick/policy.xml` after every other policy file
+    /// on the host, so the framework's file there is the last it reads.
+    home: PathBuf,
+    /// `MAGICK_CONFIGURE_PATH`: the directory that holds the framework's
+    /// file, the operator's value, and that directory again.
+    configure_path: OsString,
+}
+
+impl PolicyEnv {
+    /// The framework's policy file as `magick -list policy` names it: `HOME`
+    /// joined with `.config/ImageMagick/policy.xml`, the way ImageMagick
+    /// joins them.
+    fn policy_file(&self) -> PathBuf {
+        HOME_CONFIG_DIRS
+            .iter()
+            .fold(self.home.clone(), |dir, name| dir.join(name))
+            .join(POLICY_FILE)
+    }
+}
+
 /// Put the framework's policy in place for one run, and return the
-/// `MAGICK_CONFIGURE_PATH` the run starts with.
+/// environment the run starts with.
 ///
 /// A poisoned lock is taken as it stands: the slot holds a path, and
 /// nothing a panic could leave half done is trusted, since every run checks
 /// the directory and the file again.
-fn prepare_policy(operator: Option<&OsStr>) -> Result<OsString, FrameworkError> {
+fn prepare_policy(operator: Option<&OsStr>) -> Result<PolicyEnv, FrameworkError> {
     let mut slot = POLICY_DIR.lock().unwrap_or_else(PoisonError::into_inner);
     let dir = match slot.take() {
         Some(dir) if dir.is_intact() => dir,
@@ -840,21 +927,26 @@ fn prepare_policy(operator: Option<&OsStr>) -> Result<OsString, FrameworkError> 
     };
     let dir = slot.insert(dir);
     dir.ensure_policy()?;
-    Ok(configure_path(&dir.path, operator))
+    Ok(PolicyEnv {
+        home: dir.path.clone(),
+        configure_path: configure_path(&dir.config_dir(), operator),
+    })
 }
 
-/// The `MAGICK_CONFIGURE_PATH` a run starts with: the policy directory,
-/// the operator's own value unchanged, and the policy directory again.
+/// The `MAGICK_CONFIGURE_PATH` a run starts with: `dir`, the directory that
+/// holds the framework's policy file, then the operator's own value
+/// unchanged, then `dir` again.
 ///
 /// ImageMagick reads the `policy.xml` of every directory on the path, in
-/// order, and where two entries match it applies the one it read last. With
-/// the framework's directory last as well as first, no entry on the
-/// operator's path can outrank the framework's, while the operator's
-/// denials, and the other configuration files the operator keeps there,
-/// still apply. The operator's value is kept byte for byte rather than split
-/// and joined again, so a directory list ImageMagick accepted before reads
-/// the same after. With no operator value the one directory is both first
-/// and last.
+/// order, and where two entries match it applies the one it read last. The
+/// file it reads last of all is the one under `HOME`, which is the same
+/// file; with `dir` last on the path as well, no entry on the operator's
+/// path outranks the framework's even before ImageMagick reaches it, while
+/// the operator's denials, and the other configuration files the operator
+/// keeps there, still apply. The operator's value is kept byte for byte
+/// rather than split and joined again, so a directory list ImageMagick
+/// accepted before reads the same after. With no operator value the one
+/// directory is both first and last.
 fn configure_path(dir: &Path, operator: Option<&OsStr>) -> OsString {
     let mut value = dir.as_os_str().to_owned();
     if let Some(operator) = operator {
@@ -869,15 +961,17 @@ fn configure_path(dir: &Path, operator: Option<&OsStr>) -> OsString {
 /// The verdict on the policy in effect, for each binary and operator
 /// configure path this process has run ImageMagick with (HRD-010).
 ///
-/// ImageMagick reads its own configuration directory and the user's after
-/// every directory on `MAGICK_CONFIGURE_PATH`, so a grant there outranks the
-/// framework's policy wherever the driver puts it. The driver therefore
-/// asks ImageMagick for the policy it applies, once a process for each pair,
-/// and keeps the verdict: the host's policy files do not change under a
-/// running process in any way the driver is meant to follow. A vector, not
-/// a map, because a process runs one binary under one configure path in
-/// practice. The lock is held while ImageMagick lists its policy, so two
-/// first runs ask once.
+/// The framework's policy outranks every other on the host only because
+/// ImageMagick reads `$HOME/.config/ImageMagick` last, and that order is the
+/// binary's: it is built into ImageMagick, not read from a policy file. So
+/// the verdict is about the binary and the configure path it runs under,
+/// and no change to the host's policy files moves it. A grant added to a
+/// host file after the check is read before the framework's file and
+/// outranked like any other. The driver therefore asks ImageMagick once a
+/// process for each pair, and keeps the verdict. A vector, not a map,
+/// because a process runs one binary under one configure path in practice.
+/// The lock is held while ImageMagick lists its policy, so two first runs
+/// ask once.
 static POLICY_VERDICTS: Mutex<Vec<PolicyVerdict>> = Mutex::new(Vec::new());
 
 /// What the check of the policy in effect found for one binary and one
@@ -887,72 +981,44 @@ struct PolicyVerdict {
     operator: Option<OsString>,
     /// Why the policy in effect fails the check, or `None` when it passes.
     refusal: Option<String>,
-    /// Whether a run without autodetection has logged `refusal` yet. The
-    /// verdict holds for the life of the process, so one warning says all
-    /// there is to say; a warning on every run would bury it in the log.
-    warned: bool,
 }
 
-/// Why a run without `IMAGE_MAGICK_AUTODETECT` proceeds past a failed
-/// check of the policy in effect, as the warning says it.
-const NAMED_CODERS_HOLD: &str = "The driver names the coder for every input while \
-     IMAGE_MAGICK_AUTODETECT is off, so a grant of a coder the framework's policy denies is \
-     not reachable through it, and the run proceeds";
-
 impl MagickCliDriver {
-    /// Check that the policy ImageMagick applies under `configure_path`
-    /// denies everything the framework's policy denies, asking it once a
-    /// process for this binary and `operator` value, and decide from the
-    /// verdict whether this run, under `config`, may start.
+    /// Check that ImageMagick, started under `env`, reads the framework's
+    /// policy last and applies its denials, asking it once a process for
+    /// this binary and `operator` value, and refuse the run when it does
+    /// not, whatever `config` says of autodetection.
     ///
     /// The check ([`Self::ask_policy_in_effect`]) reads `<binary> -list
     /// policy`, started under the same environment as the runs, and when
     /// the listing passes, runs one MVG probe ([`Self::probe_mvg`]) under it
     /// too. It fails when the listing shows any of the framework's denials
-    /// reopened or missing, or the driver cannot read it, or ImageMagick does
-    /// not refuse the probe by its policy, and that verdict is kept for
-    /// every later run with this binary and operator value. A listing or
-    /// probe that could not be had at all (the binary is missing, or the
-    /// listing failed, or either timed out) is not kept: that is a fault of
-    /// the moment, such as ImageMagick installed after the process started,
-    /// and the next run asks again.
+    /// reopened or missing, or a policy file read after the framework's, or
+    /// the driver cannot read it, or ImageMagick does not refuse the probe
+    /// by its policy. That verdict is kept for every later run with this
+    /// binary and operator value: what it judges is the order this binary
+    /// reads its policy files in, which no change to the host's policy
+    /// files moves (see [`POLICY_VERDICTS`]). A failed check refuses this
+    /// run and every later one until the host is fixed and the process
+    /// restarts.
     ///
-    /// What a failed check does depends on the run's own
-    /// `config.magick_autodetect`, read against the kept verdict at every
-    /// run, so one verdict serves runs under either setting:
+    /// A listing or probe that could not be had at all (the binary is
+    /// missing, or the listing failed, or either timed out) refuses the run
+    /// too, since an unverifiable policy is not a verified one. It is not
+    /// kept: that is a fault of the moment, such as ImageMagick installed
+    /// after the process started, and the next run asks again.
     ///
-    /// - With autodetection on, ImageMagick chooses the coder from the bytes
-    ///   of an upload the framework cannot name ([`input_spec`] hands those
-    ///   over on a bare `-`), and the policy in effect is the only barrier
-    ///   between an MVG script or a PDF and the coder the host reopened. So
-    ///   a failed check refuses this run and every later one, and so does a
-    ///   check that could not be had: an unverifiable policy is not a
-    ///   verified one. The refusal covers a run on a named format too, so a
-    ///   process that opted in learns of the grant at its first run, not at
-    ///   the first upload the framework cannot name.
-    /// - With autodetection off, the driver names the coder for every input
-    ///   ([`input_spec`]) and refuses bytes it cannot name before
-    ///   ImageMagick starts ([`Self::guard`], HRD-002), and every other
-    ///   argument is a fixed string, none starting with `@`. No input
-    ///   reaches a coder the framework's policy denies, and Ghostscript, the
-    ///   delegate the policy most needs to keep away, starts only for the
-    ///   PostScript and PDF coders it denies. So a grant the check finds is
-    ///   not reachable through the driver, and refusing every run would only
-    ///   take image processing away from a host whose own policy grants PDF
-    ///   or PS to another program, such as one that makes PDF thumbnails.
-    ///   The failed check is logged once a process at `warn`, with the cause
-    ///   a refusal would carry, which names the coder and the file, and the
-    ///   run proceeds. A check that could not be had is logged at `warn` by
-    ///   each run that asked, since each run asks again, and the run
-    ///   proceeds; a binary that is missing then fails the run itself, with
-    ///   the error that names `IMAGE_MAGICK_BINARY`.
+    /// Both hold with and without autodetection. Without it the driver
+    /// names the coder for every input, but the policy is still the
+    /// barrier HRD-010 asks for, and a run under a policy in effect that
+    /// reopens a denial is not a run under the framework's policy.
     ///
     /// The policy file is not part of this decision: [`prepare_policy`]
     /// refuses a run whose policy cannot be written and read back byte for
-    /// byte, in both modes, before this check runs.
+    /// byte before this check runs.
     fn verify_policy(
         &self,
-        configure_path: &OsStr,
+        env: &PolicyEnv,
         operator: Option<OsString>,
         config: &ImageConfig,
     ) -> Result<(), FrameworkError> {
@@ -964,74 +1030,50 @@ impl MagickCliDriver {
             .position(|verdict| verdict.binary == self.binary && verdict.operator == operator);
         let at = match found {
             Some(at) => at,
-            None => match self.ask_policy_in_effect(configure_path, config) {
-                Ok(refusal) => {
-                    verdicts.push(PolicyVerdict {
-                        binary: self.binary.clone(),
-                        operator,
-                        refusal,
-                        warned: false,
-                    });
-                    verdicts.len() - 1
-                }
-                Err(fault) if config.magick_autodetect => return Err(policy_refusal(&fault)),
-                Err(fault) => {
-                    tracing::warn!(
-                        binary = %self.binary,
-                        "image: the magick driver could not check the ImageMagick policy in \
-                         effect: {fault}. {NAMED_CODERS_HOLD}. The next run checks again."
-                    );
-                    return Ok(());
-                }
-            },
+            None => {
+                let refusal = self
+                    .ask_policy_in_effect(env, config)
+                    .map_err(|fault| policy_refusal(&fault))?;
+                verdicts.push(PolicyVerdict {
+                    binary: self.binary.clone(),
+                    operator,
+                    refusal,
+                });
+                verdicts.len() - 1
+            }
         };
-        let verdict = &mut verdicts[at];
-        let Some(cause) = &verdict.refusal else {
-            return Ok(());
-        };
-        if config.magick_autodetect {
-            return Err(policy_refusal(cause));
+        match &verdicts[at].refusal {
+            Some(cause) => Err(policy_refusal(cause)),
+            None => Ok(()),
         }
-        if !verdict.warned {
-            tracing::warn!(
-                binary = %self.binary,
-                "image: the ImageMagick policy in effect fails the magick driver's check: \
-                 {cause}. {NAMED_CODERS_HOLD}. With IMAGE_MAGICK_AUTODETECT on, the driver \
-                 refuses every run until the host's policy is fixed and the process restarts. \
-                 This is logged once a process."
-            );
-            verdict.warned = true;
-        }
-        Ok(())
     }
 
-    /// Ask ImageMagick for the policy it applies under `configure_path`, and
-    /// judge it against the framework's.
+    /// Ask ImageMagick for the policy it applies under `env`, and judge it
+    /// against the framework's.
     ///
     /// Returns `Ok(None)` when the policy in effect passes, `Ok(Some(cause))`
     /// when it fails, which is a verdict the caller keeps, and `Err(cause)`
     /// when the listing or the probe could not be had at all, which is not.
-    /// Each cause names what failed and, for a grant, the entry and the file
-    /// it came from, never the bytes of a policy.
+    /// Each cause names what failed and, for a grant or a file read after
+    /// the framework's, the file, never the bytes of a policy.
     fn ask_policy_in_effect(
         &self,
-        configure_path: &OsStr,
+        env: &PolicyEnv,
         config: &ImageConfig,
     ) -> Result<Option<String>, String> {
         let args = ["-list".to_string(), "policy".to_string()];
-        let listing = self
-            .execute(&args, b"", config, 0, configure_path)
-            .map_err(|e| {
-                format!(
-                    "`{} -list policy` failed, so the policy in effect cannot be verified: {}",
-                    self.binary,
-                    e.message()
-                )
-            })?;
+        let listing = self.execute(&args, b"", config, 0, env).map_err(|e| {
+            format!(
+                "`{} -list policy` failed, so the policy in effect cannot be verified: {}",
+                self.binary,
+                e.message()
+            )
+        })?;
+        let framework = env.policy_file();
         let judged = parse_listing(&String::from_utf8_lossy(&listing))
-            .and_then(|entries| judge_listing(&entries));
+            .and_then(|listing| judge_listing(&listing, &framework.to_string_lossy()));
         match judged {
-            Ok(()) => self.probe_mvg(configure_path, config),
+            Ok(()) => self.probe_mvg(env, config),
             Err(cause) => Ok(Some(cause)),
         }
     }
@@ -1043,38 +1085,33 @@ impl MagickCliDriver {
 const MVG_PROBE: &[u8] = b"viewbox 0 0 1 1\n";
 
 impl MagickCliDriver {
-    /// Ask ImageMagick to read an MVG script under `configure_path`, and
-    /// check that its security policy refuses it. Returns why the policy in
-    /// effect fails the check, or `None` when the refusal came.
+    /// Ask ImageMagick to read an MVG script under `env`, and check that
+    /// its security policy refuses it. Returns why the policy in effect
+    /// fails the check, or `None` when the refusal came.
     ///
-    /// `magick -list policy` leaves out an entry marked `stealth="true"`, so
-    /// a stealth grant in the host's policy passes [`judge_listing`]. The
-    /// probe sees what ImageMagick does rather than what it lists, for MVG,
-    /// the script coder an upload most often abuses. Its arguments are
-    /// fixed: the limits of every run, `-format %w` with `info:`, which
-    /// writes the width to stdout and no file, and `mvg:-`, which names the
-    /// coder. The refusal counts only as a failed exit whose stderr names the
-    /// security policy and `MVG`: ImageMagick 7.1 writes "not authorized by
-    /// the security policy", and earlier releases "not allowed". A probe
-    /// that cannot be run at all returns the cause as an error, which the
-    /// caller does not keep. Neither cause repeats what the probe wrote.
-    fn probe_mvg(
-        &self,
-        configure_path: &OsStr,
-        config: &ImageConfig,
-    ) -> Result<Option<String>, String> {
+    /// `magick -list policy` leaves out an entry marked `stealth="true"`.
+    /// With the framework's file read last no such entry outranks it, and
+    /// the probe confirms that on the binary itself: it sees what
+    /// ImageMagick does rather than what it lists, for MVG, the script coder
+    /// an upload most often abuses. Its arguments are fixed: the limits of
+    /// every run, `-format %w` with `info:`, which writes the width to
+    /// stdout and no file, and `mvg:-`, which names the coder. The refusal
+    /// counts only as a failed exit whose stderr names the security policy
+    /// and `MVG`: ImageMagick 7.1 writes "not authorized by the security
+    /// policy", and earlier releases "not allowed". A probe that cannot be
+    /// run at all returns the cause as an error, which the caller does not
+    /// keep. Neither cause repeats what the probe wrote.
+    fn probe_mvg(&self, env: &PolicyEnv, config: &ImageConfig) -> Result<Option<String>, String> {
         let mut args = limit_args(config);
         args.extend(["-format", "%w", "mvg:-", "info:"].map(String::from));
-        let finished = self
-            .finish(&args, MVG_PROBE, config, 0, configure_path)
-            .map_err(|e| {
-                format!(
-                    "the MVG probe of `{}` could not be run, so the policy in effect cannot be \
-                     verified: {}",
-                    self.binary,
-                    e.message()
-                )
-            })?;
+        let finished = self.finish(&args, MVG_PROBE, config, 0, env).map_err(|e| {
+            format!(
+                "the MVG probe of `{}` could not be run, so the policy in effect cannot be \
+                 verified: {}",
+                self.binary,
+                e.message()
+            )
+        })?;
         let stderr = String::from_utf8_lossy(&finished.stderr);
         let refused = !finished.status.success()
             && stderr.contains("security policy")
@@ -1149,7 +1186,17 @@ impl ListedEntry {
     }
 }
 
-/// Read a `magick -list policy` listing into its entries.
+/// A `magick -list policy` listing, read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Listing {
+    /// The file of each `Path:` line, in the order ImageMagick read them,
+    /// `[built-in]` included.
+    files: Vec<String>,
+    /// Every entry, in the order ImageMagick applies them.
+    entries: Vec<ListedEntry>,
+}
+
+/// Read a `magick -list policy` listing into its files and entries.
 ///
 /// ImageMagick prints a `Path:` line for each file, then each entry as a
 /// `  Policy:` line followed by indented `name: value` fields; for the
@@ -1159,14 +1206,14 @@ impl ListedEntry {
 /// unverifiable policy is not a verified one. A field this function does not
 /// know is skipped, so a later ImageMagick that prints one more still reads.
 /// An error names the line, never its text, which is the host's.
-fn parse_listing(listing: &str) -> Result<Vec<ListedEntry>, String> {
+fn parse_listing(listing: &str) -> Result<Listing, String> {
     let unreadable = |line: usize, what: &str| {
         format!(
             "line {line} of `magick -list policy` {what}, so the policy in effect cannot be \
              verified"
         )
     };
-    let mut source: Option<String> = None;
+    let mut files: Vec<String> = Vec::new();
     let mut entries: Vec<ListedEntry> = Vec::new();
     // Whether the last entry belongs to the current `Path:` line, so a
     // field line can only ever fill in the entry above it.
@@ -1178,12 +1225,12 @@ fn parse_listing(listing: &str) -> Result<Vec<ListedEntry>, String> {
             continue;
         }
         if let Some(path) = line.strip_prefix("Path: ") {
-            source = Some(path.to_string());
+            files.push(path.to_string());
             open = false;
             continue;
         }
         if let Some(domain) = line.strip_prefix("  Policy: ") {
-            let Some(source) = source.clone() else {
+            let Some(source) = files.last().cloned() else {
                 return Err(unreadable(number, "is an entry before any `Path:` line"));
             };
             entries.push(ListedEntry {
@@ -1237,7 +1284,7 @@ fn parse_listing(listing: &str) -> Result<Vec<ListedEntry>, String> {
             entry.domain, entry.source
         ));
     }
-    Ok(entries)
+    Ok(Listing { files, entries })
 }
 
 /// The coders the framework's policy denies, read from
@@ -1251,7 +1298,9 @@ fn denied_coders() -> impl Iterator<Item = &'static str> {
     })
 }
 
-/// Check the policy in effect, as listed, against the framework's denials.
+/// Check the policy in effect, as listed, against the framework's denials,
+/// and check that `framework`, the framework's policy file as the listing
+/// names it, is the last file ImageMagick read.
 ///
 /// ImageMagick applies the last entry that matches, so for each coder the
 /// framework denies, the last entry whose pattern matches it must deny it.
@@ -1263,7 +1312,14 @@ fn denied_coders() -> impl Iterator<Item = &'static str> {
 /// the last `*` denial grants anything, and indirect reads stay denied when
 /// no path entry after the last `@*` denial grants a pattern that could
 /// match a path starting with `@`.
-fn judge_listing(entries: &[ListedEntry]) -> Result<(), String> {
+///
+/// Those rules judge what the listing shows. The order is what makes the
+/// framework's policy outrank what it does not show: with the framework's
+/// file read last, no entry anywhere else on the host, stealth or not, can
+/// outrank its denials. So a file read after it fails the check, whatever
+/// it holds, naming that file.
+fn judge_listing(listing: &Listing, framework: &str) -> Result<(), String> {
+    let entries = &listing.entries;
     for coder in denied_coders() {
         let mut denied = false;
         for entry in entries.iter().rev().filter(|entry| entry.is("coder")) {
@@ -1314,7 +1370,35 @@ fn judge_listing(entries: &[ListedEntry]) -> Result<(), String> {
     };
     later_grant("delegate", "*", &|_| true)?;
     later_grant("path", "@*", &may_match_indirect)?;
-    Ok(())
+    judge_order(&listing.files, framework)
+}
+
+/// Check that `framework` is the last file of `files` other than
+/// ImageMagick's built-in policy, which it lists after every file.
+fn judge_order(files: &[String], framework: &str) -> Result<(), String> {
+    let Some(last) = files.iter().rev().find(|file| *file != BUILT_IN_POLICY) else {
+        return Err(format!(
+            "`magick -list policy` names no policy file, so ImageMagick did not read the \
+             framework's policy `{framework}`"
+        ));
+    };
+    if last == framework {
+        return Ok(());
+    }
+    if files.iter().any(|file| file == framework) {
+        Err(format!(
+            "ImageMagick read `{last}` after the framework's policy `{framework}`, so an entry \
+             there can outrank the framework's, because ImageMagick applies the last entry that \
+             matches. The driver relies on its policy under HOME being the last ImageMagick \
+             reads; this ImageMagick reads another file after `$HOME/.config/ImageMagick`"
+        ))
+    } else {
+        Err(format!(
+            "ImageMagick did not read the framework's policy `{framework}` under HOME: the last \
+             policy file it read is `{last}`, so an entry there can outrank the framework's, \
+             because ImageMagick applies the last entry that matches"
+        ))
+    }
 }
 
 /// Whether a path pattern could match a path that starts with `@`, an
@@ -2268,10 +2352,9 @@ fn sharpen_amount(amount: u32) -> Option<f32> {
 /// Bytes the sniffer cannot name never get here by default: the driver
 /// refuses them before ImageMagick starts. Only an application that opts
 /// into autodetection hands them over on a bare `-`, and then the
-/// framework's policy ([`MagickCliDriver::POLICY`]), with the host's beside
-/// it, is what keeps them from the script and network coders. That is why a
-/// failed check of the policy in effect refuses every run under the opt-in,
-/// and only logs a warning without it.
+/// framework's policy ([`MagickCliDriver::POLICY`]), read last so that it
+/// outranks the host's, is what keeps them from the script and network
+/// coders.
 fn input_spec(source: Source) -> String {
     match source {
         Source::Read(format) => format!("{}:-", format.magick_coder()),
@@ -2567,12 +2650,15 @@ mod tests {
     /// A format the framework names but does not read.
     const HEIC: Source = Source::Delegated(sniff::DelegatedFormat::Heic);
 
-    /// The configure path the tests of the process plumbing start their
+    /// The environment the tests of the process plumbing start their
     /// stand-ins with. They call [`MagickCliDriver::execute`], below the
     /// policy and its check: `sh`, `sleep`, `true` and `cat` are not
     /// ImageMagick and would fail its `-list policy`.
-    fn no_configure_path() -> &'static OsStr {
-        OsStr::new("")
+    fn no_policy_env() -> PolicyEnv {
+        PolicyEnv {
+            home: PathBuf::new(),
+            configure_path: OsString::new(),
+        }
     }
 
     fn config() -> ImageConfig {
@@ -3151,7 +3237,7 @@ mod tests {
                 b"",
                 &config,
                 0,
-                no_configure_path(),
+                &no_policy_env(),
             )
             .expect_err("an orphaned grandchild must not hold the call open");
         let elapsed = started.elapsed();
@@ -3181,7 +3267,7 @@ mod tests {
         let driver = MagickCliDriver::new("sleep");
         let started = Instant::now();
         let err = driver
-            .execute(&["120".to_string()], b"", &config, 0, no_configure_path())
+            .execute(&["120".to_string()], b"", &config, 0, &no_policy_env())
             .expect_err("a stalled child must not hang");
         let elapsed = started.elapsed();
 
@@ -3215,7 +3301,7 @@ mod tests {
                 &input,
                 &ImageConfig::default(),
                 0,
-                no_configure_path(),
+                &no_policy_env(),
             );
             let _ = done.send(result);
         });
@@ -3235,13 +3321,7 @@ mod tests {
         let payload = vec![b'x'; 4 * 1024 * 1024];
         let driver = MagickCliDriver::new("cat");
         let out = driver
-            .execute(
-                &[],
-                &payload,
-                &ImageConfig::default(),
-                0,
-                no_configure_path(),
-            )
+            .execute(&[], &payload, &ImageConfig::default(), 0, &no_policy_env())
             .expect("cat must echo the payload back");
         assert_eq!(out.len(), payload.len(), "every byte must survive");
     }
