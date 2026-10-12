@@ -86,11 +86,77 @@ impl InputFormat {
     }
 }
 
+/// A format the framework names from its magic bytes but neither reads nor
+/// measures: only the `magick` driver accepts it, and only by the coder
+/// named here.
+///
+/// These are the formats the `magick` driver exists to read. Naming each
+/// one is what lets the driver hand ImageMagick `heic:-` rather than a bare
+/// `-`: with a bare `-` ImageMagick chooses the coder from the bytes, and
+/// bytes whose magic says MVG or MSL are read as a script. The list holds
+/// raster formats only, each with a signature no script format shares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DelegatedFormat {
+    /// HEIF, HEIC included: an ISO-BMFF `ftyp` box with a HEIF brand.
+    Heic,
+    /// AVIF: an ISO-BMFF `ftyp` box with the `avif` or `avis` brand.
+    Avif,
+    /// TIFF, classic or BigTIFF, in either byte order.
+    Tiff,
+    /// Photoshop document, version 1.
+    Psd,
+    /// Photoshop large document, version 2.
+    Psb,
+}
+
+impl DelegatedFormat {
+    /// The ImageMagick coder name for this format.
+    pub(crate) fn magick_coder(self) -> &'static str {
+        match self {
+            Self::Heic => "heic",
+            Self::Avif => "avif",
+            Self::Tiff => "tiff",
+            Self::Psd => "psd",
+            Self::Psb => "psb",
+        }
+    }
+}
+
+/// Recognise a format only the `magick` driver reads from its leading
+/// bytes.
+///
+/// An ISO-BMFF file is named by its major brand alone. An AVIF whose major
+/// brand is the generic HEIF `mif1` is named HEIF, which reads the same:
+/// ImageMagick's `heic` and `avif` coders are one module. Returns `None` for
+/// the five formats [`detect`] names, and for anything else.
+pub(crate) fn detect_delegated(bytes: &[u8]) -> Option<DelegatedFormat> {
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && matches!(&bytes[8..12], b"avif" | b"avis") {
+        return Some(DelegatedFormat::Avif);
+    }
+    if looks_like_heif(bytes) {
+        return Some(DelegatedFormat::Heic);
+    }
+    if [b"II*\0", b"MM\0*", b"II+\0", b"MM\0+"]
+        .iter()
+        .any(|magic| bytes.starts_with(*magic))
+    {
+        return Some(DelegatedFormat::Tiff);
+    }
+    if bytes.starts_with(b"8BPS\0\x01") {
+        return Some(DelegatedFormat::Psd);
+    }
+    if bytes.starts_with(b"8BPS\0\x02") {
+        return Some(DelegatedFormat::Psb);
+    }
+    None
+}
+
 /// Recognise one of the five supported formats from its leading bytes.
 ///
 /// Returns `None` for anything else, including HEIC - callers that need to
 /// distinguish "not an image we support" from "specifically HEIC" call
-/// [`looks_like_heif`] first.
+/// [`looks_like_heif`] first, and the `magick` driver names the formats
+/// only it reads with [`detect_delegated`].
 pub(crate) fn detect(bytes: &[u8]) -> Option<InputFormat> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Some(InputFormat::Png);
@@ -197,9 +263,10 @@ pub(crate) fn enforce_limits(
 /// Rejects empty input, then - for the five formats the framework can
 /// measure - reads the header and applies the caps. Returns `Ok(None)` when
 /// the bytes are not one of those five, which is not itself an error: the
-/// OxideAV driver treats it as unsupported, while the `magick` driver
-/// proceeds (delegating breadth is its entire purpose) under ImageMagick's
-/// own resource limits instead.
+/// OxideAV driver treats it as unsupported, while the `magick` driver goes
+/// on to [`detect_delegated`] and, for a format named there, proceeds
+/// (delegating breadth is its entire purpose) under ImageMagick's own
+/// resource limits instead.
 pub(crate) fn guard(
     bytes: &[u8],
     config: &ImageConfig,
@@ -1114,6 +1181,67 @@ mod tests {
         assert!(!looks_like_heif(
             b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00"
         ));
+    }
+
+    #[test]
+    fn hardening_delegated_formats_are_named_by_their_signatures() {
+        for (bytes, expected) in [
+            (
+                &b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic"[..],
+                DelegatedFormat::Heic,
+            ),
+            (
+                b"\x00\x00\x00\x18ftypmif1\x00\x00\x00\x00mif1heic",
+                DelegatedFormat::Heic,
+            ),
+            // The major brand decides, though an AVIF lists the generic
+            // HEIF brand `mif1` among its compatible brands.
+            (
+                b"\x00\x00\x00\x1cftypavif\x00\x00\x00\x00avifmif1miaf",
+                DelegatedFormat::Avif,
+            ),
+            (
+                b"\x00\x00\x00\x1cftypavis\x00\x00\x00\x00avismif1miaf",
+                DelegatedFormat::Avif,
+            ),
+            (b"II*\x00\x08\x00\x00\x00", DelegatedFormat::Tiff),
+            (b"MM\x00*\x00\x00\x00\x08", DelegatedFormat::Tiff),
+            (b"II+\x00\x08\x00\x00\x00", DelegatedFormat::Tiff),
+            (b"MM\x00+\x00\x08\x00\x00", DelegatedFormat::Tiff),
+            (b"8BPS\x00\x01\x00\x00\x00\x00", DelegatedFormat::Psd),
+            (b"8BPS\x00\x02\x00\x00\x00\x00", DelegatedFormat::Psb),
+        ] {
+            assert_eq!(detect_delegated(bytes), Some(expected), "{bytes:02x?}");
+            assert_eq!(
+                detect(bytes),
+                None,
+                "the built-in driver reads none of them"
+            );
+        }
+    }
+
+    #[test]
+    fn hardening_scripts_and_unnamed_formats_are_never_delegated() {
+        for bytes in [
+            // Scripts and pseudo-coders ImageMagick would run from their bytes.
+            &b"push graphic-context\nviewbox 0 0 1 1\n"[..],
+            b"viewbox 0 0 1 1\n",
+            b"<?xml version=\"1.0\"?>\n<image><read filename=\"xc:red\"/></image>",
+            b"url:http://127.0.0.1/x.png",
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+            b"%PDF-1.7\n",
+            b"%!PS-Adobe-3.0\n",
+            b"P6\n1 1\n255\n\xff\x00\x00",
+            // An MP4, a PSD of an unknown version, and the five the
+            // built-in driver reads.
+            b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00",
+            b"8BPS\x00\x03\x00\x00",
+            RED_PNG_1X1,
+            b"GIF89a\x01\x00\x01\x00",
+            b"",
+        ] {
+            assert_eq!(detect_delegated(bytes), None, "{bytes:02x?}");
+        }
     }
 
     #[test]

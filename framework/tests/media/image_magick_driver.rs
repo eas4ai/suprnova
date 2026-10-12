@@ -290,6 +290,65 @@ fn heic_decodes_when_the_host_carries_the_delegate() {
     assert_eq!((width, height), (4, 2));
 }
 
+#[test]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn hardening_each_named_coder_reads_its_format_through_the_real_binary() {
+    // The driver hands ImageMagick `<coder>:-` for every format the sniffer
+    // names, so a coder name ImageMagick does not know would refuse a file it
+    // reads. Each fixture is written by the binary under test; `tiff64` is
+    // its name for BigTIFF.
+    for (writer, sniffed) in [
+        ("heic", "heic"),
+        ("avif", "avif"),
+        ("tiff", "tiff"),
+        ("tiff64", "tiff"),
+        ("psd", "psd"),
+        ("psb", "psb"),
+    ] {
+        if !supports_format(writer) {
+            eprintln!("skipping {writer}: no host delegate");
+            continue;
+        }
+        let made = Command::new(driver().binary())
+            .args(["-size", "8x4", "xc:red", &format!("{writer}:-")])
+            .output()
+            .expect("magick must run");
+        assert!(
+            made.status.success() && !made.stdout.is_empty(),
+            "could not write a {writer} fixture: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        assert_eq!(
+            driver()
+                .dimensions(&made.stdout)
+                .unwrap_or_else(|e| panic!("{writer} read as {sniffed}: {e}")),
+            (8, 4),
+            "{writer}"
+        );
+        let png = driver()
+            .process(&made.stdout, &pipeline(Vec::new(), OutputFormat::Png))
+            .unwrap_or_else(|e| panic!("{writer} read as {sniffed}: {e}"));
+        assert!(png.starts_with(b"\x89PNG"), "{writer}");
+    }
+}
+
+#[test]
+#[serial_test::serial]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn hardening_an_mvg_document_is_refused_before_the_real_binary_runs() {
+    // Under the default configuration the bytes never reach ImageMagick, so
+    // the refusal is the framework's, whatever the host's policy.xml allows.
+    let _config = crate::image_processing::ConfigGuard::set(suprnova::ImageConfig::default());
+    let mvg = include_bytes!("fixtures/magick-script.mvg");
+    let err = driver()
+        .process(mvg, &pipeline(Vec::new(), OutputFormat::Png))
+        .expect_err("an MVG document is refused");
+    assert!(
+        err.to_string().contains("not one Suprnova names"),
+        "got: {err}"
+    );
+}
+
 /// Runs alone in a child process (see `own_process`). The facade's default
 /// driver is installed once per process, by whichever test first reaches
 /// the facade, and most tests in this binary go through the facade with the

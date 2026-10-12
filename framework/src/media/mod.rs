@@ -36,8 +36,11 @@
 //!   install, no native library, no patent exposure. Reads and writes PNG,
 //!   JPEG, WebP, GIF, and BMP.
 //! - `magick` - the opt-in [`MagickCliDriver`], which runs a host-installed
-//!   ImageMagick 7 binary. Wider input support (whatever the host's
-//!   delegates provide, including HEIC), at the cost of a host dependency.
+//!   ImageMagick 7 binary. Wider input support (HEIC, AVIF, TIFF and PSD,
+//!   as far as the host's delegates read them), at the cost of a host
+//!   dependency. It names the coder for every input and refuses bytes it
+//!   cannot name, unless `IMAGE_MAGICK_AUTODETECT` opts into letting
+//!   ImageMagick choose.
 //!
 //! Anything else is an [`ImageDriver`] implementation and
 //! [`set_default_driver`].
@@ -163,6 +166,8 @@ impl ImageDriverKind {
 ///   (default 30).
 /// - `IMAGE_AUTO_ORIENT` - apply the EXIF orientation on decode
 ///   (default `true`).
+/// - `IMAGE_MAGICK_AUTODETECT` - let ImageMagick choose the coder for input
+///   the framework cannot name (default `false`).
 ///
 /// Out-of-range values clamp with a warning rather than failing boot: a
 /// misconfigured limit should be loud, not fatal, and a limit of zero would
@@ -201,6 +206,16 @@ pub struct ImageConfig {
     /// `Orientation` tag so a viewer can still turn them; the pipeline's
     /// [`Image::orient`] applies it at a chosen place instead.
     pub auto_orient: bool,
+    /// Whether the `magick` driver hands ImageMagick input the framework
+    /// cannot name, on bare stdin, for ImageMagick to choose the coder.
+    ///
+    /// Off by default. The driver names the coder for every format the
+    /// framework recognises (`png:-`, `heic:-`, `tiff:-`) and refuses other
+    /// bytes before ImageMagick starts. With this on, ImageMagick reads such
+    /// bytes as whatever their magic says, an MVG or MSL script included,
+    /// and the host's `policy.xml` is the only barrier. Only the `magick`
+    /// driver reads it.
+    pub magick_autodetect: bool,
 }
 
 impl Default for ImageConfig {
@@ -210,6 +225,7 @@ impl Default for ImageConfig {
             max_alloc_bytes: DEFAULT_IMAGE_MAX_ALLOC_BYTES,
             magick_timeout_secs: DEFAULT_IMAGE_MAGICK_TIMEOUT_SECS,
             auto_orient: true,
+            magick_autodetect: false,
         }
     }
 }
@@ -232,6 +248,28 @@ fn parse_auto_orient(raw: Option<&str>) -> bool {
                 "IMAGE_AUTO_ORIENT is not true or false; orienting on decode, the default"
             );
             true
+        }
+    }
+}
+
+/// Read a raw `IMAGE_MAGICK_AUTODETECT`: `true`, `1`, `yes` or `on` opt in,
+/// `false`, `0`, `no` or `off` (or no value) keep it off. Anything else
+/// keeps it off with a warning: the setting widens what reaches ImageMagick,
+/// so only a value that names it turns it on.
+fn parse_magick_autodetect(raw: Option<&str>) -> bool {
+    let Some(raw) = raw else {
+        return false;
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => true,
+        "false" | "0" | "no" | "off" | "" => false,
+        _ => {
+            tracing::warn!(
+                env = "IMAGE_MAGICK_AUTODETECT",
+                value = raw,
+                "IMAGE_MAGICK_AUTODETECT is not true or false; leaving autodetection off, the default"
+            );
+            false
         }
     }
 }
@@ -301,12 +339,28 @@ impl ImageConfig {
 
         let auto_orient = parse_auto_orient(std::env::var("IMAGE_AUTO_ORIENT").ok().as_deref());
 
+        let magick_autodetect =
+            parse_magick_autodetect(std::env::var("IMAGE_MAGICK_AUTODETECT").ok().as_deref());
+
         Self {
             max_dimension,
             max_alloc_bytes,
             magick_timeout_secs,
             auto_orient,
+            magick_autodetect,
         }
+    }
+
+    /// Turn the `magick` driver's autodetection of unnamed input on or off,
+    /// as `IMAGE_MAGICK_AUTODETECT` does.
+    ///
+    /// Opting in hands the coder choice for any input the framework cannot
+    /// name to ImageMagick, so the host's `policy.xml` is then the only
+    /// barrier between an upload and coders such as MVG, MSL and `url:`.
+    #[must_use]
+    pub fn magick_autodetect(mut self, enabled: bool) -> Self {
+        self.magick_autodetect = enabled;
+        self
     }
 }
 
@@ -1316,6 +1370,32 @@ mod tests {
             "an unknown value keeps the default"
         );
         assert!(ImageConfig::default().auto_orient);
+    }
+
+    #[test]
+    fn hardening_image_magick_autodetect_turns_on_only_by_name() {
+        assert!(!parse_magick_autodetect(None), "off by default");
+        for on in ["true", "1", "yes", "on", " TRUE "] {
+            assert!(parse_magick_autodetect(Some(on)), "{on:?} opts in");
+        }
+        for off in ["false", "0", "no", "off", ""] {
+            assert!(!parse_magick_autodetect(Some(off)), "{off:?} keeps it off");
+        }
+        // It widens what reaches ImageMagick, so a value that does not name
+        // it fails closed rather than to the more permissive side.
+        assert!(
+            !parse_magick_autodetect(Some("maybe")),
+            "an unknown value keeps it off"
+        );
+        assert!(!ImageConfig::default().magick_autodetect);
+        let opted_in = ImageConfig::default().magick_autodetect(true);
+        assert!(opted_in.magick_autodetect);
+        assert!(!opted_in.magick_autodetect(false).magick_autodetect);
+        assert_eq!(
+            opted_in.magick_autodetect(false),
+            ImageConfig::default(),
+            "the builder changes that one field"
+        );
     }
 
     #[test]

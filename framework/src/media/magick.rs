@@ -26,17 +26,23 @@
 //! stdin into its own temporary directory before it decodes, and removes
 //! the copy when it exits.)
 //!
+//! The input argument always names the coder (`png:-`, `heic:-`), so
+//! ImageMagick never chooses one from the bytes of an upload. Bytes the
+//! framework cannot name are refused before ImageMagick starts, unless the
+//! application opts into autodetection with `IMAGE_MAGICK_AUTODETECT`; see
+//! [`input_spec`].
+//!
 //! # Two-tier limits
 //!
 //! Decode limits are enforced twice, because this driver's whole purpose is
 //! reading formats the framework cannot parse:
 //!
-//! 1. **Framework tier.** For the five formats
-//!    [`sniff`](super::sniff) recognises, the header is parsed and the caps
-//!    applied before the process is even spawned - identical to the
-//!    pure-Rust driver.
-//! 2. **ImageMagick tier.** For everything else (HEIC, AVIF, TIFF, PSD,
-//!    whatever the host's delegates add) a pre-parse is impossible, so every
+//! 1. **Framework tier.** For the five formats the framework reads
+//!    itself, the header is parsed and the caps applied before the process
+//!    is even spawned - identical to the pure-Rust driver.
+//! 2. **ImageMagick tier.** For the formats [`sniff`](super::sniff) names
+//!    but only ImageMagick reads (HEIC, AVIF, TIFF, PSD), and for any input
+//!    under the autodetection opt-in, a pre-parse is impossible, so every
 //!    invocation carries ImageMagick's own resource limits derived from the
 //!    same [`ImageConfig`]. `-limit disk 0` is deliberate: without it, IM
 //!    spills the pixel cache to disk and the memory cap stops being a cap.
@@ -95,6 +101,12 @@ const MIN_OUTPUT_READ: usize = 8 * 1024;
 /// `IMAGE_MAGICK_BINARY` and defaults to `magick`; an absent or
 /// non-executing binary is an error at first use, naming the env var.
 ///
+/// Input is read with a named coder: `png:-` and its kin for the five
+/// formats the framework reads, and `heic:-`, `avif:-`, `tiff:-`, `psd:-`
+/// or `psb:-` for the formats only ImageMagick reads. Other bytes are
+/// refused before the binary starts, unless `IMAGE_MAGICK_AUTODETECT` lets
+/// ImageMagick choose the coder.
+///
 /// Output formats are whatever the host's delegates can write. WebP goes
 /// through libwebp, and [`OutputFormat::WebP`] hands it the pipeline's
 /// quality for a lossy encode, with one difference from the built-in
@@ -134,16 +146,28 @@ impl MagickCliDriver {
         &self.binary
     }
 
-    /// Apply the framework-tier limits to input we can parse ourselves.
+    /// Name the input, and apply the framework-tier limits to input we can
+    /// parse ourselves.
     ///
-    /// Returns the recognised format, or `None` when the bytes are something
-    /// only ImageMagick can read - which is not an error here, unlike in the
-    /// pure-Rust driver.
-    fn guard(
-        contents: &[u8],
-        config: &ImageConfig,
-    ) -> Result<Option<sniff::InputFormat>, FrameworkError> {
-        sniff::guard(contents, config)
+    /// Returns the format the framework reads, or the one it names but only
+    /// ImageMagick reads (HEIC, TIFF), which is not an error here, unlike in
+    /// the pure-Rust driver. Bytes the framework cannot name are refused
+    /// before ImageMagick starts, unless `config` opts into autodetection.
+    fn guard(contents: &[u8], config: &ImageConfig) -> Result<Source, FrameworkError> {
+        if let Some(format) = sniff::guard(contents, config)? {
+            return Ok(Source::Read(format));
+        }
+        if let Some(format) = sniff::detect_delegated(contents) {
+            return Ok(Source::Delegated(format));
+        }
+        if config.magick_autodetect {
+            return Ok(Source::Autodetected);
+        }
+        Err(FrameworkError::param(
+            "image format is not one Suprnova names, so the magick driver does not hand it \
+             to ImageMagick; set IMAGE_MAGICK_AUTODETECT=true to let ImageMagick choose the \
+             coder for such input",
+        ))
     }
 
     /// Spawn the binary, stream `input` in, and collect stdout.
@@ -389,11 +413,33 @@ impl MagickCliDriver {
     }
 }
 
+/// What the driver tells ImageMagick to read the input as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// One of the five formats the framework reads and measures itself.
+    Read(sniff::InputFormat),
+    /// A format the framework names but only ImageMagick reads.
+    Delegated(sniff::DelegatedFormat),
+    /// Bytes the framework cannot name, handed over for ImageMagick to
+    /// choose the coder: only under `ImageConfig::magick_autodetect`.
+    Autodetected,
+}
+
+impl Source {
+    /// The format, when the framework reads it itself.
+    fn read(self) -> Option<sniff::InputFormat> {
+        match self {
+            Self::Read(format) => Some(format),
+            Self::Delegated(_) | Self::Autodetected => None,
+        }
+    }
+}
+
 /// How the `magick` driver orients an image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Orienting {
-    /// Whether the framework reads the format itself (the five it
-    /// recognises). When it does, the orientation comes from the reader the
+    /// Whether the framework reads the format itself (one of its five).
+    /// When it does, the orientation comes from the reader the
     /// built-in driver uses, so both drivers turn a file alike; when it does
     /// not (HEIC, TIFF), ImageMagick's own reading is the only one there is.
     known: bool,
@@ -451,7 +497,7 @@ struct Tail<'p> {
 /// What one ImageMagick run needs to know about the whole pipeline.
 struct Run<'a> {
     config: &'a ImageConfig,
-    detected: Option<sniff::InputFormat>,
+    source: Source,
     target: OutputFormat,
     orienting: Orienting,
     /// Drop the source's ICC profile as the image is read: its length is
@@ -467,7 +513,7 @@ impl Run<'_> {
     fn args(&self, first: bool, steps: &[Transformation], applied: &mut bool) -> Vec<String> {
         let mut args = limit_args(self.config);
         if first {
-            args.extend(first_frame_input(self.detected));
+            args.extend(first_frame_input(self.source));
             if self.drops_profile {
                 args.push("+profile".into());
                 args.push("icc".into());
@@ -921,12 +967,13 @@ impl ImageDriver for MagickCliDriver {
         pipeline: &ImagePipeline,
     ) -> Result<Vec<u8>, FrameworkError> {
         let config = super::config();
-        let detected = Self::guard(contents, &config)?;
+        let source = Self::guard(contents, &config)?;
+        let detected = source.read();
         let target = match pipeline.format.or_else(|| detected.map(same_format)) {
             Some(format) => format,
             None => {
                 return Err(FrameworkError::param(
-                    "image format is not one Suprnova can name, so the output format is \
+                    "image format is not one Suprnova writes, so the output format is \
                      ambiguous; call to_format() to choose one",
                 ));
             }
@@ -954,7 +1001,7 @@ impl ImageDriver for MagickCliDriver {
         let tag = match detected {
             Some(format) => metadata::source_orientation(format, contents),
             None if unapplied => parse_orientation(&String::from_utf8_lossy(&self.run(
-                &orientation_args(&config),
+                &orientation_args(&config, source),
                 contents,
                 &config,
             )?)),
@@ -962,7 +1009,7 @@ impl ImageDriver for MagickCliDriver {
         };
         let run = Run {
             config: &config,
-            detected,
+            source,
             target,
             orienting: Orienting {
                 known: detected.is_some(),
@@ -1027,14 +1074,14 @@ impl ImageDriver for MagickCliDriver {
     /// from a second probe, for one it cannot (HEIC, TIFF).
     fn dimensions(&self, contents: &[u8]) -> Result<(u32, u32), FrameworkError> {
         let config = super::config();
-        let detected = Self::guard(contents, &config)?;
-        let raw = self.run(&dimensions_args(&config, detected), contents, &config)?;
+        let source = Self::guard(contents, &config)?;
+        let raw = self.run(&dimensions_args(&config, source), contents, &config)?;
         let (width, height) = parse_dimensions(&String::from_utf8_lossy(&raw))?;
-        let tag = match detected {
+        let tag = match source.read() {
             _ if !config.auto_orient => None,
             Some(format) => metadata::source_orientation(format, contents),
             None => parse_orientation(&String::from_utf8_lossy(&self.run(
-                &orientation_args(&config),
+                &orientation_args(&config, source),
                 contents,
                 &config,
             )?)),
@@ -1049,8 +1096,8 @@ impl ImageDriver for MagickCliDriver {
 
     fn dominant_color(&self, contents: &[u8]) -> Result<String, FrameworkError> {
         let config = super::config();
-        let detected = Self::guard(contents, &config)?;
-        let raw = self.run(&dominant_color_args(&config, detected), contents, &config)?;
+        let source = Self::guard(contents, &config)?;
+        let raw = self.run(&dominant_color_args(&config, source), contents, &config)?;
         parse_hex_pixel(&String::from_utf8_lossy(&raw))
     }
 
@@ -1220,18 +1267,21 @@ fn sharpen_amount(amount: u32) -> Option<f32> {
 /// A bare `-` lets ImageMagick choose the decoder from the bytes it is handed,
 /// which is the ImageTragick shape: a file whose magic says MVG or MSL is read
 /// as a *script*, no matter what the application believed it was accepting,
-/// with the host's `policy.xml` as the only thing standing in the way. When
-/// the framework's own sniffer has already identified the format, name the
-/// coder - `png:-` decodes as PNG or fails, and cannot be talked into
+/// with the host's `policy.xml` as the only thing standing in the way. So the
+/// driver names the coder for every format the sniffer names, the five the
+/// framework reads and the ones only ImageMagick reads - `png:-` decodes as
+/// PNG or fails, and `heic:-` as HEIC, and neither can be talked into
 /// anything else.
 ///
-/// The unrecognised path keeps the bare `-`, because reading formats the
-/// framework cannot name is the entire reason this driver exists. That path
-/// is the one an operator's `policy.xml` still has to cover.
-fn input_spec(detected: Option<sniff::InputFormat>) -> String {
-    match detected {
-        Some(format) => format!("{}:-", format.magick_coder()),
-        None => "-".to_string(),
+/// Bytes the sniffer cannot name never get here by default: the driver
+/// refuses them before ImageMagick starts. Only an application that opts
+/// into autodetection hands them over on a bare `-`, and then its
+/// `policy.xml` is the only barrier again.
+fn input_spec(source: Source) -> String {
+    match source {
+        Source::Read(format) => format!("{}:-", format.magick_coder()),
+        Source::Delegated(format) => format!("{}:-", format.magick_coder()),
+        Source::Autodetected => "-".to_string(),
     }
 }
 
@@ -1245,9 +1295,9 @@ fn input_spec(detected: Option<sniff::InputFormat>) -> String {
 /// A GIF frame can sit at an offset on a larger screen; the built-in driver
 /// composes it onto that screen, and `-coalesce` does the same. Other formats
 /// keep their own pixels, as the built-in driver reads them.
-fn first_frame_input(detected: Option<sniff::InputFormat>) -> Vec<String> {
-    let mut args = vec![format!("{}[0]", input_spec(detected))];
-    if detected == Some(sniff::InputFormat::Gif) {
+fn first_frame_input(source: Source) -> Vec<String> {
+    let mut args = vec![format!("{}[0]", input_spec(source))];
+    if source == Source::Read(sniff::InputFormat::Gif) {
         args.push("-coalesce".into());
     }
     args
@@ -1258,13 +1308,13 @@ fn first_frame_input(detected: Option<sniff::InputFormat>) -> Vec<String> {
 fn process_args(
     pipeline: &ImagePipeline,
     config: &ImageConfig,
-    detected: Option<sniff::InputFormat>,
+    source: Source,
     target: OutputFormat,
     orienting: Orienting,
 ) -> Vec<String> {
     let run = Run {
         config,
-        detected,
+        source,
         target,
         orienting,
         drops_profile: false,
@@ -1351,27 +1401,27 @@ fn output_args(
 /// drivers answer with the screen. Every other format reports its pixels,
 /// because a page offset stored in, say, a PNG is not part of the image the
 /// built-in driver decodes.
-fn dimensions_args(config: &ImageConfig, detected: Option<sniff::InputFormat>) -> Vec<String> {
+fn dimensions_args(config: &ImageConfig, source: Source) -> Vec<String> {
     let mut args = vec!["identify".to_string()];
     args.extend(limit_args(config));
     args.push("-format".into());
-    args.push(match detected {
-        Some(sniff::InputFormat::Gif) => "%W %H".into(),
+    args.push(match source {
+        Source::Read(sniff::InputFormat::Gif) => "%W %H".into(),
         _ => "%w %h".into(),
     });
-    args.push(format!("{}[0]", input_spec(detected)));
+    args.push(format!("{}[0]", input_spec(source)));
     args
 }
 
 /// Full argv for an orientation probe of a format the framework cannot
 /// read: ImageMagick's own reading of the first frame's tag, which is what
 /// `-auto-orient` applies.
-fn orientation_args(config: &ImageConfig) -> Vec<String> {
+fn orientation_args(config: &ImageConfig, source: Source) -> Vec<String> {
     let mut args = vec!["identify".to_string()];
     args.extend(limit_args(config));
     args.push("-format".into());
     args.push("%[orientation]".into());
-    args.push(format!("{}[0]", input_spec(None)));
+    args.push(format!("{}[0]", input_spec(source)));
     args
 }
 
@@ -1397,9 +1447,9 @@ fn parse_orientation(raw: &str) -> Option<Orientation> {
 /// Alpha is switched off *before* the downscale so a transparent image's
 /// colour is not blended toward the background, matching the pure-Rust
 /// driver and Laravel, both of which drop alpha rather than weighting by it.
-fn dominant_color_args(config: &ImageConfig, detected: Option<sniff::InputFormat>) -> Vec<String> {
+fn dominant_color_args(config: &ImageConfig, source: Source) -> Vec<String> {
     let mut args = limit_args(config);
-    args.extend(first_frame_input(detected));
+    args.extend(first_frame_input(source));
     args.push("-alpha".into());
     args.push("off".into());
     args.push("-resize".into());
@@ -1510,14 +1560,17 @@ fn parse_hex_pixel(raw: &str) -> Result<String, FrameworkError> {
 mod tests {
     use super::*;
 
-    /// How a pipeline orients a source of `detected` whose tag the
-    /// framework read as none.
-    fn untagged(detected: Option<sniff::InputFormat>) -> Orienting {
+    /// How a pipeline orients a source whose tag the framework read as
+    /// none.
+    fn untagged(source: Source) -> Orienting {
         Orienting {
-            known: detected.is_some(),
+            known: source.read().is_some(),
             tag: None,
         }
     }
+
+    /// A format the framework names but does not read.
+    const HEIC: Source = Source::Delegated(sniff::DelegatedFormat::Heic);
 
     fn config() -> ImageConfig {
         ImageConfig {
@@ -1525,6 +1578,7 @@ mod tests {
             max_alloc_bytes: 1024,
             magick_timeout_secs: 30,
             auto_orient: true,
+            magick_autodetect: false,
         }
     }
 
@@ -1597,9 +1651,9 @@ mod tests {
             process_args(
                 &pipeline,
                 &config(),
-                Some(sniff::InputFormat::Png),
+                Source::Read(sniff::InputFormat::Png),
                 OutputFormat::WebP,
-                untagged(Some(sniff::InputFormat::Png))
+                untagged(Source::Read(sniff::InputFormat::Png))
             ),
             expected
         );
@@ -1616,9 +1670,9 @@ mod tests {
         let lossless = process_args(
             &pipeline,
             &config(),
-            Some(sniff::InputFormat::Png),
+            Source::Read(sniff::InputFormat::Png),
             OutputFormat::WebPLossless,
-            untagged(Some(sniff::InputFormat::Png)),
+            untagged(Source::Read(sniff::InputFormat::Png)),
         );
         assert_eq!(
             lossless[lossless.len() - 5..],
@@ -1630,9 +1684,9 @@ mod tests {
         let lossy = process_args(
             &pipeline,
             &config(),
-            Some(sniff::InputFormat::Png),
+            Source::Read(sniff::InputFormat::Png),
             OutputFormat::WebP,
-            untagged(Some(sniff::InputFormat::Png)),
+            untagged(Source::Read(sniff::InputFormat::Png)),
         );
         assert_eq!(
             lossy[lossy.len() - 5..],
@@ -1643,9 +1697,9 @@ mod tests {
         let jpeg = process_args(
             &pipeline,
             &config(),
-            Some(sniff::InputFormat::Png),
+            Source::Read(sniff::InputFormat::Png),
             OutputFormat::Jpeg,
-            untagged(Some(sniff::InputFormat::Png)),
+            untagged(Source::Read(sniff::InputFormat::Png)),
         );
         assert!(!jpeg.contains(&"-define".to_string()));
     }
@@ -1806,9 +1860,9 @@ mod tests {
         for arg in process_args(
             &pipeline,
             &config(),
-            Some(sniff::InputFormat::Jpeg),
+            Source::Read(sniff::InputFormat::Jpeg),
             OutputFormat::Jpeg,
-            untagged(Some(sniff::InputFormat::Jpeg)),
+            untagged(Source::Read(sniff::InputFormat::Jpeg)),
         ) {
             assert!(
                 !arg.contains(';')
@@ -1822,7 +1876,7 @@ mod tests {
 
     #[test]
     fn dimensions_probe_uses_the_identify_subcommand() {
-        let args = dimensions_args(&config(), Some(sniff::InputFormat::Png));
+        let args = dimensions_args(&config(), Source::Read(sniff::InputFormat::Png));
         assert_eq!(args[0], "identify");
         assert_eq!(args[args.len() - 3..], ["-format", "%w %h", "png:-[0]"]);
         assert!(args.contains(&"-limit".to_string()));
@@ -1832,26 +1886,26 @@ mod tests {
     fn a_gif_probe_reports_the_logical_screen() {
         // A first frame can be smaller than the screen it sits on; the
         // built-in driver composes it onto the screen and reports that.
-        let args = dimensions_args(&config(), Some(sniff::InputFormat::Gif));
+        let args = dimensions_args(&config(), Source::Read(sniff::InputFormat::Gif));
         assert_eq!(args[args.len() - 3..], ["-format", "%W %H", "gif:-[0]"]);
-        let unknown = dimensions_args(&config(), None);
-        assert_eq!(unknown[unknown.len() - 3..], ["-format", "%w %h", "-[0]"]);
+        let heic = dimensions_args(&config(), HEIC);
+        assert_eq!(heic[heic.len() - 3..], ["-format", "%w %h", "heic:-[0]"]);
     }
 
     #[test]
     fn dimensions_probe_reads_only_the_first_frame() {
         // `-format` writes no separator between frames, so an animation probed
         // whole prints `100 100100 100`. `[0]` selects the first frame, for a
-        // recognised coder and for the bare stdin marker alike.
-        let named = dimensions_args(&config(), Some(sniff::InputFormat::Gif));
+        // named coder and for the autodetection opt-in's bare stdin alike.
+        let named = dimensions_args(&config(), Source::Read(sniff::InputFormat::Gif));
         assert_eq!(named[named.len() - 1], "gif:-[0]");
-        let bare = dimensions_args(&config(), None);
+        let bare = dimensions_args(&config(), Source::Autodetected);
         assert_eq!(bare[bare.len() - 1], "-[0]");
     }
 
     #[test]
     fn dominant_color_probe_drops_alpha_before_downscaling() {
-        let args = dominant_color_args(&config(), Some(sniff::InputFormat::Bmp));
+        let args = dominant_color_args(&config(), Source::Read(sniff::InputFormat::Bmp));
         let alpha = args.iter().position(|a| a == "-alpha").expect("-alpha");
         let resize = args.iter().position(|a| a == "-resize").expect("-resize");
         assert!(
@@ -1917,24 +1971,73 @@ mod tests {
             (sniff::InputFormat::Gif, "gif:-"),
             (sniff::InputFormat::Bmp, "bmp:-"),
         ] {
-            assert_eq!(input_spec(Some(format)), expected);
+            assert_eq!(input_spec(Source::Read(format)), expected);
         }
     }
 
     #[test]
-    fn an_unrecognised_input_keeps_the_bare_stdin_marker() {
-        // Reading formats the framework cannot name is this driver's entire
-        // purpose, so that path cannot pin a coder; it is the one the host's
-        // policy.xml still has to cover.
-        assert_eq!(input_spec(None), "-");
+    fn hardening_a_format_only_imagemagick_reads_pins_its_coder_too() {
+        // Reading these is the driver's purpose, and naming them is what
+        // keeps the bytes of an upload from choosing the coder.
+        for (format, expected) in [
+            (sniff::DelegatedFormat::Heic, "heic:-"),
+            (sniff::DelegatedFormat::Avif, "avif:-"),
+            (sniff::DelegatedFormat::Tiff, "tiff:-"),
+            (sniff::DelegatedFormat::Psd, "psd:-"),
+            (sniff::DelegatedFormat::Psb, "psb:-"),
+        ] {
+            assert_eq!(input_spec(Source::Delegated(format)), expected);
+        }
+    }
+
+    #[test]
+    fn hardening_bare_stdin_is_the_autodetection_opt_in_alone() {
+        // The one input argument that lets ImageMagick choose the coder,
+        // which the host's policy.xml then has to cover.
+        assert_eq!(input_spec(Source::Autodetected), "-");
+    }
+
+    #[test]
+    fn hardening_the_guard_refuses_unnamed_bytes_unless_opted_in() {
+        let mvg = b"push graphic-context\nviewbox 0 0 1 1\npop graphic-context\n";
+        let err = MagickCliDriver::guard(mvg, &config()).expect_err("unnamed bytes are refused");
+        assert!(
+            err.to_string().contains("not one Suprnova names"),
+            "got: {err}"
+        );
+        assert!(
+            err.to_string().contains("IMAGE_MAGICK_AUTODETECT"),
+            "got: {err}"
+        );
+        // An empty input stays the empty-input error, opted in or not.
+        let opted_in = config().magick_autodetect(true);
+        assert!(MagickCliDriver::guard(b"", &opted_in).is_err());
+        assert_eq!(
+            MagickCliDriver::guard(mvg, &opted_in).expect("opted in"),
+            Source::Autodetected
+        );
+        // A named format keeps its coder with the opt-in on.
+        let heic = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00";
+        for config in [config(), opted_in] {
+            assert_eq!(MagickCliDriver::guard(heic, &config).expect("named"), HEIC);
+        }
+        // A format the framework reads still meets its header caps first.
+        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x20\x00\x00\x00\x20\x00";
+        let capped = MagickCliDriver::guard(png, &opted_in).expect_err("8192x8192 is over 4096");
+        assert!(capped.to_string().contains("limit"), "got: {capped}");
     }
 
     #[test]
     fn every_probe_pins_the_coder_when_the_format_is_known() {
-        let dims = dimensions_args(&config(), Some(sniff::InputFormat::Png));
+        let dims = dimensions_args(&config(), Source::Read(sniff::InputFormat::Png));
         assert_eq!(dims[dims.len() - 1], "png:-[0]");
-        let colour = dominant_color_args(&config(), Some(sniff::InputFormat::Jpeg));
+        let colour = dominant_color_args(&config(), Source::Read(sniff::InputFormat::Jpeg));
         assert!(colour.contains(&"jpeg:-[0]".to_string()));
+        let tiff = Source::Delegated(sniff::DelegatedFormat::Tiff);
+        let orientation = orientation_args(&config(), tiff);
+        assert_eq!(orientation[orientation.len() - 1], "tiff:-[0]");
+        let colour = dominant_color_args(&config(), tiff);
+        assert!(colour.contains(&"tiff:-[0]".to_string()));
     }
 
     #[test]
@@ -1945,16 +2048,16 @@ mod tests {
         let gif = process_args(
             &pipeline,
             &config(),
-            Some(sniff::InputFormat::Gif),
+            Source::Read(sniff::InputFormat::Gif),
             OutputFormat::Gif,
-            untagged(Some(sniff::InputFormat::Gif)),
+            untagged(Source::Read(sniff::InputFormat::Gif)),
         );
         let input = gif
             .iter()
             .position(|arg| arg == "gif:-[0]")
             .expect("the input");
         assert_eq!(gif[input + 1], "-coalesce");
-        let colour = dominant_color_args(&config(), Some(sniff::InputFormat::Gif));
+        let colour = dominant_color_args(&config(), Source::Read(sniff::InputFormat::Gif));
         assert!(
             colour
                 .windows(2)
@@ -1964,19 +2067,20 @@ mod tests {
         let png = process_args(
             &pipeline,
             &config(),
-            Some(sniff::InputFormat::Png),
+            Source::Read(sniff::InputFormat::Png),
             OutputFormat::Png,
-            untagged(Some(sniff::InputFormat::Png)),
+            untagged(Source::Read(sniff::InputFormat::Png)),
         );
         assert!(!png.contains(&"-coalesce".to_string()));
-        let unknown = process_args(
+        let heic = process_args(
             &pipeline,
             &config(),
-            None,
+            HEIC,
             OutputFormat::Png,
-            untagged(None),
+            untagged(HEIC),
         );
-        assert!(unknown.contains(&"-[0]".to_string()));
+        assert!(heic.contains(&"heic:-[0]".to_string()));
+        assert!(!heic.contains(&"-coalesce".to_string()));
     }
 
     #[test]
@@ -2127,7 +2231,7 @@ mod tests {
 
     #[test]
     fn img_001_orientation_is_applied_after_the_input_or_at_its_step() {
-        let jpeg = Some(sniff::InputFormat::Jpeg);
+        let jpeg = Source::Read(sniff::InputFormat::Jpeg);
         let six = Orienting {
             known: true,
             tag: Orientation::from_tag(6),
@@ -2163,9 +2267,9 @@ mod tests {
         let unknown = process_args(
             &pipeline,
             &config(),
-            None,
+            HEIC,
             OutputFormat::Png,
-            untagged(None),
+            untagged(HEIC),
         );
         assert!(unknown.contains(&"-auto-orient".to_string()));
 
@@ -2195,9 +2299,9 @@ mod tests {
         let applied = process_args(
             &pipeline,
             &config(),
-            None,
+            HEIC,
             OutputFormat::Jpeg,
-            untagged(None),
+            untagged(HEIC),
         );
         let profile = applied.iter().position(|arg| arg == "+profile").unwrap();
         assert_eq!(
@@ -2210,9 +2314,9 @@ mod tests {
         let kept = process_args(
             &pipeline,
             &opt_out,
-            None,
+            HEIC,
             OutputFormat::Jpeg,
-            untagged(None),
+            untagged(HEIC),
         );
         let profile = kept.iter().position(|arg| arg == "+profile").unwrap();
         assert_eq!(
@@ -2220,7 +2324,7 @@ mod tests {
             "!icc,!exif,*",
             "the EXIF stays for its tag in a format the framework cannot read"
         );
-        let jpeg = Some(sniff::InputFormat::Jpeg);
+        let jpeg = Source::Read(sniff::InputFormat::Jpeg);
         let known = process_args(
             &pipeline,
             &opt_out,
@@ -2298,9 +2402,9 @@ mod tests {
         let jpeg = process_args(
             &pipeline,
             &config(),
-            None,
+            HEIC,
             OutputFormat::Jpeg,
-            untagged(None),
+            untagged(HEIC),
         );
         assert!(
             jpeg.windows(6).any(|window| window
@@ -2317,9 +2421,9 @@ mod tests {
         let png = process_args(
             &pipeline,
             &config(),
-            None,
+            HEIC,
             OutputFormat::Png,
-            untagged(None),
+            untagged(HEIC),
         );
         assert!(!png.contains(&"remove".to_string()), "PNG keeps its alpha");
     }
