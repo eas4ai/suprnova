@@ -13,7 +13,8 @@
 //!   remember-me tokens were revoked. When a revocation fails, the
 //!   framework has queued `RevokeUserCredentials` for the user by the time
 //!   the outcome comes back, and the handler logs that before it answers
-//!   the error.
+//!   the error. When the retry could not be queued, the framework returns
+//!   an error in place of the outcome, which the handler answers as well.
 //!
 //! Both endpoints are public - they consume tokens minted out-of-
 //! band, so they don't sit behind `SessionAuthMiddleware`. Token
@@ -78,8 +79,10 @@ const REVOCATION_FAILED: &str = "Your password was changed, but signing you out 
 /// path. The password stays changed. The framework queued
 /// `RevokeUserCredentials` for the user before the outcome came back, so a
 /// queue worker retries both revocations until both stores confirm them;
-/// the handler logs the queued retry, or the push that failed, with the
-/// user's id. A failed push does not change the answer.
+/// the handler logs the queued retry with the user's id. When that push
+/// failed, `complete_with_outcome` returns the framework's error instead,
+/// already logged at error level with the user's id, and the `?` answers
+/// it with the same `500`.
 ///
 /// On success the facade also dispatches a `PasswordChangedMail`
 /// security notification and fires `PasswordResetCompleted`. Both
@@ -144,18 +147,14 @@ fn revocation_failed(
     }
 }
 
-/// Log, with the user's id, what the framework did about a failed
-/// revocation: the retry it queued, or the push that failed.
+/// Log, with the user's id, the retry the framework queued for a failed
+/// revocation. A retry it could not queue never reaches here: it is the
+/// error `complete_with_outcome` returned.
 fn report_revocation_retry(user_id: &str, retry: &RevocationRetry) {
     match retry {
         RevocationRetry::Queued => tracing::warn!(
             user_id,
             "password reset: queued a retry of the failed revocations"
-        ),
-        RevocationRetry::PushFailed(error) => tracing::error!(
-            user_id,
-            error = %error,
-            "password reset: the retry of the failed revocations could not be queued"
         ),
         // The framework reports `NotNeeded` only when both revocations
         // succeeded, and this is called only when one failed.

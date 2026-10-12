@@ -76,7 +76,8 @@ mutation cannot roll the mutation back.
   revocation. The provider fallback is verified-account-only: it consumes the
   framework token, rotates the provider password, then reports framework
   session and remember revocation outcomes. When a revocation fails, it
-  queues a retry before it returns. Mail and events run afterward.
+  queues a retry before it returns, and returns an error when the retry
+  cannot be queued. Mail and events run afterward.
 - `BruteForce::unlock_account` commits the unlock before firing
   `AccountUnlocked`.
 - `TwoFactor::confirm` stamps `confirmed_at` before firing
@@ -698,9 +699,16 @@ failure and makes the revocation durable instead:
   the user's id.
 - Before it returns, the reset pushes a `RevokeUserCredentials` job for the
   user with `Queue::push`. `complete` pushes it too. The outcome's
-  `revocation_retry` field says what happened: `RevocationRetry::Queued`, or
-  `RevocationRetry::PushFailed(error)` when the push failed.
+  `revocation_retry` field is then `RevocationRetry::Queued`.
   `RevocationRetry::NotNeeded` means both revocations succeeded.
+- When the push fails too, nothing would retry the revocations, so
+  `complete_with_outcome` and `complete` return an error instead of the
+  outcome. The error says that the user's password changed, names each
+  revocation that failed with the store's error, gives the push's error, and
+  asks for `RevokeUserCredentials::new("<id>")` to be queued once the queue
+  works. The framework logs it at error level with the user's id, and sends
+  no `PasswordChangedMail` and no `PasswordResetCompleted` for that reset.
+  Your handler's `?` answers it as a `500`.
 - A worker running `queue:work` runs the job. Each run revokes both the
   sessions and the remember-me tokens, fails while either store refuses, and
   succeeds once both confirm. A run after the credentials are gone revokes
@@ -720,37 +728,38 @@ With Magnetar installed, the revocations commit in the reset's own
 transaction, so there is nothing to retry and `revocation_retry` is
 `RevocationRetry::NotNeeded`.
 
-The job tries 24 times. The first retry waits about 10 seconds and each later
-one twice as long, up to one hour, so the job keeps trying through an outage of
-about half a day. Each try has a 60-second timeout. After the last try the job
-lands in `failed_jobs`, where `queue:retry` runs it again. The framework
-registers the job with the worker, so it needs no `register_job` call.
+The job retries until both stores confirm, with no bound on the number of
+tries: it declares zero tries, which the queue reads as unlimited. The first
+retry waits about 10 seconds and each later one twice as long, up to one hour
+between tries, for as long as a store refuses. Each try has a 60-second
+timeout, and a try that times out is retried too. The job reaches
+`failed_jobs` only when the worker's `--tries` bounds it, or when a try
+returns an error that ends retries, as
+[Errors that end retries](queues.md#errors-that-end-retries) describes.
+`queue:retry` then runs it again. The framework registers the job with the
+worker, so it needs no `register_job` call.
 
 The retry is only as durable as the queue that holds it:
 
 - The `database` and `redis` drivers keep the job until a worker runs it.
 - The `memory` driver keeps it in the web process, so a restart loses it.
-- The `sync` driver runs the job inside the push. If a store still refuses,
-  the push fails and the outcome reports `RevocationRetry::PushFailed`.
+- The `null` driver discards it, so nothing retries.
+- The `sync` driver runs the job inside the push. When both stores confirm
+  on that run, the revocations are done. When a store still refuses, the
+  push fails and the reset returns the error described above.
 
-When the push fails, the reset still returns its outcome, because the password
-has already changed. To report what happened, match on the outcome:
+A handler that reads the outcome logs the queued retry with the user's id. A
+failed push never reaches it as an outcome; `?` returns that error:
 
 ```rust
 use suprnova::FrameworkError;
-use suprnova::auth_flows::{PasswordReset, RevocationRetry};
+use suprnova::auth_flows::PasswordReset;
 
+// A retry that could not be queued is an `Err` here.
 let outcome = PasswordReset::complete_with_outcome(&token, &new_password).await?;
 if outcome.sessions_revoked.is_err() || outcome.remember_tokens_revoked.is_err() {
-    match &outcome.revocation_retry {
-        RevocationRetry::Queued => {
-            tracing::warn!(user_id = %outcome.user_id, "queued a retry of the revocations");
-        }
-        RevocationRetry::PushFailed(error) => {
-            tracing::error!(user_id = %outcome.user_id, %error, "the retry could not be queued");
-        }
-        RevocationRetry::NotNeeded => {}
-    }
+    // `outcome.revocation_retry` is `RevocationRetry::Queued`.
+    tracing::warn!(user_id = %outcome.user_id, "queued a retry of the revocations");
     return Err(FrameworkError::internal(
         "Your password was changed, but signing you out of your other devices failed.",
     ));
@@ -758,7 +767,7 @@ if outcome.sessions_revoked.is_err() || outcome.remember_tokens_revoked.is_err()
 ```
 
 After a failed push, queue the job yourself once the queue works again, for
-example from an operator command:
+example from an operator command, with the id the error names:
 
 ```rust
 use suprnova::Queue;
@@ -1593,7 +1602,7 @@ test adapter once for the whole binary.
 | `suprnova::auth_flows::VerifyEmailNotification` | The framework's verification notification, rendered from `EmailVerificationMail`. |
 | `suprnova::auth_flows::PasswordReset` | Magnetar-first reset with a verified-account `UserProvider` fallback over framework `auth_flow_tokens`. |
 | `suprnova::auth_flows::RevokeUserCredentials` | Queued job that revokes a user's sessions and remember-me tokens, retried until both stores confirm; a reset queues it when a revocation fails. |
-| `suprnova::auth_flows::RevocationRetry` | Whether a reset queued that job: `NotNeeded`, `Queued`, or `PushFailed(error)`. |
+| `suprnova::auth_flows::RevocationRetry` | Whether a reset queued that job: `NotNeeded` or `Queued`. A reset whose push failed returns an error instead. |
 | `suprnova::MustVerifyEmail` | Application-user contract for the framework verification facade; `send_email_verification_notification` sends the link. |
 | `suprnova::CanResetPassword` | Application-user contract for the provider reset path; `send_password_reset_notification` sends the link. |
 | `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | SeaORM table definition for framework verification tokens. |

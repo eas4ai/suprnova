@@ -2530,6 +2530,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `ServerConfig::builder().unbounded_connections()`. A deployment that
   holds more than 10000 connections at once sets `SERVER_MAX_CONNECTIONS`
   to its figure.
+- **Zero tries is unlimited.** In 3.2.1 a job whose `Job::max_tries()`
+  returned 0, or a push whose `EnvelopeOverrides::max_tries` was `Some(0)`,
+  reached the worker with no attempt to spend and was dead-lettered before
+  it ran. Zero now means unlimited, as Laravel's `$tries = 0` and the
+  worker's `--tries=0` do: the envelope of a pushed, batched or chained job
+  and of a queued notification carries `u32::MAX`, so the job is retried
+  until it succeeds and is never dead-lettered for running out of attempts.
+  An error named with `dont_retry` or `dont_retry_when`, a middleware such as
+  `FailOnException`, a timeout under `fail_on_timeout` and a worker started
+  with `--tries` still end it.
 
 ### Fixed
 
@@ -3133,19 +3143,25 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   the outcome, and nothing tried again. The reset token was spent and the
   password changed, so a stolen session or remember-me cookie kept working.
   Both now push the new `RevokeUserCredentials` job for the user before they
-  return. A queue worker runs it until both stores confirm the revocations:
-  24 tries, the first retry after about 10 seconds and each later one twice
-  as long, up to an hour, with a 60-second timeout per try. The job is
-  idempotent, so `queue:retry` can run it again from `failed_jobs`, and the
-  framework registers it with the worker. `PasswordResetOutcome` has a
-  `revocation_retry` field, a `RevocationRetry` that says whether the job was
-  queued (`Queued`), not needed (`NotNeeded`), or could not be pushed
-  (`PushFailed`, with the queue's error). A failed push is logged and does
-  not turn into an `Err`, because the password has already changed. An
-  application can queue `RevokeUserCredentials` itself after any other
+  return. A queue worker runs it until both stores confirm the revocations,
+  with no bound on the tries: the first retry after about 10 seconds and
+  each later one twice as long, up to an hour between tries, with a
+  60-second timeout per try. The job reaches `failed_jobs` only when the
+  worker's `--tries` bounds it or a try returns an error that ends retries.
+  It is idempotent, so running it again, from `queue:retry` or by hand, is
+  always safe, and the framework registers it with the worker.
+  `PasswordResetOutcome` has a `revocation_retry` field, a `RevocationRetry`
+  that says whether the job was queued (`Queued`) or not needed
+  (`NotNeeded`). When the push fails too, both return an error instead of
+  the outcome: it says that the user's password changed, names each failed
+  revocation with its error and the push's error, and asks for
+  `RevokeUserCredentials::new("<id>")` to be queued once the queue works.
+  The framework logs it at error level with the user's id, and that reset
+  sends no `PasswordChangedMail` and dispatches no `PasswordResetCompleted`.
+  An application can queue `RevokeUserCredentials` itself after any other
   credential change whose revocation failed. The dogfood application logs
-  the queued retry, or the failed push, with the user's id before it answers
-  its error.
+  the queued retry with the user's id before it answers its error, and
+  answers a failed push with its `500` too.
 - **Static files and Live UI assets are read through the directory they
   were checked in.** In 3.2.1, `StaticFiles` checked a request's canonical
   path against its root and then opened the file by name, and opened an

@@ -812,6 +812,9 @@ and the job's own `Job::*` declaration for that field:
 | `backoff` | `Job::backoff()` |
 | `after_commit` | `Job::after_commit()`, `QUEUE_AFTER_COMMIT` |
 
+A `max_tries` of `Some(0)` is unlimited, as a `Job::max_tries()` of `0` is;
+see [Unlimited tries](#unlimited-tries).
+
 `EnvelopeOverrides` is the primitive `Mail::on_queue`/`.on_connection()` and
 `Notify::queue`'s per-notification queue tuning are both built on - see
 [Mail](mail.md#queueing) and [Notifications](notifications.md).
@@ -1113,7 +1116,7 @@ impl Job for SendWelcomeEmail {
     async fn handle(self) -> Result<(), FrameworkError> { /* … */ Ok(()) }
 
     fn delay() -> Option<Duration> { None }                // default: no delay
-    fn max_tries() -> u32 { 5 }                            // default: 3
+    fn max_tries() -> u32 { 5 }                            // default: 3; 0 is unlimited
     fn timeout() -> Option<Duration> { Some(Duration::from_secs(30)) }
     fn fail_on_timeout() -> bool { false }                 // default: false (timeout retries)
     fn backoff() -> BackoffSchedule {
@@ -1463,6 +1466,38 @@ that job's budget too. Laravel behaves the same way. Size `max_tries` with
 that in mind, and prefer idempotent handlers: at-least-once delivery was
 always the contract, and this makes the redelivery path count honestly
 rather than silently.
+
+### Unlimited tries
+
+A job whose `Job::max_tries()` returns `0` is retried until it succeeds, as
+Laravel's `$tries = 0` is. A push with `EnvelopeOverrides { max_tries:
+Some(0), .. }` does the same for that one push, and so does a notification
+whose `max_tries()` returns `0`. The envelope carries `u32::MAX`, the budget
+the worker's `--tries=0` gives, so the worker never dead-letters the job for
+running out of attempts:
+
+```rust
+impl Job for SyncAccount {
+    // ...
+    fn max_tries() -> u32 { 0 } // retried until it succeeds
+    fn backoff() -> BackoffSchedule {
+        BackoffSchedule::Exponential { base_secs: 10, cap_secs: 3600, jitter_ratio: 0.25 }
+    }
+}
+```
+
+Four things still end the retries of an unlimited job and send it to the
+failed-jobs store:
+
+- An error named with `dont_retry` or `dont_retry_when`, as
+  [Errors that end retries](#errors-that-end-retries) describes.
+- A job middleware that fails the job, such as `FailOnException`.
+- A timeout, when the job's `fail_on_timeout()` is `true`.
+- A worker started with `--tries`, which replaces the job's budget with its
+  own for every job that worker runs.
+
+Give an unlimited job a backoff with a cap, as above, so a job that keeps
+failing waits between tries instead of returning to a worker at once.
 
 ### Errors that end retries
 
@@ -2067,7 +2102,8 @@ You pass worker controls beside `--poll`, `--visibility-timeout`, `--max-jobs`,
   `--poll`, which remains in milliseconds. Without either, you keep the
   existing 100 millisecond poll interval.
 - You set `--tries` to override the attempt budget for this worker. With
-  `--tries=0`, you permit retries without an attempt cap.
+  `--tries=0`, you permit retries without an attempt cap, as a job's own
+  `max_tries()` of `0` does.
 - You set `--timeout` in seconds to override the attempt timeout. With
   `--timeout=0`, you remove it. Without these controls, you keep the envelope's
   attempt budget and timeout.

@@ -24,7 +24,9 @@ pub struct ChainLink {
     pub job_name: String,
     /// Serialized job payload, captured at chain-build time.
     pub payload: serde_json::Value,
-    /// Maximum dispatch attempts for this link.
+    /// Maximum dispatch attempts for this link, as [`Job::max_tries`]
+    /// declared it. Zero is unlimited: the reified envelope carries
+    /// `u32::MAX`.
     pub max_tries: u32,
     /// Per-attempt timeout budget in seconds; `None` disables.
     pub timeout_secs: Option<u64>,
@@ -200,7 +202,7 @@ impl ChainLink {
             dispatched_at: now,
             available_at,
             attempts: 0,
-            max_tries: self.max_tries,
+            max_tries: crate::queue::envelope_max_tries(self.max_tries),
             backoff: self.backoff.clone(),
             timeout_secs: self.timeout_secs,
             fail_on_timeout: self.fail_on_timeout,

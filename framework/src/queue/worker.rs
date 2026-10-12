@@ -1030,7 +1030,7 @@ async fn run_labelled_worker(
 
         let mut env = res.envelope;
         if let Some(tries) = controls.tries {
-            env.max_tries = if tries == 0 { u32::MAX } else { tries };
+            env.max_tries = crate::queue::envelope_max_tries(tries);
         }
         if let Some(seconds) = controls.timeout {
             env.timeout_secs = (seconds > 0).then_some(seconds);

@@ -1194,6 +1194,10 @@ async fn a_model_that_overrides_the_reset_hook_sends_only_its_own_message() {
     assert_eq!(links.len(), 1, "the hook received the link");
     assert!(links[0].starts_with("https://app.test/reset?token="));
 
+    // No sessions or remember-me table here, so both revocations fail and
+    // the reset queues their retry; the fake holds it. Without a queue the
+    // reset would return the error of a retry it could not queue.
+    let _queue = suprnova::Queue::fake();
     assert_eq!(
         PasswordReset::complete(&token_of(&links[0]), "new-password")
             .await
@@ -1229,6 +1233,10 @@ async fn the_default_reset_hook_mails_email_for_reset() {
     assert_eq!(recipients, ["reset-inbox@example.com"]);
     assert!(captured[0].subject.starts_with("Reset your "));
     let link = mailed_link(&mail);
+    // No sessions or remember-me table here, so both revocations fail and
+    // the reset queues their retry; the fake holds it. Without a queue the
+    // reset would return the error of a retry it could not queue.
+    let _queue = suprnova::Queue::fake();
     PasswordReset::complete(&token_of(&link), "new-password")
         .await
         .expect("the mailed link completes the reset");

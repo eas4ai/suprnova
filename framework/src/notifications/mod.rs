@@ -136,8 +136,9 @@ pub trait Notification: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     /// Max attempts for this notification's queued jobs, including the
     /// initial dispatch. Default `3`, the same default
-    /// [`Job::max_tries`](crate::queue::Job::max_tries) declares. Mirrors
-    /// Laravel's `#[Tries(...)]` notification attribute.
+    /// [`Job::max_tries`](crate::queue::Job::max_tries) declares, and zero
+    /// is unlimited, as it is for a job. Mirrors Laravel's `#[Tries(...)]`
+    /// notification attribute.
     fn max_tries(&self) -> u32 {
         3
     }

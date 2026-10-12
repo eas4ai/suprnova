@@ -163,7 +163,8 @@ pub struct EnvelopeOverrides {
     pub timeout: Option<std::time::Duration>,
     /// Fail-on-timeout. Outranks `Job::fail_on_timeout()`.
     pub fail_on_timeout: Option<bool>,
-    /// Max attempts. Outranks `Job::max_tries()`.
+    /// Max attempts. Outranks `Job::max_tries()`. `Some(0)` is unlimited,
+    /// as a `Job::max_tries()` of zero is: the envelope carries `u32::MAX`.
     pub max_tries: Option<u32>,
     /// Backoff schedule. Outranks `Job::backoff()`.
     pub backoff: Option<BackoffSchedule>,
@@ -2346,7 +2347,7 @@ fn apply_overrides(env: &mut Envelope, overrides: &EnvelopeOverrides, connection
         env.queue = routing::forwarded_queue(Some(queue.as_str()), connection);
     }
     if let Some(max_tries) = overrides.max_tries {
-        env.max_tries = max_tries;
+        env.max_tries = envelope_max_tries(max_tries);
     }
     if let Some(backoff) = &overrides.backoff {
         env.backoff = backoff.clone();
@@ -2357,6 +2358,16 @@ fn apply_overrides(env: &mut Envelope, overrides: &EnvelopeOverrides, connection
     if let Some(fail_on_timeout) = overrides.fail_on_timeout {
         env.fail_on_timeout = fail_on_timeout;
     }
+}
+
+/// The attempt budget an envelope carries for a declared `max_tries`.
+///
+/// Zero is unlimited, as Laravel's `$tries = 0` is, and becomes `u32::MAX`:
+/// the worker compares `attempts` with `max_tries`, so a zero there would
+/// dead-letter the job before its first run. The worker's `--tries 0` maps
+/// through here too, so a job's zero and a worker's zero mean the same.
+pub(crate) fn envelope_max_tries(declared: u32) -> u32 {
+    if declared == 0 { u32::MAX } else { declared }
 }
 
 /// The connection a push of `J` resolves to when the push names none: a
@@ -2447,7 +2458,7 @@ pub(crate) fn build_envelope_on<J: Job>(
         dispatched_at: crate::clock::now(),
         available_at,
         attempts: 0,
-        max_tries: J::max_tries(),
+        max_tries: envelope_max_tries(J::max_tries()),
         backoff: J::backoff(),
         timeout_secs,
         fail_on_timeout: J::fail_on_timeout(),
@@ -2538,5 +2549,89 @@ mod tests {
                 .expect("generated consumer id should use the framework prefix");
             uuid::Uuid::parse_str(id).expect("generated consumer id should contain only a UUID");
         }
+    }
+
+    /// A job that declares zero tries: retried until it succeeds.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct RetriedUntilItSucceeds;
+
+    #[crate::async_trait]
+    impl super::Job for RetriedUntilItSucceeds {
+        fn job_name() -> &'static str {
+            "queue::tests::RetriedUntilItSucceeds"
+        }
+
+        async fn handle(self) -> Result<(), crate::error::FrameworkError> {
+            Ok(())
+        }
+
+        fn max_tries() -> u32 {
+            0
+        }
+    }
+
+    /// A job that keeps the default of three tries.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct TriedThreeTimes;
+
+    #[crate::async_trait]
+    impl super::Job for TriedThreeTimes {
+        fn job_name() -> &'static str {
+            "queue::tests::TriedThreeTimes"
+        }
+
+        async fn handle(self) -> Result<(), crate::error::FrameworkError> {
+            Ok(())
+        }
+    }
+
+    /// Zero tries is unlimited, as the worker's `--tries 0` is: the envelope
+    /// carries `u32::MAX`, so the worker never dead-letters the job for
+    /// exhaustion. Before, the envelope carried 0 and the worker
+    /// dead-lettered the job before its first run.
+    #[test]
+    fn hardening_an_envelope_for_a_job_of_zero_tries_carries_unlimited_tries() {
+        let now = crate::clock::now();
+        let envelope =
+            super::build_envelope(&RetriedUntilItSucceeds, now, None).expect("the envelope builds");
+        assert_eq!(envelope.max_tries, u32::MAX, "zero tries is unlimited");
+
+        // A chain reifies its own envelopes, the same way.
+        let link = super::chain::ChainLink::from_job(RetriedUntilItSucceeds)
+            .expect("the chain link builds");
+        assert_eq!(
+            link.to_envelope().max_tries,
+            u32::MAX,
+            "a chained job of zero tries is unlimited too"
+        );
+
+        // A bounded job keeps its bound.
+        let bounded =
+            super::build_envelope(&TriedThreeTimes, now, None).expect("the envelope builds");
+        assert_eq!(bounded.max_tries, 3);
+        let bounded_link =
+            super::chain::ChainLink::from_job(TriedThreeTimes).expect("the chain link builds");
+        assert_eq!(bounded_link.to_envelope().max_tries, 3);
+    }
+
+    /// An override of zero tries is unlimited too, and an override of a
+    /// bound, or none, behaves as before.
+    #[test]
+    fn hardening_an_override_of_zero_tries_carries_unlimited_tries() {
+        let now = crate::clock::now();
+        let with_tries = |max_tries: Option<u32>| {
+            let mut envelope =
+                super::build_envelope(&TriedThreeTimes, now, None).expect("the envelope builds");
+            let overrides = super::EnvelopeOverrides {
+                max_tries,
+                ..Default::default()
+            };
+            super::apply_overrides(&mut envelope, &overrides, "");
+            envelope.max_tries
+        };
+
+        assert_eq!(with_tries(Some(0)), u32::MAX, "zero tries is unlimited");
+        assert_eq!(with_tries(Some(5)), 5, "a bound is kept");
+        assert_eq!(with_tries(None), 3, "no override keeps the job's own");
     }
 }

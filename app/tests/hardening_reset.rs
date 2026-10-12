@@ -293,7 +293,9 @@ async fn complete_reset(
 /// The falsifier of HRD-004: the session store cannot revoke, so the reset
 /// must not report success. The password has changed, the failure is
 /// logged at error level with the user's id, and the answer is the
-/// framework's `500`.
+/// framework's `500`. The queue fake takes the retry the reset queues, so
+/// the outcome reaches the handler; a retry that cannot be queued is
+/// `hardening_a_reset_whose_retry_cannot_be_queued_still_answers_the_error`.
 #[tokio::test]
 async fn hardening_a_reset_whose_revocation_fails_does_not_report_success() {
     let lines = logged_lines();
@@ -301,6 +303,7 @@ async fn hardening_a_reset_whose_revocation_fails_does_not_report_success() {
         sessions: database_sessions(),
     }))
     .await;
+    let _queue = Queue::fake();
     let fixture = reset_fixture().await;
 
     let (status, location, body) = complete_reset(app.addr, &fixture, "a-new-password").await;

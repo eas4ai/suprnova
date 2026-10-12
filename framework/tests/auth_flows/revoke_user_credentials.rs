@@ -6,8 +6,13 @@
 //! store that refuses until the test heals it, and with a `remember_tokens`
 //! table that the test creates or leaves out.
 //!
+//! The job declares zero tries, which the queue reads as unlimited: it is
+//! retried for as long as a store refuses, and never reaches `failed_jobs`
+//! for running out of tries.
+//!
 //! The reset tests below complete a reset through the verified-provider
-//! path and read what it queued. They hold the environment lock, as every
+//! path and read what it queued, or the error it returned when the retry
+//! could not be queued. They hold the environment lock, as every
 //! test in this binary that completes a reset or fakes mail does: the reset
 //! sends a `PasswordChangedMail` when `MAIL_FROM` is set, and the mail fake
 //! is process-wide. The user has an id no other test in this binary uses,
@@ -27,12 +32,12 @@ use suprnova::auth_flows::{PasswordReset, RevocationRetry, RevokeUserCredentials
 use suprnova::container::testing::TestContainer;
 use suprnova::queue::testing::{pushed, reserved};
 use suprnova::queue::worker::WorkerConfig;
-use suprnova::queue::{Queue, QueueDriver};
+use suprnova::queue::{FailedJob, FailedJobStore, MemoryFailedJobStore, Queue, QueueDriver};
 use suprnova::session::{SessionData, SessionStore};
 use suprnova::testing::{TestClock, TestDatabase};
 use suprnova::{
-    Auth, AuthManager, EloquentUserProvider, FrameworkError, Job, WorkerControls, async_trait,
-    run_worker_with_controls,
+    Auth, AuthManager, EloquentUserProvider, FrameworkError, Job, UserProvider, WorkerControls,
+    async_trait, run_worker_with_controls,
 };
 
 use crate::password_reset_provider::TestUser;
@@ -256,6 +261,96 @@ async fn hardening_the_revocation_retry_runs_again_while_a_store_refuses_and_sto
     );
 }
 
+/// The id of the user whose store refuses past any bound a job's tries
+/// would set. No other test in this binary uses it.
+const LONG_OUTAGE_USER: &str = "31";
+
+/// The records `failed` holds for the revocation retry of
+/// `LONG_OUTAGE_USER`.
+async fn failed_long_outage_retries(failed: &MemoryFailedJobStore) -> Vec<FailedJob> {
+    failed
+        .all()
+        .await
+        .expect("read the failed jobs")
+        .into_iter()
+        .filter(|record| {
+            record.job_name == RevokeUserCredentials::job_name()
+                && record
+                    .envelope_json
+                    .contains(&format!("\"user_id\":\"{LONG_OUTAGE_USER}\""))
+        })
+        .collect()
+}
+
+/// The retry has no bound: a store that refuses for more than 24 tries, the
+/// bound the job had before, leaves the job queued and out of `failed_jobs`
+/// after every try, and the try after the store recovers completes it. The
+/// worker runs as the first test drives it, one try per drain, the clock
+/// moved past the backoff, at most an hour, between tries.
+#[tokio::test]
+async fn hardening_the_revocation_retry_keeps_running_while_a_store_refuses_past_24_tries() {
+    let database = TestDatabase::sqlite_memory()
+        .await
+        .expect("sqlite database");
+    create_remember_tokens(&database, &[LONG_OUTAGE_USER]).await;
+    let store = RefusingSessionStore::holding(&[(LONG_OUTAGE_USER, 1)]);
+    store.refuse(true);
+    bind_session_store(&store);
+    let failed = Arc::new(MemoryFailedJobStore::new());
+    Queue::set_failed_store(failed.clone());
+    let clock = TestClock::freeze();
+    let fake = Queue::fake();
+
+    Queue::push(RevokeUserCredentials::new(LONG_OUTAGE_USER))
+        .await
+        .expect("queue the retry");
+
+    const REFUSED_TRIES: usize = 30;
+    for attempt in 1..=REFUSED_TRIES {
+        drain(fake.driver()).await;
+        assert_eq!(
+            reserved::<RevokeUserCredentials>().len(),
+            attempt,
+            "try {attempt} did not run: the job left the queue"
+        );
+        assert!(
+            failed_long_outage_retries(&failed).await.is_empty(),
+            "try {attempt} put the job in failed_jobs while the store still holds the sessions"
+        );
+        assert_eq!(
+            store.sessions_of(LONG_OUTAGE_USER),
+            1,
+            "the store refused try {attempt}"
+        );
+        clock.advance(chrono::Duration::hours(2));
+    }
+
+    store.refuse(false);
+    drain(fake.driver()).await;
+    assert_eq!(
+        reserved::<RevokeUserCredentials>().len(),
+        REFUSED_TRIES + 1,
+        "the job was still queued after {REFUSED_TRIES} refused tries"
+    );
+    assert_eq!(
+        store.sessions_of(LONG_OUTAGE_USER),
+        0,
+        "the try after the store recovered revoked the sessions"
+    );
+
+    clock.advance(chrono::Duration::hours(2));
+    drain(fake.driver()).await;
+    assert_eq!(
+        reserved::<RevokeUserCredentials>().len(),
+        REFUSED_TRIES + 1,
+        "the job completed and was not tried again"
+    );
+    assert!(
+        failed_long_outage_retries(&failed).await.is_empty(),
+        "the completed job reached failed_jobs"
+    );
+}
+
 /// The job is idempotent: a run after the credentials are gone succeeds and
 /// revokes nothing.
 #[tokio::test]
@@ -437,10 +532,13 @@ async fn hardening_a_reset_whose_revocations_succeed_queues_no_retry() {
     );
 }
 
-/// A retry that cannot be queued is reported in the outcome, and the reset
-/// still returns the outcome, because the password has already changed.
+/// A retry that cannot be queued fails the reset: `complete_with_outcome`
+/// and `complete` both return an error that names the user, the revocation
+/// that failed and the push that failed, since nothing would retry the
+/// revocations otherwise. The password has changed all the same: the write
+/// comes before the revocations.
 #[tokio::test]
-async fn hardening_a_reset_reports_a_retry_it_could_not_queue() {
+async fn hardening_a_reset_whose_retry_cannot_be_queued_fails() {
     let _env = crate::env_lock::lock_env_async().await;
     let _database = reset_database().await;
     let store = RefusingSessionStore::holding(&[(RESET_USER, 1)]);
@@ -451,19 +549,49 @@ async fn hardening_a_reset_reports_a_retry_it_could_not_queue() {
     let _queue = Queue::fake_except(&[RevokeUserCredentials::job_name()]);
     suprnova::queue::testing::forget_driver();
 
-    let outcome = PasswordReset::complete_with_outcome(&reset_token().await, "new-password")
+    let error = PasswordReset::complete_with_outcome(&reset_token().await, "new-password")
         .await
-        .expect("the password changes although the retry could not be queued");
-    assert!(outcome.sessions_revoked.is_err(), "the store refused");
-    let RevocationRetry::PushFailed(error) = &outcome.revocation_retry else {
-        panic!(
-            "expected the failed push, got {:?}",
-            outcome.revocation_retry
-        );
-    };
+        .expect_err("a reset whose retry could not be queued answered as completed");
+    let message = error.to_string();
     assert!(
-        error.to_string().contains("queue driver not initialized"),
-        "the outcome carries the push's error: {error}"
+        message.contains(&format!("user {RESET_USER}")),
+        "the error names the user: {message}"
+    );
+    assert!(
+        message.contains("revoking the sessions failed")
+            && message.contains("the session store is unavailable"),
+        "the error names the revocation that failed and its error: {message}"
+    );
+    assert!(
+        !message.contains("revoking the remember-me tokens failed"),
+        "the error names a revocation that succeeded: {message}"
+    );
+    assert!(
+        message.contains("could not be queued") && message.contains("queue driver not initialized"),
+        "the error names the failed push and its error: {message}"
+    );
+    assert!(
+        message.contains(&format!("RevokeUserCredentials::new(\"{RESET_USER}\")")),
+        "the error says which job to queue: {message}"
     );
     assert_eq!(retries_queued(), 0, "the excepted retry was not recorded");
+
+    let user = EloquentUserProvider::<TestUser>::new()
+        .retrieve_by_id(RESET_USER)
+        .await
+        .expect("read the user")
+        .expect("the user exists");
+    let hash = user.get_auth_password().expect("the user has a password");
+    assert!(
+        suprnova::hashing::verify("new-password", hash).expect("verify the password"),
+        "the password write comes first and stands although the reset failed"
+    );
+
+    let error = PasswordReset::complete(&reset_token().await, "another-password")
+        .await
+        .expect_err("complete answered as completed although the retry could not be queued");
+    assert!(
+        error.to_string().contains("could not be queued"),
+        "complete returns the same error: {error}"
+    );
 }
