@@ -173,10 +173,6 @@
    "class": "noise",
    "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
   },
-  "Emits a `#[derive(Data, Validate)]` struct in `app/src/props/` (not `src/props/` - the `app/` prefix is hardcoded so the file lands in the workspace's example/host app):": {
-   "class": "noise",
-   "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
-  },
   "Event::wildcards": {
    "class": "noise",
    "evidence": "Laravel / Inertia-Laravel / Laravel-Data names in a comparison column or labelled as Laravel's."
@@ -788,6 +784,30 @@
   "where!": {
    "class": "noise",
    "evidence": "Both passages say there is no `where!` macro and name the constraint methods instead (framework/src/routing/params.rs:31 `where_methods!` defines `where_number`, `where_pattern`, ...); the statement is correct."
+  },
+  "use suprnova::serde_json": {
+   "class": "verified",
+   "evidence": "The notification stub `make:notification` writes imports the framework's `serde_json` re-export, hidden from the docs on purpose; `generators_compile_in_a_fresh_scaffold` compiles that stub (cli-generators.md)."
+  },
+  "HTTPS_PROXY": {
+   "class": "noise",
+   "evidence": "reqwest's own proxy environment variable, named in web-push.md as the proxy a transport may be built with; not a Suprnova setting."
+  },
+  "RUST_MIN_STACK": {
+   "class": "noise",
+   "evidence": "Rust's standard library variable for thread stack sizes, named in the upgrade chapter's runtime-thread-stack section as what an application may drop; not a Suprnova setting."
+  },
+  "Writes `src/enums/<snake>.rs`, an enum with no variants yet, as Laravel's enum stub has no cases.": {
+   "class": "noise",
+   "evidence": "`yet` describes the stub `make:enum` writes, which has no variants until the developer adds them; not a claim about a release."
+  },
+  "Writes `src/scopes/<snake>.rs`, a global scope that adds nothing to the query yet.": {
+   "class": "noise",
+   "evidence": "`yet` describes the stub `make:scope` writes, whose `apply` returns the query unchanged until the developer adds constraints; not a claim about a release."
+  },
+  "`NoteStats` shows the user's note count, the notes written today, and the five newest notes.": {
+   "class": "noise",
+   "evidence": "`newest` is the sort order of the Live kit's dashboard island (`latest_by(\"id\")`, five rows); not a claim about a release."
   }
  }
 }
