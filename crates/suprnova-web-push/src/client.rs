@@ -17,8 +17,8 @@ use url::Url;
 
 /// Default per-request timeout applied to the [`Client`] constructed by
 /// [`WebPushClient::new`]. A slow or hostile push service must not be able to
-/// tie up a calling task indefinitely. Callers wanting a different policy
-/// build their own [`Client`] and pass it to [`WebPushClient::with_client`].
+/// tie up a calling task indefinitely. Callers wanting a different timeout
+/// pass a [`reqwest::ClientBuilder`] to [`WebPushClient::with_client_builder`].
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How much of a push service's rejection body is read, for the debug log
@@ -73,7 +73,10 @@ pub enum EndpointPolicy {
     /// unspecified, documentation, reserved or cloud metadata address
     /// ([`crate::AddressClass`]). A transport this crate builds connects to
     /// one of the checked answers, keeping the host name for TLS and the
-    /// `Host` header, so the name is not looked up a second time. The
+    /// `Host` header, so the name is not looked up a second time. A send
+    /// over a caller's [`Client`], which looks the name up itself, is
+    /// refused with [`WebPushError::UnpinnedTransport`] unless the caller
+    /// accepts it with [`WebPushClient::allow_unpinned_destinations`]. The
     /// production default.
     #[default]
     Strict,
@@ -115,6 +118,11 @@ pub struct WebPushClient {
     /// send pins the addresses it checked. `None` for a caller's
     /// [`Client`], which resolves names itself.
     pins: Option<Arc<PinnedResolver>>,
+    /// The caller accepted by name, with
+    /// [`WebPushClient::allow_unpinned_destinations`], that a strict send
+    /// over a transport without `pins` connects wherever that transport
+    /// resolves the name.
+    unpinned_accepted: bool,
     /// Where a strict send looks the endpoint's host name up.
     lookup: Lookup,
 }
@@ -125,9 +133,11 @@ impl WebPushClient {
     /// The default transport applies a 30-second per-request timeout so a
     /// slow or hostile push service cannot tie up the caller indefinitely.
     /// The default transport does not follow redirects (a push service never
-    /// issues a 3xx, and following one would bypass endpoint SSRF validation).
-    /// Callers needing a different transport policy build their own
-    /// [`Client`] and use [`Self::with_client`] instead.
+    /// issues a 3xx, and following one would bypass endpoint SSRF validation)
+    /// and sends through no proxy, whatever `HTTPS_PROXY` says, so a strict
+    /// send connects to an address it checked; see
+    /// [`Self::with_client_builder`]. Callers needing a different timeout
+    /// or TLS setup pass their own builder to [`Self::with_client_builder`].
     ///
     /// Returns an error if `subject` is not a VAPID-conformant contact
     /// URI - see [`Self::with_client`] for the validation rules.
@@ -141,20 +151,44 @@ impl WebPushClient {
 
     /// Build a client from a caller-supplied [`reqwest::ClientBuilder`].
     ///
-    /// The hardened customization path: every builder option (proxy, TLS
-    /// pinning, timeouts) is honoured, but the redirect policy is forcibly
-    /// set to [`reqwest::redirect::Policy::none()`], ignoring whatever the
-    /// caller configured. A custom transport that could follow redirects
-    /// would let a validated endpoint bounce the POST to an unvalidated
-    /// URL, so the library does not accept the caller's redirect setting.
+    /// The hardened customization path: the builder's timeouts, TLS setup
+    /// and other options are honoured, but three settings are replaced
+    /// after yours, because each would let a send reach an address that
+    /// [`EndpointPolicy::Strict`] did not check:
     ///
-    /// The builder's name resolver is replaced too, by one that answers a
-    /// host name the [`EndpointPolicy::Strict`] policy checked with the
-    /// addresses it checked, so the connection goes to a checked address
-    /// and the name is not looked up a second time. Any other name, such
-    /// as a proxy's, is looked up as reqwest's own resolver would. A name
-    /// you map with [`reqwest::ClientBuilder::resolve`] still connects
-    /// where you mapped it.
+    /// - The redirect policy is [`reqwest::redirect::Policy::none()`]. A
+    ///   transport that follows redirects would let a validated endpoint
+    ///   bounce the POST to an unvalidated URL.
+    /// - The name resolver answers a host name the strict policy checked
+    ///   with the addresses it checked, so the connection goes to a
+    ///   checked address and the name is not looked up a second time. Any
+    ///   other name, such as an endpoint's under
+    ///   [`EndpointPolicy::AllowAny`], is looked up as reqwest's own
+    ///   resolver would.
+    /// - No proxy is used: neither one set on the builder nor one from the
+    ///   environment, such as `HTTPS_PROXY`, or the system settings. A
+    ///   proxy receives the endpoint's host name and resolves it again,
+    ///   where the strict check cannot follow. A push service you reach
+    ///   only through a proxy needs a [`Client`] you build with that
+    ///   proxy and pass to [`Self::with_client`]: under `Strict` with
+    ///   [`Self::allow_unconfined_redirects`] and
+    ///   [`Self::allow_unpinned_destinations`] when this process can
+    ///   resolve the name, and under [`EndpointPolicy::AllowAny`] when it
+    ///   cannot.
+    ///
+    /// A name you map with [`reqwest::ClientBuilder::resolve`] or
+    /// [`reqwest::ClientBuilder::resolve_to_addrs`] still connects where
+    /// you mapped it, not to the checked address. reqwest 0.13 keeps a
+    /// mapping under the lowercased name you gave and applies it only to
+    /// a host name equal to that name, so a stored endpoint can reach the
+    /// address you chose for a name you mapped and no other: the mapping
+    /// adds no destination an endpoint controls. Map only names whose
+    /// address you mean every endpoint at that name to reach. Other options
+    /// that decide where a connection goes, such as
+    /// `ClientBuilder::unix_socket` or
+    /// [`reqwest::ClientBuilder::connector_layer`], also take the place of
+    /// the checked address, and a consumed builder does not show them, so
+    /// use them only to reach an address you chose.
     ///
     /// `subject` validation matches [`Self::with_client`].
     pub fn with_client_builder(
@@ -171,6 +205,11 @@ impl WebPushClient {
             // one validated). Disabling redirects closes that SSRF.
             .redirect(reqwest::redirect::Policy::none())
             .dns_resolver(Arc::clone(&pins))
+            // A proxy receives the endpoint's host name and resolves it
+            // itself, so the connection would leave the checked addresses.
+            // This also stops reqwest reading HTTPS_PROXY and the other
+            // proxy variables when the client is built.
+            .no_proxy()
             .build()?;
         Self::from_client(
             http,
@@ -184,14 +223,21 @@ impl WebPushClient {
     /// Build a client wrapping a caller-supplied [`Client`].
     ///
     /// Use this only when [`Self::with_client_builder`] cannot express the
-    /// transport (it covers proxy, TLS, and timeout customization). An
-    /// already-built client carries its redirect policy opaquely: a
-    /// redirect-following client (reqwest's default) combined with the
-    /// default [`EndpointPolicy::Strict`] would validate only the initial
-    /// URL while a 3xx silently moves the POST elsewhere. Sends under
-    /// `Strict` are therefore refused until the transport is proven
-    /// confined ([`Self::with_client_builder`]) or explicitly accepted via
-    /// [`Self::allow_unconfined_redirects`].
+    /// transport, such as a push service reached through a proxy. An
+    /// already-built client carries its redirect policy and its name
+    /// resolution opaquely, so under the default
+    /// [`EndpointPolicy::Strict`] a send is refused before any I/O until
+    /// you accept both by name:
+    ///
+    /// - A redirect-following client (reqwest's default) would validate
+    ///   only the initial URL while a 3xx silently moves the POST
+    ///   elsewhere: [`WebPushError::UnconfinedRedirects`] until
+    ///   [`Self::allow_unconfined_redirects`].
+    /// - The client looks the endpoint's host name up again when it
+    ///   connects, or hands it to a proxy that does, so the connection may
+    ///   go to an address the strict check never saw:
+    ///   [`WebPushError::UnpinnedTransport`] until
+    ///   [`Self::allow_unpinned_destinations`].
     ///
     /// `subject` must be a VAPID contact URI per RFC 8292 §2.1: either a
     /// `mailto:` URI with a non-empty recipient, or an `https://` URL.
@@ -213,13 +259,37 @@ impl WebPushClient {
     /// Call this only when the supplied [`Client`] is known to not follow
     /// redirects (or when following them is acceptable): unlike
     /// [`Self::with_client_builder`], the library cannot verify that.
-    /// [`EndpointPolicy::Strict`] then checks the initial endpoint URL and
-    /// the addresses its host name resolves to, but the supplied client
-    /// resolves the name again when it connects, so the address it reaches
-    /// is not pinned to the one checked.
+    /// [`EndpointPolicy::Strict`] then checks the initial endpoint URL. The
+    /// supplied client also resolves the name itself, which a strict send
+    /// refuses until [`Self::allow_unpinned_destinations`] accepts it.
     pub fn allow_unconfined_redirects(mut self) -> Self {
         if self.redirects == RedirectConfinement::Unknown {
             self.redirects = RedirectConfinement::Unchecked;
+        }
+        self
+    }
+
+    /// Explicitly accept, under `Strict`, a transport that resolves the
+    /// endpoint's host name itself.
+    ///
+    /// A [`Client`] passed to [`Self::with_client`] looks the name up again
+    /// when it connects, so [`EndpointPolicy::Strict`] cannot hold the
+    /// connection to the address it checked: a name whose DNS answer
+    /// changes between the check and the connection (DNS rebinding), a
+    /// proxy that resolves the name itself, or a mapping on the client can
+    /// each send the POST to an address that was never checked. Without
+    /// this call, a strict send over such a client is refused with
+    /// [`WebPushError::UnpinnedTransport`] before any I/O.
+    ///
+    /// The strict checks still run: the endpoint's shape is checked, and
+    /// the send is refused when any address the name resolves to, where
+    /// this process runs, is not on the public internet. Only the
+    /// connection is left to the client. A client built with
+    /// [`Self::new`] or [`Self::with_client_builder`] always connects to a
+    /// checked address, and this call changes nothing for it.
+    pub fn allow_unpinned_destinations(mut self) -> Self {
+        if self.pins.is_none() {
+            self.unpinned_accepted = true;
         }
         self
     }
@@ -240,6 +310,7 @@ impl WebPushClient {
             endpoint_policy: EndpointPolicy::default(),
             redirects,
             pins,
+            unpinned_accepted: false,
             lookup: Lookup::default(),
         })
     }
@@ -279,6 +350,15 @@ impl WebPushClient {
             && self.redirects == RedirectConfinement::Unknown
         {
             return Err(WebPushError::UnconfinedRedirects);
+        }
+        // A caller-supplied transport resolves the name itself, so the
+        // connection could go to an address the strict check never saw.
+        // Refused before any work too, unless the caller accepted that.
+        if self.endpoint_policy == EndpointPolicy::Strict
+            && self.pins.is_none()
+            && !self.unpinned_accepted
+        {
+            return Err(WebPushError::UnpinnedTransport);
         }
         let payload = Payload::encrypt(
             plaintext,
@@ -365,7 +445,9 @@ impl WebPushClient {
 
     /// Look the endpoint's host name up, refuse it when any answer is not
     /// a public address, and pin the answers for this crate's transport.
-    /// A caller's [`Client`] has no pin table and resolves the name itself.
+    /// A caller's [`Client`] has no pin table and resolves the name itself,
+    /// which `send` allows only after
+    /// [`WebPushClient::allow_unpinned_destinations`].
     async fn check_destination(&self, url: &Url) -> Result<Option<PinGuard<'_>>, WebPushError> {
         // `validate_strict_endpoint` refused an address in place of a name.
         let Some(url::Host::Domain(host)) = url.host() else {
@@ -878,8 +960,9 @@ mod tests {
         );
     }
 
-    /// A caller's client resolves names itself, so nothing is pinned, but
-    /// the strict check of the answers still runs before any I/O.
+    /// A caller's client resolves names itself, so nothing is pinned. Once
+    /// the caller accepts that by name, the strict check of the answers
+    /// still runs before any I/O.
     #[tokio::test]
     async fn hardening_strict_checks_the_answers_for_a_caller_supplied_client() {
         let http = Client::builder().build().expect("stock client builds");
@@ -890,6 +973,7 @@ mod tests {
         )
         .expect("test subject is a valid mailto: URI")
         .allow_unconfined_redirects()
+        .allow_unpinned_destinations()
         .with_fixed_lookup(addresses(&["169.254.169.254"]));
         let err = send_to(&client, "https://push.example.com/push/token")
             .await
@@ -986,6 +1070,289 @@ mod tests {
         assert!(
             head.chars().all(|c| c == 'A'),
             "the head is the start of the body"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // HRD-003: a strict send connects only to an address it checked. The
+    // transport this crate builds sends through no proxy, a caller's client
+    // is refused until the caller accepts it by name, and a name the
+    // developer maps on the builder reaches only that name.
+    // ---------------------------------------------------------------------
+
+    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
+
+    /// How long a test waits for a connection that should arrive at once.
+    const CONNECT_WAIT: Duration = Duration::from_secs(10);
+
+    /// Set in the process that
+    /// `hardening_the_built_transport_ignores_https_proxy_in_the_environment`
+    /// starts, which runs that test's probe.
+    const PROXY_PROBE: &str = "SUPRNOVA_WEB_PUSH_PROXY_PROBE";
+
+    /// Accept one connection on `listener` and close it at once, so the
+    /// request that opened it fails its TLS handshake and returns. `None`
+    /// when no connection arrives in time.
+    async fn accept_one(listener: &TcpListener) -> Option<SocketAddr> {
+        tokio::time::timeout(CONNECT_WAIT, listener.accept())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map(|(_closed, peer)| peer)
+    }
+
+    /// Whether a connection reached `listener`, which nothing accepts
+    /// from, so a connection that reached it is still queued.
+    fn was_reached(listener: &std::net::TcpListener) -> bool {
+        listener
+            .set_nonblocking(true)
+            .expect("the listener goes non-blocking");
+        match listener.accept() {
+            Ok(_) => true,
+            Err(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock, "{error}");
+                false
+            }
+        }
+    }
+
+    /// POST through `client`'s own transport to a name pinned to
+    /// `destination`, as a strict send pins the addresses it checked, and
+    /// report whether `destination` received the connection.
+    async fn pinned_request(client: &WebPushClient, destination: &TcpListener) -> bool {
+        let pins = client.pins.as_deref().expect("this crate's transport pins");
+        let checked = destination.local_addr().expect("destination address");
+        let _pin = pins.pin("push.pinned.test", vec![checked]);
+        let request = tokio::time::timeout(
+            CONNECT_WAIT,
+            client.http.post("https://push.pinned.test/push").send(),
+        );
+        let (_, reached) = tokio::join!(request, accept_one(destination));
+        reached.is_some()
+    }
+
+    /// A proxy in the environment does not reach the transport this crate
+    /// builds. A proxy would receive the endpoint's host name and resolve
+    /// it again, past the addresses the strict policy checked. reqwest
+    /// reads `HTTPS_PROXY` when a client is built, so the probe runs in a
+    /// process of its own that starts with the variable set, and no other
+    /// test sees it.
+    #[tokio::test]
+    async fn hardening_the_built_transport_ignores_https_proxy_in_the_environment() {
+        if std::env::var_os(PROXY_PROBE).is_some() {
+            return send_with_https_proxy_set().await;
+        }
+        // Nothing accepts on the proxy, so a connection that reaches it
+        // stays queued for `was_reached` to find.
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the proxy");
+        let proxy_url = format!("http://{}", proxy.local_addr().expect("proxy address"));
+        let module = module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_, path)| path);
+        let test = format!(
+            "{module}::hardening_the_built_transport_ignores_https_proxy_in_the_environment"
+        );
+        let output = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args(["--exact", test.as_str(), "--nocapture", "--test-threads=1"])
+            .env(PROXY_PROBE, "1")
+            .env("HTTPS_PROXY", &proxy_url)
+            .env("https_proxy", &proxy_url)
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .env_remove("REQUEST_METHOD")
+            .output()
+            .expect("the test binary runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "the probe failed:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("1 passed"),
+            "the probe ran no test:\n{stdout}"
+        );
+        assert!(!was_reached(&proxy), "the proxy received a connection");
+    }
+
+    /// The probe of
+    /// `hardening_the_built_transport_ignores_https_proxy_in_the_environment`,
+    /// in a process whose environment names a proxy.
+    async fn send_with_https_proxy_set() {
+        assert!(
+            std::env::var_os("HTTPS_PROXY").is_some(),
+            "the probe runs with HTTPS_PROXY set"
+        );
+        let destination = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the destination");
+        let client = WebPushClient::new(
+            VapidSigner::new(VapidKey::generate()),
+            "mailto:ops@example.org",
+        )
+        .expect("test subject is a valid mailto: URI");
+        assert!(
+            pinned_request(&client, &destination).await,
+            "the request went to the proxy, not to the checked address"
+        );
+    }
+
+    /// A proxy set on the builder is dropped too: `with_client_builder`
+    /// keeps the caller's other settings and sends through no proxy.
+    #[tokio::test]
+    async fn hardening_with_client_builder_drops_a_proxy_set_on_the_builder() {
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the proxy");
+        let proxy_url = format!("http://{}", proxy.local_addr().expect("proxy address"));
+        let builder =
+            Client::builder().proxy(reqwest::Proxy::all(&proxy_url).expect("the proxy URL parses"));
+        let client = WebPushClient::with_client_builder(
+            builder,
+            VapidSigner::new(VapidKey::generate()),
+            "mailto:ops@example.org",
+        )
+        .expect("test subject is a valid mailto: URI");
+        let destination = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the destination");
+        assert!(
+            pinned_request(&client, &destination).await,
+            "the request went to the proxy, not to the checked address"
+        );
+        assert!(!was_reached(&proxy), "the proxy received a connection");
+    }
+
+    /// A caller's client that maps `push.example.com` to `destination`,
+    /// standing in for any client that resolves the name itself.
+    fn caller_client(destination: SocketAddr) -> WebPushClient {
+        let http = Client::builder()
+            .resolve("push.example.com", destination)
+            .no_proxy()
+            .timeout(CONNECT_WAIT)
+            .build()
+            .expect("the caller's client builds");
+        WebPushClient::with_client(
+            http,
+            VapidSigner::new(VapidKey::generate()),
+            "mailto:ops@example.org",
+        )
+        .expect("test subject is a valid mailto: URI")
+        .allow_unconfined_redirects()
+    }
+
+    /// A caller's client resolves the name itself, so a strict send over
+    /// it checks one address and connects to another: here the check sees
+    /// a public answer while the client connects to loopback. Without the
+    /// opt-in, the send is refused before any I/O.
+    #[tokio::test]
+    async fn hardening_strict_refuses_a_caller_supplied_client_before_any_io() {
+        let destination = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the destination");
+        let client = caller_client(destination.local_addr().expect("destination address"))
+            .with_fixed_lookup(addresses(&["8.8.8.8"]));
+        let err = send_to(&client, "https://push.example.com/push/token")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WebPushError::UnpinnedTransport), "{err:?}");
+        assert!(!err.is_retryable(), "a retry changes nothing");
+        let text = err.to_string();
+        assert!(
+            text.contains("with_client_builder") && text.contains("allow_unpinned_destinations"),
+            "the error names the fix: {text}"
+        );
+        assert!(!was_reached(&destination), "nothing was sent");
+    }
+
+    /// After the opt-in, a send goes ahead over the caller's client, to
+    /// wherever that client resolves the name, and the address check still
+    /// refuses a name that resolves to a private address.
+    #[tokio::test]
+    async fn hardening_allow_unpinned_destinations_sends_and_still_checks_the_answers() {
+        let untouched = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a listener");
+        let refused = caller_client(untouched.local_addr().expect("listener address"))
+            .allow_unpinned_destinations()
+            .with_fixed_lookup(addresses(&["8.8.8.8", "10.1.2.3"]));
+        let err = send_to(&refused, "https://push.example.com/push/token")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, WebPushError::RefusedDestination(AddressClass::Private)),
+            "{err:?}"
+        );
+        assert!(!was_reached(&untouched), "a refused send sends nothing");
+
+        let destination = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the destination");
+        let accepted = caller_client(destination.local_addr().expect("destination address"))
+            .allow_unpinned_destinations()
+            .with_fixed_lookup(addresses(&["8.8.8.8"]));
+        let (sent, reached) = tokio::join!(
+            send_to(&accepted, "https://push.example.com/push/token"),
+            accept_one(&destination)
+        );
+        assert!(
+            reached.is_some(),
+            "the send went ahead over the caller's client"
+        );
+        // The listener closes the connection, so the TLS handshake fails:
+        // a transport error, past every refusal.
+        let err = sent.unwrap_err();
+        assert!(matches!(err, WebPushError::Http(_)), "{err:?}");
+    }
+
+    /// A name the developer maps with `ClientBuilder::resolve` connects
+    /// where the developer mapped it, and the mapping reaches no other
+    /// name. reqwest 0.13 keeps the mapping under the lowercased name it
+    /// was given and looks it up by the exact name it resolves, so a
+    /// pinned name that differs from the mapped one, even by a trailing
+    /// dot or a further label, connects to the address that was checked.
+    /// A stored endpoint picks a name, never a mapping.
+    #[tokio::test]
+    async fn hardening_a_resolve_mapping_reaches_only_the_name_the_developer_mapped() {
+        let mapped = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the mapped listener");
+        let checked = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the checked listener");
+        let builder = Client::builder().resolve(
+            "push.mapped.example",
+            mapped.local_addr().expect("mapped address"),
+        );
+        let client = WebPushClient::with_client_builder(
+            builder,
+            VapidSigner::new(VapidKey::generate()),
+            "mailto:ops@example.org",
+        )
+        .expect("test subject is a valid mailto: URI");
+        let pins = client.pins.as_deref().expect("this crate's transport pins");
+        let checked_address = checked.local_addr().expect("checked address");
+
+        for host in [
+            "push.other.example",
+            "push.mapped.example.",
+            "push.mapped.example.org",
+            "mapped.example",
+        ] {
+            let _pin = pins.pin(host, vec![checked_address]);
+            let request = tokio::time::timeout(
+                CONNECT_WAIT,
+                client.http.post(format!("https://{host}/push")).send(),
+            );
+            let (_, reached) = tokio::join!(request, accept_one(&checked));
+            assert!(reached.is_some(), "{host} connects to the checked address");
+        }
+
+        // The mapped name itself, in any case, goes where it was mapped.
+        let _pin = pins.pin("push.mapped.example", vec![checked_address]);
+        let request = tokio::time::timeout(
+            CONNECT_WAIT,
+            client.http.post("https://PUSH.Mapped.Example/push").send(),
+        );
+        let (_, reached) = tokio::join!(request, accept_one(&mapped));
+        assert!(
+            reached.is_some(),
+            "the developer's mapping holds for its name"
         );
     }
 }
