@@ -37,7 +37,7 @@
 //! in-memory limit - answers 413.
 
 use crate::error::{FrameworkError, ValidationErrors};
-use crate::http::body::BodyDeadline;
+use crate::http::body::TimedBody;
 use crate::validation::message::ValidationMessage;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -1229,34 +1229,24 @@ enum Checked<'a> {
     },
 }
 
-/// `stream`, each chunk waited for under `deadline`: a chunk that does not
-/// arrive by [`BodyDeadline::next_frame`] ends the stream with an error and
-/// marks `cut` late, so the parse answers `408` rather than the `400` an
-/// opaque read failure would get.
-fn within_deadline(
-    stream: std::pin::Pin<Box<dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
-    deadline: BodyDeadline,
+/// The data of `body`, as the stream of chunks multer reads.
+///
+/// The body waits for each chunk under the request's deadlines (HRD-001),
+/// and a chunk that misses one ends it with the `408`. multer reports any
+/// failure of its stream as an opaque read error, so that one also marks
+/// `cut` late, for the parse to answer `408` rather than the `400` a
+/// malformed body gets.
+fn chunks_of(
+    body: TimedBody,
     cut: Arc<StreamCut>,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send {
-    futures::stream::unfold(Some(stream), move |state| {
-        let cut = cut.clone();
-        async move {
-            let mut stream = state?;
-            match tokio::time::timeout_at(deadline.next_frame(), stream.next()).await {
-                Ok(Some(chunk)) => Some((chunk, Some(stream))),
-                Ok(None) => None,
-                Err(_) => {
-                    cut.late.store(true, Ordering::Relaxed);
-                    let late = std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "the request body did not arrive in time",
-                    );
-                    // `None` ends the stream after the error: the body is
-                    // abandoned, and its stream dropped with it.
-                    Some((Err(late), None))
-                }
+    BodyDataStream::new(body).map(move |chunk| {
+        chunk.map_err(|error| {
+            if crate::http::body::is_timed_out(&error) {
+                cut.late.store(true, Ordering::Relaxed);
             }
-        }
+            std::io::Error::other(error)
+        })
     })
 }
 
@@ -1313,12 +1303,12 @@ where
     // request, gets the summary of what was parsed, or, from an error
     // return dropping the report, that the parse failed.
     let report = crate::inertia::MultipartReport::start();
-    let deadline = req.body_deadline();
     let (_parts, body) = req.into_parts();
+    let cut = Arc::new(StreamCut::default());
     // `BodyStream` would yield `Result<Frame<Bytes>, _>` and `Frame<Bytes>`
     // does not impl `Into<Bytes>` (multer's bound). `BodyDataStream` drops
-    // trailer frames and yields `Result<Bytes, hyper::Error>` directly,
-    // which is exactly what multer wants.
+    // trailer frames and yields `Result<Bytes, _>` directly, which is
+    // exactly what multer wants (`chunks_of`).
     //
     // A middleware that read the body first (a body-keyed rate limit, for
     // one) hands it over buffered; it is read as a one-chunk stream, so a
@@ -1326,9 +1316,7 @@ where
     type RawBody =
         std::pin::Pin<Box<dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
     let incoming: RawBody = match body {
-        crate::http::BodyState::Streaming(inc) => {
-            Box::pin(BodyDataStream::new(inc).map(|chunk| chunk.map_err(std::io::Error::other)))
-        }
+        crate::http::BodyState::Streaming(body) => Box::pin(chunks_of(body, cut.clone())),
         crate::http::BodyState::Buffered(bytes) => {
             Box::pin(futures::stream::once(async move { Ok(bytes) }))
         }
@@ -1342,8 +1330,7 @@ where
         }
         crate::http::BodyState::Failed(error) => return Err(error),
         crate::http::BodyState::Partial { read, rest } => Box::pin(
-            futures::stream::once(async move { Ok(read) })
-                .chain(BodyDataStream::new(rest).map(|chunk| chunk.map_err(std::io::Error::other))),
+            futures::stream::once(async move { Ok(read) }).chain(chunks_of(rest, cut.clone())),
         ),
     };
     // SEC-05: cap the RAW stream, not just the bytes that reach a part.
@@ -1363,12 +1350,6 @@ where
     // Counting at the transport closes all of those at once, because every
     // byte on the wire passes through here whether or not multer ever
     // attributes it to a part.
-    let cut = Arc::new(StreamCut::default());
-    // HRD-001: each chunk is waited for under the request's body
-    // deadlines, as every other read of a body is. A chunk that misses one
-    // ends the stream with an error multer reports as a read failure, and
-    // the cause is kept for the error sites below to answer `408`.
-    let incoming = within_deadline(incoming, deadline, cut.clone());
     let counted = {
         let tripped = cut.clone();
         let cap = max_body_bytes as u64;

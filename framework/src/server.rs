@@ -503,7 +503,8 @@ impl Server {
         // connection task gets its own value with no `Arc` needed.
         let header_read_timeout = self.header_read_timeout;
         // HRD-001: the body deadlines every request starts as its head
-        // arrives, for the reads of its body to wait under.
+        // arrives, for every read of its body to wait under, and for the
+        // connection's watch to abandon a body nothing reads.
         let body_read_timeout = self.body_read_timeout;
         let body_total_timeout = self.body_total_timeout;
 
@@ -614,21 +615,38 @@ impl Server {
                     let middleware = middleware.clone();
 
                     connections.spawn(async move {
-                        let service = service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
-                            let router = router.clone();
-                            let middleware = middleware.clone();
-                            // hyper calls the service once the head is
-                            // read, so the body deadlines start here.
-                            req.extensions_mut().insert(crate::http::body::BodyDeadline::start(
-                                body_read_timeout,
-                                body_total_timeout,
-                            ));
-                            async move {
-                                Ok::<_, Infallible>(handle_request_with_peer(router, middleware, req, peer_ip).await)
+                        // HRD-001: the watch that abandons this connection
+                        // when a request body has not arrived by its total
+                        // deadline, whether or not anything reads it.
+                        let watch = Arc::new(crate::http::body::ConnectionWatch::default());
+                        let service = service_fn({
+                            let watch = watch.clone();
+                            move |mut req: hyper::Request<hyper::body::Incoming>| {
+                                let router = router.clone();
+                                let middleware = middleware.clone();
+                                // hyper calls the service once the head is
+                                // read, so the body deadlines start here,
+                                // and the connection's watch arms for them.
+                                let deadline = crate::http::body::BodyDeadline::start(
+                                    body_read_timeout,
+                                    body_total_timeout,
+                                );
+                                req.extensions_mut().insert(deadline);
+                                let empty = hyper::body::Body::is_end_stream(req.body());
+                                if let Some(arrival) = watch.arm(deadline, empty) {
+                                    req.extensions_mut().insert(arrival);
+                                }
+                                async move {
+                                    Ok::<_, Infallible>(handle_request_with_peer(router, middleware, req, peer_ip).await)
+                                }
                             }
                         });
 
-                        let serve = crate::bus::after_response_connection(stream, |io| async move {
+                        let io = WatchedIo {
+                            inner: stream,
+                            watch: watch.clone(),
+                        };
+                        let serve = crate::bus::after_response_connection(io, |io| async move {
                             let io = TokioIo::new(io);
                             // SEC-07: without an installed `Timer`, hyper's
                             // documented 30s `header_read_timeout` default
@@ -649,7 +667,14 @@ impl Server {
                                 .with_upgrades()
                                 .await
                             {
-                                tracing::error!(?err, "error serving connection");
+                                if watch.is_abandoned() {
+                                    tracing::debug!(
+                                        ?err,
+                                        "a request body missed its total deadline; connection closed"
+                                    );
+                                } else {
+                                    tracing::error!(?err, "error serving connection");
+                                }
                             }
                         });
 
@@ -794,6 +819,93 @@ pub async fn handle_request_with_peer(
     ))
     .await;
     close_after_timeout(response)
+}
+
+/// The IO of a connection [`Server::run`] serves, bound to the
+/// connection's watch on its request bodies (HRD-001).
+///
+/// Once the watch abandons the connection, reads and flushes fail. hyper
+/// flushes on every pass over the connection, so the failure ends the
+/// connection even when nothing reads the body, and the socket closes with
+/// it. Writes still pass, so a response hyper is writing as the watch
+/// fires, such as the `408` a reader of the body answered at the same
+/// deadline, reaches the client before the close.
+struct WatchedIo<I> {
+    /// The connection's socket.
+    inner: I,
+    /// The watch that abandons the connection.
+    watch: Arc<crate::http::body::ConnectionWatch>,
+}
+
+impl<I> WatchedIo<I> {
+    /// Register the polling task with the watch, then fail if the
+    /// connection was abandoned. Registering first means an abandonment
+    /// that lands between the two still wakes the task.
+    fn check(&self, cx: &std::task::Context<'_>) -> std::io::Result<()> {
+        self.watch.register(cx.waker());
+        if self.watch.is_abandoned() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the request body did not arrive in time",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<I: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for WatchedIo<I> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if let Err(error) = self.check(cx) {
+            return std::task::Poll::Ready(Err(error));
+        }
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<I: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for WatchedIo<I> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.watch.register(cx.waker());
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.watch.register(cx.waker());
+        std::pin::Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if let Err(error) = self.check(cx) {
+            return std::task::Poll::Ready(Err(error));
+        }
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }
 
 /// Mark a `408 Request Timeout` response `Connection: close`.
@@ -2867,6 +2979,45 @@ mod tests {
     //! `.unwrap()` fails loudly.
     use super::*;
     use crate::routing::Router;
+
+    /// HRD-001: once the connection's watch abandons it, the connection's
+    /// reads and flushes fail, which is what ends hyper's connection, and
+    /// writes still go through, so a response already being written gets
+    /// out before the close.
+    #[tokio::test(start_paused = true)]
+    async fn hardening_an_abandoned_connection_fails_reads_and_flushes_not_writes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (server, mut client) = tokio::io::duplex(64);
+        let watch = Arc::new(crate::http::body::ConnectionWatch::default());
+        let mut io = WatchedIo {
+            inner: server,
+            watch: watch.clone(),
+        };
+
+        client.write_all(b"a").await.expect("client write");
+        let mut byte = [0u8; 1];
+        io.read_exact(&mut byte)
+            .await
+            .expect("a watched connection reads");
+        io.flush().await.expect("and flushes");
+
+        let deadline = crate::http::body::BodyDeadline::start(
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(1),
+        );
+        let _arrival = watch.arm(deadline, false).expect("a body to watch");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert!(watch.is_abandoned());
+
+        client.write_all(b"b").await.expect("client write");
+        let read = io.read(&mut byte).await.expect_err("reads fail");
+        assert_eq!(read.kind(), std::io::ErrorKind::TimedOut);
+        let flush = io.flush().await.expect_err("flushes fail");
+        assert_eq!(flush.kind(), std::io::ErrorKind::TimedOut);
+        let written = io.write(b"HTTP/1.1 408").await.expect("writes pass");
+        assert_eq!(written, 12);
+    }
 
     #[test]
     #[tracing_test::traced_test]
