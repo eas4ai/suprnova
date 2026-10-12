@@ -441,10 +441,11 @@ streaming byte counter during read.
 ### Body read deadlines
 
 The server bounds how long a request body takes to arrive, as it bounds
-how long the request head takes. Every read of the body the framework
-performs follows two deadlines: `body_bytes`, `json`, `form`, `input`, the
-form request and multipart extractors, the multipart parsers, and the
-middleware that read a body before the handler, such as CSRF.
+how long the request head takes. Every read of the body follows two
+deadlines: `body_bytes`, `json`, `form`, `input`, the form request and
+multipart extractors, the multipart parsers, the middleware that read a
+body before the handler, such as CSRF, and a handler that reads the raw
+stream itself.
 
 - The per-frame deadline, `SERVER_BODY_READ_TIMEOUT` (default 30 seconds),
   is the longest the server waits for the next piece of the body.
@@ -458,9 +459,41 @@ A body that misses either deadline is abandoned: the read fails with an
 HTTP `408 Request Timeout` error, which the request answers like any other
 error, and the server closes the connection after the response. A `408`
 response always carries `Connection: close`. Zero or a value that doesn't
-parse falls back to the default, so neither deadline can be turned off. A
-handler that takes the raw stream with `Request::into_parts` and reads it
-itself reads it without the deadlines.
+parse falls back to the default, so neither deadline can be turned off.
+
+The deadlines bind the body, not the method that reads it. A handler that
+takes the body with `Request::into_parts` gets a
+`BodyState::Streaming(TimedBody)`, and each frame it awaits waits under the
+same deadlines and fails with the same `408` when it misses one. The
+error of a `TimedBody` frame is a `FrameworkError`, so `?` returns it.
+`http_body_util::BodyExt` reads the frames:
+
+```rust
+use http_body_util::BodyExt;
+use suprnova::http::BodyState;
+use suprnova::{handler, FrameworkError, HttpResponse, Request, Response};
+
+#[handler]
+pub async fn count_bytes(req: Request) -> Response {
+    let (_, body) = req.into_parts();
+    let BodyState::Streaming(mut body) = body else {
+        return Err(FrameworkError::internal("the body was already read").into());
+    };
+    let mut read = 0;
+    while let Some(frame) = body.frame().await {
+        // A frame that misses a deadline is the `408`.
+        let frame = frame?;
+        read += frame.data_ref().map_or(0, |data| data.len());
+    }
+    Ok(HttpResponse::text(read.to_string()))
+}
+```
+
+A body nobody reads is abandoned too. If a handler keeps the request and
+never reads the body, the server closes the connection at the total
+deadline, without a response. A handler that does other work before it
+reads the body must finish reading it within the total deadline, or the
+connection closes the same way.
 
 A streamed upload stays within the per-frame deadline as long as the
 client keeps sending; a client that sends nothing for 30 seconds is cut

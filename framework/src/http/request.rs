@@ -1,8 +1,8 @@
 use super::ParamError;
 use super::body::{
-    BodyDeadline, collect_after, collect_body_until, global_max_request_body_bytes,
-    is_form_urlencoded, is_multipart_form_data, parse_form, parse_json, parse_multipart,
-    read_failure,
+    BodyArrival, BodyDeadline, TimedBody, collect_after, collect_body_until,
+    global_max_request_body_bytes, is_form_urlencoded, is_multipart_form_data, parse_form,
+    parse_json, parse_multipart,
 };
 use super::cookie::parse_cookies;
 use super::trusted_proxies::TrustedProxiesConfig;
@@ -24,8 +24,9 @@ use std::collections::HashMap;
 /// `body_bytes` / `form` / `json` reads return the cached bytes without
 /// touching the underlying stream.
 pub enum BodyState {
-    /// Body has not been read yet - still a streaming hyper body.
-    Streaming(hyper::body::Incoming),
+    /// Body has not been read yet - still streaming from the client, under
+    /// the request's body deadlines (see [`TimedBody`]).
+    Streaming(TimedBody),
     /// Body was collected into memory. Subsequent reads return these bytes.
     Buffered(Bytes),
     /// Body was consumed without buffering. Subsequent reads error.
@@ -43,8 +44,8 @@ pub enum BodyState {
     Partial {
         /// The bytes read so far, the first bytes of the body.
         read: Bytes,
-        /// The stream after them.
-        rest: hyper::body::Incoming,
+        /// The stream after them, under the same deadlines.
+        rest: TimedBody,
     },
 }
 
@@ -311,17 +312,21 @@ impl Request {
     /// the server's request pipeline; in-process tests construct via
     /// [`crate::testing`] helpers instead.
     ///
-    /// The body deadlines (HRD-001) are the ones the server started as it
-    /// read the request head; a request no `Server::run` served starts the
-    /// configured ones here.
+    /// The body becomes a [`TimedBody`] under the body deadlines (HRD-001)
+    /// the server started as it read the request head, and bound to the
+    /// connection's watch on it; a request no `Server::run` served starts
+    /// the configured deadlines here, with no connection to watch.
     pub fn new(inner: hyper::Request<hyper::body::Incoming>) -> Self {
         let (mut parts, body) = inner.into_parts();
-        if parts.extensions.get::<BodyDeadline>().is_none() {
-            parts.extensions.insert(BodyDeadline::configured());
-        }
+        let deadline = parts
+            .extensions
+            .get::<BodyDeadline>()
+            .copied()
+            .unwrap_or_else(BodyDeadline::configured);
+        let arrival = parts.extensions.remove::<BodyArrival>();
         Self {
             parts,
-            body: BodyState::Streaming(body),
+            body: BodyState::Streaming(TimedBody::new(body, deadline, arrival)),
             params: HashMap::new(),
             route_pattern: None,
             peer_addr: None,
@@ -1811,11 +1816,10 @@ impl Request {
         let content_length = super::body::parse_content_length(&self.parts.headers);
 
         let params = self.params;
-        let deadline = deadline_of(&self.parts);
 
         let bytes = match self.body {
-            BodyState::Streaming(incoming) => {
-                collect_body_until(incoming, content_length, max_bytes, deadline).await?
+            BodyState::Streaming(body) => {
+                collect_body_until(body, content_length, max_bytes).await?
             }
             // Middleware buffered the body upstream (typically the CSRF
             // middleware). Return the cached bytes without touching the
@@ -1842,9 +1846,7 @@ impl Request {
                 ));
             }
             BodyState::Failed(error) => return Err(error),
-            BodyState::Partial { read, rest } => {
-                collect_after(read, rest, max_bytes, deadline).await?
-            }
+            BodyState::Partial { read, rest } => collect_after(read, rest, max_bytes).await?,
         };
 
         Ok((
@@ -1873,12 +1875,11 @@ impl Request {
     /// already buffered).
     pub async fn buffer_body(mut self, max_bytes: usize) -> Result<Self, FrameworkError> {
         let content_length = super::body::parse_content_length(&self.parts.headers);
-        let deadline = deadline_of(&self.parts);
 
         let body = std::mem::replace(&mut self.body, BodyState::Consumed);
         let bytes = match body {
-            BodyState::Streaming(incoming) => {
-                collect_body_until(incoming, content_length, max_bytes, deadline).await?
+            BodyState::Streaming(body) => {
+                collect_body_until(body, content_length, max_bytes).await?
             }
             BodyState::Buffered(b) => b,
             BodyState::Consumed => {
@@ -1887,9 +1888,7 @@ impl Request {
                 ));
             }
             BodyState::Failed(error) => return Err(error),
-            BodyState::Partial { read, rest } => {
-                collect_after(read, rest, max_bytes, deadline).await?
-            }
+            BodyState::Partial { read, rest } => collect_after(read, rest, max_bytes).await?,
         };
         self.body = BodyState::Buffered(bytes);
         Ok(self)
@@ -1911,31 +1910,30 @@ impl Request {
     /// way, with the `408` the handler's read would have met. A body a
     /// middleware consumed before stays consumed.
     pub(crate) async fn read_body_up_to(&mut self, max_bytes: usize) -> BodyRead {
+        use http_body_util::BodyExt;
+
         let content_length = super::body::parse_content_length(&self.parts.headers);
-        let deadline = deadline_of(&self.parts);
         match std::mem::replace(&mut self.body, BodyState::Consumed) {
             BodyState::Buffered(bytes) => {
                 self.body = BodyState::Buffered(bytes.clone());
                 BodyRead::Whole(bytes)
             }
-            BodyState::Streaming(incoming)
+            BodyState::Streaming(body)
                 if content_length.is_some_and(|length| length > max_bytes as u64) =>
             {
-                self.body = BodyState::Streaming(incoming);
+                self.body = BodyState::Streaming(body);
                 BodyRead::TooLarge
             }
-            BodyState::Streaming(mut incoming) => {
+            BodyState::Streaming(mut body) => {
                 let mut buf: Vec<u8> = Vec::new();
                 loop {
-                    let frame = match deadline.frame(&mut incoming).await {
-                        Ok(Some(Ok(frame))) => frame,
-                        Ok(None) => break,
-                        Ok(Some(Err(error))) => {
-                            self.body = BodyState::Failed(read_failure(error));
-                            return BodyRead::Failed;
-                        }
-                        Err(late) => {
-                            self.body = BodyState::Failed(late);
+                    // A late frame fails with the `408`, a failed stream
+                    // with the error `body_bytes` returns.
+                    let frame = match body.frame().await {
+                        Some(Ok(frame)) => frame,
+                        None => break,
+                        Some(Err(error)) => {
+                            self.body = BodyState::Failed(error);
                             return BodyRead::Failed;
                         }
                     };
@@ -1945,7 +1943,7 @@ impl Request {
                         if buf.len() > max_bytes {
                             self.body = BodyState::Partial {
                                 read: Bytes::from(buf),
-                                rest: incoming,
+                                rest: body,
                             };
                             return BodyRead::TooLarge;
                         }
@@ -1966,13 +1964,6 @@ impl Request {
                 BodyRead::Failed
             }
         }
-    }
-
-    /// The deadlines a read of this request's body waits under (HRD-001):
-    /// for a parser that reads the stream itself, as the multipart parsers
-    /// do.
-    pub(crate) fn body_deadline(&self) -> BodyDeadline {
-        deadline_of(&self.parts)
     }
 
     /// Read the cached body bytes set by [`Request::buffer_body`].
@@ -2094,7 +2085,12 @@ impl Request {
     /// This is used internally by the handler macro for FormRequest
     /// extraction and by the multipart upload code. Callers must
     /// pattern-match on [`BodyState`] - the body may be a streaming
-    /// hyper body, an already-buffered `Bytes`, or fully consumed.
+    /// [`TimedBody`], an already-buffered `Bytes`, or fully consumed.
+    ///
+    /// A streaming body stays under the request's body deadlines (HRD-001)
+    /// however it is read: each frame waits at most the per-frame deadline,
+    /// all of it must arrive by the total deadline counted from the request
+    /// head, and a frame that misses either fails with the `408`.
     pub fn into_parts(self) -> (RequestParts, BodyState) {
         let content_type = self
             .parts
@@ -2113,17 +2109,6 @@ impl Request {
             self.body,
         )
     }
-}
-
-/// The body deadlines of the request whose head is `parts`: the ones
-/// [`Request::new`] kept, or, for a request built another way, the
-/// configured ones, starting now.
-fn deadline_of(parts: &hyper::http::request::Parts) -> BodyDeadline {
-    parts
-        .extensions
-        .get::<BodyDeadline>()
-        .copied()
-        .unwrap_or_else(BodyDeadline::configured)
 }
 
 /// Request parts after body has been separated

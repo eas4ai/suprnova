@@ -3131,18 +3131,25 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   client that sent complete headers and then sent the body a byte at a
   time, or stopped sending it, held its connection, and with
   `SERVER_MAX_CONNECTIONS` set a connection slot, for as long as it liked
-  (HRD-001). Every body read the framework performs now waits at most
+  (HRD-001). Every read of a request body now waits at most
   `SERVER_BODY_READ_TIMEOUT` (default 30 seconds) for the next piece and
   `SERVER_BODY_TOTAL_TIMEOUT` (default 3600 seconds) for the whole body,
   counted from when the server read the request head: `body_bytes`, `json`,
   `form`, `input`, the form request and multipart extractors, the multipart
-  parsers and the middleware that read a body before the handler. A body
-  that misses either deadline is abandoned: the read fails with
+  parsers, the middleware that read a body before the handler, and a
+  handler that reads the raw stream from `Request::into_parts` itself. A
+  body that misses either deadline is abandoned: the read fails with
   `408 Request Timeout`, and the server closes the connection after the
-  response. Every `408` response carries `Connection: close`. Zero or a
-  value that does not parse falls back to the default, as for the header
-  deadline. `ServerConfig` has the fields `body_read_timeout` and
+  response. A body nothing reads, such as one a handler keeps while it
+  waits on other work, is abandoned at the total deadline and its
+  connection closed. Every `408` response carries `Connection: close`. Zero
+  or a value that does not parse falls back to the default, as for the
+  header deadline. `ServerConfig` has the fields `body_read_timeout` and
   `body_total_timeout`, which `ServerConfig::builder()` and `Server` set.
+  `BodyState::Streaming` and `BodyState::Partial`, which
+  `Request::into_parts` returns, hold the new `suprnova::http::TimedBody`,
+  the body under its deadlines, where they held hyper's `Incoming`, and
+  `collect_body_with_cap` and `collect_body` take either.
 - **New projects install the timeout middleware.** In 3.2.1 no bootstrap
   `suprnova new` wrote installed `TimeoutMiddleware`, so in a new project a
   slow handler or a hung query held its connection until the client gave
