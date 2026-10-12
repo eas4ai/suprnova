@@ -1,12 +1,15 @@
 //! Authentication middleware
 
 use crate::Request;
+use crate::container::App;
+use crate::error::FrameworkError;
 use crate::http::{HttpResponse, Response};
 use crate::middleware::{Middleware, Next};
 use async_trait::async_trait;
 
 use super::contract::Credentials;
 use super::guard::Auth;
+use super::manager::AuthManager;
 
 /// Authentication middleware
 ///
@@ -396,6 +399,12 @@ impl BasicAuthMiddleware {
     /// Stateful HTTP Basic auth against the default guard - logs the user into
     /// the session on success. Mirrors Laravel's `Auth::basic()`.
     ///
+    /// A request whose session is already signed in to the guard passes
+    /// without an `Authorization` header. The guard resolves that user and
+    /// compares its authentication epoch first, as `AuthMiddleware` does, so
+    /// a session signed in before a password change is signed out and must
+    /// present valid credentials.
+    ///
     /// Persisting the login requires `SessionMiddleware` earlier in the chain
     /// (the session write is a no-op without it); [`once`](Self::once) has no
     /// such dependency.
@@ -452,6 +461,69 @@ impl BasicAuthMiddleware {
         )
     }
 
+    /// Whether the session is signed in to this middleware's guard, decided
+    /// by resolving the user through the guard rather than by the stored id.
+    ///
+    /// The guard's `user` compares the sign-in's authentication epoch with
+    /// the user's current one and ends a sign-in whose epoch moved, a
+    /// password change after it (HRD-007). Such a session, and one whose
+    /// user the provider no longer knows, is not signed in here, so the
+    /// request falls through to the `Authorization` header: valid
+    /// credentials sign the user in afresh, and anything else gets the
+    /// challenge.
+    ///
+    /// Without a guard name this resolves the manager's default guard
+    /// itself, not `Auth::user`, which follows the guard a test client
+    /// selected. Without an [`AuthManager`] it resolves as `Auth::user`
+    /// does, through the globally bound [`UserProvider`](super::UserProvider);
+    /// with none bound there is nothing to resolve against, and the stored
+    /// id grants nothing.
+    ///
+    /// # Errors
+    ///
+    /// A named guard that is absent or stateless, and the provider's error
+    /// while it resolves the user: a user who could not be resolved is
+    /// never let through.
+    async fn session_signed_in(&self) -> Result<bool, FrameworkError> {
+        match &self.guard {
+            Some(name) => {
+                // Resolved first, so a stale session slot of an absent or
+                // stateless guard is never trusted.
+                let guard = Auth::stateful_guard(name)?;
+                if crate::session::middleware::persisted_guard_auth_user_id(name).is_none() {
+                    return Ok(false);
+                }
+                Ok(guard.user().await?.is_some())
+            }
+            None => match App::get::<AuthManager>() {
+                Some(manager) => {
+                    if crate::session::middleware::persisted_guard_auth_user_id(
+                        manager.default_guard_name(),
+                    )
+                    .is_none()
+                    {
+                        return Ok(false);
+                    }
+                    Ok(manager.default_stateful_guard()?.user().await?.is_some())
+                }
+                None => {
+                    if crate::session::middleware::persisted_guard_auth_user_id(
+                        &Auth::default_guard_name(),
+                    )
+                    .is_none()
+                    {
+                        return Ok(false);
+                    }
+                    match Auth::user().await {
+                        Ok(user) => Ok(user.is_some()),
+                        Err(error) if Auth::is_missing_provider(&error) => Ok(false),
+                        Err(error) => Err(error),
+                    }
+                }
+            },
+        }
+    }
+
     /// The `401 Unauthorized` challenge response.
     fn challenge(&self) -> HttpResponse {
         HttpResponse::json(serde_json::json!({ "message": "Invalid credentials." }))
@@ -501,25 +573,12 @@ impl Default for BasicAuthMiddleware {
 #[async_trait]
 impl Middleware for BasicAuthMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
-        // Stateful basic short-circuits on an already-authenticated session,
-        // matching Laravel's `basic()`. Stateless `once` always re-reads the
-        // header.
-        if !self.stateless {
-            let already = match &self.guard {
-                Some(name) => {
-                    // Do not trust a stale session slot for an absent or
-                    // stateless guard.
-                    Auth::stateful_guard(name)?;
-                    crate::session::middleware::persisted_guard_auth_user_id(name).is_some()
-                }
-                None => crate::session::middleware::persisted_guard_auth_user_id(
-                    &Auth::default_guard_name(),
-                )
-                .is_some(),
-            };
-            if already {
-                return next(request).await;
-            }
+        // Stateful basic short-circuits on a session already signed in to
+        // the guard, matching Laravel's `basic()`, once the guard has
+        // resolved that user and compared its epoch. Stateless `once` always
+        // re-reads the header.
+        if !self.stateless && self.session_signed_in().await? {
+            return next(request).await;
         }
 
         let credentials = match self.decode(&request) {

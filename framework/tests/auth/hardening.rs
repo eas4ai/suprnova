@@ -7,8 +7,8 @@
 //! session store refuses to destroy the user's sessions, and the browser
 //! that holds a session cookie from before the change comes back. Each test
 //! drives a real `SessionMiddleware` over an in-memory store, with
-//! `AuthMiddleware` in front of a route, so the answer is the one an
-//! application would send.
+//! `AuthMiddleware` or `BasicAuthMiddleware` in front of a route, so the
+//! answer is the one an application would send.
 //!
 //! The remember-me half of HRD-007 is tested beside the other remember-me
 //! tests, in `remember_me.rs`, where the `remember_tokens` table exists.
@@ -24,6 +24,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
@@ -35,8 +36,8 @@ use suprnova::middleware::{Middleware, Next};
 use suprnova::session::{DestroyedSessions, SessionConfig, SessionData, SessionStore};
 use suprnova::testing::TestContainer;
 use suprnova::{
-    Auth, AuthConfig, AuthManager, AuthMiddleware, Authenticatable, Credentials, FrameworkError,
-    GuardConfig, HttpResponse, SessionMiddleware, UserProvider,
+    Auth, AuthConfig, AuthManager, AuthMiddleware, Authenticatable, BasicAuthMiddleware,
+    Credentials, FrameworkError, GuardConfig, HttpResponse, SessionMiddleware, UserProvider,
 };
 
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
@@ -82,6 +83,8 @@ impl Authenticatable for EpochUser {
 struct EpochProvider {
     users: StdMutex<HashMap<String, (String, EpochUser)>>,
     generation: StdMutex<u32>,
+    /// Whether `retrieve_by_id` fails, as a database outage makes it fail.
+    lookups_fail: AtomicBool,
 }
 
 impl EpochProvider {
@@ -96,7 +99,13 @@ impl EpochProvider {
         Arc::new(Self {
             users: StdMutex::new(users),
             generation: StdMutex::new(0),
+            lookups_fail: AtomicBool::new(false),
         })
+    }
+
+    /// Make `retrieve_by_id` fail (`true`) or answer again (`false`).
+    fn fail_lookups(&self, fail: bool) {
+        self.lookups_fail.store(fail, Ordering::SeqCst);
     }
 
     /// Rewrite the user's password through the provider, as a password
@@ -120,6 +129,9 @@ impl UserProvider for EpochProvider {
         &self,
         id: &str,
     ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        if self.lookups_fail.load(Ordering::SeqCst) {
+            return Err(FrameworkError::database("the users table is unavailable"));
+        }
         Ok(self
             .users
             .lock()
@@ -267,8 +279,12 @@ fn percent_encode_cookie_value(value: &str) -> String {
     encoded
 }
 
-/// A request for `/` carrying `cookie` as the session cookie.
-async fn request(config: &SessionConfig, cookie: Option<&str>) -> suprnova::Request {
+/// A request for `/` carrying `cookie` as the session cookie, and `headers`.
+async fn request(
+    config: &SessionConfig,
+    cookie: Option<&str>,
+    headers: &[(&str, &str)],
+) -> suprnova::Request {
     use bytes::Bytes;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
@@ -286,9 +302,14 @@ async fn request(config: &SessionConfig, cookie: Option<&str>) -> suprnova::Requ
             )
         })
         .unwrap_or_default();
-    let http_bytes =
-        format!("GET / HTTP/1.1\r\nHost: localhost\r\n{cookie_header}Content-Length: 0\r\n\r\n")
-            .into_bytes();
+    let other_headers = headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect::<String>();
+    let http_bytes = format!(
+        "GET / HTTP/1.1\r\nHost: localhost\r\n{cookie_header}{other_headers}Content-Length: 0\r\n\r\n"
+    )
+    .into_bytes();
     let (req_tx, req_rx) = oneshot::channel();
     let req_tx = StdMutex::new(Some(req_tx));
     let (client_io, server_io) = tokio::io::duplex(http_bytes.len() + 64 * 1024);
@@ -315,10 +336,12 @@ async fn request(config: &SessionConfig, cookie: Option<&str>) -> suprnova::Requ
     req_rx.await.expect("request captured")
 }
 
-/// What one request answered: its status and the session cookie it set.
+/// What one request answered: its status, the session cookie it set, and
+/// whether it carried a Basic challenge.
 struct Answer {
     status: u16,
     session_cookie: Option<String>,
+    challenged: bool,
 }
 
 /// Serve one request through `middleware`, with `handler` behind it, inside
@@ -329,8 +352,19 @@ async fn serve(
     cookie: Option<&str>,
     handler: Next,
 ) -> Answer {
+    serve_with_headers(middleware, config, cookie, &[], handler).await
+}
+
+/// [`serve`] for a request that also carries `headers`.
+async fn serve_with_headers(
+    middleware: &SessionMiddleware,
+    config: &SessionConfig,
+    cookie: Option<&str>,
+    headers: &[(&str, &str)],
+    handler: Next,
+) -> Answer {
     let response = request_state::request_state_scope_for_test(
-        middleware.handle(request(config, cookie).await, handler),
+        middleware.handle(request(config, cookie, headers).await, handler),
     )
     .await;
     let response = match response {
@@ -338,6 +372,11 @@ async fn serve(
     };
     let status = response.status_code();
     let response = response.into_hyper();
+    let challenged = response
+        .headers()
+        .get("www-authenticate")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("Basic realm="));
     let prefix = format!("{}=", config.cookie_name);
     let session_cookie = response
         .headers()
@@ -354,6 +393,7 @@ async fn serve(
     Answer {
         status,
         session_cookie,
+        challenged,
     }
 }
 
@@ -373,15 +413,65 @@ fn authenticated_route(guard: Option<&'static str>) -> Next {
     })
 }
 
+/// A route behind `BasicAuthMiddleware::new()` for `guard`, or the default
+/// guard: `200` for a signed-in session or valid credentials, the
+/// middleware's `401` challenge otherwise.
+fn basic_route(guard: Option<&'static str>) -> Next {
+    let route: Next = Arc::new(|_request| Box::pin(async { Ok(HttpResponse::text("dashboard")) }));
+    Arc::new(move |request| {
+        let route = route.clone();
+        Box::pin(async move {
+            let middleware = match guard {
+                Some(guard) => BasicAuthMiddleware::new().for_guard(guard),
+                None => BasicAuthMiddleware::new(),
+            };
+            middleware.handle(request, route).await
+        })
+    })
+}
+
+/// The `Authorization` header value of HTTP Basic credentials.
+fn basic_header(user: &str, password: &str) -> String {
+    use base64::Engine as _;
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+    format!("Basic {encoded}")
+}
+
 /// A handler that signs `email` in through `Auth::attempt`.
 fn attempt_route(email: &'static str) -> Next {
+    attempt_route_for(None, email)
+}
+
+/// A handler that signs `email` in through the `attempt` of `guard`, or of
+/// the default guard.
+fn attempt_route_for(guard: Option<&'static str>, email: &'static str) -> Next {
     Arc::new(move |_request| {
         Box::pin(async move {
-            match Auth::attempt(&Credentials::password(email, PASSWORD), false).await {
+            let credentials = Credentials::password(email, PASSWORD);
+            let attempted = match guard {
+                Some(guard) => match Auth::stateful_guard(guard) {
+                    Ok(guard) => guard.attempt(&credentials, false).await,
+                    Err(error) => Err(error),
+                },
+                None => Auth::attempt(&credentials, false).await,
+            };
+            match attempted {
                 Ok(Some(_)) => Ok(HttpResponse::text("signed in")),
                 Ok(None) => Err(HttpResponse::text("wrong password").status(422)),
                 Err(error) => Err(HttpResponse::text(error.to_string()).status(500)),
             }
+        })
+    })
+}
+
+/// A handler that signs user `"7"` in through `Auth::login_id`.
+fn login_id_route() -> Next {
+    Arc::new(|_request| {
+        Box::pin(async {
+            Auth::login_id("7")
+                .map(|()| HttpResponse::text("signed in"))
+                .map_err(|error| HttpResponse::text(error.to_string()).status(500))
         })
     })
 }
@@ -590,18 +680,34 @@ fn hardening_user_without_hash_or_epoch_records_none_and_stays_signed_in_child()
     );
 }
 
-/// `Auth::login_id` has no user at hand: the first request that resolves
-/// the user records the epoch, and a later password change ends the
-/// sign-in.
+/// The epochs every stored entry of the guard `guard` for user `"7"`
+/// records: `Some(text)` per entry, or `None` for an entry that records none.
+fn stored_epochs(store: &RevocationFailsStore, guard: &str) -> Vec<Option<String>> {
+    store
+        .guard_entries(guard, "7")
+        .iter()
+        .map(|entry| {
+            entry
+                .get("auth_epoch")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .collect()
+}
+
+/// `Auth::login_id` has no user at hand, so the request that signs in reads
+/// the epoch through the guard's provider before the session is stored: the
+/// stored sign-in carries a numeric epoch, never the unread mark, and a
+/// password change before any authenticated request ends it.
 #[test]
-fn hardening_login_id_records_its_epoch_at_the_first_resolution() {
+fn hardening_login_id_records_its_epoch_in_the_request_that_signs_in() {
     crate::own_process::run_alone(
-        "hardening::hardening_login_id_records_its_epoch_at_the_first_resolution_child",
+        "hardening::hardening_login_id_records_its_epoch_in_the_request_that_signs_in_child",
     );
 }
 
 #[test]
-fn hardening_login_id_records_its_epoch_at_the_first_resolution_child() {
+fn hardening_login_id_records_its_epoch_in_the_request_that_signs_in_child() {
     if !crate::own_process::is_child() {
         return;
     }
@@ -614,27 +720,24 @@ fn hardening_login_id_records_its_epoch_at_the_first_resolution_child() {
         async move {
             let config = session_config();
             let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
-            let login_id: Next = Arc::new(|_request| {
-                Box::pin(async {
-                    Auth::login_id("7")
-                        .map(|()| HttpResponse::text("signed in"))
-                        .map_err(|error| HttpResponse::text(error.to_string()).status(500))
-                })
-            });
-            let cookie = serve(&middleware, &config, None, login_id)
+            let cookie = serve(&middleware, &config, None, login_id_route())
                 .await
                 .session_cookie
                 .expect("the sign-in sets a session cookie");
 
-            let first = serve(
-                &middleware,
-                &config,
-                Some(&cookie),
-                authenticated_route(None),
-            )
-            .await;
-            assert_eq!(first.status, 200, "the first resolution records the epoch");
+            let epochs = stored_epochs(&store, "web");
+            assert_eq!(epochs.len(), 1, "one session holds the web guard");
+            for epoch in &epochs {
+                assert!(
+                    epoch
+                        .as_deref()
+                        .is_some_and(|epoch| epoch.parse::<u64>().is_ok()),
+                    "the request that signs in records a numeric epoch: {epoch:?}"
+                );
+            }
 
+            // The password changes before any authenticated request, and
+            // the eager revocation fails.
             provider.rewrite_password("7").await;
             assert!(suprnova::session::destroy_all_for_user("7").await.is_err());
 
@@ -645,9 +748,256 @@ fn hardening_login_id_records_its_epoch_at_the_first_resolution_child() {
                 authenticated_route(None),
             )
             .await;
-            assert_eq!(after.status, 401);
+            assert_eq!(
+                after.status, 401,
+                "a sign-in by id from before the password change answers as a guest"
+            );
             assert!(!store.holds("web", "7"));
         },
+    );
+}
+
+/// When the provider fails while the request that signed in by id reads the
+/// epoch, the sign-in is not kept: the stored session holds no identity and
+/// the next request is a guest's.
+#[test]
+fn hardening_login_id_whose_epoch_cannot_be_read_is_not_kept() {
+    crate::own_process::run_alone(
+        "hardening::hardening_login_id_whose_epoch_cannot_be_read_is_not_kept_child",
+    );
+}
+
+#[test]
+fn hardening_login_id_whose_epoch_cannot_be_read_is_not_kept_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let provider = EpochProvider::with_user("7", "seven@example.test", true);
+    let store = Arc::new(RevocationFailsStore::default());
+    in_scope(
+        AuthConfig::default(),
+        vec![("users", provider.clone() as Arc<dyn UserProvider>)],
+        store.clone(),
+        async move {
+            let config = session_config();
+            let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+
+            provider.fail_lookups(true);
+            let signed_in = serve(&middleware, &config, None, login_id_route()).await;
+            provider.fail_lookups(false);
+            assert!(
+                !store.holds("web", "7"),
+                "a sign-in whose epoch could not be read leaves no identity in the store"
+            );
+
+            let next = serve(
+                &middleware,
+                &config,
+                signed_in.session_cookie.as_deref(),
+                authenticated_route(None),
+            )
+            .await;
+            assert_eq!(next.status, 401, "the next request is a guest's");
+        },
+    );
+}
+
+/// HRD-007's exception through `Auth::login_id`: the request that signs in
+/// finds no epoch for a user whose model exposes neither value, so the
+/// sign-in records none and a later password change leaves it alone.
+#[test]
+fn hardening_login_id_of_a_user_without_an_epoch_records_none() {
+    crate::own_process::run_alone(
+        "hardening::hardening_login_id_of_a_user_without_an_epoch_records_none_child",
+    );
+}
+
+#[test]
+fn hardening_login_id_of_a_user_without_an_epoch_records_none_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let provider = EpochProvider::with_user("7", "seven@example.test", false);
+    let store = Arc::new(RevocationFailsStore::default());
+    in_scope(
+        AuthConfig::default(),
+        vec![("users", provider.clone() as Arc<dyn UserProvider>)],
+        store.clone(),
+        async move {
+            let config = session_config();
+            let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+            let cookie = serve(&middleware, &config, None, login_id_route())
+                .await
+                .session_cookie
+                .expect("the sign-in sets a session cookie");
+            assert_eq!(
+                stored_epochs(&store, "web"),
+                vec![None],
+                "a user that exposes no epoch records none, and no unread mark is left"
+            );
+
+            provider.rewrite_password("7").await;
+            let after = serve(
+                &middleware,
+                &config,
+                Some(&cookie),
+                authenticated_route(None),
+            )
+            .await;
+            assert_eq!(after.status, 200, "the sign-in is not checked");
+        },
+    );
+}
+
+/// HRD-007 through `BasicAuthMiddleware::new()` for `guard` (`None` for the
+/// default guard, stored as `"web"`), whose provider `provider` knows user
+/// `"7"` at `email`. Two sessions sign the user in before the password
+/// changes and the eager revocation fails. After the change, the first,
+/// without an `Authorization` header, gets the `401` challenge and loses the
+/// guard's identity; the second, with valid credentials, is signed in
+/// afresh, and that sign-in passes without a header.
+async fn basic_auth_challenges_a_session_from_before_a_password_change(
+    guard: Option<&'static str>,
+    email: &'static str,
+    provider: Arc<EpochProvider>,
+    store: Arc<RevocationFailsStore>,
+) {
+    let guard_name = guard.unwrap_or("web");
+    let config = session_config();
+    let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+    let first = serve(&middleware, &config, None, attempt_route_for(guard, email))
+        .await
+        .session_cookie
+        .expect("the first sign-in sets a session cookie");
+    let second = serve(&middleware, &config, None, attempt_route_for(guard, email))
+        .await
+        .session_cookie
+        .expect("the second sign-in sets a session cookie");
+
+    let before = serve(&middleware, &config, Some(&first), basic_route(guard)).await;
+    assert_eq!(
+        before.status, 200,
+        "the signed-in session passes Basic auth without a header"
+    );
+
+    provider.rewrite_password("7").await;
+    assert!(
+        suprnova::session::destroy_all_for_user("7").await.is_err(),
+        "the store refuses the revocation"
+    );
+    assert_eq!(
+        store.guard_entries(guard_name, "7").len(),
+        2,
+        "both sessions from before the change are still stored"
+    );
+
+    let stale = serve(&middleware, &config, Some(&first), basic_route(guard)).await;
+    assert_eq!(
+        stale.status, 401,
+        "a session from before the password change does not pass Basic auth"
+    );
+    assert!(stale.challenged, "the 401 carries the Basic challenge");
+    assert_eq!(
+        store.guard_entries(guard_name, "7").len(),
+        1,
+        "the stale session no longer holds the guard's identity"
+    );
+
+    let header = basic_header(email, PASSWORD);
+    let fresh = serve_with_headers(
+        &middleware,
+        &config,
+        Some(&second),
+        &[("Authorization", &header)],
+        basic_route(guard),
+    )
+    .await;
+    assert_eq!(
+        fresh.status, 200,
+        "valid credentials sign the user in afresh over a stale session"
+    );
+    let fresh_cookie = fresh
+        .session_cookie
+        .expect("the fresh sign-in sets a session cookie");
+    assert_eq!(
+        store.guard_entries(guard_name, "7").len(),
+        1,
+        "only the fresh sign-in holds the guard"
+    );
+
+    let after = serve(
+        &middleware,
+        &config,
+        Some(&fresh_cookie),
+        basic_route(guard),
+    )
+    .await;
+    assert_eq!(
+        after.status, 200,
+        "the fresh sign-in passes Basic auth without a header"
+    );
+}
+
+/// `BasicAuthMiddleware::new()` on the default guard resolves the session's
+/// user and compares its epoch instead of trusting the stored id.
+#[test]
+fn hardening_basic_auth_challenges_a_session_from_before_a_password_change() {
+    crate::own_process::run_alone(
+        "hardening::hardening_basic_auth_challenges_a_session_from_before_a_password_change_child",
+    );
+}
+
+#[test]
+fn hardening_basic_auth_challenges_a_session_from_before_a_password_change_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let provider = EpochProvider::with_user("7", "seven@example.test", true);
+    let store = Arc::new(RevocationFailsStore::default());
+    in_scope(
+        AuthConfig::default(),
+        vec![("users", provider.clone() as Arc<dyn UserProvider>)],
+        store.clone(),
+        basic_auth_challenges_a_session_from_before_a_password_change(
+            None,
+            "seven@example.test",
+            provider,
+            store,
+        ),
+    );
+}
+
+/// The same through `BasicAuthMiddleware::new().for_guard("admin")`: the
+/// named guard resolves its own user and compares its own epoch.
+#[test]
+fn hardening_basic_auth_for_a_named_guard_challenges_a_session_from_before_a_password_change() {
+    crate::own_process::run_alone(
+        "hardening::hardening_basic_auth_for_a_named_guard_challenges_a_session_from_before_a_password_change_child",
+    );
+}
+
+#[test]
+fn hardening_basic_auth_for_a_named_guard_challenges_a_session_from_before_a_password_change_child()
+{
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let users = EpochProvider::with_user("1", "one@example.test", true);
+    let admins = EpochProvider::with_user("7", "admin@example.test", true);
+    let store = Arc::new(RevocationFailsStore::default());
+    in_scope(
+        AuthConfig::default().guard("admin", GuardConfig::session("admins")),
+        vec![
+            ("users", users as Arc<dyn UserProvider>),
+            ("admins", admins.clone() as Arc<dyn UserProvider>),
+        ],
+        store.clone(),
+        basic_auth_challenges_a_session_from_before_a_password_change(
+            Some("admin"),
+            "admin@example.test",
+            admins,
+            store,
+        ),
     );
 }
 

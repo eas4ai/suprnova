@@ -41,9 +41,10 @@ pub(crate) enum GuardSignInEpoch {
     /// The epoch read when the guard signed the user in.
     Recorded(u64),
     /// The guard signed the user in without the user at hand
-    /// (`Auth::login_id` is synchronous and asks no provider), so the epoch
-    /// is read by the first request that resolves the user and recorded
-    /// then.
+    /// (`Auth::login_id` is synchronous and asks no provider). The mark
+    /// lives for the rest of the request that made it: a resolution of the
+    /// user in that request records the epoch, and otherwise the session
+    /// middleware reads it before it stores the session.
     Unread,
     /// A stored value that is neither form. Nothing the framework writes
     /// reads back this way, so the value was altered or written by other
@@ -238,8 +239,10 @@ impl SessionData {
     }
 
     /// Mark the guard `guard`'s sign-in as carrying an epoch not read yet
-    /// ([`GuardSignInEpoch::Unread`]): the first request that resolves the
-    /// user records it.
+    /// ([`GuardSignInEpoch::Unread`]). The mark lives for the rest of the
+    /// request that made it: a resolution of the user in that request
+    /// records the epoch, and otherwise the session middleware reads it
+    /// through the guard's provider before it stores the session.
     pub(crate) fn mark_auth_guard_epoch_unread(&mut self, guard: &str) {
         self.set_auth_guard_field(
             guard,

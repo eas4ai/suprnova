@@ -253,7 +253,8 @@ pub(crate) fn remember_expiry(
 /// The epoch is the one the default guard's provider reports for the user
 /// (HRD-007), so a password change after the issue makes the token fail
 /// [`verify_and_rotate`]. Without a registered provider, or for a user that
-/// exposes no epoch, the token is bound to none.
+/// exposes no epoch, the token is bound to none: verification then reads
+/// none either.
 ///
 /// # Errors
 ///
@@ -261,31 +262,47 @@ pub(crate) fn remember_expiry(
 /// the dates the clock can hold, or when the provider, hashing or the
 /// database fails.
 pub async fn issue(user_id: &str, ttl_minutes: i64) -> Result<String, FrameworkError> {
-    issue_for_guard(
-        &crate::auth::Auth::default_guard_name(),
-        user_id,
-        ttl_minutes,
-    )
-    .await
+    // A lifetime no date can hold is reported before the provider is asked.
+    remember_expiry(ttl_minutes)?;
+    let guard_name = crate::auth::Auth::default_guard_name();
+    // A provider error fails the issue rather than binding the token to no
+    // epoch: a token that skipped the binding would survive the next
+    // password change.
+    let epoch = crate::auth::epoch::guard_user_epoch(&guard_name, user_id).await?;
+    issue_for_guard(&guard_name, user_id, ttl_minutes, epoch).await
 }
 
 /// Issue a remember token for `user_id` of the guard `guard_name`, bound to
-/// the epoch that guard's provider reports for the user, the one
-/// [`verify_and_rotate_for_guard`] reads back for the same guard name.
+/// `epoch`: the epoch the caller read for the user through the guard's
+/// provider, `None` for a user that exposes none.
+///
+/// Verification ([`verify_and_rotate_for_guard`]) reads the user's epoch
+/// through the provider it finds by the guard name the cookie carries
+/// ([`crate::auth::epoch::guard_provider`]). A token bound to an epoch is
+/// therefore issued only for a guard name that lookup finds: for any other
+/// name, such as a `SessionGuard` built by hand under a name the
+/// [`AuthManager`](crate::auth::AuthManager) does not know, no verification
+/// could ever read the epoch back, and a token bound to none would survive
+/// the next password change.
 ///
 /// # Errors
 ///
-/// As [`issue`]. A provider error fails the issue rather than binding the
-/// token to no epoch: a token that skipped the binding would survive the
-/// next password change.
+/// As [`issue`], and an error that names the guard, with nothing stored,
+/// when `epoch` is `Some` and no provider is found for `guard_name`.
 pub(crate) async fn issue_for_guard(
     guard_name: &str,
     user_id: &str,
     ttl_minutes: i64,
+    epoch: Option<u64>,
 ) -> Result<String, FrameworkError> {
-    // A lifetime no date can hold is reported before the provider is asked.
-    remember_expiry(ttl_minutes)?;
-    let epoch = crate::auth::epoch::guard_user_epoch(guard_name, user_id).await?;
+    if epoch.is_some() && crate::auth::epoch::guard_provider(guard_name).is_none() {
+        return Err(FrameworkError::internal(format!(
+            "refusing to issue a remember-me credential for the guard \"{guard_name}\": the \
+             AuthManager does not know the guard, so the credential's epoch could never be \
+             verified. Register the guard with the AuthManager, or sign in through the \
+             manager's guard, to use remember-me."
+        )));
+    }
     issue_at_epoch(user_id, ttl_minutes, epoch).await
 }
 
