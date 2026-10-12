@@ -179,6 +179,90 @@ because its name resolves to a private address. The only policy that
 reaches it is `AllowAny`, which turns off every check, so use it only when
 your application, not a browser, decides which endpoints are stored.
 
+### Endpoint allowlist
+
+`Strict` refuses private and local destinations, but any public host
+passes it, so a tampered subscription can still make your server POST to a
+host of the attacker's choice. A browser subscribes only through its
+vendor's push service, so when your subscriptions come from browsers you
+can name every host they reach. `EndpointPolicy::Allowlist` refuses every
+other host:
+
+```rust
+use suprnova::{EndpointAllowlist, EndpointPolicy, WebPushClient};
+
+let allowlist = EndpointAllowlist::new([
+    "https://updates.push.services.mozilla.com",
+    "https://fcm.googleapis.com",
+    "https://web.push.apple.com",
+    "https://*.notify.windows.com",
+])?;
+let client = WebPushClient::new(signer, "mailto:ops@example.org")?
+    .with_endpoint_policy(EndpointPolicy::Allowlist(allowlist));
+```
+
+These are the origins of the known browser push services:
+
+| Browser | Push service origin |
+|---|---|
+| Firefox | `https://updates.push.services.mozilla.com` |
+| Chrome and most other Chromium browsers | `https://fcm.googleapis.com` |
+| Safari | `https://web.push.apple.com` |
+| Microsoft Edge | `https://*.notify.windows.com` |
+
+The allowlist runs every check of `Strict`, with the same errors. It checks
+the endpoint's origin after the checks of the URL's shape and before the
+host name is looked up, so an endpoint at a host outside the list causes
+no DNS query and no connection. An endpoint the list admits then goes
+through the address check and connects to a checked address, as under
+`Strict`.
+
+An origin is `https://host` or `https://host:port`, with no path, no
+trailing slash, no query and no user name. The host is a name, not an IP
+address. An endpoint matches an origin when its scheme is `https`, its host
+is the same name in any letter case, and its port is the same; an endpoint
+without a port uses 443. `EndpointAllowlist::new` returns
+`InvalidAllowlist`, which quotes the entry, for any other form, and for an
+empty list.
+
+Microsoft's push service spreads its subscriptions over many hosts, such
+as `wns2-par02p.notify.windows.com`, so its origin needs a wildcard. A host
+can start with the label `*.`, which matches exactly one label:
+`https://*.notify.windows.com` admits `wns2-par02p.notify.windows.com` but
+not `a.b.notify.windows.com` or `notify.windows.com`. The wildcard is the
+whole first label and appears once, and the name after it has two labels
+or more, so `https://*.com` is refused.
+
+An endpoint at another origin returns `WebPushError::OriginNotAllowed`
+before anything is sent. It carries the origin, such as
+`https://push.example.net`, and never the path of the endpoint, which is
+the token that reaches the browser. `is_retryable()` returns `false`.
+
+To send one message under a policy other than the client's own, such as
+from a client that sits behind an `Arc` shared with other senders, call
+`WebPushClient::send_with_policy`.
+
+#### Set the allowlist for the notifications channel
+
+`WebPushChannel` reads the allowlist from `WEB_PUSH_ENDPOINT_ORIGINS`, a
+comma-separated list of origins in the form above:
+
+```env
+WEB_PUSH_ENDPOINT_ORIGINS=https://updates.push.services.mozilla.com,https://fcm.googleapis.com,https://web.push.apple.com,https://*.notify.windows.com
+```
+
+When the variable names one or more origins, every send of the channel
+goes under `EndpointPolicy::Allowlist` with them, whatever policy you built
+the client with, `AllowAny` included. Unset, or blank, the client's own
+policy applies. Spaces around an entry and empty entries are ignored.
+`WebPushChannel::new` reads the variable and returns an error that names it
+when an entry is not an origin, so a typo fails at boot, where you build
+the channel, instead of leaving the channel open to every host.
+
+Set the variable when your application stores subscriptions from browsers.
+Leave it unset when your push service runs on a private network, because
+the allowlist keeps the strict address check, which refuses it.
+
 ### Custom transport
 
 `WebPushClient::new` applies a 30-second per-request timeout. If you
@@ -275,13 +359,17 @@ let client: Arc<WebPushClient> = Arc::new(
 // 86_400 (24h) is a reasonable default for non-urgent notifications;
 // drop to 60 for "act right now" alerts where a stale message is
 // worse than no message.
-let webpush = Arc::new(WebPushChannel::new(client, 86_400));
+let webpush = Arc::new(WebPushChannel::new(client, 86_400)?);
 
 let dispatcher = NotificationDispatcher::new()
     .register_channel(webpush);
 
 set_dispatcher(Arc::new(dispatcher))?;
 ```
+
+`WebPushChannel::new` returns an error when `WEB_PUSH_ENDPOINT_ORIGINS`
+holds an entry that is not an origin. See
+[Set the allowlist for the notifications channel](#set-the-allowlist-for-the-notifications-channel).
 
 `register_channel` is last-write-wins on the channel's `name()`, so
 tests can swap in a stub without affecting the production binding.
@@ -545,16 +633,22 @@ subscription. Two groups of checks raise it:
   metadata host, or a reserved name such as `.local` or `.internal`).
   When its host name resolves to an address the policy refuses, the error
   is `WebPushError::RefusedDestination`, which carries the class of the
-  address in place of a text.
+  address in place of a text. When the allowlist does not name its origin,
+  the error is `WebPushError::OriginNotAllowed`, which carries the origin.
 - The keys. `p256dh` is no base64url, does not decode to 65 bytes, is not
   in uncompressed form or is no point of the P-256 curve. `auth` is no
   base64url or does not decode to 16 bytes.
 
 The stored data is wrong, so a retry cannot help. `is_retryable()` returns
-`false`. `WebPushChannel` handles both errors as it handles a gone
+`false`. `WebPushChannel` handles these errors as it handles a gone
 subscription: it logs a warning and dispatch returns `Ok(())`, so a queue
 does not send the job again. For a refused address, the reason is the
-class, such as `its host name resolves to a private address`.
+class, such as `its host name resolves to a private address`. For an origin
+outside the allowlist, it is the origin, such as
+`its origin https://push.example.net is not in the endpoint allowlist`.
+When that origin belongs to a push service your users subscribe through,
+add it to `WEB_PUSH_ENDPOINT_ORIGINS` instead of removing the
+subscription.
 
 ```text
 WARN webpush subscription cannot be used; caller should remove
@@ -582,7 +676,8 @@ match client.send(&sub, payload, ContentEncoding::Aes128Gcm, 60).await {
     Err(
         WebPushError::SubscriptionGone
         | WebPushError::InvalidSubscription(_)
-        | WebPushError::RefusedDestination(_),
+        | WebPushError::RefusedDestination(_)
+        | WebPushError::OriginNotAllowed(_),
     ) => {
         // remove the subscription
     }
@@ -710,7 +805,7 @@ async fn order_shipped_pushes() {
             .unwrap()
             .with_endpoint_policy(EndpointPolicy::AllowAny),
     );
-    let channel = Arc::new(WebPushChannel::new(client, 60));
+    let channel = Arc::new(WebPushChannel::new(client, 60).unwrap());
 
     let dispatcher = NotificationDispatcher::new().register_channel(channel);
     set_dispatcher(Arc::new(dispatcher)).unwrap();
@@ -724,6 +819,10 @@ async fn order_shipped_pushes() {
 }
 ```
 
+Leave `WEB_PUSH_ENDPOINT_ORIGINS` unset in a test that uses `AllowAny`.
+When it names origins, the channel sends under the allowlist, which
+refuses the mock server's `http` address.
+
 For end-to-end tests that don't care about the encrypted bytes,
 `Notify::fake()` (covered in [Notifications](notifications.md))
 captures the dispatch without running the channel - faster, no
@@ -734,11 +833,15 @@ mock server, no encryption round-trip.
 - Primitives: `suprnova::VapidKey`, `suprnova::VapidSigner`,
   `suprnova::VapidClaims`
 - Client: `suprnova::WebPushClient`, `suprnova::EndpointPolicy`,
-  `suprnova::PushResponse`, `suprnova::SubscriptionInfo`
+  `suprnova::EndpointAllowlist`, `suprnova::PushResponse`,
+  `suprnova::SubscriptionInfo`
 - Error: `suprnova::WebPushError` - `.is_retryable()`, `.retry_after()`,
   `WebPushError::SubscriptionGone`, `WebPushError::InvalidSubscription`,
-  `WebPushError::RefusedDestination`, `WebPushError::Lookup`,
-  `WebPushError::PushServiceRejected`
+  `WebPushError::RefusedDestination`, `WebPushError::OriginNotAllowed`,
+  `WebPushError::Lookup`, `WebPushError::PushServiceRejected`;
+  `suprnova::InvalidAllowlist` for an origin list that does not parse
+- Environment: `WEB_PUSH_ENDPOINT_ORIGINS` (see
+  [Environment Variables](env-vars.md#web-push))
 - Refused address classes: `suprnova::AddressClass`
 - Encoding: `suprnova::ContentEncoding` (Aes128Gcm; 3992-byte plaintext cap)
 - Channel: `suprnova::WebPushChannel`

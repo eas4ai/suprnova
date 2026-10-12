@@ -108,26 +108,26 @@ pub enum WebPushError {
     #[error("subscription cannot be used: {0}")]
     InvalidSubscription(String),
     /// Refused before any I/O: a caller-supplied HTTP client with an
-    /// unknown redirect policy must not send under the `Strict` endpoint
-    /// policy, which validates only the initial URL. Build the transport
-    /// with `WebPushClient::with_client_builder` (redirects forcibly
-    /// disabled) or explicitly accept the risk with
+    /// unknown redirect policy must not send under the `Strict` or
+    /// `Allowlist` endpoint policy, which validates only the initial URL.
+    /// Build the transport with `WebPushClient::with_client_builder`
+    /// (redirects forcibly disabled) or explicitly accept the risk with
     /// `WebPushClient::allow_unconfined_redirects`.
     #[error(
-        "refusing Strict send over a redirect-uncharacterized HTTP client; \
+        "refusing a Strict or Allowlist send over a redirect-uncharacterized HTTP client; \
          use WebPushClient::with_client_builder or allow_unconfined_redirects"
     )]
     UnconfinedRedirects,
     /// Refused before any I/O: a caller-supplied HTTP client resolves the
-    /// endpoint's host name itself when it connects, so the `Strict`
-    /// endpoint policy cannot hold the connection to the address it
-    /// checked. Build the transport with `WebPushClient::new` or
+    /// endpoint's host name itself when it connects, so the `Strict` or
+    /// `Allowlist` endpoint policy cannot hold the connection to the
+    /// address it checked. Build the transport with `WebPushClient::new` or
     /// `WebPushClient::with_client_builder`, whose connection goes to a
     /// checked address, or accept by name that it may go elsewhere with
     /// `WebPushClient::allow_unpinned_destinations`.
     #[error(
-        "refusing Strict send over a caller-supplied HTTP client, which resolves the \
-         host name itself and may connect to an address that was not checked; \
+        "refusing a Strict or Allowlist send over a caller-supplied HTTP client, which \
+         resolves the host name itself and may connect to an address that was not checked; \
          use WebPushClient::new or with_client_builder, or allow_unpinned_destinations"
     )]
     UnpinnedTransport,
@@ -139,6 +139,21 @@ pub enum WebPushError {
     /// data: no retry changes it, so the caller removes the subscription.
     #[error("subscription cannot be used: its host name resolves to {0}")]
     RefusedDestination(AddressClass),
+    /// The `Allowlist` endpoint policy refused the subscription because the
+    /// origin of its endpoint is not one the list names, and nothing was
+    /// sent, not even a lookup of the host name.
+    ///
+    /// The value is the origin, such as `https://push.example.net` or
+    /// `https://push.example.net:8443`: the scheme, the host and a port
+    /// other than 443. It never holds the path of the endpoint, which is
+    /// the token that reaches the browser.
+    ///
+    /// Like [`Self::InvalidSubscription`], this is a fault of the stored
+    /// data under the configured list: no retry changes it. Remove the
+    /// subscription, unless the origin belongs to a push service your users
+    /// use, in which case add the origin to the list.
+    #[error("subscription cannot be used: its origin {0} is not in the endpoint allowlist")]
+    OriginNotAllowed(String),
     /// The `Strict` endpoint policy could not look the subscription's host
     /// name up, or the name resolved to no address, and nothing was sent.
     /// A lookup can fail for a moment, so a retry may succeed.
@@ -158,8 +173,9 @@ impl WebPushError {
     /// Returns `false` for terminal outcomes: `SubscriptionGone` (404/410),
     /// other 4xx (authn/authz/protocol errors), and for the local errors
     /// that fired before any HTTP I/O (`InvalidSubscription`,
-    /// `RefusedDestination`, `Vapid`, `Encryption`, `Base64`, `Json`,
-    /// `Internal`, `UnconfinedRedirects`, `UnpinnedTransport`).
+    /// `RefusedDestination`, `OriginNotAllowed`, `Vapid`, `Encryption`,
+    /// `Base64`, `Json`, `Internal`, `UnconfinedRedirects`,
+    /// `UnpinnedTransport`).
     ///
     /// When `Some`, [`Self::retry_after`] gives the push-service-suggested
     /// minimum delay.
@@ -172,6 +188,7 @@ impl WebPushError {
             Self::SubscriptionGone
             | Self::InvalidSubscription(_)
             | Self::RefusedDestination(_)
+            | Self::OriginNotAllowed(_)
             | Self::Vapid(_)
             | Self::Encryption(_)
             | Self::Base64(_)
@@ -192,3 +209,12 @@ impl WebPushError {
         }
     }
 }
+
+/// Why [`crate::EndpointAllowlist::new`] refused the origins it was given.
+///
+/// The text names the entry and the rule it breaks. An entry is
+/// configuration, never a subscription, so it holds no secret and the text
+/// quotes it as written.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{0}")]
+pub struct InvalidAllowlist(pub(crate) String);

@@ -351,13 +351,18 @@ let client = WebPushClient::new(
     VapidKey::from_pem(b"-----BEGIN PRIVATE KEY-----\n…")?,
     "mailto:ops@example.com",
 )?;
-let push_channel = WebPushChannel::new(Arc::new(client), 86_400 /* TTL seconds */);
+let push_channel = WebPushChannel::new(Arc::new(client), 86_400 /* TTL seconds */)?;
 ```
 
 The recipient's `route_for("webpush")` returns a serialized
 `SubscriptionInfo` JSON (the same shape the browser hands back from
 `PushSubscription.toJSON()` - store it verbatim, return it untouched).
 The TTL is forwarded to the push service.
+
+`WebPushChannel::new` reads `WEB_PUSH_ENDPOINT_ORIGINS`. When it names the
+origins of your push services, the channel refuses an endpoint at any
+other origin, and an entry that is not an origin makes `new` return an
+error. See [Endpoint allowlist](web-push.md#endpoint-allowlist).
 
 When the push service tells the channel a subscription is gone (HTTP
 404/410), the channel logs a structured WARN and returns success - the
@@ -489,7 +494,7 @@ use suprnova::notifications::set_dispatcher;
 let dispatcher = NotificationDispatcher::new()
     .register_channel(Arc::new(MailChannel::new()))
     .register_channel(Arc::new(DatabaseChannel::new(db, "users")))
-    .register_channel(Arc::new(WebPushChannel::new(push_client, 86_400)));
+    .register_channel(Arc::new(WebPushChannel::new(push_client, 86_400)?));
 
 set_dispatcher(Arc::new(dispatcher))?;
 ```
