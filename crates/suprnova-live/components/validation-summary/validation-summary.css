@@ -1,0 +1,16 @@
+.sn-validation-summary {
+  padding: var(--sn-space-4);
+  border: var(--sn-state-border-width) solid var(--sn-color-danger);
+  border-radius: var(--sn-radius-md);
+  background: var(--sn-color-danger-soft);
+  margin-block-end: var(--sn-density-stack);
+}
+
+.sn-validation-summary:empty {
+  display: none;
+}
+
+.sn-validation-summary-title {
+  margin: 0 0 var(--sn-space-2);
+  font-size: var(--sn-font-size-base);
+}
