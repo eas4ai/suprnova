@@ -152,23 +152,15 @@ fn open_beneath(root: &Path, relative: &Path) -> Option<(File, u64, PathBuf)> {
     Some((file, metadata.len(), PathBuf::from(entry.name)))
 }
 
-/// Where `openat` and `O_NOFOLLOW` are unavailable, the file is found by its
-/// canonical path and opened by that name, so a directory swapped for a
-/// symbolic link between the check and the open is followed. The length
-/// still comes from the opened handle.
+/// Where `openat` and `O_NOFOLLOW` are unavailable there is no way to keep
+/// a request inside the root once a directory on its path can be swapped
+/// for a symbolic link, so nothing is served: every request is a 404
+/// rather than a check that a rename can defeat (HRD-005). The framework
+/// builds on Unix alone today (its process and signal handling are Unix
+/// calls), so this arm is reached by no supported build.
 #[cfg(not(unix))]
-fn open_beneath(root: &Path, relative: &Path) -> Option<(File, u64, PathBuf)> {
-    let root = std::fs::canonicalize(root).ok()?;
-    let file_path = std::fs::canonicalize(root.join(relative)).ok()?;
-    if !file_path.starts_with(&root) {
-        return None;
-    }
-    let file = File::open(&file_path).ok()?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
-    Some((file, metadata.len(), file_path))
+fn open_beneath(_root: &Path, _relative: &Path) -> Option<(File, u64, PathBuf)> {
+    None
 }
 
 fn not_found() -> Response {

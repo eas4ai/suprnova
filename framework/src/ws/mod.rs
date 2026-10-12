@@ -73,7 +73,7 @@ pub enum OriginPolicy {
     ///
     /// A missing `Origin` is rejected, and so is a request whose public
     /// scheme cannot be determined: a trusted proxy that names no scheme in
-    /// `X-Forwarded-Proto` or `X-Forwarded-Ssl`, or names one that is
+    /// `X-Forwarded-Proto` or `X-Forwarded-Ssl: on`, or names one that is
     /// neither `http` nor `https`, and a request that carries either header
     /// from a peer that is not a trusted proxy. Behind a TLS-terminating
     /// proxy, list the proxy in `APP_TRUSTED_PROXIES` and have it send

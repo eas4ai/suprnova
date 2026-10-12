@@ -361,6 +361,24 @@ async fn hardening_an_unknown_public_scheme_refuses() {
         "a scheme that is neither http nor https admitted an origin"
     );
 
+    // A trusted proxy whose X-Forwarded-Ssl does not say `on` states no
+    // scheme either: an empty value is as unknown as a missing header.
+    for value in ["", "off"] {
+        let status = upgrade_status(
+            proxied,
+            &[
+                ("Host", PUBLIC_HOST),
+                ("X-Forwarded-Ssl", value),
+                ("Origin", "http://app.example.com"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            status, 403,
+            "an X-Forwarded-Ssl of {value:?} admitted an origin by host and port"
+        );
+    }
+
     // A forwarded scheme from a peer the application does not trust: a
     // proxy stands in front, and nothing it says can be believed.
     for origin in ["http://app.example.com", "https://app.example.com"] {

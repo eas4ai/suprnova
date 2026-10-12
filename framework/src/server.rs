@@ -2326,8 +2326,9 @@ fn check_origin_policy(
 ///
 /// - When the TCP peer is a trusted proxy, the proxy states the scheme:
 ///   `X-Forwarded-Proto` with `http` or `https` as its first value, or
-///   `X-Forwarded-Ssl`. The answer is then [`Request::scheme`]. A trusted
-///   proxy that sends neither, or names another scheme, leaves it unknown.
+///   `X-Forwarded-Ssl: on`. The answer is then [`Request::scheme`]. A
+///   trusted proxy that sends neither, names another scheme, or sends an
+///   `X-Forwarded-Ssl` that does not say `on`, leaves it unknown.
 /// - When the peer is not a trusted proxy, the connection is the public hop,
 ///   and the server speaks plain HTTP, so the answer is
 ///   [`Request::scheme`]. A request that carries `X-Forwarded-Proto` or
@@ -2347,7 +2348,12 @@ fn public_scheme(request: &Request) -> Option<&'static str> {
             Some(request.scheme())
         }
         Some(_) => None,
-        None => forwarded_ssl.map(|_| request.scheme()),
+        // `X-Forwarded-Ssl` states the scheme only when it says `on`, the
+        // one value `Request::secure` reads; an empty or other value states
+        // nothing, and the scheme stays unknown.
+        None => forwarded_ssl
+            .filter(|value| value.trim().eq_ignore_ascii_case("on"))
+            .map(|_| request.scheme()),
     }
 }
 
@@ -3107,6 +3113,13 @@ mod tests {
             public_scheme(&proxied_upgrade(&[("x-forwarded-ssl", "on")])),
             Some("https")
         );
+        for value in ["", " ", "off", "0", "yes"] {
+            assert_eq!(
+                public_scheme(&proxied_upgrade(&[("x-forwarded-ssl", value)])),
+                None,
+                "an X-Forwarded-Ssl of {value:?} states no scheme"
+            );
+        }
     }
 
     #[test]
