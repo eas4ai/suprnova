@@ -2921,3 +2921,121 @@ fn hardening_rehash_on_sign_in_and_logout_other_devices_keeps_this_device_signed
         );
     });
 }
+
+/// Where [`hardening_session_guard_unknown_to_the_manager_issues_no_remember_credential`]
+/// captures what the framework logs: the formatted events, one line each.
+#[cfg(feature = "testing")]
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+#[cfg(feature = "testing")]
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("the log buffer is poisoned"))?
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "testing")]
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// HRD-007: a remember credential is bound to the epoch its guard's
+/// provider read, and its verification finds the provider by the guard name
+/// the cookie carries. A `SessionGuard` built by hand under a name the
+/// `AuthManager` does not know could never have that epoch read back, so it
+/// issues no credential: the login completes, its session records the epoch
+/// the guard's own provider read, no remember row or cookie is issued, and
+/// the warning names the guard.
+///
+/// A guard the manager knows is covered by
+/// `hardening_remember_cookie_issued_before_a_password_change_stops_signing_in`,
+/// whose `Auth::attempt` signs in through the manager's default guard.
+#[cfg(feature = "testing")]
+#[test]
+fn hardening_session_guard_unknown_to_the_manager_issues_no_remember_credential() {
+    use tracing::instrument::WithSubscriber;
+
+    const USER_ID: &str = "hrd007-unknown-guard";
+
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .without_time()
+        .finish();
+    in_database(async move {
+        bind_epoch_provider(EpochRememberProvider::new(
+            "hrd007-manager-user",
+            "manager@example.test",
+            false,
+        ));
+        let partners = EpochRememberProvider::new(USER_ID, "partner@example.test", false);
+
+        let login: suprnova::middleware::Next = Arc::new(move |_request| {
+            let partners = partners.clone();
+            Box::pin(async move {
+                let failed = |error: FrameworkError| {
+                    suprnova::HttpResponse::text(error.to_string()).status(500)
+                };
+                let user = partners
+                    .retrieve_by_id(USER_ID)
+                    .await
+                    .map_err(failed)?
+                    .ok_or_else(|| suprnova::HttpResponse::text("no partner").status(500))?;
+                SessionGuard::named("partner", partners.clone())
+                    .login(user, true)
+                    .await
+                    .map_err(failed)?;
+                let recorded = suprnova::session::session()
+                    .and_then(|session| {
+                        session
+                            .data
+                            .get("_auth_guards")
+                            .and_then(|guards| guards.get("partner"))
+                            .and_then(|entry| entry.get("auth_epoch"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(ToOwned::to_owned)
+                    })
+                    .unwrap_or_default();
+                Ok(suprnova::HttpResponse::text(recorded))
+            })
+        });
+
+        let answer = serve_epoch_request(&[], login)
+            .with_subscriber(subscriber)
+            .await;
+        assert_eq!(answer.status, 200, "the login succeeds: {}", answer.body);
+        assert!(
+            answer.body.parse::<u64>().is_ok(),
+            "the session records the epoch the guard's own provider read: {:?}",
+            answer.body
+        );
+        assert_eq!(
+            count_tokens_for(USER_ID).await,
+            0,
+            "no remember row is stored for the user"
+        );
+        assert_eq!(answer.remember_cookie, None, "no remember cookie is queued");
+
+        let text = String::from_utf8_lossy(&logs.0.lock().expect("the log buffer")).into_owned();
+        assert!(
+            text.lines()
+                .any(|line| line.contains("WARN") && line.contains("partner")),
+            "the warning names the guard:\n{text}"
+        );
+    });
+}

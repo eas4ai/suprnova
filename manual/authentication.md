@@ -903,6 +903,12 @@ The decoded username is matched against the `field` credential (default
 a `WWW-Authenticate: Basic realm="..."` challenge. Configure with
 `.field(...)`, `.realm(...)`, and `.for_guard(...)`.
 
+With `BasicAuthMiddleware::new()`, a request whose session is already signed
+in to the guard passes without a header. The guard first resolves that user
+and compares its [auth epoch](#auth-epochs), as `AuthMiddleware` does, so a
+session signed in before a password change is signed out and must present
+valid credentials.
+
 ## Lifecycle events
 
 The guards dispatch five lifecycle events. Listen for them via the
@@ -1122,22 +1128,36 @@ The framework records and compares the epoch in these places:
 - **Session sign-ins.** `Auth::attempt`, `Auth::login`,
   `Auth::login_using_id`, `Auth::login_remember`, and the same methods of a
   named session guard read the epoch through the guard's provider and record
-  it beside the guard's identity in the session. `Auth::login_id` asks no
-  provider, so the first request that resolves the user records it.
+  it beside the guard's identity in the session. `Auth::login_id`,
+  `session::set_auth_user`, and `TwoFactor::complete_challenge` don't read
+  it themselves. The request that signs in reads it through the default
+  guard's provider before `SessionMiddleware` stores the session. If the
+  provider fails that read, the sign-in isn't stored, and the framework
+  logs a warning with the guard and the user id.
 - **Remember-me credentials.** Without the Magnetar engine, each
-  `remember_tokens` row is bound to the epoch at issue, and the cookie
-  verifies only against the user's current epoch.
-- **Requests.** `Auth::user`, a guard's `user` method, and `AuthMiddleware`
-  resolve the user and compare. `Auth::id` and `Auth::check` read the
-  session without resolving the user, so they don't compare.
+  `remember_tokens` row is bound to the epoch that the guard's provider read
+  for the sign-in. The cookie verifies only against the user's current
+  epoch, read through the provider of the guard that the cookie names. A
+  `SessionGuard` that you build yourself under a name the `AuthManager`
+  doesn't know can't issue one: its login completes without a remembered
+  session and logs a warning that names the guard. To use remember-me with
+  such a guard, register the guard with the `AuthManager`.
+- **Requests.** `Auth::user`, a guard's `user` method, `AuthMiddleware`, and
+  `BasicAuthMiddleware::new()` resolve the user and compare.
+  `BasicAuthMiddleware::new()` lets a session that is already signed in
+  pass without an `Authorization` header only after this comparison.
+  `Auth::id` and `Auth::check` read the session without resolving the
+  user, so they don't compare.
 
 When the epochs differ, the framework ends that sign-in before the request
 reaches your handler. The guard's identity leaves the session, the
 remember-me credential this session holds for the guard is deleted and its
 cookie cleared, and the request continues as a guest's: `AuthMiddleware`
-answers `401` or redirects to your login page. The framework logs the user
-id at `info` level. It dispatches no `Logout` event, because the user didn't
-sign out, and it leaves the other guards of the session signed in.
+answers `401` or redirects to your login page, and `BasicAuthMiddleware::new()`
+answers its `401` challenge unless the request carries valid credentials,
+which sign the user in again. The framework logs the user id at `info`
+level. It dispatches no `Logout` event, because the user didn't sign out,
+and it leaves the other guards of the session signed in.
 
 A user whose model returns `None` from both `auth_epoch` and
 `get_auth_password`, such as an OAuth-only account, records no epoch and
