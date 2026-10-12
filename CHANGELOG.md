@@ -3100,8 +3100,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   follows a symbolic link that stays inside its root, and either root may
   itself be a link. A link whose relative target climbs above the root is
   refused even when it leads back in, and `StaticFiles` answers 404 for a
-  FIFO instead of holding the request open. On Windows, which has no
-  `openat`, the path is still checked and then opened by name.
+  FIFO instead of holding the request open. On a platform without
+  `openat` the two servers serve nothing, since no check by name holds there.
 - **The `magick` driver names the coder it hands ImageMagick.** In 3.2.1
   the `magick` driver named the coder only for PNG, JPEG, WebP, GIF and
   BMP. It handed every other input to ImageMagick on a bare `-`, so

@@ -230,20 +230,15 @@ fn open_asset(root: &Path, component: &str, file: &str) -> Option<(File, std::fs
     open_file_in(&directory, OsStr::new(file), file).ok()?
 }
 
-/// Where `openat` and `O_NOFOLLOW` are unavailable, a symbolic link below
-/// the root is refused by comparing canonical paths, and the file is then
-/// opened by that name, so a link swapped in between the comparison and the
-/// open is followed. The bound and the bytes still come from one handle.
+/// Where `openat` and `O_NOFOLLOW` are unavailable there is no way to keep
+/// a request inside the root once a directory on its path can be swapped
+/// for a symbolic link, so no asset is served: every request is a closed
+/// 404 rather than a check that a rename can defeat (HRD-005). The
+/// framework builds on Unix alone today, so this arm is reached by no
+/// supported build.
 #[cfg(not(unix))]
-fn open_asset(root: &Path, component: &str, file: &str) -> Option<(File, std::fs::Metadata)> {
-    let root = std::fs::canonicalize(root).ok()?;
-    let path = std::fs::canonicalize(root.join(component).join(file)).ok()?;
-    if path != root.join(component).join(file) {
-        return None;
-    }
-    let handle = File::open(&path).ok()?;
-    let metadata = handle.metadata().ok()?;
-    metadata.is_file().then_some((handle, metadata))
+fn open_asset(_root: &Path, _component: &str, _file: &str) -> Option<(File, std::fs::Metadata)> {
+    None
 }
 
 /// One closed segment of lowercase letters, digits and hyphens.
