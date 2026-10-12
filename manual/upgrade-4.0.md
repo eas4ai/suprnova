@@ -1006,6 +1006,23 @@ decides, for `push`, `push_unique` and `bulk` alike.
 **Do:** Nothing to do. To push a job before the commit while its connection
 waits, return `Some(false)` from `after_commit_choice`.
 
+### Zero tries is unlimited.
+
+**Before:** A job whose `Job::max_tries()` returned `0`, or a push whose
+`EnvelopeOverrides::max_tries` was `Some(0)`, was dead-lettered before it
+ran.
+
+**Now:** Zero is unlimited, as Laravel's `$tries = 0` and the worker's
+`--tries=0` are. The job is retried until it succeeds. An error named with
+`dont_retry` or `dont_retry_when`, a middleware such as `FailOnException`, a
+timeout under `fail_on_timeout` and a worker started with `--tries` still
+end it.
+
+**Do:** Nothing to do for a job that declares a bound. A job or a
+notification that returns `0` from `max_tries()` now runs, and keeps running
+while it fails: return `1` to run it once, or keep `0` and give it a backoff
+with a cap. For details, see [Unlimited tries](queues.md#unlimited-tries).
+
 ## Rate limiting
 
 ### The in-memory rate limiter keeps answering while it sweeps.
@@ -2656,19 +2673,26 @@ after the reset.
 
 **Now:** Both push a `RevokeUserCredentials` job for the user with
 `Queue::push` before they return, and a queue worker retries both
-revocations until both stores confirm them. The framework registers the
-job with the worker. `PasswordResetOutcome` has a `revocation_retry` field
-of type `RevocationRetry`: `Queued`, `NotNeeded` when both revocations
-succeeded, or `PushFailed(error)` when the push failed. A failed push is
-logged and the reset still returns its outcome.
+revocations until both stores confirm them, with no bound on the tries and
+up to an hour between tries. The framework registers the job with the
+worker. `PasswordResetOutcome` has a `revocation_retry` field of type
+`RevocationRetry`: `Queued`, or `NotNeeded` when both revocations
+succeeded. When the push fails too, both return an error in place of the
+outcome, logged at error level with the user's id: the password has
+changed, and that reset sends no `PasswordChangedMail` and dispatches no
+`PasswordResetCompleted`.
 
 **Do:** Run `queue:work` on a driver that keeps jobs, such as `database` or
 `redis`, so the retry runs: the `memory` driver loses the job on a restart,
-and the `sync` driver runs it once inside the push. If your handler reads
-the outcome, log `revocation_retry` with the user's id, and after
-`PushFailed` queue `RevokeUserCredentials::new(user_id)` yourself once the
-queue works again. A `PasswordResetOutcome` you build yourself, for example
-in a test, needs the new field. For details, see
+the `null` driver discards it, and the `sync` driver runs it once inside the
+push. A worker started with `--tries` gives the job that bound, so after a
+long outage the job lands in `failed_jobs`; run `queue:retry` on it then.
+If your handler reads the outcome, log the queued retry with the user's id.
+Answer the error a failed push returns as any other `500`; its message
+names the user and the job to queue once the queue works,
+`RevokeUserCredentials::new("<id>")`. A `PasswordResetOutcome` you build
+yourself, for example in a test, needs the new field, set to one of its two
+variants. For details, see
 [When a revocation fails](auth-flows.md#when-a-revocation-fails).
 
 ### A session or remember-me cookie from before a password change stops working.

@@ -147,6 +147,10 @@ async fn verified_provider_user_resets_without_a_magnetar_engine() {
     assert_eq!(unverified_mail.count(), 0);
 
     assert!(PasswordReset::check(&token).await.expect("check token"));
+    // No sessions or remember-me table here, so both revocations fail and
+    // the reset queues their retry; the fake holds it. Without a queue the
+    // reset would return the error of a retry it could not queue.
+    let _queue = suprnova::Queue::fake();
     let user_id = PasswordReset::complete(&token, "new-password")
         .await
         .expect("complete provider reset");

@@ -17,8 +17,10 @@ use std::time::Duration;
 ///
 /// [`PasswordReset::complete`](crate::auth_flows::PasswordReset::complete)
 /// and [`PasswordReset::complete_with_outcome`](crate::auth_flows::PasswordReset::complete_with_outcome)
-/// queue it when a revocation after the password change fails. Queue it
-/// yourself after any other credential change whose revocation failed:
+/// queue it when a revocation after the password change fails, and return
+/// an error naming this job when they cannot. Queue it yourself then, once
+/// the queue works, and after any other credential change whose revocation
+/// failed:
 ///
 /// ```rust,no_run
 /// use suprnova::Queue;
@@ -37,9 +39,9 @@ use std::time::Duration;
 /// refuses, which makes the queue retry it, and succeeds once both confirm.
 ///
 /// The job is idempotent: both revocations delete what is there, so a run
-/// after the credentials are gone succeeds and revokes nothing. A retry
-/// that overlaps another run, or a run `queue:retry` starts again from
-/// `failed_jobs`, is safe for the same reason.
+/// after the credentials are gone succeeds and revokes nothing. Running it
+/// again is always safe: a retry that overlaps another run, a run
+/// `queue:retry` starts again from `failed_jobs`, or a second push of it.
 ///
 /// The framework registers the job with the worker, as it registers
 /// [`SendMailJob`](crate::mail::SendMailJob), so `queue:work` runs it with no
@@ -47,13 +49,21 @@ use std::time::Duration;
 ///
 /// # Retry policy
 ///
-/// - **24 tries.** A refused revocation is almost always an outage of the
-///   database or the session backend. The first retry waits about 10
-///   seconds and each later one twice as long, up to one hour, so the job
-///   covers a short blip quickly and keeps trying through an outage of
-///   about half a day without loading a store that is already struggling.
-///   After the last try the job lands in `failed_jobs`, where an operator
-///   sees it and `queue:retry` can run it again.
+/// - **No bound on the tries.** The job retries until both stores confirm:
+///   [`Job::max_tries`] is zero, which the queue reads as unlimited. A
+///   refused revocation is almost always an outage of the database or the
+///   session backend, and while it lasts a stolen credential the store
+///   still holds is not revoked, so the job does not give up. The first
+///   retry waits about 10 seconds and each later one twice as long, up to
+///   one hour between tries, so the job covers a short blip quickly and
+///   keeps trying through an outage of any length without loading a store
+///   that is already struggling.
+/// - **`failed_jobs` sees it only when something else ends the retries:**
+///   a worker started with `--tries`, whose budget replaces the job's own,
+///   or an error the application named with
+///   [`Exceptions::dont_retry`](crate::Exceptions::dont_retry) or
+///   [`Exceptions::dont_retry_when`](crate::Exceptions::dont_retry_when).
+///   `queue:retry` runs it again from there.
 /// - **A 60-second timeout per try.** A store connection that hangs would
 ///   otherwise hold a worker for good. A timeout counts as a failed try and
 ///   is retried.
@@ -80,8 +90,9 @@ impl Job for RevokeUserCredentials {
         "Suprnova::RevokeUserCredentials"
     }
 
+    /// Unlimited: retried until both stores confirm.
     fn max_tries() -> u32 {
-        24
+        0
     }
 
     fn backoff() -> BackoffSchedule {

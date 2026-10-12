@@ -137,6 +137,17 @@ pub trait Job: Serialize + DeserializeOwned + Send + Sync + 'static {
     }
 
     /// Max attempts including the initial dispatch. Default: 3.
+    ///
+    /// Zero: unlimited, the job is retried until it succeeds or an error
+    /// that ends retries is returned, as Laravel's `$tries = 0`. The
+    /// envelope then carries `u32::MAX`, the budget the worker's
+    /// `--tries 0` gives, so the worker never dead-letters the job for
+    /// running out of attempts. An error named with
+    /// [`Exceptions::dont_retry`](crate::Exceptions::dont_retry) or
+    /// [`Exceptions::dont_retry_when`](crate::Exceptions::dont_retry_when),
+    /// a middleware that fails the job, a timeout under
+    /// [`Self::fail_on_timeout`] and the worker's `--tries` still end it.
+    /// Pair it with a [`Self::backoff`] that has a cap.
     fn max_tries() -> u32
     where
         Self: Sized,
