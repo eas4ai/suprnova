@@ -3094,6 +3094,26 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   failed revocation is logged at error level with the user's id and answered
   with a `500` through the framework's error path; the password stays
   changed.
+- **A password reset whose revocation fails queues a retry.** In 3.2.1,
+  when the provider path of `PasswordReset::complete` or
+  `PasswordReset::complete_with_outcome` could not revoke the user's other
+  sessions or remember-me tokens, it logged a warning, reported the error in
+  the outcome, and nothing tried again. The reset token was spent and the
+  password changed, so a stolen session or remember-me cookie kept working.
+  Both now push the new `RevokeUserCredentials` job for the user before they
+  return. A queue worker runs it until both stores confirm the revocations:
+  24 tries, the first retry after about 10 seconds and each later one twice
+  as long, up to an hour, with a 60-second timeout per try. The job is
+  idempotent, so `queue:retry` can run it again from `failed_jobs`, and the
+  framework registers it with the worker. `PasswordResetOutcome` has a
+  `revocation_retry` field, a `RevocationRetry` that says whether the job was
+  queued (`Queued`), not needed (`NotNeeded`), or could not be pushed
+  (`PushFailed`, with the queue's error). A failed push is logged and does
+  not turn into an `Err`, because the password has already changed. An
+  application can queue `RevokeUserCredentials` itself after any other
+  credential change whose revocation failed. The dogfood application logs
+  the queued retry, or the failed push, with the user's id before it answers
+  its error.
 - **Static files and Live UI assets are read through the directory they
   were checked in.** In 3.2.1, `StaticFiles` checked a request's canonical
   path against its root and then opened the file by name, and opened an

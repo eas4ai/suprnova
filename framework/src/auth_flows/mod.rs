@@ -10,6 +10,9 @@
 //!   `auth_flow_tokens` table, the password rotated through the configured
 //!   [`UserProvider`](crate::auth::UserProvider), with anti-enumeration
 //!   `send_link` and a fire-and-forget [`PasswordChangedMail`] notification.
+//!   A revocation that fails after the password changed queues
+//!   [`RevokeUserCredentials`], which the worker retries until both stores
+//!   confirm.
 //! - `BruteForce` + `LoginThrottleMiddleware` - Magnetar-backed lockout
 //!   plus an HTTP middleware that 429s pre-handler when the targeted
 //!   account is locked. Available when any `database-*` feature is enabled.
@@ -38,6 +41,7 @@ pub mod events;
 pub mod mail;
 pub mod password_reset;
 pub mod remember_me;
+pub mod revoke_user_credentials;
 pub mod token_store;
 pub mod two_factor;
 pub mod two_factor_challenge_middleware;
@@ -69,7 +73,8 @@ pub use events::{
 pub use mail::{
     EmailVerificationMail, PasswordChangedMail, PasswordResetMail, VerifyEmailNotification,
 };
-pub use password_reset::PasswordReset;
+pub use password_reset::{PasswordReset, RevocationRetry};
+pub use revoke_user_credentials::RevokeUserCredentials;
 pub use token_store::{TokenPurpose, create_auth_flow_tokens_table};
 pub use two_factor::{EnrollmentResponse, TwoFactor, TwoFactorLockout, TwoFactorUser};
 pub use two_factor_challenge_middleware::TwoFactorChallengeMiddleware;

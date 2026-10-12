@@ -75,7 +75,8 @@ mutation cannot roll the mutation back.
   available, including first-proof policy, auth-epoch advancement, and atomic
   revocation. The provider fallback is verified-account-only: it consumes the
   framework token, rotates the provider password, then reports framework
-  session and remember revocation outcomes. Mail and events run afterward.
+  session and remember revocation outcomes. When a revocation fails, it
+  queues a retry before it returns. Mail and events run afterward.
 - `BruteForce::unlock_account` commits the unlock before firing
   `AccountUnlocked`.
 - `TwoFactor::confirm` stamps `confirmed_at` before firing
@@ -86,7 +87,10 @@ mutation cannot roll the mutation back.
   `TwoFactorChallenged`.
 
 A listener that needs durability should buffer its work (queue a
-job from the listener body); the facade itself never retries.
+job from the listener body); the facades never retry a listener. The one
+retry the framework queues itself is the retry of a password reset's
+failed revocation, described in
+[When a revocation fails](#when-a-revocation-fails).
 
 ## Bootstrapping
 
@@ -191,7 +195,7 @@ Password reset normalizes an unknown or provider-backed unverified address to
 storage checks succeed. Configuration and storage failures still surface.
 Magnetar completion uses the atomic first-email-proof store. Provider fallback
 completion returns a `PasswordResetOutcome` with explicit framework session and
-remember-revocation results.
+remember-revocation results, and queues a retry of a revocation that failed.
 
 ### Registering the 2FA migrations
 
@@ -558,8 +562,8 @@ link and a changed address, with the same `403`.
 |---|---|---|
 | `send_link` | `send_link(email: &str, base_url: &str) -> Result<()>` | Uses Magnetar when installed; otherwise issues a framework token only for a verified user from an explicitly reset-capable provider and sends the link through the provider's `send_password_reset_notification`. Unknown and unverified addresses return `Ok(())`. Every answer is held for `PASSWORD_RESET_TIMEBOX_MS`. |
 | `check` | `check(token: &str) -> Result<bool>` | Non-consuming validation through Magnetar or the framework token store used by the provider fallback. |
-| `complete` | `complete(token: &str, new_password: &str) -> Result<String>` | Runs Magnetar's atomic first-proof transaction when installed; otherwise rotates a verified provider user and revokes framework session/remember state. |
-| `complete_with_outcome` | `complete_with_outcome(token, new_password) -> Result<PasswordResetOutcome>` | Returns committed Magnetar counts or the provider fallback's explicit framework revocation outcomes. |
+| `complete` | `complete(token: &str, new_password: &str) -> Result<String>` | Runs Magnetar's atomic first-proof transaction when installed; otherwise rotates a verified provider user, revokes framework session/remember state, and queues a retry of a revocation that failed. |
+| `complete_with_outcome` | `complete_with_outcome(token, new_password) -> Result<PasswordResetOutcome>` | Returns committed Magnetar counts or the provider fallback's explicit framework revocation outcomes, and says whether a retry was queued. |
 
 ```rust
 use suprnova::auth_flows::PasswordReset;
@@ -583,7 +587,9 @@ let user_id: String = outcome.user_id;
 
 `complete` returns the user id alone and discards the two revocation
 outcomes, so a handler that calls it reports success while a stolen session
-may still work; prefer `complete_with_outcome`. Both pass the plaintext
+may still work; prefer `complete_with_outcome`. Both queue the retry of a
+failed revocation, as [When a revocation fails](#when-a-revocation-fails)
+describes. Both pass the plaintext
 password through `SecretString`; Magnetar hashes it inside the credential
 engine. Do not pre-hash it. An empty or whitespace-only
 password returns HTTP 400 before the engine is called.
@@ -677,6 +683,93 @@ On an already verified account, reset preserves legitimate passkeys, linked
 accounts, and confirmed two-factor enrollment. On an unverified squatted
 account, first proof removes provisional credentials so the prior registrant
 cannot retain access.
+
+### When a revocation fails
+
+On the provider path, the reset writes the password before it revokes the
+user's other sessions and remember-me tokens, and the reset token is spent by
+then. A revocation that fails can't undo either step, so the reset reports the
+failure and makes the revocation durable instead:
+
+- `complete_with_outcome` returns the store's error in `sessions_revoked` or
+  `remember_tokens_revoked`. Your handler answers an error, never the success
+  page. The controller that `suprnova new` writes returns that error. The
+  dogfood application answers `500` and logs the failure at error level with
+  the user's id.
+- Before it returns, the reset pushes a `RevokeUserCredentials` job for the
+  user with `Queue::push`. `complete` pushes it too. The outcome's
+  `revocation_retry` field says what happened: `RevocationRetry::Queued`, or
+  `RevocationRetry::PushFailed(error)` when the push failed.
+  `RevocationRetry::NotNeeded` means both revocations succeeded.
+- A worker running `queue:work` runs the job. Each run revokes both the
+  sessions and the remember-me tokens, fails while either store refuses, and
+  succeeds once both confirm. A run after the credentials are gone revokes
+  nothing and succeeds, so running the job again is always safe. It revokes
+  every session and remember-me token of the user, those opened after the
+  reset too, so a retry that succeeds later signs the user out once more;
+  the error answer already told them to sign in again on every device. The
+  job tries 24 times over about half a day, then lands in `failed_jobs`,
+  where `queue:retry` runs it again.
+- Until the job succeeds, the stale credentials still don't work. Each sign-in
+  records the user's authentication epoch, which a password change moves. On
+  every request, the framework compares the recorded epoch with the current
+  one, so a session or remember-me cookie from before the reset is signed out
+  and answered as a guest. A user whose provider exposes neither an epoch nor
+  a password hash records no epoch, so for that user the job is the only
+  remedy.
+
+With Magnetar installed, the revocations commit in the reset's own
+transaction, so there is nothing to retry and `revocation_retry` is
+`RevocationRetry::NotNeeded`.
+
+The job tries 24 times. The first retry waits about 10 seconds and each later
+one twice as long, up to one hour, so the job keeps trying through an outage of
+about half a day. Each try has a 60-second timeout. After the last try the job
+lands in `failed_jobs`, where `queue:retry` runs it again. The framework
+registers the job with the worker, so it needs no `register_job` call.
+
+The retry is only as durable as the queue that holds it:
+
+- The `database` and `redis` drivers keep the job until a worker runs it.
+- The `memory` driver keeps it in the web process, so a restart loses it.
+- The `sync` driver runs the job inside the push. If a store still refuses,
+  the push fails and the outcome reports `RevocationRetry::PushFailed`.
+
+When the push fails, the reset still returns its outcome, because the password
+has already changed. To report what happened, match on the outcome:
+
+```rust
+use suprnova::FrameworkError;
+use suprnova::auth_flows::{PasswordReset, RevocationRetry};
+
+let outcome = PasswordReset::complete_with_outcome(&token, &new_password).await?;
+if outcome.sessions_revoked.is_err() || outcome.remember_tokens_revoked.is_err() {
+    match &outcome.revocation_retry {
+        RevocationRetry::Queued => {
+            tracing::warn!(user_id = %outcome.user_id, "queued a retry of the revocations");
+        }
+        RevocationRetry::PushFailed(error) => {
+            tracing::error!(user_id = %outcome.user_id, %error, "the retry could not be queued");
+        }
+        RevocationRetry::NotNeeded => {}
+    }
+    return Err(FrameworkError::internal(
+        "Your password was changed, but signing you out of your other devices failed.",
+    ));
+}
+```
+
+After a failed push, queue the job yourself once the queue works again, for
+example from an operator command:
+
+```rust
+use suprnova::Queue;
+use suprnova::auth_flows::RevokeUserCredentials;
+
+Queue::push(RevokeUserCredentials::new(user_id)).await?;
+```
+
+Queue the same job after any other credential change whose revocation failed.
 
 ## Brute-Force Protection
 
@@ -1501,6 +1594,8 @@ test adapter once for the whole binary.
 | `suprnova::auth_flows::EnsureEmailVerifiedMiddleware` | `new()` for 403 JSON to every caller; `redirect_to(path)` and `redirect_to_route(name)` for browser or Inertia redirects, with 403 JSON for a request that expects JSON. |
 | `suprnova::auth_flows::VerifyEmailNotification` | The framework's verification notification, rendered from `EmailVerificationMail`. |
 | `suprnova::auth_flows::PasswordReset` | Magnetar-first reset with a verified-account `UserProvider` fallback over framework `auth_flow_tokens`. |
+| `suprnova::auth_flows::RevokeUserCredentials` | Queued job that revokes a user's sessions and remember-me tokens, retried until both stores confirm; a reset queues it when a revocation fails. |
+| `suprnova::auth_flows::RevocationRetry` | Whether a reset queued that job: `NotNeeded`, `Queued`, or `PushFailed(error)`. |
 | `suprnova::MustVerifyEmail` | Application-user contract for the framework verification facade; `send_email_verification_notification` sends the link. |
 | `suprnova::CanResetPassword` | Application-user contract for the provider reset path; `send_password_reset_notification` sends the link. |
 | `suprnova::auth_flows::token_store::create_auth_flow_tokens_table` | SeaORM table definition for framework verification tokens. |

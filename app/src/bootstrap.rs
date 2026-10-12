@@ -164,6 +164,14 @@ pub async fn register() {
     .expect("register at boot");
     register_job::<suprnova::notifications::notify_job::SendNotificationJob>();
 
+    // HRD-008 - the retry of a password reset's failed revocations. The
+    // reset queues `RevokeUserCredentials` when it cannot revoke the user's
+    // other sessions or remember-me tokens, and `queue:work` retries it
+    // until both stores confirm. The framework registers it already, as it
+    // registers `SendMailJob`, so this call is harmless, like the
+    // `SendMailJob` one above.
+    register_job::<suprnova::auth_flows::RevokeUserCredentials>();
+
     // Phase 6A T7 - factory + seeder dogfood. Registers `BaseSeeder`
     // so a `suprnova db:seed` invocation (Phase 6B) will populate 50
     // users + 200 posts via the framework's Factory / Persistable

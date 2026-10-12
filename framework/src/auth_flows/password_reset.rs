@@ -27,10 +27,13 @@
 //! verification, rotates the provider password, and then attempts framework
 //! session and remember revocation before notifications. Its revocation
 //! outcomes remain explicit because a generic provider cannot join those
-//! framework stores into the provider's password transaction.
+//! framework stores into the provider's password transaction. When either
+//! revocation fails it queues [`RevokeUserCredentials`] before the
+//! notifications, so a queue worker retries both until both stores confirm.
 
 use crate::auth::{AuthFlowUser, UserProvider, active_user_provider};
 use crate::auth_flows::mail::{PasswordChangedMail, PasswordResetMail};
+use crate::auth_flows::revoke_user_credentials::RevokeUserCredentials;
 use crate::auth_flows::token_store::{TokenPurpose, TokenStore};
 use crate::error::FrameworkError;
 use crate::mail::Mail;
@@ -59,12 +62,14 @@ use std::sync::Arc;
 /// // From the click-through handler, after the user enters a new password:
 /// let user_id = PasswordReset::complete(&token_from_query, &new_password).await?;
 ///
-/// // Or, for a caller that wants to alert/retry on a revocation failure
-/// // instead of relying on the `warn!` log line (SEC-02(d)):
+/// // Or, for a caller that reports a revocation failure instead of
+/// // relying on the `warn!` log line (SEC-02(d)):
 /// let outcome = PasswordReset::complete_with_outcome(&token_from_query, &new_password).await?;
 /// if outcome.sessions_revoked.is_err() || outcome.remember_tokens_revoked.is_err() {
-///     // e.g. page an operator - the password rotated, but a stolen
-///     // credential may still have a live session or remember-me cookie.
+///     // The password rotated, but a stolen credential may still have a
+///     // live session or remember-me cookie until the queued
+///     // `RevokeUserCredentials` retry succeeds. `outcome.revocation_retry`
+///     // says whether the retry was queued.
 /// }
 /// # Ok(()) }
 /// ```
@@ -94,6 +99,28 @@ pub struct PasswordResetOutcome {
     /// [`crate::auth::remember::revoke_all_for_user`]. Same `Ok(n)` /
     /// `Err` shape as [`Self::sessions_revoked`].
     pub remember_tokens_revoked: Result<u64, FrameworkError>,
+    /// What the reset did about a failed revocation: whether it queued
+    /// [`RevokeUserCredentials`] for `user_id` before returning. Always
+    /// [`RevocationRetry::NotNeeded`] when both revocations succeeded.
+    pub revocation_retry: RevocationRetry,
+}
+
+/// Whether a password reset queued the retry of a failed revocation.
+///
+/// Read from [`PasswordResetOutcome::revocation_retry`]. The retry is a
+/// [`RevokeUserCredentials`] job for the user, which a queue worker runs
+/// until both stores confirm the revocations.
+#[derive(Debug)]
+pub enum RevocationRetry {
+    /// Nothing to retry: both revocations succeeded, or Magnetar committed
+    /// them in the reset's own transaction.
+    NotNeeded,
+    /// A revocation failed and the retry was queued.
+    Queued,
+    /// A revocation failed and queuing the retry failed too, with this
+    /// error. Nothing will retry the revocations: queue
+    /// [`RevokeUserCredentials`] yourself once the queue works again.
+    PushFailed(FrameworkError),
 }
 
 impl PasswordReset {
@@ -239,6 +266,9 @@ impl PasswordReset {
     /// **not** surface as an `Err` here - see
     /// [`Self::complete_with_outcome`] for a sibling that reports those
     /// outcomes to the caller (SEC-02(d)) instead of only logging them.
+    /// Either failure queues [`RevokeUserCredentials`] for the user before
+    /// this returns, so the revocations are retried although this caller
+    /// never sees the outcome.
     pub async fn complete(token: &str, new_password: &str) -> Result<String, FrameworkError> {
         Self::complete_with_outcome(token, new_password)
             .await
@@ -257,6 +287,15 @@ impl PasswordReset {
     /// a nonzero revoked count, `warn!` on failure), so existing
     /// log-based monitoring is unaffected by which entry point a
     /// caller uses.
+    ///
+    /// When either revocation fails, the completion pushes a
+    /// [`RevokeUserCredentials`] job for the user with
+    /// [`Queue::push`](crate::queue::Queue::push) before it returns, and
+    /// [`PasswordResetOutcome::revocation_retry`] says whether the push
+    /// succeeded. A worker running `queue:work` retries both revocations
+    /// until both stores confirm them. A push that fails is logged and
+    /// reported as [`RevocationRetry::PushFailed`]; it does not turn into
+    /// an `Err` either, because the password has already changed.
     ///
     /// # Errors
     ///
@@ -325,6 +364,7 @@ impl PasswordReset {
             user_id: id,
             sessions_revoked: Ok(commit.revoked_sessions),
             remember_tokens_revoked: Ok(commit.remember_rows_revoked),
+            revocation_retry: RevocationRetry::NotNeeded,
         })
     }
 
@@ -419,6 +459,8 @@ impl PasswordReset {
                 Err(error)
             }
         };
+        let revocation_retry =
+            queue_revocation_retry(&id, &sessions_revoked, &remember_tokens_revoked).await;
 
         match provider.flow_user_by_id(&id).await {
             Ok(Some(AuthFlowUser { email, name, .. })) => {
@@ -458,7 +500,34 @@ impl PasswordReset {
             user_id: id,
             sessions_revoked,
             remember_tokens_revoked,
+            revocation_retry,
         })
+    }
+}
+
+/// Queue [`RevokeUserCredentials`] for `user_id` when either revocation
+/// failed, and say what happened.
+async fn queue_revocation_retry(
+    user_id: &str,
+    sessions_revoked: &Result<u64, FrameworkError>,
+    remember_tokens_revoked: &Result<u64, FrameworkError>,
+) -> RevocationRetry {
+    if sessions_revoked.is_ok() && remember_tokens_revoked.is_ok() {
+        return RevocationRetry::NotNeeded;
+    }
+    match crate::queue::Queue::push(RevokeUserCredentials::new(user_id)).await {
+        Ok(()) => {
+            tracing::info!(
+                "queued a retry of the revocations for user {user_id} after password reset"
+            );
+            RevocationRetry::Queued
+        }
+        Err(error) => {
+            tracing::warn!(
+                "queuing the retry of the revocations failed for user {user_id} after password reset: {error}"
+            );
+            RevocationRetry::PushFailed(error)
+        }
     }
 }
 fn map_magnetar_reset_service_error(error: magnetar::Error) -> FrameworkError {

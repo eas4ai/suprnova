@@ -10,14 +10,17 @@
 //!   `token=...&new_password=...`. Calls
 //!   `PasswordReset::complete_with_outcome` and redirects to `/?reset=ok`
 //!   only when the password changed and the user's other sessions and
-//!   remember-me tokens were revoked.
+//!   remember-me tokens were revoked. When a revocation fails, the
+//!   framework has queued `RevokeUserCredentials` for the user by the time
+//!   the outcome comes back, and the handler logs that before it answers
+//!   the error.
 //!
 //! Both endpoints are public - they consume tokens minted out-of-
 //! band, so they don't sit behind `SessionAuthMiddleware`. Token
 //! validity is the auth check.
 
 use serde::Deserialize;
-use suprnova::auth_flows::PasswordReset;
+use suprnova::auth_flows::{PasswordReset, RevocationRetry};
 use suprnova::{FrameworkError, HttpResponse, Request, Response};
 
 /// Body for `POST /auth/password/request`.
@@ -72,7 +75,11 @@ const REVOCATION_FAILED: &str = "Your password was changed, but signing you out 
 /// password is not enough while a stolen session or remember-me cookie
 /// still works, so a revocation that fails is logged at error level with
 /// the user's id and answered as a `500` through the framework's error
-/// path. The password stays changed.
+/// path. The password stays changed. The framework queued
+/// `RevokeUserCredentials` for the user before the outcome came back, so a
+/// queue worker retries both revocations until both stores confirm them;
+/// the handler logs the queued retry, or the push that failed, with the
+/// user's id. A failed push does not change the answer.
 ///
 /// On success the facade also dispatches a `PasswordChangedMail`
 /// security notification and fires `PasswordResetCompleted`. Both
@@ -105,6 +112,7 @@ async fn complete_reset_inner(req: Request) -> Result<HttpResponse, FrameworkErr
         &outcome.remember_tokens_revoked,
     );
     if sessions_failed || remember_failed {
+        report_revocation_retry(&outcome.user_id, &outcome.revocation_retry);
         return Err(FrameworkError::internal(REVOCATION_FAILED));
     }
 
@@ -133,5 +141,24 @@ fn revocation_failed(
             );
             true
         }
+    }
+}
+
+/// Log, with the user's id, what the framework did about a failed
+/// revocation: the retry it queued, or the push that failed.
+fn report_revocation_retry(user_id: &str, retry: &RevocationRetry) {
+    match retry {
+        RevocationRetry::Queued => tracing::warn!(
+            user_id,
+            "password reset: queued a retry of the failed revocations"
+        ),
+        RevocationRetry::PushFailed(error) => tracing::error!(
+            user_id,
+            error = %error,
+            "password reset: the retry of the failed revocations could not be queued"
+        ),
+        // The framework reports `NotNeeded` only when both revocations
+        // succeeded, and this is called only when one failed.
+        RevocationRetry::NotNeeded => {}
     }
 }
