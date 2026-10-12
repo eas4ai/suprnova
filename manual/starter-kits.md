@@ -281,8 +281,12 @@ The kit adds these files to the shared backend:
 - `src/flash.rs` - the `Toast` a finished flow shows on the next page.
 - `src/controllers/errors.rs` - the `ErrorPage` middleware, which renders
   every framework error response as the error page in the application
-  layout. A client that expects JSON keeps the JSON body, and in debug mode
+  layout, keeping the response's status, its other headers and its error
+  report. A client that expects JSON keeps the JSON body, and in debug mode
   a `5xx` keeps the development error page.
+- `src/controllers/profile.rs` - `POST /profile/name`, the JSON endpoint
+  the Inertia kits ship for the display name; the dashboard's island saves
+  it through Live.
 - `public/css/app.css` - the page layout, written with the same `--sn-`
   tokens the library uses.
 
@@ -317,7 +321,9 @@ takes it with `Toast::take()`, which removes it. The toast is an ordinary
 session value rather than a session flash, because a flash ages on every
 request of the session, the Live requests included. Saving a note makes
 your open dashboards refresh, and that refresh would age a flashed toast
-away before the redirect lands.
+away before the redirect lands. The kit also turns session blocking on
+(`SESSION_BLOCK=true` in `.env`), so the requests of one session run one
+at a time and a refresh cannot write over the toast a save just kept.
 
 ### Add a page
 

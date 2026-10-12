@@ -7,7 +7,9 @@
 //! `templates/live/`, and the Live components that act under `src/live/`.
 //! The views import the shipped component library, which the scaffold
 //! installs under `templates/suprnova-ui/` the way `live:add` does
-//! ([`LIBRARY_COMPONENTS`]).
+//! ([`LIBRARY_COMPONENTS`]). `tests/documents.rs` renders every document
+//! through the test client as its visitor sees it; the kit's compile check
+//! runs it.
 
 use std::fs;
 use std::path::Path;
@@ -92,6 +94,10 @@ const FILES: &[(&str, &str)] = &[
         include_str!("files/live/src/controllers/password_reset.rs.tpl"),
     ),
     (
+        "src/controllers/profile.rs",
+        include_str!("files/live/src/controllers/profile.rs.tpl"),
+    ),
+    (
         "src/views/mod.rs",
         include_str!("files/live/src/views/mod.rs.tpl"),
     ),
@@ -134,6 +140,10 @@ const FILES: &[(&str, &str)] = &[
     (
         "src/live/verify_email.rs",
         include_str!("files/live/src/live/verify_email.rs.tpl"),
+    ),
+    (
+        "tests/documents.rs",
+        include_str!("files/live/tests/documents.rs.tpl"),
     ),
     (
         "templates/live/layouts/head.html",
@@ -265,6 +275,12 @@ SERVER_PORT=8765
 # since this project installs no Inertia layer, but the `suprnova` CLI's
 # generators do: `make:inertia` refuses in a Live project.
 SUPRNOVA_FRONTEND={frontend}
+
+# Session blocking: the requests of one session run one at a time, with a
+# lock taken through the cache store. A Live request that refreshes an
+# open dashboard can otherwise write a session it loaded before a saved
+# note kept its toast, and drop the toast.
+SESSION_BLOCK=true
 ";
 
 /// `env.tpl` with the Live kit's ports and frontend section.

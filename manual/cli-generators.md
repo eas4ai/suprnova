@@ -773,8 +773,11 @@ They share these rules:
   nothing and exits 0. Pass `--force` to write the stub over it.
 - **The path is printed**: `Created <path>` or `Updated <path>` for each
   file the run writes, then the line that wires the new item in.
-- **No clash with the stub's imports.** `make:rule Rule` is refused,
-  because the stub imports the `Rule` trait under that name.
+- **No clash with the stub's imports or Rust's prelude.** `make:rule Rule`
+  is refused, because the stub imports the `Rule` trait under that name,
+  and `make:mail Option` is refused, because a type named `Option` would
+  shadow the `Option<String>` the stub's own signatures use. The same goes
+  for a `--model` or `--event` of such a name.
 
 Every file is checked before anything is written, and the command writes
 all of them or none. Each stub compiles in a project `suprnova new`

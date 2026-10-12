@@ -481,9 +481,10 @@ fn get(port: u16, path: &str) -> std::io::Result<(u16, String)> {
 }
 
 /// PAR-192: a fresh `--frontend live` scaffold compiles against the
-/// in-tree framework, and its server answers each guest page with a Live
-/// document in its layout. The scaffold builds its debug binary, the one
-/// `suprnova serve` runs, into the shared build directory.
+/// in-tree framework, its own document test renders every page for its
+/// visitor, and its server answers each guest page with a Live document in
+/// its layout. The scaffold builds its debug binary, the one `suprnova
+/// serve` runs, into the shared build directory.
 #[test]
 #[ignore = "compile check - builds and serves a Live kit scaffold; slow"]
 fn live_kit_compiles_and_renders() {
@@ -502,6 +503,10 @@ fn live_kit_compiles_and_renders() {
     std::fs::copy(&workspace_lock, project.join("Cargo.lock")).expect("copy Cargo.lock");
 
     run_cargo_shared(&project, &["check"]);
+    // The kit's own `tests/documents.rs`: every document rendered through
+    // the test client as its visitor sees it, the account pages as a
+    // signed-in user with a note, the error page and the profile endpoint.
+    run_cargo_shared(&project, &["test", "--test", "documents"]);
     run_cargo_shared(&project, &["build", "--bin", name]);
 
     let port = std::net::TcpListener::bind("127.0.0.1:0")

@@ -28,6 +28,55 @@ use crate::ui;
 /// refuses one.
 const MAX_NAME_LEN: usize = 64;
 
+/// The names of Rust's prelude, which every stub uses unqualified: a
+/// generated type of one of these names shadows the prelude item in its
+/// own file (`pub struct Option {}` beside `Option<String>`), and the
+/// file does not compile. `E` is the type parameter of the listener of
+/// any event.
+const PRELUDE_NAMES: &[&str] = &[
+    "AsMut",
+    "AsRef",
+    "Box",
+    "Clone",
+    "Copy",
+    "Debug",
+    "Default",
+    "DoubleEndedIterator",
+    "Drop",
+    "E",
+    "Eq",
+    "Err",
+    "ExactSizeIterator",
+    "Extend",
+    "Fn",
+    "FnMut",
+    "FnOnce",
+    "From",
+    "FromIterator",
+    "Hash",
+    "Into",
+    "IntoIterator",
+    "Iterator",
+    "None",
+    "Ok",
+    "Option",
+    "Ord",
+    "PartialEq",
+    "PartialOrd",
+    "Result",
+    "Send",
+    "Sized",
+    "Some",
+    "String",
+    "Sync",
+    "ToOwned",
+    "ToString",
+    "TryFrom",
+    "TryInto",
+    "Unpin",
+    "Vec",
+];
+
 /// The kind of file a generator writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -459,15 +508,22 @@ impl Plan {
         };
 
         let imports = kind.imports();
-        let clashes = std::iter::once(names.type_name.as_str())
+        let named = std::iter::once(names.type_name.as_str())
             .chain(model.iter().map(|model| model.type_name.as_str()))
-            .chain(event.iter().map(|event| event.type_name.as_str()))
-            .find(|name| imports.contains(name));
-        if let Some(clash) = clashes {
-            return Err(format!(
-                "'{clash}' cannot be used here: the {noun} file imports a `{clash}` of its \
-                 own; choose another name"
-            ));
+            .chain(event.iter().map(|event| event.type_name.as_str()));
+        for name in named {
+            if imports.contains(&name) {
+                return Err(format!(
+                    "'{name}' cannot be used here: the {noun} file imports a `{name}` of its \
+                     own; choose another name"
+                ));
+            }
+            if PRELUDE_NAMES.contains(&name) {
+                return Err(format!(
+                    "'{name}' cannot be used here: it is a name of Rust's prelude the {noun} \
+                     file uses, and a `{name}` of its own would shadow it; choose another name"
+                ));
+            }
         }
 
         let modules: Vec<&str> = kind.dirs().iter().map(|(module, _)| *module).collect();
@@ -1021,6 +1077,46 @@ mod tests {
                 .with_model(Some("Builder".to_string())),
         );
         assert!(scope.err().unwrap_or_default().contains("imports a"));
+    }
+
+    #[test]
+    fn a_name_of_the_prelude_is_refused_for_every_kind() {
+        // `make:mail Option` would write `pub struct Option {}` beside
+        // `Option<String>`; `make:listener E` would shadow the listener's
+        // own type parameter.
+        for (kind, name) in [
+            (Kind::Mail, "Option"),
+            (Kind::Cast, "Result"),
+            (Kind::Listener, "E"),
+            (Kind::Job, "String"),
+            (Kind::Enum, "Vec"),
+            (Kind::Class, "Some"),
+        ] {
+            let error = plan(kind, name).err().unwrap_or_default();
+            assert!(error.contains("Rust's prelude"), "{kind:?} {name}: {error}");
+        }
+        // A suffixed kind names its type after the suffix, so `Option` is
+        // `OptionSeeder`, which shadows nothing; a factory of `Option` names
+        // the model `Option`, which does.
+        assert_eq!(
+            plan(Kind::Seeder, "Option").unwrap().names.type_name,
+            "OptionSeeder"
+        );
+        assert_eq!(
+            plan(Kind::Resource, "String").unwrap().names.type_name,
+            "StringResource"
+        );
+        assert!(
+            plan(Kind::Factory, "Option")
+                .err()
+                .unwrap_or_default()
+                .contains("Rust's prelude")
+        );
+        let model = Plan::new(
+            &Request::new(Kind::Scope, "Active".to_string(), false)
+                .with_model(Some("Option".to_string())),
+        );
+        assert!(model.err().unwrap_or_default().contains("Rust's prelude"));
     }
 
     #[test]

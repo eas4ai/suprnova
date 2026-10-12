@@ -9,3 +9,4 @@ pub mod errors;
 pub mod home;
 pub mod notes;
 pub mod password_reset;
+pub mod profile;
