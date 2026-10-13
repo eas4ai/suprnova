@@ -14,11 +14,11 @@ models, `#[handler]`, `#[command]`, `routes!` - on top of hyper, SeaORM and
 Tokio, so one long-lived process serves requests, runs queue workers and
 the scheduler, and holds WebSocket connections.
 
-Current `main` requires Rust 1.94.0 or newer. The tagged v4.0.1 release has
+Current `main` requires Rust 1.94.0 or newer. The tagged v4.0.2 release has
 the same Rust 1.94.0 floor.
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v4.0.1 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v4.0.2 suprnova-cli
 suprnova new myapp --frontend svelte
 cd myapp
 suprnova serve
@@ -272,7 +272,7 @@ install the VS Code extension from its
 
 Suprnova is distributed through git tags, not crates.io. A generated app
 depends on
-`suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.0.1" }`,
+`suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.0.2" }`,
 and the CLI installs with `cargo install --git`. The adapter crates
 (`suprnova-payments-stripe`, `suprnova-payments-paddle`,
 `suprnova-payments-nowpayments` and `suprnova-web-push`) follow the same
