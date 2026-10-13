@@ -1,0 +1,27 @@
+{#
+  suprnova.account-menu - the signed-in principal's menu (NAV-005).
+  Classification: stitch slot under RenderCache. The menu names the
+  principal, so its markup belongs to one identity and never enters a
+  shared cached shell; an application mounts it as its own identity-bound
+  island and the stitched document carries one slot for it. The disclosure
+  is a native details element, the entries are anchors, and signing out is a
+  form that posts with the session's CSRF token, so the menu works before
+  any script runs.
+#}
+{% macro account_menu(id, name, initials, label="Account") %}
+<details class="sn-account-menu" id="{{ id }}">
+<summary class="sn-account-menu-summary" aria-label="{{ label }}: {{ name }}">
+<span class="sn-account-menu-avatar" aria-hidden="true">{{ initials }}</span>
+<span class="sn-account-menu-name">{{ name }}</span>
+</summary>
+<ul class="sn-account-menu-list" aria-label="{{ label }}">{{ caller() }}</ul>
+</details>
+{% endmacro %}
+
+{% macro account_link(href, text) %}
+<li class="sn-account-menu-item"><a class="sn-account-menu-link" href="{{ href }}">{{ text }}</a></li>
+{% endmacro %}
+
+{% macro account_sign_out(action, token, text="Sign out") %}
+<li class="sn-account-menu-item"><form class="sn-account-menu-form" method="post" action="{{ action }}"><input type="hidden" name="_token" value="{{ token }}"><button class="sn-account-menu-link sn-account-menu-button" type="submit">{{ text }}</button></form></li>
+{% endmacro %}
