@@ -36,6 +36,7 @@
 {% call radio::radio_group("plan", "Plan", plans, selected=plan, authority=authority) %}{% endcall %}
 {% call checkbox::checkbox_group("topics", "Topics", topic_options, topics, authority=authority) %}{% endcall %}
 {% call checkbox::checkbox("agree", "I agree to the terms", required=true, checked=agree, authority=authority) %}{% endcall %}
+{% call switch::switch("newsletter", "Send me the newsletter", checked=newsletter, authority=authority) %}{% endcall %}
 {% call field::field("avatar", "Avatar") %}{% call file::file_input("avatar", accept="image/*") %}{% endcall %}{% endcall %}
 {% endcall %}
 {% call label::label("nickname", "Nickname") %}{% endcall %}
