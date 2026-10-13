@@ -2754,7 +2754,19 @@ guard.
 
 **Do:** Nothing to run, for most applications: no migration and no
 configuration. Expect each remembered device to sign in once after the
-deploy. If your user model exposes no password hash and no epoch, its
+deploy. A form that changes the signed-in user's password ends that
+user's own session too, so the next request after the change is a
+guest's. To keep the user signed in where they made the change, sign them
+in again after saving the new password:
+
+```rust
+user.set_password_hash(&hashing::hash(&form.password)?);
+Model::save(&user).await?;
+Auth::login(Arc::new(user), false).await?;
+```
+
+The new sign-in records the new epoch. Every other session and
+remember-me cookie of that user still stops working. If your user model exposes no password hash and no epoch, its
 sessions stay unchecked; return the hash from `get_auth_password`, or a
 counter from `auth_epoch`, to have them checked. A custom user provider
 whose model keeps a counter that advances without a password change
