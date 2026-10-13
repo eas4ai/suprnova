@@ -2,8 +2,8 @@
 // A region rendered with a duration hides each message that long after it
 // appears, held while the pointer is over the region or focus is inside it,
 // so a reader who reaches for a message keeps it. The default region has no
-// duration and renders no element: its messages stay until the next
-// document. Light DOM: the messages are the server's markup; hidden is the
+// duration, and this element then does nothing: its messages stay until
+// the next document. Light DOM: the messages are the server's markup; hidden is the
 // one attribute this element writes, and a morph that shows a message again
 // times it again.
 if (!customElements.get("sn-flash-region")) {

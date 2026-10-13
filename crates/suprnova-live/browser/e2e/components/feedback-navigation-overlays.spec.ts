@@ -185,7 +185,7 @@ test.describe("FDB-004: a flash region with a duration hides its messages", () =
 test("FDB-004: a flash region with no duration keeps its messages", async ({ page }) => {
   await page.clock.install();
   await mountComponents(page, {
-    html: `<div class="sn-flash-region" id="flash" role="status" aria-label="Notices"><div class="sn-flash" id="saved" data-sn-variant="success">Settings saved</div></div>`,
+    html: `<sn-flash-region class="sn-flash-host"><div class="sn-flash-region" id="flash" role="status" aria-label="Notices"><div class="sn-flash" id="saved" data-sn-variant="success">Settings saved</div></div></sn-flash-region>`,
     components: ["flash-region"],
   });
   await page.clock.runFor(60_000);

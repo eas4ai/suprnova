@@ -7,10 +7,12 @@
   messages carry a variant and a text. A duration in milliseconds hides
   each message that long after it appears, held while the pointer or focus
   is on the region (sn-flash-region, flash-region.js); the default, 0,
-  keeps every message until the next document and renders no element.
+  keeps every message until the next document. The element always wraps
+  the region, so the view's structure is the same on every branch and a
+  morph never moves the region; without a duration it does nothing.
 #}
 {% macro flash_region(id, messages, label="Notices", duration=0) %}
-{% if duration > 0 %}<sn-flash-region class="sn-flash-host" data-sn-duration="{{ duration }}">{% endif %}<div class="sn-flash-region" id="{{ id }}" role="status" aria-label="{{ label }}">
+<sn-flash-region class="sn-flash-host"{% if duration > 0 %} data-sn-duration="{{ duration }}"{% endif %}><div class="sn-flash-region" id="{{ id }}" role="status" aria-label="{{ label }}">
 {% for message in messages %}<div class="sn-flash" data-sn-variant="{{ message.variant }}">{{ message.text }}</div>
-{% endfor %}</div>{% if duration > 0 %}</sn-flash-region>{% endif %}
+{% endfor %}</div></sn-flash-region>
 {% endmacro %}

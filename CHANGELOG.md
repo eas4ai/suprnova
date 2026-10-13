@@ -12,7 +12,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `duration` in milliseconds; a region rendered with one hides each message
   that long after it appears and holds the timer while the pointer or focus
   is on the region, as the toast region does. The default, 0, keeps every
-  message until the next document and renders the same markup as before.
+  message until the next document. The region is now wrapped in the
+  `sn-flash-region` element on every branch, which does nothing without a
+  duration.
 
 ### Fixed
 
