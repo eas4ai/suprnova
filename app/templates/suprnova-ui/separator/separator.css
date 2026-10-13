@@ -1,8 +1,11 @@
 @layer suprnova-ui {
+  /* A browser's own hr carries auto inline margins, which take the free
+     space of a grid or flex track and leave the rule no width at all. */
   .sn-separator {
     border: 0;
     border-block-start: var(--sn-state-border-width) solid var(--sn-color-border);
     margin-block: var(--sn-space-4);
+    margin-inline: 0;
   }
 
   .sn-separator[aria-orientation="vertical"] {

@@ -14,6 +14,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   is on the region, as the toast region does. The default, 0, keeps every
   message until the next document and renders the same markup as before.
 
+### Fixed
+
+- **The horizontal separator has a width inside a grid or flex parent.**
+  A browser's own `hr` carries auto inline margins, which took the free
+  space of the track and left `suprnova.separator` no width at all; the
+  rule now sets them to zero.
+
 ### Changed
 
 - **The tooltip bubble follows the color scheme.** `suprnova.tooltip` drew
