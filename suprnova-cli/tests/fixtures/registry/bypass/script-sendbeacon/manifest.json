@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-sendbeacon",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
