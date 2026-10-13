@@ -33,6 +33,12 @@
     list-style: none;
   }
 
+  /* The base stylesheet spaces stacked list items with a top margin; in
+     this row that margin dropped every member after the first. */
+  .sn-avatar-member {
+    margin: 0;
+  }
+
   .sn-avatar-member + .sn-avatar-member {
     margin-inline-start: calc(-1 * var(--sn-space-2));
   }

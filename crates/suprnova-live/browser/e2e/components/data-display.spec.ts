@@ -36,3 +36,15 @@ test("DATA-001: the scroll area scrolls content taller than its bound", async ({
   });
   expect(await log.evaluate((node) => node.scrollTop)).toBe(200);
 });
+
+test("DATA-002: every member of an avatar group sits on one row", async ({ page }) => {
+  await mountComponents(page, {
+    html: `<ul class="sn-avatar-group" role="list" aria-label="Reviewers"><li class="sn-avatar-member"><span class="sn-avatar" role="img" aria-label="Ada Lovelace" data-sn-size="md">AL</span></li><li class="sn-avatar-member"><span class="sn-avatar" role="img" aria-label="Grace Hopper" data-sn-size="md">GH</span></li><li class="sn-avatar-member"><span class="sn-avatar" role="img" aria-label="Linus Torvalds" data-sn-size="md">LT</span></li></ul>`,
+    components: ["avatar"],
+  });
+  const tops = await page
+    .locator(".sn-avatar-member")
+    .evaluateAll((items) => items.map((item) => Math.round(item.getBoundingClientRect().top)));
+  expect(tops).toHaveLength(3);
+  expect(new Set(tops).size).toBe(1);
+});

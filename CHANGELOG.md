@@ -12,6 +12,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   items with a top margin, which dropped every crumb after the first below
   the first in `suprnova.breadcrumbs`. The crumbs now carry no margin and
   the row aligns them on the baseline.
+- **Avatar group members sit on one row.** The same list-item margin
+  dropped every member after the first in `suprnova.avatar`; the members
+  now carry only their overlap.
 
 ## 4.0.2 - 2026-10-13
 
