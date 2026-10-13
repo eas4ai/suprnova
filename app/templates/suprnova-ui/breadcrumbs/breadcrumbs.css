@@ -1,11 +1,18 @@
 .sn-breadcrumbs-list {
   display: flex;
   flex-wrap: wrap;
+  align-items: baseline;
   gap: var(--sn-space-2);
   margin: 0 0 var(--sn-density-stack);
   padding: 0;
   list-style: none;
   font-size: var(--sn-font-size-sm);
+}
+
+/* The base stylesheet spaces stacked list items with a top margin; in this
+   row that margin dropped every crumb after the first below the first. */
+.sn-breadcrumb {
+  margin: 0;
 }
 
 .sn-breadcrumb + .sn-breadcrumb::before {

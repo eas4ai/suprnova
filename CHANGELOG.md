@@ -4,6 +4,15 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 4.0.3 - 2026-10-13
+
+### Fixed
+
+- **Breadcrumbs sit on one line.** The base stylesheet spaces stacked list
+  items with a top margin, which dropped every crumb after the first below
+  the first in `suprnova.breadcrumbs`. The crumbs now carry no margin and
+  the row aligns them on the baseline.
+
 ## 4.0.2 - 2026-10-13
 
 ### Added

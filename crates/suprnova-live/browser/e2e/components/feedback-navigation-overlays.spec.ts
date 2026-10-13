@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { mountComponents } from "./support.js";
 
-// FDB-004, FDB-007, NAV-007, OVL-007, and UI-024 on the shipped files in each engine.
+// FDB-004, FDB-007, NAV-007, OVL-007, UI-024 and the breadcrumbs row on the shipped files in each engine.
 
 async function center(page: Page, selector: string): Promise<{ x: number; y: number }> {
   const box = await page.locator(selector).boundingBox();
@@ -190,6 +190,21 @@ test("FDB-004: a flash region with no duration keeps its messages", async ({ pag
   });
   await page.clock.runFor(60_000);
   await expect(page.locator("#saved")).toBeVisible();
+});
+
+test("breadcrumbs: every crumb sits on the row's baseline", async ({ page }) => {
+  await mountComponents(page, {
+    html: `<nav class="sn-breadcrumbs" id="trail" aria-label="Breadcrumb"><ol class="sn-breadcrumbs-list"><li class="sn-breadcrumb"><a class="sn-breadcrumb-link" href="#home">Home</a></li><li class="sn-breadcrumb"><a class="sn-breadcrumb-link" href="#components">Components</a></li><li class="sn-breadcrumb" aria-current="page">Breadcrumbs</li></ol></nav>`,
+    components: ["breadcrumbs"],
+  });
+  const tops = await page.locator(".sn-breadcrumb").evaluateAll((items) =>
+    items.map((item) => {
+      const box = item.getBoundingClientRect();
+      return Math.round(box.top + box.height);
+    }),
+  );
+  expect(tops).toHaveLength(3);
+  expect(new Set(tops).size).toBe(1);
 });
 
 test("NAV-007: a nested local tabs instance selects only its own tabs and panels", async ({
