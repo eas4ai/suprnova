@@ -1,0 +1,9 @@
+{#
+  suprnova.form-actions - the bar that holds a form's submit and secondary
+  actions; the caller renders the buttons.
+#}
+{% macro form_actions() %}
+<div class="sn-form-actions">
+{{ caller() }}
+</div>
+{% endmacro %}

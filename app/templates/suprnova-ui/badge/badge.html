@@ -1,0 +1,8 @@
+{#
+  suprnova.badge - a status pill that always carries text (DATA-002).
+  The variant colors the pill; the text names the status, so the badge
+  never depends on color alone.
+#}
+{% macro badge(text, variant="neutral") %}
+<span class="sn-badge" data-sn-variant="{{ variant }}">{{ text }}</span>
+{% endmacro %}
