@@ -13,6 +13,7 @@ import type {
 } from "../application/types.js";
 import { applyUrlReflection } from "../application/url.js";
 import { FeedbackRuntime } from "../feedback/targets.js";
+import { validationIssuesFrom } from "../models/state.js";
 import type { RuntimeCallRegistry } from "../extensions/calls.js";
 import type { EffectInvocation, EffectRegistry, EffectRunOutcome } from "../extensions/effects.js";
 import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
@@ -568,17 +569,7 @@ export class DocumentRuntime {
         const models = this.#events.modelState(record);
         if (models !== null) {
           for (const field of models.fields()) {
-            const raw = response.validation[field];
-            const messages =
-              typeof raw === "string"
-                ? [raw]
-                : Array.isArray(raw)
-                  ? raw.filter((value): value is string => typeof value === "string")
-                  : [];
-            models.setValidation(
-              field,
-              messages.map((message) => Object.freeze({ message })),
-            );
+            models.setValidation(field, validationIssuesFrom(response.validation[field]));
           }
         }
         const rendered = this.#events.readRenderedModels(record);

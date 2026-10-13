@@ -281,12 +281,25 @@ pub mod validation {
                     for error in field_errors {
                         let message = format!("validation.{}", error.code);
                         if seen.insert((path.clone(), message.clone())) {
-                            issues.push(ValidationIssue::new(
+                            let issue = ValidationIssue::new(
                                 suprnova_live::state::ModelPath::parse(&path)
                                     .map_err(|_| ValidationPortError::unavailable())?,
                                 suprnova_live::validation::ValidationMessageId::parse(&message)
                                     .map_err(|_| ValidationPortError::unavailable())?,
-                            ));
+                            );
+                            // The words the field shows, resolved here in the
+                            // request's locale as the HTTP 422 body resolves
+                            // them: the rule's own message, else the catalog.
+                            let text = crate::error::render_validation_message(
+                                &path,
+                                &crate::error::validator_error_message(&path, error),
+                            );
+                            issues.push(
+                                match suprnova_live::validation::ValidationText::parse(&text) {
+                                    Ok(text) => issue.with_text(text),
+                                    Err(_) => issue,
+                                },
+                            );
                         }
                     }
                 }

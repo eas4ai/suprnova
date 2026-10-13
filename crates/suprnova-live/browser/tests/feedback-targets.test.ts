@@ -155,3 +155,26 @@ describe("feedback directive targets", () => {
     expect(element.hasAttribute("hidden")).toBe(true);
   });
 });
+
+describe("field error text", () => {
+  it("shows the field's own message and keeps the generic text for a field without one", () => {
+    const time = new FakeTime();
+    const element = new FakeElement("OUTPUT");
+    const target = new FeedbackTargetBinding(
+      element as unknown as Element,
+      "error",
+      ["live.polite"],
+      "field:full_name",
+      time.clock,
+      time.scheduler,
+    );
+
+    target.update(snapshot(new Set(["error"])), "model.1.1", "validation", "Enter your name.");
+    time.advance(feedbackTimingPolicy("error").delayMs);
+    expect(element.textContent).toBe("Enter your name.");
+
+    target.update(snapshot(new Set(["error"])), "model.2.1", "validation");
+    time.advance(feedbackTimingPolicy("error").delayMs);
+    expect(element.textContent).toBe("Validation failed");
+  });
+});

@@ -122,7 +122,7 @@ pub mod validation {
     /// [`ActionMetadata`](crate::live::metadata::ActionMetadata) declares.
     pub use suprnova_live::validation::ValidationSelection;
     pub use suprnova_live::validation::{
-        BagPolicy, ErrorBag, ValidationIssue, ValidationMessageId, ValidationStatus,
+        BagPolicy, ErrorBag, ValidationIssue, ValidationMessageId, ValidationStatus, ValidationText,
     };
 }
 
@@ -362,4 +362,6 @@ pub use upload_policy::{
     UploadPolicy, UploadPolicyBuilder, UploadPolicyError, UploadReplacement, UploadScan,
     UploadScanFailure, UploadType,
 };
-pub use validation::{ErrorBag, ValidationIssue, ValidationMessageId, ValidationStatus};
+pub use validation::{
+    ErrorBag, ValidationIssue, ValidationMessageId, ValidationStatus, ValidationText,
+};

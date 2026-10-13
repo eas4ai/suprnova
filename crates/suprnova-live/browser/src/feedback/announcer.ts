@@ -82,11 +82,14 @@ export class FeedbackAnnouncer {
     }
   }
 
+  /// Announces `kind` for `scope` once per `transition`; `message` replaces the
+  /// kind's generic text when the caller holds the words the user should read.
   announce(
     scope: string,
     kind: FeedbackAnnouncementKind,
     transition: string,
     politeness: FeedbackPoliteness,
+    message: string | null = null,
   ): boolean {
     if (!SAFE_KEY.test(scope) || !SAFE_KEY.test(transition)) return false;
     const now = this.#now();
@@ -99,7 +102,7 @@ export class FeedbackAnnouncer {
     const key = `${scope}:${kind}:${transition}`;
     if (this.#seenAt.has(key) || this.#acceptedAt.length >= this.#maximumPerWindow) return false;
     try {
-      this.#sink(Object.freeze({ message: MESSAGES[kind], politeness }));
+      this.#sink(Object.freeze({ message: message ?? MESSAGES[kind], politeness }));
     } catch {
       return false;
     }

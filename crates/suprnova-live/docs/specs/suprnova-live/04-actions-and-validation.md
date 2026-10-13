@@ -46,7 +46,8 @@ Acceptance criteria:
 - Applications can validate selected fields, the whole component, or an
   action-specific input type.
 - Validation errors use stable field paths and message identifiers suitable for
-  localization.
+  localization, and carry the text the server resolved for the application
+  user beside each identifier when it has one.
 - Invalid input prevents protected domain effects unless an action explicitly
   implements a safe partial workflow.
 - Error bags clear, retain, or replace messages according to documented action

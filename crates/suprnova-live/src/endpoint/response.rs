@@ -565,13 +565,20 @@ fn refresh_fields(
     )
 }
 
+/// One entry per issue path: the message identity alone, as every issue
+/// carried before the server resolved text, or an object naming the identity
+/// and the text the application user reads. The browser accepts both forms.
 fn validation_json(validation: &crate::validation::ErrorBag) -> Value {
     let mut fields = Map::new();
     for issue in validation.issues() {
-        fields.insert(
-            issue.path().as_str().to_owned(),
-            Value::String(issue.message().as_str().to_owned()),
-        );
+        let entry = match issue.text() {
+            Some(text) => json!({
+                "id": issue.message().as_str(),
+                "text": text.as_str(),
+            }),
+            None => Value::String(issue.message().as_str().to_owned()),
+        };
+        fields.insert(issue.path().as_str().to_owned(), entry);
     }
     Value::Object(fields)
 }
@@ -768,7 +775,9 @@ mod tests {
     use super::*;
     use crate::limits::InputLimits;
     use crate::protocol::ProtocolLimitConfig;
+    use crate::state::ModelPath;
     use crate::validation::ErrorBag;
+    use crate::validation::{ValidationIssue, ValidationMessageId, ValidationText};
     use crate::view::{AssetSet, IslandRender};
 
     struct TestAuthority {
@@ -777,6 +786,29 @@ mod tests {
         slot: IslandSlot,
         scope: ScopeFingerprint,
         instance: InstanceId,
+    }
+
+    /// A field issue reaches the wire as its message identity alone, or as the
+    /// identity beside the text the server resolved for the application user.
+    #[test]
+    fn validation_json_carries_the_resolved_text_beside_the_identity() {
+        let bare = ValidationIssue::new(
+            ModelPath::parse("seats").expect("path"),
+            ValidationMessageId::parse("binding.type_mismatch").expect("identity"),
+        );
+        let worded = ValidationIssue::new(
+            ModelPath::parse("full_name").expect("path"),
+            ValidationMessageId::parse("validation.length").expect("identity"),
+        )
+        .with_text(ValidationText::parse("Enter your name.").expect("text"));
+        let bag = ErrorBag::from_issues(vec![bare, worded]).expect("bag");
+        assert_eq!(
+            validation_json(&bag),
+            json!({
+                "seats": "binding.type_mismatch",
+                "full_name": {"id": "validation.length", "text": "Enter your name."},
+            })
+        );
     }
 
     fn test_authority() -> TestAuthority {

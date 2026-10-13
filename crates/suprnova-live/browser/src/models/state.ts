@@ -15,7 +15,50 @@ const VALIDATION_MESSAGE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
 const MAX_MODEL_OBSERVERS = 8;
 
 export interface ValidationIssue {
+  /// The stable message identity the server named (`validation.length`).
   readonly message: string;
+  /// The text the server resolved for the application user, when it had one.
+  readonly text?: string;
+}
+
+/// The validation entries of one field as the response carries them: a
+/// message identity, an object naming the identity and its resolved text, or
+/// a list of either. Anything else is not an issue and is dropped; an entry
+/// whose text is not a non-empty string keeps its identity alone.
+export function validationIssuesFrom(raw: unknown): readonly ValidationIssue[] {
+  const entries = Array.isArray(raw) ? raw : [raw];
+  const issues: ValidationIssue[] = [];
+  for (const entry of entries) {
+    if (typeof entry === "string") {
+      if (VALIDATION_MESSAGE.test(entry)) issues.push(Object.freeze({ message: entry }));
+      continue;
+    }
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+    const record = entry as Readonly<Record<string, unknown>>;
+    const message = record["id"];
+    if (typeof message !== "string" || !VALIDATION_MESSAGE.test(message)) continue;
+    const text = record["text"];
+    issues.push(
+      typeof text === "string" && text.length > 0
+        ? Object.freeze({ message, text })
+        : Object.freeze({ message }),
+    );
+  }
+  return Object.freeze(issues);
+}
+
+function validationIssuesEqual(
+  left: readonly ValidationIssue[],
+  right: readonly ValidationIssue[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((issue, index) => {
+      const other = right[index];
+      if (other === undefined) return false;
+      return issue.message === other.message && issue.text === other.text;
+    })
+  );
 }
 
 export interface ModelFieldState {
@@ -106,12 +149,7 @@ export class ModelState {
   setValidation(field: string, issues: readonly ValidationIssue[]): void {
     const state = this.#required(field);
     const normalized = normalizeValidation(issues);
-    if (
-      state.validation.length === normalized.length &&
-      state.validation.every((issue, index) => issue.message === normalized[index]?.message)
-    ) {
-      return;
-    }
+    if (validationIssuesEqual(state.validation, normalized)) return;
     state.validation = normalized;
     this.#notify();
   }
@@ -150,9 +188,7 @@ export class ModelState {
     const proposalChanged =
       submittedEditSequence === state.editSequence &&
       !modelValuesEqual(state.browserProposal, value);
-    const validationChanged =
-      state.validation.length !== normalized.length ||
-      state.validation.some((issue, index) => issue.message !== normalized[index]?.message);
+    const validationChanged = !validationIssuesEqual(state.validation, normalized);
     const inFlightChanged =
       state.inFlightIntent !== null && (intent === undefined || state.inFlightIntent === intent);
     state.acceptedServerValue = value;
@@ -222,7 +258,12 @@ function normalizeValidation(issues: readonly ValidationIssue[]): readonly Valid
   return Object.freeze(
     issues.map((issue) => {
       if (!VALIDATION_MESSAGE.test(issue.message)) throw new Error("model_validation_invalid");
-      return Object.freeze({ message: issue.message });
+      if (issue.text !== undefined && (typeof issue.text !== "string" || issue.text.length === 0)) {
+        throw new Error("model_validation_invalid");
+      }
+      return issue.text === undefined
+        ? Object.freeze({ message: issue.message })
+        : Object.freeze({ message: issue.message, text: issue.text });
     }),
   );
 }

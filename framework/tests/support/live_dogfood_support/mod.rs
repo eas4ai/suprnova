@@ -27,6 +27,7 @@ use suprnova::{
     SessionConfig, SessionData, SessionMiddleware, SessionStore, SlidingWindowConfig, StatusCode,
     async_trait, handle_request,
 };
+use validator::Validate;
 
 pub mod filters {
     pub use suprnova::view::filters::trusted_html;
@@ -59,14 +60,22 @@ pub const FORM_DOCUMENT_PATH: &str = "/dogfood/form";
 pub const FORM_DOCUMENT_KEY: &str = "dogfood-form";
 
 /// A form island whose model fields decode strictly: a seat count and a
-/// topic list, with a count of the saves that ran.
-#[derive(LiveComponent)]
+/// topic list, with a count of the saves that ran. `register` validates the
+/// whole form: a name under a rule with its own message and a contact
+/// address under the catalog-keyed email rule, both empty on mount.
+#[derive(LiveComponent, Validate)]
 #[live(name = "tests.dogfood-form", view = "live/tests/dogfood-form.html")]
 pub struct DogfoodForm {
     #[model]
     seats: u64,
     #[model]
     topics: Vec<String>,
+    #[model]
+    #[validate(length(min = 1, message = "Enter your name."))]
+    name: String,
+    #[model]
+    #[validate(email)]
+    contact: String,
     #[public]
     saves: u64,
 }
@@ -83,6 +92,18 @@ impl DogfoodForm {
     #[action]
     pub fn reserve(&mut self, extra: u64) {
         self.seats += extra;
+    }
+
+    /// Runs only once every field validates.
+    #[action(validate = "whole")]
+    pub fn register(&mut self) {
+        self.saves += 1;
+    }
+
+    /// The whole-component validation `register` asks for.
+    #[validate]
+    pub fn validate_component(&self) -> Result<(), validator::ValidationErrors> {
+        Validate::validate(self)
     }
 }
 

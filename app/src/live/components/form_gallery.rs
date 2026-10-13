@@ -5,6 +5,7 @@
 use suprnova::live::{
     LiveComponent, UploadPolicy, UploadReplacement, UploadScan, UploadType, live,
 };
+use validator::Validate;
 
 /// The checked filter the radio and checkbox groups key their inputs with.
 pub mod filters {
@@ -26,8 +27,9 @@ fn avatar_policy() -> UploadPolicy {
 }
 
 /// A form that uses each shipped presentational component once, rendered
-/// by `live/form-gallery.html`.
-#[derive(LiveComponent)]
+/// by `live/form-gallery.html`. `save` validates the whole form, so the
+/// email field shows the message its rule names when the address is not one.
+#[derive(LiveComponent, Validate)]
 #[live(
     name = "app.form-gallery",
     view = "live/form-gallery.html",
@@ -44,6 +46,7 @@ pub struct FormGallery {
     query: String,
     /// Email address, bound with the plain input.
     #[model]
+    #[validate(email(message = "Enter an email address such as ada@example.com."))]
     email: String,
     /// Free text, bound with the textarea.
     #[model]
@@ -127,8 +130,14 @@ impl FormGallery {
     }
 
     /// Accepts the form; the gallery keeps what was entered.
-    #[action]
+    #[action(validate = "whole")]
     pub fn save(&mut self) {}
+
+    /// The whole-component validation `save` asks for.
+    #[validate]
+    pub fn validate_component(&self) -> Result<(), validator::ValidationErrors> {
+        Validate::validate(self)
+    }
 
     /// Clears every control back to its mounted value.
     #[action]
