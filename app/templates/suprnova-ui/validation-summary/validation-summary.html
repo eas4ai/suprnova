@@ -1,11 +1,25 @@
 {#
-  suprnova.validation-summary - the form-level error list for one action,
-  announced politely; each entry links to its field so the summary focuses
-  the correction without repeating every field message.
+  suprnova.validation-summary - the form-level error list for one action.
+  The section shows only while an entry shows: each entry is bound with
+  live:error to its field and links to it, so the summary names the fields
+  to correct without repeating every field message, and the last entry
+  carries the action's own failure, announced politely. A form that nobody
+  has submitted renders the summary hidden.
 #}
 {% macro validation_summary(action, title="Please correct the following") %}
-<section class="sn-validation-summary" aria-labelledby="{{ action }}-summary-title" live:error.live.polite="{{ action }}">
+<section class="sn-validation-summary" aria-labelledby="{{ action }}-summary-title">
 <h2 class="sn-validation-summary-title" id="{{ action }}-summary-title">{{ title }}</h2>
+<ul class="sn-validation-summary-list">
 {{ caller() }}
+<li class="sn-validation-summary-entry" hidden live:error.live.polite="{{ action }}"></li>
+</ul>
 </section>
+{% endmacro %}
+
+{#
+  One entry per field the action validates: hidden until that field's
+  validation fails, then a link that focuses the field by its id.
+#}
+{% macro summary_entry(name, label) %}
+<li class="sn-validation-summary-entry" hidden live:error="{{ name }}"><a class="sn-validation-summary-link" href="#{{ name }}">{{ label }}</a></li>
 {% endmacro %}

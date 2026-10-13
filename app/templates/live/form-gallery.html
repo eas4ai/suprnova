@@ -17,7 +17,12 @@
 {% import "suprnova-ui/validation-summary/validation-summary.html" as summary %}
 {% import "suprnova-ui/file-input/file-input.html" as file %}
 <form class="sn-form" live:submit.prevent="save">
-{% call summary::validation_summary("save") %}{% endcall %}
+{% call summary::validation_summary("save") %}
+{% call summary::summary_entry("email", "Email") %}{% endcall %}
+{% call summary::summary_entry("secret", "Password") %}{% endcall %}
+{% call summary::summary_entry("quantity", "Seats") %}{% endcall %}
+{% call summary::summary_entry("agree", "I agree to the terms") %}{% endcall %}
+{% endcall %}
 {% call fieldset::fieldset("Account") %}
 {% call field::field("email", "Email", hint="We never share it.", required=true) %}{% call input::input("email", kind="email", required=true, autocomplete="email", value=email, authority=authority) %}{% endcall %}{% endcall %}
 {% call field::field("secret", "Password", required=true) %}{% call password::password_input("secret", autocomplete="new-password", required=true) %}{% endcall %}{% endcall %}

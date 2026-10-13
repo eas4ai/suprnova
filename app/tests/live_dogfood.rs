@@ -284,6 +284,50 @@ async fn polling_recovery_and_assets_work_through_the_real_stack() {
 /// component through the vendored macros, opts the suprnova-ui base in, and
 /// renders the controls the checker proves.
 #[tokio::test]
+async fn the_validation_summary_renders_hidden_until_a_field_or_the_action_fails() {
+    let app = setup_app(7).await;
+    let session = seed_session(&app).await;
+
+    let reply = get(&app, "/live/forms", Some(&session)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let html = reply.text();
+    // Every entry starts hidden: the runtime reveals one while its field is
+    // in error, and the stylesheet hides a summary with no entry shown.
+    for field in ["email", "secret", "quantity", "agree"] {
+        let entry = format!(
+            "<li class=\"sn-validation-summary-entry\" hidden live:error=\"{field}\"><a class=\"sn-validation-summary-link\" href=\"#{field}\">"
+        );
+        assert!(html.contains(&entry), "missing {entry} in {html}");
+    }
+    assert!(
+        html.contains(
+            "<li class=\"sn-validation-summary-entry\" hidden live:error.live.polite=\"save\"></li>"
+        ),
+        "{html}"
+    );
+    assert_eq!(
+        html.matches("sn-validation-summary-entry\"").count(),
+        html.matches("sn-validation-summary-entry\" hidden").count(),
+        "an entry rendered without hidden would show before any error: {html}"
+    );
+
+    let css = get(
+        &app,
+        "/suprnova-ui/validation-summary/validation-summary.css",
+        None,
+    )
+    .await;
+    assert_eq!(css.status, StatusCode::OK);
+    assert!(
+        css.text().contains(
+            ".sn-validation-summary:not(:has(.sn-validation-summary-entry:not([hidden])))"
+        ),
+        "{}",
+        css.text()
+    );
+}
+
+#[tokio::test]
 async fn the_form_gallery_renders_every_presentational_component_with_the_library_base() {
     let app = setup_app(7).await;
     let session = seed_session(&app).await;

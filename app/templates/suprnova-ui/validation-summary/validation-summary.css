@@ -6,11 +6,31 @@
   margin-block-end: var(--sn-density-stack);
 }
 
-.sn-validation-summary:empty {
+/* The runtime reveals an entry while its field or action is in error; a
+   summary with no entry shown has nothing to say and takes no room. */
+.sn-validation-summary:not(:has(.sn-validation-summary-entry:not([hidden]))) {
   display: none;
 }
 
 .sn-validation-summary-title {
   margin: 0 0 var(--sn-space-2);
   font-size: var(--sn-font-size-base);
+}
+
+.sn-validation-summary-list {
+  margin: 0;
+  padding-inline-start: var(--sn-space-5);
+  display: grid;
+  gap: var(--sn-space-1);
+}
+
+.sn-validation-summary-link {
+  color: var(--sn-color-text);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.sn-validation-summary-link:hover,
+.sn-validation-summary-link:focus-visible {
+  color: var(--sn-color-danger);
 }

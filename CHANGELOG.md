@@ -4,7 +4,21 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
-## 4.0.0 - 2026-10-12
+## 4.0.1 - 2026-10-13
+
+### Fixed
+
+- **The validation summary shows only while a field or the action is in
+  error.** `suprnova.validation-summary` rendered its red box and title on
+  a form nobody had submitted, and listed nothing after a failed one: its
+  stylesheet hid the section only when it was empty, and the macro always
+  wrote the title inside it. The section now hides until one of its entries
+  shows. The new `summary_entry(name, label)` macro, called inside the
+  summary, renders one entry per field the action validates: hidden until
+  that field's validation fails, then a link that focuses the field. The
+  action's own failure shows as the last entry, announced politely. A
+  summary called with no entries still shows the action's failure.
+
 
 ### Added
 
