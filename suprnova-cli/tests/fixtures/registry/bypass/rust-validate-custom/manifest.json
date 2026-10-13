@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-validate-custom",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}
