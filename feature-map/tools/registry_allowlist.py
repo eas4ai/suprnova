@@ -639,6 +639,7 @@ ADMIT = {
     "suprnova::live::ValidationIssue": None,
     "suprnova::live::ValidationMessageId": None,
     "suprnova::live::ValidationStatus": None,
+    "suprnova::live::ValidationText": None,
     "suprnova::live::VerifyTransfer": None,
     "suprnova::live::__private::askama": None,
     "suprnova::live::__private::session::load": None,
