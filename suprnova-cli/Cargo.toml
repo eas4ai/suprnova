@@ -99,7 +99,7 @@ cssparser = "0.37"
 # compiling the application (REG-022). The Live engine crate holds the
 # checker; it is the framework's engine, not the framework, so the CLI still
 # does not depend on the `suprnova` crate.
-suprnova-live = { path = "../crates/suprnova-live", version = "4.0.2" }
+suprnova-live = { path = "../crates/suprnova-live", version = "4.0.3" }
 # No `suprnova` here: a command that needs the framework at run time runs
 # the project's application binary, which links it already, as `ssr:start`,
 # `ssr:stop` and `ssr:check` run its commands of the same name (PAR-061).
@@ -124,6 +124,6 @@ nix = { version = "=0.31.3", default-features = false, features = ["process", "s
 # Verify generated keys round-trip through the framework's loader
 # (`tests/new_scaffolds_app_key.rs` and `commands/key_generate.rs`'s tests).
 # Only the tests link it.
-suprnova = { path = "../framework", version = "4.0.2" }
+suprnova = { path = "../framework", version = "4.0.3" }
 # Integration tests that invoke the binary with a temp working directory.
 tempfile = "3"

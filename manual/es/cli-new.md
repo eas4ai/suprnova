@@ -163,7 +163,7 @@ La propia CLI se distribuye vía git, no vía crates.io (fase previa al
 lanzamiento):
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v4.0.2 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v4.0.3 suprnova-cli
 ```
 
 `--force` sobre el mismo comando actualiza una instalación existente.

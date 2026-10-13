@@ -41,7 +41,7 @@ on in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.0.2", features = ["filesystem-gcs"] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.0.3", features = ["filesystem-gcs"] }
 ```
 
 Without the feature, `register_azblob` / `register_gcs` and their config
