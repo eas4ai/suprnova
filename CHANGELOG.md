@@ -16,6 +16,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   request's locale and sends it beside the identifier, and the field's error
   output shows it. An issue without text, such as a value the field cannot
   decode, keeps the generic announcement.
+- **The scroll area's size token is defined.** 4.0.2 bounded the region
+  with `--sn-scroll-area-size` and left the token undefined, so the shared
+  stylesheet never named it and the engine's token check failed. The shared
+  stylesheet now defines it at 16rem; a page or a region still sets its own.
 
 ## 4.0.3 - 2026-10-13
 
