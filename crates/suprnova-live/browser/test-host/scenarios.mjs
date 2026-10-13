@@ -102,9 +102,9 @@ function integrity(value) {
   return `sha256-${sha256(value)}`;
 }
 
-const externalModuleIntegrity = "sha256-i0gzTGHsUccGT0i6dk/7sXlng3B+pu2GN2qSIWi/+dw=";
+const externalModuleIntegrity = "sha256-9clRZawmUuFrO8pJ4R37fZcO0+WuONbrNsTw7qIa3UE=";
 const externalClassicBootIntegrity = "sha256-driX1AsbsALchFYpBEj6JN/QRgsB3x5rHdMifbdcfOA=";
-const externalClassicRuntimeIntegrity = "sha256-n7A8irIOUtA3mraoTSXds1OK1sCb2TXvXY6ixj6nDhI=";
+const externalClassicRuntimeIntegrity = "sha256-YRGGGBjyFRjqlDOLiUMSeplR0U6O3/FaG1IfZ1S0/+M=";
 
 function requireReviewedIntegrity(value, expected, name) {
   if (integrity(value) !== expected) throw new Error(`${name}_integrity_drift`);

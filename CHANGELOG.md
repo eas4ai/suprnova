@@ -4,6 +4,19 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 4.0.4 - 2026-10-13
+
+### Fixed
+
+- **A field shows its own validation message.** The Live response named each
+  issue by its message identifier alone, so a `live:error` output under a
+  rejected field read the runtime's generic "Validation failed" while the
+  text a `#[validate(message = "...")]` rule or the validation catalog
+  provides never reached the page. The server now resolves that text in the
+  request's locale and sends it beside the identifier, and the field's error
+  output shows it. An issue without text, such as a value the field cannot
+  decode, keeps the generic announcement.
+
 ## 4.0.3 - 2026-10-13
 
 ### Fixed

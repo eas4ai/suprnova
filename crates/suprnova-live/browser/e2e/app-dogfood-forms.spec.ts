@@ -180,3 +180,16 @@ test("FORM-009 and LIVE-037: a reset replaces an edit the island refused, and th
   await expect(page.locator("#query")).toHaveAttribute("value", "docs");
   await expect(quantity).toHaveValue("");
 });
+
+test("FORM-001: a rejected field shows the message its rule names", async ({ page }) => {
+  await openGallery(page);
+  await page.locator("#email").fill("not an address");
+  const response = page.waitForResponse((reply) => actionNamed("save")(reply.request()));
+  await page.getByRole("button", { name: "Save" }).click();
+  expect((await response).status()).toBe(200);
+  // The server resolved the rule's own message and the field's error output
+  // shows it in place of the runtime's generic announcement.
+  await expect(page.locator("#email-error")).toHaveText(
+    "Enter an email address such as ada@example.com.",
+  );
+});

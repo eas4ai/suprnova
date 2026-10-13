@@ -8,7 +8,7 @@ import {
   type ModelControlRead,
 } from "../src/models/control.js";
 import { buildModelBatch } from "../src/models/forms.js";
-import { ModelState } from "../src/models/state.js";
+import { ModelState, validationIssuesFrom } from "../src/models/state.js";
 import { MISSING, modelValuesEqual } from "../src/models/value.js";
 import type { IntentSource } from "../src/scheduler/intent.js";
 import { ServerIntent } from "../src/scheduler/intent.js";
@@ -255,5 +255,55 @@ describe("per-island model state", () => {
       ),
       { numRuns: 200 },
     );
+  });
+});
+
+describe("validation issue text", () => {
+  it("keeps the server's text beside the message identity", () => {
+    const state = new ModelState();
+    state.register("full_name", "");
+    state.setValidation("full_name", [{ message: "validation.length", text: "Enter your name." }]);
+    expect(state.snapshot("full_name").validation).toEqual([
+      { message: "validation.length", text: "Enter your name." },
+    ]);
+  });
+
+  it("notices a text change under an unchanged identity", () => {
+    const state = new ModelState();
+    state.register("full_name", "");
+    state.setValidation("full_name", [{ message: "validation.length", text: "Enter your name." }]);
+    let notified = 0;
+    state.subscribe(() => {
+      notified += 1;
+    });
+    state.setValidation("full_name", [{ message: "validation.length", text: "Enter your name." }]);
+    expect(notified).toBe(0);
+    state.setValidation("full_name", [{ message: "validation.length", text: "Enter a longer name." }]);
+    expect(notified).toBe(1);
+  });
+
+  it("reads every wire form of a field's validation entry", () => {
+    expect(validationIssuesFrom("validation.length")).toEqual([{ message: "validation.length" }]);
+    expect(validationIssuesFrom({ id: "validation.length", text: "Enter your name." })).toEqual([
+      { message: "validation.length", text: "Enter your name." },
+    ]);
+    expect(
+      validationIssuesFrom([
+        "validation.length",
+        { id: "validation.email", text: "Enter an email address." },
+      ]),
+    ).toEqual([
+      { message: "validation.length" },
+      { message: "validation.email", text: "Enter an email address." },
+    ]);
+    expect(validationIssuesFrom({ text: "no identity" })).toEqual([]);
+    expect(validationIssuesFrom({ id: "validation.length", text: 7 })).toEqual([
+      { message: "validation.length" },
+    ]);
+    expect(validationIssuesFrom({ id: "validation.length", text: "" })).toEqual([
+      { message: "validation.length" },
+    ]);
+    expect(validationIssuesFrom(null)).toEqual([]);
+    expect(validationIssuesFrom(["not a message id!"])).toEqual([]);
   });
 });

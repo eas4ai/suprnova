@@ -16,7 +16,7 @@
 {% import "suprnova-ui/form-actions/form-actions.html" as actions %}
 {% import "suprnova-ui/validation-summary/validation-summary.html" as summary %}
 {% import "suprnova-ui/file-input/file-input.html" as file %}
-<form class="sn-form" live:submit.prevent="save">
+<form class="sn-form" novalidate live:submit.prevent="save">
 {% call summary::validation_summary("save") %}
 {% call summary::summary_entry("email", "Email") %}{% endcall %}
 {% call summary::summary_entry("secret", "Password") %}{% endcall %}

@@ -641,3 +641,59 @@ async fn an_island_past_one_mib_of_root_metadata_renders_through_actions() {
         );
     }
 }
+
+/// The message a `#[validate(message = "...")]` rule names reaches the
+/// browser beside the issue's identity, as the text the field's `live:error`
+/// output shows; a catalog-keyed rule carries its rendered catalog text.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_field_issue_carries_the_text_the_rule_names() {
+    let _container = TestContainer::fake();
+    form_fixture();
+    let router = Arc::new(build_form_router());
+    prepare_live_router_for_test(&router).expect("prepare Live runtime");
+    let middleware = production_middleware();
+
+    let (status, headers, body) =
+        dispatch(router.clone(), middleware.clone(), get(FORM_DOCUMENT_PATH)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let cookie = session_cookie(&headers);
+    let snapshot = decoded_snapshot(&body);
+    let (status, _, body) = dispatch(
+        router.clone(),
+        middleware.clone(),
+        form_invoke_request(
+            ActionRequest {
+                snapshot,
+                cookie: &cookie,
+                fetch_site: Some("same-origin"),
+                login: Some("user-7"),
+                idempotency_key: "RkZGRkZGRkZGRkZGRkZGRg",
+            },
+            "register",
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let answer: Value = serde_json::from_slice(&body).expect("action JSON");
+    assert_eq!(
+        answer["validation"]["name"],
+        json!({"id": "validation.length", "text": "Enter your name."}),
+        "{answer}"
+    );
+    let contact = &answer["validation"]["contact"];
+    assert_eq!(contact["id"], "validation.email", "{answer}");
+    assert!(
+        contact["text"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty() && text != "validation.email"),
+        "the catalog-keyed rule carries rendered text: {answer}"
+    );
+    assert!(
+        answer["render"]["html"]
+            .as_str()
+            .is_some_and(|html| html.contains("<p id=\"saves\">0</p>")),
+        "register did not run: {answer}"
+    );
+}

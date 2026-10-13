@@ -7,7 +7,8 @@ mod port;
 pub use engine::{ValidationEngine, ValidationEngineError, ValidationEngineErrorKind};
 pub(crate) use error_bag::HARD_MAX_VALIDATION_ISSUES;
 pub use error_bag::{
-    BagPolicy, ErrorBag, ValidationBagError, ValidationIssue, ValidationMessageId, ValidationStatus,
+    BagPolicy, ErrorBag, ValidationBagError, ValidationIssue, ValidationMessageId,
+    ValidationStatus, ValidationText,
 };
 pub use port::{
     ValidationFuture, ValidationPort, ValidationPortError, ValidationRequest, ValidationSelection,

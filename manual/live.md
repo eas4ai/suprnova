@@ -69,6 +69,10 @@ impl Counter {
   A proposal the field cannot decode, such as an empty number for a `u64`
   field, is a validation error on that field: the action does not run, the
   field keeps its value, and `live:error` shows the error.
+  A `live:error` output under a field shows the message the server resolved
+  for it: the rule's own `message = "..."`, else the validation catalog's
+  text in the request's locale. An error with no words of its own, such as
+  the undecodable proposal, shows the generic validation announcement.
 - `#[action]` methods are the only entry points the browser can invoke. They
   receive validated arguments and may return typed outcomes such as a
   redirect or a flash.

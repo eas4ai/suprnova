@@ -32,6 +32,12 @@ parameter names the island root lists in `data-suprnova-live-actions`.
 </form>
 ```
 
+A `live:error` target scoped to a field shows the words the server resolved
+for that field's issues: a rule's own `message`, else the validation catalog's
+text in the request's locale. An issue the server names by identity alone,
+such as a proposal the field cannot decode, shows the runtime's generic
+validation announcement.
+
 ## Models and server actions
 
 `live:model` binds a registered model field. Timing is explicit: immediate,

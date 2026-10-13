@@ -83,6 +83,7 @@ interface TargetPresentation {
   visible: boolean;
   transition: string | null;
   announcementKind: FeedbackAnnouncementKind | null;
+  announcementMessage: string | null;
   politeness: FeedbackPoliteness | null;
 }
 
@@ -129,6 +130,7 @@ class FeedbackElementPresentation {
     }
     this.#entries.set(token, {
       announcementKind: null,
+      announcementMessage: null,
       modifiers: new Set(modifiers),
       politeness: null,
       scope,
@@ -143,11 +145,13 @@ class FeedbackElementPresentation {
     token: symbol,
     transition: string | null,
     announcementKind: FeedbackAnnouncementKind | null,
+    announcementMessage: string | null = null,
   ): void {
     const entry = this.#entries.get(token);
     if (entry === undefined) return;
     entry.transition = transition;
     entry.announcementKind = announcementKind;
+    entry.announcementMessage = announcementMessage;
     entry.politeness = entry.modifiers.has("live.assertive")
       ? "assertive"
       : entry.modifiers.has("live.polite")
@@ -174,6 +178,7 @@ class FeedbackElementPresentation {
         entry.announcementKind,
         entry.transition,
         entry.politeness,
+        entry.announcementMessage,
       );
     }
   }
@@ -276,6 +281,7 @@ export class FeedbackTargetBinding {
     snapshot: FeedbackSnapshot,
     transition: string | null,
     announcementKind: FeedbackAnnouncementKind | null = null,
+    announcementMessage: string | null = null,
   ): void {
     if (this.#disposed) return;
     const changed = transition !== this.#transition;
@@ -284,6 +290,7 @@ export class FeedbackTargetBinding {
       this.#token,
       transition,
       announcementKind ?? defaultAnnouncement(this.#state),
+      announcementMessage,
     );
     this.#timing.update(snapshot.states.has(this.#state), transition);
     if (changed && this.#timing.visible()) this.#present(true);
@@ -410,6 +417,21 @@ function announcementFor(
     return "validation";
   }
   return defaultAnnouncement(state);
+}
+
+/// The words a field-scope error target shows: the text the server resolved
+/// for each of the field's issues, in order. A field whose issues carry no
+/// text keeps the generic validation announcement.
+function announcementMessageFor(
+  state: FeedbackState,
+  scope: FeedbackScope,
+  model: ModelState | null,
+): string | null {
+  if (state !== "error" || scope.kind !== "field" || model === null) return null;
+  const texts = model
+    .snapshot(scope.value)
+    .validation.flatMap((issue) => (issue.text === undefined ? [] : [issue.text]));
+  return texts.length === 0 ? null : texts.join(" ");
 }
 
 function within(node: Node, element: Element): boolean {
@@ -678,6 +700,7 @@ export class FeedbackRuntime {
         snapshot,
         transitionFor(snapshot, managed.scope, state.model),
         announcementFor(managed.state, managed.scope, state.model),
+        announcementMessageFor(managed.state, managed.scope, state.model),
       );
     }
   }

@@ -406,54 +406,11 @@ impl ValidationErrors {
         }
     }
 
-    /// Render one message for `field` against the current locale.
-    ///
-    /// This is the single translation point in the whole validation
-    /// stack - and the single place the `localization` feature is
-    /// consulted, which is why the field-label lookup is nested here
-    /// rather than living in its own method. A keyless message, a key
-    /// no catalog defines, or a build with the feature off all fall
-    /// through to the message's own English text.
-    ///
-    /// A context prefix is applied *after* translation, so
-    /// `FrameworkError::context` never costs a message its localization.
+    /// Render one message for `field` against the current locale, through
+    /// [`render_validation_message`], the translation point every surface
+    /// shares.
     fn render(&self, field: &str, m: &ValidationMessage) -> String {
-        #[cfg(feature = "localization")]
-        {
-            use crate::localization::Lang;
-
-            // The human label for the field: the `field-<name>` catalog
-            // message when the app defines one (Laravel's custom
-            // attribute names), else Laravel's displayable attribute: the
-            // name snake-cased (`unitPrice` reads `unit price`, as a
-            // renamed input key reads in Laravel) with `_` as spaces.
-            fn display_field(field: &str) -> String {
-                let key = format!("field-{field}");
-                if Lang::has(&key)
-                    && let Ok(label) = Lang::try_get(&key)
-                {
-                    return label;
-                }
-                snake_case(field).replace('_', " ")
-            }
-
-            if m.is_keyed() && Lang::has(&m.key) {
-                let mut args = m.args.clone();
-                args.insert(
-                    "field".into(),
-                    serde_json::Value::String(display_field(field)),
-                );
-                if let Ok(rendered) = Lang::try_get_with(&m.key, args) {
-                    return match &m.prefix {
-                        Some(prefix) => format!("{prefix}: {rendered}"),
-                        None => rendered,
-                    };
-                }
-            }
-        }
-        let _ = field;
-        // `Display` already applies the prefix to the fallback text.
-        m.to_string()
+        render_validation_message(field, m)
     }
 
     /// Every message for `field`, rendered against the current locale.
@@ -566,12 +523,64 @@ fn snake_case(name: &str) -> String {
     snake
 }
 
+/// Render one validation message for `field` against the current locale:
+/// the single translation point in the whole validation stack, and the
+/// single place the `localization` feature is consulted, which is why the
+/// field-label lookup is nested here. The HTTP 422 body and the text a Live
+/// issue carries to the browser both come through it. A keyless message, a
+/// key no catalog defines, or a build with the feature off all fall through
+/// to the message's own English text.
+///
+/// A context prefix is applied *after* translation, so
+/// `FrameworkError::context` never costs a message its localization.
+pub(crate) fn render_validation_message(field: &str, m: &ValidationMessage) -> String {
+    #[cfg(feature = "localization")]
+    {
+        use crate::localization::Lang;
+
+        // The human label for the field: the `field-<name>` catalog
+        // message when the app defines one (Laravel's custom
+        // attribute names), else Laravel's displayable attribute: the
+        // name snake-cased (`unitPrice` reads `unit price`, as a
+        // renamed input key reads in Laravel) with `_` as spaces.
+        fn display_field(field: &str) -> String {
+            let key = format!("field-{field}");
+            if Lang::has(&key)
+                && let Ok(label) = Lang::try_get(&key)
+            {
+                return label;
+            }
+            snake_case(field).replace('_', " ")
+        }
+
+        if m.is_keyed() && Lang::has(&m.key) {
+            let mut args = m.args.clone();
+            args.insert(
+                "field".into(),
+                serde_json::Value::String(display_field(field)),
+            );
+            if let Ok(rendered) = Lang::try_get_with(&m.key, args) {
+                return match &m.prefix {
+                    Some(prefix) => format!("{prefix}: {rendered}"),
+                    None => rendered,
+                };
+            }
+        }
+    }
+    let _ = field;
+    // `Display` already applies the prefix to the fallback text.
+    m.to_string()
+}
+
 /// Translate one `validator::ValidationError` into a [`ValidationMessage`].
 ///
 /// `field` is the **fully-qualified** key (`items.1.name`, not `name`) so
 /// the generic fallback names the actual path - two nested `name` fields
 /// otherwise render byte-identical messages.
-fn validator_error_message(field: &str, error: &validator::ValidationError) -> ValidationMessage {
+pub(crate) fn validator_error_message(
+    field: &str,
+    error: &validator::ValidationError,
+) -> ValidationMessage {
     // An explicit `#[validate(..., message = "…")]` is the author's final
     // word. Laravel resolves a custom message ahead of the lang file, and
     // keyless is the only shape a catalog id cannot override - so the text
