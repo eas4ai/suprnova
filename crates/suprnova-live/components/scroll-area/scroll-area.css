@@ -1,6 +1,8 @@
 @layer suprnova-ui {
+  /* The region scrolls past this size; a page sets --sn-scroll-area-size on
+     the region or an ancestor for another bound. */
   .sn-scroll-area {
-    max-block-size: var(--sn-space-measure);
+    max-block-size: var(--sn-scroll-area-size, 16rem);
     overflow: auto;
     overscroll-behavior: contain;
     padding: var(--sn-space-2);

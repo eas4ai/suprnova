@@ -20,6 +20,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   A browser's own `hr` carries auto inline margins, which took the free
   space of the track and left `suprnova.separator` no width at all; the
   rule now sets them to zero.
+- **The scroll area scrolls.** `suprnova.scroll-area` bounded its block
+  size by the measure token, about 640px, so most content fit without a
+  scrollbar. The bound is now 16rem, and a page sets
+  `--sn-scroll-area-size` on the region or an ancestor for another.
 
 ### Changed
 
