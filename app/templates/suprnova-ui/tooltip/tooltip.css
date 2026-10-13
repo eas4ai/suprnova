@@ -11,9 +11,11 @@
   max-inline-size: 20rem;
   padding: var(--sn-space-1) var(--sn-space-2);
   translate: -50% var(--sn-space-1);
+  border: var(--sn-state-border-width) solid var(--sn-color-border);
   border-radius: var(--sn-radius-sm);
-  background: var(--sn-color-text);
-  color: var(--sn-color-text-inverse);
+  background: var(--sn-color-surface);
+  color: var(--sn-color-text);
+  box-shadow: var(--sn-shadow-md);
   font-size: var(--sn-font-size-sm);
   line-height: var(--sn-font-leading-tight);
   white-space: nowrap;

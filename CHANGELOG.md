@@ -4,6 +4,15 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 4.0.2 - 2026-10-13
+
+### Changed
+
+- **The tooltip bubble follows the color scheme.** `suprnova.tooltip` drew
+  its bubble in the text color with inverse text, a light bubble on a dark
+  page. It now sits on the surface tokens with the border and shadow the
+  popover and the dropdown menu use, so it re-themes with them.
+
 ## 4.0.1 - 2026-10-13
 
 ### Fixed
