@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.input",
+  "version": 1,
+  "root": "suprnova-ui/input",
+  "files": [
+    "input.html",
+    "input.css"
+  ],
+  "elements": []
+}

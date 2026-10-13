@@ -1,0 +1,5 @@
+error: a component field may declare only one state category
+ --> tests/ui/live/fail/session_dehydrated.rs:7:5
+  |
+7 |     #[public]
+  |     ^
