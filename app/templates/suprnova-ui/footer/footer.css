@@ -1,0 +1,25 @@
+.sn-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sn-space-4);
+  padding: var(--sn-space-6) var(--sn-space-gutter);
+  border-block-start: var(--sn-state-border-width) solid var(--sn-color-border);
+  color: var(--sn-color-text-muted);
+  font-size: var(--sn-font-size-sm);
+}
+
+.sn-footer-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sn-density-gap);
+}
+
+.sn-footer-link {
+  color: var(--sn-color-link);
+}
+
+.sn-footer-text {
+  margin: 0;
+}
