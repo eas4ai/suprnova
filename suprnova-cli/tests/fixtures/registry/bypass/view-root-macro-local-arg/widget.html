@@ -1,0 +1,3 @@
+{% macro link(href) %}<a href="{{ href }}">x</a>{% endmacro %}
+{% let home = suprnova::url::root() %}
+{% call link(home) %}{% endcall %} {# refused: view-url #}
