@@ -9,6 +9,20 @@
   display: none;
 }
 
+.sn-flash-host {
+  display: block;
+}
+
+/* sn-flash-region hides a message after the region's duration; a region
+   whose every message has timed out takes no room. */
+.sn-flash[hidden] {
+  display: none;
+}
+
+.sn-flash-region:not(:has(.sn-flash:not([hidden]))) {
+  display: none;
+}
+
 .sn-flash {
   padding: var(--sn-space-3) var(--sn-space-4);
   border: var(--sn-state-border-width) solid var(--sn-color-border);

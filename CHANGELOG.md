@@ -6,6 +6,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## 4.0.2 - 2026-10-13
 
+### Added
+
+- **A flash region can time its messages out.** `flash_region` takes a
+  `duration` in milliseconds; a region rendered with one hides each message
+  that long after it appears and holds the timer while the pointer or focus
+  is on the region, as the toast region does. The default, 0, keeps every
+  message until the next document and renders the same markup as before.
+
 ### Changed
 
 - **The tooltip bubble follows the color scheme.** `suprnova.tooltip` drew

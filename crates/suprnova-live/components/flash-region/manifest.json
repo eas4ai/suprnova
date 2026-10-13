@@ -2,7 +2,10 @@
   "name": "suprnova.flash-region",
   "files": [
     "flash-region.html",
-    "flash-region.css"
+    "flash-region.css",
+    "flash-region.js"
   ],
-  "elements": []
+  "elements": [
+    "sn-flash-region"
+  ]
 }

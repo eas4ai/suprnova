@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { mountComponents } from "./support.js";
 
-// FDB-007, NAV-007, OVL-007, and UI-024 on the shipped files in each engine.
+// FDB-004, FDB-007, NAV-007, OVL-007, and UI-024 on the shipped files in each engine.
 
 async function center(page: Page, selector: string): Promise<{ x: number; y: number }> {
   const box = await page.locator(selector).boundingBox();
@@ -144,6 +144,52 @@ test.describe("FDB-007: the toast region holds a toast's timer", () => {
     await page.clock.runFor(1_100);
     await expect(page.locator("#fresh")).toBeHidden();
   });
+});
+
+test.describe("FDB-004: a flash region with a duration hides its messages", () => {
+  const REGION = `<main id="page"><p id="away">Elsewhere</p><sn-flash-region class="sn-flash-host" data-sn-duration="1000"><div class="sn-flash-region" id="flash" role="status" aria-label="Notices"><div class="sn-flash" id="saved" data-sn-variant="success">Settings saved</div></div></sn-flash-region></main>`;
+
+  test.beforeEach(async ({ page }) => {
+    await page.clock.install();
+    await mountComponents(page, { html: REGION, components: ["flash-region"] });
+    await expect(page.locator("#saved")).toBeVisible();
+  });
+
+  test("after the duration, held while the pointer rests on the region", async ({ page }) => {
+    await page.clock.runFor(900);
+    await expect(page.locator("#saved")).toBeVisible();
+    const saved = await center(page, "#saved");
+    await page.mouse.move(saved.x, saved.y);
+    await page.clock.runFor(3_000);
+    await expect(page.locator("#saved")).toBeVisible();
+
+    await page.mouse.move(1, 1);
+    await page.clock.runFor(1_100);
+    await expect(page.locator("#saved")).toBeHidden();
+    // A region whose every message has timed out takes no room.
+    await expect(page.locator("#flash")).toBeHidden();
+  });
+
+  test("and times a message a morph shows again", async ({ page }) => {
+    await page.clock.runFor(1_100);
+    await expect(page.locator("#saved")).toBeHidden();
+    await page.evaluate(() => document.getElementById("saved")?.removeAttribute("hidden"));
+    await expect(page.locator("#saved")).toBeVisible();
+    await page.clock.runFor(900);
+    await expect(page.locator("#saved")).toBeVisible();
+    await page.clock.runFor(200);
+    await expect(page.locator("#saved")).toBeHidden();
+  });
+});
+
+test("FDB-004: a flash region with no duration keeps its messages", async ({ page }) => {
+  await page.clock.install();
+  await mountComponents(page, {
+    html: `<div class="sn-flash-region" id="flash" role="status" aria-label="Notices"><div class="sn-flash" id="saved" data-sn-variant="success">Settings saved</div></div>`,
+    components: ["flash-region"],
+  });
+  await page.clock.runFor(60_000);
+  await expect(page.locator("#saved")).toBeVisible();
 });
 
 test("NAV-007: a nested local tabs instance selects only its own tabs and panels", async ({
