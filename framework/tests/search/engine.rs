@@ -163,14 +163,11 @@ async fn generation_and_descriptor_validation_cannot_be_bypassed()
     Ok(())
 }
 
-#[tokio::test]
-async fn typo_corrections_do_not_become_prefixes() -> Result<(), suprnova::FrameworkError> {
-    use std::collections::BTreeMap;
+fn typo_prefix_descriptor() -> suprnova::search::IndexDescriptor {
     use suprnova::search::{
-        AttributeDecl, AttributeType, AttributeValue, EngineQuery, GenerationId, IndexDescriptor,
-        IndexSettings, IndexedDocument, QueryText, SearchDocument, SearchableDecl, expand,
+        AttributeDecl, AttributeType, IndexDescriptor, IndexSettings, SearchableDecl,
     };
-    let descriptor = IndexDescriptor {
+    IndexDescriptor {
         name: "typo_prefix",
         model_table: "items",
         key_column: "id",
@@ -190,7 +187,17 @@ async fn typo_corrections_do_not_become_prefixes() -> Result<(), suprnova::Frame
         search_touches: vec![],
         settings: IndexSettings::default,
         scope: None,
+    }
+}
+
+#[tokio::test]
+async fn typo_corrections_do_not_become_prefixes() -> Result<(), suprnova::FrameworkError> {
+    use std::collections::BTreeMap;
+    use suprnova::search::{
+        AttributeValue, EngineQuery, GenerationId, IndexedDocument, QueryText, SearchDocument,
+        expand,
     };
+    let descriptor = typo_prefix_descriptor();
     let engine = CollectionEngine::new();
     let generation = GenerationId::default();
     let settings = descriptor.index_settings();
@@ -229,6 +236,28 @@ async fn typo_corrections_do_not_become_prefixes() -> Result<(), suprnova::Frame
     let results = engine.query(&descriptor, &generation, &q).await?;
     assert_eq!(results.candidates.len(), 1);
     assert_eq!(results.candidates[0].document.key, "a");
+    // A query warms the generation's field cache. Changed content and removals
+    // must update both matching and the vocabulary used by the next snapshot.
+    let mut updated = documents[1].clone();
+    updated.document.source_version = 2;
+    updated
+        .document
+        .attributes
+        .insert("body".into(), AttributeValue::Text("apple apple".into()));
+    updated.content_hash = updated.document.content_hash(&settings.index_time.digest());
+    engine.index(&descriptor, &generation, &[updated]).await?;
+    let results = engine.query(&descriptor, &generation, &q).await?;
+    assert_eq!(results.candidates.len(), 2);
+    assert_eq!(results.candidates[0].document.key, "b");
+    engine
+        .remove(&descriptor, &generation, &[("a".into(), 2)])
+        .await?;
+    let results = engine.query(&descriptor, &generation, &q).await?;
+    assert_eq!(results.candidates.len(), 1);
+    assert_eq!(results.candidates[0].document.key, "b");
+    let vocabulary = engine.vocabulary(&descriptor, &generation).await?;
+    assert_eq!(vocabulary.words.get("apple"), Some(&1));
+    assert!(!vocabulary.words.contains_key("applesauce"));
     Ok(())
 }
 

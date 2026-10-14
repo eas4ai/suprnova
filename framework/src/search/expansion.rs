@@ -8,6 +8,9 @@ use unicode_segmentation::UnicodeSegmentation;
 use super::{query::QueryText, settings::QuerySettings};
 use crate::FrameworkError;
 
+mod index;
+pub use index::VocabularyWords;
+
 /// Document frequencies select useful corrections without scanning application rows.
 ///
 /// ```
@@ -20,7 +23,7 @@ use crate::FrameworkError;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vocabulary {
     /// Only words with a positive document frequency belong to the live vocabulary.
-    pub words: BTreeMap<String, u64>,
+    pub words: VocabularyWords,
 }
 
 const MAX_CORRECTION_SCALARS: usize = 64;
@@ -33,20 +36,32 @@ impl Vocabulary {
     /// Correction is limited to 64 Unicode scalars per query token. Longer tokens
     /// retain exact matches only. Candidate lengths must fit the edit budget before
     /// distance is computed, bounding each expansion comparison to at most 64 by 66.
+    /// A lazy deletion index supplies candidates for the spec's budgets of 1 and 2.
     pub fn within(&self, word: &str, budget: usize) -> Vec<(String, u64)> {
         let length = word.chars().take(MAX_CORRECTION_SCALARS + 1).count();
-        let mut candidates: Vec<_> = self
-            .words
-            .iter()
+        if length > MAX_CORRECTION_SCALARS || budget == 0 {
+            return self
+                .words
+                .get(word)
+                .filter(|df| **df > 0)
+                .map(|df| vec![(word.to_owned(), *df)])
+                .unwrap_or_default();
+        }
+        // Budgets above the spec's maximum retain the public method's scan behavior.
+        let candidates = if budget <= 2 {
+            self.words.candidates(word, budget)
+        } else {
+            self.words.keys().map(String::as_str).collect()
+        };
+        let mut candidates: Vec<_> = candidates
+            .into_iter()
+            .filter_map(|candidate| self.words.get(candidate).map(|df| (candidate, df)))
             .filter(|(candidate, df)| {
                 if **df == 0 {
                     return false;
                 }
-                if word == candidate.as_str() {
+                if word == *candidate {
                     return true;
-                }
-                if length > MAX_CORRECTION_SCALARS || budget == 0 {
-                    return false;
                 }
                 let candidate_length = candidate
                     .chars()
@@ -55,7 +70,7 @@ impl Vocabulary {
                 length.abs_diff(candidate_length) <= budget
                     && strsim::damerau_levenshtein(word, candidate) <= budget
             })
-            .map(|(candidate, df)| (candidate.clone(), *df))
+            .map(|(candidate, df)| (candidate.to_owned(), *df))
             .collect();
         candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         candidates

@@ -1754,8 +1754,10 @@ impl SearchEngine for DatabaseSearchEngine {
             .await?
             .iter()
             .map(|r| Ok((get(r, "word")?, get::<i64>(r, "document_frequency")? as u64)))
-            .collect::<Result<_, FrameworkError>>()?;
-        Ok(Arc::new(Vocabulary { words }))
+            .collect::<Result<BTreeMap<_, _>, FrameworkError>>()?;
+        Ok(Arc::new(Vocabulary {
+            words: words.into(),
+        }))
     }
     async fn count(
         &self,
