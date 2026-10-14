@@ -498,6 +498,7 @@ impl SessionStore for DatabaseSessionDriver {
             // This row was read from storage under its own id -
             // see `SessionData::loaded_from_store` (SEC-02(c)).
             loaded_from_store: true,
+            pending_sign_in_rebinds: Vec::new(),
         }))
     }
 

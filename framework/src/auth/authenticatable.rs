@@ -105,6 +105,20 @@ pub trait Authenticatable: Send + Sync + 'static {
         None
     }
 
+    /// The column [`Self::get_auth_password`] reads, Laravel's
+    /// `getAuthPasswordName`: `"password"` unless the model keeps its hash
+    /// under another name.
+    ///
+    /// A request that writes the signed-in user through a model rebinds its
+    /// sign-in to the new password only when this column is among the
+    /// columns the write set (see [Auth epochs](crate::auth)). A write that
+    /// leaves the column alone never moves the sign-in, however the row
+    /// reads, so a password change another session commits meanwhile is not
+    /// adopted.
+    fn auth_password_name(&self) -> &str {
+        "password"
+    }
+
     /// The account's auth epoch, read in the same row read as
     /// [`Self::get_auth_password`], or `None` when the provider did not
     /// read it.

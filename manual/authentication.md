@@ -1160,15 +1160,21 @@ level. It dispatches no `Logout` event, because the user didn't sign out,
 and it leaves the other guards of the session signed in.
 
 The session that changes its own user's password keeps its sign-in. When a
-request writes the signed-in user through the model (`save`, `update`, and
-their transactional forms), the sign-in records the epoch of the values the
-request wrote, so the password form's own session continues while every
-other session and remember-me cookie of the user ends. `EloquentUserProvider`
+request that resolved the signed-in user writes that user through the model
+(`save`, `update`, and their transactional forms) and the write sets the
+password column (`Authenticatable::auth_password_name`, `password` unless
+you override it), the sign-in records the epoch of the values the write
+sent to storage, after the casts, so the password form's own session
+continues while every other session and remember-me cookie of the user
+ends. Inside a transaction the sign-in follows the commit: a write that
+rolls back leaves it as it was. A write that leaves the password column
+alone, a request that writes the user without resolving the signed-in user,
+or a write that bypasses the model (a query-builder `update` or raw SQL)
+never moves a sign-in, so a password change another session commits
+meanwhile still ends this one on its next request. `EloquentUserProvider`
 recognizes the written model as its user; a provider of your own implements
 `UserProvider::written_user` the same way, with a downcast to its model
-type. A write that bypasses the model, such as a query-builder `update` or
-raw SQL, isn't seen, and that session ends on its next request as any other
-does.
+type.
 
 A user whose model returns `None` from both `auth_epoch` and
 `get_auth_password`, such as an OAuth-only account, records no epoch and
@@ -1231,7 +1237,7 @@ mismatch ends only that guard's sign-in, so another guard signed in on the
 same session keeps its sign-in. Laravel keeps the session that changed the
 password by storing its user object's hash again after the handler ran;
 Suprnova rebinds that session at the model write, from the values the
-request wrote.
+write sent to storage, once it commits.
 
 ## Security guarantees
 

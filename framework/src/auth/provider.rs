@@ -140,12 +140,13 @@ pub trait UserProvider: Send + Sync + 'static {
     ///
     /// The framework asks it when a request writes a model through `save`
     /// or `update` while the session holds a sign-in with a recorded
-    /// authentication epoch (HRD-007). A written model that is the
-    /// signed-in user rebinds that sign-in to the epoch of the written
-    /// values, so the session that changed its own password stays signed
-    /// in while every other session of the user ends. A provider that
-    /// answers `None` leaves the sign-in bound to the old epoch, and the
-    /// session that changed the password ends on its next request.
+    /// authentication epoch (HRD-007). A written model that is the user
+    /// this request resolved, written with its password column, rebinds
+    /// that sign-in to the epoch of the values sent to storage once the
+    /// write commits, so the session that changed its own password stays
+    /// signed in while every other session of the user ends. A provider
+    /// that answers `None` leaves the sign-in bound to the old epoch, and
+    /// the session that changed the password ends on its next request.
     ///
     /// `EloquentUserProvider` answers for its model type. A provider you
     /// write over a model type answers the same way:

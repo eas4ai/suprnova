@@ -2755,13 +2755,15 @@ guard.
 **Do:** Nothing to run, for most applications: no migration and no
 configuration. Expect each remembered device to sign in once after the
 deploy. A form that changes the signed-in user's password through the
-model keeps that user's own session: the request that saves the new hash
-binds its sign-in to the new epoch, and every other session and
-remember-me cookie of that user stops working. A user provider of your own
-implements `UserProvider::written_user`, a downcast to its model type, so
-the framework recognizes the written user; a password written with a
-query-builder update or raw SQL isn't seen, and that session ends on its
-next request. If your user model exposes no password hash and no epoch, its
+model keeps that user's own session: the request that resolved the user
+and saved the new hash into the password column binds its sign-in to the
+new epoch once the write commits, and every other session and remember-me
+cookie of that user stops working. A user provider of your own implements
+`UserProvider::written_user`, a downcast to its model type, so the
+framework recognizes the written user; a model whose hash lives in another
+column names it from `Authenticatable::auth_password_name`; a password
+written with a query-builder update or raw SQL isn't seen, and that
+session ends on its next request. If your user model exposes no password hash and no epoch, its
 sessions stay unchecked; return the hash from `get_auth_password`, or a
 counter from `auth_epoch`, to have them checked. A custom user provider
 whose model keeps a counter that advances without a password change

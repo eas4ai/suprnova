@@ -36,17 +36,31 @@
 //! other session of the user. Laravel's `AuthenticateSession` stores the
 //! hash of the request's own user object again after the handler ran, so
 //! the session that made the change keeps it. Suprnova rebinds at the
-//! write: when a request writes the signed-in user through a model
-//! (`save`, `update` and their transactional forms), the guard's provider
-//! recognizes the written model as one of its users
-//! ([`UserProvider::written_user`]) and the sign-in records the epoch of
-//! the values the request wrote ([`observe_user_write`]). Every other
-//! session of the user still ends on its next request. The epoch comes
-//! from the written values and never from the row read back after the
-//! write, so a password change another request commits meanwhile is not
-//! adopted by this one. A write that bypasses the model, a query-builder
-//! update or raw SQL, is not seen, as Laravel does not see a write that
-//! bypasses its user object.
+//! write ([`observe_user_write`]), under four conditions that together
+//! keep the comparison honest:
+//!
+//! - **This request resolved the guard's user.** The comparison ran and
+//!   found the sign-in current before the handler wrote. A stale session
+//!   whose request writes the user without resolving it (a public reset
+//!   page) stays stale.
+//! - **The written model is the signed-in user.** The guard's provider
+//!   recognizes the model type ([`UserProvider::written_user`]) and the
+//!   identifier is the one the guard holds.
+//! - **The write set the password column** ([`Authenticatable::auth_password_name`]).
+//!   The epoch comes from the values sent to storage, after the casts, so
+//!   a hashed cast records the stored hash. A write of other columns says
+//!   nothing about the password, however the row reads, so a password
+//!   change another session commits meanwhile is not adopted by a reload
+//!   and an unrelated update.
+//! - **The write committed.** Inside a transaction, manual or ambient,
+//!   the rebind waits for the commit and the session middleware applies
+//!   it before it stores the session; a rollback leaves the sign-in as it
+//!   was.
+//!
+//! Every other session of the user still ends on its next request. A
+//! write that bypasses the model, a query-builder update or raw SQL, is
+//! not seen, as Laravel does not see a write that bypasses its user
+//! object.
 //!
 //! # Magnetar
 //!
@@ -61,6 +75,7 @@
 
 use std::any::Any;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use sha2::{Digest, Sha256};
 
@@ -246,19 +261,31 @@ pub(crate) fn sign_in_watches_writes() -> bool {
 /// Rebind the sign-ins a model write of this request belongs to (HRD-007,
 /// the request that changes the password; see the module documentation).
 ///
-/// `written` is the model as the request wrote it: the values in memory,
-/// not the row read back. For each guard of the session whose sign-in
-/// recorded an epoch, the guard's provider is asked whether `written` is
-/// one of its users ([`UserProvider::written_user`]); when it is, and its
-/// identifier is the one the guard holds, the sign-in records the epoch of
-/// the written values, or none when the user no longer exposes one. A
-/// guard Magnetar fences records nothing here, as elsewhere. A write of
-/// another user, or of another model, changes nothing.
-pub(crate) fn observe_user_write(written: &(dyn Any + Send + Sync)) {
+/// `written` is the model as the write sent it to storage: the attributes,
+/// the listeners' changes and the casts applied, read back through the
+/// model's casts, so a hashed password is the stored hash. `columns` names
+/// the columns the write set, and `tx` the manual transaction it ran in.
+///
+/// For each guard of the session whose sign-in recorded an epoch, the
+/// sign-in is rebound only when this request resolved the guard's user
+/// (`request_state::has_guard_user`), the guard's provider recognizes
+/// `written` as one of its users with the identifier the guard holds, and
+/// `columns` includes that user's password column. It then records the
+/// epoch of the written values, or none when the user exposes no epoch.
+/// Inside a transaction the rebind is queued on the session with a flag the
+/// transaction's after-commit callback sets, and the session middleware
+/// applies the committed ones before it stores the session
+/// (`apply_committed_sign_in_rebinds`). A guard Magnetar fences records
+/// nothing here, as elsewhere.
+pub(crate) async fn observe_user_write(
+    written: &(dyn Any + Send + Sync),
+    columns: &[String],
+    tx: Option<&crate::database::Transaction>,
+) {
     for (guard_name, user_id, recorded) in
         crate::session::middleware::guards_with_recorded_sign_in_epoch()
     {
-        if magnetar_fences(&guard_name) {
+        if magnetar_fences(&guard_name) || !super::request_state::has_guard_user(&guard_name) {
             continue;
         }
         let Some(provider) = guard_provider(&guard_name) else {
@@ -270,16 +297,52 @@ pub(crate) fn observe_user_write(written: &(dyn Any + Send + Sync)) {
         if user.get_auth_identifier() != user_id {
             continue;
         }
+        if !columns.iter().any(|column| column == user.auth_password_name()) {
+            continue;
+        }
         let epoch = credential_epoch(user);
         if epoch == Some(recorded) {
             continue;
         }
-        crate::session::middleware::record_guard_sign_in_epoch(&guard_name, &user_id, epoch);
-        tracing::debug!(
-            target: "suprnova::auth",
-            guard = %guard_name,
-            user_id = %user_id,
-            "the signed-in user's epoch moved in this request; the sign-in is bound to the new one"
+        if tx.is_none() && !crate::database::after_commit::in_transaction() {
+            crate::session::middleware::record_guard_sign_in_epoch(&guard_name, &user_id, epoch);
+            tracing::debug!(
+                target: "suprnova::auth",
+                guard = %guard_name,
+                user_id = %user_id,
+                "the signed-in user's password changed in this request; the sign-in is bound to the new epoch"
+            );
+            continue;
+        }
+        // The write is part of a transaction: the sign-in follows its
+        // commit, which the callback reports through the flag.
+        let committed = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&committed);
+        let mark = move || async move {
+            flag.store(true, Ordering::Release);
+            Ok(())
+        };
+        match tx {
+            Some(tx) => tx.after_commit(mark),
+            None => {
+                if let Err(error) = crate::DB::after_commit(mark).await {
+                    tracing::warn!(
+                        target: "suprnova::auth",
+                        guard = %guard_name,
+                        user_id = %user_id,
+                        %error,
+                        "the sign-in could not follow the transaction's commit; it stays bound \
+                         to the earlier epoch"
+                    );
+                    continue;
+                }
+            }
+        }
+        crate::session::middleware::queue_guard_sign_in_rebind(
+            &guard_name,
+            &user_id,
+            epoch,
+            committed,
         );
     }
 }
