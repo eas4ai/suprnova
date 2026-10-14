@@ -287,10 +287,7 @@ pub fn parse_manifest(bytes: &[u8], directory: &str, namespace: &str) -> Result<
     manifest_from_object(object, directory, namespace)
 }
 
-/// Parses a shipped component's manifest: [`parse_manifest`] under the
-/// shipped namespace, so the shipped library is held to exactly the format
-/// a third-party author can produce (REG-002, REG-016), and its element
-/// tags keep `sn-`.
+/// Parses shipped assets by the same rules as a third-party manifest (REG-002).
 pub fn parse_shipped_manifest(bytes: &[u8], directory: &str) -> Result<ComponentManifest> {
     parse_manifest(bytes, directory, SHIPPED_LIBRARY)
 }
@@ -832,5 +829,38 @@ mod tests {
         assert!(strict_json(br#"[{"a":1}]"#).is_ok());
         let big = format!("{{\"a\":\"{}\"}}", "x".repeat(super::MAX_JSON_BYTES));
         assert!(strict_json_object(big.as_bytes()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod framework_components_tests {
+    use super::{parse_manifest, parse_shipped_manifest};
+    use crate::registry::plan::FRAMEWORK_COMPONENTS;
+
+    #[test]
+    fn search_box_cannot_declare_a_framework_type_in_its_manifest() {
+        let manifest = br#"{"name":"suprnova.search-box","files":["search-box.html"],"register":["components::SearchBox"]}"#;
+        assert!(parse_shipped_manifest(manifest, "search-box").is_err());
+        assert!(parse_manifest(manifest, "search-box", "suprnova").is_err());
+        let unsupported = br#"{"name":"suprnova.widget","files":["widget.html"],"register":["components::Widget"]}"#;
+        assert!(parse_shipped_manifest(unsupported, "widget").is_err());
+    }
+
+    #[test]
+    fn search_box_uses_the_framework_table_with_a_strict_manifest_and_no_vendored_rust() {
+        let bytes =
+            include_bytes!("../../../crates/suprnova-live/components/search-box/manifest.json");
+        let manifest = parse_manifest(bytes, "search-box", "suprnova").expect("strict manifest");
+        assert_eq!(
+            parse_shipped_manifest(bytes, "search-box").expect("shipped manifest"),
+            manifest
+        );
+        assert!(manifest.register.is_empty());
+        assert!(manifest.rust_modules().is_empty());
+        let (_, path) = FRAMEWORK_COMPONENTS
+            .iter()
+            .find(|(directory, _)| *directory == "search-box")
+            .expect("framework registration table entry");
+        assert_eq!(*path, "suprnova::live::components::SearchBox");
     }
 }

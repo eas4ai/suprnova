@@ -10,7 +10,8 @@ import type { NotesIndexProps } from '../../types/inertia-props'
 // `types/inertia-props.ts` types it, so `usePage()` takes no argument.
 const { root } = usePage().props
 
-// The signed-in user's own notes, newest first. The handler sends `notes`
+// The signed-in user's own notes, ranked for search and newest first otherwise.
+// The handler sends `notes`
 // through `Inertia::paginate` over a cursor paginator, so the list is the
 // rows of one page and the next page is asked for by cursor.
 const props = defineProps<NotesIndexProps>()
@@ -117,7 +118,9 @@ function searchNotes() {
             :page-props="(_props, shared) => ({ ...shared, note })"
             class="block py-3 hover:bg-gray-50"
           >
-            <span class="block text-sm font-medium text-gray-900">{{ note.title }}</span>
+            <span v-if="note.highlight" class="block text-sm font-medium text-gray-900" v-html="note.highlight.title"></span>
+            <span v-else class="block text-sm font-medium text-gray-900">{{ note.title }}</span>
+            <p v-if="note.highlight?.body" class="text-sm text-gray-500" v-html="note.highlight.body"></p>
             <time :datetime="note.created_at" class="block text-xs text-gray-500">{{ note.created_at }}</time>
           </Link>
         </li>

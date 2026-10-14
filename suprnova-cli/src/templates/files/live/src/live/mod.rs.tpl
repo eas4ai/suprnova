@@ -48,6 +48,7 @@ use crate::models::user::User;
 /// Builds the registry of every Live component in this application.
 pub fn registry() -> Result<LiveRegistry, RegistryError> {
     let registry = LiveRegistry::builder()
+        .register::<suprnova::live::components::SearchBox>()?
         .register::<forgot_password_form::ForgotPasswordForm>()?
         .register::<login_form::LoginForm>()?
         .register::<note_form::NoteForm>()?

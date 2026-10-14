@@ -42,6 +42,12 @@ export interface NoteSummary {
   id: number;
   title: string;
   created_at: string;
+  highlight: NoteHighlight | null;
+}
+
+export interface NoteHighlight {
+  title: string;
+  body: string;
 }
 
 export interface NotesShowProps {

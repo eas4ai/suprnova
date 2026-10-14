@@ -33,6 +33,7 @@ pub const LIBRARY_COMPONENTS: &[&str] = &[
     "list-group",
     "load-more",
     "password-input",
+    "search-box",
     "search-input",
     "stat-card",
     "textarea",

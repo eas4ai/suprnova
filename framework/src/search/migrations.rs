@@ -194,7 +194,11 @@ impl MigrationTrait for CreateSearchTables {
 
 /// Append these migrations so persistent search can share the application's connection.
 pub fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-    vec![Box::new(CreateSearchTables), Box::new(CreateSearchJobs)]
+    vec![
+        Box::new(CreateSearchTables),
+        Box::new(CreateSearchJobs),
+        Box::new(CreateSearchAnalytics),
+    ]
 }
 
 /// Durable pending references let every queue driver participate in generation publication.
@@ -419,6 +423,167 @@ impl MigrationTrait for CreateSearchJobs {
                     Table::alter()
                         .table(Alias::new("search_generations"))
                         .drop_column(Alias::new("switch_watermark"))
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+/// Analytics has separate retention so rebuilding indexes cannot erase activity.
+pub struct CreateSearchAnalytics;
+
+impl MigrationName for CreateSearchAnalytics {
+    fn name(&self) -> &str {
+        "m20261014_000003_create_search_analytics"
+    }
+}
+
+fn analytics_table(
+    table: &str,
+    columns: Vec<(&str, &str)>,
+    backend: DbBackend,
+) -> TableCreateStatement {
+    let mut schema = Table::create();
+    schema.table(Alias::new(table)).if_not_exists().col(
+        ColumnDef::new(Alias::new("id"))
+            .string_len(36)
+            .not_null()
+            .primary_key(),
+    );
+    for (name, kind) in columns {
+        let mut column = ColumnDef::new(Alias::new(name));
+        match kind {
+            "bigint" => {
+                column.big_integer();
+            }
+            "text" if backend == DbBackend::MySql => {
+                column.custom(Alias::new("LONGTEXT"));
+            }
+            "text" => {
+                column.text();
+            }
+            "nullable" => {
+                column.string().null();
+            }
+            _ => {
+                column.string();
+            }
+        }
+        if kind != "nullable" {
+            column.not_null();
+        }
+        schema.col(&mut column);
+    }
+    schema.col(
+        ColumnDef::new(Alias::new("created_at"))
+            .big_integer()
+            .not_null(),
+    );
+    if let Some((column, parent)) = match table {
+        "search_impressions" => Some(("query_id", "search_queries")),
+        "search_clicks" => Some(("impression_id", "search_impressions")),
+        _ => None,
+    } {
+        schema.foreign_key(
+            ForeignKey::create()
+                .name(format!("{table}_parent"))
+                .from(Alias::new(table), Alias::new(column))
+                .to(Alias::new(parent), Alias::new("id"))
+                .on_delete(ForeignKeyAction::Cascade),
+        );
+    }
+    if backend == DbBackend::MySql {
+        schema.character_set("utf8mb4").collate("utf8mb4_bin");
+    }
+    schema
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateSearchAnalytics {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        for (table, columns) in [
+            (
+                "search_queries",
+                vec![
+                    ("index", "string"),
+                    ("query", "text"),
+                    ("query_fold", "text"),
+                    ("filters", "text"),
+                    ("hits", "bigint"),
+                    ("took_ms", "bigint"),
+                    ("viewer_id", "nullable"),
+                ],
+            ),
+            (
+                "search_impressions",
+                vec![
+                    ("query_id", "string"),
+                    ("session_hash", "string"),
+                    ("keys", "text"),
+                ],
+            ),
+            (
+                "search_clicks",
+                vec![
+                    ("impression_id", "string"),
+                    ("key", "text"),
+                    ("position", "bigint"),
+                ],
+            ),
+        ] {
+            let schema = analytics_table(table, columns, manager.get_database_backend());
+            manager.create_table(schema.to_owned()).await?;
+            let retention_index = format!("{table}_retention");
+            if !manager.has_index(table, &retention_index).await? {
+                manager
+                    .create_index(
+                        Index::create()
+                            .name(&retention_index)
+                            .table(Alias::new(table))
+                            .col(Alias::new("created_at"))
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+        }
+        for (name, table, columns) in [
+            (
+                "search_queries_index_time",
+                "search_queries",
+                vec!["index", "created_at"],
+            ),
+            (
+                "search_impressions_query",
+                "search_impressions",
+                vec!["query_id"],
+            ),
+            (
+                "search_clicks_impression",
+                "search_clicks",
+                vec!["impression_id"],
+            ),
+        ] {
+            if manager.has_index(table, name).await? {
+                continue;
+            }
+            let mut index = Index::create();
+            index.name(name).table(Alias::new(table));
+            for column in columns {
+                index.col(Alias::new(column));
+            }
+            manager.create_index(index.to_owned()).await?;
+        }
+        Ok(())
+    }
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        for table in ["search_clicks", "search_impressions", "search_queries"] {
+            manager
+                .drop_table(
+                    Table::drop()
+                        .table(Alias::new(table))
+                        .if_exists()
                         .to_owned(),
                 )
                 .await?;

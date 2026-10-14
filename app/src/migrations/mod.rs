@@ -15,6 +15,7 @@ mod m_2026_06_08_auth_flows_user_columns;
 mod m_2026_08_01_bench_tables;
 mod m_2026_08_01_queue_tables;
 mod m_2026_08_02_bench_tick_task;
+mod m_2026_10_14_search_dogfood;
 
 pub struct Migrator;
 
@@ -120,6 +121,7 @@ impl MigratorTrait for Migrator {
             Box::new(suprnova::queue::migrations::CreateFailedJobsTable),
             Box::new(suprnova::features::migrations::FeaturesToPennantLayout),
         ];
+        migrations.push(Box::new(m_2026_10_14_search_dogfood::Migration));
         migrations.extend(suprnova::search::migrations());
         migrations.extend(suprnova::recommendations::migrations());
         migrations

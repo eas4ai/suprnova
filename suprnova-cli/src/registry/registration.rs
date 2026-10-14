@@ -91,7 +91,8 @@ pub(crate) fn edits(
     };
 
     let mut live_edits: Vec<(Range<usize>, String)> = Vec::new();
-    let needs_namespace = !modules.is_empty() || !register.is_empty();
+    let needs_namespace =
+        !modules.is_empty() || register.iter().any(|path| path.starts_with("crate::"));
     if needs_namespace && matches!(declared_namespace, Declaration::Missing) {
         live_edits.push(declare_module(
             &live_source,
@@ -169,7 +170,10 @@ impl Wanted<'_> {
         let declared = |file: Option<&syn::File>, module: &str| {
             file.is_some_and(|file| matches!(module_declaration(file, module), Declaration::Plain))
         };
-        if !declared(live, namespace_module) {
+        if (!self.modules.is_empty()
+            || self.register.iter().any(|path| path.starts_with("crate::")))
+            && !declared(live, namespace_module)
+        {
             lines.push(format!("{LIVE_MODULE}: pub mod {namespace_module};"));
         }
         for module in self.modules {
@@ -199,6 +203,15 @@ impl Wanted<'_> {
 fn full_paths(namespace_module: &str, entries: &[String]) -> Result<Vec<String>> {
     let mut paths: Vec<String> = Vec::new();
     for entry in entries {
+        if namespace_module == "suprnova"
+            && entry.starts_with("suprnova::live::components::")
+            && entry.split("::").all(is_identifier)
+        {
+            if !paths.contains(entry) {
+                paths.push(entry.clone());
+            }
+            continue;
+        }
         let segments: Vec<&str> = entry.split("::").collect();
         let (module, name) = match segments.as_slice() {
             ["crate", "live", namespace, module, name] if *namespace == namespace_module => {
@@ -759,6 +772,7 @@ mod tests {
     use super::registered_components;
     use crate::registry::RegistryError;
     use crate::registry::install::{RegistrationEdits, registration_edits};
+    use crate::registry::plan::FRAMEWORK_COMPONENTS;
 
     const SCAFFOLD: &str = include_str!("../templates/files/backend/live/mod.rs.tpl");
     const COUNTER: &str = "crate::live::acme::counter::Counter";
@@ -806,6 +820,72 @@ mod tests {
             &[],
         )
         .expect("edits")
+    }
+
+    #[test]
+    fn the_framework_search_box_registers_without_an_application_namespace_module() {
+        let dir = project(SCAFFOLD);
+        let entries: Vec<String> = FRAMEWORK_COMPONENTS
+            .iter()
+            .filter(|(directory, _)| *directory == "search-box")
+            .map(|(_, path)| (*path).to_owned())
+            .collect();
+        let changes = registration_edits(dir.path(), "suprnova", &[], &entries, &[])
+            .expect("framework registration");
+        write(dir.path(), &changes);
+        let source = std::fs::read_to_string(dir.path().join("src/live/mod.rs")).expect("module");
+        assert!(source.contains(".register::<suprnova::live::components::SearchBox>()?"));
+        assert!(!source.contains("pub mod suprnova;"));
+        assert!(!dir.path().join("src/live/suprnova").exists());
+        let again = registration_edits(dir.path(), "suprnova", &[], &entries, &[])
+            .expect("second registration");
+        assert_eq!(again, RegistrationEdits::Write(Vec::new()));
+        assert!(registration_edits(dir.path(), "acme", &[], &entries, &[]).is_err());
+    }
+
+    #[test]
+    fn framework_component_paths_register_and_unregister_without_a_namespace_module() {
+        let dir = project(SCAFFOLD);
+        let entries = strings(&["suprnova::live::components::Widget"]);
+        let changes = registration_edits(dir.path(), "suprnova", &[], &entries, &[])
+            .expect("framework registration");
+        write(dir.path(), &changes);
+        let source = std::fs::read_to_string(dir.path().join("src/live/mod.rs")).expect("module");
+        assert!(source.contains(".register::<suprnova::live::components::Widget>()?"));
+        assert!(!source.contains("pub mod suprnova;"));
+        assert!(!dir.path().join("src/live/suprnova").exists());
+        let changes = registration_edits(dir.path(), "suprnova", &[], &[], &entries)
+            .expect("framework unregistration");
+        write(dir.path(), &changes);
+        let source = std::fs::read_to_string(dir.path().join("src/live/mod.rs")).expect("module");
+        assert!(!source.contains(".register::<"), "{source}");
+        syn::parse_file(&source).expect("the module still parses");
+        assert!(!dir.path().join("src/live/suprnova").exists());
+    }
+
+    #[test]
+    fn malformed_framework_paths_are_refused_before_anything_is_planned() {
+        let dir = project(SCAFFOLD);
+        for path in [
+            "suprnova::live::components::",
+            "suprnova::live::components::fn",
+            "suprnova::live::components::Widget>()?; std::process::exit(1); //",
+            "suprnova::live::components::Wïdget",
+            "suprnova::live::other::Widget",
+        ] {
+            assert!(
+                registration_edits(dir.path(), "suprnova", &[], &strings(&[path]), &[]).is_err(),
+                "{path}"
+            );
+            assert!(
+                registration_edits(dir.path(), "suprnova", &[], &[], &strings(&[path])).is_err(),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/live/mod.rs")).expect("module"),
+            SCAFFOLD
+        );
     }
 
     #[test]

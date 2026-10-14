@@ -222,8 +222,26 @@ pub type DocumentBatchLoader =
 /// Type-erased imports let maintenance commands use each model's chunked loader.
 pub type BulkImporter = fn() -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send>>;
 
+/// Dispatch to a model's generic builder preserves hydration and scope at public boundaries.
+pub type ProjectedSearcher = fn(
+    super::query::SearchQuery,
+    Vec<String>,
+    Option<Viewer>,
+) -> Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    super::results::SearchResults<super::results::RawHit>,
+                    FrameworkError,
+                >,
+            > + Send,
+    >,
+>;
+
 /// One inventory entry connects model write hooks, jobs and scoped reads.
 pub struct SearchableEntry {
+    /// Projection keeps HTTP and library components on the model's ordinary search pipeline.
+    pub search: ProjectedSearcher,
     /// Runtime type identity makes non-searchable write hooks a cheap no-op.
     pub type_id: fn() -> TypeId,
     /// Rust names let console commands accept a model or index identity.

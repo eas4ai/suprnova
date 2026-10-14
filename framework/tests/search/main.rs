@@ -35,3 +35,8 @@ mod embedder_http;
 mod embedder_http_openrouter;
 #[cfg(feature = "testing")]
 mod qdrant;
+
+#[cfg(feature = "testing")]
+mod endpoint;
+
+mod analytics;

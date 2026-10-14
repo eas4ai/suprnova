@@ -91,6 +91,9 @@ pub const LISTENER_TASK: &str = "bench:queued-listener";
 /// had changed; measuring only the plain arm would say nothing about the
 /// fix.
 pub fn register(schedule: &mut Schedule) {
+    // Analytics retention is independent of rebuilding the notes search index.
+    schedule.add(schedule.command("search:analytics-prune").daily());
+
     // Every minute is the shortest interval that still exercises the
     // cross-replica question, and it keeps a ten-minute run to ten rows
     // per replica rather than something that needs sampling.

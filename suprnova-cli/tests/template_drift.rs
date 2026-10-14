@@ -1730,6 +1730,25 @@ fn scaffolded_controllers_generate_types_without_unresolved_props() {
     );
 }
 
+/// The search formatter's title and body remain explicit typed Inertia props.
+#[test]
+fn scaffolded_note_highlights_have_no_untyped_field() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let structs = scan_scaffold_controllers(dir.path());
+    let rendered = suprnova_cli::commands::generate_types::generate_typescript(
+        &structs,
+        suprnova_cli::commands::generate_types::PageTypes::default(),
+    );
+    assert!(
+        rendered.contains("highlight: NoteHighlight | null;"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("export interface NoteHighlight {\n  title: string;\n  body: string;\n}"),
+        "{rendered}"
+    );
+}
+
 /// The scaffolded backend opts into the error page, and every starter
 /// ships the component it names.
 ///

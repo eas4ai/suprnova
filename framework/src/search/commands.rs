@@ -337,3 +337,64 @@ async fn run_persistent(
     })
     .await
 }
+
+#[command(
+    name = "search:analytics",
+    description = "Report top queries, missing queries and click positions [--index name] [--days days]"
+)]
+async fn analytics(args: Vec<String>) -> Result<(), FrameworkError> {
+    let mut index = None;
+    let mut days = None;
+    let mut arguments = args.iter();
+    while let Some(argument) = arguments.next() {
+        let (name, value) = match argument.split_once('=') {
+            Some(pair) => pair,
+            None => (
+                argument.as_str(),
+                arguments
+                    .next()
+                    .ok_or_else(|| FrameworkError::param(format!("{argument} requires a value")))?
+                    .as_str(),
+            ),
+        };
+        match name {
+            "--index" if index.is_none() => index = Some(value),
+            "--days" if days.is_none() => {
+                days = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| FrameworkError::param("analytics --days must be positive"))?,
+                )
+            }
+            _ => {
+                return Err(FrameworkError::param(format!(
+                    "search:analytics unknown or repeated option '{name}'"
+                )));
+            }
+        }
+    }
+    let report = super::analytics::report(index, days.unwrap_or(30)).await?;
+    crate::console::line(
+        serde_json::to_string(&report).map_err(|error| {
+            FrameworkError::internal(format!("search analytics report: {error}"))
+        })?,
+    );
+    Ok(())
+}
+
+#[command(
+    name = "search:analytics-prune",
+    description = "Prune expired search analytics and removal tombstones"
+)]
+async fn analytics_prune(args: Vec<String>) -> Result<(), FrameworkError> {
+    if !args.is_empty() {
+        return Err(FrameworkError::param(
+            "search:analytics-prune accepts no parameters",
+        ));
+    }
+    crate::console::line(format!(
+        "search:analytics-prune - removed {} rows",
+        super::analytics::prune().await?
+    ));
+    Ok(())
+}

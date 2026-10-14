@@ -563,6 +563,29 @@ pub(crate) fn create_project(
     )
     .map_err(|e| format!("Failed to write src/models/note.rs: {}", e))?;
 
+    // Both kits register the same idempotent notes fixtures for `db:seed`.
+    fs::create_dir_all(project_path.join("src/seeders"))
+        .map_err(|error| format!("Failed to create seeders directory: {error}"))?;
+    for (path, template) in [
+        (
+            "src/seeders/mod.rs",
+            include_str!("../templates/files/backend/seeders/mod.rs.tpl"),
+        ),
+        (
+            "src/seeders/notes.rs",
+            include_str!("../templates/files/backend/seeders/notes.rs.tpl"),
+        ),
+    ] {
+        fs::write(project_path.join(path), template)
+            .map_err(|error| format!("Failed to write {path}: {error}"))?;
+    }
+
+    fs::write(
+        project_path.join("src/schedule.rs"),
+        include_str!("../templates/files/backend/search_schedule.rs.tpl"),
+    )
+    .map_err(|error| format!("Failed to write src/schedule.rs: {error}"))?;
+
     // Write src/migrations/mod.rs
     fs::write(
         project_path.join("src/migrations/mod.rs"),

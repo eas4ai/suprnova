@@ -151,9 +151,9 @@ impl<T> IntoComponentResult<T> for T {
     }
 }
 
-impl<T> IntoComponentResult<T> for Result<T, ComponentError> {
+impl<T, E: Into<ComponentError>> IntoComponentResult<T> for Result<T, E> {
     fn into_component_result(self) -> Result<T, ComponentError> {
-        self
+        self.map_err(Into::into)
     }
 }
 
@@ -170,9 +170,9 @@ impl IntoComponentHookResult for () {
     }
 }
 
-impl IntoComponentHookResult for Result<(), ComponentError> {
+impl<E: Into<ComponentError>> IntoComponentHookResult for Result<(), E> {
     fn into_component_hook_result(self) -> Result<(), ComponentError> {
-        self
+        self.map_err(Into::into)
     }
 }
 
@@ -468,5 +468,36 @@ pub fn decode_field<T: DeserializeOwned>(
                     .map_err(|_| ComponentError::contract_failure())?;
             decode_json_field(&encode_json_field(&value)?)
         }
+    }
+}
+
+#[cfg(test)]
+mod converted_component_errors {
+    use super::{ComponentError, IntoComponentHookResult, IntoComponentResult};
+
+    struct HostError;
+    impl From<HostError> for ComponentError {
+        fn from(_: HostError) -> Self {
+            Self::application_failure()
+        }
+    }
+
+    #[test]
+    fn host_mount_and_lifecycle_errors_reach_the_closed_component_boundary() {
+        let mount: Result<u32, HostError> = Err(HostError);
+        let result: Result<u32, ComponentError> = mount.into_component_result();
+        assert_eq!(result, Err(ComponentError::application_failure()));
+        let hook: Result<(), HostError> = Err(HostError);
+        assert_eq!(
+            hook.into_component_hook_result(),
+            Err(ComponentError::application_failure())
+        );
+        let existing: Result<(), ComponentError> = Err(ComponentError::contract_failure());
+        assert_eq!(
+            existing.into_component_hook_result(),
+            Err(ComponentError::contract_failure())
+        );
+        let success: Result<u32, HostError> = Ok(7);
+        assert_eq!(success.into_component_result(), Ok(7));
     }
 }

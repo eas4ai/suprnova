@@ -31,6 +31,146 @@ use serde::Serialize;
 
 type HydrationCallback<M> = Box<dyn FnOnce(Builder<M>) -> Builder<M> + Send>;
 
+/// Runtime index selection still executes the registered model's generic search builder.
+pub struct IndexSearchBuilder {
+    index: String,
+    builder: SearchBuilder<()>,
+}
+
+impl IndexSearchBuilder {
+    pub(crate) fn new(index: String) -> Self {
+        Self {
+            index,
+            builder: SearchBuilder::new(""),
+        }
+    }
+
+    /// Query text is parsed by the same core grammar as a statically named model.
+    pub fn search(mut self, query: impl Into<String>) -> Self {
+        self.builder.plan.text = super::query::QueryText::parse(&query.into());
+        self
+    }
+
+    /// Bind filters against the resolved index before any driver read.
+    pub fn filter(mut self, filter: impl Into<SearchFilter>) -> Self {
+        self.builder = self.builder.filter(filter);
+        self
+    }
+
+    /// Facets retain the generic builder's complete candidate counting universe.
+    pub fn facets(mut self, attributes: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.builder = self.builder.facets(attributes);
+        self
+    }
+
+    /// Formatting always uses code-owned tags and escaped source text.
+    pub fn highlight(mut self, attributes: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.builder = self.builder.highlight(attributes);
+        self
+    }
+
+    /// Sorting validates the declaration before binding engine input.
+    pub fn sort_by(mut self, attribute: impl Into<String>, direction: SortDirection) -> Self {
+        self.builder = self.builder.sort_by(attribute, direction);
+        self
+    }
+
+    /// A bounded result window prevents an island from hydrating unbounded rows.
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.builder = self.builder.limit(limit);
+        self
+    }
+
+    /// Offsets preserve the same deterministic order used by the generic builder.
+    pub fn offset(mut self, offset: usize) -> Self {
+        self.builder = self.builder.offset(offset);
+        self
+    }
+
+    /// Explicit viewer context keeps background and component reads scoped.
+    pub fn for_viewer(mut self, viewer: Viewer) -> Self {
+        self.builder = self.builder.for_viewer(viewer);
+        self
+    }
+
+    /// Projection excludes model-only fields while preserving scores, highlights and analytics.
+    pub async fn get(self) -> Result<SearchResults<RawHit>, FrameworkError> {
+        let entry = SearchRegistry::by_index(&self.index)?;
+        (entry.search)(self.builder.plan, self.builder.grammar, self.builder.viewer).await
+    }
+}
+
+/// Derive-generated dispatch invokes generic hydration before exposing a document projection.
+#[doc(hidden)]
+pub async fn search_projected<M>(
+    plan: SearchQuery,
+    grammar: Vec<String>,
+    viewer: Option<Viewer>,
+) -> Result<SearchResults<RawHit>, FrameworkError>
+where
+    M: Searchable + From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    let builder = SearchBuilder::<M> {
+        plan,
+        grammar,
+        viewer,
+        hydration: None,
+        model: PhantomData,
+    };
+    let (result, documents) = builder.execute().await?;
+    Ok(SearchResults {
+        hits: result
+            .hits
+            .into_iter()
+            .map(|hit| project_hit(hit, &documents))
+            .collect::<Result<_, _>>()?,
+        total: result.total,
+        facets: result.facets,
+        facet_stats: result.facet_stats,
+        processing_time_ms: result.processing_time_ms,
+        engine: result.engine,
+        query: result.query,
+        pagination: result.pagination,
+        impression: result.impression,
+    })
+}
+
+fn project_hit<M>(
+    hit: Hit<M>,
+    documents: &HashMap<String, SearchDocument>,
+) -> Result<Hit<RawHit>, FrameworkError> {
+    let document = documents.get(&hit.key).ok_or_else(|| {
+        FrameworkError::internal(format!(
+            "search key '{}' lost its declared projection",
+            hit.key
+        ))
+    })?;
+    Ok(Hit {
+        model: RawHit {
+            attributes: document.attributes.clone(),
+        },
+        key: hit.key,
+        engine_score: hit.engine_score,
+        normalized_score: hit.normalized_score,
+        engine: hit.engine,
+        formatted: hit.formatted,
+        geo_distance: hit.geo_distance,
+        group_members: hit
+            .group_members
+            .into_iter()
+            .map(|member| project_hit(member, documents))
+            .collect::<Result<_, _>>()?,
+    })
+}
+
 /// Deferred model queries keep fluent configuration infallible and terminal errors explicit.
 /// Attribute and numeric validation runs at each terminal before any driver read.
 pub struct SearchBuilder<M> {
@@ -320,13 +460,24 @@ where
             .take(plan.limit)
             .collect();
         normalize_hits(&mut hits);
+        let processing_time_ms = elapsed_ms(started);
+        let impression = super::analytics::record(
+            descriptor.name,
+            &plan,
+            &viewer,
+            retrieved.total.value(),
+            processing_time_ms,
+            hits.iter().map(|hit| hit.key.clone()).collect(),
+        )
+        .await?;
         Ok((
             SearchResults {
+                impression,
                 hits,
                 total: retrieved.total,
                 facets: retrieved.facets,
                 facet_stats: retrieved.facet_stats,
-                processing_time_ms: elapsed_ms(started),
+                processing_time_ms,
                 engine: retrieved.engine_name,
                 query: plan.text.original.clone(),
                 pagination,

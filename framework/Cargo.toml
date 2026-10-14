@@ -212,6 +212,8 @@ percent-encoding = "2.3.2"
 deunicode = "1.6.2"
 strsim = "0.11"
 unicode-segmentation = "1"
+# Full Unicode folding keeps analytics suggestions consistent across case variants.
+icu_casemap = "2.2"
 httpdate = "1.0.3"
 argon2 = "0.5.3"
 md-5 = "0.11.0"

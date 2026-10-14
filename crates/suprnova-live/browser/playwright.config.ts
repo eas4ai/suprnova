@@ -10,7 +10,8 @@ export default defineConfig({
     baseURL: "http://127.0.0.1:4173",
     trace: "retain-on-failure",
   },
-  webServer: [
+  // Static component cases load vendored assets directly and need no application hosts.
+  webServer: process.env["SUPRNOVA_LIVE_COMPONENT_ONLY"] === "1" ? [] : [
     {
       command: "node test-host/server.mjs",
       url: "http://127.0.0.1:4173/health",

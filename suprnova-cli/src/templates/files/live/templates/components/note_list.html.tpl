@@ -16,7 +16,17 @@
 {% call empty::empty_state("notes-empty", "no-results", "No notes match", text=component.no_results()) %}{% call button::button("Clear the search", action="clear_search", variant="secondary") %}{% endcall %}{% endcall %}
 {% endif %}
 {% else %}
-{% call more::load_more_list("notes", label="Your notes") %}{% for note in notes %}<li class="kit-note-row" live:key="{{ note.key|live_key }}"><a href="{{ suprnova::url::root() }}/notes/{{ note.id }}">{{ note.title }}</a> <time class="kit-muted" datetime="{{ note.created_at }}">{{ note.created_on }}</time></li>{% endfor %}{% endcall %}
+{% call more::load_more_list("notes", label="Your notes") %}
+{% for note in notes %}
+<li class="kit-note-row" live:key="{{ note.key|live_key }}">
+<div>
+<a href="{{ suprnova::url::root() }}/notes/{{ note.id }}">{% if let Some(title) = note.highlight_title %}{% let title_html = component.highlight(title)? %}{{ title_html|trusted_html }}{% else %}{{ note.title }}{% endif %}</a>
+{% if let Some(body) = note.highlight_body %}<p>{% let body_html = component.highlight(body)? %}{{ body_html|trusted_html }}</p>{% endif %}
+</div>
+<time class="kit-muted" datetime="{{ note.created_at }}">{{ note.created_on }}</time>
+</li>
+{% endfor %}
+{% endcall %}
 {% call more::load_more("load_more", exhausted=!more) %}{% endcall %}
 {% endif %}
 {% endcall %}

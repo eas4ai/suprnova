@@ -63,6 +63,13 @@ pub struct AppDocument;
 pub async fn register() {
     // Initialize database connection
     DB::init().await.expect("Failed to connect to database");
+    // Database migrations run before this hook; the engine generation does not.
+    crate::models::note::Note::initialize_search()
+        .await
+        .expect("Failed to initialize notes search index");
+
+    // Register reusable notes fixtures for `db:seed` and `--class=NotesSeeder`.
+    suprnova::seed::register::<crate::seeders::notes::NotesSeeder>();
 
     // Authentication: register the AuthManager (the config/auth.php analogue)
     // and a user provider so `Auth::attempt` and `Auth::user_as::<User>()`
