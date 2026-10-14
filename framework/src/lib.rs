@@ -625,6 +625,8 @@ pub use vector::{
     MemoryVectorDriver, QdrantDistance, QdrantVectorDriver, SUPRNOVA_ID_PAYLOAD_KEY, Vector,
     VectorDriver, VectorItem, VectorMatch, VectorRegistry, VectorStore,
 };
+#[cfg(feature = "vector-pgvector")]
+pub use vector::{PgVectorDistance, PgVectorDriver};
 #[cfg(feature = "web-push")]
 pub use web_push::{
     AddressClass, ContentEncoding, EndpointAllowlist, EndpointPolicy, InvalidAllowlist,

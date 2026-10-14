@@ -348,6 +348,7 @@ default = [
     "database-postgres",
     "database-mysql",
     "vector-mariadb",
+    "vector-pgvector",
     "web-push",
     "localization",
     "magnetar-oauth",
@@ -445,6 +446,8 @@ database-mysql = [
 ]
 # Enables the direct-SQLx MariaDB vector driver.
 vector-mariadb = ["dep:sqlx", "sqlx/mysql", "database-mysql"]
+# Enables the direct-SQLx Postgres pgvector driver.
+vector-pgvector = ["dep:sqlx", "sqlx/postgres", "database-postgres"]
 # Enables the browser web-push client and notification channel. Kept in the
 # default set while allowing minimal builds to exclude its RSA implementation.
 web-push = ["dep:suprnova-web-push"]

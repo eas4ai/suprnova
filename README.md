@@ -113,7 +113,7 @@ exists in `frontend/src/pages/`.
 | **Broadcasting and WebSockets** | Public, private and presence channels, `BroadcastHub`, `InMemoryBroadcastHub`, `PusherBroadcastHub` for Pusher, Soketi and Reverb, `SeaStreamerBroadcastHub` behind the `broadcasting-fanout` feature |
 | **Filesystem** | `Storage` over OpenDAL: local, memory, S3 and S3-compatible stores (R2, B2, RustFS, MinIO), Azure and GCS behind features; a default disk from `FILESYSTEM_DISK` |
 | **HTTP client** | `Http` with retries and `Http::fake` |
-| **Vector search** | `Vector` with `MemoryVectorDriver`, `QdrantVectorDriver`, `MariaDbVectorDriver` and `PineconeVectorDriver` |
+| **Vector search** | `Vector` with `MemoryVectorDriver`, `QdrantVectorDriver`, `MariaDbVectorDriver`, `PgVectorDriver` and `PineconeVectorDriver` |
 | **Payments** | `Checkout`, `Subscription`, `CustomerStore` and `WebhookHandler` traits, with adapter crates for Stripe, Paddle and NOWPayments |
 | **Validation and data** | `#[request]` form requests, rules such as `Unique`, `Exists`, `Confirmed`, `RequiredIf` and `DateFormat`, `#[derive(Data)]` data objects, JSON:API resources |
 | **Auth** | `Auth::login`, `Auth::user`, named guards, remember-me, email verification, password reset, two-factor with recovery codes, brute-force lockout, gates and `#[policy]`; passwords, OAuth (Apple, Facebook, Google, TikTok, X), passkeys and magic links through `Auth::password`, `Auth::oauth`, `Auth::passkey` and `Auth::magic_link` |

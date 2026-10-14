@@ -29,6 +29,7 @@ drivers they use.
 | `database-postgres` | Yes | Postgres support across SeaORM, migrations, and Magnetar storage. |
 | `database-mysql` | Yes | MySQL support across SeaORM, migrations, and Magnetar storage. |
 | `vector-mariadb` | Yes | The direct-SQLx MariaDB vector driver; also enables `database-mysql`. |
+| `vector-pgvector` | Yes | The direct-SQLx Postgres pgvector vector driver; also enables `database-postgres`. |
 | `web-push` | Yes | VAPID/web-push support and the web-push notification channel. |
 | `broadcasting-fanout` | No | SeaStreamer-backed cross-process broadcasting fanout. |
 | `otel` | No | OpenTelemetry tracing and export integration. |

@@ -1,8 +1,8 @@
 # Vector
 
-Suprnova ships a Laravel-shape `Vector` facade backed by one of four
-drivers - in-process Memory, Qdrant, Pinecone, or MariaDB native
-`VECTOR(N)` - picked explicitly at boot via `Vector::register`. The
+Suprnova ships a Laravel-shape `Vector` facade backed by one of five
+drivers - in-process Memory, Qdrant, Pinecone, MariaDB native
+`VECTOR(N)`, or Postgres with pgvector - picked explicitly at boot via `Vector::register`. The
 facade is a thin layer over a `VectorDriver` trait, so custom backends
 plug in the same way the built-ins do.
 
@@ -308,18 +308,86 @@ MARIADB_URL='mysql://root:secret@localhost:3306/vectors' \
     cargo test -p suprnova --test vector -- --ignored mariadb::
 ```
 
+### pgvector - `PgVectorDriver`
+
+Talks to Postgres through its own `sqlx::PgPool`. The server needs the pgvector package installed and the `vector` extension enabled in the application's database. On first use, the driver checks `pg_extension`; a missing extension produces an error naming the pgvector package and `CREATE EXTENSION vector`. A successful check is cached per driver. Connection and query failures can be retried on the next call.
+
+**Feature.** `vector-pgvector` is on by default beside `vector-mariadb`. It enables `sqlx/postgres` and `database-postgres`. Minimal builds can omit the driver by disabling default features.
+
+`from_url` accepts `postgres://` or `postgresql://` and connects lazily, so registration does not require a reachable server. `from_pool(pool)` accepts a pool with your own connection limits and timeouts. `from_env()` reads `PGVECTOR_URL` first; when it is unset or blank, it takes `DATABASE_URL` only if its scheme is `postgres` or `postgresql`. Errors name the variables without showing the URL, which carries the password.
+
+**Schema is yours.** The driver never creates tables or extensions. Run this SQL in your application migration before using a 1536-dimensional cosine store:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE TABLE IF NOT EXISTS "documents" (
+  id VARCHAR(254) PRIMARY KEY,
+  embedding vector(1536) NOT NULL,
+  metadata JSONB NULL
+);
+CREATE INDEX ON "documents" USING hnsw (embedding vector_cosine_ops);
+```
+
+Generate migration text with `driver.ensure_table_sql_for("documents", 1536)?` to use the driver's configured distance. The static `PgVectorDriver::ensure_table_sql("documents", 1536, PgVectorDistance::Cosine)?` is available to migration generators without a driver. Both return the extension, table, and index statements above. The index statement creates a new index each time: run the migration once. Use the opclass for the same distance you configure on the driver.
+
+**Distances and scores.** Results are best first, with higher scores meaning more similar. pgvector returns the negative inner product from `<#>` so Postgres can scan the index in ascending order. The driver reverses that sign for the exposed score.
+
+| Distance | Operator | HNSW opclass | Exposed `score` |
+| --- | --- | --- | --- |
+| Cosine (default) | `<=>` | `vector_cosine_ops` | `1 - distance`, usually `[-1, 1]` |
+| Euclidean | `<->` | `vector_l2_ops` | `1 / (1 + distance)`, `(0, 1]` |
+| Inner product | `<#>` | `vector_ip_ops` | `-distance`, unbounded |
+
+The cosine score keeps negative similarity; it does not use MariaDB's `[0, 1]` normalization. A zero query under cosine is an error because its direction is undefined. Euclidean and inner product accept zero queries. An empty query or `k == 0` returns an empty list. These formulas follow [pgvector's distance operators](https://github.com/pgvector/pgvector#distances).
+
+**Store-name safety.** Names use `[A-Za-z_][A-Za-z0-9_]*`, at most 63 bytes, so Postgres cannot silently truncate them. Every SQL identifier is validated and double-quoted; every runtime value is bound. IDs round-trip unchanged through `VARCHAR(254)`. Metadata must be a JSON object or null; null is stored as SQL `NULL` in the `JSONB` column.
+
+**Writes.** Upserts use batches of 500 rows with `ON CONFLICT (id) DO UPDATE`; deletes use batches of 1000 IDs. Each call uses one transaction across all batches, so an error rolls the whole call back. Embeddings are bound as text such as `[0.1,0.2,0.3]` and cast to `vector`. Postgres enforces the table's dimension; its error text is preserved in `FrameworkError` with the store name. Changing embedding models to a new dimension requires a migration and re-embedding.
+
+**Example.** After migrating a three-dimensional `documents` table, set `PGVECTOR_URL` or a Postgres `DATABASE_URL` and run:
+
+```rust
+use std::sync::Arc;
+use suprnova::{FrameworkError, PgVectorDistance, PgVectorDriver, Vector, VectorItem};
+
+#[tokio::main]
+async fn main() -> Result<(), FrameworkError> {
+    let driver = PgVectorDriver::from_env()?
+        .with_distance(PgVectorDistance::Cosine);
+    Vector::register("documents", Arc::new(driver));
+
+    let store = Vector::store("documents")?;
+    store.upsert(vec![VectorItem::new(
+        "doc-1", vec![1.0, 0.0, 0.0], serde_json::json!({"title": "Hello"}),
+    )]).await?;
+    for hit in store.similar(vec![1.0, 0.0, 0.0], 10).await? {
+        println!("{}: {} (score {})", hit.id, hit.metadata["title"], hit.score);
+    }
+    Ok(())
+}
+```
+
+**Trapdoor.** `driver.pool()` exposes the `sqlx::PgPool` for joins or queries beyond the trait. `embedding_to_vec_text`, `score_from_distance`, and `ensure_table_sql` keep direct SQL consistent with the driver.
+
+**Tests.** Database-free tests run by default. Integration tests create the extension and a unique table per test, then drop the table. They require a disposable database because the missing-extension test attempts `DROP EXTENSION vector` without `CASCADE`, restores it afterward, and prints a skip reason if the role cannot drop it or other tables depend on it. All Postgres tests share an advisory lock to prevent that test racing the others.
+
+```bash
+PG_TEST_URL='postgres://user:pass@localhost:5432/vectors' \
+    cargo nextest run -p suprnova --test vector --run-ignored only -E 'test(pgvector::postgres_)'
+```
+
 ## Driver comparison
 
-| Aspect | Memory | Qdrant | Pinecone | MariaDB |
-| --- | --- | --- | --- | --- |
-| Backing store | `HashMap` | Qdrant gRPC | Pinecone REST | MariaDB SQL |
-| Persistence | None | Yes | Yes | Yes |
-| Auto-create | n/a | Yes (configurable) | No (user creates index) | No (migration is yours) |
-| String IDs | Native | Hashed to UUID-5 | Native | Native |
-| Metadata key reserved | None | `__suprnova_id` | None | None |
-| Throughput | Per-process | Concurrent | Concurrent (pool-bounded) | Concurrent (pool-bounded) |
-| Distance metric | Cosine | Configurable | Set at index creation | Cosine / Euclidean |
-| Version requirement | - | Any | Any | **11.7+** |
+| Aspect | Memory | Qdrant | Pinecone | MariaDB | pgvector |
+| --- | --- | --- | --- | --- | --- |
+| Backing store | `HashMap` | Qdrant gRPC | Pinecone REST | MariaDB SQL | Postgres SQL |
+| Persistence | None | Yes | Yes | Yes | Yes |
+| Auto-create | n/a | Yes (configurable) | No (user creates index) | No (migration is yours) | No (migration is yours) |
+| String IDs | Native | Hashed to UUID-5 | Native | Native | Native |
+| Metadata key reserved | None | `__suprnova_id` | None | None | None |
+| Throughput | Per-process | Concurrent | Concurrent (pool-bounded) | Concurrent (pool-bounded) | Concurrent (pool-bounded) |
+| Distance metric | Cosine | Configurable | Set at index creation | Cosine / Euclidean | Cosine / Euclidean / Inner product |
+| Version requirement | - | Any | Any | **11.7+** | Postgres with pgvector and HNSW support |
 
 ## Operational notes
 
@@ -333,7 +401,7 @@ MARIADB_URL='mysql://root:secret@localhost:3306/vectors' \
 
 ## Extending
 
-To add a fifth backend (Weaviate, Milvus, LanceDB, pgvector, LibSQL, ...):
+To add a sixth backend (Weaviate, Milvus, LanceDB, LibSQL, ...):
 
 1. Add a new `framework/src/vector/<backend>.rs` implementing `VectorDriver`.
 2. Re-export the driver type from `framework/src/vector/mod.rs` and the crate root.
@@ -348,7 +416,7 @@ The trait is intentionally small so the bar to ship a new driver stays low. If a
 - [Database](database.md) - multi-driver SeaORM setup, including
   MariaDB as a relational backend alongside vectors
 - [Environment Variables](env-vars.md) - `QDRANT_URL`,
-  `PINECONE_API_KEY`, `MARIADB_URL` and other driver env contracts
+  `PINECONE_API_KEY`, `MARIADB_URL`, `PGVECTOR_URL` and other driver env contracts
 - [Cache](cache.md) - sibling facade with the same driver-trait shape
 - [Laravel Parity Map](parity.md) - where vector search sits relative
   to Scout
