@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-location-assign",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

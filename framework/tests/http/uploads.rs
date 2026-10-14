@@ -1,0 +1,625 @@
+//! Integration tests for streaming multipart uploads.
+//!
+//! Covers the `#[derive(MultipartRequest)]` extractor end-to-end:
+//! all six field shapes (file scalar/option/vec, text scalar/option/vec),
+//! byte-boundary short-circuit on oversize, magic-byte content sniffing,
+//! `authorize` and `after_validation` hooks. `multipart_validation` drives
+//! the field errors and the stage order through `handle_request`.
+use crate::common;
+
+use common::{build_multipart_body, request_from_multipart};
+use suprnova::http::upload::validators::{ImageFile, MaxSize};
+use suprnova::http::upload::{MultipartRequestHooks, UploadedFile};
+use suprnova::{FromRequest, MultipartRequest, Request, ValidationErrors};
+
+#[derive(MultipartRequest)]
+struct AvatarUpload {
+    #[field("avatar")]
+    avatar: UploadedFile<(ImageFile, MaxSize<5_242_880>)>,
+    #[field("caption")]
+    caption: Option<String>,
+}
+
+// A minimal valid PNG: 8-byte signature + IHDR chunk. infer recognises it.
+fn tiny_png() -> Vec<u8> {
+    let mut bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x0D]);
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&[0; 13]);
+    bytes.extend_from_slice(&[0, 0, 0, 0]);
+    bytes
+}
+
+// ── Smoke: low-level parser sees both fields ──
+
+#[tokio::test]
+async fn multipart_parses_two_fields_via_helper() {
+    use suprnova::http::upload::parse_multipart_streaming;
+    let body = build_multipart_body(
+        "test",
+        &[
+            ("avatar", Some("a.bin"), b"image-bytes"),
+            ("caption", None, b"hello"),
+        ],
+    );
+    let req = request_from_multipart("test", body).await;
+    let payload = parse_multipart_streaming(req, |_, _, _| Ok(()))
+        .await
+        .unwrap();
+    let names: Vec<&str> = payload.fields.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(names.contains(&"avatar"));
+    assert!(names.contains(&"caption"));
+}
+
+// ── Derive macro: file + optional text ──
+
+#[tokio::test]
+async fn derive_extracts_avatar_and_caption() {
+    let png = tiny_png();
+    let body = build_multipart_body(
+        "test",
+        &[
+            ("avatar", Some("a.png"), &png),
+            ("caption", None, b"hello world"),
+        ],
+    );
+    let req = request_from_multipart("test", body).await;
+    let form = AvatarUpload::from_request(req).await.unwrap();
+    let avatar_bytes = form.avatar.bytes().await.unwrap();
+    assert!(avatar_bytes.starts_with(&png[..8]));
+    assert_eq!(form.caption.as_deref(), Some("hello world"));
+}
+
+#[tokio::test]
+async fn derive_rejects_oversize_at_byte_boundary() {
+    let big = vec![0u8; 6 * 1024 * 1024];
+    let body = build_multipart_body("test", &[("avatar", Some("big.bin"), &big)]);
+    let req = request_from_multipart("test", body).await;
+    let err = AvatarUpload::from_request(req)
+        .await
+        .err()
+        .expect("oversize body should fail");
+    // A file over `MaxSize` is invalid input for that field, not a
+    // request-wide limit: a 422 under the field's name.
+    assert_eq!(err.status_code(), 422);
+    match err {
+        suprnova::FrameworkError::Validation(errors) => {
+            assert!(errors.errors.contains_key("avatar"), "{errors}");
+        }
+        other => panic!("expected a validation error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn derive_rejects_non_image_via_magic_bytes() {
+    let pdf = b"%PDF-1.4 lorem ipsum dolor sit amet".to_vec();
+    let body = build_multipart_body("test", &[("avatar", Some("not.png"), &pdf)]);
+    let req = request_from_multipart("test", body).await;
+    let err = AvatarUpload::from_request(req)
+        .await
+        .err()
+        .expect("non-image bytes should fail ImageFile validator");
+    assert_eq!(err.status_code(), 422);
+}
+
+// ── Array uploads ──
+
+#[derive(MultipartRequest)]
+struct Gallery {
+    #[field("photos")]
+    photos: Vec<UploadedFile<MaxSize<1_048_576>>>,
+}
+
+#[tokio::test]
+async fn derive_collects_array_uploads() {
+    let body = build_multipart_body(
+        "test",
+        &[
+            ("photos", Some("a.bin"), b"first"),
+            ("photos", Some("b.bin"), b"second"),
+            ("photos", Some("c.bin"), b"third"),
+        ],
+    );
+    let req = request_from_multipart("test", body).await;
+    let form = Gallery::from_request(req).await.unwrap();
+    assert_eq!(form.photos.len(), 3);
+    assert_eq!(form.photos[0].bytes().await.unwrap().as_ref(), b"first");
+    assert_eq!(form.photos[1].bytes().await.unwrap().as_ref(), b"second");
+    assert_eq!(form.photos[2].bytes().await.unwrap().as_ref(), b"third");
+}
+
+// ── max_count on Vec fields ──
+//
+// Closes self-audit item B: the Phase 4 body cap blocks total bytes,
+// but `Vec<UploadedFile<()>>` would accept unlimited part count within
+// budget. A client could send 100k 1-byte parts in a 25 MiB body. The
+// `#[field(name, max_count = N)]` attribute caps Vec growth during
+// parsing; the (N+1)-th part returns 413 immediately, before
+// allocating the extra `UploadedFile`.
+
+#[derive(MultipartRequest)]
+struct CappedGallery {
+    #[field("photos", max_count = 3)]
+    photos: Vec<UploadedFile>,
+}
+
+#[tokio::test]
+async fn vec_count_cap_rejects_when_over_max() {
+    let parts: Vec<(&str, Option<&str>, &[u8])> = (0..5)
+        .map(|_| ("photos", Some("a.bin"), &b"data"[..]))
+        .collect();
+    let body = build_multipart_body("test", &parts);
+    let req = request_from_multipart("test", body).await;
+    let err = CappedGallery::from_request(req)
+        .await
+        .err()
+        .expect("five parts must blow the max_count = 3 cap");
+    assert_eq!(err.status_code(), 413, "got error: {err:?}");
+    assert!(
+        err.to_string().contains("max_count"),
+        "error message should mention max_count: {err}"
+    );
+}
+
+#[tokio::test]
+async fn vec_count_cap_accepts_at_max() {
+    let parts: Vec<(&str, Option<&str>, &[u8])> = (0..3)
+        .map(|_| ("photos", Some("a.bin"), &b"data"[..]))
+        .collect();
+    let body = build_multipart_body("test", &parts);
+    let req = request_from_multipart("test", body).await;
+    let form = CappedGallery::from_request(req).await.unwrap();
+    assert_eq!(form.photos.len(), 3);
+}
+
+#[tokio::test]
+async fn vec_count_cap_accepts_below_max() {
+    let parts: Vec<(&str, Option<&str>, &[u8])> = (0..2)
+        .map(|_| ("photos", Some("a.bin"), &b"data"[..]))
+        .collect();
+    let body = build_multipart_body("test", &parts);
+    let req = request_from_multipart("test", body).await;
+    let form = CappedGallery::from_request(req).await.unwrap();
+    assert_eq!(form.photos.len(), 2);
+}
+
+#[derive(MultipartRequest)]
+struct CappedTags {
+    #[field("tags", max_count = 4)]
+    tags: Vec<String>,
+}
+
+#[tokio::test]
+async fn text_vec_count_cap_rejects_when_over_max() {
+    let parts: Vec<(&str, Option<&str>, &[u8])> =
+        (0..6).map(|_| ("tags", None, &b"hello"[..])).collect();
+    let body = build_multipart_body("test", &parts);
+    let req = request_from_multipart("test", body).await;
+    let err = CappedTags::from_request(req)
+        .await
+        .err()
+        .expect("six text parts must blow the max_count = 4 cap");
+    assert_eq!(err.status_code(), 413, "got error: {err:?}");
+    assert!(
+        err.to_string().contains("max_count"),
+        "error message should mention max_count: {err}"
+    );
+}
+
+#[tokio::test]
+async fn text_vec_count_cap_accepts_at_max() {
+    let parts: Vec<(&str, Option<&str>, &[u8])> =
+        (0..4).map(|_| ("tags", None, &b"x"[..])).collect();
+    let body = build_multipart_body("test", &parts);
+    let req = request_from_multipart("test", body).await;
+    let form = CappedTags::from_request(req).await.unwrap();
+    assert_eq!(form.tags.len(), 4);
+}
+
+// ── FromStr text parsing ──
+
+#[derive(MultipartRequest)]
+struct Submission {
+    #[field("priority")]
+    priority: u32,
+}
+
+#[tokio::test]
+async fn derive_parses_text_field_via_fromstr() {
+    let body = build_multipart_body("test", &[("priority", None, b"42")]);
+    let req = request_from_multipart("test", body).await;
+    let form = Submission::from_request(req).await.unwrap();
+    assert_eq!(form.priority, 42);
+}
+
+#[tokio::test]
+async fn derive_rejects_unparseable_text_field() {
+    let body = build_multipart_body("test", &[("priority", None, b"not-a-number")]);
+    let req = request_from_multipart("test", body).await;
+    let err = Submission::from_request(req)
+        .await
+        .err()
+        .expect("unparseable text should fail FromStr");
+    // Invalid input for the field, not a malformed request.
+    assert_eq!(err.status_code(), 422);
+}
+
+// ── Hooks ──
+
+#[derive(MultipartRequest)]
+#[multipart(custom_hooks)]
+#[allow(dead_code)] // `file` exists to exercise the macro's required-file
+// path; the test never reaches it because `authorize`
+// short-circuits with Unauthorized before parsing.
+struct GuardedUpload {
+    #[field("file")]
+    file: UploadedFile,
+}
+
+impl MultipartRequestHooks for GuardedUpload {
+    fn authorize(_req: &Request) -> bool {
+        false
+    }
+}
+
+#[tokio::test]
+async fn derive_authorize_hook_short_circuits_with_unauthorized() {
+    let body = build_multipart_body("test", &[("file", Some("a.bin"), b"data")]);
+    let req = request_from_multipart("test", body).await;
+    let err = GuardedUpload::from_request(req)
+        .await
+        .err()
+        .expect("authorize returning false should fail");
+    // FrameworkError::Unauthorized maps to 403 per framework/src/error.rs.
+    assert_eq!(err.status_code(), 403);
+}
+
+#[derive(MultipartRequest)]
+#[multipart(custom_hooks)]
+struct ChecksumForm {
+    #[field("file")]
+    file: UploadedFile,
+    #[field("expected_size")]
+    expected_size: usize,
+}
+
+impl MultipartRequestHooks for ChecksumForm {
+    fn after_validation(&self) -> Result<(), ValidationErrors> {
+        // `after_validation` is sync - no `.await`. Use the pre-computed
+        // `size` field, which works for both memory- and disk-backed
+        // uploads without re-reading bytes.
+        if self.file.size as usize != self.expected_size {
+            let mut errs = ValidationErrors::new();
+            errs.add("file", "size mismatch");
+            return Err(errs);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn derive_after_validation_hook_runs_after_construction() {
+    let body = build_multipart_body(
+        "test",
+        &[
+            ("file", Some("a.bin"), b"actual_data_is_14b"),
+            ("expected_size", None, b"5"),
+        ],
+    );
+    let req = request_from_multipart("test", body).await;
+    let err = ChecksumForm::from_request(req)
+        .await
+        .err()
+        .expect("size mismatch should fail after_validation");
+    assert_eq!(err.status_code(), 422);
+}
+
+// ── extension_from_magic: magic-byte-derived storage extension ──
+
+#[tokio::test]
+async fn extension_from_magic_returns_canonical_for_png() {
+    let png = tiny_png();
+    let body = build_multipart_body("test", &[("avatar", Some("evil.exe"), &png)]);
+    let req = request_from_multipart("test", body).await;
+    let form = AvatarUpload::from_request(req).await.unwrap();
+    // Filename says ".exe", magic bytes say PNG - magic wins.
+    assert_eq!(form.avatar.extension_from_magic(), "png");
+}
+
+#[derive(MultipartRequest)]
+struct Blob {
+    #[field("file")]
+    file: UploadedFile,
+}
+
+#[tokio::test]
+async fn extension_from_magic_falls_back_to_bin_for_unknown_content() {
+    // 32 zero bytes don't match any infer signature. The field uses the
+    // no-op `UploadedFile<()>` so the ImageFile validator isn't gating the
+    // request; we want to reach `extension_from_magic` and observe the
+    // `"bin"` fallback path.
+    let unknown = vec![0u8; 32];
+    let body = build_multipart_body("test", &[("file", Some("anything.tar"), &unknown)]);
+    let req = request_from_multipart("test", body).await;
+    let form = Blob::from_request(req).await.unwrap();
+    assert_eq!(form.file.extension_from_magic(), "bin");
+}
+
+// ── Stateful validator: one instance threaded across chunk + final phases ──
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Stateful validator using `AtomicUsize` interior mutability. Counts
+/// `validate_chunk` calls; `validate_final` returns `Err` if the count
+/// is zero, which would mean the macro constructed a SEPARATE instance
+/// for the final phase (the chunk-phase counter would have been
+/// discarded with that other instance). Under the corrected macro the
+/// same `&self` is used in both phases, so the counter survives and
+/// `from_request` succeeds.
+#[derive(Default)]
+struct ChunkCounter {
+    count: AtomicUsize,
+}
+
+impl suprnova::http::upload::validators::UploadValidator for ChunkCounter {
+    fn validate_chunk(&self, _sniff: &[u8], _size: u64) -> Result<(), suprnova::FrameworkError> {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn validate_final(
+        &self,
+        _sniff: &[u8],
+        _size: u64,
+        _ct: Option<&str>,
+    ) -> Result<(), suprnova::FrameworkError> {
+        let chunks = self.count.load(Ordering::SeqCst);
+        if chunks == 0 {
+            return Err(suprnova::FrameworkError::Domain {
+                message: "validate_final saw zero chunks - instances not threaded".into(),
+                status_code: 500,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(MultipartRequest)]
+struct ProbedUpload {
+    #[field("data")]
+    #[allow(dead_code)] // we just need the macro to invoke the validator
+    data: UploadedFile<ChunkCounter>,
+}
+
+#[tokio::test]
+async fn validator_instance_is_threaded_across_chunk_and_final() {
+    // 256 KiB body, well above multer's internal chunk size, so the
+    // streaming path produces at least one `validate_chunk` call before
+    // `validate_final` runs.
+    let body = build_multipart_body("test", &[("data", Some("a.bin"), &[0u8; 256_000])]);
+    let req = request_from_multipart("test", body).await;
+    // If the macro constructed separate instances per phase, the final
+    // phase would see count=0 and return Err. The same-instance hoist
+    // means count > 0 and the request succeeds.
+    let result = ProbedUpload::from_request(req).await;
+    assert!(
+        result.is_ok(),
+        "validator instance must persist from chunk to final phase: {:?}",
+        result.err().map(|e| e.to_string()),
+    );
+}
+
+// ── Multipart body cap & spill threshold: default / global override / per-struct override ──
+//
+// The global body cap and spill threshold are process-wide atomics that
+// every multipart parse in the process reads. A test that sets one runs
+// alone in a child process (see `own_process`): a lock among these
+// tests did not stop the other tests of the binary, such as
+// `derive_rejects_oversize_at_byte_boundary`, from parsing under a 1 MiB
+// cap meant for one test. The tests here that read the defaults run in
+// the shared process, where no test changes them.
+
+#[derive(suprnova::MultipartRequest)]
+struct UncappedBlob {
+    #[field("file")]
+    #[allow(dead_code)] // the assertion is on status code, not the constructed value
+    file: suprnova::UploadedFile,
+}
+
+#[tokio::test]
+async fn body_cap_uses_default_when_no_override() {
+    // 26 MiB body - exceeds the 25 MiB compile-time default.
+    let big = vec![0u8; 26 * 1024 * 1024];
+    let body = build_multipart_body("test", &[("file", Some("a.bin"), &big)]);
+    let req = request_from_multipart("test", body).await;
+    let err = UncappedBlob::from_request(req)
+        .await
+        .err()
+        .expect("default 25 MiB cap should reject 26 MiB body");
+    assert_eq!(err.status_code(), 413);
+}
+
+#[test]
+fn body_cap_respects_global_override() {
+    crate::own_process::run_alone("uploads::body_cap_respects_global_override_child");
+}
+
+#[tokio::test]
+async fn body_cap_respects_global_override_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    // Set a 1 MiB process-global cap.
+    suprnova::http::upload::set_global_max_multipart_body_bytes(1024 * 1024);
+
+    let two_mb = vec![0u8; 2 * 1024 * 1024];
+    let body = build_multipart_body("test", &[("file", Some("a.bin"), &two_mb)]);
+    let req = request_from_multipart("test", body).await;
+    let err = UncappedBlob::from_request(req)
+        .await
+        .err()
+        .expect("global 1 MiB cap should reject 2 MiB body");
+    assert_eq!(err.status_code(), 413);
+}
+
+#[derive(suprnova::MultipartRequest)]
+#[multipart(max_body_bytes = 512)]
+struct TinyBlob {
+    #[field("file")]
+    file: suprnova::UploadedFile,
+}
+
+#[test]
+fn body_cap_per_struct_override_wins() {
+    crate::own_process::run_alone("uploads::body_cap_per_struct_override_wins_child");
+}
+
+#[tokio::test]
+async fn body_cap_per_struct_override_wins_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    // Bump the global way up - per-struct should still apply.
+    suprnova::http::upload::set_global_max_multipart_body_bytes(100 * 1024 * 1024);
+
+    // 1 KiB body - under global, over the per-struct 512-byte cap.
+    let kb = vec![0u8; 1024];
+    let body = build_multipart_body("test", &[("file", Some("a.bin"), &kb)]);
+    let req = request_from_multipart("test", body).await;
+    let err = TinyBlob::from_request(req)
+        .await
+        .err()
+        .expect("per-struct 512-byte cap should reject 1 KiB body");
+    assert_eq!(err.status_code(), 413);
+}
+
+#[tokio::test]
+async fn body_cap_per_struct_under_cap_succeeds() {
+    // 256-byte body, under the per-struct 512-byte cap - should succeed.
+    let small = vec![0u8; 256];
+    let body = build_multipart_body("test", &[("file", Some("a.bin"), &small)]);
+    let req = request_from_multipart("test", body).await;
+    let form = TinyBlob::from_request(req).await.unwrap();
+    assert_eq!(form.file.size, 256);
+}
+
+// ── Spill-to-disk: true streaming for large parts ──
+
+#[derive(suprnova::MultipartRequest)]
+struct AnyFile {
+    #[field("file")]
+    file: suprnova::UploadedFile,
+}
+
+#[test]
+fn upload_spills_to_disk_above_threshold() {
+    crate::own_process::run_alone("uploads::upload_spills_to_disk_above_threshold_child");
+}
+
+#[tokio::test]
+async fn upload_spills_to_disk_above_threshold_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    // Drop the spill threshold so a small body forces the disk path.
+    // Bump the body cap so the cap doesn't reject first.
+    suprnova::http::upload::set_global_upload_spill_threshold(1024); // 1 KiB
+    suprnova::http::upload::set_global_max_multipart_body_bytes(10 * 1024 * 1024);
+
+    let big = vec![7u8; 4 * 1024]; // 4 KiB - comfortably above the 1 KiB threshold
+    let body = build_multipart_body("test", &[("file", Some("big.bin"), &big)]);
+    let req = request_from_multipart("test", body).await;
+
+    let form = AnyFile::from_request(req).await.unwrap();
+    assert_eq!(form.file.size, 4 * 1024);
+    // The async `bytes()` accessor must round-trip the spilled file
+    // identical to what was uploaded.
+    let bytes = form.file.bytes().await.unwrap();
+    assert_eq!(bytes.len(), 4 * 1024);
+    assert!(bytes.iter().all(|b| *b == 7u8));
+}
+
+/// `usize::MAX` is the documented way to turn spilling off. Sizing the
+/// sniff buffer as `threshold + 1` overflowed on it, so every part
+/// panicked before a byte was read.
+#[test]
+fn upload_with_spilling_disabled_stays_in_memory() {
+    crate::own_process::run_alone("uploads::upload_with_spilling_disabled_stays_in_memory_child");
+}
+
+#[tokio::test]
+async fn upload_with_spilling_disabled_stays_in_memory_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    suprnova::http::upload::set_global_upload_spill_threshold(usize::MAX);
+
+    let small = vec![5u8; 2048];
+    let body = build_multipart_body("test", &[("file", Some("small.bin"), &small)]);
+    let req = request_from_multipart("test", body).await;
+
+    let form = AnyFile::from_request(req)
+        .await
+        .expect("an upload with spilling disabled must parse");
+    assert_eq!(form.file.size, 2048);
+    let bytes = form.file.bytes().await.unwrap();
+    assert!(bytes.iter().all(|b| *b == 5u8));
+}
+
+#[tokio::test]
+async fn upload_stays_in_memory_below_threshold() {
+    // Default 2 MiB spill threshold. A 1 KiB body must NOT trigger the
+    // disk path - assertion is content-equality round-tripped through the
+    // in-memory accessor.
+    let small = vec![3u8; 1024];
+    let body = build_multipart_body("test", &[("file", Some("small.bin"), &small)]);
+    let req = request_from_multipart("test", body).await;
+
+    let form = AnyFile::from_request(req).await.unwrap();
+    assert_eq!(form.file.size, 1024);
+    let bytes = form.file.bytes().await.unwrap();
+    assert_eq!(bytes.len(), 1024);
+    assert!(bytes.iter().all(|b| *b == 3u8));
+}
+
+#[cfg(all(feature = "filesystem", feature = "testing"))]
+#[test]
+fn store_as_streams_disk_backed_part_to_storage() {
+    crate::own_process::run_alone("uploads::store_as_streams_disk_backed_part_to_storage_child");
+}
+
+#[cfg(all(feature = "filesystem", feature = "testing"))]
+#[tokio::test]
+async fn store_as_streams_disk_backed_part_to_storage_child() {
+    use suprnova::Storage;
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _storage_guard = Storage::fake();
+    Storage::register_memory("spill_dest");
+
+    // Force the spill path with a small threshold.
+    suprnova::http::upload::set_global_upload_spill_threshold(1024);
+    suprnova::http::upload::set_global_max_multipart_body_bytes(10 * 1024 * 1024);
+
+    // 4 KiB body - must spill. Non-uniform content so we can detect
+    // truncation or corruption in the round-trip assertion.
+    let mut big = Vec::with_capacity(4 * 1024);
+    for i in 0..(4 * 1024) {
+        big.push((i % 251) as u8); // 251 keeps a clear pattern without trivial repeats.
+    }
+    let body = build_multipart_body("test", &[("file", Some("big.bin"), &big)]);
+    let req = request_from_multipart("test", body).await;
+
+    let form = AnyFile::from_request(req).await.unwrap();
+    let disk = Storage::disk("spill_dest").unwrap();
+    form.file
+        .store_as(&disk, "stored/big.bin")
+        .await
+        .expect("store_as must stream disk-backed parts");
+
+    // Read the stored object back and assert byte-for-byte equality with
+    // the original upload - this proves the streaming copy preserved
+    // every byte (no early termination, no truncation, no double-write).
+    let stored = disk.read("stored/big.bin").await.unwrap();
+    assert_eq!(stored.to_vec(), big);
+}
