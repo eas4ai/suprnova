@@ -5032,6 +5032,57 @@ fn reg_004_a_script_defining_an_element_the_manifest_does_not_declare_is_refused
 
 const SCAFFOLD_LIVE_MOD: &str = "use suprnova::live::{LiveRegistry, RegistryError};\n\n/// Builds the registry of every Live component in this application.\npub fn registry() -> Result<LiveRegistry, RegistryError> {\n    let registry = LiveRegistry::builder()\n        .build();\n    Ok(registry)\n}\n";
 
+#[test]
+fn live_add_search_box_registers_the_framework_type_and_repeating_changes_no_project_files() {
+    let root = project();
+    fs::create_dir_all(root.path().join("src/live")).expect("src/live");
+    fs::write(
+        root.path().join("src/live/mod.rs"),
+        include_str!("../src/templates/files/backend/live/mod.rs.tpl"),
+    )
+    .expect("scaffold Live module");
+
+    let output = live_add(root.path(), &["search-box"]);
+    assert!(output.status.success(), "{}", combined(&output));
+    let source = fs::read_to_string(root.path().join("src/live/mod.rs")).expect("Live module");
+    assert_eq!(
+        source
+            .matches(".register::<suprnova::live::components::SearchBox>()?")
+            .count(),
+        1,
+        "{source}"
+    );
+    assert!(!source.contains("pub mod suprnova;"), "{source}");
+    assert!(!root.path().join("src/live/suprnova").exists());
+    let project_file = ProjectFile::load(root.path()).expect("project file");
+    let shipped = project_file.shipped().expect("shipped records");
+    assert!(shipped.contains_key(&component("suprnova/search-box")));
+    assert!(shipped.contains_key(&component("suprnova/search-input")));
+    let manifest_bytes = fs::read(
+        root.path()
+            .join("templates/suprnova-ui/search-box/manifest.json"),
+    )
+    .expect("installed manifest");
+    let manifest = library::parse_manifest(&manifest_bytes, "search-box", "suprnova")
+        .expect("strict installed manifest");
+    assert!(manifest.register.is_empty());
+    assert!(manifest.rust_modules().is_empty());
+
+    // The lock nonce changes on every acquisition; installed project files do not.
+    let mut before = files_under(root.path());
+    before.remove(&PathBuf::from(project::LOCK_FILE));
+    let output = live_add(root.path(), &["search-box"]);
+    assert!(output.status.success(), "{}", combined(&output));
+    assert!(
+        combined(&output).contains("already registered"),
+        "{}",
+        combined(&output)
+    );
+    let mut after = files_under(root.path());
+    after.remove(&PathBuf::from(project::LOCK_FILE));
+    assert_eq!(after, before);
+}
+
 /// Item 12 (REG-012): a repeat install's plan shows the module declarations
 /// and registrations that already exist as already declared and already
 /// registered, not as lines it would add.

@@ -2453,6 +2453,59 @@ fn reg_016_every_shipped_component_passes_the_view_and_script_scans() {
     );
 }
 
+#[test]
+fn framework_search_hit_accessors_are_admitted_only_for_the_framework_owned_shipped_view() {
+    for view in [
+        "{{ hit.key() }}",
+        "{% for field in hit.formatted() %}{{ field.0 }}{% endfor %}",
+        "{% let markup = hit.highlight(field)? %}{{ markup|trusted_html }}",
+    ] {
+        let files = vec![("widget.html".to_string(), view.as_bytes().to_vec())];
+        for (namespace, directory, accepted) in [
+            ("suprnova", "search-box", true),
+            ("suprnova", "widget", false),
+            ("acme", "search-box", false),
+        ] {
+            let component = ComponentFiles {
+                namespace,
+                directory,
+                files: &files,
+                dependency_modules: &[],
+                importable_views: &[],
+                importable_scripts: &[],
+            };
+            let report = scan_component(&component, allowlist::embedded().expect("allowlist"))
+                .expect("scan");
+            assert_eq!(
+                report.accepted(),
+                accepted,
+                "{namespace}/{directory}: {view}: {:?}",
+                report.findings
+            );
+            assert!(report.capabilities.is_empty());
+        }
+    }
+}
+
+#[test]
+fn framework_search_hit_accessors_do_not_admit_unknown_methods_or_url_sources() {
+    for view in [
+        "{{ hit.key() }}",
+        "{{ hit.formatted() }}",
+        "{{ hit.highlight(field)? }}",
+        "{{ suprnova::live::components::SearchBoxHit::key(hit) }}",
+        "{{ suprnova::live::components::SearchBoxHit::formatted(hit) }}",
+        "{% let hit = suprnova::serde::Deserialize::deserialize(payload)? %}{% let markup = suprnova::live::components::SearchBoxHit::highlight(hit, field)? %}{{ markup|trusted_html }}",
+        "{{ suprnova::live::components::OtherHit::highlight(hit, field)? }}",
+        "{{ suprnova::live::components::SearchBoxHit::unknown(hit) }}",
+        "{{ suprnova::live::components::SearchBox::select(component) }}",
+        "<a href=\"{{ suprnova::live::components::SearchBoxHit::key(hit) }}\">{{ label }}</a>",
+    ] {
+        let report = scan_view(view);
+        assert!(!report.accepted(), "{view}");
+    }
+}
+
 /// REG-031: the framework filters the view scan admits are exactly the ones
 /// `suprnova::view::filters` re-exports.
 #[test]

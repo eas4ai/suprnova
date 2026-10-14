@@ -31,6 +31,11 @@ use super::statement::{Digest, Statement};
 use super::{Capability, RegistryError, Result};
 use crate::secure_fs;
 
+/// Framework types registered when their shipped component assets install.
+/// These types belong to the framework, so manifests cannot declare them.
+pub(crate) const FRAMEWORK_COMPONENTS: &[(&str, &str)] =
+    &[("search-box", "suprnova::live::components::SearchBox")];
+
 /// The most components one plan may hold (REG-010).
 pub const MAX_PLAN_COMPONENTS: usize = 64;
 
@@ -1031,14 +1036,16 @@ impl Resolver<'_> {
                 .manifest
                 .register
                 .iter()
-                .map(|entry| {
-                    if shipped {
-                        format!("suprnova::live::{entry}")
-                    } else {
-                        format!("crate::live::{ns_module}::{entry}")
-                    }
-                })
+                .map(|entry| format!("crate::live::{ns_module}::{entry}"))
                 .collect();
+            if shipped {
+                registrations.extend(
+                    FRAMEWORK_COMPONENTS
+                        .iter()
+                        .filter(|(directory, _)| *directory == address.component)
+                        .map(|(_, path)| (*path).to_owned()),
+                );
+            }
             for path in &recorded {
                 let retained = kept_modules.iter().any(|module| {
                     path.starts_with(&format!("crate::live::{ns_module}::{module}::"))

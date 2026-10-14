@@ -16,6 +16,8 @@ use askama_parser::{
 use super::allowlist::{Admission, Allowlist, STD_ALLOWED};
 use super::url::{UrlRefusal, check_constant, names_another_origin};
 use super::{ComponentFiles, ScanReport};
+use crate::registry::address::SHIPPED_LIBRARY;
+use crate::registry::plan::FRAMEWORK_COMPONENTS;
 use crate::registry::{Capability, Result};
 use markup::{Dynamic, Markup, Sink};
 
@@ -270,6 +272,15 @@ pub(crate) fn check_css_text(file: &str, text: &str, line: u32) -> Vec<super::Fi
 /// call on the component's state.
 fn own_methods(component: &ComponentFiles<'_>) -> BTreeSet<String> {
     let mut methods = BTreeSet::new();
+    // Framework-owned shipped views use result accessors whose Rust stays
+    // in the framework. Third-party namespaces cannot use this grant.
+    if component.namespace == SHIPPED_LIBRARY
+        && FRAMEWORK_COMPONENTS
+            .iter()
+            .any(|(directory, _)| *directory == component.directory)
+    {
+        methods.extend(["key", "formatted", "highlight"].map(str::to_owned));
+    }
     for (name, bytes) in component.files {
         if !name.ends_with(".rs") {
             continue;

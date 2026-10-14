@@ -9,8 +9,8 @@ pub mod middleware;
 pub mod migrations;
 pub mod models;
 pub mod routes;
-pub mod views;
-/// Seed fixtures are linked so bootstrap can register them for `db:seed`.
-pub mod seeders;
 /// The application scheduler runs retention cleanup alongside user tasks.
 pub mod schedule;
+/// Seed fixtures are linked so bootstrap can register them for `db:seed`.
+pub mod seeders;
+pub mod views;

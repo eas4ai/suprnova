@@ -284,23 +284,18 @@ fn parse_handover(value: &serde_json::Value) -> Result<KeyHandover> {
 /// `suprnova` is the shipped library's, whose element tags keep `sn-`.
 pub fn parse_manifest(bytes: &[u8], directory: &str, namespace: &str) -> Result<ComponentManifest> {
     let object = strict_json_object(bytes)?;
-    manifest_from_object(object, directory, namespace, false)
+    manifest_from_object(object, directory, namespace)
 }
 
-/// Parses shipped assets while allowing the reviewed framework-owned Rust component.
-///
-/// The exact search-box registration is linked by the framework, so installing its
-/// assets does not copy Rust into the application's namespace. Other registrations
-/// retain the same file ownership checks as third-party manifests.
+/// Parses shipped assets by the same rules as a third-party manifest (REG-002).
 pub fn parse_shipped_manifest(bytes: &[u8], directory: &str) -> Result<ComponentManifest> {
-    manifest_from_object(strict_json_object(bytes)?, directory, SHIPPED_LIBRARY, true)
+    parse_manifest(bytes, directory, SHIPPED_LIBRARY)
 }
 
 fn manifest_from_object(
     object: serde_json::Map<String, serde_json::Value>,
     directory: &str,
     namespace: &str,
-    shipped: bool,
 ) -> Result<ComponentManifest> {
     let label = format!("components/{directory}/manifest.json");
     refuse_unknown_keys(&object, &MANIFEST_KEYS, &label)?;
@@ -384,12 +379,9 @@ fn manifest_from_object(
     let register = string_list(&object, "register", &label)?;
     let mut registered = BTreeSet::new();
     for entry in &register {
-        let framework_owned =
-            shipped && directory == "search-box" && entry == "components::SearchBox";
-        let valid = framework_owned
-            || entry.split_once("::").is_some_and(|(module, type_name)| {
-                modules.contains(module) && valid_type_name(type_name)
-            });
+        let valid = entry.split_once("::").is_some_and(|(module, type_name)| {
+            modules.contains(module) && valid_type_name(type_name)
+        });
         if !valid {
             return Err(RegistryError::Invalid(format!(
                 "{label} register `{}` must be `<module>::<Type>`, where `<module>` is one of its Rust files",
@@ -843,13 +835,32 @@ mod tests {
 #[cfg(test)]
 mod framework_components_tests {
     use super::{parse_manifest, parse_shipped_manifest};
+    use crate::registry::plan::FRAMEWORK_COMPONENTS;
 
     #[test]
-    fn search_box_declares_its_framework_component_without_vendored_rust() {
+    fn search_box_cannot_declare_a_framework_type_in_its_manifest() {
         let manifest = br#"{"name":"suprnova.search-box","files":["search-box.html"],"register":["components::SearchBox"]}"#;
-        assert!(parse_shipped_manifest(manifest, "search-box").is_ok());
+        assert!(parse_shipped_manifest(manifest, "search-box").is_err());
         assert!(parse_manifest(manifest, "search-box", "suprnova").is_err());
         let unsupported = br#"{"name":"suprnova.widget","files":["widget.html"],"register":["components::Widget"]}"#;
         assert!(parse_shipped_manifest(unsupported, "widget").is_err());
+    }
+
+    #[test]
+    fn search_box_uses_the_framework_table_with_a_strict_manifest_and_no_vendored_rust() {
+        let bytes =
+            include_bytes!("../../../crates/suprnova-live/components/search-box/manifest.json");
+        let manifest = parse_manifest(bytes, "search-box", "suprnova").expect("strict manifest");
+        assert_eq!(
+            parse_shipped_manifest(bytes, "search-box").expect("shipped manifest"),
+            manifest
+        );
+        assert!(manifest.register.is_empty());
+        assert!(manifest.rust_modules().is_empty());
+        let (_, path) = FRAMEWORK_COMPONENTS
+            .iter()
+            .find(|(directory, _)| *directory == "search-box")
+            .expect("framework registration table entry");
+        assert_eq!(*path, "suprnova::live::components::SearchBox");
     }
 }
