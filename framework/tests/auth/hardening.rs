@@ -37,8 +37,8 @@ use suprnova::session::{DestroyedSessions, SessionConfig, SessionData, SessionSt
 use suprnova::testing::{TestContainer, TestDatabase};
 use suprnova::{
     Auth, AuthConfig, AuthManager, AuthMiddleware, Authenticatable, BasicAuthMiddleware,
-    CanResetPassword, Credentials, EloquentUserProvider, FrameworkError, GuardConfig, HttpResponse,
-    Model, SessionMiddleware, UserProvider,
+    CanResetPassword, Credentials, DB, EloquentUserProvider, FrameworkError, GuardConfig,
+    HttpResponse, Model, MustVerifyEmail, SessionMiddleware, UserProvider, model,
 };
 
 use crate::eloquent_provider::TestUser;
@@ -553,6 +553,180 @@ fn change_password_route(write: PasswordWrite) -> Next {
     })
 }
 
+/// The kit's user shape with a hashed password: assigning the plaintext
+/// stores a hash, as `AsHashed` does, over the same `users` table as
+/// [`TestUser`].
+#[model(
+    table = "users",
+    fillable = ["email", "password"],
+    casts = { password = suprnova::AsHashed },
+)]
+pub struct HashedUser {
+    pub id: i64,
+    pub email: String,
+    pub password: String,
+    pub email_verified_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl Authenticatable for HashedUser {
+    fn get_auth_identifier(&self) -> String {
+        self.id.to_string()
+    }
+    fn get_auth_password(&self) -> Option<&str> {
+        Some(&self.password)
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+}
+
+impl MustVerifyEmail for HashedUser {
+    fn email(&self) -> &str {
+        &self.email
+    }
+    fn email_verified_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.email_verified_at
+    }
+    fn set_email_verified_at(&mut self, at: Option<chrono::DateTime<chrono::Utc>>) {
+        self.email_verified_at = at;
+    }
+}
+
+impl CanResetPassword for HashedUser {
+    fn email_for_reset(&self) -> &str {
+        &self.email
+    }
+    fn set_password_hash(&mut self, hash: &str) {
+        self.password = hash.to_string();
+    }
+}
+
+/// `handler` behind `AuthMiddleware::new()`: the request resolves and
+/// checks the default guard's user before the handler runs.
+fn behind_auth(handler: Next) -> Next {
+    Arc::new(move |request| {
+        let handler = handler.clone();
+        Box::pin(async move { AuthMiddleware::new().handle(request, handler).await })
+    })
+}
+
+/// The signed-in user's id, as the handlers below read it.
+fn signed_in_id() -> Result<i64, HttpResponse> {
+    Auth::id()
+        .and_then(|id| id.parse::<i64>().ok())
+        .ok_or_else(|| HttpResponse::text("no signed-in user").status(401))
+}
+
+fn failed(error: FrameworkError) -> HttpResponse {
+    HttpResponse::text(error.to_string()).status(500)
+}
+
+/// A route behind `AuthMiddleware::new()` whose handler assigns the
+/// plaintext to a [`HashedUser`] and saves: the cast stores a new hash.
+fn hashed_plaintext_change_route() -> Next {
+    behind_auth(Arc::new(|_request| {
+        Box::pin(async {
+            let id = signed_in_id()?;
+            let mut user = HashedUser::find(id)
+                .await
+                .map_err(failed)?
+                .ok_or_else(|| HttpResponse::text("the user row is gone").status(500))?;
+            user.password = PASSWORD.to_owned();
+            user.save().await.map_err(failed)?;
+            Ok(HttpResponse::text("password changed"))
+        })
+    }))
+}
+
+/// A route with no authentication middleware whose handler writes user 1's
+/// password through the model without resolving the signed-in user, as a
+/// public reset page does.
+fn unresolved_password_write_route() -> Next {
+    Arc::new(|_request| {
+        Box::pin(async {
+            let mut user = TestUser::find(1_i64)
+                .await
+                .map_err(failed)?
+                .ok_or_else(|| HttpResponse::text("the user row is gone").status(500))?;
+            let hash = suprnova::hash(PASSWORD).map_err(failed)?;
+            user.set_password_hash(&hash);
+            user.save().await.map_err(failed)?;
+            Ok(HttpResponse::text("password written"))
+        })
+    })
+}
+
+/// A route behind `AuthMiddleware::new()` whose handler sees another
+/// session change the password (a raw write of a new hash, after this
+/// request resolved its user) and then updates only the email through the
+/// model.
+fn email_update_after_foreign_change_route() -> Next {
+    behind_auth(Arc::new(|_request| {
+        Box::pin(async {
+            let id = signed_in_id()?;
+            let hash = suprnova::hash(PASSWORD).map_err(failed)?;
+            DB::unprepared(&format!("UPDATE users SET password = '{hash}'"))
+                .await
+                .map_err(failed)?;
+            let user = TestUser::find(id)
+                .await
+                .map_err(failed)?
+                .ok_or_else(|| HttpResponse::text("the user row is gone").status(500))?;
+            user.update(suprnova::attrs! { email: "moved@example.test" })
+                .await
+                .map_err(failed)?;
+            Ok(HttpResponse::text("email changed"))
+        })
+    }))
+}
+
+/// A route behind `AuthMiddleware::new()` whose handler writes a new
+/// password inside a manual transaction and rolls it back.
+fn rolled_back_change_route() -> Next {
+    behind_auth(Arc::new(|_request| {
+        Box::pin(async {
+            let id = signed_in_id()?;
+            let user = TestUser::find(id)
+                .await
+                .map_err(failed)?
+                .ok_or_else(|| HttpResponse::text("the user row is gone").status(500))?;
+            let hash = suprnova::hash(PASSWORD).map_err(failed)?;
+            let tx = DB::begin_transaction().await.map_err(failed)?;
+            user.update_with_tx(&tx, suprnova::attrs! { password: hash })
+                .await
+                .map_err(failed)?;
+            tx.rollback().await.map_err(failed)?;
+            Ok(HttpResponse::text("password write rolled back"))
+        })
+    }))
+}
+
+/// A route behind `AuthMiddleware::new()` whose handler changes the
+/// password inside `DB::transaction`, which commits when the closure
+/// returns.
+fn transactional_change_route() -> Next {
+    behind_auth(Arc::new(|_request| {
+        Box::pin(async {
+            let id = signed_in_id()?;
+            DB::transaction(move |_tx| {
+                Box::pin(async move {
+                    let mut user = TestUser::find(id)
+                        .await?
+                        .ok_or_else(|| FrameworkError::internal("the user row is gone"))?;
+                    user.set_password_hash(&suprnova::hash(PASSWORD)?);
+                    user.save().await
+                })
+            })
+            .await
+            .map_err(failed)?;
+            Ok(HttpResponse::text("password changed"))
+        })
+    }))
+}
+
 /// Run `test` on [`RT`] in a container scope that binds the auth manager
 /// `config`, the provider `users` under the name `"users"` (and any
 /// `extra` providers), and `store` as the session store revocation
@@ -796,6 +970,296 @@ fn password_change_keeps_the_changing_session(write: PasswordWrite) {
             );
         },
     );
+}
+
+/// Finding 1 of the adversary review: a sign-in is rebound only by a
+/// request that resolved and checked it. A stale session whose request
+/// writes the user's password without resolving the signed-in user (a
+/// public reset page) stays stale and ends on its next protected request.
+#[test]
+fn hardening_stale_session_is_not_renewed_by_a_write_it_did_not_resolve() {
+    crate::own_process::run_alone(
+        "hardening::hardening_stale_session_is_not_renewed_by_a_write_it_did_not_resolve_child",
+    );
+}
+
+#[test]
+fn hardening_stale_session_is_not_renewed_by_a_write_it_did_not_resolve_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let provider = Arc::new(EloquentUserProvider::<TestUser>::new());
+    let store = Arc::new(RevocationFailsStore::default());
+    in_scope(
+        AuthConfig::default(),
+        vec![("users", provider as Arc<dyn UserProvider>)],
+        store.clone(),
+        async move {
+            let _db = eloquent_user().await;
+            let config = session_config();
+            let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+            let stale = sign_in(&middleware, &config).await;
+            let changing = sign_in(&middleware, &config).await;
+            let changed = serve(
+                &middleware,
+                &config,
+                Some(&changing),
+                change_password_route(PasswordWrite::Save),
+            )
+            .await;
+            assert_eq!(
+                changed.status, 200,
+                "the other session changes the password"
+            );
+
+            let written = serve(
+                &middleware,
+                &config,
+                Some(&stale),
+                unresolved_password_write_route(),
+            )
+            .await;
+            assert_eq!(written.status, 200, "the public write succeeds");
+
+            let after = serve(
+                &middleware,
+                &config,
+                Some(&stale),
+                authenticated_route(None),
+            )
+            .await;
+            assert_eq!(
+                after.status, 401,
+                "a write the stale session did not resolve does not renew it"
+            );
+        },
+    );
+}
+
+/// Finding 2: a request that resolved its user and then writes the user
+/// without touching the password column does not adopt a password change
+/// another session committed meanwhile.
+#[test]
+fn hardening_an_unrelated_write_does_not_adopt_another_sessions_password_change() {
+    crate::own_process::run_alone(
+        "hardening::hardening_an_unrelated_write_does_not_adopt_another_sessions_password_change_child",
+    );
+}
+
+#[test]
+fn hardening_an_unrelated_write_does_not_adopt_another_sessions_password_change_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let provider = Arc::new(EloquentUserProvider::<TestUser>::new());
+    let store = Arc::new(RevocationFailsStore::default());
+    in_scope(
+        AuthConfig::default(),
+        vec![("users", provider as Arc<dyn UserProvider>)],
+        store.clone(),
+        async move {
+            let _db = eloquent_user().await;
+            let config = session_config();
+            let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+            let cookie = sign_in(&middleware, &config).await;
+            let updated = serve(
+                &middleware,
+                &config,
+                Some(&cookie),
+                email_update_after_foreign_change_route(),
+            )
+            .await;
+            assert_eq!(updated.status, 200, "the email update succeeds");
+
+            let after = serve(
+                &middleware,
+                &config,
+                Some(&cookie),
+                authenticated_route(None),
+            )
+            .await;
+            assert_eq!(
+                after.status, 401,
+                "the session that did not change the password ends after another session did"
+            );
+        },
+    );
+}
+
+/// Finding 3: the sign-in is bound to the values sent to storage. A model
+/// with a hashed password cast is assigned the plaintext and saved; the
+/// session records the stored hash's epoch and stays signed in.
+#[test]
+fn hardening_password_change_through_a_hashed_cast_keeps_the_changing_session() {
+    crate::own_process::run_alone(
+        "hardening::hardening_password_change_through_a_hashed_cast_keeps_the_changing_session_child",
+    );
+}
+
+#[test]
+fn hardening_password_change_through_a_hashed_cast_keeps_the_changing_session_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let provider = Arc::new(EloquentUserProvider::<HashedUser>::new());
+    let store = Arc::new(RevocationFailsStore::default());
+    in_scope(
+        AuthConfig::default(),
+        vec![("users", provider as Arc<dyn UserProvider>)],
+        store.clone(),
+        async move {
+            let _db = eloquent_user().await;
+            let config = session_config();
+            let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+            let changing = sign_in(&middleware, &config).await;
+            let other = sign_in(&middleware, &config).await;
+            let changed = serve(
+                &middleware,
+                &config,
+                Some(&changing),
+                hashed_plaintext_change_route(),
+            )
+            .await;
+            assert_eq!(changed.status, 200, "the plaintext is stored as a hash");
+
+            let kept = serve(
+                &middleware,
+                &config,
+                Some(&changing),
+                authenticated_route(None),
+            )
+            .await;
+            assert_eq!(
+                kept.status, 200,
+                "the session that changed the password stays signed in"
+            );
+            let ended = serve(
+                &middleware,
+                &config,
+                Some(&other),
+                authenticated_route(None),
+            )
+            .await;
+            assert_eq!(ended.status, 401, "another session of the same user ends");
+        },
+    );
+}
+
+/// Finding 4: a password write that rolls back changes nothing, so the
+/// sign-in stays bound as it was and keeps answering.
+#[test]
+fn hardening_a_rolled_back_password_write_leaves_the_sign_in_as_it_was() {
+    crate::own_process::run_alone(
+        "hardening::hardening_a_rolled_back_password_write_leaves_the_sign_in_as_it_was_child",
+    );
+}
+
+#[test]
+fn hardening_a_rolled_back_password_write_leaves_the_sign_in_as_it_was_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let provider = Arc::new(EloquentUserProvider::<TestUser>::new());
+    let store = Arc::new(RevocationFailsStore::default());
+    in_scope(
+        AuthConfig::default(),
+        vec![("users", provider as Arc<dyn UserProvider>)],
+        store.clone(),
+        async move {
+            let _db = eloquent_user().await;
+            let config = session_config();
+            let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+            let cookie = sign_in(&middleware, &config).await;
+            let rolled_back = serve(
+                &middleware,
+                &config,
+                Some(&cookie),
+                rolled_back_change_route(),
+            )
+            .await;
+            assert_eq!(rolled_back.status, 200, "the write rolls back");
+
+            let after = serve(
+                &middleware,
+                &config,
+                Some(&cookie),
+                authenticated_route(None),
+            )
+            .await;
+            assert_eq!(
+                after.status, 200,
+                "a rolled-back password write leaves the sign-in as it was"
+            );
+        },
+    );
+}
+
+/// Finding 4, the other side: a password change inside `DB::transaction`
+/// rebinds the sign-in once the transaction commits, and the other
+/// session of the user ends.
+#[test]
+fn hardening_a_password_change_inside_a_transaction_rebinds_after_the_commit() {
+    crate::own_process::run_alone(
+        "hardening::hardening_a_password_change_inside_a_transaction_rebinds_after_the_commit_child",
+    );
+}
+
+#[test]
+fn hardening_a_password_change_inside_a_transaction_rebinds_after_the_commit_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let provider = Arc::new(EloquentUserProvider::<TestUser>::new());
+    let store = Arc::new(RevocationFailsStore::default());
+    in_scope(
+        AuthConfig::default(),
+        vec![("users", provider as Arc<dyn UserProvider>)],
+        store.clone(),
+        async move {
+            let _db = eloquent_user().await;
+            let config = session_config();
+            let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+            let changing = sign_in(&middleware, &config).await;
+            let other = sign_in(&middleware, &config).await;
+            let changed = serve(
+                &middleware,
+                &config,
+                Some(&changing),
+                transactional_change_route(),
+            )
+            .await;
+            assert_eq!(changed.status, 200, "the transaction commits");
+
+            let kept = serve(
+                &middleware,
+                &config,
+                Some(&changing),
+                authenticated_route(None),
+            )
+            .await;
+            assert_eq!(
+                kept.status, 200,
+                "the session that changed the password stays signed in"
+            );
+            let ended = serve(
+                &middleware,
+                &config,
+                Some(&other),
+                authenticated_route(None),
+            )
+            .await;
+            assert_eq!(ended.status, 401, "another session of the same user ends");
+        },
+    );
+}
+
+/// Sign user 1 in through `Auth::attempt` and return the session cookie.
+async fn sign_in(middleware: &SessionMiddleware, config: &SessionConfig) -> String {
+    let signed_in = serve(middleware, config, None, attempt_route("one@example.test")).await;
+    assert_eq!(signed_in.status, 200, "the sign-in succeeds");
+    signed_in
+        .session_cookie
+        .expect("the sign-in sets a session cookie")
 }
 
 /// HRD-007's exception: a user whose model exposes neither an epoch nor a

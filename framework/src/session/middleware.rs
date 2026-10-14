@@ -1591,7 +1591,10 @@ impl SessionMiddleware {
         }
 
         // HRD-007: a sign-in this request made without a user at hand
-        // records its epoch now, before the session is stored.
+        // records its epoch now, before the session is stored, and a
+        // password change inside a transaction that committed rebinds the
+        // sign-in that made it.
+        apply_committed_sign_in_rebinds(&slot);
         record_unread_sign_in_epochs(&slot).await;
 
         self.persist_and_rotate(PersistInput {
@@ -3181,6 +3184,61 @@ pub(crate) fn guards_with_recorded_sign_in_epoch() -> Vec<(String, String, u64)>
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Queue a rebind of the guard `guard_name`'s sign-in as `user_id` to
+/// `epoch` for the end of the request, to apply when `committed` is set by
+/// then (`crate::auth::epoch::observe_user_write`, a password write inside
+/// a transaction). Writes nothing when the guard no longer holds that
+/// identity, for the reason [`record_guard_sign_in_epoch`] gives.
+pub(crate) fn queue_guard_sign_in_rebind(
+    guard_name: &str,
+    user_id: &str,
+    epoch: Option<u64>,
+    committed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let _ = SESSION_CONTEXT.try_with(|slot| {
+        let mut slot = crate::lock::recover(slot);
+        let Some(session) = slot.as_mut() else {
+            return;
+        };
+        if session.auth_guard_id(guard_name).as_deref() != Some(user_id) {
+            return;
+        }
+        session.queue_sign_in_rebind(crate::session::store::PendingSignInRebind {
+            guard: guard_name.to_owned(),
+            user_id: user_id.to_owned(),
+            epoch,
+            committed,
+        });
+    });
+}
+
+/// Apply the sign-in rebinds queued by [`queue_guard_sign_in_rebind`] whose
+/// transaction committed, and drop the rest: a rolled-back or unfinished
+/// password write leaves the sign-in as it was. Runs before the session is
+/// stored, outside the request's task-local scopes, so it works on `slot`
+/// directly as [`record_unread_sign_in_epochs`] does.
+fn apply_committed_sign_in_rebinds(slot: &Arc<Mutex<Option<SessionData>>>) {
+    if slot.is_poisoned() {
+        return;
+    }
+    let mut slot = crate::lock::recover(slot);
+    let Some(session) = slot.as_mut() else {
+        return;
+    };
+    for rebind in session.take_pending_sign_in_rebinds() {
+        if !rebind.committed()
+            || session.auth_guard_id(&rebind.guard).as_deref() != Some(rebind.user_id.as_str())
+        {
+            continue;
+        }
+        match rebind.epoch {
+            Some(epoch) => session.set_auth_guard_epoch(&rebind.guard, epoch),
+            None => session.clear_auth_guard_epoch(&rebind.guard),
+        }
+        session.dirty = true;
+    }
 }
 
 /// Record `epoch` as the authentication epoch of the guard `guard_name`'s

@@ -87,8 +87,12 @@ where
     let stored_row = previous.clone().try_into_storage()?;
     let changed_row = changed.clone().try_into_storage()?;
     let stored = stored_row.clone().into_active_model();
-    let rebinds = crate::auth::epoch::sign_in_watches_writes().then(|| changed.clone());
     let mut am = changed.into_active_model_for_update()?;
+    let rebinds = if crate::auth::epoch::sign_in_watches_writes() {
+        M::__written_from_active_model(&am)?
+    } else {
+        None
+    };
     let mut written = Attrs::new();
     for column in <M::Entity as EntityTrait>::Column::iter() {
         let ActiveValue::Set(new) = am.get(column) else {
@@ -107,6 +111,7 @@ where
         }
     }
 
+    let written_columns: Vec<String> = written.keys().map(str::to_owned).collect();
     let shared = std::sync::Arc::new(tokio::sync::Mutex::new(written));
     M::__dispatch_updating(previous, shared.clone()).await?;
     M::__dispatch_saving(shared.clone(), false).await?;
@@ -136,7 +141,7 @@ where
         None,
     )?;
     if let Some(written) = &rebinds {
-        crate::auth::epoch::observe_user_write(written);
+        crate::auth::epoch::observe_user_write(written, &written_columns, None).await;
     }
     M::__dispatch_updated(previous, &current).await?;
     M::__dispatch_saved(&current).await?;
@@ -1316,6 +1321,11 @@ where
         let touch_plan = Self::__plan_touches(Some(self), &final_attrs)?;
         let mut am = self.clone().into_active_model_for_update()?;
         Self::apply_attrs_to_active_model(&mut am, final_attrs.clone())?;
+        let rebinds = if crate::auth::epoch::sign_in_watches_writes() {
+            Self::__written_from_active_model(&am)?
+        } else {
+            None
+        };
         let written_columns = prune_save_columns(self, &final_attrs, &mut am)?;
         let original = self.clone().try_into_storage()?;
         // T11/T12: route through resolve_write.
@@ -1344,7 +1354,9 @@ where
             Self::__decoded_values_equal,
             Some(&written_columns),
         )?;
-        crate::auth::epoch::observe_user_write(self);
+        if let Some(written) = &rebinds {
+            crate::auth::epoch::observe_user_write(written, &written_columns, None).await;
+        }
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned(&touch_plan).await?;
@@ -1376,8 +1388,14 @@ where
         let touch_plan = Self::__plan_touches(Some(&self), &final_attrs)?;
         let row = self.try_into_storage()?;
         let mut am = row.into_active_model();
+        let watching = crate::auth::epoch::sign_in_watches_writes();
+        let written_columns: Vec<String> = if watching {
+            final_attrs.keys().map(str::to_owned).collect()
+        } else {
+            Vec::new()
+        };
         Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
-        let rebinds = if crate::auth::epoch::sign_in_watches_writes() {
+        let rebinds = if watching {
             Self::__written_from_active_model(&am)?
         } else {
             None
@@ -1409,7 +1427,7 @@ where
             None,
         )?;
         if let Some(written) = &rebinds {
-            crate::auth::epoch::observe_user_write(written);
+            crate::auth::epoch::observe_user_write(written, &written_columns, None).await;
         }
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
@@ -1949,6 +1967,11 @@ where
         let touch_plan = Self::__plan_touches(Some(self), &final_attrs)?;
         let mut am = self.clone().into_active_model_for_update()?;
         Self::apply_attrs_to_active_model(&mut am, final_attrs.clone())?;
+        let rebinds = if crate::auth::epoch::sign_in_watches_writes() {
+            Self::__written_from_active_model(&am)?
+        } else {
+            None
+        };
         let written_columns = prune_save_columns(self, &final_attrs, &mut am)?;
         let original = self.clone().try_into_storage()?;
         let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
@@ -1966,7 +1989,9 @@ where
             Self::__decoded_values_equal,
             Some(&written_columns),
         )?;
-        crate::auth::epoch::observe_user_write(self);
+        if let Some(written) = &rebinds {
+            crate::auth::epoch::observe_user_write(written, &written_columns, Some(tx)).await;
+        }
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned_with_tx(tx, &touch_plan).await?;
@@ -1997,8 +2022,14 @@ where
         let touch_plan = Self::__plan_touches(Some(&self), &final_attrs)?;
         let row = self.try_into_storage()?;
         let mut am = row.into_active_model();
+        let watching = crate::auth::epoch::sign_in_watches_writes();
+        let written_columns: Vec<String> = if watching {
+            final_attrs.keys().map(str::to_owned).collect()
+        } else {
+            Vec::new()
+        };
         Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
-        let rebinds = if crate::auth::epoch::sign_in_watches_writes() {
+        let rebinds = if watching {
             Self::__written_from_active_model(&am)?
         } else {
             None
@@ -2019,7 +2050,7 @@ where
             None,
         )?;
         if let Some(written) = &rebinds {
-            crate::auth::epoch::observe_user_write(written);
+            crate::auth::epoch::observe_user_write(written, &written_columns, Some(tx)).await;
         }
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
@@ -2641,15 +2672,16 @@ where
         self,
     ) -> Result<<Self::Entity as EntityTrait>::ActiveModel, FrameworkError>;
 
-    /// The model an `update` is about to write, assembled from `am`: the
-    /// row with the attributes applied and cast. The sign-in of a request
-    /// that writes the signed-in user is rebound to the epoch of these
-    /// values (`crate::auth::epoch::observe_user_write`): what the request
-    /// wrote, never the row read back after the write, which a concurrent
-    /// write could have changed. `Ok(None)` means the model cannot
-    /// assemble it; the macro emits the conversion, and this default
-    /// answers only for an implementation written by hand, whose
-    /// `update` then leaves a sign-in bound as it was.
+    /// The model a write is about to send to storage, assembled from `am`:
+    /// the row with the attributes applied and cast, read back through the
+    /// casts. The sign-in of a request that writes the signed-in user's
+    /// password is rebound to the epoch of these values
+    /// (`crate::auth::epoch::observe_user_write`): what the write sends,
+    /// never the row read back after it, which a concurrent write could
+    /// have changed. `Ok(None)` means the model cannot assemble it; the
+    /// macro emits the conversion, and this default answers only for an
+    /// implementation written by hand, whose writes then leave a sign-in
+    /// bound as it was.
     ///
     /// **Not part of the public API.** It is `pub` because the macro emits
     /// the override.

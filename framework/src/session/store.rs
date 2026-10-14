@@ -3,6 +3,8 @@
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::FrameworkError;
 
@@ -91,6 +93,29 @@ pub struct SessionData {
     /// it in `write`, or use it there to prevent the same class of
     /// resurrection race in its own backend.
     pub loaded_from_store: bool,
+    /// Sign-in rebinds a password write inside a transaction queued for
+    /// the end of this request: the session middleware applies those whose
+    /// transaction committed before it stores the session, and drops the
+    /// rest (HRD-007). Never stored.
+    pub(crate) pending_sign_in_rebinds: Vec<PendingSignInRebind>,
+}
+
+/// A sign-in rebind waiting for its transaction's commit: the guard, the
+/// user id its sign-in holds, the epoch to record (`None` clears it) and
+/// the flag the transaction's after-commit callback sets.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingSignInRebind {
+    pub(crate) guard: String,
+    pub(crate) user_id: String,
+    pub(crate) epoch: Option<u64>,
+    pub(crate) committed: Arc<AtomicBool>,
+}
+
+impl PendingSignInRebind {
+    /// Whether the transaction the rebind waited for committed.
+    pub(crate) fn committed(&self) -> bool {
+        self.committed.load(Ordering::Acquire)
+    }
 }
 
 impl SessionData {
@@ -103,7 +128,19 @@ impl SessionData {
             csrf_token,
             dirty: false,
             loaded_from_store: false,
+            pending_sign_in_rebinds: Vec::new(),
         }
+    }
+
+    /// Queue a sign-in rebind for the end of the request (see
+    /// [`Self::pending_sign_in_rebinds`]).
+    pub(crate) fn queue_sign_in_rebind(&mut self, rebind: PendingSignInRebind) {
+        self.pending_sign_in_rebinds.push(rebind);
+    }
+
+    /// Take the queued sign-in rebinds, leaving none.
+    pub(crate) fn take_pending_sign_in_rebinds(&mut self) -> Vec<PendingSignInRebind> {
+        std::mem::take(&mut self.pending_sign_in_rebinds)
     }
 
     /// Rotate the session to a fresh id, clearing

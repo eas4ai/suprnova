@@ -366,6 +366,7 @@ impl SessionStore for MongoSessionDriver {
             csrf_token: csrf_token.unwrap_or_else(crate::session::middleware::generate_csrf_token),
             dirty: false,
             loaded_from_store: true,
+            pending_sign_in_rebinds: Vec::new(),
         }))
     }
 
