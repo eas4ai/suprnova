@@ -640,3 +640,8 @@ path = "tests/live/async_backpressure.rs"
 [[test]]
 name = "search"
 path = "tests/search/main.rs"
+
+[[test]]
+name = "recommendations"
+path = "tests/recommendations/main.rs"
+required-features = ["testing", "database-sqlite"]
