@@ -121,7 +121,9 @@ impl Visit {
 
 /// Run `fut` with `visit` as the current visit.
 pub(crate) async fn scope<F: std::future::Future>(visit: Arc<Visit>, fut: F) -> F::Output {
-    VISIT.scope(visit, fut).await
+    // Boxed, as `auth::request_state::scope` boxes: the wrapper holds the
+    // middleware chain's future.
+    VISIT.scope(visit, Box::pin(fut)).await
 }
 
 /// The visit the Inertia middleware scoped, or `None` when the request did

@@ -473,14 +473,14 @@ impl SuprnovaEndpointKernel {
             VerifiedEndpointSnapshot::Instance(snapshot) => {
                 let digest =
                     request_digest(&request, snapshot.body().instance_id().clone(), authority)?;
-                self.dispatch_instanced(
+                Box::pin(self.dispatch_instanced(
                     &request,
                     snapshot,
                     browser,
                     operation,
                     digest,
                     response_sealer,
-                )
+                ))
                 .await?
             }
             VerifiedEndpointSnapshot::Seed(_) => {
@@ -495,7 +495,7 @@ impl SuprnovaEndpointKernel {
                     .await
                     .map_err(|_| EndpointKernelError::unavailable())?;
                 let digest = request_digest(&request, promoted.instance_id().clone(), authority)?;
-                self.dispatch_promoted(
+                Box::pin(self.dispatch_promoted(
                     &request,
                     browser,
                     operation,
@@ -503,7 +503,7 @@ impl SuprnovaEndpointKernel {
                     browser_nonce.clone(),
                     digest,
                     response_sealer,
-                )
+                ))
                 .await?
             }
         };

@@ -23,7 +23,9 @@ tokio::task_local! {
 /// Run `fut` with the request's originating socket id installed. Scoped in
 /// `server.rs` alongside the auth / flash / SSR per-request task-locals.
 pub(crate) async fn scope<F: std::future::Future>(socket_id: Option<String>, fut: F) -> F::Output {
-    REQUEST_SOCKET.scope(socket_id, fut).await
+    // Boxed, as `auth::request_state::scope` boxes: the wrapper holds the
+    // whole request's future.
+    REQUEST_SOCKET.scope(socket_id, Box::pin(fut)).await
 }
 
 /// The originating connection's socket id for the current request, or `None`

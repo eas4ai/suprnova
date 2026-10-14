@@ -176,8 +176,13 @@ fn read_state<R>(f: impl FnOnce(&AuthRequestState) -> R) -> Option<R> {
 /// Inertia flash-bag and SSR scopes so every middleware and handler
 /// downstream can read and write the current user.
 pub(crate) async fn scope<F: std::future::Future>(fut: F) -> F::Output {
+    // Boxed: the task-local wrapper holds its future by value, and this one
+    // wraps the whole request (the frames budget test measures it).
     AUTH_STATE
-        .scope(Arc::new(Mutex::new(AuthRequestState::default())), fut)
+        .scope(
+            Arc::new(Mutex::new(AuthRequestState::default())),
+            Box::pin(fut),
+        )
         .await
 }
 

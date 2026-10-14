@@ -94,6 +94,10 @@ pub(crate) async fn response<F>(future: F) -> hyper::Response<BoxBody<Bytes, Inf
 where
     F: Future<Output = hyper::Response<BoxBody<Bytes, Infallible>>>,
 {
+    // Boxed: the scoped block would otherwise hold the request future, the
+    // largest of the request, by value, and the task-local wrapper around it
+    // a second time (the frames budget test measures this).
+    let future = Box::pin(future);
     PENDING
         .scope(RefCell::new(Vec::new()), async move {
             let response = future.await;
