@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-timer-null",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
