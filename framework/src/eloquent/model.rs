@@ -87,6 +87,7 @@ where
     let stored_row = previous.clone().try_into_storage()?;
     let changed_row = changed.clone().try_into_storage()?;
     let stored = stored_row.clone().into_active_model();
+    let rebinds = crate::auth::epoch::sign_in_watches_writes().then(|| changed.clone());
     let mut am = changed.into_active_model_for_update()?;
     let mut written = Attrs::new();
     for column in <M::Entity as EntityTrait>::Column::iter() {
@@ -134,6 +135,9 @@ where
         M::__decoded_values_equal,
         None,
     )?;
+    if let Some(written) = &rebinds {
+        crate::auth::epoch::observe_user_write(written);
+    }
     M::__dispatch_updated(previous, &current).await?;
     M::__dispatch_saved(&current).await?;
     current.__touch_planned(&touch_plan).await?;
@@ -1340,6 +1344,7 @@ where
             Self::__decoded_values_equal,
             Some(&written_columns),
         )?;
+        crate::auth::epoch::observe_user_write(self);
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned(&touch_plan).await?;
@@ -1372,6 +1377,11 @@ where
         let row = self.try_into_storage()?;
         let mut am = row.into_active_model();
         Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
+        let rebinds = if crate::auth::epoch::sign_in_watches_writes() {
+            Self::__written_from_active_model(&am)?
+        } else {
+            None
+        };
         // T11/T12: route through resolve_write.
         let current =
             crate::render_cache::orm::atomic(Self::default_connection_name(), || async move {
@@ -1398,6 +1408,9 @@ where
             Self::__decoded_values_equal,
             None,
         )?;
+        if let Some(written) = &rebinds {
+            crate::auth::epoch::observe_user_write(written);
+        }
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned(&touch_plan).await?;
@@ -1953,6 +1966,7 @@ where
             Self::__decoded_values_equal,
             Some(&written_columns),
         )?;
+        crate::auth::epoch::observe_user_write(self);
         Self::__dispatch_updated(self, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned_with_tx(tx, &touch_plan).await?;
@@ -1984,6 +1998,11 @@ where
         let row = self.try_into_storage()?;
         let mut am = row.into_active_model();
         Self::apply_attrs_to_active_model(&mut am, final_attrs)?;
+        let rebinds = if crate::auth::epoch::sign_in_watches_writes() {
+            Self::__written_from_active_model(&am)?
+        } else {
+            None
+        };
         let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
         let updated = exec
             .update_active(am)
@@ -1999,6 +2018,9 @@ where
             Self::__decoded_values_equal,
             None,
         )?;
+        if let Some(written) = &rebinds {
+            crate::auth::epoch::observe_user_write(written);
+        }
         Self::__dispatch_updated(&previous, &current).await?;
         Self::__dispatch_saved(&current).await?;
         current.__touch_planned_with_tx(tx, &touch_plan).await?;
@@ -2618,6 +2640,26 @@ where
     fn into_active_model_for_update(
         self,
     ) -> Result<<Self::Entity as EntityTrait>::ActiveModel, FrameworkError>;
+
+    /// The model an `update` is about to write, assembled from `am`: the
+    /// row with the attributes applied and cast. The sign-in of a request
+    /// that writes the signed-in user is rebound to the epoch of these
+    /// values (`crate::auth::epoch::observe_user_write`): what the request
+    /// wrote, never the row read back after the write, which a concurrent
+    /// write could have changed. `Ok(None)` means the model cannot
+    /// assemble it; the macro emits the conversion, and this default
+    /// answers only for an implementation written by hand, whose
+    /// `update` then leaves a sign-in bound as it was.
+    ///
+    /// **Not part of the public API.** It is `pub` because the macro emits
+    /// the override.
+    #[doc(hidden)]
+    fn __written_from_active_model(
+        am: &<Self::Entity as EntityTrait>::ActiveModel,
+    ) -> Result<Option<Self>, FrameworkError> {
+        let _ = am;
+        Ok(None)
+    }
 }
 
 /// The owners of the `MorphTo` relations named in a model's

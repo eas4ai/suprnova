@@ -4,6 +4,7 @@
 //! to enable `Auth::user()`.
 
 use async_trait::async_trait;
+use std::any::Any;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -131,6 +132,37 @@ pub trait UserProvider: Send + Sync + 'static {
         _credentials: &serde_json::Value,
     ) -> Result<(), FrameworkError> {
         Ok(())
+    }
+
+    /// View `model`, a model a request has just written, as one of this
+    /// provider's users when it is one: `Some` for the user type this
+    /// provider resolves, `None` for any other model. Default: `None`.
+    ///
+    /// The framework asks it when a request writes a model through `save`
+    /// or `update` while the session holds a sign-in with a recorded
+    /// authentication epoch (HRD-007). A written model that is the
+    /// signed-in user rebinds that sign-in to the epoch of the written
+    /// values, so the session that changed its own password stays signed
+    /// in while every other session of the user ends. A provider that
+    /// answers `None` leaves the sign-in bound to the old epoch, and the
+    /// session that changed the password ends on its next request.
+    ///
+    /// `EloquentUserProvider` answers for its model type. A provider you
+    /// write over a model type answers the same way:
+    ///
+    /// ```rust,ignore
+    /// fn written_user<'a>(
+    ///     &self,
+    ///     model: &'a (dyn Any + Send + Sync),
+    /// ) -> Option<&'a dyn Authenticatable> {
+    ///     model.downcast_ref::<User>().map(|user| user as &dyn Authenticatable)
+    /// }
+    /// ```
+    fn written_user<'a>(
+        &self,
+        _model: &'a (dyn Any + Send + Sync),
+    ) -> Option<&'a dyn Authenticatable> {
+        None
     }
 
     /// Run a fixed-cost hash verification to absorb the timing signal

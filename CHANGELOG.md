@@ -16,6 +16,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   request's locale and sends it beside the identifier, and the field's error
   output shows it. An issue without text, such as a value the field cannot
   decode, keeps the generic announcement.
+- **A user who changes their own password stays signed in.** The session
+  that made the change recorded the password's earlier epoch, so the check
+  that ends sign-ins from before a password change ended it too on its next
+  request, with every other session of the user. A request that writes the
+  signed-in user through the model (`save`, `update`, and their
+  transactional forms) now binds its sign-in to the epoch of the values it
+  wrote, so that session continues while every other session and
+  remember-me cookie of the user still ends. `EloquentUserProvider`
+  recognizes the written model; a provider of your own implements
+  `UserProvider::written_user` to do the same. A write that bypasses the
+  model, such as a query-builder update, is not seen.
 - **The scroll area's size token is defined.** 4.0.2 bounded the region
   with `--sn-scroll-area-size` and left the token undefined, so the shared
   stylesheet never named it and the engine's token check failed. The shared

@@ -34,11 +34,14 @@ use tokio::runtime::Runtime;
 use suprnova::auth::request_state;
 use suprnova::middleware::{Middleware, Next};
 use suprnova::session::{DestroyedSessions, SessionConfig, SessionData, SessionStore};
-use suprnova::testing::TestContainer;
+use suprnova::testing::{TestContainer, TestDatabase};
 use suprnova::{
     Auth, AuthConfig, AuthManager, AuthMiddleware, Authenticatable, BasicAuthMiddleware,
-    Credentials, FrameworkError, GuardConfig, HttpResponse, SessionMiddleware, UserProvider,
+    CanResetPassword, Credentials, EloquentUserProvider, FrameworkError, GuardConfig, HttpResponse,
+    Model, SessionMiddleware, UserProvider,
 };
+
+use crate::eloquent_provider::TestUser;
 
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio runtime"));
 
@@ -476,6 +479,80 @@ fn login_id_route() -> Next {
     })
 }
 
+/// How a handler writes the signed-in user's new password through the
+/// model: the two write paths an application's own password form uses.
+#[derive(Clone, Copy)]
+enum PasswordWrite {
+    /// Set the hash on the loaded model and `save` it.
+    Save,
+    /// `update` the loaded model with the hash as an attribute.
+    Update,
+}
+
+/// An in-memory `users` table with one user, `one@example.test`, whose
+/// password is [`PASSWORD`], for `EloquentUserProvider<TestUser>`: the
+/// provider and the write path a scaffolded application's own password
+/// form uses. Create it inside [`in_scope`], where the connection registers
+/// in the test's container, and keep it for the whole test.
+async fn eloquent_user() -> TestDatabase {
+    let db = TestDatabase::sqlite_memory()
+        .await
+        .expect("an in-memory database");
+    db.execute_unprepared(
+        "CREATE TABLE users (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            email TEXT NOT NULL, \
+            password TEXT NOT NULL, \
+            email_verified_at TEXT\
+         )",
+    )
+    .await
+    .expect("the users table");
+    // A bcrypt hash holds no quote, so it is interpolated as is.
+    let hash = suprnova::hash(PASSWORD).expect("a hash of the password");
+    db.execute_unprepared(&format!(
+        "INSERT INTO users (email, password) VALUES ('one@example.test', '{hash}')"
+    ))
+    .await
+    .expect("the user row");
+    db
+}
+
+/// A route behind `AuthMiddleware::new()` whose handler changes the
+/// signed-in user's own password through the model, by `write`: a new
+/// hash of the same plaintext, as a password form stores one.
+fn change_password_route(write: PasswordWrite) -> Next {
+    let handler: Next = Arc::new(move |_request| {
+        Box::pin(async move {
+            let failed = |error: FrameworkError| HttpResponse::text(error.to_string()).status(500);
+            let id = Auth::id()
+                .and_then(|id| id.parse::<i64>().ok())
+                .ok_or_else(|| HttpResponse::text("no signed-in user").status(401))?;
+            let mut user = TestUser::find(id)
+                .await
+                .map_err(failed)?
+                .ok_or_else(|| HttpResponse::text("the user row is gone").status(500))?;
+            let hash = suprnova::hash(PASSWORD).map_err(failed)?;
+            match write {
+                PasswordWrite::Save => {
+                    user.set_password_hash(&hash);
+                    user.save().await.map_err(failed)?;
+                }
+                PasswordWrite::Update => {
+                    user.update(suprnova::attrs! { password: hash })
+                        .await
+                        .map_err(failed)?;
+                }
+            }
+            Ok(HttpResponse::text("password changed"))
+        })
+    });
+    Arc::new(move |request| {
+        let handler = handler.clone();
+        Box::pin(async move { AuthMiddleware::new().handle(request, handler).await })
+    })
+}
+
 /// Run `test` on [`RT`] in a container scope that binds the auth manager
 /// `config`, the provider `users` under the name `"users"` (and any
 /// `extra` providers), and `store` as the session store revocation
@@ -619,6 +696,104 @@ fn hardening_session_stays_signed_in_while_the_password_is_unchanged_child() {
                 assert_eq!(answer.status, 200);
             }
             assert!(store.holds("web", "7"));
+        },
+    );
+}
+
+/// A user who changes their own password keeps the session that made the
+/// change: the request that wrote the new hash through the model binds its
+/// sign-in to the new epoch, while every other session of the user ends on
+/// its next request.
+#[test]
+fn hardening_password_change_through_save_keeps_the_changing_session() {
+    crate::own_process::run_alone(
+        "hardening::hardening_password_change_through_save_keeps_the_changing_session_child",
+    );
+}
+
+#[test]
+fn hardening_password_change_through_save_keeps_the_changing_session_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    password_change_keeps_the_changing_session(PasswordWrite::Save);
+}
+
+/// The same through `update`, whose written model is assembled from the
+/// attributes before the write.
+#[test]
+fn hardening_password_change_through_update_keeps_the_changing_session() {
+    crate::own_process::run_alone(
+        "hardening::hardening_password_change_through_update_keeps_the_changing_session_child",
+    );
+}
+
+#[test]
+fn hardening_password_change_through_update_keeps_the_changing_session_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    password_change_keeps_the_changing_session(PasswordWrite::Update);
+}
+
+fn password_change_keeps_the_changing_session(write: PasswordWrite) {
+    let provider = Arc::new(EloquentUserProvider::<TestUser>::new());
+    let store = Arc::new(RevocationFailsStore::default());
+    in_scope(
+        AuthConfig::default(),
+        vec![("users", provider as Arc<dyn UserProvider>)],
+        store.clone(),
+        async move {
+            let _db = eloquent_user().await;
+            let config = session_config();
+            let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+            let mut cookies = Vec::new();
+            for _ in 0..2 {
+                let signed_in = serve(
+                    &middleware,
+                    &config,
+                    None,
+                    attempt_route("one@example.test"),
+                )
+                .await;
+                assert_eq!(signed_in.status, 200, "the sign-in succeeds");
+                cookies.push(
+                    signed_in
+                        .session_cookie
+                        .expect("the sign-in sets a session cookie"),
+                );
+            }
+            let (changing, other) = (&cookies[0], &cookies[1]);
+
+            let changed = serve(
+                &middleware,
+                &config,
+                Some(changing),
+                change_password_route(write),
+            )
+            .await;
+            assert_eq!(
+                changed.status, 200,
+                "the signed-in user changes their own password"
+            );
+
+            let kept = serve(
+                &middleware,
+                &config,
+                Some(changing),
+                authenticated_route(None),
+            )
+            .await;
+            assert_eq!(
+                kept.status, 200,
+                "the session that changed the password stays signed in"
+            );
+
+            let ended = serve(&middleware, &config, Some(other), authenticated_route(None)).await;
+            assert_eq!(
+                ended.status, 401,
+                "another session of the same user ends on its next request"
+            );
         },
     );
 }

@@ -3,6 +3,7 @@
 //! This provider implements the `UserProvider` trait to fetch users from the database.
 
 use async_trait::async_trait;
+use std::any::Any;
 use std::sync::Arc;
 use suprnova::FrameworkError;
 use suprnova::auth::{Authenticatable, UserProvider};
@@ -47,5 +48,17 @@ impl UserProvider for DatabaseUserProvider {
         let user = User::find_by_id(numeric_id).await?;
 
         Ok(user.map(|u| Arc::new(u) as Arc<dyn Authenticatable>))
+    }
+
+    // A request that writes its own user through the model rebinds its
+    // sign-in to the new password; without this the session that changed
+    // the password would end on its next request.
+    fn written_user<'a>(
+        &self,
+        model: &'a (dyn Any + Send + Sync),
+    ) -> Option<&'a dyn Authenticatable> {
+        model
+            .downcast_ref::<User>()
+            .map(|user| user as &dyn Authenticatable)
     }
 }

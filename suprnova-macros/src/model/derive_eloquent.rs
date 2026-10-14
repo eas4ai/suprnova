@@ -1573,6 +1573,21 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                 #timestamp_inject_save
                 ::core::result::Result::Ok(am)
             }
+
+            fn __written_from_active_model(
+                am: &<Self::Entity as ::suprnova::EntityTrait>::ActiveModel,
+            ) -> ::core::result::Result<
+                ::core::option::Option<Self>,
+                ::suprnova::FrameworkError,
+            > {
+                let row = <<Self::Entity as ::suprnova::EntityTrait>::ActiveModel
+                    as ::suprnova::sea_orm::TryIntoModel<
+                        <Self::Entity as ::suprnova::EntityTrait>::Model,
+                    >>::try_into_model(::core::clone::Clone::clone(am))
+                    .map_err(|error| ::suprnova::FrameworkError::database(error.to_string()))?;
+                <Self as ::suprnova::eloquent::Model>::try_from_storage(row)
+                    .map(::core::option::Option::Some)
+            }
         }
 
         #touchable_impl
