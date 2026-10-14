@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: magick-driver-keeps-the-accounts-user-policy
+Current: framework-frames-under-a-live-action
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -1181,3 +1181,9 @@ Delivers backlog item scaffold-files-not-rustfmt-clean: Found building the Live 
 Requirements: HRD-010
 
 Delivers backlog item magick-driver-keeps-the-accounts-user-policy: The magick driver runs every child with HOME set to its policy directory, so ImageMagick no longer reads the account's own $XDG_CONFIG_HOME/ImageMagick or $HOME/.config/ImageMagick. A policy or config the operator kept there stopped applying in 4.0.0. The driver appends the real user dir of the process ($XDG_CONFIG_HOME/ImageMagick, else $HOME/.config/ImageMagick) to MAGICK_CONFIGURE_PATH after the operator's value, so the account's policy and config apply as before while the framework file under the child's HOME stays the last Path. Real-binary tests: a user-dir denial still applies, and a user-dir grant is still outranked by the framework file.
+
+## framework-frames-under-a-live-action
+
+Requirements: PAR-192
+
+Delivers backlog item framework-frames-under-a-live-action: The deeper issue behind defect 122c1056 (Shawn 2026-10-11 19:55: make sure the bigger issue is notated): in a debug build the framework's own frames below a Live action use about 1.75 to 1.8 MiB of stack before the action runs (measured by lane k under gdb: about 930 KB in the hyper server, after-response and task-local frames, about 360 KB in the Live endpoint and executor, most of the rest in the session and RenderCache middleware; registration overflows at RUST_MIN_STACK=1.75 MiB inside its first email-regex compile). The 8 MiB runtime thread stack the main macro now sets gives actions room; it does not make the frames smaller. Fix: box the large futures and shrink the frames in the server, the middleware chain and the Live engine so a debug build runs a Live action within Tokio's 2 MiB default, with a measurement in the test suite that fails when the frames below an action grow past a budget.
