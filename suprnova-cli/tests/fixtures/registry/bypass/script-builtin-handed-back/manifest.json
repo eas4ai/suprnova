@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-builtin-handed-back",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
