@@ -1198,7 +1198,10 @@ Requirements: SEARCH-001, SEARCH-002, SEARCH-003, SEARCH-004, SEARCH-005, SEARCH
    developer's dedicated server (Agent 1), whose nDCG@10 and versions it
    commits as the per-engine floors with the tolerance and p95 budgets, the gate's
    `suprnova-gate-qdrant` container (`qdrant/qdrant:v1.19.2`) created once
-   by `scripts/setup-gate-databases.sh` (whose Mongo block moves above its
+   by `scripts/setup-gate-databases.sh`, a `pgvector` driver for the
+   `VectorDriver` trait (ruled in by the developer on 2026-10-14 06:41, "yes
+   add": a Postgres application gets hybrid search with nothing extra, as a
+   MariaDB one does) (whose Mongo block moves above its
    exit) with a `scripts/check-qdrant.sh` engine pass, the migrations for
    the analytics and recommendation tables, the kit template changes
    mirrored in `scaffold_snapshot`, `manual/search.md`,
