@@ -6,7 +6,7 @@
 use sea_orm::entity::prelude::*;
 use sea_orm::{ActiveModelTrait, EntityTrait, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
-use suprnova::{FrameworkError, DB};
+use suprnova::{DB, FrameworkError};
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "app_users")]

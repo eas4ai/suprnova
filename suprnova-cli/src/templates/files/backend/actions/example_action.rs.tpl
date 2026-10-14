@@ -6,7 +6,7 @@
 //! when you no longer need the example; use `suprnova make:action <Name>`
 //! to scaffold real actions for your domain.
 
-use suprnova::{injectable, FrameworkError};
+use suprnova::{FrameworkError, injectable};
 
 /// Echoes its input back to the caller, with a structured-log entry
 /// recording every invocation. Real applications replace this with the

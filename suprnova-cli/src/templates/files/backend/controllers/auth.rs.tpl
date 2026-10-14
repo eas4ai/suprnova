@@ -21,8 +21,8 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use suprnova::{
-    auth_flows::EmailVerification, handler, inertia_response, redirect, Auth, Credentials,
-    FormRequest, Inertia, InertiaProps, Request, Response, Validate, ValidationErrors,
+    Auth, Credentials, FormRequest, Inertia, InertiaProps, Request, Response, Validate,
+    ValidationErrors, auth_flows::EmailVerification, handler, inertia_response, redirect,
 };
 
 use crate::models::user::User;

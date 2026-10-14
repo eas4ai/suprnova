@@ -4,7 +4,7 @@
 //! Registration and login use Magnetar through `Auth::password()`.
 
 use serde::Deserialize;
-use suprnova::{handler, Auth, FrameworkError, HttpResponse, Request, Resource, Response};
+use suprnova::{Auth, FrameworkError, HttpResponse, Request, Resource, Response, handler};
 
 use crate::models::user::User;
 use crate::resources::user_resource::UserResource;
@@ -95,9 +95,9 @@ pub async fn login(req: Request) -> Response {
         .authenticate(&body.email, &body.password, None, None)
         .await?;
 
-    let token = session.token.ok_or_else(|| {
-        FrameworkError::internal("authentication did not return a session token")
-    })?;
+    let token = session
+        .token
+        .ok_or_else(|| FrameworkError::internal("authentication did not return a session token"))?;
 
     // Secret tokens redact their `Display` and `Debug` output. Exposure is
     // explicit only at the response boundary.

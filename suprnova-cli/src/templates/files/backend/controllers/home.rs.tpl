@@ -1,4 +1,4 @@
-use suprnova::{handler, inertia_response, InertiaProps, Request, Response};
+use suprnova::{InertiaProps, Request, Response, handler, inertia_response};
 
 #[derive(InertiaProps)]
 pub struct HomeProps {
@@ -12,8 +12,12 @@ pub struct HomeProps {
 
 #[handler]
 pub async fn index(req: Request) -> Response {
-    inertia_response!(&req, "Home", HomeProps {
-        title: "Suprnova".to_string(),
-        message: "Your Inertia app is ready.".to_string(),
-    })
+    inertia_response!(
+        &req,
+        "Home",
+        HomeProps {
+            title: "Suprnova".to_string(),
+            message: "Your Inertia app is ready.".to_string(),
+        }
+    )
 }

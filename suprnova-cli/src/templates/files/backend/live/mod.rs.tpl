@@ -23,8 +23,7 @@ use suprnova::{
 
 /// Builds the registry of every Live component in this application.
 pub fn registry() -> Result<LiveRegistry, RegistryError> {
-    let registry = LiveRegistry::builder()
-        .build();
+    let registry = LiveRegistry::builder().build();
     Ok(registry)
 }
 

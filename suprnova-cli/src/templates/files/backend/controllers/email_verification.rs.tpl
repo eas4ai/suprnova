@@ -69,7 +69,10 @@ pub async fn resend(_req: Request) -> Response {
     let user = current_user().await?;
     if !user.is_email_verified() {
         EmailVerification::send_link(&user, &verification_link()).await?;
-        Inertia::flash("toast", Toast::info("A new verification link is on its way."))?;
+        Inertia::flash(
+            "toast",
+            Toast::info("A new verification link is on its way."),
+        )?;
     }
     redirect!("/verify-email").into()
 }

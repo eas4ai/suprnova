@@ -27,10 +27,10 @@ use std::sync::Arc;
 
 #[allow(unused_imports)]
 use suprnova::{
-    bind, global_middleware, singleton, App, Auth, AuthConfig, AuthManager, CsrfMiddleware, DevToolsConfig,
-    EloquentUserProvider, Frontend, IncludeMiddleware, Inertia, InertiaConfig,
-    InertiaRootTemplate, LocaleMiddleware, LocaleShare, OriginPolicy, RootShare, SessionConfig,
-    SessionMiddleware, DB,
+    App, Auth, AuthConfig, AuthManager, CsrfMiddleware, DB, DevToolsConfig, EloquentUserProvider,
+    Frontend, IncludeMiddleware, Inertia, InertiaConfig, InertiaRootTemplate, LocaleMiddleware,
+    LocaleShare, OriginPolicy, RootShare, SessionConfig, SessionMiddleware, bind,
+    global_middleware, singleton,
 };
 
 use crate::middleware;
