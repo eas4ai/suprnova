@@ -2,9 +2,11 @@
 //!
 //! Tokio's default is 2 MiB per worker and blocking thread. In a debug
 //! build the frames the framework puts under a Live action (the server, the
-//! middleware, the session, the render cache and the Live engine) use about
+//! middleware, the session, the render cache and the Live engine) used about
 //! 1.75 MiB of that, so an action a little deeper overflowed the stack and
-//! aborted the server. The child process below runs a frame of 3 MiB on a
+//! aborted the server. The framework now boxes those futures and the
+//! `live_stack_budget` test keeps the frames under 1 MiB; the larger stack
+//! stays, for an application's own deep frames. The child process below runs a frame of 3 MiB on a
 //! worker thread and on a blocking thread: it overflows the default and
 //! fits the size the macro sets.
 

@@ -166,10 +166,12 @@ fn main_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
     // is the entire point of this macro - see the module doc.
     // `thread_stack_size` gives every worker and blocking thread 8 MiB, the
     // size Linux gives the main thread, in place of Tokio's 2 MiB: in a
-    // debug build the frames the framework puts under a Live action use
+    // debug build the frames the framework puts under a Live action used
     // about 1.75 MiB, and an action a little deeper overflowed the default
-    // and aborted the server. The size is reserved address space, used only
-    // as a stack is touched.
+    // and aborted the server. The framework's frames now stay under 1 MiB
+    // (the `live_stack_budget` test measures them); the larger stack stays
+    // for an application's own deep frames. The size is reserved address
+    // space, used only as a stack is touched.
     // `set_default_build_id` runs immediately after: `env!` expands where
     // these tokens are compiled, which is the *application* crate, not
     // this macro crate, so it records the application's own

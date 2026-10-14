@@ -45,6 +45,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   operator's value and before its own directory's last entry: the
   account's denials and configuration apply as before, and the framework's
   policy is still the last ImageMagick reads.
+- **The framework's frames below a Live action fit Tokio's default stack.**
+  In a debug build the server, the after-response and task-local wrappers,
+  the session middleware and the Live engine used about 1.75 MiB of stack
+  before an action ran, so an action a little deeper overflowed a thread
+  with Tokio's 2 MiB default. The request future is now boxed before each
+  wrapper holds it, as are the Live dispatch and the session handler, and
+  those frames use under 0.8 MiB. A test runs a Live action through the
+  real server on a thread with the 2 MiB default and fails when the frames
+  below the action pass 1 MiB.
 - **The scroll area's size token is defined.** 4.0.2 bounded the region
   with `--sn-scroll-area-size` and left the token undefined, so the shared
   stylesheet never named it and the engine's token check failed. The shared

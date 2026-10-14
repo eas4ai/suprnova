@@ -52,6 +52,7 @@ pub struct DogfoodCounter {
 impl DogfoodCounter {
     #[action]
     pub fn increment(&mut self) {
+        stack_probe::record();
         self.count += 1;
     }
 }
@@ -687,4 +688,47 @@ fn action_request_for(
     builder
         .body(Full::new(Bytes::from(body)))
         .expect("build Live action request")
+}
+
+/// The stack depth below a Live action, for the frames budget test.
+///
+/// A thread that measures calls [`stack_probe::mark_base`] first, at its
+/// entry; the counter's action then records how far below that point it
+/// ran. Without a base nothing is recorded, so every other test leaves it
+/// alone.
+pub mod stack_probe {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static BASE: AtomicUsize = AtomicUsize::new(0);
+    static DEPTH: AtomicUsize = AtomicUsize::new(0);
+
+    /// The address of a local in this frame: where the stack stands now.
+    #[inline(never)]
+    fn here() -> usize {
+        let marker = 0u8;
+        std::ptr::from_ref(std::hint::black_box(&marker)) as usize
+    }
+
+    /// Record the measuring thread's entry as the base; the stack grows
+    /// down from here.
+    pub fn mark_base() {
+        BASE.store(here(), Ordering::SeqCst);
+    }
+
+    /// Record how far below the base the current frame runs, when a base is
+    /// marked.
+    pub fn record() {
+        let base = BASE.load(Ordering::SeqCst);
+        if base == 0 {
+            return;
+        }
+        DEPTH.store(base.saturating_sub(here()), Ordering::SeqCst);
+    }
+
+    /// The depth the last action ran at, in bytes below the base, or `None`
+    /// when no action ran under a marked base.
+    pub fn depth() -> Option<usize> {
+        let depth = DEPTH.load(Ordering::SeqCst);
+        (depth != 0).then_some(depth)
+    }
 }
