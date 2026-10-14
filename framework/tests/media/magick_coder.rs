@@ -966,6 +966,53 @@ fn hardening_the_operators_configure_path_follows_the_frameworks() {
     }
 }
 
+/// An account directory whose path holds the configure-path separator
+/// cannot go on `MAGICK_CONFIGURE_PATH`, and the driver's `HOME` would hide
+/// it: the run is refused before ImageMagick starts, naming the directory
+/// and the way out, rather than started without the account's denials.
+#[test]
+#[serial]
+fn hardening_an_account_directory_holding_the_separator_refuses_the_run() {
+    let output = {
+        let _env = crate::env_lock::lock_env();
+        let mut child = crate::own_process::child_command(
+            "magick_coder::hardening_an_account_directory_holding_the_separator_refuses_the_run_child",
+        );
+        child
+            .env("HOME", "/srv/account:blue")
+            .env_remove("XDG_CONFIG_HOME");
+        child.output().expect("the child runs")
+    };
+    crate::own_process::assert_child_passed(&output);
+}
+
+/// Runs only in the child process the separator test starts, with `HOME`
+/// naming a path that holds `:`.
+#[test]
+fn hardening_an_account_directory_holding_the_separator_refuses_the_run_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _config = ConfigGuard::set(ImageConfig::default());
+    let recorder = Recorder::new("policy-account-separator");
+    let err = recorder
+        .driver()
+        .dimensions(RED_PNG_1X1)
+        .expect_err("the run is refused")
+        .to_string();
+    assert!(
+        err.contains("/srv/account:blue/.config/ImageMagick")
+            && err.contains("MAGICK_CONFIGURE_PATH")
+            && err.contains("XDG_CONFIG_HOME"),
+        "the refusal names the directory and the way out: {err}"
+    );
+    assert!(
+        recorder.runs().is_empty(),
+        "ImageMagick was not started: {:?}",
+        recorder.runs()
+    );
+}
+
 /// The account's own ImageMagick configuration directory, as ImageMagick
 /// and the driver name it: `$XDG_CONFIG_HOME/ImageMagick` when that is set,
 /// else `$HOME/.config/ImageMagick`; `None` with neither.

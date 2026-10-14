@@ -238,10 +238,13 @@ impl MagickCliDriver {
     /// policy is the last ImageMagick reads, and it outranks every other
     /// policy on the host: the operator's path, ImageMagick's own directory
     /// and the user's, an entry marked `stealth="true"` included. The host's
-    /// denials still apply. With `HOME` changed, a `policy.xml` in the
-    /// account's own `~/.config/ImageMagick` is not read at all; a policy of
-    /// the operator's own goes on `MAGICK_CONFIGURE_PATH` or in
-    /// `$XDG_CONFIG_HOME/ImageMagick`.
+    /// denials still apply. The account's own ImageMagick directory
+    /// (`$XDG_CONFIG_HOME/ImageMagick`, else `$HOME/.config/ImageMagick`),
+    /// which the driver's `HOME` would otherwise hide, goes on
+    /// `MAGICK_CONFIGURE_PATH` after the operator's value, so a `policy.xml`
+    /// or another configuration file there applies as it did before the
+    /// driver, under this policy; a policy of the operator's own goes there
+    /// or on `MAGICK_CONFIGURE_PATH`.
     ///
     /// The driver checks that order on the binary it runs, before the first
     /// run of a process: it reads `magick -list policy`, which must show the
@@ -888,20 +891,28 @@ fn operator_configure_path() -> Option<OsString> {
 /// The account's own ImageMagick configuration directory, the one
 /// ImageMagick reads from a process's environment: `$XDG_CONFIG_HOME/ImageMagick`
 /// when that variable names a directory, else `$HOME/.config/ImageMagick`.
-/// `None` when neither variable names one, or when the path holds the
-/// configure-path separator, which ImageMagick would read as two
-/// directories.
+/// `Ok(None)` when neither variable names one.
 ///
 /// The driver starts ImageMagick with `HOME` naming its policy directory,
 /// which hides this directory from the `$HOME/.config/ImageMagick` read.
 /// Putting it on the configure path keeps the policy and configuration the
 /// operator keeps there applying, under the framework's file.
-fn account_config_dir() -> Option<PathBuf> {
+///
+/// # Errors
+///
+/// A directory whose path holds the configure-path separator cannot go on
+/// the path: ImageMagick would read it as two directories and lose the
+/// policy kept there, which native ImageMagick reads through `HOME` without
+/// splitting. The run is refused before ImageMagick starts, naming the path
+/// and the way out, rather than started without the account's denials.
+fn account_config_dir() -> Result<Option<PathBuf>, FrameworkError> {
     let xdg = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty());
     let dir = match xdg {
         Some(xdg) => PathBuf::from(xdg).join("ImageMagick"),
         None => {
-            let home = std::env::var_os("HOME").filter(|value| !value.is_empty())?;
+            let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) else {
+                return Ok(None);
+            };
             HOME_CONFIG_DIRS
                 .iter()
                 .fold(PathBuf::from(home), |dir, name| dir.join(name))
@@ -912,7 +923,18 @@ fn account_config_dir() -> Option<PathBuf> {
         .as_encoded_bytes()
         .iter()
         .any(|byte| CONFIGURE_PATH_SEPARATOR.as_bytes().contains(byte));
-    (!holds_separator).then_some(dir)
+    if holds_separator {
+        return Err(policy_error(
+            &dir,
+            format!(
+                "the account's ImageMagick directory holds `{CONFIGURE_PATH_SEPARATOR}`, which \
+                 ImageMagick reads as the end of a directory in MAGICK_CONFIGURE_PATH, so the \
+                 policy kept there cannot stay in effect; point XDG_CONFIG_HOME at a path \
+                 without it"
+            ),
+        ));
+    }
+    Ok(Some(dir))
 }
 
 /// The environment the driver starts every ImageMagick process with
@@ -968,7 +990,7 @@ fn prepare_policy(operator: Option<&OsStr>) -> Result<PolicyEnv, FrameworkError>
         configure_path: configure_path(
             &dir.config_dir(),
             operator,
-            account_config_dir().as_deref(),
+            account_config_dir()?.as_deref(),
         ),
     })
 }
