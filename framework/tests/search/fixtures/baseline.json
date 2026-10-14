@@ -1,0 +1,27 @@
+{
+  "calibrated": false,
+  "fixture_sha256": "dfcd40669cd0f82678814fcc9af2751f086ec0ce9d63d3b8054770991b0cc5f7",
+  "fixture_license": "SciFact claims and judgments: CC BY 4.0; S2ORC abstracts: ODC-By 1.0; see LICENSE",
+  "tolerance": 0.05,
+  "rivals": {
+    "meilisearch": {
+      "version": null,
+      "lexical": null
+    },
+    "typesense": {
+      "version": null,
+      "lexical": null
+    }
+  },
+  "p95_budgets_ms": {
+    "collection": 12000,
+    "sqlite": 2000,
+    "postgres": 30000,
+    "mysql": 30000,
+    "qdrant": 2000
+  },
+  "budget_comment": "Measured 2026-10-14 on this shared machine with unoptimized dev/test builds, full SciFact, and cached EmbeddingGemma-2 fp32. Local budgets are twice the largest lexical or hybrid p95 across completed test and console trials, rounded up to whole seconds: collection 5658.024 ms, sqlite 601.174 ms, qdrant 670.860 ms. Corpus inference used SEARCH_EMBED_BATCH=8 and is outside query timing. Postgres and MySQL retain unmeasured provisional 30000 ms estimates because PG_TEST_URL and MYSQL_TEST_URL were unset; measure and replace those limits before relying on them. Rival relevance calibration has not run.",
+  "calibrated_at": null,
+  "tree_hash": null,
+  "latency_scope": "warm engine query: parsing, expansion, retrieval, query inference and fusion; fixed vocabulary; no hydration"
+}

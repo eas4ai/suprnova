@@ -5,6 +5,8 @@
 //! applications register external drivers at bootstrap.
 
 /// Bootstrap pins model configuration before indexing or retrieval begins.
+/// Judged relevance and warm latency make rival comparisons reproducible.
+pub mod baseline;
 pub mod boot;
 pub mod builder;
 mod commands;

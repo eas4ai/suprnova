@@ -1007,7 +1007,8 @@ async fn retrieve(
     })
 }
 
-fn matches_negative(
+/// Semantic retrieval shares lexical exclusions across builders and judged baselines.
+pub(super) fn matches_negative(
     document: &SearchDocument,
     settings: &IndexSettings,
     negatives: &[String],
