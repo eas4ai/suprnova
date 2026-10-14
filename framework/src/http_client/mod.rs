@@ -171,7 +171,7 @@ fn base_builder() -> reqwest::ClientBuilder {
 
 /// The client for a request: one of the two shared clients, or, for a
 /// request with its own connect timeout, the client kept for that timeout.
-fn client_for(
+pub(crate) fn client_for(
     no_redirects: bool,
     connect_timeout: Option<Duration>,
 ) -> Result<reqwest::Client, FrameworkError> {

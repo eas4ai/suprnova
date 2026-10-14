@@ -209,6 +209,10 @@ async fn bootstrap_runtime_drivers(report_failures: bool) -> Result<(), BootErro
             .map_err(Into::into),
     )?;
     settle(
+        "search",
+        crate::search::boot::boot().await.map_err(Into::into),
+    )?;
+    settle(
         "mail",
         crate::mail::boot::bootstrap_from_env().map_err(Into::into),
     )?;

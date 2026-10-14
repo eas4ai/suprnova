@@ -81,3 +81,6 @@ assets/
 /.githooks/
 __pycache__/
 *.pyc
+
+# Verified model downloads are runtime cache artifacts.
+**/storage/search/models/

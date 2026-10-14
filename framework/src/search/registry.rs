@@ -531,6 +531,21 @@ impl SearchRegistry {
         Ok(())
     }
 
+    /// Builtin lazy providers fill gaps while preserving application bootstrap registrations.
+    #[cfg(feature = "search-fastembed")]
+    pub(in crate::search) fn register_reranker_default(
+        name: &str,
+        reranker: Arc<dyn Reranker>,
+    ) -> Result<(), FrameworkError> {
+        services()
+            .rerankers
+            .write()
+            .map_err(|_| poison())?
+            .entry(name.into())
+            .or_insert(reranker);
+        Ok(())
+    }
+
     /// An unregistered reranker is an error rather than a silently ignored request.
     pub fn reranker(name: &str) -> Result<Arc<dyn Reranker>, FrameworkError> {
         services()

@@ -236,3 +236,63 @@ async fn fake_truncates_its_scalar_tokens_after_applying_preparation() {
         fake.embed_query("abé").await.unwrap()
     );
 }
+
+#[cfg(feature = "testing")]
+#[tokio::test]
+async fn boot_none_keeps_lexical_only_error_and_existing_provider_is_retained() {
+    use std::sync::Arc;
+    use suprnova::search::{Search, SearchConfig, SearchEmbedder, SearchRegistry};
+    SearchRegistry::isolated(async {
+        SearchConfig::scope(SearchConfig::default(), async {
+            Search::boot().await.unwrap();
+            assert!(
+                SearchRegistry::embedder_named("boot", "none")
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("SEARCH_EMBEDDER")
+            );
+        })
+        .await
+        .unwrap();
+        let provider = Arc::new(suprnova::search::FakeEmbedder::new(4).unwrap());
+        SearchRegistry::register_embedder("http", provider.clone()).unwrap();
+        SearchConfig::scope(
+            SearchConfig {
+                embedder: SearchEmbedder::Http,
+                ..Default::default()
+            },
+            async {
+                Search::boot().await.unwrap();
+                Search::boot().await.unwrap();
+                let registered = SearchRegistry::embedder_named("boot", "http").unwrap();
+                assert_eq!(registered.profile().dimensions, 4);
+            },
+        )
+        .await
+        .unwrap();
+    })
+    .await;
+}
+
+#[cfg(all(feature = "testing", not(feature = "search-fastembed")))]
+#[tokio::test]
+async fn fastembed_boot_names_the_required_feature_when_it_is_disabled() {
+    use suprnova::search::{Search, SearchConfig, SearchEmbedder, SearchRegistry};
+    SearchRegistry::isolated(async {
+        SearchConfig::scope(
+            SearchConfig {
+                embedder: SearchEmbedder::Fastembed,
+                ..Default::default()
+            },
+            async {
+                let error = Search::boot().await.unwrap_err().to_string();
+                assert!(error.contains("SEARCH_EMBEDDER"));
+                assert!(error.contains("search-fastembed"));
+            },
+        )
+        .await
+        .unwrap();
+    })
+    .await;
+}
