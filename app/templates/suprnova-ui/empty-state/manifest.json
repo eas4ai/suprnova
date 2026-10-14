@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.empty-state",
+  "version": 1,
+  "root": "suprnova-ui/empty-state",
+  "files": [
+    "empty-state.html",
+    "empty-state.css"
+  ],
+  "elements": []
+}

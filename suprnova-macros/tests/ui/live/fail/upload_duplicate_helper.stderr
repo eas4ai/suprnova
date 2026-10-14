@@ -1,0 +1,5 @@
+error: duplicate #[upload] helper
+  --> tests/ui/live/fail/upload_duplicate_helper.rs:12:5
+   |
+12 |     #[upload(policy = policy)]
+   |     ^
