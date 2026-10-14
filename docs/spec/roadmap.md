@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: daybreak-remedies-complete
+Current: password-change-keeps-the-changing-session
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -1163,3 +1163,9 @@ developer writes them in.
 Every commitment inherits the Live gate and the repository gate; a
 commitment is Done only when its mechanisms pass on a committed tree and
 its review is recorded (`sudus review`).
+
+## password-change-keeps-the-changing-session
+
+Requirements: HRD-007
+
+Delivers backlog item password-change-keeps-the-changing-session: A signed-in user who changes their own password is signed out on their next request: the session that made the change carries the old auth epoch, so the epoch check ends it with every other session. Laravel's AuthenticateSession stores the new password hash in the current session at the end of the request, so the session that changed the password stays signed in. suprnova.app hit it on 4.0.0 (its profile password form) and now calls Auth::login after saving the password. The framework refreshes the recorded epoch of the current session's guard when the request that resolved the user changed that user's epoch, and a test shows the changing session stays signed in while another session of the same user is ended.
