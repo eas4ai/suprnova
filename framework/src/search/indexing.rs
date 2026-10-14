@@ -24,10 +24,64 @@ use crate::{
 
 tokio::task_local! { static SYNC_DISABLED: bool; }
 
+pub(crate) fn syncing_disabled() -> bool {
+    SYNC_DISABLED
+        .try_with(|disabled| *disabled)
+        .unwrap_or(false)
+}
+
+/// Search intents require a model transaction even when render caching is disabled.
+#[doc(hidden)]
+pub async fn atomic<M: 'static, T, F, Fut>(
+    connection: Option<&str>,
+    write: F,
+) -> Result<T, FrameworkError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T, FrameworkError>>,
+    T: Send,
+{
+    let mut dependent = SearchRegistry::by_type(TypeId::of::<M>())?.is_some();
+    for relation in crate::eloquent::relations::relations().filter(|relation| {
+        (relation.target_type)() == TypeId::of::<M>()
+            || relation
+                .morph_targets
+                .iter()
+                .any(|target| (target.type_id)() == TypeId::of::<M>())
+    }) {
+        if let Some(entry) = SearchRegistry::by_type((relation.parent_type)())? {
+            dependent |= (entry.descriptor)().search_touches.contains(&relation.name);
+        }
+    }
+    if !dependent || syncing_disabled() || crate::database::after_commit::in_transaction() {
+        return crate::render_cache::orm::atomic(connection, write).await;
+    }
+    crate::render_cache::orm::atomic(connection, || async {
+        // The cache wrapper probes and, when needed, opens its transaction first.
+        // Only a closed cache write side needs the independent search transaction.
+        if crate::database::after_commit::in_transaction() {
+            return write().await;
+        }
+        let run = || DB::transaction_ambient(write);
+        match connection {
+            Some(name) => DB::with_default_connection(name, run()).await,
+            None => run().await,
+        }
+    })
+    .await
+}
+
+/// Generated batch loaders share the source connection restored by deferred dispatch.
+#[doc(hidden)]
+pub fn job_connection() -> Option<String> {
+    super::registry::job_connection()
+}
+
 type VersionKey = (String, String);
 #[derive(Default)]
 struct VersionState {
     events: HashMap<VersionKey, i64>,
+    indexes: HashMap<String, i64>,
 }
 type VersionCache = std::sync::Arc<Mutex<VersionState>>;
 static VERSIONS: LazyLock<VersionCache> =
@@ -44,13 +98,16 @@ fn versions() -> VersionCache {
 }
 
 #[cfg(feature = "testing")]
-pub(crate) async fn isolated_versions<F: Future>(future: F) -> F::Output {
-    ISOLATED_VERSIONS
-        .scope(
-            std::sync::Arc::new(Mutex::new(VersionState::default())),
-            future,
-        )
-        .await
+pub(crate) fn isolated_versions<F: Future>(future: F) -> impl Future<Output = F::Output> {
+    let future = Box::pin(future);
+    async move {
+        ISOLATED_VERSIONS
+            .scope(
+                std::sync::Arc::new(Mutex::new(VersionState::default())),
+                future,
+            )
+            .await
+    }
 }
 
 /// Model keys use their scalar representation, preserving strings without JSON quotes.
@@ -135,7 +192,8 @@ fn timestamp_version(index: &str, value: &serde_json::Value) -> Result<i64, Fram
 }
 
 // An explicit write/import/removal is newer than all previously enqueued operations
-// for this key even when its searchable attributes and source timestamp did not change.
+// in this index even when source timestamps do not change. Fixed flush cutoffs
+// must precede every later key's write, including writes under a frozen clock.
 fn event_version(index: &str, key: &str, document_version: i64) -> Result<i64, FrameworkError> {
     let cache = versions();
     let mut state = cache
@@ -147,7 +205,14 @@ fn event_version(index: &str, key: &str, document_version: i64) -> Result<i64, F
         .get(&identity)
         .copied()
         .unwrap_or(document_version)
-        .max(document_version);
+        .max(document_version)
+        .max(
+            state
+                .indexes
+                .get(index)
+                .copied()
+                .unwrap_or(document_version),
+        );
     let next = previous.checked_add(1).ok_or_else(|| {
         FrameworkError::param(format!(
             "search index `{index}` key `{key}` source version overflow"
@@ -155,7 +220,12 @@ fn event_version(index: &str, key: &str, document_version: i64) -> Result<i64, F
     })?;
     let next = next.max(crate::clock::now().timestamp_micros());
     state.events.insert(identity, next);
+    state.indexes.insert(index.to_owned(), next);
     Ok(next)
+}
+
+fn flush_version(index: &str) -> Result<i64, FrameworkError> {
+    event_version(index, "__flush__", 0)
 }
 
 /// Write kinds keep deletion policy separate from the model's persistence implementation.
@@ -214,21 +284,34 @@ impl Job for SearchIndexJob {
     }
 
     async fn handle(self) -> Result<(), FrameworkError> {
-        let entry = SearchRegistry::by_index(&self.index)?;
-        let documents = if self.op == IndexOperation::Index {
-            (entry.load_document)(&self.key)
-                .await?
-                .into_iter()
-                .collect()
-        } else {
-            Vec::new()
-        };
-        write_documents(
-            &self.index,
-            self.generation,
-            &[(self.key, self.source_version)],
-            documents,
-        )
+        let index = self.index.clone();
+        super::registry::in_model_connection(&index, async move {
+            if super::generations::already_completed(
+                &self.index,
+                self.generation.as_ref(),
+                &[(self.key.clone(), self.source_version)],
+            )
+            .await?
+            {
+                return Ok(());
+            }
+            let entry = SearchRegistry::by_index(&self.index)?;
+            let documents = if self.op == IndexOperation::Index {
+                (entry.load_document)(&self.key)
+                    .await?
+                    .into_iter()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            write_documents(
+                &self.index,
+                self.generation,
+                &[(self.key, self.source_version)],
+                documents,
+            )
+            .await
+        })
         .await
     }
 }
@@ -258,13 +341,27 @@ impl Job for SearchIndexBatchJob {
         true
     }
     async fn handle(self) -> Result<(), FrameworkError> {
-        let entry = SearchRegistry::by_index(&self.index)?;
-        let documents = if self.op == IndexOperation::Index {
-            (entry.load_documents)(self.keys.iter().map(|(key, _)| key.clone()).collect()).await?
-        } else {
-            Vec::new()
-        };
-        write_documents(&self.index, self.generation, &self.keys, documents).await
+        let index = self.index.clone();
+        super::registry::in_model_connection(&index, async move {
+            if super::generations::already_completed(
+                &self.index,
+                self.generation.as_ref(),
+                &self.keys,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+            let entry = SearchRegistry::by_index(&self.index)?;
+            let documents = if self.op == IndexOperation::Index {
+                (entry.load_documents)(self.keys.iter().map(|(key, _)| key.clone()).collect())
+                    .await?
+            } else {
+                Vec::new()
+            };
+            write_documents(&self.index, self.generation, &self.keys, documents).await
+        })
+        .await
     }
 }
 
@@ -272,6 +369,9 @@ impl Job for SearchIndexBatchJob {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SearchFlushJob {
     index: String,
+    generation: Option<GenerationId>,
+    #[serde(default)]
+    source_version: i64,
 }
 
 #[async_trait]
@@ -283,99 +383,238 @@ impl Job for SearchFlushJob {
         true
     }
     async fn handle(self) -> Result<(), FrameworkError> {
-        let descriptor = (SearchRegistry::by_index(&self.index)?.descriptor)();
-        let engine = SearchRegistry::engine_for(&self.index)?;
-        let generation = SearchRegistry::generation_for(&self.index).await?;
-        let query = super::query::EngineQuery {
-            expanded: super::expansion::ExpandedQuery::default(),
-            filter: None,
-            sort: Vec::new(),
-            depth: SearchConfig::current()?.chunk,
-            highlights: false,
-            crop: Default::default(),
-        };
-        let total = engine.count(descriptor, &generation, &query).await?;
-        let super::results::Total::Exact(total) = total else {
-            return Err(FrameworkError::param(format!(
-                "search index `{}` removal requires an exact lexical count",
-                self.index
-            )));
-        };
-        let mut removed = 0u64;
-        while removed < total {
-            let page = engine.query(descriptor, &generation, &query).await?;
-            if page.candidates.is_empty() {
-                if engine.count(descriptor, &generation, &query).await?.value() == 0 {
-                    return Ok(());
+        let index = self.index.clone();
+        super::registry::in_model_connection(&index, async move {
+            if super::generations::already_completed(
+                &self.index,
+                self.generation.as_ref(),
+                &[("__flush__".into(), self.source_version)],
+            )
+            .await?
+            {
+                return Ok(());
+            }
+            let descriptor = (SearchRegistry::by_index(&self.index)?.descriptor)();
+            let engine = SearchRegistry::engine_for(&self.index)?;
+            let generation = match self.generation {
+                Some(generation) => generation,
+                None => SearchRegistry::generation_for(&self.index).await?,
+            };
+            engine
+                .record_flush(descriptor, &generation, self.source_version)
+                .await?;
+            loop {
+                let keys = engine
+                    .keys_before_version(
+                        descriptor,
+                        &generation,
+                        self.source_version,
+                        SearchConfig::current()?.chunk,
+                    )
+                    .await?;
+                if keys.is_empty() {
+                    break;
                 }
-                return Err(FrameworkError::param(format!(
-                    "search index `{}` reported remaining documents but returned no removal candidates",
-                    self.index
-                )));
+                let keys: Vec<_> = keys
+                    .into_iter()
+                    .map(|(key, _)| (key, self.source_version))
+                    .collect();
+                let outcome = engine.remove(descriptor, &generation, &keys).await?;
+                if outcome.written == 0
+                    && outcome.skipped_older == 0
+                    && outcome.skipped_tombstoned == 0
+                {
+                    return Err(FrameworkError::param(format!(
+                        "search index `{}` removal made no progress",
+                        self.index
+                    )));
+                }
             }
-            let keys = page
-                .candidates
-                .into_iter()
-                .map(|candidate| {
-                    let document = candidate.document;
-                    Ok((
-                        document.key.clone(),
-                        event_version(&self.index, &document.key, document.source_version)?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, FrameworkError>>()?;
-            let outcome = engine.remove(descriptor, &generation, &keys).await?;
-            if outcome.written == 0 {
-                return Err(FrameworkError::param(format!(
-                    "search index `{}` removal made no progress because writes raced with the sweep",
-                    self.index
-                )));
-            }
-            removed = removed.saturating_add(outcome.written as u64);
-        }
-        if engine.count(descriptor, &generation, &query).await?.value() != 0 {
-            return Err(FrameworkError::param(format!(
-                "search index `{}` received concurrent writes during removal",
-                self.index
-            )));
-        }
-        Ok(())
+            super::generations::complete(
+                &self.index,
+                &generation,
+                &[("__flush__".into(), self.source_version)],
+            )
+            .await?;
+            Ok(())
+        })
+        .await
     }
 }
 
-async fn enqueue_job<J: Job>(job: J, tx: Option<&Transaction>) -> Result<(), FrameworkError> {
-    let config = SearchConfig::current()?;
-    let context = super::registry::capture_context(config.clone());
-    let cache = versions();
-    let callback = move || async move {
-        with_versions(
-            cache,
-            super::registry::in_context(context, async move {
-                if config.queue {
-                    Queue::push_with(
-                        job,
-                        EnvelopeOverrides {
-                            queue: config.queue_name,
-                            connection: config.queue_connection,
-                            // This callback is already past the transaction's commit boundary.
-                            after_commit: Some(false),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                } else {
-                    job.handle().await
-                }
-            }),
-        )
-        .await
-    };
-    if let Some(tx) = tx {
-        tx.after_commit(callback);
-        Ok(())
-    } else {
-        DB::after_commit(callback).await
+pub(crate) trait DeferredSearchJob: Job + Clone {
+    fn index(&self) -> &str;
+    fn generation(&self) -> Option<GenerationId>;
+    fn pin(&mut self, generation: GenerationId);
+    fn keys(&self) -> Vec<(String, i64)>;
+}
+impl DeferredSearchJob for SearchIndexJob {
+    fn index(&self) -> &str {
+        &self.index
     }
+    fn generation(&self) -> Option<GenerationId> {
+        self.generation.clone()
+    }
+    fn pin(&mut self, generation: GenerationId) {
+        self.generation = Some(generation);
+    }
+    fn keys(&self) -> Vec<(String, i64)> {
+        vec![(self.key.clone(), self.source_version)]
+    }
+}
+impl DeferredSearchJob for SearchIndexBatchJob {
+    fn index(&self) -> &str {
+        &self.index
+    }
+    fn generation(&self) -> Option<GenerationId> {
+        self.generation.clone()
+    }
+    fn pin(&mut self, generation: GenerationId) {
+        self.generation = Some(generation);
+    }
+    fn keys(&self) -> Vec<(String, i64)> {
+        self.keys.clone()
+    }
+}
+impl DeferredSearchJob for SearchFlushJob {
+    fn index(&self) -> &str {
+        &self.index
+    }
+    fn generation(&self) -> Option<GenerationId> {
+        self.generation.clone()
+    }
+    fn pin(&mut self, generation: GenerationId) {
+        self.generation = Some(generation);
+    }
+    fn keys(&self) -> Vec<(String, i64)> {
+        vec![("__flush__".into(), self.source_version)]
+    }
+}
+
+pub(crate) fn enqueue_job<J: DeferredSearchJob>(
+    job: J,
+    tx: Option<&Transaction>,
+) -> impl Future<Output = Result<(), FrameworkError>> {
+    // Keep the durable dispatch future behind one pointer before ORM transaction
+    // and model-hook scopes retain it in their own async state machines.
+    Box::pin(async move {
+        let config = SearchConfig::current()?;
+        let connection_override = super::registry::job_connection();
+        let declared = (SearchRegistry::by_index(job.index())?.connection)();
+        let connection = match tx {
+            Some(tx) => tx.connection_name.to_string(),
+            None => crate::database::transaction::ExecutorChoice::resolve_write(
+                None,
+                connection_override.as_deref(),
+                declared,
+            )
+            .await?
+            .connection_name()
+            .to_owned(),
+        };
+        let mut payload = serde_json::to_value(&job).map_err(|failure| {
+            FrameworkError::param(format!("search job serialization: {failure}"))
+        })?;
+        payload
+            .as_object_mut()
+            .ok_or_else(|| FrameworkError::param("search job payload must be an object"))?
+            .insert(
+                "_search_connection".into(),
+                serde_json::Value::String(connection.clone()),
+            );
+        let queue_context = crate::context::Context::dehydrate();
+        let intent = super::registry::in_connection(
+            connection.clone(),
+            super::outbox::stage_job(job.index(), J::job_name(), &payload, tx),
+        )
+        .await?;
+        let context = super::registry::capture_context(config.clone());
+        let cache = versions();
+        let callback = move || {
+            super::registry::in_connection(
+                connection.clone(),
+                crate::context::Context::scope(
+                    crate::context::Context::hydrate(queue_context.as_ref()),
+                    async move {
+                        crate::context::Context::hidden_add(
+                            "suprnova.search.connection",
+                            &connection,
+                        );
+                        with_versions(
+                            cache,
+                            super::registry::in_context(context, async move {
+                                let explicit = job.generation();
+                                let mut generations = super::generations::reserve_job(
+                                    job.index(),
+                                    &job.keys(),
+                                    explicit.as_ref(),
+                                    J::job_name(),
+                                    payload.clone(),
+                                )
+                                .await?;
+                                super::outbox::reserved(job.index(), intent.as_deref()).await?;
+                                // Scope functions can inspect any filterable attribute. Inline the
+                                // full projection after commit so queued work cannot delay visibility.
+                                let scoped = J::job_name() == SearchIndexJob::job_name()
+                                    && (SearchRegistry::by_index(job.index())?.descriptor)()
+                                        .scope
+                                        .is_some();
+                                if scoped && config.queue {
+                                    for generation in &generations {
+                                        let mut inline = job.clone();
+                                        inline.pin(generation.clone());
+                                        inline.handle().await?;
+                                    }
+                                    // A concurrent publication can retire the initial targets. The
+                                    // synchronous write already reached its building generation.
+                                    generations = super::generations::reserve_job(
+                                        job.index(),
+                                        &job.keys(),
+                                        explicit.as_ref(),
+                                        J::job_name(),
+                                        payload.clone(),
+                                    )
+                                    .await?;
+                                }
+                                for generation in generations {
+                                    let mut pinned = job.clone();
+                                    pinned.pin(generation.clone());
+                                    let keys = pinned.keys();
+                                    let index = pinned.index().to_owned();
+                                    if config.queue
+                                        && super::generations::import_generation().is_none()
+                                    {
+                                        Queue::push_with(
+                                            pinned,
+                                            EnvelopeOverrides {
+                                                queue: config.queue_name.clone(),
+                                                connection: config.queue_connection.clone(),
+                                                after_commit: Some(false),
+                                                ..Default::default()
+                                            },
+                                        )
+                                        .await?;
+                                        super::generations::published(&index, &generation, &keys)
+                                            .await?;
+                                    } else {
+                                        pinned.handle().await?;
+                                    }
+                                }
+                                Ok(())
+                            }),
+                        )
+                        .await
+                    },
+                ),
+            )
+        };
+        if let Some(tx) = tx {
+            tx.after_commit(callback);
+            Ok(())
+        } else {
+            DB::after_commit(callback).await
+        }
+    })
 }
 
 async fn with_versions<F: Future>(cache: VersionCache, future: F) -> F::Output {
@@ -619,6 +858,7 @@ async fn write_documents(
     if !indexed.is_empty() {
         engine.index(descriptor, &generation, &indexed).await?;
     }
+    super::generations::complete(index, &generation, keys).await?;
     Ok(())
 }
 
@@ -666,7 +906,7 @@ where
                 index: M::descriptor().name.into(),
                 keys,
                 op,
-                generation: None,
+                generation: super::generations::import_generation(),
             },
             None,
         )
@@ -675,8 +915,283 @@ where
     Ok(())
 }
 
+async fn enqueue_touched_parents<M: Serialize + 'static>(
+    model: &M,
+    tx: Option<&Transaction>,
+    visited: &mut std::collections::HashSet<(&'static str, String)>,
+) -> Result<(), FrameworkError> {
+    for job in touched_parent_jobs(model, tx, visited).await? {
+        job.enqueue(tx).await?;
+    }
+    Ok(())
+}
+
+/// Capture reverse joins before a cascading deletion can erase its pivot rows.
+#[doc(hidden)]
+pub async fn plan_model_delete<M: Serialize + 'static>(
+    model: &M,
+    tx: Option<&Transaction>,
+) -> Result<Vec<SearchIndexJob>, FrameworkError> {
+    if SYNC_DISABLED
+        .try_with(|disabled| *disabled)
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+    touched_parent_jobs(model, tx, &mut std::collections::HashSet::new()).await
+}
+
+/// Register the captured parents only after the deletion statement succeeds.
+#[doc(hidden)]
+pub async fn after_model_delete<M: 'static>(
+    model: &M,
+    kind: WriteKind,
+    tx: Option<&Transaction>,
+    jobs: Vec<SearchIndexJob>,
+) -> Result<(), FrameworkError> {
+    if SYNC_DISABLED
+        .try_with(|disabled| *disabled)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    for job in jobs {
+        job.enqueue(tx).await?;
+    }
+    enqueue_model(model, kind, tx).await
+}
+
+async fn touched_parent_jobs<M: Serialize + 'static>(
+    model: &M,
+    tx: Option<&Transaction>,
+    visited: &mut std::collections::HashSet<(&'static str, String)>,
+) -> Result<Vec<SearchIndexJob>, FrameworkError> {
+    use crate::eloquent::relations::RelationKind;
+    let mut jobs = Vec::new();
+    let mut fields = None;
+    for relation in crate::eloquent::relations::relations().filter(|relation| {
+        (relation.target_type)() == TypeId::of::<M>()
+            || relation
+                .morph_targets
+                .iter()
+                .any(|target| (target.type_id)() == TypeId::of::<M>())
+    }) {
+        let Some(entry) = SearchRegistry::by_type((relation.parent_type)())? else {
+            continue;
+        };
+        let descriptor = (entry.descriptor)();
+        if !descriptor.search_touches.contains(&relation.name) {
+            continue;
+        }
+        let fields = fields
+            .get_or_insert(serde_json::to_value(model).map_err(|error| {
+                FrameworkError::param(format!("search touches model: {error}"))
+            })?);
+        let read = |column: &str| fields.get(column).filter(|value| !value.is_null()).cloned();
+        let (from, predicate, value) = match relation.kind {
+            RelationKind::HasOne
+            | RelationKind::HasMany
+            | RelationKind::MorphOne
+            | RelationKind::MorphMany => {
+                if !relation.morph_type_column.is_empty()
+                    && read(relation.morph_type_column)
+                        .as_ref()
+                        .and_then(serde_json::Value::as_str)
+                        != Some(relation.morph_type_value)
+                {
+                    continue;
+                }
+                (
+                    descriptor.model_table.to_owned(),
+                    format!("p.{}", relation.parent_key),
+                    read(relation.foreign_key),
+                )
+            }
+            RelationKind::BelongsTo => (
+                descriptor.model_table.to_owned(),
+                format!("p.{}", relation.foreign_key),
+                read(relation.parent_key),
+            ),
+            RelationKind::BelongsToMany
+            | RelationKind::MorphToMany
+            | RelationKind::MorphedByMany
+            | RelationKind::HasOneThrough
+            | RelationKind::HasManyThrough => {
+                let column = if matches!(
+                    relation.kind,
+                    RelationKind::HasOneThrough | RelationKind::HasManyThrough
+                ) {
+                    relation.target_join_key
+                } else {
+                    relation.target_primary_key
+                };
+                (
+                    format!(
+                        "{} p JOIN {} r ON p.{} = r.{}",
+                        descriptor.model_table,
+                        relation.pivot_table,
+                        relation.parent_key,
+                        relation.pivot_parent_key
+                    ),
+                    format!("r.{}", relation.pivot_related_key),
+                    read(column),
+                )
+            }
+            RelationKind::MorphTo => {
+                let target = relation
+                    .morph_targets
+                    .iter()
+                    .find(|target| (target.type_id)() == TypeId::of::<M>())
+                    .ok_or_else(|| {
+                        FrameworkError::param(format!(
+                            "search touches `{}` has no matching morph target",
+                            relation.name
+                        ))
+                    })?;
+                (
+                    descriptor.model_table.to_owned(),
+                    format!("p.{}", relation.foreign_key),
+                    read(target.primary_key),
+                )
+            }
+        };
+        let Some(value) = value else { continue };
+        for identifier in [
+            descriptor.model_table,
+            descriptor.key_column,
+            relation.parent_key,
+            relation.foreign_key,
+            relation.pivot_table,
+            relation.pivot_parent_key,
+            relation.pivot_related_key,
+        ]
+        .into_iter()
+        .filter(|identifier| !identifier.is_empty())
+        {
+            crate::database::validate_identifier(identifier)?;
+        }
+        let exec = match tx {
+            Some(tx) => crate::database::transaction::ExecutorChoice::from_tx(tx),
+            None => {
+                crate::database::transaction::ExecutorChoice::resolve_read(None, None, None).await?
+            }
+        };
+        let bind_column = match relation.kind {
+            RelationKind::HasOne
+            | RelationKind::HasMany
+            | RelationKind::MorphOne
+            | RelationKind::MorphMany => relation.foreign_key,
+            RelationKind::BelongsTo => relation.parent_key,
+            RelationKind::HasOneThrough | RelationKind::HasManyThrough => relation.target_join_key,
+            RelationKind::MorphTo => relation
+                .morph_targets
+                .iter()
+                .find(|target| (target.type_id)() == TypeId::of::<M>())
+                .map(|target| target.primary_key)
+                .ok_or_else(|| FrameworkError::param("search touches morph target disappeared"))?,
+            RelationKind::BelongsToMany
+            | RelationKind::MorphToMany
+            | RelationKind::MorphedByMany => relation.target_primary_key,
+        };
+        let binder = if relation.kind == RelationKind::MorphTo {
+            relation
+                .morph_targets
+                .iter()
+                .find(|target| (target.type_id)() == TypeId::of::<M>())
+                .map(|target| (target.query_constraints)().binder)
+                .ok_or_else(|| FrameworkError::param("search touches morph binder disappeared"))?
+        } else {
+            relation.related_bind_column
+        };
+        let bound_key = binder(bind_column, &value)
+            .unwrap_or_else(|| crate::eloquent::model::json_value_to_sea_value(&value));
+        let key_placeholder =
+            crate::database::placeholder::typed_placeholder(exec.backend(), 1, &bound_key)?;
+        let mut values = vec![bound_key];
+        let key_type = if exec.backend() == sea_orm::DbBackend::MySql {
+            "CHAR"
+        } else {
+            "TEXT"
+        };
+        let mut sql = if from == descriptor.model_table {
+            format!(
+                "SELECT CAST(p.{} AS {key_type}) AS search_key FROM {from} p WHERE {predicate} = {}",
+                descriptor.key_column, key_placeholder
+            )
+        } else {
+            format!(
+                "SELECT CAST(p.{} AS {key_type}) AS search_key FROM {from} WHERE {predicate} = {}",
+                descriptor.key_column, key_placeholder
+            )
+        };
+        if relation.kind == RelationKind::MorphTo {
+            let target = relation
+                .morph_targets
+                .iter()
+                .find(|target| (target.type_id)() == TypeId::of::<M>())
+                .ok_or_else(|| FrameworkError::param("search touches morph target disappeared"))?;
+            crate::database::validate_identifier(relation.morph_type_column)?;
+            let mut placeholders = Vec::new();
+            for name in target.morph_type_names() {
+                values.push(name.into());
+                placeholders.push(crate::database::__macro_support::placeholder(
+                    exec.backend(),
+                    values.len(),
+                )?);
+            }
+            sql.push_str(&format!(
+                " AND p.{} IN ({})",
+                relation.morph_type_column,
+                placeholders.join(", ")
+            ));
+        }
+        if !relation.pivot_table.is_empty() && !relation.morph_type_column.is_empty() {
+            crate::database::validate_identifier(relation.morph_type_column)?;
+            values.push(relation.morph_type_value.into());
+            sql.push_str(&format!(
+                " AND r.{} = {}",
+                relation.morph_type_column,
+                crate::database::__macro_support::placeholder(exec.backend(), 2)?
+            ));
+        }
+        let rows = exec
+            .query_all(sea_orm::Statement::from_sql_and_values(
+                exec.backend(),
+                sql,
+                values,
+            ))
+            .await
+            .map_err(|error| FrameworkError::database(error.to_string()))?;
+        for row in rows {
+            let key = row
+                .try_get::<String>("", "search_key")
+                .or_else(|_| {
+                    row.try_get::<i64>("", "search_key")
+                        .map(|key| key.to_string())
+                })
+                .or_else(|_| {
+                    row.try_get::<u64>("", "search_key")
+                        .map(|key| key.to_string())
+                })
+                .map_err(|error| {
+                    FrameworkError::database(format!("search touches key: {error}"))
+                })?;
+            if visited.insert((entry.index, key.clone())) {
+                jobs.push(SearchIndexJob {
+                    index: entry.index.into(),
+                    source_version: event_version(entry.index, &key, 0)?,
+                    key,
+                    op: IndexOperation::Index,
+                    generation: None,
+                });
+            }
+        }
+    }
+    Ok(jobs)
+}
+
 /// The persistence bridge accepts all model types, making nonsearchable writes a cheap no-op.
-pub async fn after_model_write<M: 'static>(
+pub async fn after_model_write<M: Serialize + 'static>(
     model: &M,
     kind: WriteKind,
     tx: Option<&Transaction>,
@@ -687,6 +1202,34 @@ pub async fn after_model_write<M: 'static>(
     {
         return Ok(());
     }
+    enqueue_touched_parents(model, tx, &mut std::collections::HashSet::new()).await?;
+    enqueue_model(model, kind, tx).await
+}
+
+/// Retain both owners when an update changes a related row's foreign key.
+#[doc(hidden)]
+pub async fn after_model_update<M: Serialize + 'static>(
+    previous: &M,
+    current: &M,
+    tx: Option<&Transaction>,
+) -> Result<(), FrameworkError> {
+    if SYNC_DISABLED
+        .try_with(|disabled| *disabled)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let mut visited = std::collections::HashSet::new();
+    enqueue_touched_parents(previous, tx, &mut visited).await?;
+    enqueue_touched_parents(current, tx, &mut visited).await?;
+    enqueue_model(current, WriteKind::Updated, tx).await
+}
+
+async fn enqueue_model<M: 'static>(
+    model: &M,
+    kind: WriteKind,
+    tx: Option<&Transaction>,
+) -> Result<(), FrameworkError> {
     let Some(entry) = SearchRegistry::by_type(TypeId::of::<M>())? else {
         return Ok(());
     };
@@ -694,7 +1237,9 @@ pub async fn after_model_write<M: 'static>(
     let descriptor = (entry.descriptor)();
     let deleted =
         kind == WriteKind::ForceDeleted || (kind == WriteKind::Deleted && !descriptor.soft_delete);
-    let op = if deleted || !(entry.should_index)(model)? {
+    // Restore receives the pre-restore snapshot from the model macro. Its old
+    // deletion flag cannot decide eligibility; the worker evaluates the live row.
+    let op = if deleted || (kind != WriteKind::Restored && !(entry.should_index)(model)?) {
         IndexOperation::Remove
     } else {
         IndexOperation::Index
@@ -740,9 +1285,27 @@ where
     }
     query
         .chunk_by_id(chunk as u64, |models| async move {
-            enqueue_models::<M>(models.into_vec(), IndexOperation::Index).await
+            let count = models.len();
+            enqueue_models::<M>(models.into_vec(), IndexOperation::Index).await?;
+            crate::console::line(format!(
+                "search index `{}` submitted {count} documents",
+                M::descriptor().name
+            ));
+            Ok(())
         })
         .await
+}
+
+pub(crate) async fn flush_index(index: &str) -> Result<(), FrameworkError> {
+    enqueue_job(
+        SearchFlushJob {
+            index: index.to_owned(),
+            generation: None,
+            source_version: flush_version(index)?,
+        },
+        None,
+    )
+    .await
 }
 
 /// Removal walks the engine in bounded chunks so orphaned and soft-deleted keys are cleared too.
@@ -767,6 +1330,8 @@ where
     enqueue_job(
         SearchFlushJob {
             index: M::descriptor().name.into(),
+            generation: None,
+            source_version: flush_version(M::descriptor().name)?,
         },
         None,
     )

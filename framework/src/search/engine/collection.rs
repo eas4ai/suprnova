@@ -22,9 +22,11 @@ struct IndexState {
     generations: BTreeMap<GenerationId, Generation>,
 }
 struct Generation {
+    state: &'static str,
     settings: IndexSettings,
     documents: BTreeMap<String, IndexedDocument>,
     tombstones: BTreeMap<String, (i64, Instant)>,
+    flush: Option<(i64, Instant)>,
 }
 /// In-memory storage keeps generations isolated and locks each mutation atomically.
 pub struct CollectionEngine {
@@ -530,6 +532,12 @@ impl SearchEngine for CollectionEngine {
         let generation = generation_mut(&mut state, index, id)?;
         let mut hashes = BTreeMap::new();
         for proposed in documents {
+            if generation.flush.is_some_and(|(cutoff, removed_at)| {
+                removed_at.elapsed() < self.tombstone_retention
+                    && proposed.document.source_version <= cutoff
+            }) {
+                continue;
+            }
             if let Some(stored) = generation.documents.get_mut(&proposed.document.key) {
                 if stored.content_hash == proposed.content_hash {
                     stored.document.source_version = stored
@@ -542,6 +550,56 @@ impl SearchEngine for CollectionEngine {
         }
         Ok(hashes)
     }
+    async fn record_flush(
+        &self,
+        index: &IndexDescriptor,
+        id: &GenerationId,
+        cutoff: i64,
+    ) -> Result<(), FrameworkError> {
+        let mut state = self.write()?;
+        let generation = generation_mut(&mut state, index, id)?;
+        if generation
+            .flush
+            .is_none_or(|(previous, _)| cutoff >= previous)
+        {
+            generation.flush = Some((cutoff, Instant::now()));
+        }
+        Ok(())
+    }
+    async fn keys_before_version(
+        &self,
+        index: &IndexDescriptor,
+        id: &GenerationId,
+        cutoff: i64,
+        limit: usize,
+    ) -> Result<Vec<(String, i64)>, FrameworkError> {
+        index.validate()?;
+        if limit == 0 {
+            return Err(FrameworkError::param(
+                "search removal chunk must be positive",
+            ));
+        }
+        GenerationId::new(id.0.clone())?;
+        let state = self.read()?;
+        let generation = state
+            .indexes
+            .get(index.name)
+            .and_then(|state| state.generations.get(id))
+            .ok_or_else(|| {
+                FrameworkError::param(format!(
+                    "search index `{}` generation `{}` does not exist",
+                    index.name,
+                    id.as_str()
+                ))
+            })?;
+        Ok(generation
+            .documents
+            .values()
+            .filter(|doc| doc.document.source_version <= cutoff)
+            .take(limit)
+            .map(|doc| (doc.document.key.clone(), doc.document.source_version))
+            .collect())
+    }
     async fn current_generation(
         &self,
         index: &str,
@@ -551,6 +609,32 @@ impl SearchEngine for CollectionEngine {
             .indexes
             .get(index)
             .and_then(|i| i.current.clone()))
+    }
+    async fn retire_index(&self, index: &str) -> Result<(), FrameworkError> {
+        if let Some(index) = self.write()?.indexes.get_mut(index) {
+            index.current = None;
+            for generation in index.generations.values_mut() {
+                generation.state = "retired";
+            }
+        }
+        Ok(())
+    }
+    async fn generation_states(
+        &self,
+        index: &str,
+    ) -> Result<Vec<(GenerationId, String)>, FrameworkError> {
+        Ok(self
+            .read()?
+            .indexes
+            .get(index)
+            .map(|state| {
+                state
+                    .generations
+                    .iter()
+                    .map(|(id, generation)| (id.clone(), generation.state.into()))
+                    .collect()
+            })
+            .unwrap_or_default())
     }
     async fn create_generation(
         &self,
@@ -572,9 +656,11 @@ impl SearchEngine for CollectionEngine {
         i.generations.insert(
             id.clone(),
             Generation {
+                state: "building",
                 settings: settings.clone(),
                 documents: BTreeMap::new(),
                 tombstones: BTreeMap::new(),
+                flush: None,
             },
         );
         Ok(())
@@ -596,6 +682,14 @@ impl SearchEngine for CollectionEngine {
                 "search index {}: current generation changed",
                 index.name
             )));
+        }
+        if let Some(old) = &i.current
+            && let Some(generation) = i.generations.get_mut(old)
+        {
+            generation.state = "retired";
+        }
+        if let Some(generation) = i.generations.get_mut(&to) {
+            generation.state = "current";
         }
         i.current = Some(to);
         Ok(())
@@ -661,6 +755,13 @@ impl SearchEngine for CollectionEngine {
             .retain(|_, (_, created)| now.duration_since(*created) < self.tombstone_retention);
         let mut outcome = WriteOutcome::default();
         for document in docs {
+            if generation.flush.is_some_and(|(cutoff, removed_at)| {
+                now.duration_since(removed_at) < self.tombstone_retention
+                    && document.document.source_version <= cutoff
+            }) {
+                outcome.skipped_tombstoned += 1;
+                continue;
+            }
             apply_write(generation, document, &mut outcome);
         }
         Ok(outcome)

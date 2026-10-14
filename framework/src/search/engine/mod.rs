@@ -1,5 +1,6 @@
 //! Drivers own relevance while preserving one versioned, scoped query contract.
 pub mod collection;
+pub(crate) mod connection;
 pub mod database;
 pub mod null;
 pub mod qdrant;
@@ -132,6 +133,59 @@ pub trait SearchEngine: Send + Sync {
     /// Resolve the generation readers currently share atomically.
     async fn current_generation(&self, index: &str)
     -> Result<Option<GenerationId>, FrameworkError>;
+    /// Maintenance needs hidden and retired generations to pin writes and delay reclamation.
+    /// Drivers with isolated builds override this method to expose every retained generation.
+    async fn generation_states(
+        &self,
+        index: &str,
+    ) -> Result<Vec<(GenerationId, String)>, FrameworkError> {
+        Ok(self
+            .current_generation(index)
+            .await?
+            .into_iter()
+            .map(|id| (id, "current".into()))
+            .collect())
+    }
+    /// Retain a generation-wide removal fence before sweeping its existing keys.
+    /// Writes at or below the cutoff must be rejected for the tombstone lifetime,
+    /// including queued writes whose keys were absent when the flush began.
+    async fn record_flush(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        cutoff: i64,
+    ) -> Result<(), FrameworkError> {
+        let _ = (generation, cutoff);
+        Err(FrameworkError::param(format!(
+            "search index `{}` engine `{}` does not support retained flush fences",
+            index.name,
+            self.name()
+        )))
+    }
+    /// Retried sweeps select bounded keys below a fixed metadata version cutoff.
+    /// Ordinary attribute filters cannot express source versions, and skipping newer
+    /// candidates from a ranked first page would prevent a flush from progressing.
+    async fn keys_before_version(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        cutoff: i64,
+        limit: usize,
+    ) -> Result<Vec<(String, i64)>, FrameworkError> {
+        let _ = (generation, cutoff, limit);
+        Err(FrameworkError::param(format!(
+            "search index `{}` engine `{}` does not support bounded version removal",
+            index.name,
+            self.name()
+        )))
+    }
+    /// Deletion clears the read pointer only after the coordinator has fenced pending jobs.
+    async fn retire_index(&self, index: &str) -> Result<(), FrameworkError> {
+        Err(FrameworkError::param(format!(
+            "search index '{index}': engine '{}' does not support index deletion",
+            self.name()
+        )))
+    }
     /// Create an empty isolated generation with its exact settings.
     async fn create_generation(
         &self,

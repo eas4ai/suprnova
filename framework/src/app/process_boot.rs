@@ -206,6 +206,7 @@ async fn bootstrap_runtime_drivers(report_failures: bool) -> Result<(), BootErro
         "queue",
         crate::queue::bootstrap_from_env().await.map_err(Into::into),
     )?;
+    settle("search", crate::search::boot().await.map_err(Into::into))?;
     settle(
         "rate limit",
         crate::rate_limit::bootstrap_from_env()

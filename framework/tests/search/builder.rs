@@ -127,10 +127,11 @@ async fn live_scope_recheck_drops_stale_public_documents_from_hits_keys_and_raw(
         SearchRegistry::isolated(async {
             let public = note("Rust changing", true, 0).await;
             index(&public).await;
-            public
-                .update(suprnova::attrs! { owner_id: 9 })
-                .await
-                .unwrap();
+            suprnova::without_syncing_to_search(|| async {
+                public.update(suprnova::attrs! { owner_id: 9 }).await
+            })
+            .await
+            .unwrap();
             assert!(
                 SearchNote::search("Rust")
                     .get()
@@ -155,7 +156,9 @@ async fn missing_row_is_dropped_and_its_removal_is_enqueued() {
         SearchRegistry::isolated(async {
             let model = note("Rust disappearing", true, 0).await;
             index(&model).await;
-            model.force_delete().await.unwrap();
+            suprnova::without_syncing_to_search(|| async { model.force_delete().await })
+                .await
+                .unwrap();
             let _queue = Queue::fake();
             let config = SearchConfig {
                 queue: true,
@@ -296,7 +299,9 @@ async fn trashed_hits_require_both_index_and_query_opt_in() {
         config(),
         SearchRegistry::isolated(async {
             let model = note("Rust trashed", true, 0).await;
-            model.clone().delete().await.unwrap();
+            suprnova::without_syncing_to_search(|| async { model.clone().delete().await })
+                .await
+                .unwrap();
             let entry = SearchRegistry::by_index(SearchNote::descriptor().name).unwrap();
             let document = (entry.load_document)(&model.id.to_string())
                 .await
@@ -455,10 +460,11 @@ async fn federation_projects_declared_fields_and_rechecks_live_scope() {
                 result.facets[SearchNote::descriptor().name]["category"][0].count,
                 1
             );
-            visible
-                .update(suprnova::attrs! { owner_id: 9 })
-                .await
-                .unwrap();
+            suprnova::without_syncing_to_search(|| async {
+                visible.update(suprnova::attrs! { owner_id: 9 }).await
+            })
+            .await
+            .unwrap();
             assert!(
                 Search::federated([SearchNote::descriptor().name])
                     .search("Rust")
@@ -1138,7 +1144,11 @@ async fn pagination_refills_candidates_dropped_by_live_scope_checks() {
             index(&a).await;
             index(&b).await;
             index(&c).await;
-            a.update(suprnova::attrs! { owner_id: 9 }).await.unwrap();
+            suprnova::without_syncing_to_search(|| async {
+                a.update(suprnova::attrs! { owner_id: 9 }).await
+            })
+            .await
+            .unwrap();
             let first = SearchNote::search("Rust")
                 .hits_cap(2)
                 .paginate(1, 1)
@@ -1406,7 +1416,11 @@ async fn refills_preserve_live_group_members_and_distinct_representatives() {
             for model in [&a, &b, &c, &d, &e] {
                 index(model).await;
             }
-            a.update(suprnova::attrs! { owner_id: 9 }).await.unwrap();
+            suprnova::without_syncing_to_search(|| async {
+                a.update(suprnova::attrs! { owner_id: 9 }).await
+            })
+            .await
+            .unwrap();
             let groups = SearchNote::search("Rust")
                 .hits_cap(2)
                 .group_by("category", 2)

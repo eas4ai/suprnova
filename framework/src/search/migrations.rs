@@ -194,7 +194,237 @@ impl MigrationTrait for CreateSearchTables {
 
 /// Append these migrations so persistent search can share the application's connection.
 pub fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-    vec![Box::new(CreateSearchTables)]
+    vec![Box::new(CreateSearchTables), Box::new(CreateSearchJobs)]
+}
+
+/// Durable pending references let every queue driver participate in generation publication.
+pub struct CreateSearchJobs;
+
+impl MigrationName for CreateSearchJobs {
+    fn name(&self) -> &str {
+        "m20261014_000002_create_search_jobs"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateSearchJobs {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let mut payload = ColumnDef::new(Alias::new("payload_json"));
+        if manager.get_database_backend() == DbBackend::MySql {
+            payload.custom(Alias::new("LONGTEXT"));
+        } else {
+            payload.text();
+        }
+        payload.not_null();
+        let mut jobs = Table::create()
+            .table(Alias::new("search_jobs_pending"))
+            .if_not_exists()
+            .col(
+                ColumnDef::new(Alias::new("job_id"))
+                    .string_len(64)
+                    .not_null()
+                    .primary_key(),
+            )
+            .col(
+                ColumnDef::new(Alias::new("index_name"))
+                    .string_len(128)
+                    .not_null(),
+            )
+            .col(
+                ColumnDef::new(Alias::new("generation"))
+                    .string_len(64)
+                    .not_null(),
+            )
+            .col(
+                ColumnDef::new(Alias::new("sequence"))
+                    .big_integer()
+                    .not_null(),
+            )
+            .col(
+                ColumnDef::new(Alias::new("job_name"))
+                    .string_len(64)
+                    .not_null(),
+            )
+            .col(&mut payload)
+            .col(
+                ColumnDef::new(Alias::new("published"))
+                    .boolean()
+                    .not_null()
+                    .default(false),
+            )
+            .col(
+                ColumnDef::new(Alias::new("completed"))
+                    .boolean()
+                    .not_null()
+                    .default(false),
+            )
+            .col(ColumnDef::new(Alias::new("completed_at")).big_integer())
+            .to_owned();
+        if manager.get_database_backend() == DbBackend::MySql {
+            jobs.character_set("utf8mb4").collate("utf8mb4_bin");
+        }
+        manager.create_table(jobs).await?;
+        if !manager
+            .has_column("search_generations", "switch_watermark")
+            .await?
+        {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Alias::new("search_generations"))
+                        .add_column(ColumnDef::new(Alias::new("switch_watermark")).big_integer())
+                        .to_owned(),
+                )
+                .await?;
+        }
+        for (name, len) in [
+            ("building_generation", 64),
+            ("building_digest", 64),
+            ("creation_owner", 36),
+        ] {
+            if !manager.has_column("search_generations", name).await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(Alias::new("search_generations"))
+                            .add_column(ColumnDef::new(Alias::new(name)).string_len(len))
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+        }
+        if !manager
+            .has_column("search_generations", "creation_expires_at")
+            .await?
+        {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Alias::new("search_generations"))
+                        .add_column(ColumnDef::new(Alias::new("creation_expires_at")).big_integer())
+                        .to_owned(),
+                )
+                .await?;
+        }
+        for name in ["flush_version", "flush_removed_at"] {
+            if !manager.has_column("search_generations", name).await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(Alias::new("search_generations"))
+                            .add_column(ColumnDef::new(Alias::new(name)).big_integer())
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+        }
+        let mut intent_payload = ColumnDef::new(Alias::new("payload_json"));
+        if manager.get_database_backend() == DbBackend::MySql {
+            intent_payload.custom(Alias::new("LONGTEXT"));
+        } else {
+            intent_payload.text();
+        }
+        intent_payload.not_null();
+        let mut intents = Table::create()
+            .table(Alias::new("search_job_intents"))
+            .if_not_exists()
+            .col(
+                ColumnDef::new(Alias::new("intent_id"))
+                    .string_len(64)
+                    .not_null()
+                    .primary_key(),
+            )
+            .col(
+                ColumnDef::new(Alias::new("index_name"))
+                    .string_len(128)
+                    .not_null(),
+            )
+            .col(
+                ColumnDef::new(Alias::new("job_name"))
+                    .string_len(64)
+                    .not_null(),
+            )
+            .col(&mut intent_payload)
+            .col(
+                ColumnDef::new(Alias::new("created_at"))
+                    .big_integer()
+                    .not_null(),
+            )
+            .to_owned();
+        if manager.get_database_backend() == DbBackend::MySql {
+            intents.character_set("utf8mb4").collate("utf8mb4_bin");
+        }
+        manager.create_table(intents).await?;
+        if !manager
+            .has_index("search_jobs_pending", "search_jobs_generation_sequence")
+            .await?
+        {
+            manager
+                .create_index(
+                    Index::create()
+                        .name("search_jobs_generation_sequence")
+                        .table(Alias::new("search_jobs_pending"))
+                        .col(Alias::new("index_name"))
+                        .col(Alias::new("generation"))
+                        .col(Alias::new("sequence"))
+                        .to_owned(),
+                )
+                .await?;
+        }
+        manager.get_connection().execute_unprepared("UPDATE search_generations SET state=CASE state WHEN 'active' THEN 'current' WHEN 'inactive' THEN 'building' ELSE state END WHERE state IN ('active','inactive')").await?;
+        Ok(())
+    }
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(Alias::new("search_job_intents"))
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(Alias::new("search_jobs_pending"))
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await?;
+        for name in [
+            "building_generation",
+            "building_digest",
+            "creation_owner",
+            "creation_expires_at",
+            "flush_version",
+            "flush_removed_at",
+        ] {
+            if manager.has_column("search_generations", name).await? {
+                manager
+                    .alter_table(
+                        Table::alter()
+                            .table(Alias::new("search_generations"))
+                            .drop_column(Alias::new(name))
+                            .to_owned(),
+                    )
+                    .await?;
+            }
+        }
+        if manager
+            .has_column("search_generations", "switch_watermark")
+            .await?
+        {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Alias::new("search_generations"))
+                        .drop_column(Alias::new("switch_watermark"))
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -208,10 +438,14 @@ mod tests {
         let manager = SchemaManager::new(&database);
         CreateSearchTables.up(&manager).await?;
         CreateSearchTables.up(&manager).await?;
+        CreateSearchJobs.up(&manager).await?;
+        CreateSearchJobs.up(&manager).await?;
         for table in [
             "search_generations",
             "search_tombstones",
             "search_vocabulary",
+            "search_jobs_pending",
+            "search_job_intents",
         ] {
             assert!(manager.has_table(table).await?);
         }
@@ -240,6 +474,8 @@ mod tests {
         assert_eq!(row.try_get::<Option<String>>("", "model")?, None);
         assert_eq!(row.try_get::<Option<i64>>("", "dimensions")?, None);
 
+        CreateSearchJobs.down(&manager).await?;
+        CreateSearchJobs.down(&manager).await?;
         CreateSearchTables.down(&manager).await?;
         CreateSearchTables.down(&manager).await?;
         for table in [

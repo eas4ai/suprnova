@@ -821,6 +821,9 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     // `#[model(connection = ".")]` → primary. The bare
                     // `resolve()` only consults CURRENT_TX, silently
                     // ignoring per-model connection routing.
+                    ::suprnova::search::indexing::atomic::<Self, _, _, _>(
+                        <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
+                        || async {
                     let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
                         ::core::option::Option::None,
                         ::core::option::Option::None,
@@ -831,6 +834,10 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                         .await
                         .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
                     ::suprnova::render_cache::orm::after_model_write(self).await?;
+                    ::suprnova::search::indexing::after_model_write(self, ::suprnova::search::WriteKind::Updated, None).await?;
+                            ::core::result::Result::Ok(())
+                        },
+                    ).await?;
                     ::core::result::Result::Ok(())
                 }
             }
@@ -1013,7 +1020,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     // transaction, so a future dropped between them rolls the
                     // tombstone back instead of leaving it committed ahead of
                     // the pages that read the row.
-                    ::suprnova::database::__macro_support::atomic_write(
+                    ::suprnova::search::indexing::atomic::<Self, _, _, _>(
                         <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                         || async {
                             let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
@@ -1045,12 +1052,14 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                                 " WHERE {pk_name} = {}",
                                 ::suprnova::database::__macro_support::placeholder(backend, values.len())?,
                             ));
+                            let search_touches = ::suprnova::search::indexing::plan_model_delete(&self, None).await?;
                             exec.run(
                                 ::suprnova::sea_orm::Statement::from_sql_and_values(backend, &sql, values),
                             )
                             .await
                             .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                            ::suprnova::render_cache::orm::after_model_write(&self).await
+                            ::suprnova::render_cache::orm::after_model_write(&self).await?;
+                            ::suprnova::search::indexing::after_model_delete(&self, ::suprnova::search::WriteKind::Deleted, None, search_touches).await
                         },
                     )
                     .await?;
@@ -1087,7 +1096,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     // silently ignoring per-model connection routing.
                     // The UPDATE and its generation advance share one
                     // transaction, as the soft delete's do.
-                    ::suprnova::database::__macro_support::atomic_write(
+                    ::suprnova::search::indexing::atomic::<Self, _, _, _>(
                         <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                         || async {
                             let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
@@ -1116,7 +1125,8 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                             )
                             .await
                             .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                            ::suprnova::render_cache::orm::after_model_write(&self).await
+                            ::suprnova::render_cache::orm::after_model_write(&self).await?;
+                            ::suprnova::search::indexing::after_model_write(&self, ::suprnova::search::WriteKind::Restored, None).await
                         },
                     )
                     .await?;
@@ -1181,7 +1191,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                     // CURRENT_TX, silently ignoring per-model routing.
                     // The DELETE and its generation advance share one
                     // transaction, as the soft delete's do.
-                    ::suprnova::database::__macro_support::atomic_write(
+                    ::suprnova::search::indexing::atomic::<Self, _, _, _>(
                         <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                         || async {
                             let exec = ::suprnova::database::transaction::ExecutorChoice::resolve_write(
@@ -1190,10 +1200,12 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
                                 <Self as ::suprnova::eloquent::EloquentModel>::default_connection_name(),
                             )
                             .await?;
+                            let search_touches = ::suprnova::search::indexing::plan_model_delete(&snapshot, None).await?;
                             exec.delete_active(am)
                                 .await
                                 .map_err(|e| ::suprnova::FrameworkError::database(e.to_string()))?;
-                            ::suprnova::render_cache::orm::after_model_write(&snapshot).await
+                            ::suprnova::render_cache::orm::after_model_write(&snapshot).await?;
+                            ::suprnova::search::indexing::after_model_delete(&snapshot, ::suprnova::search::WriteKind::ForceDeleted, None, search_touches).await
                         },
                     )
                     .await?;

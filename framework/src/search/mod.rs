@@ -7,15 +7,18 @@
 /// Bootstrap pins model configuration before indexing or retrieval begins.
 pub mod boot;
 pub mod builder;
+mod commands;
 pub mod config;
 pub mod document;
 pub mod embedder;
 pub mod engine;
 pub mod expansion;
 pub mod fusion;
+pub mod generations;
 pub mod highlight;
 pub mod indexing;
 pub mod migrations;
+mod outbox;
 pub mod query;
 pub mod registry;
 pub mod results;
@@ -77,6 +80,29 @@ pub use settings::{
 use crate::{FrameworkError, eloquent::Model};
 use sea_orm::{EntityTrait, IntoActiveModel, PrimaryKeyTrait};
 use serde::Serialize;
+
+/// Every runtime binary resolves search services once, while applications without indexes pay no setup cost.
+pub async fn boot() -> Result<(), FrameworkError> {
+    let indexes = SearchRegistry::indexes()?;
+    if indexes.is_empty() {
+        return Ok(());
+    }
+    let config = SearchConfig::current()?;
+    for index in indexes {
+        SearchRegistry::engine_for(index)?;
+        let settings = (SearchRegistry::by_index(index)?.descriptor)().index_settings();
+        if settings
+            .index_time
+            .embedder
+            .as_deref()
+            .is_some_and(|name| name != "none")
+            || (settings.index_time.embedder.is_none() && config.embedder != SearchEmbedder::None)
+        {
+            SearchRegistry::embedder_for(index)?;
+        }
+    }
+    Ok(())
+}
 
 /// Model declarations implement this trait so search hydration remains ordinary Eloquent.
 /// The derive must appear below `#[suprnova::model]` to see its generated metadata.

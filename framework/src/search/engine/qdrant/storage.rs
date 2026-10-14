@@ -47,7 +47,10 @@ pub(super) async fn settings_optional(
         return Ok(None);
     };
     let state: String = row.try_get("", "state").map_err(|e| error(index, e))?;
-    if !matches!(state.as_str(), "active" | "inactive") {
+    if !matches!(
+        state.as_str(),
+        "current" | "building" | "retired" | "active" | "inactive"
+    ) {
         return Err(error(
             index,
             format!(
@@ -122,7 +125,8 @@ pub(super) async fn create(
                 .transpose()
                 .map_err(|e| error(index, e))?
                 .into(),
-            "inactive".into(),
+            // A new generation is building until a switch publishes it, as the database engine records it.
+            "building".into(),
         ])
         .map_err(|e| error(index, e))?
         .to_owned();
@@ -163,7 +167,7 @@ fn state_query(index: &str) -> sea_orm::sea_query::SelectStatement {
     Query::select()
         .column(a("generation"))
         .from(a("search_generations"))
-        .and_where(Expr::col(a("state")).eq("active"))
+        .and_where(Expr::col(a("state")).is_in(["current", "active"]))
         .and_where(Expr::col(a("index_name")).eq(index))
         .to_owned()
 }
@@ -219,7 +223,12 @@ pub(super) async fn locked(
             .map_err(|e| error(index, e))?
             .ok_or_else(|| error(index, format!("generation {target}: not created")))?;
         let state: String = row.try_get("", "state").map_err(|e| error(index, e))?;
-        if target != "__control" && !matches!(state.as_str(), "active" | "inactive") {
+        if target != "__control"
+            && !matches!(
+                state.as_str(),
+                "current" | "building" | "retired" | "active" | "inactive"
+            )
+        {
             return Err(error(
                 index,
                 format!("generation {target}: unavailable state {state}"),
@@ -250,7 +259,10 @@ pub(super) async fn switch(
         .map_err(|e| error(index, e))?
         .ok_or_else(|| error(index, format!("generation {}: not created", to.as_str())))?;
     let state: String = target.try_get("", "state").map_err(|e| error(index, e))?;
-    if !matches!(state.as_str(), "active" | "inactive") {
+    if !matches!(
+        state.as_str(),
+        "current" | "building" | "retired" | "active" | "inactive"
+    ) {
         return Err(error(
             index,
             format!("generation {}: unavailable state {state}", to.as_str()),
@@ -258,16 +270,16 @@ pub(super) async fn switch(
     }
     let query = Query::update()
         .table(a("search_generations"))
-        .value(a("state"), "inactive")
+        .value(a("state"), "retired")
         .and_where(Expr::col(a("index_name")).eq(index))
-        .and_where(Expr::col(a("state")).eq("active"))
+        .and_where(Expr::col(a("state")).is_in(["current", "active"]))
         .to_owned();
     txn.execute_raw(backend.build(&query))
         .await
         .map_err(|e| error(index, e))?;
     let query = Query::update()
         .table(a("search_generations"))
-        .value(a("state"), "active")
+        .value(a("state"), "current")
         .and_where(Expr::col(a("index_name")).eq(index))
         .and_where(Expr::col(a("generation")).eq(to.as_str()))
         .to_owned();
