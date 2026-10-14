@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: password-change-keeps-the-changing-session
+Current: scaffold-files-not-rustfmt-clean
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -1169,3 +1169,9 @@ its review is recorded (`sudus review`).
 Requirements: HRD-007
 
 Delivers backlog item password-change-keeps-the-changing-session: A signed-in user who changes their own password is signed out on their next request: the session that made the change carries the old auth epoch, so the epoch check ends it with every other session. Laravel's AuthenticateSession stores the new password hash in the current session at the end of the request, so the session that changed the password stays signed in. suprnova.app hit it on 4.0.0 (its profile password form) and now calls Auth::login after saving the password. The framework refreshes the recorded epoch of the current session's guard when the request that resolved the user changed that user's epoch, and a test shows the changing session stays signed in while another session of the same user is ended.
+
+## scaffold-files-not-rustfmt-clean
+
+Requirements: PAR-080
+
+Delivers backlog item scaffold-files-not-rustfmt-clean: Found building the Live starter kit (lane k, 2026-10-11): in a fresh 2024-edition scaffold, cargo fmt rewrites the shared templates example_action.rs, logging.rs, two migrations and models/user.rs, so a developer's first cargo fmt produces a diff in files they did not touch. Fix: format those templates to rustfmt's 2024 layout and keep a test that runs cargo fmt --check on a scaffold.
