@@ -442,6 +442,82 @@ fn apply_embed_source(
     Ok(())
 }
 
+fn sparse_source(
+    document: &SearchDocument,
+    attr: &super::WeightedAttribute,
+) -> Result<String, FrameworkError> {
+    let value = document.attributes.get(&attr.name).ok_or_else(|| {
+        FrameworkError::param(format!(
+            "search index {} attribute {}: missing sparse source",
+            document.index, attr.name
+        ))
+    })?;
+    match value {
+        super::AttributeValue::Text(text) => Ok(text.clone()),
+        super::AttributeValue::List(values) => Ok(values
+            .iter()
+            .filter_map(super::AttributeValue::as_text)
+            .collect::<Vec<_>>()
+            .join("\n")),
+        super::AttributeValue::Null => Ok(String::new()),
+        _ => Err(FrameworkError::param(format!(
+            "search index {} attribute {}: sparse source requires text",
+            document.index, attr.name
+        ))),
+    }
+}
+fn add_sparse(
+    combined: &mut std::collections::BTreeMap<u32, f64>,
+    vector: super::SparseEmbedding,
+    weight: f32,
+) -> Result<(), FrameworkError> {
+    vector.validate()?;
+    for (dimension, value) in vector.indices.into_iter().zip(vector.values) {
+        *combined.entry(dimension).or_default() += f64::from(value) * f64::from(weight);
+    }
+    Ok(())
+}
+async fn embed_sparse_documents(
+    index: &str,
+    settings: &super::IndexSettings,
+    indexed: &mut [IndexedDocument],
+) -> Result<(), FrameworkError> {
+    let Some(provider) = &settings.index_time.sparse_model else {
+        return Ok(());
+    };
+    if indexed.is_empty() {
+        return Ok(());
+    }
+    let embedder = SearchRegistry::embedder_named(index, provider)?;
+    let mut inputs = Vec::new();
+    let mut weights = Vec::new();
+    for (position, doc) in indexed.iter().enumerate() {
+        for attr in &settings.index_time.searchable_attributes {
+            inputs.push(sparse_source(&doc.document, attr)?);
+            weights.push((position, attr.weight));
+        }
+    }
+    let vectors = embedder.embed_sparse(&inputs).await?;
+    if vectors.len() != inputs.len() {
+        return Err(FrameworkError::param(format!(
+            "search index {index} sparse model {provider}: wrong embedding count"
+        )));
+    }
+    let mut combined = vec![std::collections::BTreeMap::new(); indexed.len()];
+    for (vector, (position, weight)) in vectors.into_iter().zip(weights) {
+        add_sparse(&mut combined[position], vector, weight)?;
+    }
+    for (doc, values) in indexed.iter_mut().zip(combined) {
+        let sparse = super::SparseEmbedding {
+            indices: values.keys().copied().collect(),
+            values: values.values().map(|v| *v as f32).collect(),
+        };
+        sparse.validate()?;
+        doc.sparse = Some(sparse);
+    }
+    Ok(())
+}
+
 async fn write_documents(
     index: &str,
     generation: Option<GenerationId>,
@@ -532,6 +608,7 @@ async fn write_documents(
             );
         }
     }
+    embed_sparse_documents(index, &settings, &mut indexed).await?;
     let removals: Vec<_> = remaining
         .into_iter()
         .map(|(key, version)| (key.to_owned(), version))

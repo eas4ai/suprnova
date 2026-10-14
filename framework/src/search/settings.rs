@@ -172,6 +172,8 @@ pub struct IndexTimeSettings {
     pub embedder: Option<String>,
     /// The model identity is part of the generation's content digest.
     pub model: Option<String>,
+    /// Registered sparse provider identity pins the lexical vector space to this generation.
+    pub sparse_model: Option<String>,
     /// A declared dimension catches incompatible vectors before storage.
     pub dimensions: Option<usize>,
 }
@@ -248,6 +250,16 @@ impl IndexSettings {
                     attr.name
                 )));
             }
+        }
+        if self
+            .index_time
+            .sparse_model
+            .as_ref()
+            .is_some_and(|name| name.trim().is_empty())
+        {
+            return Err(FrameworkError::param(
+                "search index_time.sparse_model requires a nonempty registered provider name",
+            ));
         }
         if self.index_time.dimensions == Some(0) {
             return Err(FrameworkError::param(

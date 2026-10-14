@@ -2,6 +2,7 @@
 pub mod collection;
 pub mod database;
 pub mod null;
+pub mod qdrant;
 use super::{
     document::SearchDocument,
     embedder::SparseEmbedding,
@@ -206,6 +207,18 @@ pub trait SearchEngine: Send + Sync {
         filter: Option<&Filter>,
         depth: usize,
     ) -> Result<EngineResult, FrameworkError>;
+    /// Drivers with native fusion can consume both legs together without changing ordinary queries.
+    /// Returning None retains the framework fusion path for existing drivers.
+    async fn hybrid(
+        &self,
+        _index: &IndexDescriptor,
+        _generation: &GenerationId,
+        _q: &EngineQuery,
+        _vector: &[f32],
+        _ratio: f32,
+    ) -> Result<Option<EngineResult>, FrameworkError> {
+        Ok(None)
+    }
     /// Count facet values over the full filtered lexical universe before truncation.
     async fn facets(
         &self,

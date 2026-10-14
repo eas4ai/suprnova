@@ -44,6 +44,7 @@ pub use embedder::{
 pub use engine::collection::CollectionEngine;
 pub use engine::database::DatabaseSearchEngine;
 pub use engine::null::NullEngine;
+pub use engine::qdrant::QdrantSearchEngine;
 pub use engine::{
     EngineCandidate, EngineCapabilities, EngineResult, GenerationId, IndexedDocument, SearchEngine,
     WriteOutcome,
