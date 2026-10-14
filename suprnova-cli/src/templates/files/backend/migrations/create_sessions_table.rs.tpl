@@ -1,5 +1,5 @@
 use sea_orm_migration::prelude::*;
-use suprnova::session::migrations::{create_sessions_table, SessionUserKey};
+use suprnova::session::migrations::{SessionUserKey, create_sessions_table};
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;

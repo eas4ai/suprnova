@@ -1,6 +1,6 @@
 //! Logging middleware - logs all requests
 
-use suprnova::{async_trait, Middleware, Next, Request, Response};
+use suprnova::{Middleware, Next, Request, Response, async_trait};
 
 /// Middleware that logs all incoming requests
 pub struct LoggingMiddleware;

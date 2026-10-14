@@ -828,10 +828,11 @@ mod tests {
         let namespace = written(&edits, "src/live/acme/mod.rs");
         assert!(namespace.contains("\npub mod counter;\n"), "{namespace}");
         syn::parse_file(&namespace).expect("the namespace module parses");
-        // Every byte outside the two insertions is kept.
+        // Every byte outside the two insertions is kept; the split before
+        // `.build()`, which made room for the registration, is rejoined.
         let without = live.replace("pub mod acme;\n\n", "").replace(
-            "\n        .register::<crate::live::acme::counter::Counter>()?",
-            "",
+            "\n        .register::<crate::live::acme::counter::Counter>()?\n        .build();",
+            ".build();",
         );
         assert_eq!(without, SCAFFOLD);
     }
@@ -875,7 +876,7 @@ mod tests {
     #[test]
     fn reg_005_a_registration_written_another_way_counts_as_the_same_type() {
         let source = SCAFFOLD.replace(
-            "    let registry = LiveRegistry::builder()\n        .build();",
+            "    let registry = LiveRegistry::builder().build();",
             "    let registry = LiveRegistry::builder()\n        // The acme counter.\n        .register::<acme::counter::Counter>()?\n        .register::<self::acme::counter::Counter>()?\n        .build();",
         );
         let source = source.replace(
@@ -900,10 +901,10 @@ mod tests {
     }
 
     #[test]
-    fn reg_005_a_one_line_builder_is_split_before_build() {
+    fn reg_005_a_builder_already_split_before_build_is_registered_the_same() {
         let source = SCAFFOLD.replace(
-            "LiveRegistry::builder()\n        .build();",
             "LiveRegistry::builder().build();",
+            "LiveRegistry::builder()\n        .build();",
         );
         let dir = project(&source);
         let live = written(&install(dir.path()), "src/live/mod.rs");
@@ -928,7 +929,7 @@ mod tests {
 
     #[test]
     fn reg_005_an_unrecognized_builder_gets_lines_reported_and_nothing_written() {
-        let chain = "    let registry = LiveRegistry::builder()\n        .build();";
+        let chain = "    let registry = LiveRegistry::builder().build();";
         for (label, source) in [
             (
                 "a second registry()",

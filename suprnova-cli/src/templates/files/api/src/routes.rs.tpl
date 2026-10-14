@@ -1,4 +1,4 @@
-use suprnova::{get, group, post, routes, AuthMiddleware};
+use suprnova::{AuthMiddleware, get, group, post, routes};
 
 use crate::controllers;
 

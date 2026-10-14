@@ -12,7 +12,7 @@ use std::any::Any;
 
 use chrono::{DateTime, Utc};
 use suprnova::{
-    attrs, hashing, model, Authenticatable, CanResetPassword, FrameworkError, MustVerifyEmail,
+    Authenticatable, CanResetPassword, FrameworkError, MustVerifyEmail, attrs, hashing, model,
 };
 
 #[model(
@@ -113,9 +113,7 @@ impl Authenticatable for User {
         self
     }
 
-    fn into_arc_any(
-        self: std::sync::Arc<Self>,
-    ) -> std::sync::Arc<dyn Any + Send + Sync> {
+    fn into_arc_any(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn Any + Send + Sync> {
         self
     }
 }

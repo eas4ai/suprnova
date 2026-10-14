@@ -37,7 +37,10 @@ impl From<Note> for NoteSummary {
         Self {
             id: note.id,
             title: note.title,
-            created_at: note.created_at.map(|date| date.to_rfc3339()).unwrap_or_default(),
+            created_at: note
+                .created_at
+                .map(|date| date.to_rfc3339())
+                .unwrap_or_default(),
         }
     }
 }
@@ -57,7 +60,10 @@ impl From<Note> for NoteView {
             id: note.id,
             title: note.title,
             body: note.body,
-            created_at: note.created_at.map(|date| date.to_rfc3339()).unwrap_or_default(),
+            created_at: note
+                .created_at
+                .map(|date| date.to_rfc3339())
+                .unwrap_or_default(),
         }
     }
 }

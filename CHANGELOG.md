@@ -30,6 +30,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   in another column names it from `Authenticatable::auth_password_name`. A
   write that bypasses the model, such as a query-builder update, is not
   seen.
+- **A fresh scaffold is rustfmt-clean.** `suprnova new` wrote the shared
+  backend templates, the Live kit and the API starter in a layout rustfmt's
+  2024 style edition rewrites (import order and line wrapping), so a
+  developer's first `cargo fmt` changed files they had not touched. The
+  templates now carry that layout, and a test formats a fresh scaffold of
+  every kind with `cargo fmt --check`.
 - **The scroll area's size token is defined.** 4.0.2 bounded the region
   with `--sn-scroll-area-size` and left the token undefined, so the shared
   stylesheet never named it and the engine's token check failed. The shared

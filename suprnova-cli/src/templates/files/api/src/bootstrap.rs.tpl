@@ -41,14 +41,11 @@ pub async fn register() {
     DB::init().await.expect("Failed to connect to database");
 
     let db = DB::connection().expect("DB not initialized");
-    let magnetar = MagnetarConfig::from_sea_orm(db.inner().clone()).passkey_config(
-        PasskeyConfig {
-            rp_id: std::env::var("PASSKEY_RP_ID")
-                .unwrap_or_else(|_| "localhost".to_string()),
-            rp_origin: std::env::var("PASSKEY_RP_ORIGIN")
-                .unwrap_or_else(|_| "http://localhost".to_string()),
-        },
-    );
+    let magnetar = MagnetarConfig::from_sea_orm(db.inner().clone()).passkey_config(PasskeyConfig {
+        rp_id: std::env::var("PASSKEY_RP_ID").unwrap_or_else(|_| "localhost".to_string()),
+        rp_origin: std::env::var("PASSKEY_RP_ORIGIN")
+            .unwrap_or_else(|_| "http://localhost".to_string()),
+    });
     init_magnetar(magnetar)
         .await
         .expect("Failed to initialize Magnetar");
