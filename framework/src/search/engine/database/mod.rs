@@ -780,6 +780,32 @@ async fn drop_tables<C: ConnectionTrait>(
     Ok(())
 }
 
+const CREATION_LEASE_SECONDS: i64 = 60;
+
+async fn renew_creation<C: ConnectionTrait>(
+    conn: &C,
+    dialect: Dialect,
+    index: &str,
+    generation: &str,
+    owner: &str,
+) -> Result<(), FrameworkError> {
+    let mut sql = Sql::new(dialect);
+    let expires = sql.bind(crate::clock::now().timestamp() + CREATION_LEASE_SECONDS);
+    let i = sql.bind(index.to_owned());
+    let g = sql.bind(generation.to_owned());
+    let token = sql.bind(owner.to_owned());
+    execute(conn, format!("UPDATE search_generations SET creation_expires_at={expires} WHERE index_name={i} AND generation={g} AND state='creating' AND creation_owner={token}"), sql).await?;
+    let metadata = DatabaseSearchEngine::metadata(conn, dialect, index, generation).await?;
+    if get::<String>(&metadata, "state")? != "creating"
+        || get::<Option<String>>(&metadata, "creation_owner")?.as_deref() != Some(owner)
+    {
+        return Err(db_error(format!(
+            "index {index} generation {generation}: creation lease was replaced"
+        )));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl SearchEngine for DatabaseSearchEngine {
     fn name(&self) -> &str {
@@ -806,11 +832,11 @@ impl SearchEngine for DatabaseSearchEngine {
         identifier(index)?;
         let mut sql = Sql::new(self.dialect().await?);
         let i = sql.bind(index.to_owned());
-        let active = sql.bind("active".to_owned());
+        let active = sql.bind("current".to_owned());
         let result = rows(
             DB::connection()?.inner(),
             format!(
-                "SELECT generation FROM search_generations WHERE index_name={i} AND state={active}"
+                "SELECT generation FROM search_generations WHERE index_name={i} AND state IN ({active},'active')"
             ),
             sql,
         )
@@ -824,6 +850,15 @@ impl SearchEngine for DatabaseSearchEngine {
             .first()
             .map(|r| GenerationId::new(get::<String>(r, "generation")?))
             .transpose()
+    }
+    async fn generation_states(
+        &self,
+        index: &str,
+    ) -> Result<Vec<(GenerationId, String)>, FrameworkError> {
+        identifier(index)?;
+        let mut sql = Sql::new(self.dialect().await?);
+        let i = sql.bind(index.to_owned());
+        rows(DB::connection()?.inner(), format!("SELECT generation,state FROM search_generations WHERE index_name={i} AND generation!='__control' ORDER BY generation"), sql).await?.iter().map(|row| Ok((GenerationId::new(get::<String>(row,"generation")?)?, get(row,"state")?))).collect()
     }
     async fn create_generation(
         &self,
@@ -854,34 +889,108 @@ impl SearchEngine for DatabaseSearchEngine {
             "ON CONFLICT (index_name,generation) DO NOTHING"
         };
         execute(conn.inner(),format!("INSERT INTO search_generations(index_name,generation,state,settings_json,digest) VALUES ({i},{g},{state},{empty},{digest}) {conflict}"),sql).await?;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let now = crate::clock::now().timestamp();
+        let tx = conn.inner().begin().await.map_err(db_error)?;
+        Self::lock(&tx, dialect, index.name, "__control").await?;
         let mut sql = Sql::new(dialect);
         let i = sql.bind(index.name.to_owned());
         let g = sql.bind(generation.as_str().to_owned());
-        let state = sql.bind("creating".to_owned());
-        let settings_json = sql.bind(serde_json::to_string(settings).map_err(db_error)?);
-        let digest = sql.bind(settings.index_time.digest());
-        let model = sql.bind(settings.index_time.model.clone());
-        let dimensions = sql.bind(
-            settings
-                .index_time
-                .dimensions
-                .map(i64::try_from)
-                .transpose()
-                .map_err(db_error)?,
-        );
-        execute(conn.inner(),format!("INSERT INTO search_generations(index_name,generation,state,settings_json,digest,model,dimensions) VALUES ({i},{g},{state},{settings_json},{digest},{model},{dimensions})"),sql).await.map_err(|e|FrameworkError::database(format!("search index {} generation {}: {e}",index.name,generation.as_str())))?;
+        let existing = rows(&tx, format!("SELECT state,digest,creation_expires_at FROM search_generations WHERE index_name={i} AND generation={g}"), sql).await?;
+        let recovering = if let Some(row) = existing.first() {
+            if get::<String>(row, "state")? != "creating"
+                || get::<String>(row, "digest")? != settings.index_time.digest()
+            {
+                return Err(db_error(format!(
+                    "index {} generation {}: already exists with a different state or settings",
+                    index.name,
+                    generation.as_str()
+                )));
+            }
+            if get::<Option<i64>>(row, "creation_expires_at")?.is_some_and(|expiry| expiry > now) {
+                return Err(db_error(format!(
+                    "index {} generation {}: creation lease is still active; retry after its expiry",
+                    index.name,
+                    generation.as_str()
+                )));
+            }
+            let mut sql = Sql::new(dialect);
+            let token = sql.bind(owner.clone());
+            let expiry = sql.bind(now + CREATION_LEASE_SECONDS);
+            let i = sql.bind(index.name.to_owned());
+            let g = sql.bind(generation.as_str().to_owned());
+            execute(&tx, format!("UPDATE search_generations SET creation_owner={token},creation_expires_at={expiry} WHERE index_name={i} AND generation={g}"), sql).await?;
+            true
+        } else {
+            let mut sql = Sql::new(dialect);
+            let i = sql.bind(index.name.to_owned());
+            let g = sql.bind(generation.as_str().to_owned());
+            let state = sql.bind("creating".to_owned());
+            let settings_json = sql.bind(serde_json::to_string(settings).map_err(db_error)?);
+            let digest = sql.bind(settings.index_time.digest());
+            let model = sql.bind(settings.index_time.model.clone());
+            let dimensions = sql.bind(
+                settings
+                    .index_time
+                    .dimensions
+                    .map(i64::try_from)
+                    .transpose()
+                    .map_err(db_error)?,
+            );
+            let token = sql.bind(owner.clone());
+            let expiry = sql.bind(now + CREATION_LEASE_SECONDS);
+            execute(&tx,format!("INSERT INTO search_generations(index_name,generation,state,settings_json,digest,model,dimensions,creation_owner,creation_expires_at) VALUES ({i},{g},{state},{settings_json},{digest},{model},{dimensions},{token},{expiry})"),sql).await?;
+            false
+        };
+        tx.commit().await.map_err(db_error)?;
         let mut created_tables = Vec::new();
         let build=async {
-            for ddl in side_ddl(index,&table,dialect).into_iter().chain(native) {
-                conn.inner().execute_unprepared(&ddl).await.map_err(db_error)?;
-                if let Some(name)=created_table(&ddl){created_tables.push(name);}
+            let ddl = async {
+                if recovering {
+                    renew_creation(conn.inner(),dialect,index.name,generation.as_str(),&owner).await?;
+                    drop_tables(conn.inner(),index,&table,dialect).await?;
+                }
+                for ddl in side_ddl(index,&table,dialect).into_iter().chain(native) {
+                    renew_creation(conn.inner(),dialect,index.name,generation.as_str(),&owner).await?;
+                    conn.inner().execute_unprepared(&ddl).await.map_err(db_error)?;
+                    if let Some(name)=created_table(&ddl){created_tables.push(name);}
+                }
+                Ok::<_,FrameworkError>(())
+            };
+            // Empty-table DDL is normally quick, but a live creator waiting on the
+            // database must not lose its lease just because one statement is slow.
+            let heartbeat = async || -> Result<(), FrameworkError> {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    renew_creation(conn.inner(),dialect,index.name,generation.as_str(),&owner).await?;
+                }
+            };
+            tokio::select! {
+                result = ddl => result?,
+                result = heartbeat() => result?,
             }
-            let mut sql=Sql::new(dialect);let state=sql.bind("inactive".to_owned());let i=sql.bind(index.name.to_owned());let g=sql.bind(generation.as_str().to_owned());
-            execute(conn.inner(),format!("UPDATE search_generations SET state={state} WHERE index_name={i} AND generation={g} AND state='creating'"),sql).await?;
-            if Self::metadata(conn.inner(),dialect,index.name,generation.as_str()).await.and_then(|r|get::<String>(&r,"state"))? != "inactive" {return Err(db_error(format!("search index {}: generation build was retired",index.name)));}
+            let tx = conn.inner().begin().await.map_err(db_error)?;
+            Self::lock(&tx,dialect,index.name,"__control").await?;
+            renew_creation(&tx,dialect,index.name,generation.as_str(),&owner).await?;
+            let mut sql=Sql::new(dialect);let state=sql.bind("building".to_owned());let i=sql.bind(index.name.to_owned());let g=sql.bind(generation.as_str().to_owned());let token=sql.bind(owner.clone());
+            if execute(&tx,format!("UPDATE search_generations SET state={state},creation_owner=NULL,creation_expires_at=NULL WHERE index_name={i} AND generation={g} AND state='creating' AND creation_owner={token}"),sql).await? != 1 {return Err(db_error(format!("search index {}: generation creation lease was replaced",index.name)));}
+            tx.commit().await.map_err(db_error)?;
             Ok::<_,FrameworkError>(())
         }.await;
         if let Err(error) = build {
+            // A superseded creator must never tear down its successor's storage.
+            if renew_creation(
+                conn.inner(),
+                dialect,
+                index.name,
+                generation.as_str(),
+                &owner,
+            )
+            .await
+            .is_err()
+            {
+                return Err(error);
+            }
             drop_created(conn.inner(), &created_tables, dialect)
                 .await
                 .map_err(|cleanup| {
@@ -894,9 +1003,10 @@ impl SearchEngine for DatabaseSearchEngine {
             let mut sql = Sql::new(dialect);
             let i = sql.bind(index.name.to_owned());
             let g = sql.bind(generation.as_str().to_owned());
+            let token = sql.bind(owner);
             execute(
                 conn.inner(),
-                format!("DELETE FROM search_generations WHERE index_name={i} AND generation={g}"),
+                format!("DELETE FROM search_generations WHERE index_name={i} AND generation={g} AND state='creating' AND creation_owner={token}"),
                 sql,
             )
             .await?;
@@ -921,11 +1031,11 @@ impl SearchEngine for DatabaseSearchEngine {
         Self::lock(&tx, dialect, index.name, "__control").await?;
         let mut sql = Sql::new(dialect);
         let i = sql.bind(index.name.to_owned());
-        let active = sql.bind("active".to_owned());
+        let active = sql.bind("current".to_owned());
         let current = rows(
             &tx,
             format!(
-                "SELECT generation FROM search_generations WHERE index_name={i} AND state={active}"
+                "SELECT generation FROM search_generations WHERE index_name={i} AND state IN ({active},'active')"
             ),
             sql,
         )
@@ -945,11 +1055,49 @@ impl SearchEngine for DatabaseSearchEngine {
             &Self::metadata(&tx, dialect, index.name, to.as_str()).await?,
             "state",
         )?;
-        if !matches!(state.as_str(), "active" | "inactive") {
+        if !matches!(
+            state.as_str(),
+            "current" | "building" | "retired" | "active" | "inactive"
+        ) {
             return Err(db_error(format!(
                 "search index {} generation {}: state {state} cannot serve readers",
                 index.name,
                 to.as_str()
+            )));
+        }
+        let mut pending_sql = Sql::new(dialect);
+        let name = pending_sql.bind(index.name.to_owned());
+        let pending = rows(&tx, format!("SELECT COUNT(*) AS n FROM search_jobs_pending WHERE index_name={name} AND completed=FALSE"), pending_sql).await?;
+        if pending
+            .first()
+            .map(|row| get::<i64>(row, "n"))
+            .transpose()?
+            .unwrap_or(0)
+            != 0
+        {
+            return Err(db_error(format!(
+                "search index {}: pending jobs prevent generation publication",
+                index.name
+            )));
+        }
+        let mut intent_sql = Sql::new(dialect);
+        let name = intent_sql.bind(index.name.to_owned());
+        let intents = rows(
+            &tx,
+            format!("SELECT COUNT(*) AS n FROM search_job_intents WHERE index_name={name}"),
+            intent_sql,
+        )
+        .await?;
+        if intents
+            .first()
+            .map(|row| get::<i64>(row, "n"))
+            .transpose()?
+            .unwrap_or(0)
+            != 0
+        {
+            return Err(db_error(format!(
+                "search index {}: pending jobs prevent generation publication",
+                index.name
             )));
         }
         if dialect == Dialect::Postgres {
@@ -957,12 +1105,15 @@ impl SearchEngine for DatabaseSearchEngine {
         }
         let mut sql = Sql::new(dialect);
         let target = sql.bind(to.as_str().to_owned());
-        let active = sql.bind("active".to_owned());
-        let inactive = sql.bind("inactive".to_owned());
+        let active = sql.bind("current".to_owned());
+        let inactive = sql.bind("retired".to_owned());
         let i = sql.bind(index.name.to_owned());
-        let old = sql.bind("active".to_owned());
+        let old = sql.bind("current".to_owned());
         let target2 = sql.bind(to.as_str().to_owned());
-        execute(&tx,format!("UPDATE search_generations SET state=CASE WHEN generation={target} THEN {active} ELSE {inactive} END WHERE index_name={i} AND (state={old} OR generation={target2})"),sql).await?;
+        execute(&tx,format!("UPDATE search_generations SET state=CASE WHEN generation={target} THEN {active} ELSE {inactive} END WHERE index_name={i} AND (state IN ({old},'active') OR generation={target2})"),sql).await?;
+        let mut sql = Sql::new(dialect);
+        let i = sql.bind(index.name.to_owned());
+        execute(&tx,format!("UPDATE search_generations SET building_generation=NULL,building_digest=NULL WHERE index_name={i} AND generation='__control'"),sql).await?;
         tx.commit().await.map_err(db_error)
     }
     async fn drop_generation(
@@ -980,9 +1131,26 @@ impl SearchEngine for DatabaseSearchEngine {
             &Self::metadata(&tx, dialect, index.name, generation.as_str()).await?,
             "state",
         )?;
-        if matches!(state.as_str(), "active" | "creating") {
+        if matches!(state.as_str(), "current" | "active" | "creating") {
             return Err(FrameworkError::param(format!(
                 "search index {}: cannot drop active or building generation {}",
+                index.name,
+                generation.as_str()
+            )));
+        }
+        let mut pending_sql = Sql::new(dialect);
+        let i = pending_sql.bind(index.name.to_owned());
+        let g = pending_sql.bind(generation.as_str().to_owned());
+        let pending = rows(&tx,format!("SELECT COUNT(*) AS n FROM search_jobs_pending WHERE index_name={i} AND generation={g} AND completed=FALSE"),pending_sql).await?;
+        if pending
+            .first()
+            .map(|row| get::<i64>(row, "n"))
+            .transpose()?
+            .unwrap_or(0)
+            != 0
+        {
+            return Err(db_error(format!(
+                "search index {} generation {}: pending jobs prevent dropping",
                 index.name,
                 generation.as_str()
             )));
@@ -1059,6 +1227,49 @@ impl SearchEngine for DatabaseSearchEngine {
         execute(DB::connection()?.inner(),format!("UPDATE search_generations SET settings_json={value} WHERE index_name={i} AND generation={g}"),sql).await?;
         Ok(())
     }
+    async fn record_flush(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        cutoff: i64,
+    ) -> Result<(), FrameworkError> {
+        table(index, generation)?;
+        let dialect = self.dialect().await?;
+        let conn = DB::connection()?;
+        let tx = conn.inner().begin().await.map_err(db_error)?;
+        Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
+        ensure_ready(&tx, dialect, index.name, generation).await?;
+        let metadata = Self::metadata(&tx, dialect, index.name, generation.as_str()).await?;
+        if get::<Option<i64>>(&metadata, "flush_version")?.is_none_or(|previous| cutoff >= previous)
+        {
+            let mut sql = Sql::new(dialect);
+            let version = sql.bind(cutoff);
+            let removed = sql.bind(now());
+            let i = sql.bind(index.name.to_owned());
+            let g = sql.bind(generation.as_str().to_owned());
+            execute(&tx, format!("UPDATE search_generations SET flush_version={version},flush_removed_at={removed} WHERE index_name={i} AND generation={g}"), sql).await?;
+        }
+        tx.commit().await.map_err(db_error)
+    }
+    async fn keys_before_version(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        cutoff: i64,
+        limit: usize,
+    ) -> Result<Vec<(String, i64)>, FrameworkError> {
+        let (dialect, table, _) = self.context(index, generation).await?;
+        let mut sql = Sql::new(dialect);
+        let key = sql.ident("key");
+        let table = sql.ident(&table);
+        let cutoff = sql.bind(cutoff);
+        let limit = sql.bind(i64::try_from(limit).map_err(db_error)?);
+        rows(DB::connection()?.inner(), format!("SELECT {key},source_version FROM {table} WHERE source_version<={cutoff} ORDER BY {key} LIMIT {limit}"), sql)
+            .await?
+            .iter()
+            .map(|row| Ok((get(row, "key")?, get(row, "source_version")?)))
+            .collect()
+    }
     async fn read_settings(
         &self,
         index: &IndexDescriptor,
@@ -1074,7 +1285,10 @@ impl SearchEngine for DatabaseSearchEngine {
         )
         .await?;
         let state: String = get(&metadata, "state")?;
-        if !matches!(state.as_str(), "active" | "inactive") {
+        if !matches!(
+            state.as_str(),
+            "current" | "building" | "retired" | "active" | "inactive"
+        ) {
             return Err(FrameworkError::database(format!(
                 "search index {} generation {}: unavailable state {state}",
                 index.name,
@@ -1098,6 +1312,21 @@ impl SearchEngine for DatabaseSearchEngine {
         Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
         let mut outcome = WriteOutcome::default();
         ensure_ready(&tx, dialect, index.name, generation).await?;
+        let metadata = Self::metadata(&tx, dialect, index.name, generation.as_str()).await?;
+        let retention = crate::search::SearchConfig::current()?
+            .tombstone_hours
+            .checked_mul(3600)
+            .and_then(|seconds| i64::try_from(seconds).ok())
+            .ok_or_else(|| {
+                FrameworkError::param("SEARCH_TOMBSTONE_HOURS exceeds timestamp range")
+            })?;
+        let expires_before = now().checked_sub(retention).ok_or_else(|| {
+            FrameworkError::param("SEARCH_TOMBSTONE_HOURS exceeds timestamp range")
+        })?;
+        let flush = get::<Option<i64>>(&metadata, "flush_version")?
+            .zip(get::<Option<i64>>(&metadata, "flush_removed_at")?)
+            .filter(|(_, removed)| *removed > expires_before)
+            .map(|(version, _)| version);
         let scope = WriteContext {
             index,
             generation,
@@ -1106,6 +1335,10 @@ impl SearchEngine for DatabaseSearchEngine {
             settings: &settings,
         };
         for doc in docs {
+            if flush.is_some_and(|cutoff| doc.document.source_version <= cutoff) {
+                outcome.skipped_tombstoned += 1;
+                continue;
+            }
             write_document(&tx, &scope, doc, &mut outcome).await?;
         }
         if dialect == Dialect::Postgres {
@@ -2099,7 +2332,10 @@ async fn ensure_ready(
 ) -> Result<(), FrameworkError> {
     let metadata = DatabaseSearchEngine::metadata(tx, dialect, index, generation.as_str()).await?;
     let state: String = get(&metadata, "state")?;
-    if !matches!(state.as_str(), "active" | "inactive") {
+    if !matches!(
+        state.as_str(),
+        "current" | "building" | "retired" | "active" | "inactive"
+    ) {
         return Err(FrameworkError::database(format!(
             "search index {index} generation {}: unavailable state {state}",
             generation.as_str()

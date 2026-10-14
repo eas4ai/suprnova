@@ -23,11 +23,39 @@ impl SearchEngine for NullEngine {
             ..EngineCapabilities::default()
         }
     }
+    async fn keys_before_version(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        cutoff: i64,
+        limit: usize,
+    ) -> Result<Vec<(String, i64)>, FrameworkError> {
+        self.metadata
+            .keys_before_version(index, generation, cutoff, limit)
+            .await
+    }
+    async fn record_flush(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        cutoff: i64,
+    ) -> Result<(), FrameworkError> {
+        self.metadata.record_flush(index, generation, cutoff).await
+    }
     async fn current_generation(
         &self,
         index: &str,
     ) -> Result<Option<GenerationId>, FrameworkError> {
         self.metadata.current_generation(index).await
+    }
+    async fn retire_index(&self, index: &str) -> Result<(), FrameworkError> {
+        self.metadata.retire_index(index).await
+    }
+    async fn generation_states(
+        &self,
+        index: &str,
+    ) -> Result<Vec<(GenerationId, String)>, FrameworkError> {
+        self.metadata.generation_states(index).await
     }
     async fn create_generation(
         &self,

@@ -1,6 +1,8 @@
 //! Search core behavior and driver conformance share one integration binary.
 #[cfg(feature = "testing")]
 mod builder;
+#[cfg(feature = "testing")]
+mod commands;
 mod core;
 #[cfg(feature = "testing")]
 mod database;
@@ -18,6 +20,8 @@ mod embedder;
 mod engine;
 mod expansion;
 mod fusion;
+#[cfg(feature = "testing")]
+mod generations;
 mod highlight;
 #[cfg(feature = "testing")]
 mod indexing;

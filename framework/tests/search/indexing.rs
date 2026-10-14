@@ -550,3 +550,798 @@ async fn reordered_timestamp_free_import_cannot_resurrect_a_newer_removal() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn persistence_hooks_wait_for_explicit_commit_and_drop_rollback_and_savepoints() {
+    let _db = database().await;
+    let _queue = Queue::fake();
+    SearchConfig::scope(
+        config(true),
+        SearchRegistry::isolated(async {
+            fn attrs() -> suprnova::Attrs {
+                suprnova::attrs! { title: "Hook", eligible: true }
+            }
+            let tx = DB::begin_transaction().await.unwrap();
+            EligibilityNote::create_with_tx(&tx, attrs()).await.unwrap();
+            assert!(suprnova::queue::testing::pushed::<SearchIndexJob>().is_empty());
+            tx.rollback().await.unwrap();
+            assert!(suprnova::queue::testing::pushed::<SearchIndexJob>().is_empty());
+            DB::transaction(|_| {
+                Box::pin(async {
+                    EligibilityNote::create(attrs()).await?;
+                    let failed: Result<(), FrameworkError> = DB::transaction(|_| {
+                        Box::pin(async {
+                            EligibilityNote::create(attrs()).await?;
+                            Err(FrameworkError::param("discard nested write"))
+                        })
+                    })
+                    .await;
+                    assert!(failed.is_err());
+                    assert!(suprnova::queue::testing::pushed::<SearchIndexJob>().is_empty());
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+            let jobs = suprnova::queue::testing::pushed::<SearchIndexJob>();
+            assert_eq!(jobs.len(), 1);
+            assert!(jobs[0].generation.is_some());
+            let tx = DB::begin_transaction().await.unwrap();
+            EligibilityNote::create_with_tx(&tx, attrs()).await.unwrap();
+            tx.commit().await.unwrap();
+            assert_eq!(
+                suprnova::queue::testing::pushed::<SearchIndexJob>().len(),
+                2
+            );
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn queued_scope_changes_refresh_guest_totals_and_facets_before_return() {
+    let _db = database().await;
+    let _queue = Queue::fake();
+    SearchConfig::scope(
+        config(true),
+        SearchRegistry::isolated(async {
+            let model = note("Scope freshness", true, 0).await;
+            after_model_write(&model, WriteKind::Created, None)
+                .await
+                .unwrap();
+            let visible = SearchNote::search("Scope")
+                .facets(["category"])
+                .get()
+                .await
+                .unwrap();
+            assert_eq!(visible.total, Total::Exact(1));
+            assert_eq!(visible.facets["category"][0].count, 1);
+            model
+                .update(suprnova::attrs! { owner_id: 9 })
+                .await
+                .unwrap();
+            let hidden = SearchNote::search("Scope")
+                .facets(["category"])
+                .get()
+                .await
+                .unwrap();
+            assert_eq!(hidden.total, Total::Exact(0));
+            assert!(hidden.facets["category"].is_empty());
+            assert_eq!(
+                suprnova::queue::testing::pushed::<SearchIndexJob>().len(),
+                2
+            );
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[suprnova::model(table = "search_touch_parents", timestamps = false, fillable = ["title"], relations = {
+    children: HasMany<SearchTouchChild> { fk = "parent_id" },
+})]
+#[derive(Searchable)]
+#[searchable(
+    index = "search_touch_parent_index",
+    touches("children"),
+    with = "load_children"
+)]
+struct SearchTouchParent {
+    id: i64,
+    #[searchable(text)]
+    title: String,
+}
+
+#[suprnova::model(table = "search_touch_children", timestamps = false, fillable = ["parent_id", "title"])]
+struct SearchTouchChild {
+    id: i64,
+    parent_id: i64,
+    title: String,
+}
+
+impl SearchTouchParent {
+    async fn load_children(mut models: Vec<Self>) -> Result<Vec<Self>, FrameworkError> {
+        let ids = models.iter().map(|model| model.id).collect::<Vec<_>>();
+        let children = SearchTouchChild::query()
+            .where_in("parent_id", ids)
+            .get()
+            .await?;
+        for model in &mut models {
+            model.title = children
+                .iter()
+                .filter(|child| child.parent_id == model.id)
+                .map(|child| child.title.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+        Ok(models)
+    }
+}
+
+#[tokio::test]
+async fn a_nonsearchable_related_write_enqueues_only_its_parent_and_reloads_relations() {
+    let _db = database().await;
+    DB::unprepared("CREATE TABLE search_touch_parents (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL)").await.unwrap();
+    DB::unprepared("CREATE TABLE search_touch_children (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER NOT NULL, title TEXT NOT NULL)").await.unwrap();
+    let _queue = Queue::fake();
+    SearchConfig::scope(
+        config(true),
+        SearchRegistry::isolated(async {
+            let (parent, other) = without_syncing_to_search(|| async {
+                Ok((
+                    SearchTouchParent::create(suprnova::attrs! {title: "Parent"}).await?,
+                    SearchTouchParent::create(suprnova::attrs! {title: "Other"}).await?,
+                ))
+            })
+            .await
+            .unwrap();
+            let tx = DB::begin_transaction().await.unwrap();
+            SearchTouchChild::create_with_tx(
+                &tx,
+                suprnova::attrs! {parent_id: parent.id, title: "Discard"},
+            )
+            .await
+            .unwrap();
+            tx.rollback().await.unwrap();
+            assert!(suprnova::queue::testing::pushed::<SearchIndexJob>().is_empty());
+            let child =
+                SearchTouchChild::create(suprnova::attrs! {parent_id: parent.id, title: "Related"})
+                    .await
+                    .unwrap();
+            let jobs = suprnova::queue::testing::pushed::<SearchIndexJob>();
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].key, parent.id.to_string());
+            jobs[0].clone().handle().await.unwrap();
+            assert_eq!(
+                SearchTouchParent::search("Related")
+                    .get()
+                    .await
+                    .unwrap()
+                    .total,
+                Total::Exact(1)
+            );
+            let mut moved = child
+                .update(suprnova::attrs! {parent_id: other.id})
+                .await
+                .unwrap();
+            let jobs = suprnova::queue::testing::pushed::<SearchIndexJob>();
+            assert_eq!(jobs.len(), 3);
+            let keys = jobs[1..]
+                .iter()
+                .map(|job| job.key.clone())
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(
+                keys,
+                [parent.id.to_string(), other.id.to_string()]
+                    .into_iter()
+                    .collect()
+            );
+            moved.parent_id = parent.id;
+            moved.save().await.unwrap();
+            let jobs = suprnova::queue::testing::pushed::<SearchIndexJob>();
+            assert_eq!(jobs.len(), 5);
+            let saved_keys = jobs[3..]
+                .iter()
+                .map(|job| job.key.clone())
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(
+                saved_keys,
+                [parent.id.to_string(), other.id.to_string()]
+                    .into_iter()
+                    .collect()
+            );
+            moved.delete().await.unwrap();
+            let jobs = suprnova::queue::testing::pushed::<SearchIndexJob>();
+            assert_eq!(jobs.len(), 6);
+            assert_eq!(jobs[5].key, parent.id.to_string());
+            for job in jobs[1..].iter().cloned() {
+                job.handle().await.unwrap();
+            }
+            assert_eq!(
+                SearchTouchParent::search("Related")
+                    .get()
+                    .await
+                    .unwrap()
+                    .total,
+                Total::Exact(0)
+            );
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn derived_soft_delete_restore_and_force_delete_update_search_without_manual_hooks() {
+    let _db = database().await;
+    SearchConfig::scope(
+        config(false),
+        SearchRegistry::isolated(async {
+            let model = note("Lifecycle", true, 0).await;
+            after_model_write(&model, WriteKind::Created, None)
+                .await
+                .unwrap();
+            model.clone().delete().await.unwrap();
+            assert_eq!(
+                SearchNote::search("Lifecycle").get().await.unwrap().total,
+                Total::Exact(0)
+            );
+            let deleted = SearchNote::search("Lifecycle")
+                .with_trashed()
+                .get()
+                .await
+                .unwrap();
+            assert_eq!(deleted.total, Total::Exact(1));
+            model.clone().restore().await.unwrap();
+            assert_eq!(
+                SearchNote::search("Lifecycle").get().await.unwrap().total,
+                Total::Exact(1)
+            );
+            model.force_delete().await.unwrap();
+            assert_eq!(
+                SearchNote::search("Lifecycle")
+                    .with_trashed()
+                    .get()
+                    .await
+                    .unwrap()
+                    .total,
+                Total::Exact(0)
+            );
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[suprnova::model(table = "search_pivot_parents", timestamps = false, fillable = ["title"], relations = {
+    labels: BelongsToMany<SearchPivotLabel, SearchPivotLink> {
+        pivot_table = "search_pivot_links", pivot_foreign_key = "parent_id", pivot_related_key = "label_id"
+    },
+})]
+#[derive(Searchable)]
+#[searchable(index = "search_pivot_parent_index", touches("labels"))]
+struct SearchPivotParent {
+    id: i64,
+    #[searchable(text)]
+    title: String,
+}
+#[suprnova::model(table = "search_pivot_labels", timestamps = false, fillable = ["title"])]
+struct SearchPivotLabel {
+    id: i64,
+    title: String,
+}
+#[suprnova::model(table = "search_pivot_links", timestamps = false, fillable = ["parent_id", "label_id"])]
+struct SearchPivotLink {
+    id: i64,
+    parent_id: i64,
+    label_id: i64,
+}
+
+#[tokio::test]
+async fn cascading_related_deletion_captures_parent_keys_before_pivot_rows_disappear() {
+    let _db = database().await;
+    for sql in [
+        "CREATE TABLE search_pivot_parents (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL)",
+        "CREATE TABLE search_pivot_labels (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL)",
+        "CREATE TABLE search_pivot_links (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER NOT NULL, label_id INTEGER NOT NULL)",
+        "CREATE TRIGGER search_pivot_cascade AFTER DELETE ON search_pivot_labels BEGIN DELETE FROM search_pivot_links WHERE label_id = OLD.id; END",
+    ] {
+        DB::unprepared(sql).await.unwrap();
+    }
+    let _queue = Queue::fake();
+    SearchConfig::scope(
+        config(true),
+        SearchRegistry::isolated(async {
+            let (parent, label) = without_syncing_to_search(|| async {
+                let parent = SearchPivotParent::create(suprnova::attrs! {title: "Parent"}).await?;
+                let label = SearchPivotLabel::create(suprnova::attrs! {title: "Label"}).await?;
+                SearchPivotLink::create(
+                    suprnova::attrs! {parent_id: parent.id, label_id: label.id},
+                )
+                .await?;
+                Ok((parent, label))
+            })
+            .await
+            .unwrap();
+            let tx = DB::begin_transaction().await.unwrap();
+            label.clone().force_delete_with_tx(&tx).await.unwrap();
+            tx.rollback().await.unwrap();
+            assert!(suprnova::queue::testing::pushed::<SearchIndexJob>().is_empty());
+            label.force_delete().await.unwrap();
+            let jobs = suprnova::queue::testing::pushed::<SearchIndexJob>();
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].index, "search_pivot_parent_index");
+            assert_eq!(jobs[0].key, parent.id.to_string());
+            assert_eq!(SearchPivotLink::query().get().await.unwrap().len(), 0);
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn automatic_inline_writes_are_invisible_before_commit_and_absent_after_rollback() {
+    let _db = database().await;
+    SearchConfig::scope(
+        config(false),
+        SearchRegistry::isolated(async {
+            let tx = DB::begin_transaction().await.unwrap();
+            EligibilityNote::create_with_tx(
+                &tx,
+                suprnova::attrs! {title: "Inline hook", eligible: true},
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                EligibilityNote::search("Inline").get().await.unwrap().total,
+                Total::Exact(0)
+            );
+            tx.rollback().await.unwrap();
+            assert_eq!(
+                EligibilityNote::search("Inline").get().await.unwrap().total,
+                Total::Exact(0)
+            );
+            let tx = DB::begin_transaction().await.unwrap();
+            EligibilityNote::create_with_tx(
+                &tx,
+                suprnova::attrs! {title: "Inline hook", eligible: true},
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                EligibilityNote::search("Inline").get().await.unwrap().total,
+                Total::Exact(0)
+            );
+            tx.commit().await.unwrap();
+            assert_eq!(
+                EligibilityNote::search("Inline").get().await.unwrap().total,
+                Total::Exact(1)
+            );
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn duplicate_flush_cannot_remove_a_later_explicit_reimport() {
+    let _db = database().await;
+    let _queue = Queue::fake();
+    SearchConfig::scope(
+        config(true),
+        SearchRegistry::isolated(async {
+            let model = note("Flush cutoff", true, 0).await;
+            let keys = [model.id.to_string()];
+            searchable::<SearchNote>(&keys).await.unwrap();
+            suprnova::search::indexing::remove_all_from_search::<SearchNote>()
+                .await
+                .unwrap();
+            let jobs = suprnova::queue::testing::pending_jobs();
+            for job in &jobs {
+                suprnova::queue::worker::dispatch_by_name(&job.name, job.payload.clone())
+                    .await
+                    .unwrap();
+            }
+            let engine = SearchRegistry::engine_for(SearchNote::descriptor().name).unwrap();
+            assert_eq!(count(engine.as_ref()).await, 0);
+            searchable::<SearchNote>(&keys).await.unwrap();
+            let latest = suprnova::queue::testing::pending_jobs()
+                .into_iter()
+                .filter(|job| job.name == "Suprnova::SearchIndexBatch")
+                .max_by_key(|job| job.payload["keys"][0][1].as_i64().unwrap())
+                .unwrap();
+            suprnova::queue::worker::dispatch_by_name(&latest.name, latest.payload)
+                .await
+                .unwrap();
+            assert_eq!(count(engine.as_ref()).await, 1);
+            let flush = jobs
+                .iter()
+                .find(|job| job.name == "Suprnova::SearchFlush")
+                .unwrap();
+            suprnova::queue::worker::dispatch_by_name(&flush.name, flush.payload.clone())
+                .await
+                .unwrap();
+            assert_eq!(count(engine.as_ref()).await, 1);
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+struct IntentMigrator;
+#[async_trait::async_trait]
+impl sea_orm_migration::MigratorTrait for IntentMigrator {
+    fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
+        let mut migrations = super::derive::SearchMigrator::migrations();
+        migrations.extend(suprnova::search::migrations());
+        migrations
+    }
+}
+
+#[tokio::test]
+async fn transactional_intents_roll_back_and_committed_intents_recover_missing_dispatch() {
+    let _db = suprnova::testing::TestDatabase::fresh::<IntentMigrator>()
+        .await
+        .unwrap();
+    let _queue = Queue::fake();
+    SearchConfig::scope(config(true), SearchRegistry::isolated(async {
+        let index = EligibilityNote::descriptor().name;
+        suprnova::search::generations::create_index(index).await.unwrap();
+        let tx = DB::begin_transaction().await.unwrap();
+        EligibilityNote::create_with_tx(&tx, suprnova::attrs! {title: "Rollback intent", eligible: true}).await.unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(DB::scalar::<i64>("SELECT COUNT(*) FROM search_job_intents", Vec::<sea_orm::Value>::new()).await.unwrap(), 0);
+        assert!(suprnova::queue::testing::pushed::<SearchIndexJob>().is_empty());
+        let model = without_syncing_to_search(|| async {
+            EligibilityNote::create(suprnova::attrs! {title: "Recover intent", eligible: true}).await
+        }).await.unwrap();
+        let staged = SearchIndexJob { index: index.into(), key: model.id.to_string(), source_version: 1, op: IndexOperation::Index, generation: None };
+        DB::statement("INSERT INTO search_job_intents(intent_id,index_name,job_name,payload_json,created_at) VALUES (?,?,?,?,?)", vec!["committed_without_callback".into(), index.into(), SearchIndexJob::job_name().into(), serde_json::to_string(&staged).unwrap().into(), 1i64.into()]).await.unwrap();
+        suprnova::search::generations::status(index, true).await.unwrap();
+        assert_eq!(DB::scalar::<i64>("SELECT COUNT(*) FROM search_job_intents", Vec::<sea_orm::Value>::new()).await.unwrap(), 0);
+        assert_eq!(EligibilityNote::search("Recover").get().await.unwrap().total, Total::Exact(1));
+    })).await.unwrap();
+}
+
+#[suprnova::model(table = "search_touch_clock", fillable = ["title"])]
+#[derive(Searchable)]
+struct SearchTouchClock {
+    id: i64,
+    #[searchable(text)]
+    title: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    #[searchable(filterable)]
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[tokio::test]
+async fn timestamp_touch_indexes_after_atomic_commit_and_ambient_rollback_discards_it() {
+    use suprnova::Touchable;
+    let _db = suprnova::testing::TestDatabase::fresh::<IntentMigrator>()
+        .await
+        .unwrap();
+    DB::unprepared("CREATE TABLE search_touch_clock (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)").await.unwrap();
+    SearchConfig::scope(
+        config(false),
+        SearchRegistry::isolated(async {
+            suprnova::search::generations::create_index(SearchTouchClock::descriptor().name)
+                .await
+                .unwrap();
+            let model = without_syncing_to_search(|| async {
+                SearchTouchClock::create(suprnova::attrs! {title: "Touch"}).await
+            })
+            .await
+            .unwrap();
+            let pending = model.clone();
+            let rollback: Result<(), FrameworkError> = DB::transaction(|_| {
+                Box::pin(async move {
+                    pending.touch().await?;
+                    Err(FrameworkError::param("discard touch"))
+                })
+            })
+            .await;
+            assert!(rollback.is_err());
+            assert_eq!(
+                SearchTouchClock::search("Touch").get().await.unwrap().total,
+                Total::Exact(0)
+            );
+            model.touch().await.unwrap();
+            let stored = SearchTouchClock::find(model.id).await.unwrap().unwrap();
+            let documents = SearchTouchClock::search("Touch").raw().await.unwrap();
+            assert_eq!(documents.len(), 1);
+            assert_eq!(
+                documents[0].attributes,
+                stored.to_search_document().unwrap().attributes
+            );
+            assert_eq!(
+                DB::scalar::<i64>(
+                    "SELECT COUNT(*) FROM search_job_intents",
+                    Vec::<sea_orm::Value>::new()
+                )
+                .await
+                .unwrap(),
+                0
+            );
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn standalone_source_insert_rolls_back_when_intent_staging_fails_with_cache_disabled() {
+    struct CacheDisabled;
+    impl Drop for CacheDisabled {
+        fn drop(&mut self) {
+            suprnova::render_cache::RenderCache::set_write_side_enabled_for_test(None);
+        }
+    }
+    suprnova::render_cache::RenderCache::set_write_side_enabled_for_test(Some(false));
+    let _disabled = CacheDisabled;
+    let _db = suprnova::testing::TestDatabase::fresh::<IntentMigrator>()
+        .await
+        .unwrap();
+    let config = SearchConfig {
+        driver: SearchDriver::Database,
+        queue: false,
+        ..config(false)
+    };
+    SearchConfig::scope(config, SearchRegistry::isolated(async {
+        suprnova::search::generations::create_index(EligibilityNote::descriptor().name).await.unwrap();
+        DB::unprepared("CREATE TRIGGER reject_search_intent BEFORE INSERT ON search_job_intents BEGIN SELECT RAISE(ABORT, 'reject intent staging'); END").await.unwrap();
+        let outcome = EligibilityNote::create(suprnova::attrs! {title: "Atomic source", eligible: true}).await;
+        assert!(outcome.unwrap_err().to_string().contains("reject intent staging"));
+        assert_eq!(EligibilityNote::query().get().await.unwrap().len(), 0);
+        assert_eq!(DB::scalar::<i64>("SELECT COUNT(*) FROM search_job_intents", Vec::<sea_orm::Value>::new()).await.unwrap(), 0);
+        assert_eq!(DB::scalar::<i64>("SELECT COUNT(*) FROM search_jobs_pending", Vec::<sea_orm::Value>::new()).await.unwrap(), 0);
+    })).await.unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_queued_scope_write_refreshes_totals_and_facets_before_return() {
+    let _db = suprnova::testing::TestDatabase::fresh::<IntentMigrator>()
+        .await
+        .unwrap();
+    let _queue = Queue::fake();
+    let config = SearchConfig {
+        driver: SearchDriver::Database,
+        queue: true,
+        ..config(true)
+    };
+    SearchConfig::scope(config, SearchRegistry::isolated(async {
+        suprnova::search::generations::create_index(SearchNote::descriptor().name).await.unwrap();
+        let model = SearchNote::create(suprnova::attrs! {title: "Scoped sqlite", body: "Search body", category: "notes", rank: 7, enabled: true, owner_id: 0, tags: vec!["rust"], lat: 40.0, lng: -73.0}).await.unwrap();
+        let visible = SearchNote::search("Scoped").facets(["category"]).get().await.unwrap();
+        assert_eq!(visible.total, Total::Exact(1));
+        assert_eq!(visible.facets["category"][0].count, 1);
+        model.update(suprnova::attrs! {owner_id: 9}).await.unwrap();
+        let hidden = SearchNote::search("Scoped").facets(["category"]).get().await.unwrap();
+        assert_eq!(hidden.total, Total::Exact(0));
+        assert!(hidden.facets["category"].is_empty());
+        assert_eq!(suprnova::queue::testing::pushed::<SearchIndexJob>().len(), 2);
+    })).await.unwrap();
+}
+
+#[suprnova::model(table = "search_named_notes", connection = "search_secondary", timestamps = false, fillable = ["title"])]
+#[derive(Searchable)]
+struct NamedSearchNote {
+    id: i64,
+    #[searchable(text)]
+    title: String,
+}
+
+async fn named_databases() -> (suprnova::testing::TestDatabase, suprnova::DbConnection) {
+    use sea_orm::ConnectionTrait;
+    use sea_orm_migration::MigratorTrait;
+    let primary = suprnova::testing::TestDatabase::sqlite_memory()
+        .await
+        .unwrap();
+    let settings = suprnova::DatabaseConfig::builder()
+        .url("sqlite::memory:")
+        .max_connections(1)
+        .min_connections(1)
+        .logging(false)
+        .build();
+    let secondary = suprnova::DbConnection::connect(&settings).await.unwrap();
+    super::database_support::Migrator::up(secondary.inner(), None)
+        .await
+        .unwrap();
+    secondary.inner().execute_unprepared("CREATE TABLE search_named_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL)").await.unwrap();
+    suprnova::ConnectionRegistry::register_existing("search_secondary", secondary.clone())
+        .await
+        .unwrap();
+    (primary, secondary)
+}
+
+#[tokio::test]
+async fn named_standalone_source_intent_and_inline_engine_stay_off_unmigrated_primary() {
+    let (primary, _secondary) = named_databases().await;
+    let config = SearchConfig {
+        driver: SearchDriver::Database,
+        queue: false,
+        ..config(false)
+    };
+    SearchConfig::scope(config, SearchRegistry::isolated(async {
+        suprnova::console::test(["search:index", "search_named_notes"]).run().await.assert_successful();
+        let model = NamedSearchNote::create(suprnova::attrs! {title: "Named inline"}).await.unwrap();
+        assert_eq!(NamedSearchNote::search("Named").keys().await.unwrap(), vec![model.id.to_string()]);
+        DB::with_default_connection("search_secondary", async {
+            assert_eq!(NamedSearchNote::search("Named").keys().await?, vec![model.id.to_string()]);
+            assert_eq!(DB::scalar::<i64>("SELECT COUNT(*) FROM search_job_intents", Vec::<sea_orm::Value>::new()).await?, 0);
+            Ok(())
+        }).await.unwrap();
+        suprnova::console::test(["search:import", "NamedSearchNote"]).run().await.assert_successful();
+        suprnova::console::test(["search:reindex", "NamedSearchNote"]).run().await.assert_successful();
+        suprnova::console::test(["search:status", "search_named_notes"]).run().await.assert_successful();
+        assert_eq!(NamedSearchNote::search("Named").keys().await.unwrap(), vec![model.id.to_string()]);
+        assert!(primary.fetch_all("SELECT name FROM sqlite_master WHERE name IN ('search_named_notes','search_jobs_pending','search_job_intents')", Vec::<sea_orm::Value>::new()).await.unwrap().is_empty());
+    })).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_named_queued_worker_restores_model_connection_from_primary_context() {
+    let (primary, _secondary) = named_databases().await;
+    let _queue = Queue::fake();
+    let config = SearchConfig {
+        driver: SearchDriver::Database,
+        queue: true,
+        ..config(true)
+    };
+    SearchConfig::scope(config, SearchRegistry::isolated(async {
+        DB::with_default_connection("search_secondary", async {
+            suprnova::search::generations::create_index(NamedSearchNote::descriptor().name).await
+        }).await.unwrap();
+        let model = NamedSearchNote::create(suprnova::attrs! {title: "Named queued"}).await.unwrap();
+        let jobs = suprnova::queue::testing::pushed::<SearchIndexJob>();
+        assert_eq!(jobs.len(), 1);
+        jobs[0].clone().handle().await.unwrap();
+        DB::with_default_connection("search_secondary", async {
+            assert_eq!(NamedSearchNote::search("Named").keys().await?, vec![model.id.to_string()]);
+            assert_eq!(DB::scalar::<i64>("SELECT COUNT(*) FROM search_jobs_pending WHERE completed=FALSE", Vec::<sea_orm::Value>::new()).await?, 0);
+            Ok(())
+        }).await.unwrap();
+        assert!(primary.fetch_all("SELECT name FROM sqlite_master WHERE name IN ('search_named_notes','search_jobs_pending','search_job_intents')", Vec::<sea_orm::Value>::new()).await.unwrap().is_empty());
+    })).await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_secondary_transaction_connection_travels_with_queue_context_without_mutating_pusher()
+ {
+    use sea_orm::ConnectionTrait;
+    let (primary, secondary) = named_databases().await;
+    secondary.inner().execute_unprepared("CREATE TABLE search_eligibility (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, eligible BOOLEAN NOT NULL)").await.unwrap();
+    let queue = Queue::fake();
+    let config = SearchConfig {
+        driver: SearchDriver::Database,
+        queue: true,
+        ..config(true)
+    };
+    suprnova::context::Context::scope(suprnova::context::ContextStore::default(), SearchConfig::scope(config, SearchRegistry::isolated(async {
+        suprnova::context::Context::hidden_add("pusher.marker", "unchanged");
+        DB::with_default_connection("search_secondary", async {
+            suprnova::search::generations::create_index(EligibilityNote::descriptor().name).await
+        }).await.unwrap();
+        let tx = DB::with_default_connection("search_secondary", async { DB::begin_transaction().await }).await.unwrap();
+        let model = EligibilityNote::create_with_tx(&tx, suprnova::attrs! {title: "Explicit secondary", eligible: true}).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(suprnova::context::Context::hidden_get::<String>("pusher.marker").as_deref(), Some("unchanged"));
+        assert!(suprnova::context::Context::hidden_get::<String>("suprnova.search.connection").is_none());
+        let reserved = queue.driver().pop(std::time::Duration::from_secs(30)).await.unwrap().unwrap();
+        let context = reserved.envelope.context.as_ref().unwrap();
+        assert_eq!(context.hidden["suprnova.search.connection"], "search_secondary");
+        assert_eq!(context.hidden["pusher.marker"], "unchanged");
+        assert_eq!(DB::default_connection(), suprnova::database::PRIMARY_CONNECTION_NAME);
+        suprnova::queue::worker::run_through_middleware(reserved.envelope).await.unwrap();
+        DB::with_default_connection("search_secondary", async {
+            assert_eq!(EligibilityNote::search("Explicit").keys().await?, vec![model.id.to_string()]);
+            Ok(())
+        }).await.unwrap();
+        assert!(primary.fetch_all("SELECT name FROM sqlite_master WHERE name IN ('search_eligibility','search_jobs_pending','search_job_intents')", Vec::<sea_orm::Value>::new()).await.unwrap().is_empty());
+    }))).await.unwrap();
+}
+
+struct CacheIntentMigrator;
+#[async_trait::async_trait]
+impl sea_orm_migration::MigratorTrait for CacheIntentMigrator {
+    fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
+        let mut migrations = <IntentMigrator as sea_orm_migration::MigratorTrait>::migrations();
+        migrations.push(Box::new(suprnova::render_cache::migration::Migration));
+        migrations
+    }
+}
+
+#[tokio::test]
+async fn first_searchable_write_advances_migrated_render_cache_before_any_prior_write() {
+    struct CacheEnabled;
+    impl Drop for CacheEnabled {
+        fn drop(&mut self) {
+            suprnova::render_cache::RenderCache::set_write_side_enabled_for_test(None);
+        }
+    }
+    suprnova::render_cache::RenderCache::set_write_side_enabled_for_test(Some(true));
+    let _enabled = CacheEnabled;
+    let _db = suprnova::testing::TestDatabase::fresh::<CacheIntentMigrator>()
+        .await
+        .unwrap();
+    let config = SearchConfig {
+        driver: SearchDriver::Database,
+        queue: false,
+        ..config(false)
+    };
+    SearchConfig::scope(
+        config,
+        SearchRegistry::isolated(async {
+            suprnova::search::generations::create_index(EligibilityNote::descriptor().name)
+                .await
+                .unwrap();
+            assert_eq!(
+                DB::scalar::<i64>(
+                    "SELECT COUNT(*) FROM suprnova_render_generations",
+                    Vec::<sea_orm::Value>::new()
+                )
+                .await
+                .unwrap(),
+                0
+            );
+            EligibilityNote::create(
+                suprnova::attrs! {title: "First cached source", eligible: true},
+            )
+            .await
+            .unwrap();
+            assert!(
+                DB::scalar::<i64>(
+                    "SELECT COUNT(*) FROM suprnova_render_generations",
+                    Vec::<sea_orm::Value>::new()
+                )
+                .await
+                .unwrap()
+                    > 0
+            );
+            assert_eq!(
+                EligibilityNote::search("First").get().await.unwrap().total,
+                Total::Exact(1)
+            );
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_different_key_created_after_flush_survives_a_frozen_clock_cutoff() {
+    let _db = database().await;
+    let at = chrono::DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    suprnova::clock::TestClock::scope(at, |_| {
+        SearchConfig::scope(
+            config(false),
+            SearchRegistry::isolated(async {
+                EligibilityNote::create(
+                    suprnova::attrs! {title: "Before frozen flush", eligible: true},
+                )
+                .await
+                .unwrap();
+                suprnova::search::indexing::remove_all_from_search::<EligibilityNote>()
+                    .await
+                    .unwrap();
+                let created = EligibilityNote::create(
+                    suprnova::attrs! {title: "After frozen flush", eligible: true},
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    EligibilityNote::search("After").keys().await.unwrap(),
+                    vec![created.id.to_string()]
+                );
+                assert_eq!(
+                    EligibilityNote::search("Before").get().await.unwrap().total,
+                    Total::Exact(0)
+                );
+            }),
+        )
+    })
+    .await
+    .unwrap();
+}

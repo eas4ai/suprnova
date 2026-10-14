@@ -87,66 +87,72 @@ where
     crate::database::validate_identifier(M::PRIMARY_KEY)?;
     let extras = pivot_extras_through_casts::<M>(extra, &[column, M::PRIMARY_KEY])?;
     let key = row.primary_key_value_json();
-    crate::render_cache::orm::atomic(M::default_connection_name(), || async {
-        let exec = ExecutorChoice::resolve_write(None, None, M::default_connection_name()).await?;
-        let backend = exec.backend();
-        let mut values: Vec<sea_orm::Value> = vec![step.into()];
-        let ph = crate::database::__macro_support::placeholder(backend, 1)?;
-        let mut sets = vec![format!("{column} = {column} + {ph}")];
-        for (name, value) in extras {
-            let value = match &exec {
-                ExecutorChoice::Tx(tx, _) => {
-                    bind_pivot_extra(tx.as_ref(), M::TABLE, &name, value).await?
-                }
-                ExecutorChoice::Pool(pool, _) => {
-                    bind_pivot_extra(pool.inner(), M::TABLE, &name, value).await?
-                }
+    let current =
+        crate::search::indexing::atomic::<M, _, _, _>(M::default_connection_name(), || async {
+            let exec =
+                ExecutorChoice::resolve_write(None, None, M::default_connection_name()).await?;
+            let backend = exec.backend();
+            let mut values: Vec<sea_orm::Value> = vec![step.into()];
+            let ph = crate::database::__macro_support::placeholder(backend, 1)?;
+            let mut sets = vec![format!("{column} = {column} + {ph}")];
+            for (name, value) in extras {
+                let value = match &exec {
+                    ExecutorChoice::Tx(tx, _) => {
+                        bind_pivot_extra(tx.as_ref(), M::TABLE, &name, value).await?
+                    }
+                    ExecutorChoice::Pool(pool, _) => {
+                        bind_pivot_extra(pool.inner(), M::TABLE, &name, value).await?
+                    }
+                };
+                let expression = match value {
+                    Some(value) => {
+                        let ph = crate::database::placeholder::typed_placeholder(
+                            backend,
+                            values.len() + 1,
+                            &value,
+                        )?;
+                        values.push(value);
+                        ph
+                    }
+                    None => "NULL".to_owned(),
+                };
+                sets.push(format!("{name} = {expression}"));
+            }
+            let key_value = M::bind_column(M::PRIMARY_KEY, &key)
+                .unwrap_or_else(|| crate::eloquent::model::json_value_to_sea_value(&key));
+            let key_ph = crate::database::placeholder::typed_placeholder(
+                backend,
+                values.len() + 1,
+                &key_value,
+            )?;
+            values.push(key_value);
+            exec.run(sea_orm::Statement::from_sql_and_values(
+                backend,
+                format!(
+                    "UPDATE {} SET {} WHERE {} = {key_ph}",
+                    M::TABLE,
+                    sets.join(", "),
+                    M::PRIMARY_KEY
+                ),
+                values,
+            ))
+            .await
+            .map_err(|error| FrameworkError::database(error.to_string()))?;
+            crate::render_cache::orm::after_model_write(&row).await?;
+            let query = Builder::<M>::new();
+            let query = if let Some(name) = M::default_connection_name() {
+                query.on(name)
+            } else {
+                query
             };
-            let expression = match value {
-                Some(value) => {
-                    let ph = crate::database::placeholder::typed_placeholder(
-                        backend,
-                        values.len() + 1,
-                        &value,
-                    )?;
-                    values.push(value);
-                    ph
-                }
-                None => "NULL".to_owned(),
-            };
-            sets.push(format!("{name} = {expression}"));
-        }
-        let key_value = M::bind_column(M::PRIMARY_KEY, &key)
-            .unwrap_or_else(|| crate::eloquent::model::json_value_to_sea_value(&key));
-        let key_ph =
-            crate::database::placeholder::typed_placeholder(backend, values.len() + 1, &key_value)?;
-        values.push(key_value);
-        exec.run(sea_orm::Statement::from_sql_and_values(
-            backend,
-            format!(
-                "UPDATE {} SET {} WHERE {} = {key_ph}",
-                M::TABLE,
-                sets.join(", "),
-                M::PRIMARY_KEY
-            ),
-            values,
-        ))
-        .await
-        .map_err(|error| FrameworkError::database(error.to_string()))?;
-        crate::render_cache::orm::after_model_write(&row).await
-    })
-    .await?;
-    let query = Builder::<M>::new();
-    let query = if let Some(name) = M::default_connection_name() {
-        query.on(name)
-    } else {
-        query
-    };
-    query
-        .where_key(key)
-        .first()
-        .await?
-        .ok_or_else(|| FrameworkError::not_found("increment_or_create: record no longer exists"))
+            let current = query.where_key(key.clone()).first().await?.ok_or_else(|| {
+                FrameworkError::not_found("increment_or_create: record no longer exists")
+            })?;
+            crate::search::indexing::after_model_update(&row, &current, None).await?;
+            Ok(current)
+        })
+        .await?;
+    Ok(current)
 }
 
 /// Map bounded reads per record without changing the builder's batch callback contract.

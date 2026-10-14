@@ -219,10 +219,19 @@ pub type DocumentBatchLoader =
         Vec<String>,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<SearchDocument>, FrameworkError>> + Send>>;
 
+/// Type-erased imports let maintenance commands use each model's chunked loader.
+pub type BulkImporter = fn() -> Pin<Box<dyn Future<Output = Result<(), FrameworkError>> + Send>>;
+
 /// One inventory entry connects model write hooks, jobs and scoped reads.
 pub struct SearchableEntry {
     /// Runtime type identity makes non-searchable write hooks a cheap no-op.
     pub type_id: fn() -> TypeId,
+    /// Rust names let console commands accept a model or index identity.
+    pub model_name: fn() -> &'static str,
+    /// Declared model routing also binds deferred worker engine and metadata writes.
+    pub connection: fn() -> Option<&'static str>,
+    /// Bulk imports retain the model's bounded hydration path.
+    pub import_all: BulkImporter,
     /// The index name supports jobs whose payload carries no model type.
     pub index: &'static str,
     /// Static metadata remains available for the process lifetime.
@@ -299,15 +308,20 @@ pub(crate) fn capture_context(config: SearchConfig) -> SearchExecutionContext {
     }
 }
 
-pub(crate) async fn in_context<T>(
+// Box before constructing scopes: otherwise each generic task-local wrapper retains
+// another copy of the concrete job future in its state and stack temporaries.
+pub(crate) fn in_context<T>(
     context: SearchExecutionContext,
     future: impl Future<Output = Result<T, FrameworkError>>,
-) -> Result<T, FrameworkError> {
-    SearchConfig::scope(
-        context.config,
-        ISOLATED_SERVICES.scope(context.state, future),
-    )
-    .await?
+) -> impl Future<Output = Result<T, FrameworkError>> {
+    let future = Box::pin(future);
+    async move {
+        SearchConfig::scope(
+            context.config,
+            ISOLATED_SERVICES.scope(context.state, future),
+        )
+        .await?
+    }
 }
 
 /// The registry resolves immutable model entries and configurable engine handles.
@@ -354,6 +368,27 @@ impl SearchRegistry {
             Some(_) => Err(FrameworkError::param(
                 "search model type is registered more than once",
             )),
+        }
+    }
+
+    /// Resolve a model name or index while refusing ambiguous model names.
+    pub fn by_model_or_index(name: &str) -> Result<&'static SearchableEntry, FrameworkError> {
+        let entries: Vec<_> = inventory::iter::<SearchableEntry>
+            .into_iter()
+            .filter(|entry| {
+                entry.index == name
+                    || (entry.model_name)() == name
+                    || (entry.model_name)().rsplit("::").next() == Some(name)
+            })
+            .collect();
+        match entries.as_slice() {
+            [entry] => Self::by_index(entry.index),
+            [] => Err(FrameworkError::param(format!(
+                "search model or index `{name}` is not registered"
+            ))),
+            _ => Err(FrameworkError::param(format!(
+                "search model or index `{name}` is ambiguous"
+            ))),
         }
     }
 
@@ -410,7 +445,17 @@ impl SearchRegistry {
 
     /// Built-in database and test engines resolve lazily; applications register other drivers.
     pub fn engine_for(index: &str) -> Result<Arc<dyn SearchEngine>, FrameworkError> {
-        Self::by_index(index)?;
+        let entry = Self::by_index(index)?;
+        let routed = |engine: Arc<dyn SearchEngine>| -> Arc<dyn SearchEngine> {
+            if (entry.connection)().is_some() && engine.name() == "database" {
+                Arc::new(super::engine::connection::ConnectionEngine::new(
+                    entry.index,
+                    engine,
+                ))
+            } else {
+                engine
+            }
+        };
         let config = SearchConfig::current()?;
         let state = services();
         let driver = state
@@ -427,7 +472,7 @@ impl SearchRegistry {
             .get(&driver)
             .cloned()
         {
-            return Ok(engine);
+            return Ok(routed(engine));
         }
         let engine: Arc<dyn SearchEngine> = match driver.as_str() {
             "collection" => Arc::new(CollectionEngine::with_tombstone_hours(
@@ -438,7 +483,7 @@ impl SearchRegistry {
                 let engine: Arc<dyn SearchEngine> =
                     Arc::new(super::engine::database::DatabaseSearchEngine::new());
                 Self::register_engine("database", Arc::clone(&engine))?;
-                return Ok(engine);
+                return Ok(routed(engine));
             }
             "qdrant" => Arc::new(QdrantSearchEngine::from_env()?),
             _ => {
@@ -448,7 +493,7 @@ impl SearchRegistry {
             }
         };
         let mut engines = state.engines.write().map_err(|_| poison())?;
-        Ok(Arc::clone(engines.entry(driver).or_insert(engine)))
+        Ok(routed(Arc::clone(engines.entry(driver).or_insert(engine))))
     }
 
     /// In-memory drivers get a complete default generation before their first write.
@@ -582,12 +627,70 @@ impl SearchRegistry {
 
     /// Tests can isolate mutable services without affecting other async tests.
     #[cfg(feature = "testing")]
-    pub async fn isolated<F: Future>(future: F) -> F::Output {
-        ISOLATED_SERVICES
+    pub fn isolated<F: Future>(future: F) -> impl Future<Output = F::Output> {
+        let future = Box::pin(future);
+        async move {
+            ISOLATED_SERVICES
+                .scope(
+                    Arc::new(Services::default()),
+                    super::indexing::isolated_versions(future),
+                )
+                .await
+        }
+    }
+}
+
+tokio::task_local! { static JOB_CONNECTION: String; }
+
+pub(crate) fn job_connection() -> Option<String> {
+    crate::context::Context::hidden_get::<String>("suprnova.search.connection")
+        .or_else(|| JOB_CONNECTION.try_with(Clone::clone).ok())
+}
+
+// Allocate the input at the call boundary, before nested connection scopes can
+// multiply a large coordinator or model-write future's stack footprint.
+pub(crate) fn in_connection<F, T>(
+    name: String,
+    future: F,
+) -> impl Future<Output = Result<T, FrameworkError>>
+where
+    F: Future<Output = Result<T, FrameworkError>>,
+{
+    let future = Box::pin(future);
+    async move {
+        JOB_CONNECTION
             .scope(
-                Arc::new(Services::default()),
-                super::indexing::isolated_versions(future),
+                name.clone(),
+                crate::DB::with_default_connection(name, future),
             )
             .await
     }
+}
+
+pub(crate) fn in_model_connection<F, T>(
+    index: &str,
+    future: F,
+) -> impl Future<Output = Result<T, FrameworkError>>
+where
+    F: Future<Output = Result<T, FrameworkError>>,
+{
+    let future = Box::pin(future);
+    async move {
+        let entry = SearchRegistry::by_index(index)?;
+        let name = job_connection().or_else(|| (entry.connection)().map(str::to_owned));
+        match name {
+            Some(name) => in_connection(name, future).await,
+            None => future.await,
+        }
+    }
+}
+
+pub(crate) fn in_index_connection<F, T>(
+    index: &str,
+    future: F,
+) -> impl Future<Output = Result<T, FrameworkError>>
+where
+    F: Future<Output = Result<T, FrameworkError>>,
+{
+    in_model_connection(index, future)
 }

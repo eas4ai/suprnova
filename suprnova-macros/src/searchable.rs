@@ -503,6 +503,7 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 let keys = keys.iter().map(|key| ::suprnova::search::indexing::model_key_value::<<Self as ::suprnova::eloquent::EloquentModel>::Key>(key, key_column))
                     .collect::<Result<Vec<_>, _>>()?;
                 let mut query = <Self as ::suprnova::eloquent::Model>::query();
+                if let Some(connection) = ::suprnova::search::indexing::job_connection() { query = query.on(connection); }
                 if #soft_delete { query = query.__disable_named_scope("soft_deletes"); }
                 let rows = query.where_in(key_column, keys).get().await?;
                 let models = <Self as ::suprnova::search::Searchable>::make_searchable_using(rows.into_vec()).await?;
@@ -519,6 +520,9 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         ::suprnova::inventory::submit! {
             ::suprnova::search::SearchableEntry {
                 type_id: || ::std::any::TypeId::of::<#model>(),
+                model_name: || ::std::any::type_name::<#model>(),
+                connection: <#model as ::suprnova::eloquent::EloquentModel>::default_connection_name,
+                import_all: || ::std::boxed::Box::pin(::suprnova::search::indexing::make_all_searchable::<#model>()),
                 index: #index,
                 descriptor: <#model as ::suprnova::search::Searchable>::descriptor,
                 load_document: |key| {

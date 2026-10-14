@@ -8112,6 +8112,8 @@ where
     /// affected row count. Does NOT fire model events - for per-row
     /// hook dispatch iterate with `get()` and call `.update(attrs)`
     /// per row.
+    /// Mass updates do not update search indexes because no model events fire.
+    /// Run `search:import` after a mass update to refresh searchable documents.
     ///
     /// Every column in `attrs` is interpolated as a SQL identifier
     /// (not a parameter - SQL doesn't allow that), and validated
@@ -8194,7 +8196,8 @@ where
     }
 
     /// Delete every row the query matches and return how many. No
-    /// per-row model events fire.
+    /// per-row model events fire. Search indexes are not updated. Run
+    /// `search:flush` followed by `search:import` after a mass delete to refresh documents.
     ///
     /// On a model declared with `soft_deletes` this is a soft delete:
     /// one `UPDATE table SET deleted_at = <now> WHERE <where_terms>`,

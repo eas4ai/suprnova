@@ -28,7 +28,6 @@ fn note_scope(viewer: &Viewer) -> Filter {
 #[searchable(
     index = "test_search_notes",
     soft_delete,
-    touches("author"),
     should_index = "is_enabled",
     with = "load_for_search",
     scope = "note_scope",
@@ -130,9 +129,12 @@ pub(crate) async fn database() -> TestDatabase {
 }
 
 pub(crate) async fn note(title: &str, enabled: bool, owner: i64) -> SearchNote {
-    SearchNote::create(suprnova::attrs! {
-        title: title, body: "Search body", category: "notes", rank: 7,
-        enabled: enabled, owner_id: owner, tags: vec!["rust", "search"], lat: 40.0, lng: -73.0,
+    suprnova::search::indexing::without_syncing_to_search(|| async {
+        SearchNote::create(suprnova::attrs! {
+            title: title, body: "Search body", category: "notes", rank: 7,
+            enabled: enabled, owner_id: owner, tags: vec!["rust", "search"], lat: 40.0, lng: -73.0,
+        })
+        .await
     })
     .await
     .unwrap()
@@ -185,7 +187,7 @@ async fn registry_exposes_order_weights_scope_and_predicate_through_the_derive()
     let descriptor = SearchNote::descriptor();
     assert_eq!(descriptor.model_table, "search_notes");
     assert_eq!(descriptor.key_column, "id");
-    assert_eq!(descriptor.search_touches, vec!["author"]);
+    assert!(descriptor.search_touches.is_empty());
     assert_eq!(
         descriptor.attributes[0].searchable.as_ref().unwrap().order,
         0
@@ -249,7 +251,9 @@ async fn loader_includes_soft_deleted_models_only_for_opted_in_indexes() {
     let _db = database().await;
     let model = note("Deleted", true, 0).await;
     let key = model.id.to_string();
-    model.delete().await.unwrap();
+    suprnova::without_syncing_to_search(|| async { model.delete().await })
+        .await
+        .unwrap();
     let entry = suprnova::SearchRegistry::by_index(SearchNote::descriptor().name).unwrap();
     let document = (entry.load_document)(&key).await.unwrap().unwrap();
     assert_eq!(

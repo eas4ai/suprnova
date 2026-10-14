@@ -116,21 +116,25 @@ where
     M::__dispatch_updating(previous, shared.clone()).await?;
     M::__dispatch_saving(shared.clone(), false).await?;
     let touch_plan = M::__plan_touches(Some(previous), &*shared.lock().await)?;
-    let current = crate::render_cache::orm::atomic(M::default_connection_name(), || async move {
-        let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-            None,
-            None,
-            M::default_connection_name(),
-        )
-        .await?;
-        let updated = exec
-            .update_active(am)
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        let current = M::try_from_storage(updated)?;
-        crate::render_cache::orm::after_model_write(&current).await?;
-        Ok(current)
-    })
+    let current = crate::search::indexing::atomic::<M, _, _, _>(
+        M::default_connection_name(),
+        || async move {
+            let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                None,
+                None,
+                M::default_connection_name(),
+            )
+            .await?;
+            let updated = exec
+                .update_active(am)
+                .await
+                .map_err(|e| FrameworkError::database(e.to_string()))?;
+            let current = M::try_from_storage(updated)?;
+            crate::render_cache::orm::after_model_write(&current).await?;
+            crate::search::indexing::after_model_update(previous, &current, None).await?;
+            Ok(current)
+        },
+    )
     .await?;
 
     record_save_on(
@@ -148,6 +152,45 @@ where
     current.__touch_planned(&touch_plan).await?;
     crate::eloquent::changes::finish_save(row_state(current.__eager_cache()));
     Ok(current)
+}
+
+// Search touches need the stored FK when a caller mutates the public field before save.
+fn search_original<M>(model: &M) -> Result<M, FrameworkError>
+where
+    // `Model`'s where-clause does not propagate to an `M: Model` bound.
+    M: Model,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    if crate::search::indexing::syncing_disabled() {
+        return Ok(model.clone());
+    }
+    let mut related = false;
+    for relation in crate::eloquent::relations::relations().filter(|relation| {
+        (relation.target_type)() == std::any::TypeId::of::<M>()
+            || relation
+                .morph_targets
+                .iter()
+                .any(|target| (target.type_id)() == std::any::TypeId::of::<M>())
+    }) {
+        if let Some(entry) = crate::search::SearchRegistry::by_type((relation.parent_type)())? {
+            related |= (entry.descriptor)().search_touches.contains(&relation.name);
+        }
+    }
+    if related
+        && let Some(row) = crate::eloquent::changes::original_row(row_state(model.__eager_cache()))
+    {
+        return M::__model_from_stored_row(row.as_any()).ok_or_else(|| {
+            FrameworkError::internal("search original row has the wrong model type")
+        })?;
+    }
+    Ok(model.clone())
 }
 
 /// Records a table read and hands the error back unchanged.
@@ -269,7 +312,7 @@ where
     // one transaction, so a future dropped between them rolls the counter
     // back instead of leaving it committed ahead of the generations every
     // cached page that read it depends on.
-    crate::render_cache::orm::atomic(M::default_connection_name(), || async move {
+    crate::search::indexing::atomic::<M, _, _, _>(M::default_connection_name(), || async move {
         // T11/T12: route through resolve_write.
         let exec = crate::database::transaction::ExecutorChoice::resolve_write(
             None,
@@ -294,7 +337,9 @@ where
         ))
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))?;
-        crate::render_cache::orm::after_model_write(model).await
+        crate::render_cache::orm::after_model_write(model).await?;
+        crate::search::indexing::after_model_write(model, crate::search::WriteKind::Updated, None)
+            .await
     })
     .await
 }
@@ -1166,8 +1211,9 @@ where
         // honours per-model `connection = "..."`, and skips
         // `__read_replica__` (writes always go to primary unless the
         // model explicitly opts elsewhere).
-        let row =
-            crate::render_cache::orm::atomic(Self::default_connection_name(), || async move {
+        let row = crate::search::indexing::atomic::<Self, _, _, _>(
+            Self::default_connection_name(),
+            || async move {
                 let exec = crate::database::transaction::ExecutorChoice::resolve_write(
                     None,
                     None,
@@ -1180,9 +1226,16 @@ where
                     .map_err(|e| FrameworkError::database(e.to_string()))?;
                 let row = Self::try_from_storage(inserted)?;
                 crate::render_cache::orm::after_model_write(&row).await?;
+                crate::search::indexing::after_model_write(
+                    &row,
+                    crate::search::WriteKind::Created,
+                    None,
+                )
+                .await?;
                 Ok(row)
-            })
-            .await?;
+            },
+        )
+        .await?;
 
         // Nothing was loaded before the insert: no original until it returns.
         crate::eloquent::changes::begin_insert(row_state(row.__eager_cache()));
@@ -1243,8 +1296,9 @@ where
         }
         Self::apply_attrs_to_active_model(&mut am, changed)?;
 
-        let row =
-            crate::render_cache::orm::atomic(Self::default_connection_name(), || async move {
+        let row = crate::search::indexing::atomic::<Self, _, _, _>(
+            Self::default_connection_name(),
+            || async move {
                 let exec = crate::database::transaction::ExecutorChoice::resolve_write(
                     None,
                     None,
@@ -1257,9 +1311,16 @@ where
                     .map_err(|e| FrameworkError::database(e.to_string()))?;
                 let row = Self::try_from_storage(inserted)?;
                 crate::render_cache::orm::after_model_write(&row).await?;
+                crate::search::indexing::after_model_write(
+                    &row,
+                    crate::search::WriteKind::Created,
+                    None,
+                )
+                .await?;
                 Ok(row)
-            })
-            .await?;
+            },
+        )
+        .await?;
 
         // Nothing was loaded before the insert: no original until it returns.
         crate::eloquent::changes::begin_insert(row_state(row.__eager_cache()));
@@ -1327,10 +1388,12 @@ where
             None
         };
         let written_columns = prune_save_columns(self, &final_attrs, &mut am)?;
+        let search_previous = search_original(self)?;
         let original = self.clone().try_into_storage()?;
         // T11/T12: route through resolve_write.
-        let current =
-            crate::render_cache::orm::atomic(Self::default_connection_name(), || async move {
+        let current = crate::search::indexing::atomic::<Self, _, _, _>(
+            Self::default_connection_name(),
+            || async move {
                 let exec = crate::database::transaction::ExecutorChoice::resolve_write(
                     None,
                     None,
@@ -1343,9 +1406,12 @@ where
                     .map_err(|e| FrameworkError::database(e.to_string()))?;
                 let current = Self::try_from_storage(updated)?;
                 crate::render_cache::orm::after_model_write(&current).await?;
+                crate::search::indexing::after_model_update(&search_previous, &current, None)
+                    .await?;
                 Ok(current)
-            })
-            .await?;
+            },
+        )
+        .await?;
 
         record_save_on(
             self.__eager_cache(),
@@ -1401,8 +1467,10 @@ where
             None
         };
         // T11/T12: route through resolve_write.
-        let current =
-            crate::render_cache::orm::atomic(Self::default_connection_name(), || async move {
+        let search_previous = previous.clone();
+        let current = crate::search::indexing::atomic::<Self, _, _, _>(
+            Self::default_connection_name(),
+            || async move {
                 let exec = crate::database::transaction::ExecutorChoice::resolve_write(
                     None,
                     None,
@@ -1415,9 +1483,12 @@ where
                     .map_err(|e| FrameworkError::database(e.to_string()))?;
                 let current = Self::try_from_storage(updated)?;
                 crate::render_cache::orm::after_model_write(&current).await?;
+                crate::search::indexing::after_model_update(&search_previous, &current, None)
+                    .await?;
                 Ok(current)
-            })
-            .await?;
+            },
+        )
+        .await?;
 
         record_save_on(
             previous.__eager_cache(),
@@ -1602,18 +1673,30 @@ where
         let row = self.try_into_storage()?;
         let am = row.into_active_model();
         // T11/T12: route through resolve_write.
-        crate::render_cache::orm::atomic(Self::default_connection_name(), || async {
-            let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-                None,
-                None,
-                Self::default_connection_name(),
-            )
-            .await?;
-            exec.delete_active(am)
+        crate::search::indexing::atomic::<Self, _, _, _>(
+            Self::default_connection_name(),
+            || async {
+                let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                    None,
+                    None,
+                    Self::default_connection_name(),
+                )
+                .await?;
+                let search_touches =
+                    crate::search::indexing::plan_model_delete(&snapshot, None).await?;
+                exec.delete_active(am)
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+                crate::render_cache::orm::after_model_write(&snapshot).await?;
+                crate::search::indexing::after_model_delete(
+                    &snapshot,
+                    crate::search::WriteKind::Deleted,
+                    None,
+                    search_touches,
+                )
                 .await
-                .map_err(|e| FrameworkError::database(e.to_string()))?;
-            crate::render_cache::orm::after_model_write(&snapshot).await
-        })
+            },
+        )
         .await?;
 
         Self::__dispatch_deleted(&snapshot, false).await?;
@@ -1636,18 +1719,30 @@ where
         let row = self.try_into_storage()?;
         let am = row.into_active_model();
         // T11/T12: route through resolve_write.
-        crate::render_cache::orm::atomic(Self::default_connection_name(), || async {
-            let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-                None,
-                None,
-                Self::default_connection_name(),
-            )
-            .await?;
-            exec.delete_active(am)
+        crate::search::indexing::atomic::<Self, _, _, _>(
+            Self::default_connection_name(),
+            || async {
+                let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                    None,
+                    None,
+                    Self::default_connection_name(),
+                )
+                .await?;
+                let search_touches =
+                    crate::search::indexing::plan_model_delete(&snapshot, None).await?;
+                exec.delete_active(am)
+                    .await
+                    .map_err(|e| FrameworkError::database(e.to_string()))?;
+                crate::render_cache::orm::after_model_write(&snapshot).await?;
+                crate::search::indexing::after_model_delete(
+                    &snapshot,
+                    crate::search::WriteKind::ForceDeleted,
+                    None,
+                    search_touches,
+                )
                 .await
-                .map_err(|e| FrameworkError::database(e.to_string()))?;
-            crate::render_cache::orm::after_model_write(&snapshot).await
-        })
+            },
+        )
         .await?;
 
         Self::__dispatch_force_deleted(&snapshot).await?;
@@ -1749,15 +1844,18 @@ where
         if Self::TOUCHES.is_empty() {
             return Ok(());
         }
-        crate::render_cache::orm::atomic(Self::default_connection_name(), || async {
-            let exec = crate::database::transaction::ExecutorChoice::resolve_write(
-                None,
-                None,
-                Self::default_connection_name(),
-            )
-            .await?;
-            self.__touch_owners_via(&exec, None, plan).await
-        })
+        crate::search::indexing::atomic::<Self, _, _, _>(
+            Self::default_connection_name(),
+            || async {
+                let exec = crate::database::transaction::ExecutorChoice::resolve_write(
+                    None,
+                    None,
+                    Self::default_connection_name(),
+                )
+                .await?;
+                self.__touch_owners_via(&exec, None, plan).await
+            },
+        )
         .await
     }
 
@@ -1973,6 +2071,7 @@ where
             None
         };
         let written_columns = prune_save_columns(self, &final_attrs, &mut am)?;
+        let search_previous = search_original(self)?;
         let original = self.clone().try_into_storage()?;
         let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
         let updated = exec
@@ -1981,6 +2080,7 @@ where
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         let current = Self::try_from_storage(updated)?;
         crate::render_cache::orm::after_model_write_with_tx(tx, &current).await?;
+        crate::search::indexing::after_model_update(&search_previous, &current, Some(tx)).await?;
 
         record_save_on(
             self.__eager_cache(),
@@ -2041,6 +2141,7 @@ where
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         let current = Self::try_from_storage(updated)?;
         crate::render_cache::orm::after_model_write_with_tx(tx, &current).await?;
+        crate::search::indexing::after_model_update(&previous, &current, Some(tx)).await?;
 
         record_save_on(
             previous.__eager_cache(),
@@ -2073,10 +2174,19 @@ where
         let row = self.try_into_storage()?;
         let am = row.into_active_model();
         let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
+        let search_touches =
+            crate::search::indexing::plan_model_delete(&snapshot, Some(tx)).await?;
         exec.delete_active(am)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         crate::render_cache::orm::after_model_write_with_tx(tx, &snapshot).await?;
+        crate::search::indexing::after_model_delete(
+            &snapshot,
+            crate::search::WriteKind::Deleted,
+            Some(tx),
+            search_touches,
+        )
+        .await?;
 
         Self::__dispatch_deleted(&snapshot, false).await?;
         snapshot.__touch_planned_with_tx(tx, &touch_plan).await?;
@@ -2111,6 +2221,12 @@ where
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         let row = Self::try_from_storage(inserted)?;
         crate::render_cache::orm::after_model_write_with_tx(tx, &row).await?;
+        crate::search::indexing::after_model_write(
+            &row,
+            crate::search::WriteKind::Created,
+            Some(tx),
+        )
+        .await?;
 
         // Nothing was loaded before the insert: no original until it returns.
         crate::eloquent::changes::begin_insert(row_state(row.__eager_cache()));
@@ -2136,10 +2252,19 @@ where
         let row = self.try_into_storage()?;
         let am = row.into_active_model();
         let exec = crate::database::transaction::ExecutorChoice::from_tx(tx);
+        let search_touches =
+            crate::search::indexing::plan_model_delete(&snapshot, Some(tx)).await?;
         exec.delete_active(am)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
         crate::render_cache::orm::after_model_write_with_tx(tx, &snapshot).await?;
+        crate::search::indexing::after_model_delete(
+            &snapshot,
+            crate::search::WriteKind::ForceDeleted,
+            Some(tx),
+            search_touches,
+        )
+        .await?;
 
         Self::__dispatch_force_deleted(&snapshot).await?;
         Self::__dispatch_deleted(&snapshot, true).await?;
@@ -3110,6 +3235,7 @@ where
                 .await?
             }
         };
+        let search_touches = crate::search::indexing::plan_model_delete(snapshot_ref, tx).await?;
         let result = exec
             .delete_active(am)
             .await
@@ -3123,11 +3249,21 @@ where
             Some(t) => crate::render_cache::orm::after_model_write_with_tx(t, snapshot_ref).await?,
             None => crate::render_cache::orm::after_model_write(snapshot_ref).await?,
         }
+        crate::search::indexing::after_model_delete(
+            snapshot_ref,
+            crate::search::WriteKind::Deleted,
+            tx,
+            search_touches,
+        )
+        .await?;
         Ok(())
     };
     match tx {
         Some(_) => write().await?,
-        None => crate::render_cache::orm::atomic(M::default_connection_name(), write).await?,
+        None => {
+            crate::search::indexing::atomic::<M, _, _, _>(M::default_connection_name(), write)
+                .await?
+        }
     }
 
     M::__dispatch_deleted(&snapshot, false).await?;
@@ -3221,6 +3357,7 @@ where
             placeholder(backend, values.len())?,
             M::SOFT_DELETES_COLUMN,
         ));
+        let search_touches = crate::search::indexing::plan_model_delete(model_ref, tx).await?;
         let result = exec
             .run(sea_orm::Statement::from_sql_and_values(
                 backend, &sql, values,
@@ -3236,11 +3373,21 @@ where
             Some(t) => crate::render_cache::orm::after_model_write_with_tx(t, model_ref).await?,
             None => crate::render_cache::orm::after_model_write(model_ref).await?,
         }
+        crate::search::indexing::after_model_delete(
+            model_ref,
+            crate::search::WriteKind::Deleted,
+            tx,
+            search_touches,
+        )
+        .await?;
         Ok(())
     };
     match tx {
         Some(_) => write().await?,
-        None => crate::render_cache::orm::atomic(M::default_connection_name(), write).await?,
+        None => {
+            crate::search::indexing::atomic::<M, _, _, _>(M::default_connection_name(), write)
+                .await?
+        }
     }
 
     M::__dispatch_trashed(&model).await?;
