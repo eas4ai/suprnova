@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: scaffold-files-not-rustfmt-clean
+Current: magick-driver-keeps-the-accounts-user-policy
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -1175,3 +1175,9 @@ Delivers backlog item password-change-keeps-the-changing-session: A signed-in us
 Requirements: PAR-080
 
 Delivers backlog item scaffold-files-not-rustfmt-clean: Found building the Live starter kit (lane k, 2026-10-11): in a fresh 2024-edition scaffold, cargo fmt rewrites the shared templates example_action.rs, logging.rs, two migrations and models/user.rs, so a developer's first cargo fmt produces a diff in files they did not touch. Fix: format those templates to rustfmt's 2024 layout and keep a test that runs cargo fmt --check on a scaffold.
+
+## magick-driver-keeps-the-accounts-user-policy
+
+Requirements: HRD-010
+
+Delivers backlog item magick-driver-keeps-the-accounts-user-policy: The magick driver runs every child with HOME set to its policy directory, so ImageMagick no longer reads the account's own $XDG_CONFIG_HOME/ImageMagick or $HOME/.config/ImageMagick. A policy or config the operator kept there stopped applying in 4.0.0. The driver appends the real user dir of the process ($XDG_CONFIG_HOME/ImageMagick, else $HOME/.config/ImageMagick) to MAGICK_CONFIGURE_PATH after the operator's value, so the account's policy and config apply as before while the framework file under the child's HOME stays the last Path. Real-binary tests: a user-dir denial still applies, and a user-dir grant is still outranked by the framework file.
