@@ -910,61 +910,80 @@ async fn retrieve(
             embedder.profile(),
             settings.index_time.dimensions,
         )?;
-        let mut semantic = engine
-            .semantic(
-                descriptor,
-                &generation,
-                &vector.dense,
-                query.filter.as_ref(),
-                settings.query.fusion_depth,
-            )
-            .await?;
-        validate_candidates(descriptor, &semantic.candidates)?;
-        semantic.candidates.retain(|candidate| {
-            !matches_negative(&candidate.document, &settings, &query.expanded.negatives)
-        });
-        let semantic_keys = semantic
-            .candidates
-            .iter()
-            .map(|hit| hit.document.key.clone())
-            .collect::<Vec<_>>();
-        let lexical_keys = lexical
-            .candidates
-            .iter()
-            .map(|hit| hit.document.key.clone())
-            .collect::<Vec<_>>();
-        let ranks = if ratio == 1.0 {
-            semantic
+        if let Some(mut native) = engine
+            .hybrid(descriptor, &generation, &query, &vector.dense, ratio)
+            .await?
+        {
+            validate_candidates(descriptor, &native.candidates)?;
+            native.candidates.retain(|candidate| {
+                !matches_negative(&candidate.document, &settings, &query.expanded.negatives)
+            });
+            total = native.total;
+            candidates = native
+                .candidates
+                .into_iter()
+                .map(|candidate| RankedCandidate {
+                    rank_score: candidate.score,
+                    candidate,
+                })
+                .collect();
+        } else {
+            let mut semantic = engine
+                .semantic(
+                    descriptor,
+                    &generation,
+                    &vector.dense,
+                    query.filter.as_ref(),
+                    settings.query.fusion_depth,
+                )
+                .await?;
+            validate_candidates(descriptor, &semantic.candidates)?;
+            semantic.candidates.retain(|candidate| {
+                !matches_negative(&candidate.document, &settings, &query.expanded.negatives)
+            });
+            let semantic_keys = semantic
                 .candidates
                 .iter()
-                .map(|hit| (hit.document.key.clone(), hit.score))
-                .collect()
-        } else {
-            weighted_rrf(&[
-                (1.0 - f64::from(ratio), lexical_keys),
-                (f64::from(ratio), semantic_keys),
-            ])
-        };
-        let mut by_key: HashMap<_, _> = semantic
-            .candidates
-            .into_iter()
-            .map(|candidate| (candidate.document.key.clone(), candidate))
-            .collect();
-        if ratio != 1.0 {
-            for candidate in lexical.candidates {
-                by_key.insert(candidate.document.key.clone(), candidate);
+                .map(|hit| hit.document.key.clone())
+                .collect::<Vec<_>>();
+            let lexical_keys = lexical
+                .candidates
+                .iter()
+                .map(|hit| hit.document.key.clone())
+                .collect::<Vec<_>>();
+            let ranks = if ratio == 1.0 {
+                semantic
+                    .candidates
+                    .iter()
+                    .map(|hit| (hit.document.key.clone(), hit.score))
+                    .collect()
+            } else {
+                weighted_rrf(&[
+                    (1.0 - f64::from(ratio), lexical_keys),
+                    (f64::from(ratio), semantic_keys),
+                ])
+            };
+            let mut by_key: HashMap<_, _> = semantic
+                .candidates
+                .into_iter()
+                .map(|candidate| (candidate.document.key.clone(), candidate))
+                .collect();
+            if ratio != 1.0 {
+                for candidate in lexical.candidates {
+                    by_key.insert(candidate.document.key.clone(), candidate);
+                }
             }
-        }
-        candidates = ranks
-            .into_iter()
-            .filter_map(|(key, score)| {
-                by_key.remove(&key).map(|candidate| RankedCandidate {
-                    candidate,
-                    rank_score: score,
+            candidates = ranks
+                .into_iter()
+                .filter_map(|(key, score)| {
+                    by_key.remove(&key).map(|candidate| RankedCandidate {
+                        candidate,
+                        rank_score: score,
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
-        total = Total::Estimated(candidates.len() as u64);
+                .collect::<Vec<_>>();
+            total = Total::Estimated(candidates.len() as u64);
+        }
     }
     if ratio > 0.0 && !plan.sort.is_empty() {
         candidates.sort_by(|a, b| {
@@ -1021,7 +1040,7 @@ fn validate_candidates(
     Ok(())
 }
 
-fn compare_sort(a: &SearchDocument, b: &SearchDocument, sorts: &[Sort]) -> Ordering {
+pub(crate) fn compare_sort(a: &SearchDocument, b: &SearchDocument, sorts: &[Sort]) -> Ordering {
     for sort in sorts {
         let (va, vb, direction) = match sort {
             Sort::Attribute {

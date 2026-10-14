@@ -4,7 +4,10 @@ use super::{
     config::SearchConfig,
     document::{AttributeType, SearchDocument},
     embedder::Embedder,
-    engine::{GenerationId, SearchEngine, collection::CollectionEngine, null::NullEngine},
+    engine::{
+        GenerationId, SearchEngine, collection::CollectionEngine, null::NullEngine,
+        qdrant::QdrantSearchEngine,
+    },
     query::Filter,
     scope::Viewer,
     settings::{EmbedSource, IndexSettings, WeightedAttribute},
@@ -311,6 +314,23 @@ pub(crate) async fn in_context<T>(
 pub struct SearchRegistry;
 
 impl SearchRegistry {
+    /// Bootstrap configured Qdrant search before requests or jobs resolve a generation.
+    /// Explicitly registered engines win over environment defaults.
+    pub fn bootstrap() -> Result<(), FrameworkError> {
+        let configured = SearchConfig::current()?.driver.as_str() == "qdrant"
+            || std::env::var("QDRANT_URL").is_ok_and(|v| !v.trim().is_empty());
+        if configured
+            && !services()
+                .engines
+                .read()
+                .map_err(|_| poison())?
+                .contains_key("qdrant")
+        {
+            Self::register_engine("qdrant", Arc::new(QdrantSearchEngine::from_env()?))?;
+        }
+        Ok(())
+    }
+
     /// Duplicate index names fail instead of choosing inventory's unspecified order.
     pub fn by_index(index: &str) -> Result<&'static SearchableEntry, FrameworkError> {
         let entries = INVENTORY.names.get(index).ok_or_else(|| {
@@ -420,6 +440,7 @@ impl SearchRegistry {
                 Self::register_engine("database", Arc::clone(&engine))?;
                 return Ok(engine);
             }
+            "qdrant" => Arc::new(QdrantSearchEngine::from_env()?),
             _ => {
                 return Err(FrameworkError::param(format!(
                     "SEARCH_DRIVER '{driver}' for index '{index}' is not registered"

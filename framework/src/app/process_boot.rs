@@ -175,6 +175,10 @@ async fn bootstrap_runtime_drivers(report_failures: bool) -> Result<(), BootErro
             outcome => outcome,
         }
     };
+    settle(
+        "search",
+        crate::search::SearchRegistry::bootstrap().map_err(Into::into),
+    )?;
     // The MongoDB connections first: the cache and the queue may run on them.
     #[cfg(feature = "database-mongodb")]
     settle(
