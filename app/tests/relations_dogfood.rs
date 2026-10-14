@@ -689,7 +689,7 @@ pub struct DogfoodThPost {
 
 #[tokio::test]
 async fn has_many_through_dogfood_smoke() {
-    let db = TestDatabase::sqlite_memory().await.unwrap();
+    let db = TestDatabase::fresh::<Migrator>().await.unwrap();
     db.execute_unprepared(
         "CREATE TABLE dogfood_th_countries (\
             id INTEGER PRIMARY KEY AUTOINCREMENT, \

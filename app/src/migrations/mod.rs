@@ -120,6 +120,7 @@ impl MigratorTrait for Migrator {
             Box::new(suprnova::queue::migrations::CreateFailedJobsTable),
             Box::new(suprnova::features::migrations::FeaturesToPennantLayout),
         ];
+        migrations.extend(suprnova::search::migrations());
         migrations.extend(suprnova::recommendations::migrations());
         migrations
     }

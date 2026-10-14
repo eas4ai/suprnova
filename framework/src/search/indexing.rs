@@ -292,6 +292,7 @@ impl Job for SearchFlushJob {
             sort: Vec::new(),
             depth: SearchConfig::current()?.chunk,
             highlights: false,
+            crop: Default::default(),
         };
         let total = engine.count(descriptor, &generation, &query).await?;
         let super::results::Total::Exact(total) = total else {

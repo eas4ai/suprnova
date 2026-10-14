@@ -403,6 +403,9 @@ pub struct EngineQuery {
     pub depth: usize,
     /// Allows engines with safe native formatting to supply it.
     pub highlights: bool,
+    /// Native crop engines receive visible-character budgets for requested attributes.
+    #[serde(default)]
+    pub crop: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

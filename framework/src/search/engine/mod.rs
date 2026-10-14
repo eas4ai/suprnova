@@ -1,5 +1,6 @@
 //! Drivers own relevance while preserving one versioned, scoped query contract.
 pub mod collection;
+pub mod database;
 pub mod null;
 use super::{
     document::SearchDocument,
@@ -100,6 +101,9 @@ pub struct EngineResult {
 pub struct EngineCapabilities {
     /// Native highlights are HTML escaped before tags are inserted.
     pub native_highlight: bool,
+    /// Native fragments honor requested visible-character crop budgets before markup.
+    #[serde(default)]
+    pub native_crop: bool,
     /// Sparse vectors can be indexed and queried.
     pub sparse: bool,
     /// Phrase adjacency is enforced.

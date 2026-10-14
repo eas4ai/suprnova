@@ -388,7 +388,7 @@ impl SearchRegistry {
         Ok(())
     }
 
-    /// Built-in test engines are lazy singletons; other drivers must be registered.
+    /// Built-in database and test engines resolve lazily; applications register other drivers.
     pub fn engine_for(index: &str) -> Result<Arc<dyn SearchEngine>, FrameworkError> {
         Self::by_index(index)?;
         let config = SearchConfig::current()?;
@@ -414,6 +414,12 @@ impl SearchRegistry {
                 config.tombstone_hours,
             )?),
             "null" => Arc::new(NullEngine::new()),
+            "database" => {
+                let engine: Arc<dyn SearchEngine> =
+                    Arc::new(super::engine::database::DatabaseSearchEngine::new());
+                Self::register_engine("database", Arc::clone(&engine))?;
+                return Ok(engine);
+            }
             _ => {
                 return Err(FrameworkError::param(format!(
                     "SEARCH_DRIVER '{driver}' for index '{index}' is not registered"

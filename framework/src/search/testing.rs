@@ -203,6 +203,7 @@ pub mod conformance {
             sort: vec![],
             depth: 100,
             highlights: false,
+            crop: Default::default(),
         })
     }
     /// A fresh corpus verifies every mandatory engine behavior using isolated generations.
@@ -711,6 +712,7 @@ pub mod conformance {
             sort: vec![],
             depth: 100,
             highlights: false,
+            crop: Default::default(),
         }
     }
 }

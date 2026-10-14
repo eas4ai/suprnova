@@ -513,6 +513,7 @@ fn format_hits<M>(
             &retrieved.query,
             &retrieved.settings,
             plan,
+            retrieved.native_crop,
         )?;
         hits.push(Hit {
             model,
@@ -803,6 +804,7 @@ async fn prepare(
         sort: plan.sort.clone(),
         depth,
         highlights: !plan.highlight.is_empty() || !plan.crop.is_empty(),
+        crop: plan.crop.clone(),
     };
     Ok(Prepared {
         engine,
@@ -820,6 +822,7 @@ struct RankedCandidate {
 }
 struct Retrieved {
     engine_name: String,
+    native_crop: bool,
     generation: GenerationId,
     settings: IndexSettings,
     query: EngineQuery,
@@ -973,6 +976,7 @@ async fn retrieve(
 
     Ok(Retrieved {
         engine_name: engine.name().into(),
+        native_crop: engine.capabilities().native_crop,
         generation,
         settings,
         query,
@@ -1071,6 +1075,7 @@ fn format_fields(
     query: &EngineQuery,
     settings: &IndexSettings,
     plan: &SearchQuery,
+    native_crop: bool,
 ) -> Result<BTreeMap<String, String>, FrameworkError> {
     let mut fields = BTreeMap::new();
     for name in plan.highlight.iter().chain(plan.crop.keys()) {
@@ -1079,8 +1084,8 @@ fn format_fields(
             .get(name)
             .and_then(AttributeValue::searchable_text)
         {
-            // Crop uses source spans; native markup cannot be safely cropped after insertion.
-            let formatted = if !plan.crop.contains_key(name) {
+            // Drivers advertising native crop return complete fragments within the budget.
+            let formatted = if !plan.crop.contains_key(name) || native_crop {
                 native
                     .and_then(|fields| fields.get(name))
                     .filter(|formatted| native_fragment_is_safe(formatted, &settings.query))
@@ -1381,6 +1386,7 @@ impl FederatedBuilder {
                     &retrieved.query,
                     &retrieved.settings,
                     &plan,
+                    retrieved.native_crop,
                 )?;
                 hits.insert(
                     (index.clone(), key.clone()),

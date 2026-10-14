@@ -1,7 +1,8 @@
 //! Search keeps engine-native relevance behind one typed, scoped model API.
 //!
 //! The collection driver and deterministic embedder make the same pipeline testable
-//! without external services. Applications register persistent drivers at bootstrap.
+//! without external services. Database search resolves on the application connection;
+//! applications register external drivers at bootstrap.
 
 pub mod builder;
 pub mod config;
@@ -12,6 +13,7 @@ pub mod expansion;
 pub mod fusion;
 pub mod highlight;
 pub mod indexing;
+pub mod migrations;
 pub mod query;
 pub mod registry;
 pub mod results;
@@ -32,6 +34,7 @@ pub use embedder::{
     Precision, SparseEmbedding, validate_embedding,
 };
 pub use engine::collection::CollectionEngine;
+pub use engine::database::DatabaseSearchEngine;
 pub use engine::null::NullEngine;
 pub use engine::{
     EngineCandidate, EngineCapabilities, EngineResult, GenerationId, IndexedDocument, SearchEngine,
@@ -44,6 +47,7 @@ pub use indexing::{
     IndexOperation, SearchIndexJob, WriteKind, after_model_write, make_all_searchable,
     remove_all_from_search, searchable, unsearchable, without_syncing_to_search,
 };
+pub use migrations::migrations;
 pub use query::{
     EngineQuery, Filter, GroupBy, QueryText, Rerank, SearchQuery, Sort, SortDirection,
 };

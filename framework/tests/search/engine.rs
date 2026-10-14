@@ -114,6 +114,7 @@ async fn typo_expansion_respects_attributes_that_disable_corrections()
         sort: vec![],
         depth: 20,
         highlights: false,
+        crop: Default::default(),
     };
     let result = engine.query(&descriptor, &generation, &q).await?;
     assert_eq!(result.candidates.len(), 1);
@@ -223,6 +224,7 @@ async fn typo_corrections_do_not_become_prefixes() -> Result<(), suprnova::Frame
         sort: vec![],
         depth: 20,
         highlights: false,
+        crop: Default::default(),
     };
     let results = engine.query(&descriptor, &generation, &q).await?;
     assert_eq!(results.candidates.len(), 1);

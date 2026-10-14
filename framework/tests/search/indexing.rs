@@ -51,6 +51,7 @@ async fn count(engine: &dyn SearchEngine) -> u64 {
                 sort: vec![],
                 depth: 100,
                 highlights: false,
+                crop: Default::default(),
             },
         )
         .await
@@ -87,6 +88,7 @@ async fn job_reloads_latest_rows_and_removes_missing_or_ineligible_rows() {
                         sort: vec![],
                         depth: 100,
                         highlights: false,
+                        crop: Default::default(),
                     },
                 )
                 .await
@@ -467,6 +469,7 @@ async fn eligibility_restoration_advances_a_version_without_indexed_attribute_ch
                 sort: vec![],
                 depth: 10,
                 highlights: false,
+                crop: Default::default(),
             };
             assert_eq!(
                 engine.count(descriptor, &generation, &query).await.unwrap(),

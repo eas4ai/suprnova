@@ -492,11 +492,18 @@ async fn registry_errors_name_driver_index_and_provider_without_fallback() {
                     .to_string()
                     .contains("missing-index")
             );
+            SearchRegistry::set_index_driver(
+                SearchNote::descriptor().name,
+                "unregistered_search_engine",
+            )
+            .unwrap();
             let error = match SearchRegistry::engine_for(SearchNote::descriptor().name) {
-                Ok(_) => unreachable!("unregistered database driver accepted"),
+                Ok(_) => unreachable!("unregistered search driver accepted"),
                 Err(error) => error,
             };
             assert!(error.to_string().contains("SEARCH_DRIVER"));
+            assert!(error.to_string().contains("unregistered_search_engine"));
+            assert!(error.to_string().contains(SearchNote::descriptor().name));
             SearchRegistry::register_engine("custom", Arc::new(CollectionEngine::new())).unwrap();
             SearchRegistry::set_index_driver(SearchNote::descriptor().name, "custom").unwrap();
             assert_eq!(
