@@ -4,7 +4,9 @@ use suprnova::{
     FrameworkError,
     search::{
         CollectionEngine,
-        baseline::{Baseline, BaselineFloors, Fixture, Latency, ndcg_at_10},
+        baseline::{
+            Baseline, BaselineFloors, BudgetCheck, Fixture, Latency, ndcg_at_10, optimized_build,
+        },
     },
 };
 
@@ -33,6 +35,19 @@ fn baseline_ndcg_hand_computed() -> Result<(), FrameworkError> {
 }
 
 #[test]
+fn baseline_budget_policy_matches_build() {
+    assert_eq!(optimized_build(), !cfg!(debug_assertions));
+    assert_eq!(
+        BudgetCheck::for_build(),
+        if optimized_build() {
+            BudgetCheck::Enforce
+        } else {
+            BudgetCheck::Report
+        }
+    );
+}
+
+#[test]
 fn baseline_latency_nearest_rank() -> Result<(), FrameworkError> {
     let samples = (1..=100).map(f64::from).rev().collect::<Vec<_>>();
     let latency = Latency::from_samples(&samples)?;
@@ -43,6 +58,46 @@ fn baseline_latency_nearest_rank() -> Result<(), FrameworkError> {
     assert!(Latency::from_samples(&[]).is_err());
     assert!(Latency::from_samples(&[f64::NAN]).is_err());
     assert!(Latency::from_samples(&[-1.0]).is_err());
+    Ok(())
+}
+
+#[test]
+fn baseline_rival_budgets_hand_computed() -> Result<(), FrameworkError> {
+    use suprnova::search::baseline::{Measurement, Rival};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("baseline.json");
+    let mut floors = BaselineFloors::load(fixtures().join("baseline.json"))?;
+    floors.calibrated = true;
+    floors.calibrated_at = Some("2026-10-14T00:00:00Z".into());
+    for (meili, typesense, expected) in [(4.0, 7.5, 15.0), (9.0, 2.0, 18.0), (3.0, 3.0, 6.0)] {
+        let rival = |version: &str, p95_ms| Rival {
+            version: Some(version.into()),
+            lexical: Some(Measurement {
+                ndcg_at_10: 0.8,
+                queries: 300,
+                latency: Latency {
+                    p50_ms: 1.0,
+                    p95_ms,
+                    p99_ms: 10.0,
+                },
+            }),
+        };
+        floors.rivals.meilisearch = rival("1.test", meili);
+        floors.rivals.typesense = rival("29.test", typesense);
+        floors
+            .p95_budgets_ms
+            .values_mut()
+            .for_each(|budget| *budget = expected);
+        floors.write(&path)?;
+        BaselineFloors::load(&path)?;
+        let mut edited = floors.clone();
+        *edited.p95_budgets_ms.get_mut("collection").unwrap() *= 1.01;
+        std::fs::write(&path, serde_json::to_vec(&edited).unwrap()).unwrap();
+        assert!(BaselineFloors::load(&path).is_err());
+        *edited.p95_budgets_ms.get_mut("collection").unwrap() = expected * (1.0 + 1e-10);
+        edited.write(&path)?;
+        BaselineFloors::load(&path)?;
+    }
     Ok(())
 }
 
@@ -167,6 +222,7 @@ async fn record(
     baseline.assert_record(
         &result,
         std::env::var("SEARCH_BASELINE_ALLOW_UNCALIBRATED").as_deref() == Ok("1"),
+        BudgetCheck::for_build(),
     )
 }
 
@@ -405,7 +461,62 @@ async fn baseline_calibration_uses_tasks_import_and_versions() -> Result<(), Fra
             .ndcg_at_10,
         1.0
     );
-    assert_eq!(calibrated.p95_budgets_ms, floors.p95_budgets_ms);
+    let meili_p95 = calibrated
+        .rivals
+        .meilisearch
+        .lexical
+        .as_ref()
+        .unwrap()
+        .latency
+        .p95_ms;
+    let typesense_p95 = calibrated
+        .rivals
+        .typesense
+        .lexical
+        .as_ref()
+        .unwrap()
+        .latency
+        .p95_ms;
+    assert_eq!(
+        calibrated.p95_budgets_ms.keys().collect::<Vec<_>>(),
+        floors.p95_budgets_ms.keys().collect::<Vec<_>>()
+    );
+    for budget in calibrated.p95_budgets_ms.values() {
+        assert_eq!(*budget, 2.0 * meili_p95.max(typesense_p95));
+    }
+    assert!(
+        calibrated
+            .budget_comment
+            .contains(&format!("{meili_p95:.6}"))
+    );
+    assert!(
+        calibrated
+            .budget_comment
+            .contains(&format!("{typesense_p95:.6}"))
+    );
+    assert!(calibrated.budget_comment.contains("1.test"));
+    assert!(calibrated.budget_comment.contains("29.test"));
+    assert!(
+        calibrated
+            .budget_comment
+            .contains("two times the slower rival's p95")
+    );
+    assert!(
+        calibrated
+            .budget_comment
+            .contains(&calibrated.calibrated_at.as_ref().unwrap()[..10])
+    );
+    assert!(!calibrated.budget_comment.contains(&meili.uri()));
+    assert!(!calibrated.budget_comment.contains("test-meili"));
+    assert!(!calibrated.budget_comment.contains(&typesense.uri()));
+    assert!(!calibrated.budget_comment.contains("test-typesense"));
+    let output = dir.path().join("baseline.json");
+    calibrated.write(&output)?;
+    assert_eq!(
+        BaselineFloors::load(&output)?.p95_budgets_ms,
+        calibrated.p95_budgets_ms
+    );
+    println!("{}", calibrated.budget_comment);
     meili.verify().await;
     typesense.verify().await;
     Ok(())
@@ -450,27 +561,77 @@ async fn baseline_assertions_enforce_floors_budgets_and_identity() -> Result<(),
         version: Some("test-typesense".into()),
         lexical: Some(weaker),
     };
-    floors.p95_budgets_ms.insert("collection".into(), 1000.0);
+    // Relevance and speed are independent: Typesense is weaker but slower.
+    floors.rivals.meilisearch.lexical.as_mut().unwrap().latency = Latency {
+        p50_ms: 100.0,
+        p95_ms: 200.0,
+        p99_ms: 300.0,
+    };
+    floors.rivals.typesense.lexical.as_mut().unwrap().latency = Latency {
+        p50_ms: 250.0,
+        p95_ms: 500.0,
+        p99_ms: 600.0,
+    };
+    floors
+        .p95_budgets_ms
+        .values_mut()
+        .for_each(|budget| *budget = 1000.0);
+    let mut edited = floors.clone();
+    edited.p95_budgets_ms.insert("collection".into(), 1200.0);
+    std::fs::write(
+        dir.path().join("baseline.json"),
+        serde_json::to_vec(&edited).unwrap(),
+    )
+    .unwrap();
+    assert!(Baseline::load(dir.path()).is_err());
     floors.write(dir.path().join("baseline.json"))?;
     let baseline = Baseline::load(dir.path())?;
     let mut result = baseline
         .run("collection", &CollectionEngine::new(), None)
         .await?;
     assert_eq!(result.lexical.ndcg_at_10, 1.0);
-    baseline.assert_record(&result, false)?;
+    baseline.assert_record(&result, false, BudgetCheck::Enforce)?;
+    assert!(result.query_inference.is_none());
     let scope = result.latency_scope.clone();
+    assert_eq!(
+        scope,
+        "warm engine query: parsing, expansion, retrieval and fusion; query inference timed separately; fixed vocabulary; no hydration"
+    );
+    result.latency_scope = "warm engine query: parsing, expansion, retrieval, query inference and fusion; fixed vocabulary; no hydration".into();
+    assert!(
+        baseline
+            .assert_record(&result, false, BudgetCheck::Report)
+            .is_err()
+    );
     result.latency_scope = "different timing boundary".into();
-    assert!(baseline.assert_record(&result, false).is_err());
+    assert!(
+        baseline
+            .assert_record(&result, false, BudgetCheck::Enforce)
+            .is_err()
+    );
     result.latency_scope = scope;
+    let mut old_scope = floors.clone();
+    old_scope.latency_scope = "warm engine query: parsing, expansion, retrieval, query inference and fusion; fixed vocabulary; no hydration".into();
+    std::fs::write(
+        dir.path().join("baseline.json"),
+        serde_json::to_vec(&old_scope).unwrap(),
+    )
+    .unwrap();
+    assert!(BaselineFloors::load(dir.path().join("baseline.json")).is_err());
+    floors.write(dir.path().join("baseline.json"))?;
     result.vocabulary_prepare_ms = -1.0;
-    assert!(baseline.assert_record(&result, false).is_err());
+    assert!(
+        baseline
+            .assert_record(&result, false, BudgetCheck::Enforce)
+            .is_err()
+    );
     result.vocabulary_prepare_ms = 0.0;
     let _db = baseline_database().await?;
     let sqlite = suprnova::search::DatabaseSearchEngine::new();
     for _ in 0..2 {
         let sqlite_record = baseline.run("sqlite", &sqlite, None).await?;
         assert_eq!(sqlite_record.lexical.ndcg_at_10, 1.0);
-        baseline.assert_record(&sqlite_record, false)?;
+        baseline.assert_record(&sqlite_record, false, BudgetCheck::for_build())?;
     }
     let tables = suprnova::DB::select(
         "SELECT name FROM sqlite_master WHERE name LIKE ?",
@@ -484,36 +645,127 @@ async fn baseline_assertions_enforce_floors_budgets_and_identity() -> Result<(),
     result.lexical.ndcg_at_10 = 0.74;
     assert!(
         baseline
-            .assert_record(&result, false)
+            .assert_record(&result, false, BudgetCheck::Enforce)
+            .unwrap_err()
+            .to_string()
+            .contains("nDCG@10")
+    );
+    assert!(
+        baseline
+            .assert_record(&result, false, BudgetCheck::Report)
             .unwrap_err()
             .to_string()
             .contains("nDCG@10")
     );
     result.lexical.ndcg_at_10 = 0.8;
+    result.query_inference = Some(Latency::from_samples(&[1.0])?);
+    assert!(
+        baseline
+            .assert_record(&result, false, BudgetCheck::Report)
+            .unwrap_err()
+            .to_string()
+            .contains("query_inference")
+    );
+    result.query_inference = None;
     result.hybrid = Some(result.lexical.clone());
     result.model_profile = Some(suprnova::search::default_profile());
     result.model_provenance = Some(result.model_profile.as_ref().unwrap().provenance()?);
     assert!(
         baseline
-            .assert_record(&result, false)
+            .assert_record(&result, false, BudgetCheck::Report)
+            .unwrap_err()
+            .to_string()
+            .contains("query_inference")
+    );
+    result.query_inference = Some(Latency::from_samples(&[2000.0])?);
+    assert!(
+        baseline
+            .assert_record(&result, false, BudgetCheck::Enforce)
             .unwrap_err()
             .to_string()
             .contains("hybrid")
     );
+    assert!(
+        baseline
+            .assert_record(&result, false, BudgetCheck::Report)
+            .unwrap_err()
+            .to_string()
+            .contains("nDCG@10")
+    );
     result.hybrid.as_mut().unwrap().ndcg_at_10 = 0.81;
-    baseline.assert_record(&result, false)?;
+    baseline.assert_record(&result, false, BudgetCheck::Enforce)?;
+    result.query_inference.as_mut().unwrap().p95_ms = f64::NAN;
+    assert!(
+        baseline
+            .assert_record(&result, false, BudgetCheck::Report)
+            .is_err()
+    );
+    result.query_inference = Some(Latency::from_samples(&[2000.0])?);
+    result.hybrid.as_mut().unwrap().latency = Latency::from_samples(&[1001.0])?;
+    assert!(
+        baseline
+            .assert_record(&result, false, BudgetCheck::Enforce)
+            .unwrap_err()
+            .to_string()
+            .contains("hybrid p95")
+    );
+    baseline.assert_record(&result, false, BudgetCheck::Report)?;
     result.hybrid = None;
+    result.query_inference = None;
     result.lexical.latency = Latency::from_samples(&[1001.0])?;
     assert!(
         baseline
-            .assert_record(&result, false)
+            .assert_record(&result, false, BudgetCheck::Enforce)
             .unwrap_err()
             .to_string()
             .contains("p95")
     );
+    baseline.assert_record(&result, false, BudgetCheck::Report)?;
+    result.lexical.latency.p50_ms = f64::NAN;
+    assert!(
+        baseline
+            .assert_record(&result, false, BudgetCheck::Report)
+            .is_err()
+    );
+    // A delayed HTTP provider proves that inference stays outside both engine samples.
+    // This exercises the hybrid runner without downloading a local model.
+    use suprnova::search::embedder::http::{HttpEmbedder, HttpEmbedderConfig};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let provider = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data":[{"index":0,"embedding":[1.0,0.0]}]}))
+                .set_delay(std::time::Duration::from_millis(150)),
+        )
+        .expect(3) // One document batch, then warm and measured hybrid queries.
+        .mount(&provider)
+        .await;
+    let embedder = HttpEmbedder::new(HttpEmbedderConfig {
+        base_url: provider.uri(),
+        model: "baseline-timing-test".into(),
+        dimensions: Some(2),
+        ..Default::default()
+    })
+    .await?;
+    let timed = baseline
+        .run("collection", &CollectionEngine::new(), Some(&embedder))
+        .await?;
+    let inference = timed.query_inference.as_ref().unwrap();
+    assert!(inference.p50_ms >= 150.0);
+    assert!(timed.lexical.latency.p95_ms < inference.p50_ms);
+    assert!(timed.hybrid.as_ref().unwrap().latency.p95_ms < inference.p50_ms);
+    assert_eq!(timed.lexical.queries, 1);
+    assert_eq!(timed.hybrid.as_ref().unwrap().queries, 1);
+    baseline.assert_record(&timed, false, BudgetCheck::Enforce)?;
+    provider.verify().await;
     result.lexical.latency = Latency::from_samples(&[1.0])?;
     result.fixture_sha256 = "0".repeat(64);
-    assert!(baseline.assert_record(&result, false).is_err());
+    assert!(
+        baseline
+            .assert_record(&result, false, BudgetCheck::Enforce)
+            .is_err()
+    );
     std::fs::write(
         dir.path().join("queries.jsonl"),
         "{\"id\":\"q\",\"text\":\"changed\"}\n",

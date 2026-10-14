@@ -3,7 +3,7 @@
 
 use super::{
     CollectionEngine, DatabaseSearchEngine, QdrantSearchEngine, SearchConfig, SearchEmbedder,
-    baseline::{Baseline, BaselineFloors, Calibration, Fixture, fixture_directory},
+    baseline::{Baseline, BaselineFloors, BudgetCheck, Calibration, Fixture, fixture_directory},
     generations,
     registry::SearchRegistry,
 };
@@ -196,7 +196,7 @@ async fn search_baseline(args: Vec<String>) -> Result<(), FrameworkError> {
             .join(format!("../target/search-baseline/{engine}.json"));
         record.write(output)?;
         baseline.print(&record)?;
-        if let Err(error) = baseline.assert_record(&record, allow) {
+        if let Err(error) = baseline.assert_record(&record, allow, BudgetCheck::for_build()) {
             failures.push(error.to_string());
         }
     }

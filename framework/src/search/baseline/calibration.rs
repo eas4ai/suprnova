@@ -249,6 +249,34 @@ impl Calibration {
             typesense,
         };
         floors.calibrated_at = Some(chrono::Utc::now().to_rfc3339());
+        let budget = floors.rival_budget()?;
+        for value in floors.p95_budgets_ms.values_mut() {
+            *value = budget;
+        }
+        let meili = floors.rivals.meilisearch.lexical.as_ref().ok_or_else(|| {
+            FrameworkError::internal("search baseline Meilisearch: missing measurement")
+        })?;
+        let typesense = floors.rivals.typesense.lexical.as_ref().ok_or_else(|| {
+            FrameworkError::internal("search baseline Typesense: missing measurement")
+        })?;
+        floors.budget_comment = format!(
+            "Calibrated {}: Meilisearch {} p95 {:.6} ms; Typesense {} p95 {:.6} ms. Every engine budget is two times the slower rival's p95, measured over the same queries as nDCG@10 after a full warm-up pass.",
+            floors.calibrated_at.as_deref().unwrap_or_default(),
+            floors
+                .rivals
+                .meilisearch
+                .version
+                .as_deref()
+                .unwrap_or_default(),
+            meili.latency.p95_ms,
+            floors
+                .rivals
+                .typesense
+                .version
+                .as_deref()
+                .unwrap_or_default(),
+            typesense.latency.p95_ms,
+        );
         floors.tree_hash = tree_hash();
         floors.validate()?;
         Ok(floors)
