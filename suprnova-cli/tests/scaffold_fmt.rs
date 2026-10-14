@@ -33,33 +33,36 @@ fn scaffold(tmp: &TempDir, name: &str, args: &[&str]) -> PathBuf {
     tmp.path().join(name)
 }
 
-/// `cargo fmt --check` in `project`: the differences rustfmt would make,
-/// or none.
-fn fmt_check(project: &Path) -> String {
+/// `cargo fmt --check` in `project`: `Ok(())` when it finished and found
+/// nothing to change; otherwise its exit status with everything it printed,
+/// so a formatter that found differences, failed before printing them or
+/// was killed never reads as clean.
+fn fmt_check(project: &Path) -> Result<(), String> {
     let output = Command::new(env!("CARGO"))
         .args(["fmt", "--check"])
         .current_dir(project)
         .output()
         .expect("`cargo fmt --check` runs");
     if output.status.success() {
-        return String::new();
+        return Ok(());
     }
-    format!(
-        "{}{}",
+    Err(format!(
+        "`cargo fmt --check` exited with {}\nstdout:\n{}stderr:\n{}",
+        output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-    )
+    ))
 }
 
 fn assert_fmt_clean(name: &str, args: &[&str]) {
     let tmp = TempDir::new().expect("a temporary directory");
     let project = scaffold(&tmp, name, args);
-    let differences = fmt_check(&project);
-    assert!(
-        differences.is_empty(),
-        "a fresh `suprnova new {name} {args:?}` is not rustfmt-clean; \
-         `cargo fmt --check` would change:\n{differences}"
-    );
+    if let Err(report) = fmt_check(&project) {
+        panic!(
+            "a fresh `suprnova new {name} {args:?}` is not rustfmt-clean, or the check did not \
+             finish: {report}"
+        );
+    }
 }
 
 #[test]
