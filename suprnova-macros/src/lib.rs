@@ -39,6 +39,7 @@ mod request;
 mod resource;
 mod route_binding_derive;
 mod scopes;
+mod searchable;
 mod serde_attrs;
 mod service;
 mod suprnova_test;
@@ -47,6 +48,21 @@ mod utils;
 mod view;
 mod workflow;
 mod workflow_step;
+
+/// Derive typed search metadata after `#[suprnova::model]` expands the model.
+///
+/// Field roles keep undeclared model data out of the index. The optional
+/// `settings = "path"` struct option names a `fn() -> IndexSettings`, allowing
+/// settings to remain in application code. Predicate methods return
+/// `Result<bool, FrameworkError>` and chunk hooks return
+/// `Result<Vec<Self>, FrameworkError>` asynchronously.
+#[proc_macro_derive(Searchable, attributes(searchable))]
+pub fn derive_searchable(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    searchable::expand(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
 
 /// Derives canonical state and browser-contract metadata for a Live component.
 #[proc_macro_derive(

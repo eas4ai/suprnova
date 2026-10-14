@@ -110,6 +110,8 @@ pub mod resources;
 pub mod routing;
 pub mod schedule;
 pub mod schema;
+/// Typed search engines, model projections and scoped retrieval.
+pub mod search;
 pub mod seed;
 pub mod server;
 pub mod session;
@@ -617,10 +619,30 @@ pub use media::{
     ImageDriverKind, ImagePipeline, ImagePixels, MagickCliDriver, OutputFormat, OxideAvImageDriver,
     Transformation, TransformationSettings, register_transformation, register_transformation_with,
 };
+#[cfg(feature = "testing")]
+pub use search::testing::conformance;
+pub use search::{
+    AttributeDecl, AttributeType, AttributeValue, CollectionEngine, DocumentBatchLoader,
+    DocumentLoader, EmbedInput, EmbedSource, Embedder, Embedding, EngineCandidate,
+    EngineCapabilities, EngineQuery, EngineResult, ExpandedQuery, ExpandedTerm, FacetDistribution,
+    FacetOrder, FacetRange, FacetStats, FacetValue, FakeEmbedder, FederatedBuilder, FederatedHit,
+    FederatedRank, FederatedResults, Filter, GenerationId, GeoPoint, GroupBy, Hit, IndexDescriptor,
+    IndexOperation, IndexSettings, IndexTimeSettings, IndexedDocument, InputKinds, LanguageConfig,
+    MediaPart, ModelFiles, ModelProfile, NullEngine, Pooling, Precision, QuerySettings, QueryText,
+    RawHit, Rerank, Reranker, Search, SearchBuilder, SearchConfig, SearchDocument, SearchDriver,
+    SearchEmbedder, SearchEngine, SearchFilter, SearchIndexJob, SearchPagination, SearchQuery,
+    SearchRegistry, SearchResults, Searchable, SearchableDecl, SearchableEntry, SettingsChange,
+    Sort, SortDirection, SparseEmbedding, Synonym, Total, TypoTolerance, Viewer, Vocabulary,
+    WeightedAttribute, WriteKind, WriteOutcome, after_model_write, apply_scope, default_profile,
+    embedding_profile, embedding_profile_names, evaluate_scope, expand, federated_rrf, highlight,
+    make_all_searchable, normalize, paginate, remove_all_from_search, searchable, tokenize,
+    unsearchable, validate_embedding, validate_tags, weighted_rrf, without_syncing_to_search,
+};
 #[cfg(feature = "vector-pinecone")]
 pub use vector::PineconeVectorDriver;
 #[cfg(feature = "vector-mariadb")]
 pub use vector::{MariaDbDistance, MariaDbVectorDriver};
+
 pub use vector::{
     MemoryVectorDriver, QdrantDistance, QdrantVectorDriver, SUPRNOVA_ID_PAYLOAD_KEY, Vector,
     VectorDriver, VectorItem, VectorMatch, VectorRegistry, VectorStore,
@@ -850,6 +872,7 @@ pub use suprnova_macros::FormRequest as FormRequestDerive;
 pub use suprnova_macros::InertiaProps;
 pub use suprnova_macros::InputNames;
 pub use suprnova_macros::LiveComponent;
+pub use suprnova_macros::Searchable;
 pub use suprnova_macros::accessor;
 pub use suprnova_macros::authorize;
 pub use suprnova_macros::command;

@@ -101,16 +101,19 @@ static REGISTRY: LazyLock<RwLock<HashMap<String, Registration>>> =
 /// [`BroadcastNotificationJob`](crate::notifications::channels::broadcast::BroadcastNotificationJob)
 /// for a message that names a queue or a connection, and a password reset
 /// whose revocation failed pushes
-/// [`RevokeUserCredentials`](crate::auth_flows::RevokeUserCredentials). An
+/// [`RevokeUserCredentials`](crate::auth_flows::RevokeUserCredentials), while
+/// model search synchronization pushes
+/// [`SearchIndexJob`](crate::search::indexing::SearchIndexJob). An
 /// application never writes any of these types, so it cannot be expected to
 /// register them. Without these entries a worker would dead-letter every
-/// queued mail, notification, broadcast and revocation retry as
+/// queued mail, notification, broadcast, search write and revocation retry as
 /// `unknown job`, and the `sync` driver would fail the push itself.
 fn framework_jobs() -> HashMap<String, Registration> {
     use crate::auth_flows::RevokeUserCredentials;
     use crate::mail::SendMailJob;
     use crate::notifications::channels::broadcast::BroadcastNotificationJob;
     use crate::notifications::notify_job::SendNotificationJob;
+    use crate::search::indexing::{SearchFlushJob, SearchIndexBatchJob, SearchIndexJob};
     HashMap::from([
         (
             SendMailJob::job_name().to_string(),
@@ -127,6 +130,18 @@ fn framework_jobs() -> HashMap<String, Registration> {
         (
             RevokeUserCredentials::job_name().to_string(),
             registration_for::<RevokeUserCredentials>(),
+        ),
+        (
+            SearchIndexJob::job_name().to_string(),
+            registration_for::<SearchIndexJob>(),
+        ),
+        (
+            SearchIndexBatchJob::job_name().to_string(),
+            registration_for::<SearchIndexBatchJob>(),
+        ),
+        (
+            SearchFlushJob::job_name().to_string(),
+            registration_for::<SearchFlushJob>(),
         ),
     ])
 }
