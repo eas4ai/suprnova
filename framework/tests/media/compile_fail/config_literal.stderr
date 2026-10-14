@@ -1,0 +1,9 @@
+error[E0639]: cannot create non-exhaustive struct using struct expression
+ --> tests/media/compile_fail/config_literal.rs:6:13
+  |
+6 |       let _ = suprnova::ImageConfig {
+  |  _____________^
+7 | |         max_dimension: 1024,
+8 | |         ..suprnova::ImageConfig::default()
+9 | |     };
+  | |_____^

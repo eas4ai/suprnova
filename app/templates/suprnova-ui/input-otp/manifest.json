@@ -1,0 +1,13 @@
+{
+  "name": "suprnova.input-otp",
+  "version": 1,
+  "root": "suprnova-ui/input-otp",
+  "files": [
+    "input-otp.html",
+    "input-otp.css",
+    "input-otp.js"
+  ],
+  "elements": [
+    "sn-input-otp"
+  ]
+}

@@ -1,0 +1,82 @@
+@layer suprnova-ui {
+  .sn-account-menu {
+    position: relative;
+    display: inline-block;
+  }
+
+  .sn-account-menu-summary {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sn-space-2);
+    padding: var(--sn-space-1) var(--sn-space-2);
+    border-radius: var(--sn-radius-full);
+    cursor: pointer;
+    list-style: none;
+  }
+
+  .sn-account-menu-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .sn-account-menu-summary:hover {
+    background: var(--sn-color-surface-sunken);
+  }
+
+  .sn-account-menu-summary:focus-visible {
+    outline: var(--sn-state-outline-width) solid var(--sn-color-focus-ring);
+    outline-offset: var(--sn-state-outline-width);
+  }
+
+  .sn-account-menu-avatar {
+    display: inline-grid;
+    place-items: center;
+    inline-size: var(--sn-space-8);
+    block-size: var(--sn-space-8);
+    border-radius: var(--sn-radius-full);
+    background: var(--sn-color-accent);
+    color: var(--sn-color-on-accent);
+    font-size: var(--sn-font-size-sm);
+    font-weight: var(--sn-font-weight-medium);
+  }
+
+  .sn-account-menu-list {
+    position: absolute;
+    inset-inline-end: 0;
+    z-index: 2;
+    min-inline-size: 12rem;
+    margin: var(--sn-space-1) 0 0;
+    padding: var(--sn-space-1);
+    list-style: none;
+    border: var(--sn-state-border-width) solid var(--sn-color-border);
+    border-radius: var(--sn-radius-md);
+    background: var(--sn-color-surface-raised);
+    box-shadow: var(--sn-shadow-md);
+  }
+
+  .sn-account-menu-form {
+    margin: 0;
+  }
+
+  .sn-account-menu-link {
+    display: block;
+    inline-size: 100%;
+    padding: var(--sn-space-2) var(--sn-space-3);
+    border: 0;
+    border-radius: var(--sn-radius-sm);
+    background: transparent;
+    color: var(--sn-color-text);
+    font: inherit;
+    text-align: start;
+    text-decoration: none;
+    cursor: pointer;
+  }
+
+  .sn-account-menu-link:hover {
+    background: var(--sn-color-surface-sunken);
+  }
+
+  .sn-account-menu-link:focus-visible {
+    outline: var(--sn-state-outline-width) solid var(--sn-color-focus-ring);
+    outline-offset: calc(-1 * var(--sn-state-outline-width));
+  }
+}
