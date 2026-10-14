@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, collections::BTreeMap};
 
 /// Bound predicates prevent request values from becoming engine syntax.
+/// Programmatically built trees deeper than 64 edges are rejected with
+/// `FrameworkError::ParamError` at query execution, before recursive cloning.
+/// Disposal is iterative so rejecting an oversized tree cannot overflow the stack.
+/// Borrow variant payloads when matching because filters implement `Drop`.
 ///
 /// ```
 /// use suprnova::{Filter, AttributeValue};
@@ -46,7 +50,22 @@ pub enum Filter {
     /// Negation composes arbitrary bound predicates.
     Not(Box<Filter>),
 }
+impl Drop for Filter {
+    fn drop(&mut self) {
+        let mut pending = self.detach_children();
+        while let Some(mut child) = pending.pop() {
+            pending.extend(child.detach_children());
+        }
+    }
+}
 impl Filter {
+    fn detach_children(&mut self) -> Vec<Self> {
+        match self {
+            Self::And(children) | Self::Or(children) => std::mem::take(children),
+            Self::Not(child) => vec![std::mem::replace(&mut **child, Self::And(Vec::new()))],
+            _ => Vec::new(),
+        }
+    }
     /// Parse and bind against declarations before any engine receives the plan.
     pub fn parse(input: &str, descriptor: &IndexDescriptor) -> Result<Self, FrameworkError> {
         let mut parser = Parser {
@@ -504,7 +523,9 @@ impl Parser<'_> {
         if fs.len() == 1 {
             Ok(fs.remove(0))
         } else {
-            Ok(Filter::Or(fs))
+            let filter = Filter::Or(fs);
+            filter.validate(self.descriptor)?;
+            Ok(filter)
         }
     }
     fn and(&mut self) -> Result<Filter, FrameworkError> {
@@ -515,14 +536,16 @@ impl Parser<'_> {
         if fs.len() == 1 {
             Ok(fs.remove(0))
         } else {
-            Ok(Filter::And(fs))
+            let filter = Filter::And(fs);
+            filter.validate(self.descriptor)?;
+            Ok(filter)
         }
     }
     fn unary(&mut self) -> Result<Filter, FrameworkError> {
-        self.depth += 1;
         if self.depth > 64 {
             return Err(FrameworkError::param("filter: nesting exceeds 64"));
         }
+        self.depth += 1;
         let result = if self.keyword("NOT") {
             self.unary().map(|f| Filter::Not(Box::new(f)))
         } else if self.symbol('(') {

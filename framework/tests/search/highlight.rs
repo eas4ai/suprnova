@@ -136,3 +136,18 @@ fn transliteration_tokens_highlight_their_entire_original_unicode_span() {
         );
     }
 }
+
+#[test]
+fn tag_validation_uses_html_whitespace_and_rejects_leftover_attributes() {
+    for pre in [
+        "<em\u{00a0}class=\"hit\">",
+        "<em class=\"hit\"\u{00a0}>",
+        "<em\u{000b}class=\"hit\">",
+        "<em class=\"hit\"\u{000b}>",
+    ] {
+        assert!(validate_tags(pre, "</em>").is_err(), "{pre:?}");
+    }
+    for space in [' ', '\t', '\n', '\r', '\u{000c}'] {
+        validate_tags(&format!("<em{space}class=\"hit\"{space}>"), "</em>").unwrap();
+    }
+}

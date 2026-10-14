@@ -48,7 +48,7 @@ pub(crate) struct SearchNote {
     pub enabled: bool,
     #[searchable(filterable)]
     pub owner_id: i64,
-    #[searchable(facet)]
+    #[searchable(text, facet)]
     pub tags: Vec<String>,
     pub lat: f64,
     pub lng: f64,
@@ -145,7 +145,7 @@ async fn derive_returns_only_declared_typed_attributes_and_embedding_source() {
     let document = model.to_search_document().unwrap();
     assert_eq!(document.index, "test_search_notes");
     assert_eq!(document.key, model.id.to_string());
-    assert!(document.source_version > 0);
+    assert_eq!(document.source_version, 0);
     assert_eq!(document.title.as_deref(), Some("Rust search"));
     assert_eq!(
         document.embed_text.as_deref(),
@@ -232,7 +232,7 @@ async fn registry_exposes_order_weights_scope_and_predicate_through_the_derive()
 }
 
 #[tokio::test]
-async fn unchanged_timestamp_free_documents_reuse_versions_and_changes_advance() {
+async fn timestamp_free_projection_does_not_assign_a_write_version() {
     let _db = database().await;
     let mut model = note("Version", true, 0).await;
     let first = model.to_search_document().unwrap();
@@ -241,7 +241,7 @@ async fn unchanged_timestamp_free_documents_reuse_versions_and_changes_advance()
         first.source_version
     );
     model.title = "Changed version".into();
-    assert!(model.to_search_document().unwrap().source_version > first.source_version);
+    assert_eq!(model.to_search_document().unwrap().source_version, 0);
 }
 
 #[tokio::test]

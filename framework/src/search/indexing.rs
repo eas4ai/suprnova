@@ -25,10 +25,8 @@ use crate::{
 tokio::task_local! { static SYNC_DISABLED: bool; }
 
 type VersionKey = (String, String);
-type VersionRecord = (String, i64);
 #[derive(Default)]
 struct VersionState {
-    documents: HashMap<VersionKey, VersionRecord>,
     events: HashMap<VersionKey, i64>,
 }
 type VersionCache = std::sync::Arc<Mutex<VersionState>>;
@@ -96,40 +94,18 @@ pub fn model_key_value<K: serde::de::DeserializeOwned>(
     Ok(value)
 }
 
-/// Timestamped models retain their storage version; other models reuse unchanged identities.
-///
-/// The fallback clock is process-local. A durable engine remains authoritative across processes
-/// and rejects any projection whose source version is behind its stored version.
+/// Timestamped projections retain their storage version; timestamp-free projections use zero.
+/// The write boundary assigns a version once and serializes it in the job. Reloading a row
+/// must never mint a newer version that could pass a subsequent removal's tombstone.
 #[doc(hidden)]
 pub fn source_version(
     document: &SearchDocument,
     updated_at: Option<serde_json::Value>,
 ) -> Result<i64, FrameworkError> {
-    if let Some(value) = updated_at.filter(|value| !value.is_null()) {
-        return timestamp_version(&document.index, &value);
+    match updated_at.filter(|value| !value.is_null()) {
+        Some(value) => timestamp_version(&document.index, &value),
+        None => Ok(0),
     }
-    let identity = document.content_hash("");
-    let key = (document.index.clone(), document.key.clone());
-    let cache = versions();
-    let mut versions = cache
-        .lock()
-        .map_err(|_| FrameworkError::internal("search source-version cache lock poisoned"))?;
-    if let Some((previous, version)) = versions.documents.get(&key)
-        && *previous == identity
-    {
-        return Ok(*version);
-    }
-    let now = crate::clock::now().timestamp_micros();
-    let version = match versions.documents.get(&key) {
-        Some((_, previous)) => now.max(
-            previous
-                .checked_add(1)
-                .ok_or_else(|| FrameworkError::param("search source version overflow"))?,
-        ),
-        None => now,
-    };
-    versions.documents.insert(key, (identity, version));
-    Ok(version)
 }
 
 fn timestamp_version(index: &str, value: &serde_json::Value) -> Result<i64, FrameworkError> {
@@ -166,12 +142,6 @@ fn event_version(index: &str, key: &str, document_version: i64) -> Result<i64, F
         .lock()
         .map_err(|_| FrameworkError::internal("search source-version cache lock poisoned"))?;
     let identity = (index.to_owned(), key.to_owned());
-    let document_version = state
-        .documents
-        .get(&identity)
-        .map_or(document_version, |(_, version)| {
-            document_version.max(*version)
-        });
     let previous = state
         .events
         .get(&identity)
@@ -497,7 +467,7 @@ async fn write_documents(
                 document.key
             ))
         })?;
-        document.source_version = document.source_version.max(version);
+        document.source_version = version;
         apply_embed_source(&mut document, settings.index_time.embed_source.as_ref())?;
         document.validate(descriptor)?;
         let content_hash = document.content_hash(&digest);
@@ -507,6 +477,13 @@ async fn write_documents(
             dense: None,
             sparse: None,
         });
+    }
+    if !indexed.is_empty() {
+        let hashes = engine
+            .stored_hashes(descriptor, &generation, &indexed)
+            .await?;
+        indexed
+            .retain(|document| hashes.get(&document.document.key) != Some(&document.content_hash));
     }
     let embedding_enabled = match settings.index_time.embedder.as_deref() {
         Some("none") => false,

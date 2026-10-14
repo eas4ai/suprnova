@@ -152,6 +152,21 @@ impl AttributeValue {
         }
     }
 
+    /// Lexical reads and formatting share the joined representation of text lists.
+    pub(crate) fn searchable_text(&self) -> Option<std::borrow::Cow<'_, str>> {
+        match self {
+            Self::Text(text) => Some(std::borrow::Cow::Borrowed(text)),
+            Self::List(values) => Some(std::borrow::Cow::Owned(
+                values
+                    .iter()
+                    .filter_map(Self::as_text)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )),
+            _ => None,
+        }
+    }
+
     /// A numeric view supports scoring and stats without changing stored types.
     pub fn numeric(&self) -> Option<f64> {
         match self {

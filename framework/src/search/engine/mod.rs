@@ -160,6 +160,18 @@ pub trait SearchEngine: Send + Sync {
         index: &IndexDescriptor,
         generation: &GenerationId,
     ) -> Result<IndexSettings, FrameworkError>;
+    /// Check stored identities before inference so unchanged writes can skip indexing.
+    /// For matching hashes, atomically advance the stored source version to the greater
+    /// of the stored and proposed versions, preserving stale-write protection on a skip.
+    /// The empty default opts existing drivers out of this optimization until supported.
+    async fn stored_hashes(
+        &self,
+        _index: &IndexDescriptor,
+        _generation: &GenerationId,
+        _documents: &[IndexedDocument],
+    ) -> Result<BTreeMap<String, String>, FrameworkError> {
+        Ok(BTreeMap::new())
+    }
     /// Apply validated documents while rejecting stale or tombstoned writes.
     async fn index(
         &self,
