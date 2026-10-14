@@ -943,19 +943,41 @@ fn hardening_the_operators_configure_path_follows_the_frameworks() {
         Some(""),
         None,
     ] {
-        let output = {
-            let _env = crate::env_lock::lock_env();
-            let mut child = crate::own_process::child_command(
-                "magick_coder::hardening_the_operators_configure_path_follows_the_frameworks_child",
-            );
-            match operator {
-                Some(value) => child.env("MAGICK_CONFIGURE_PATH", value),
-                None => child.env_remove("MAGICK_CONFIGURE_PATH"),
+        // The account's own ImageMagick directory: `$XDG_CONFIG_HOME/ImageMagick`
+        // when that is set, else `$HOME/.config/ImageMagick`.
+        for xdg in [None, Some("/srv/xdg-config")] {
+            let output = {
+                let _env = crate::env_lock::lock_env();
+                let mut child = crate::own_process::child_command(
+                    "magick_coder::hardening_the_operators_configure_path_follows_the_frameworks_child",
+                );
+                match operator {
+                    Some(value) => child.env("MAGICK_CONFIGURE_PATH", value),
+                    None => child.env_remove("MAGICK_CONFIGURE_PATH"),
+                };
+                match xdg {
+                    Some(value) => child.env("XDG_CONFIG_HOME", value),
+                    None => child.env_remove("XDG_CONFIG_HOME"),
+                };
+                child.output().expect("the child runs")
             };
-            child.output().expect("the child runs")
-        };
-        crate::own_process::assert_child_passed(&output);
+            crate::own_process::assert_child_passed(&output);
+        }
     }
+}
+
+/// The account's own ImageMagick configuration directory, as ImageMagick
+/// and the driver name it: `$XDG_CONFIG_HOME/ImageMagick` when that is set,
+/// else `$HOME/.config/ImageMagick`; `None` with neither.
+fn account_imagemagick_dir() -> Option<String> {
+    let xdg = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty());
+    let dir = match xdg {
+        Some(xdg) => std::path::PathBuf::from(xdg).join("ImageMagick"),
+        None => std::path::PathBuf::from(std::env::var_os("HOME")?)
+            .join(".config")
+            .join("ImageMagick"),
+    };
+    Some(dir.to_string_lossy().into_owned())
 }
 
 /// Runs only in the child process the configure-path test starts, with the
@@ -966,9 +988,10 @@ fn hardening_the_operators_configure_path_follows_the_frameworks_child() {
         return;
     }
     let operator = std::env::var("MAGICK_CONFIGURE_PATH").ok();
+    let account = account_imagemagick_dir().expect("the test process has a HOME");
     let _config = ConfigGuard::set(ImageConfig::default());
     let recorder = Recorder::new(&format!(
-        "policy-operator-{}",
+        "policy-operator-{}-{}",
         operator
             .as_deref()
             .map_or("unset", |value| if value.is_empty() {
@@ -977,7 +1000,12 @@ fn hardening_the_operators_configure_path_follows_the_frameworks_child() {
                 "two"
             } else {
                 "one"
-            })
+            }),
+        if std::env::var_os("XDG_CONFIG_HOME").is_some() {
+            "xdg"
+        } else {
+            "home"
+        }
     ));
     recorder
         .driver()
@@ -987,14 +1015,14 @@ fn hardening_the_operators_configure_path_follows_the_frameworks_child() {
     let framework = root.join(POLICY_CONFIG_DIR);
     let framework = framework.to_string_lossy();
     let expected = match operator.as_deref() {
-        Some(value) if !value.is_empty() => format!("{framework}:{value}:{framework}"),
-        _ => framework.to_string(),
+        Some(value) if !value.is_empty() => format!("{framework}:{value}:{account}:{framework}"),
+        _ => format!("{framework}:{account}:{framework}"),
     };
     assert_eq!(
         recorder.configure_paths(),
         [Some(expected.clone())],
-        "the directory that holds the framework's file first and last, the operator's \
-         between, unchanged"
+        "the directory that holds the framework's file first and last, the operator's value \
+         unchanged and then the account's own ImageMagick directory between"
     );
     assert_eq!(
         recorder.listings(),

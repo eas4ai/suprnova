@@ -36,6 +36,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   developer's first `cargo fmt` changed files they had not touched. The
   templates now carry that layout, and a test formats a fresh scaffold of
   every kind with `cargo fmt --check`.
+- **The account's own ImageMagick policy applies again.** The magick driver
+  starts ImageMagick with `HOME` naming its policy directory, which hid the
+  service account's `~/.config/ImageMagick` from its runs, so a policy or
+  configuration the operator kept there stopped applying in 4.0.0. The
+  driver now puts that directory (`$XDG_CONFIG_HOME/ImageMagick`, else
+  `$HOME/.config/ImageMagick`) on `MAGICK_CONFIGURE_PATH` after the
+  operator's value and before its own directory's last entry: the
+  account's denials and configuration apply as before, and the framework's
+  policy is still the last ImageMagick reads.
 - **The scroll area's size token is defined.** 4.0.2 bounded the region
   with `--sn-scroll-area-size` and left the token undefined, so the shared
   stylesheet never named it and the engine's token check failed. The shared

@@ -42,11 +42,16 @@
 //! writes it again when it differs. It starts ImageMagick with `HOME`
 //! naming that directory, and with `MAGICK_CONFIGURE_PATH` naming the
 //! directory that holds the file first and last, around the operator's own
-//! value. ImageMagick applies the last entry that matches, and it reads
-//! `$HOME/.config/ImageMagick` after every other policy file: the operator's
-//! path, its own configuration directory, and `$XDG_CONFIG_HOME`. So the
-//! framework's policy is the last ImageMagick reads, and it outranks every
-//! other policy on the host. It is the one file the driver writes. A run
+//! value and the account's own ImageMagick directory
+//! (`$XDG_CONFIG_HOME/ImageMagick`, else `$HOME/.config/ImageMagick`), which
+//! the driver's `HOME` would otherwise hide from ImageMagick: a policy or
+//! configuration the operator keeps there applies as it did before the
+//! driver, under the framework's. ImageMagick applies the last entry that
+//! matches, and it reads `$HOME/.config/ImageMagick` after every other
+//! policy file: the operator's path, its own configuration directory, and
+//! `$XDG_CONFIG_HOME`. So the framework's policy is the last ImageMagick
+//! reads, and it outranks every other policy on the host. It is the one
+//! file the driver writes. A run
 //! whose policy cannot be put in place is refused before ImageMagick starts
 //! for it, with or without autodetection.
 //!
@@ -880,6 +885,36 @@ fn operator_configure_path() -> Option<OsString> {
     std::env::var_os("MAGICK_CONFIGURE_PATH").filter(|value| !value.is_empty())
 }
 
+/// The account's own ImageMagick configuration directory, the one
+/// ImageMagick reads from a process's environment: `$XDG_CONFIG_HOME/ImageMagick`
+/// when that variable names a directory, else `$HOME/.config/ImageMagick`.
+/// `None` when neither variable names one, or when the path holds the
+/// configure-path separator, which ImageMagick would read as two
+/// directories.
+///
+/// The driver starts ImageMagick with `HOME` naming its policy directory,
+/// which hides this directory from the `$HOME/.config/ImageMagick` read.
+/// Putting it on the configure path keeps the policy and configuration the
+/// operator keeps there applying, under the framework's file.
+fn account_config_dir() -> Option<PathBuf> {
+    let xdg = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty());
+    let dir = match xdg {
+        Some(xdg) => PathBuf::from(xdg).join("ImageMagick"),
+        None => {
+            let home = std::env::var_os("HOME").filter(|value| !value.is_empty())?;
+            HOME_CONFIG_DIRS
+                .iter()
+                .fold(PathBuf::from(home), |dir, name| dir.join(name))
+        }
+    };
+    let holds_separator = dir
+        .as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .any(|byte| CONFIGURE_PATH_SEPARATOR.as_bytes().contains(byte));
+    (!holds_separator).then_some(dir)
+}
+
 /// The environment the driver starts every ImageMagick process with
 /// (HRD-010), the checks of the policy in effect included.
 struct PolicyEnv {
@@ -888,7 +923,8 @@ struct PolicyEnv {
     /// on the host, so the framework's file there is the last it reads.
     home: PathBuf,
     /// `MAGICK_CONFIGURE_PATH`: the directory that holds the framework's
-    /// file, the operator's value, and that directory again.
+    /// file, the operator's value, the account's own ImageMagick directory,
+    /// and that directory again.
     configure_path: OsString,
 }
 
@@ -929,29 +965,45 @@ fn prepare_policy(operator: Option<&OsStr>) -> Result<PolicyEnv, FrameworkError>
     dir.ensure_policy()?;
     Ok(PolicyEnv {
         home: dir.path.clone(),
-        configure_path: configure_path(&dir.config_dir(), operator),
+        configure_path: configure_path(
+            &dir.config_dir(),
+            operator,
+            account_config_dir().as_deref(),
+        ),
     })
 }
 
 /// The `MAGICK_CONFIGURE_PATH` a run starts with: `dir`, the directory that
 /// holds the framework's policy file, then the operator's own value
-/// unchanged, then `dir` again.
+/// unchanged, then `account`, the account's own ImageMagick directory
+/// ([`account_config_dir`]), then `dir` again.
 ///
 /// ImageMagick reads the `policy.xml` of every directory on the path, in
 /// order, and where two entries match it applies the one it read last. The
 /// file it reads last of all is the one under `HOME`, which is the same
 /// file; with `dir` last on the path as well, no entry on the operator's
-/// path outranks the framework's even before ImageMagick reaches it, while
-/// the operator's denials, and the other configuration files the operator
-/// keeps there, still apply. The operator's value is kept byte for byte
-/// rather than split and joined again, so a directory list ImageMagick
-/// accepted before reads the same after. With no operator value the one
-/// directory is both first and last.
-fn configure_path(dir: &Path, operator: Option<&OsStr>) -> OsString {
+/// path or in the account's directory outranks the framework's even before
+/// ImageMagick reaches it, while the denials there, and the other
+/// configuration files kept there, still apply. The account's directory
+/// comes after the operator's value, where ImageMagick would read it
+/// without the driver. The operator's value is kept byte for byte rather
+/// than split and joined again, so a directory list ImageMagick accepted
+/// before reads the same after. With neither value the one directory is
+/// both first and last.
+fn configure_path(dir: &Path, operator: Option<&OsStr>, account: Option<&Path>) -> OsString {
     let mut value = dir.as_os_str().to_owned();
+    let mut followed = false;
     if let Some(operator) = operator {
         value.push(CONFIGURE_PATH_SEPARATOR);
         value.push(operator);
+        followed = true;
+    }
+    if let Some(account) = account {
+        value.push(CONFIGURE_PATH_SEPARATOR);
+        value.push(account);
+        followed = true;
+    }
+    if followed {
         value.push(CONFIGURE_PATH_SEPARATOR);
         value.push(dir);
     }
