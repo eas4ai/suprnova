@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: framework-frames-under-a-live-action
+Current: search-and-starter-recommender
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -1152,6 +1152,66 @@ Requirements: HRD-007, HRD-008, HRD-009, HRD-010, HRD-011
    has a current pass on a committed tree and the review is recorded; the
    tag v4.0.0 then follows through `scripts/release.sh --resume` on a
    pushed main, whose gate repeats only the steps these changes touch.
+
+## search-and-starter-recommender
+
+Requirements: SEARCH-001, SEARCH-002, SEARCH-003, SEARCH-004, SEARCH-005, SEARCH-006, SEARCH-007, SEARCH-008, SEARCH-009, SEARCH-010, SEARCH-011, SEARCH-012, SEARCH-013, SEARCH-014, REC-001, REC-002, REC-003, REC-004, REC-008
+
+56. search-and-starter-recommender - Suprnova's own search, the feature the
+   developer chose for this version over WebMCP ("search first",
+   2026-10-14), designed with him on 2026-10-14 (`search.md`), reviewed
+   adversarially by gpt-6.1-sol the same morning and redrafted twice, the
+   second time on his ruling that each engine's native full-text ranking
+   does the ranking; and the starter recommender borrowed from his
+   nation-x_com application (`recommendations.md`, REC-001 to REC-004 and
+   REC-008), shipped now because "the idea is to build data" for the graph
+   recommender, which is the commitment after this one (REC-005 to
+   REC-007). In the order the work depends:
+   - the document, the derive and the two settings classes (SEARCH-001,
+     SEARCH-002), then the `SearchEngine` trait with the `collection`,
+     `null` and `database` engines on SQLite, MariaDB and Postgres and the
+     `qdrant` engine (SEARCH-003), the builder with its filter grammar,
+     facets, grouping, geo and federated search (SEARCH-004, SEARCH-009)
+   - indexing with versions, tombstones, after-commit on every transaction
+     form, generations and the commands (SEARCH-005)
+   - the `Embedder` trait with the `http` provider, qualified against the
+     developer's OpenRouter test target by an ignored hand-run test, and
+     the `fastembed` provider behind `search-fastembed` with the
+     EmbeddingGemma 2 default profile and its provenance record
+     (SEARCH-006); expansion, hybrid fusion and rerank (SEARCH-007),
+     highlights (SEARCH-008), scopes (SEARCH-010)
+   - the Live `search-box`, `Search::routes()` and the kits' notes search
+     (SEARCH-011); analytics, suggestions and the prune command
+     (SEARCH-012); the relevance and latency baseline (SEARCH-013); the
+     manual chapter and env-vars rows (SEARCH-014)
+   - the event stream, the starter engine with its bounds, run records and
+     projected explanations, the versioned data contract and the manual
+     chapter (REC-001 to REC-004, REC-008)
+   Delivery: the `search` and `recommendations` modules under
+   `framework/src/`, crate-root re-exports, the derive in
+   `suprnova-macros`, integration test binaries `search` and
+   `recommendations` under `framework/tests/`, engine-named ignored tests
+   (`_postgres`, `_mariadb`, `_qdrant`) the gate's engine passes select by
+   name, the BEIR fixture corpus with its judgments under
+   `framework/tests/search/fixtures/`, the `search:baseline` calibration
+   command run by hand against Meilisearch and Typesense in Docker on the
+   developer's dedicated server (Agent 1), whose nDCG@10 and versions it
+   commits as the per-engine floors with the tolerance and p95 budgets, the gate's
+   `suprnova-gate-qdrant` container (`qdrant/qdrant:v1.19.2`) created once
+   by `scripts/setup-gate-databases.sh` (whose Mongo block moves above its
+   exit) with a `scripts/check-qdrant.sh` engine pass, the migrations for
+   the analytics and recommendation tables, the kit template changes
+   mirrored in `scaffold_snapshot`, `manual/search.md`,
+   `manual/recommendations.md`, `manual/env-vars.md` rows, changelog entries
+   under the open version. Mechanisms: `search` (the `search` binary, then
+   its `_qdrant` tests against the gate container) and `recommendations`
+   (the `recommendations` binary), each bound to a violating example before
+   the start. The `search-fastembed` feature is off by default and the kits
+   search lexically until `SEARCH_EMBEDDER` is set, as presented and
+   confirmed on 2026-10-14. Done when every requirement has a current pass on
+   a committed tree, the engine passes are green on the host MariaDB and
+   Postgres and the Qdrant container, the hand-run http embedder test has
+   passed once against the OpenRouter target, and the review is recorded.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

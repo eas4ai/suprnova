@@ -113,6 +113,8 @@ rather than duplicates.
 | Runtime contention (one limit for hash work, one blocking task per streamed file, the in-memory rate limiter's sweep, the WebSocket task registry; issues #146 to #149) | RTC | runtime-contention.md | Agreed 2026-10-07 |
 | Hardening (the Daybreak audit's findings and their remaining remedies: body-read deadlines and a finite connection cap, the Magick coder boundary under a framework-owned policy, Web Push destination validation and an endpoint allowlist, reset revocation reporting, the authentication epoch and the durable revocation retry, descriptor-relative asset serving, full-origin WebSocket checks) | HRD | hardening.md | Agreed 2026-10-11 |
 | The manual checked against the code, and remediating what the check finds | MAN | manual-check.md | Agreed 2026-09-27 (delegated by the developer); tooling in `feature-map/`, commands in `feature-map/README.md` |
+| Search (searchable models, two settings classes, each engine's native full-text ranking behind one builder over the database and Qdrant engines, query expansion for typos and synonyms, the embedder and its default model with provenance, facets, highlights, scopes, the Live search box and JSON endpoint, analytics and suggestions, the per-engine relevance and latency baseline) | SEARCH | search.md | Agreed 2026-10-14 |
+| Recommendations (the immutable event stream, the starter SQL recommender, the versioned data contract it builds, its manual chapter; the knowledge-graph recommender that follows) | REC | recommendations.md | REC-001 to REC-004 and REC-008 Agreed 2026-10-14; REC-005 to REC-007 Draft until their own commitment |
 
 Domains with no spec file yet, and the manual chapters that are their
 published reference:

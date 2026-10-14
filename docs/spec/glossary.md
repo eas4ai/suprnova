@@ -116,3 +116,75 @@ reporting file, line, and column; `--allow-unproved` accepts dynamic
 structures it makes no claim about (`manual/live.md`, Views and
 Diagnostics; `suprnova-cli/src/commands/live_check.rs:145-147`). Avoid:
 linter.
+
+**Search document.** The one shape of a searchable model that
+every engine, the embedder and the recommenders read: the model's key,
+its index, each declared attribute's value and the embed text, produced by
+`to_search_document()` from `#[derive(Searchable)]` (SEARCH-001). Its key,
+index plus model key, is the target key of a recommendation event
+(REC-001). Avoid: record, row, hit (a hit is a document returned by a
+query with its score).
+
+**Search engine.** An implementation of the `SearchEngine` trait
+(SEARCH-003): `database` (the application's own database ranking with its
+native full-text index, the semantic leg in a vector store), `qdrant`,
+`collection` (in-memory BM25, for tests), `null` (accepts writes, answers
+empty). The builder semantics hold on every engine; the order of hits is
+the engine's. Avoid: driver (the vector drivers keep that word), backend.
+
+**Query expansion.** What the framework does to a query before the
+engine ranks it (SEARCH-007): synonyms, typo candidates from the index's
+vocabulary within the typo budget, the last word as a prefix, phrases and
+exclusions in the engine's syntax, stop words removed; bounded per word.
+Avoid: rewriting, correction (the engine still sees the original word).
+
+**Index generation.** One built copy of an index under one set of
+settings, one embedding model and one dimension count; `search:reindex`
+and any model or dimension change build a new generation beside the old
+and switch readers when it is complete (SEARCH-005). Avoid: version,
+alias.
+
+**Embedder.** An implementation of the `Embedder` trait
+(SEARCH-006) with a model profile: `fastembed` (local ONNX inference) or
+`http` (any OpenAI-compatible embeddings endpoint). The default model is
+EmbeddingGemma 2 at 768 dimensions; the user chooses any other. Avoid:
+provider name as a driver name (there is no "openai" embedder).
+
+**Relevance (search).** The engine's own score for a hit
+(MariaDB and MySQL `MATCH` relevance, Postgres `ts_rank_cd`, SQLite
+`bm25()`, Qdrant's fusion score), exposed with its normalization to [0, 1]
+within one result (SEARCH-004, SEARCH-007). Avoid: ranking rules (a
+Meilisearch concept the framework does not implement), ranking score.
+
+**Hybrid search.** A query whose lexical result (the engine's)
+and semantic result (cosine over the index's vectors) are fused by
+weighted reciprocal rank fusion, with a ratio from 0 (lexical only) to 1
+(semantic only) (SEARCH-004, SEARCH-007). Avoid: semantic ratio as a
+separate feature.
+
+**Scope (search).** The filter an index derives from the viewer
+and applies inside every query's candidate filter, so hits, facet counts
+and totals hold only what the viewer may see (SEARCH-010). Avoid:
+tenant filter, visibility (the attribute an application may use to build
+one).
+
+**Recommendation event.** One appended, immutable fact about an
+actor and a target (a search document key): type, weight in basis points,
+surface, time, access scope, source version, dedupe key unique per actor
+(REC-001). The starter engine's main input and the graph engine's
+provenance, referenced as the pair of id and content digest. Avoid:
+signal, interaction.
+
+**Starter recommender.** The SQL engine (REC-002): co-occurrence
+over the event stream and the targets' search documents (facet values,
+timestamps, scope), with the fallbacks attribute affinity, popularity,
+recent; bounded per actor; materialized per run with projected
+explanations and run records. Exists to build the data the graph engine
+needs. Avoid: small engine (the developer's shorthand, not the code's
+name), collaborative filter.
+
+**Graph recommender.** Draft. The knowledge-graph engine (REC-005 to
+REC-007): typed nodes and edges with scope, provenance and confidence,
+embeddings in the search collection, a blended score, a fallback to the
+starter engine under a confidence threshold. Avoid: large engine, RAG
+recommender (retrieval is one of its inputs).
