@@ -1159,6 +1159,17 @@ which sign the user in again. The framework logs the user id at `info`
 level. It dispatches no `Logout` event, because the user didn't sign out,
 and it leaves the other guards of the session signed in.
 
+The session that changes its own user's password keeps its sign-in. When a
+request writes the signed-in user through the model (`save`, `update`, and
+their transactional forms), the sign-in records the epoch of the values the
+request wrote, so the password form's own session continues while every
+other session and remember-me cookie of the user ends. `EloquentUserProvider`
+recognizes the written model as its user; a provider of your own implements
+`UserProvider::written_user` the same way, with a downcast to its model
+type. A write that bypasses the model, such as a query-builder `update` or
+raw SQL, isn't seen, and that session ends on its next request as any other
+does.
+
 A user whose model returns `None` from both `auth_epoch` and
 `get_auth_password`, such as an OAuth-only account, records no epoch and
 isn't checked. A session signed in before 4.0.0 carries no epoch either; it
@@ -1217,7 +1228,10 @@ on a mismatch. Suprnova compares on every request that resolves a user, for
 every session guard and for remember-me cookies, so a stolen credential
 stops working after a password change whatever middleware the route runs. A
 mismatch ends only that guard's sign-in, so another guard signed in on the
-same session keeps its sign-in.
+same session keeps its sign-in. Laravel keeps the session that changed the
+password by storing its user object's hash again after the handler ran;
+Suprnova rebinds that session at the model write, from the values the
+request wrote.
 
 ## Security guarantees
 

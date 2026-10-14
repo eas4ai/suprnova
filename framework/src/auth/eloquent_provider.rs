@@ -16,6 +16,7 @@
 //! configured credential-column allowlist, never on arbitrary keys in
 //! the credential map.
 
+use std::any::Any;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -265,6 +266,15 @@ where
             return Err(error);
         }
         Ok(())
+    }
+
+    fn written_user<'a>(
+        &self,
+        model: &'a (dyn Any + Send + Sync),
+    ) -> Option<&'a dyn Authenticatable> {
+        model
+            .downcast_ref::<M>()
+            .map(|user| user as &dyn Authenticatable)
     }
 
     async fn retrieve_by_email(&self, email: &str) -> Result<Option<AuthFlowUser>, FrameworkError> {

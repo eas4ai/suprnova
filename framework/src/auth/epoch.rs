@@ -29,6 +29,25 @@
 //!   first email proof, which leave the password hash unchanged; a counter
 //!   that the application advances itself is the stronger signal.
 //!
+//! # The request that changes the password
+//!
+//! The session that changes its own user's password recorded the old
+//! epoch, so the comparison on its next request would end it with every
+//! other session of the user. Laravel's `AuthenticateSession` stores the
+//! hash of the request's own user object again after the handler ran, so
+//! the session that made the change keeps it. Suprnova rebinds at the
+//! write: when a request writes the signed-in user through a model
+//! (`save`, `update` and their transactional forms), the guard's provider
+//! recognizes the written model as one of its users
+//! ([`UserProvider::written_user`]) and the sign-in records the epoch of
+//! the values the request wrote ([`observe_user_write`]). Every other
+//! session of the user still ends on its next request. The epoch comes
+//! from the written values and never from the row read back after the
+//! write, so a password change another request commits meanwhile is not
+//! adopted by this one. A write that bypasses the model, a query-builder
+//! update or raw SQL, is not seen, as Laravel does not see a write that
+//! bypasses its user object.
+//!
 //! # Magnetar
 //!
 //! When the Magnetar engine's host sign-in authority is installed, the
@@ -40,6 +59,7 @@
 //! truth: a second comparison against another value (the digest) could only
 //! disagree with Magnetar's and sign a valid session out.
 
+use std::any::Any;
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
@@ -215,10 +235,58 @@ pub(crate) fn check_session_sign_in(
     }
 }
 
+/// Whether a model write in this request can rebind a sign-in: the session
+/// holds a guard sign-in with a recorded epoch. `Model::update` assembles
+/// the model it writes only when this holds, so a request with no sign-in
+/// pays nothing for the rebind.
+pub(crate) fn sign_in_watches_writes() -> bool {
+    !crate::session::middleware::guards_with_recorded_sign_in_epoch().is_empty()
+}
+
+/// Rebind the sign-ins a model write of this request belongs to (HRD-007,
+/// the request that changes the password; see the module documentation).
+///
+/// `written` is the model as the request wrote it: the values in memory,
+/// not the row read back. For each guard of the session whose sign-in
+/// recorded an epoch, the guard's provider is asked whether `written` is
+/// one of its users ([`UserProvider::written_user`]); when it is, and its
+/// identifier is the one the guard holds, the sign-in records the epoch of
+/// the written values, or none when the user no longer exposes one. A
+/// guard Magnetar fences records nothing here, as elsewhere. A write of
+/// another user, or of another model, changes nothing.
+pub(crate) fn observe_user_write(written: &(dyn Any + Send + Sync)) {
+    for (guard_name, user_id, recorded) in
+        crate::session::middleware::guards_with_recorded_sign_in_epoch()
+    {
+        if magnetar_fences(&guard_name) {
+            continue;
+        }
+        let Some(provider) = guard_provider(&guard_name) else {
+            continue;
+        };
+        let Some(user) = provider.written_user(written) else {
+            continue;
+        };
+        if user.get_auth_identifier() != user_id {
+            continue;
+        }
+        let epoch = credential_epoch(user);
+        if epoch == Some(recorded) {
+            continue;
+        }
+        crate::session::middleware::record_guard_sign_in_epoch(&guard_name, &user_id, epoch);
+        tracing::debug!(
+            target: "suprnova::auth",
+            guard = %guard_name,
+            user_id = %user_id,
+            "the signed-in user's epoch moved in this request; the sign-in is bound to the new one"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::any::Any;
 
     struct Model {
         password: Option<&'static str>,

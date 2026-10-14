@@ -3151,6 +3151,38 @@ pub(crate) fn persisted_guard_sign_in_epoch(
         .flatten()
 }
 
+/// The guards of the session whose sign-in recorded an epoch, each with
+/// the user id it holds and that epoch: the sign-ins a model write of the
+/// signed-in user rebinds (`crate::auth::epoch::observe_user_write`).
+/// Empty outside a session scope.
+///
+/// Reads the session slot directly, as [`persisted_guard_sign_in_epoch`]
+/// does and for the same reason: its only outcome is which sign-ins a
+/// write rebinds, and the rebind itself goes through
+/// [`record_guard_sign_in_epoch`], which marks the principal read.
+pub(crate) fn guards_with_recorded_sign_in_epoch() -> Vec<(String, String, u64)> {
+    SESSION_CONTEXT
+        .try_with(|slot| {
+            let slot = crate::lock::recover(slot);
+            let Some(session) = slot.as_ref() else {
+                return Vec::new();
+            };
+            session
+                .auth_guard_names()
+                .into_iter()
+                .filter_map(|guard| {
+                    let GuardSignInEpoch::Recorded(epoch) = session.auth_guard_epoch(&guard)?
+                    else {
+                        return None;
+                    };
+                    let user_id = session.auth_guard_id(&guard)?;
+                    Some((guard, user_id, epoch))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Record `epoch` as the authentication epoch of the guard `guard_name`'s
 /// sign-in as `user_id`, replacing the [`GuardSignInEpoch::Unread`] mark of
 /// [`set_guard_auth_user`]. `None`, a user that exposes no epoch, removes
