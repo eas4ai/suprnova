@@ -333,3 +333,197 @@ fn overflowing_numeric_tokens_do_not_receive_corrections() {
         assert_eq!(expanded.terms[0].alternatives, [token.to_lowercase()]);
     }
 }
+
+// Keep the old scan independent of the candidate index as an equivalence oracle.
+fn scan(vocabulary: &Vocabulary, word: &str, budget: usize) -> Vec<(String, u64)> {
+    let length = word.chars().take(65).count();
+    let mut matches: Vec<_> = vocabulary
+        .words
+        .iter()
+        .filter(|(candidate, df)| {
+            if **df == 0 {
+                return false;
+            }
+            if word == candidate.as_str() {
+                return true;
+            }
+            if length > 64 || budget == 0 {
+                return false;
+            }
+            let candidate_length = candidate
+                .chars()
+                .take(length.saturating_add(budget).saturating_add(1))
+                .count();
+            length.abs_diff(candidate_length) <= budget
+                && strsim::damerau_levenshtein(word, candidate) <= budget
+        })
+        .map(|(word, df)| (word.clone(), *df))
+        .collect();
+    matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    matches
+}
+
+#[test]
+fn indexed_candidates_equal_scan_for_random_unicode_vocabularies() {
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
+    let mut rng = StdRng::seed_from_u64(0x5c1fac7);
+    let alphabet = ['a', 'b', 'c', 'd', 'é', '界'];
+    for _ in 0..16 {
+        let mut vocabulary = Vocabulary::default();
+        for _ in 0..128 {
+            let word = (0..rng.random_range(0..14))
+                .map(|_| alphabet[rng.random_range(0..alphabet.len())])
+                .collect::<String>();
+            vocabulary.words.insert(word, rng.random_range(0..8));
+        }
+        let mut queries = vocabulary.words.keys().cloned().collect::<Vec<_>>();
+        for source in vocabulary.words.keys() {
+            let mut chars: Vec<_> = source.chars().collect();
+            if chars.len() >= 2 {
+                let at = rng.random_range(0..chars.len() - 1);
+                chars.swap(at, at + 1);
+            }
+            // A transposition plus an insertion exercises unrestricted Damerau distance.
+            chars.insert(
+                rng.random_range(0..=chars.len()),
+                alphabet[rng.random_range(0..alphabet.len())],
+            );
+            queries.push(chars.into_iter().collect());
+        }
+        for _ in 0..64 {
+            queries.push(
+                (0..rng.random_range(0..14))
+                    .map(|_| alphabet[rng.random_range(0..alphabet.len())])
+                    .collect(),
+            );
+        }
+        for query in queries {
+            for budget in 0..=2 {
+                assert_eq!(
+                    vocabulary.within(&query, budget),
+                    scan(&vocabulary, &query, budget),
+                    "query {query:?}, budget {budget}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn vocabulary_cache_survives_clone_serde_and_map_mutations() {
+    let mut original = vocabulary();
+    original.within("hosue", 2);
+    let clone = original.clone();
+    original.words.remove("house");
+    original.words.insert("hogue".into(), 40);
+    original.words.insert("horse".into(), 0);
+    for snapshot in [&original, &clone] {
+        assert_eq!(snapshot.within("hosue", 2), scan(snapshot, "hosue", 2));
+        let serialized = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(serialized, serde_json::json!({"words": &snapshot.words}));
+        let decoded: Vocabulary = serde_json::from_value(serialized).unwrap();
+        assert_eq!(&decoded, snapshot);
+        assert_eq!(decoded.within("hosue", 2), scan(snapshot, "hosue", 2));
+    }
+}
+
+#[test]
+fn indexed_candidates_preserve_repeated_scalars_and_correction_boundaries() {
+    let vocabulary = Vocabulary {
+        words: [
+            ("ca".into(), 1),
+            ("abc".into(), 2),
+            ("aabbaa".into(), 3),
+            ("界".repeat(63), 4),
+            ("界".repeat(64), 5),
+            ("界".repeat(65), 6),
+            ("界".repeat(66), 7),
+            ("界".repeat(67), 8),
+            (String::new(), 9),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    for query in [
+        "ca".to_owned(),
+        "abc".into(),
+        "ababaa".into(),
+        "界".repeat(64),
+        "界".repeat(65),
+        String::new(),
+    ] {
+        for budget in 0..=3 {
+            assert_eq!(
+                vocabulary.within(&query, budget),
+                scan(&vocabulary, &query, budget)
+            );
+        }
+    }
+}
+
+#[cfg(all(feature = "testing", target_os = "linux"))]
+fn resident_kib() -> Result<usize, suprnova::FrameworkError> {
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|error| suprnova::FrameworkError::internal(error.to_string()))?;
+    status
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("VmRSS:")
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse().ok())
+        })
+        .ok_or_else(|| suprnova::FrameworkError::internal("missing VmRSS"))
+}
+
+#[test]
+#[cfg(feature = "testing")]
+#[ignore = "manual SciFact cold index and warm expansion measurement"]
+fn scifact_expansion_measurement() -> Result<(), suprnova::FrameworkError> {
+    use std::{collections::BTreeMap, path::PathBuf, time::Instant};
+    use suprnova::search::baseline::Fixture;
+    let fixture =
+        Fixture::load(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/search/fixtures"))?;
+    let mut words = BTreeMap::new();
+    for document in &fixture.corpus {
+        let unique = tokenize(&format!("{} {}", document.title, document.text))
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        for word in unique {
+            *words.entry(word).or_insert(0) += 1;
+        }
+    }
+    let vocabulary = Vocabulary {
+        words: words.into(),
+    };
+    #[cfg(target_os = "linux")]
+    let before_kib = resident_kib()?;
+    let started = Instant::now();
+    vocabulary.within("framework", 2);
+    let cold = started.elapsed();
+    #[cfg(target_os = "linux")]
+    eprintln!(
+        "SciFact index RSS growth: {} KiB",
+        resident_kib()?.saturating_sub(before_kib)
+    );
+    let started = Instant::now();
+    for query in &fixture.queries {
+        expand(
+            &QueryText::parse(&query.text),
+            &QuerySettings::default(),
+            &vocabulary,
+            64,
+        )?;
+    }
+    let warm = started.elapsed();
+    eprintln!(
+        "SciFact: {} words, cold index {:?}, 300 warm expansions {:?}",
+        vocabulary.words.len(),
+        cold,
+        warm
+    );
+    assert!(
+        warm.as_secs_f64() < 10.0,
+        "300 expansions exceeded ten seconds: {warm:?}"
+    );
+    Ok(())
+}

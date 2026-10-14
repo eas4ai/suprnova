@@ -9,7 +9,7 @@ use crate::search::{
 use std::{
     cmp::Ordering,
     collections::{BTreeSet, HashMap},
-    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard},
     time::{Duration, Instant},
 };
 #[derive(Default)]
@@ -25,6 +25,7 @@ struct Generation {
     state: &'static str,
     settings: IndexSettings,
     documents: BTreeMap<String, IndexedDocument>,
+    tokenized: OnceLock<BTreeMap<String, Vec<Field>>>,
     tombstones: BTreeMap<String, (i64, Instant)>,
     flush: Option<(i64, Instant)>,
 }
@@ -149,7 +150,27 @@ pub(super) fn validate_settings(
     }
     Ok(())
 }
-fn fields(document: &SearchDocument, settings: &IndexSettings) -> Vec<(String, Vec<String>, f64)> {
+struct Field {
+    name: String,
+    words: Vec<String>,
+    weight: f64,
+    frequencies: HashMap<String, usize>,
+}
+
+impl Field {
+    fn count(&self, word: &str, prefix: bool) -> usize {
+        if prefix {
+            self.words
+                .iter()
+                .filter(|candidate| candidate.starts_with(word))
+                .count()
+        } else {
+            self.frequencies.get(word).copied().unwrap_or(0)
+        }
+    }
+}
+
+fn fields(document: &SearchDocument, settings: &IndexSettings) -> Vec<Field> {
     settings
         .index_time
         .searchable_attributes
@@ -157,37 +178,65 @@ fn fields(document: &SearchDocument, settings: &IndexSettings) -> Vec<(String, V
         .filter_map(|a| {
             document.attributes.get(&a.name).map(|v| {
                 let text = v.searchable_text().unwrap_or_default();
-                (a.name.clone(), tokenize(&text), f64::from(a.weight))
+                let words = tokenize(&text);
+                let mut frequencies = HashMap::new();
+                for word in &words {
+                    *frequencies.entry(word.clone()).or_insert(0) += 1;
+                }
+                Field {
+                    name: a.name.clone(),
+                    words,
+                    weight: f64::from(a.weight),
+                    frequencies,
+                }
             })
         })
         .collect()
 }
+// The generation's write lock invalidates this cache before changing content or
+// settings. Matching and BM25 can borrow one immutable tokenization per document.
+fn field_cache(generation: &Generation) -> &BTreeMap<String, Vec<Field>> {
+    generation.tokenized.get_or_init(|| {
+        generation
+            .documents
+            .iter()
+            .map(|(key, document)| {
+                (
+                    key.clone(),
+                    fields(&document.document, &generation.settings),
+                )
+            })
+            .collect()
+    })
+}
 fn phrase_matches(words: &[String], phrase: &[String]) -> bool {
     !phrase.is_empty() && words.windows(phrase.len()).any(|w| w == phrase)
 }
-fn alternative_matches(words: &[String], alternative: &str, prefix: bool) -> usize {
+fn alternative_matches(field: &Field, alternative: &str, prefix: bool) -> usize {
+    // Normalized single ASCII words need no allocation or transliteration.
+    if !alternative.is_empty()
+        && alternative
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() && !byte.is_ascii_uppercase())
+    {
+        return field.count(alternative, prefix);
+    }
     let parts = tokenize(alternative);
     if parts.len() > 1 {
-        return words.windows(parts.len()).filter(|w| *w == parts).count();
+        return field
+            .words
+            .windows(parts.len())
+            .filter(|w| *w == parts)
+            .count();
     }
     if let Some(part) = parts.first() {
-        words
-            .iter()
-            .filter(|w| {
-                if prefix {
-                    w.starts_with(part)
-                } else {
-                    *w == part
-                }
-            })
-            .count()
+        field.count(part, prefix)
     } else {
         0
     }
 }
 fn term_count(
-    name: &str,
-    words: &[String],
+    field: &Field,
     term: &crate::search::expansion::ExpandedTerm,
     settings: &IndexSettings,
     query_disabled: &BTreeSet<String>,
@@ -196,29 +245,27 @@ fn term_count(
         .query
         .typo_tolerance
         .disable_on_attributes
-        .contains(name)
-        || query_disabled.contains(name);
+        .contains(&field.name)
+        || query_disabled.contains(&field.name);
     term.alternatives
         .iter()
         .chain(std::iter::once(&term.original))
         .filter(|a| !disabled || !term.typo_alternatives.contains(a))
-        .map(|a| alternative_matches(words, a, term.prefix && a == &term.original))
+        .map(|a| alternative_matches(field, a, term.prefix && a == &term.original))
         .max()
         .unwrap_or(0)
 }
-fn lexical_matches(document: &SearchDocument, settings: &IndexSettings, q: &ExpandedQuery) -> bool {
-    let fs = fields(document, settings);
+fn lexical_matches(fs: &[Field], settings: &IndexSettings, q: &ExpandedQuery) -> bool {
     q.terms.iter().all(|term| {
-        fs.iter().any(|(name, ws, _)| {
-            term_count(name, ws, term, settings, &q.typo_disabled_attributes) > 0
-        })
+        fs.iter()
+            .any(|field| term_count(field, term, settings, &q.typo_disabled_attributes) > 0)
     }) && q
         .phrases
         .iter()
-        .all(|phrase| fs.iter().any(|(_, ws, _)| phrase_matches(ws, phrase)))
+        .all(|phrase| fs.iter().any(|field| phrase_matches(&field.words, phrase)))
         && !q.negatives.iter().any(|negative| {
             fs.iter()
-                .any(|(_, ws, _)| alternative_matches(ws, negative, false) > 0)
+                .any(|field| alternative_matches(field, negative, false) > 0)
         })
 }
 pub(super) fn validate_query(
@@ -254,11 +301,12 @@ pub(super) fn validate_query(
     Ok(())
 }
 fn matching<'a>(g: &'a Generation, q: &EngineQuery) -> Vec<&'a IndexedDocument> {
+    let tokenized = field_cache(g);
     g.documents
         .values()
         .filter(|d| {
             q.filter.as_ref().is_none_or(|f| f.matches(&d.document))
-                && lexical_matches(&d.document, &g.settings, &q.expanded)
+                && lexical_matches(&tokenized[&d.document.key], &g.settings, &q.expanded)
         })
         .collect()
 }
@@ -268,15 +316,11 @@ struct Bm25Stats {
     frequencies: Vec<f64>,
 }
 fn bm25_stats(g: &Generation, q: &ExpandedQuery) -> Bm25Stats {
-    let documents = g
-        .documents
-        .values()
-        .map(|d| fields(&d.document, &g.settings))
-        .collect::<Vec<_>>();
+    let documents = field_cache(g);
     let n = documents.len() as f64;
     let average = documents
-        .iter()
-        .map(|fs| fs.iter().map(|(_, ws, _)| ws.len()).sum::<usize>())
+        .values()
+        .map(|fs| fs.iter().map(|field| field.words.len()).sum::<usize>())
         .sum::<usize>() as f64
         / n.max(1.0);
     let frequencies = q
@@ -284,10 +328,10 @@ fn bm25_stats(g: &Generation, q: &ExpandedQuery) -> Bm25Stats {
         .iter()
         .map(|term| {
             documents
-                .iter()
+                .values()
                 .filter(|fs| {
-                    fs.iter().any(|(name, ws, _)| {
-                        term_count(name, ws, term, &g.settings, &q.typo_disabled_attributes) > 0
+                    fs.iter().any(|field| {
+                        term_count(field, term, &g.settings, &q.typo_disabled_attributes) > 0
                     })
                 })
                 .count() as f64
@@ -300,15 +344,16 @@ fn bm25_stats(g: &Generation, q: &ExpandedQuery) -> Bm25Stats {
     }
 }
 fn bm25(document: &SearchDocument, g: &Generation, q: &ExpandedQuery, stats: &Bm25Stats) -> f64 {
-    let fs = fields(document, &g.settings);
-    let length = fs.iter().map(|(_, ws, _)| ws.len()).sum::<usize>() as f64;
+    let fs = &field_cache(g)[&document.key];
+    let length = fs.iter().map(|field| field.words.len()).sum::<usize>() as f64;
     let denominator = 1.2 * (0.25 + 0.75 * length / stats.average_length.max(1.0));
     let mut score = 0.0;
     for (term, df) in q.terms.iter().zip(&stats.frequencies) {
         let tf = fs
             .iter()
-            .map(|(name, ws, weight)| {
-                term_count(name, ws, term, &g.settings, &q.typo_disabled_attributes) as f64 * weight
+            .map(|field| {
+                term_count(field, term, &g.settings, &q.typo_disabled_attributes) as f64
+                    * field.weight
             })
             .sum::<f64>();
         let idf = (1.0 + (stats.document_count - df + 0.5) / (df + 0.5)).ln();
@@ -317,8 +362,8 @@ fn bm25(document: &SearchDocument, g: &Generation, q: &ExpandedQuery, stats: &Bm
     for phrase in &q.phrases {
         score += fs
             .iter()
-            .filter(|(_, ws, _)| phrase_matches(ws, phrase))
-            .map(|(_, _, weight)| weight)
+            .filter(|field| phrase_matches(&field.words, phrase))
+            .map(|field| field.weight)
             .sum::<f64>();
     }
     score
@@ -502,6 +547,7 @@ fn apply_write(
         }
     }
     generation.tombstones.remove(key);
+    generation.tokenized.take();
     generation.documents.insert(key.clone(), document.clone());
     outcome.written += 1;
 }
@@ -659,6 +705,7 @@ impl SearchEngine for CollectionEngine {
                 state: "building",
                 settings: settings.clone(),
                 documents: BTreeMap::new(),
+                tokenized: OnceLock::new(),
                 tombstones: BTreeMap::new(),
                 flush: None,
             },
@@ -729,6 +776,7 @@ impl SearchEngine for CollectionEngine {
                 index.name
             )));
         }
+        g.tokenized.take();
         g.settings = settings.clone();
         Ok(())
     }
@@ -788,6 +836,7 @@ impl SearchEngine for CollectionEngine {
                 continue;
             }
             g.documents.remove(key);
+            g.tokenized.take();
             g.tombstones.insert(key.clone(), (*version, now));
             result.written += 1;
         }
@@ -972,16 +1021,18 @@ impl SearchEngine for CollectionEngine {
         let state = self.read()?;
         let g = generation(&state, index, id)?;
         let mut words = BTreeMap::new();
-        for doc in g.documents.values() {
-            let unique = fields(&doc.document, &g.settings)
-                .into_iter()
-                .flat_map(|(_, ws, _)| ws)
+        for fs in field_cache(g).values() {
+            let unique = fs
+                .iter()
+                .flat_map(|field| field.words.iter())
                 .collect::<BTreeSet<_>>();
             for word in unique {
-                *words.entry(word).or_insert(0) += 1;
+                *words.entry(word.clone()).or_insert(0) += 1;
             }
         }
-        Ok(Arc::new(Vocabulary { words }))
+        Ok(Arc::new(Vocabulary {
+            words: words.into(),
+        }))
     }
     async fn count(
         &self,
