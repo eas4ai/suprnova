@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.number-input",
+  "version": 1,
+  "root": "suprnova-ui/number-input",
+  "files": [
+    "number-input.html",
+    "number-input.css"
+  ],
+  "elements": []
+}
