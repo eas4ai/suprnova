@@ -62,6 +62,49 @@ pub fn highlight(
     Ok(render_spans(text, &spans, start, end, settings))
 }
 
+/// Native match offsets retain database stemming while sharing safe character cropping.
+pub(crate) fn format_native(
+    marked: &str,
+    settings: &QuerySettings,
+    crop: Option<usize>,
+) -> Result<String, FrameworkError> {
+    validate_tags(&settings.highlight_pre_tag, &settings.highlight_post_tag)?;
+    if crop == Some(0) {
+        return Err(FrameworkError::param("crop length must be positive"));
+    }
+    let mut text = String::with_capacity(marked.len());
+    let mut spans = Vec::new();
+    let mut opened = None;
+    for character in marked.chars() {
+        match character {
+            '\u{001e}' => {
+                if opened.is_some() {
+                    return Err(FrameworkError::param(
+                        "native highlight markers must not nest",
+                    ));
+                }
+                opened = Some(text.len());
+            }
+            '\u{001f}' => {
+                let start = opened.take().ok_or_else(|| {
+                    FrameworkError::param("native highlight closing marker has no opening marker")
+                })?;
+                if start < text.len() {
+                    spans.push((start, text.len()));
+                }
+            }
+            character => text.push(character),
+        }
+    }
+    if opened.is_some() {
+        return Err(FrameworkError::param(
+            "native highlight opening marker has no closing marker",
+        ));
+    }
+    let (start, end) = crop_bounds(&text, &spans, crop);
+    Ok(render_spans(&text, &spans, start, end, settings))
+}
+
 fn matched_spans(text: &str, query: &ExpandedQuery) -> Vec<(usize, usize)> {
     let words: Vec<_> = text
         .unicode_word_indices()
@@ -181,5 +224,69 @@ fn match_phrase(
             .eq(phrase.iter())
     {
         matches.push((words[at].0, words[at + phrase.len() - 1].1));
+    }
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+
+    #[test]
+    fn native_highlights_escape_source_before_adding_validated_tags() {
+        let settings = QuerySettings::default();
+        let formatted = format_native(
+            "<script>alert(1)</script> \u{001e}Rust\u{001f} & \"quoted\"",
+            &settings,
+            None,
+        )
+        .expect("balanced native markers");
+        assert_eq!(
+            formatted,
+            "&lt;script&gt;alert(1)&lt;/script&gt; <em>Rust</em> &amp; &quot;quoted&quot;"
+        );
+        assert!(!formatted.contains('\u{001e}'));
+        assert!(!formatted.contains('\u{001f}'));
+    }
+
+    #[test]
+    fn native_crops_use_unicode_characters_around_the_native_match() {
+        let settings = QuerySettings {
+            crop_marker: "~".into(),
+            ..QuerySettings::default()
+        };
+        let formatted = format_native(
+            "甲乙丙丁戊己庚辛壬癸 \u{001e}東京\u{001f} 都の街 末尾",
+            &settings,
+            Some(6),
+        )
+        .expect("Unicode crop");
+        assert!(formatted.contains("<em>東京</em>"));
+        assert!(formatted.starts_with('~'));
+        assert!(formatted.ends_with('~'));
+        let visible = formatted.replace("<em>", "").replace("</em>", "");
+        assert_eq!(visible.trim_matches('~').chars().count(), 6);
+    }
+
+    #[test]
+    fn native_snippet_omission_markers_remain_visible() {
+        let settings = QuerySettings::default();
+        assert_eq!(
+            format_native("...near \u{001e}match\u{001f}...", &settings, None)
+                .expect("native snippet"),
+            "...near <em>match</em>..."
+        );
+    }
+
+    #[test]
+    fn native_highlights_reject_unbalanced_or_nested_markers() {
+        let settings = QuerySettings::default();
+        for malformed in [
+            "\u{001e}open",
+            "close\u{001f}",
+            "\u{001e}outer\u{001e}inner\u{001f}\u{001f}",
+        ] {
+            assert!(format_native(malformed, &settings, None).is_err());
+        }
+        assert!(format_native("text", &settings, Some(0)).is_err());
     }
 }

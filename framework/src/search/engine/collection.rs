@@ -101,7 +101,7 @@ fn generation_mut<'a>(
             ))
         })
 }
-fn validate_settings(
+pub(super) fn validate_settings(
     index: &IndexDescriptor,
     settings: &IndexSettings,
 ) -> Result<(), FrameworkError> {
@@ -219,7 +219,10 @@ fn lexical_matches(document: &SearchDocument, settings: &IndexSettings, q: &Expa
                 .any(|(_, ws, _)| alternative_matches(ws, negative, false) > 0)
         })
 }
-fn validate_query(index: &IndexDescriptor, q: &EngineQuery) -> Result<(), FrameworkError> {
+pub(super) fn validate_query(
+    index: &IndexDescriptor,
+    q: &EngineQuery,
+) -> Result<(), FrameworkError> {
     if let Some(f) = &q.filter {
         f.validate(index)?;
     }
@@ -365,7 +368,11 @@ fn sort_compare(a: &EngineCandidate, b: &EngineCandidate, sorts: &[Sort]) -> Ord
         .total_cmp(&a.score)
         .then_with(|| a.document.key.cmp(&b.document.key))
 }
-fn facet_decl(index: &IndexDescriptor, attr: &str, stats: bool) -> Result<(), FrameworkError> {
+pub(super) fn facet_decl(
+    index: &IndexDescriptor,
+    attr: &str,
+    stats: bool,
+) -> Result<(), FrameworkError> {
     let decl = index.attribute(attr)?;
     if !decl.facet
         || (stats

@@ -35,6 +35,7 @@ async fn catalog(viewer: &Viewer, exclude_guest: bool) -> Result<Catalog, Framew
             sort: Vec::new(),
             depth: 1,
             highlights: false,
+            crop: BTreeMap::new(),
         };
         let count = engine.count(descriptor, &generation, &query).await?.value();
         query.depth = usize::try_from(count)
