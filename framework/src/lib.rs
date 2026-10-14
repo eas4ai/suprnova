@@ -102,6 +102,8 @@ pub mod profiling;
 pub mod queue;
 pub mod rate_limit;
 pub mod rbac;
+/// Immutable recommendation events and versioned starter recommendations.
+pub mod recommendations;
 pub(crate) mod redis_client;
 mod redis_facade;
 pub(crate) mod redis_retry;
@@ -618,6 +620,12 @@ pub use media::{
     DEFAULT_IMAGE_MAX_DIMENSION, DEFAULT_IMAGE_QUALITY, Image, ImageConfig, ImageDriver,
     ImageDriverKind, ImagePipeline, ImagePixels, MagickCliDriver, OutputFormat, OxideAvImageDriver,
     Transformation, TransformationSettings, register_transformation, register_transformation_with,
+};
+pub use recommendations::{
+    Actor, EventClass, EventProvenance, EventScoring, EventType, GenerateRun, GenerationOutcome,
+    ProvenanceState, Recommend, RecommendConfig, Recommendation, RecommendationBuilder,
+    RecommendationEvent, RecommendationExplanation, RecommendationRun, RecommendationTarget,
+    Recommender, StarterRecommender, event_digest,
 };
 #[cfg(feature = "testing")]
 pub use search::testing::conformance;

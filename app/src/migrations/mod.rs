@@ -21,7 +21,7 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![
+        let mut migrations: Vec<Box<dyn MigrationTrait>> = vec![
             Box::new(m20251208_160100_create_users_table::Migration),
             Box::new(m20251208_200000_create_todos_table::Migration),
             Box::new(m20251208_220000_create_sessions_table::Migration),
@@ -119,6 +119,8 @@ impl MigratorTrait for Migrator {
             Box::new(suprnova::queue::migrations::CreateJobsTable),
             Box::new(suprnova::queue::migrations::CreateFailedJobsTable),
             Box::new(suprnova::features::migrations::FeaturesToPennantLayout),
-        ]
+        ];
+        migrations.extend(suprnova::recommendations::migrations());
+        migrations
     }
 }
