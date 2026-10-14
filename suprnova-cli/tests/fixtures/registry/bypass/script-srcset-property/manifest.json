@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-srcset-property",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-std-env",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}
