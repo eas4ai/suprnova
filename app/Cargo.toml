@@ -18,12 +18,13 @@ name = "console"
 path = "src/bin/console.rs"
 
 [dependencies]
-# Production build shape: default features off, the nine non-`testing`
+# Production build shape: default features off, the eleven non-`testing`
 # defaults listed explicitly, so the binaries below never carry a test
 # seam. See manual/deployment.md, "Production build shape".
 suprnova = { path = "../framework", default-features = false, features = [
     "filesystem", "database-sqlite", "database-postgres", "database-mysql",
-    "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media",
+    "vector-mariadb", "vector-pgvector", "web-push", "localization", "magnetar-oauth",
+    "media",
     "queue-sqs",
 ] }
 tokio = { version = "1", features = ["full"] }

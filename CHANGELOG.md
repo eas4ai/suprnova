@@ -6,6 +6,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## 4.0.4 - 2026-10-13
 
+### Added
+
+- **pgvector driver.** `PgVectorDriver` joins the vector drivers behind the
+  `vector-pgvector` default feature: a Postgres application stores and
+  searches embeddings in its own database.
+
 ### Fixed
 
 - **A field shows its own validation message.** The Live response named each

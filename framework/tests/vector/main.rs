@@ -3,5 +3,6 @@
 
 pub mod mariadb;
 pub mod memory;
+pub mod pgvector;
 pub mod pinecone;
 pub mod qdrant;

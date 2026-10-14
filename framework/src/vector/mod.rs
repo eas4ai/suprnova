@@ -3,8 +3,9 @@
 //! Suprnova diverges from Laravel's pgvector-only story by treating
 //! every vector backend as a first-class driver behind a single
 //! [`VectorDriver`] trait. v1 ships Memory (in-process), Qdrant,
-//! Pinecone, and MariaDB (11.7+ native `VECTOR(N)` + HNSW) drivers;
-//! Weaviate / Milvus / LanceDB / pgvector / LibSQL queue up behind
+//! Pinecone, MariaDB (11.7+ native `VECTOR(N)` + HNSW), and Postgres
+//! (pgvector extension + HNSW) drivers;
+//! Weaviate / Milvus / LanceDB / LibSQL queue up behind
 //! real consumer demand.
 //!
 //! ```rust,no_run
@@ -37,6 +38,8 @@ mod handle_cache;
 #[cfg(feature = "vector-mariadb")]
 pub mod mariadb;
 pub mod memory;
+#[cfg(feature = "vector-pgvector")]
+pub mod pgvector;
 #[cfg(feature = "vector-pinecone")]
 pub mod pinecone;
 pub mod qdrant;
@@ -46,6 +49,8 @@ pub use driver::{VectorDriver, VectorItem, VectorMatch};
 #[cfg(feature = "vector-mariadb")]
 pub use mariadb::{MariaDbDistance, MariaDbVectorDriver};
 pub use memory::MemoryVectorDriver;
+#[cfg(feature = "vector-pgvector")]
+pub use pgvector::{PgVectorDistance, PgVectorDriver};
 #[cfg(feature = "vector-pinecone")]
 pub use pinecone::{
     DEFAULT_API_VERSION, DEFAULT_CONTROL_PLANE, PineconeMatch, PineconeVector, PineconeVectorDriver,

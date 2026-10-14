@@ -415,7 +415,7 @@ register the same configuration under a name of your own, use
 
 ## Vector search
 
-The three vector drivers read their connection from the environment when you
+The four external vector drivers read their connection from the environment when you
 call their `from_env()` constructor. Nothing reads these variables at boot. You
 choose the driver in Rust and register it in `bootstrap()`. See [Vector](vector.md).
 
@@ -424,7 +424,8 @@ choose the driver in Rust and register it in `bootstrap()`. See [Vector](vector.
 | `QDRANT_URL` | none - required | `String` | The gRPC URL of Qdrant, port 6334 by default. `QdrantVectorDriver::from_env()` fails when it is unset or blank. |
 | `QDRANT_API_KEY` | unset | `String` | The key of Qdrant Cloud, or of a self-hosted instance that asks for one. |
 | `MARIADB_URL` | none - see `DATABASE_URL` | `String` | The URL of the MariaDB that holds the vectors. `MariaDbVectorDriver::from_env()` reads it first. |
-| `DATABASE_URL` | none | `String` | Read by `MariaDbVectorDriver::from_env()` when `MARIADB_URL` is unset, and taken only when its scheme is `mariadb://` or `mysql://`. A URL of another engine is not taken. |
+| `PGVECTOR_URL` | none - see `DATABASE_URL` | `String` | The Postgres URL that holds the vectors. `PgVectorDriver::from_env()` reads it first. |
+| `DATABASE_URL` | none | `String` | Fallback when the driver's own URL is unset or blank. MariaDB accepts schemes `mariadb` or `mysql`; pgvector accepts `postgres` or `postgresql`. A URL of another engine is not taken. |
 | `PINECONE_API_KEY` | none - required | `String` | The Pinecone API key. `PineconeVectorDriver::from_env()` fails when it is unset or blank. |
 | `PINECONE_CONTROLLER_HOST` | `https://api.pinecone.io` | `String` | The base URL of the Pinecone control plane. |
 | `PINECONE_API_VERSION` | `2025-04` | `String` | The value of the `X-Pinecone-Api-Version` header. |

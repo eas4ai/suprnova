@@ -19,12 +19,13 @@ path = "src/main.rs"
 
 [dependencies]
 # The production build shape (design doc section 5, vocabulary): default
-# features off, the nine non-`testing` defaults. `with-testing` is this
+# features off, the eleven non-`testing` defaults. `with-testing` is this
 # probe's own switch, proving the exact same set of references compiles
 # once `suprnova/testing` is added back and fails without it.
 suprnova = { path = "../../../../framework", default-features = false, features = [
     "filesystem", "database-sqlite", "database-postgres", "database-mysql",
-    "vector-mariadb", "web-push", "localization", "magnetar-oauth", "media",
+    "vector-mariadb", "vector-pgvector", "web-push", "localization", "magnetar-oauth",
+    "media",
     "queue-sqs",
 ] }
 
