@@ -1007,7 +1007,10 @@ fn hardening_stale_session_is_not_renewed_by_a_write_it_did_not_resolve_child() 
                 change_password_route(PasswordWrite::Save),
             )
             .await;
-            assert_eq!(changed.status, 200, "the other session changes the password");
+            assert_eq!(
+                changed.status, 200,
+                "the other session changes the password"
+            );
 
             let written = serve(
                 &middleware,
@@ -1018,7 +1021,13 @@ fn hardening_stale_session_is_not_renewed_by_a_write_it_did_not_resolve_child() 
             .await;
             assert_eq!(written.status, 200, "the public write succeeds");
 
-            let after = serve(&middleware, &config, Some(&stale), authenticated_route(None)).await;
+            let after = serve(
+                &middleware,
+                &config,
+                Some(&stale),
+                authenticated_route(None),
+            )
+            .await;
             assert_eq!(
                 after.status, 401,
                 "a write the stale session did not resolve does not renew it"
@@ -1062,7 +1071,13 @@ fn hardening_an_unrelated_write_does_not_adopt_another_sessions_password_change_
             .await;
             assert_eq!(updated.status, 200, "the email update succeeds");
 
-            let after = serve(&middleware, &config, Some(&cookie), authenticated_route(None)).await;
+            let after = serve(
+                &middleware,
+                &config,
+                Some(&cookie),
+                authenticated_route(None),
+            )
+            .await;
             assert_eq!(
                 after.status, 401,
                 "the session that did not change the password ends after another session did"
@@ -1107,12 +1122,24 @@ fn hardening_password_change_through_a_hashed_cast_keeps_the_changing_session_ch
             .await;
             assert_eq!(changed.status, 200, "the plaintext is stored as a hash");
 
-            let kept = serve(&middleware, &config, Some(&changing), authenticated_route(None)).await;
+            let kept = serve(
+                &middleware,
+                &config,
+                Some(&changing),
+                authenticated_route(None),
+            )
+            .await;
             assert_eq!(
                 kept.status, 200,
                 "the session that changed the password stays signed in"
             );
-            let ended = serve(&middleware, &config, Some(&other), authenticated_route(None)).await;
+            let ended = serve(
+                &middleware,
+                &config,
+                Some(&other),
+                authenticated_route(None),
+            )
+            .await;
             assert_eq!(ended.status, 401, "another session of the same user ends");
         },
     );
@@ -1143,11 +1170,22 @@ fn hardening_a_rolled_back_password_write_leaves_the_sign_in_as_it_was_child() {
             let config = session_config();
             let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
             let cookie = sign_in(&middleware, &config).await;
-            let rolled_back =
-                serve(&middleware, &config, Some(&cookie), rolled_back_change_route()).await;
+            let rolled_back = serve(
+                &middleware,
+                &config,
+                Some(&cookie),
+                rolled_back_change_route(),
+            )
+            .await;
             assert_eq!(rolled_back.status, 200, "the write rolls back");
 
-            let after = serve(&middleware, &config, Some(&cookie), authenticated_route(None)).await;
+            let after = serve(
+                &middleware,
+                &config,
+                Some(&cookie),
+                authenticated_route(None),
+            )
+            .await;
             assert_eq!(
                 after.status, 200,
                 "a rolled-back password write leaves the sign-in as it was"
@@ -1192,12 +1230,24 @@ fn hardening_a_password_change_inside_a_transaction_rebinds_after_the_commit_chi
             .await;
             assert_eq!(changed.status, 200, "the transaction commits");
 
-            let kept = serve(&middleware, &config, Some(&changing), authenticated_route(None)).await;
+            let kept = serve(
+                &middleware,
+                &config,
+                Some(&changing),
+                authenticated_route(None),
+            )
+            .await;
             assert_eq!(
                 kept.status, 200,
                 "the session that changed the password stays signed in"
             );
-            let ended = serve(&middleware, &config, Some(&other), authenticated_route(None)).await;
+            let ended = serve(
+                &middleware,
+                &config,
+                Some(&other),
+                authenticated_route(None),
+            )
+            .await;
             assert_eq!(ended.status, 401, "another session of the same user ends");
         },
     );

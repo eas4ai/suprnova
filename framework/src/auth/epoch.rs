@@ -297,7 +297,10 @@ pub(crate) async fn observe_user_write(
         if user.get_auth_identifier() != user_id {
             continue;
         }
-        if !columns.iter().any(|column| column == user.auth_password_name()) {
+        if !columns
+            .iter()
+            .any(|column| column == user.auth_password_name())
+        {
             continue;
         }
         let epoch = credential_epoch(user);
