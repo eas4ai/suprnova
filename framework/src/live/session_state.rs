@@ -65,6 +65,9 @@ pub fn stage<T: Serialize>(component: &str, field: &str, value: &T) -> Result<()
 /// output. The caller passes the values to [`commit`] once the outcome is
 /// accepted, and drops them otherwise.
 pub(crate) async fn scope<F: Future>(future: F) -> (F::Output, Vec<(String, Value)>) {
+    // Boxed: the scoped block and its task-local wrapper would otherwise hold
+    // the endpoint's future by value (the frames budget test measures it).
+    let future = Box::pin(future);
     STAGED
         .scope(RefCell::new(Vec::new()), async move {
             let output = future.await;

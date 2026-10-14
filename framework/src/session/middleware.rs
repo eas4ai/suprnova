@@ -2863,18 +2863,24 @@ impl Middleware for SessionMiddleware {
         let block = original_session_id
             .as_ref()
             .and_then(|id| self.block_for(&request).map(|block| (id.clone(), block)));
+        // Boxed: `handle_session` is the largest future of the middleware
+        // chain, and this frame would otherwise carry it twice (the frames
+        // budget test measures it).
         let Some((session_id, block)) = block else {
-            return self
-                .handle_session(request, next, original_session_id, last_touch_at)
-                .await;
+            return Box::pin(self.handle_session(
+                request,
+                next,
+                original_session_id,
+                last_touch_at,
+            ))
+            .await;
         };
         let held = match super::blocking::acquire(&session_id, block).await {
             Ok(held) => held,
             Err(response) => return Err(response),
         };
-        let response = self
-            .handle_session(request, next, original_session_id, last_touch_at)
-            .await;
+        let response =
+            Box::pin(self.handle_session(request, next, original_session_id, last_touch_at)).await;
         held.release().await;
         response
     }

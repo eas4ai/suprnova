@@ -975,7 +975,8 @@ async fn serve_request(
     if !Config::is_debug() {
         let browser = crate::error::debug_page::production_browser(&req);
         let is_head = req.method() == hyper::Method::HEAD;
-        let response = route_request(router, middleware_registry, req, peer_ip).await;
+        // Boxed, as the debug path below boxes it.
+        let response = Box::pin(route_request(router, middleware_registry, req, peer_ip)).await;
         let response = if browser {
             crate::error::debug_page::production_page(response)
         } else {
@@ -1142,28 +1143,29 @@ async fn route_request(
     let terminate_method = method.clone();
     let terminate_path = path.clone();
 
+    // Per-request auth state (resolved user cache + via-remember flag),
+    // guard-agnostic so token-only requests without a session can still use
+    // `set_user` / `once` / `has_user`.
+    //
+    // Each scope is boxed before the next wraps it: a task-local wrapper
+    // holds its future by value, and four of them around the request would
+    // otherwise each carry a copy of it on the stack of the task that polls
+    // the request, which the frames budget test measures.
+    let inner = Box::pin(handle_request_inner(
+        router,
+        middleware_registry,
+        req,
+        method,
+        &path,
+        peer_ip,
+    ));
+    let socket_scoped = Box::pin(crate::broadcasting::request_socket::scope(
+        request_socket_id,
+        crate::auth::request_state::scope(inner),
+    ));
+    let ssr_scoped = Box::pin(crate::inertia::ssr::DISABLE_SSR.scope(ssr_disabled, socket_scoped));
     let response = crate::inertia::flash::FLASH_BAG
-        .scope(flash_bag, async move {
-            crate::inertia::ssr::DISABLE_SSR
-                .scope(ssr_disabled, async move {
-                    // Per-request auth state (resolved user cache + via-remember
-                    // flag), guard-agnostic so token-only requests without a
-                    // session can still use `set_user` / `once` / `has_user`.
-                    crate::broadcasting::request_socket::scope(
-                        request_socket_id,
-                        crate::auth::request_state::scope(handle_request_inner(
-                            router,
-                            middleware_registry,
-                            req,
-                            method,
-                            &path,
-                            peer_ip,
-                        )),
-                    )
-                    .await
-                })
-                .await
-        })
+        .scope(flash_bag, ssr_scoped)
         .await;
 
     let response = if is_head {
