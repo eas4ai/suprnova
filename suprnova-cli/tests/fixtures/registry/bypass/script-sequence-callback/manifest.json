@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-sequence-callback",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
