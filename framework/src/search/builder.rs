@@ -308,7 +308,7 @@ where
         let plan = bind_grammar(descriptor, self.plan, self.grammar)?;
         let mut retrieved = retrieve(descriptor, &plan, &viewer).await?;
         let hydrated =
-            Self::hydrate_candidates(&mut retrieved, &plan, &viewer, self.hydration).await?;
+            Self::hydrate_with_refills(&mut retrieved, &plan, &viewer, self.hydration).await?;
         let mut hits = format_hits(hydrated.allowed, &retrieved, &plan)?;
         hits = group_hits(hits, plan.group.as_ref(), &hydrated.documents)?;
         rerank_hits(&mut hits, &hydrated.documents, &plan).await?;
@@ -334,11 +334,64 @@ where
             hydrated.documents,
         ))
     }
+    async fn hydrate_with_refills(
+        retrieved: &mut Retrieved,
+        plan: &SearchQuery,
+        viewer: &Viewer,
+        callback: Option<HydrationCallback<M>>,
+    ) -> Result<Hydrated<M>, FrameworkError> {
+        let descriptor = M::descriptor();
+        let mut hydration = M::query();
+        if descriptor.soft_delete && plan.with_trashed {
+            hydration = hydration.__disable_named_scope("soft_deletes");
+        }
+        if let Some(callback) = callback {
+            hydration = callback(hydration);
+        }
+        let universe = usize::try_from(retrieved.total.value()).unwrap_or(usize::MAX);
+        let lexical = plan
+            .hybrid_ratio
+            .unwrap_or(retrieved.settings.query.hybrid_ratio)
+            == 0.0;
+        let mut hydrated;
+        loop {
+            let count = retrieved.candidates.len();
+            hydrated = Self::hydrate_candidates(retrieved, plan, viewer, &hydration).await?;
+            if !lexical
+                || count < retrieved.query.depth
+                || retrieved.query.depth >= universe
+                || enough_representatives(
+                    hydrated.allowed.iter().map(|(ranked, _)| &ranked.candidate),
+                    &retrieved.settings,
+                    plan,
+                    retrieved.hits_cap,
+                )
+            {
+                break;
+            }
+            retrieved.query.depth = retrieved.query.depth.saturating_mul(2).min(universe);
+            let engine = SearchRegistry::engine_for(descriptor.name)?;
+            let page = engine
+                .query(descriptor, &retrieved.generation, &retrieved.query)
+                .await?;
+            validate_candidates(descriptor, &page.candidates)?;
+            retrieved.candidates = page
+                .candidates
+                .into_iter()
+                .map(|candidate| RankedCandidate {
+                    rank_score: candidate.score,
+                    candidate,
+                })
+                .collect();
+        }
+        Ok(hydrated)
+    }
+
     async fn hydrate_candidates(
         retrieved: &mut Retrieved,
         plan: &SearchQuery,
         viewer: &Viewer,
-        hydration: Option<HydrationCallback<M>>,
+        hydration: &Builder<M>,
     ) -> Result<Hydrated<M>, FrameworkError> {
         let descriptor = M::descriptor();
         let entry = SearchRegistry::by_index(descriptor.name)?;
@@ -352,13 +405,7 @@ where
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut hydrate = M::query().where_in(M::primary_key_name(), keys);
-        if descriptor.soft_delete && plan.with_trashed {
-            hydrate = hydrate.__disable_named_scope("soft_deletes");
-        }
-        if let Some(callback) = hydration {
-            hydrate = callback(hydrate);
-        }
+        let hydrate = hydration.clone().where_in(M::primary_key_name(), keys);
         let mut models = if retrieved.candidates.is_empty() {
             HashMap::new()
         } else {
@@ -397,13 +444,11 @@ where
                 if !model.should_be_searchable()? || !(entry.evaluate_scope)(viewer, &live) {
                     continue;
                 }
-                if descriptor.soft_delete
-                    && !plan.with_trashed
-                    && matches!(
-                        live.attributes.get("__soft_deleted"),
-                        Some(AttributeValue::Bool(true))
-                    )
-                {
+                let deleted = !M::SOFT_DELETES_COLUMN.is_empty()
+                    && model
+                        .field_value(M::SOFT_DELETES_COLUMN)
+                        .is_some_and(|value| !value.is_null());
+                if deleted && !(descriptor.soft_delete && plan.with_trashed) {
                     continue;
                 }
                 documents.insert(key.clone(), candidate.candidate.document.clone());
@@ -583,6 +628,9 @@ fn bind_grammar(
     mut plan: SearchQuery,
     grammar: Vec<String>,
 ) -> Result<SearchQuery, FrameworkError> {
+    if let Some(filter) = &plan.filter {
+        filter.validate(descriptor)?;
+    }
     for text in grammar {
         let filter = Filter::parse(&text, descriptor)?;
         plan.filter = Some(match plan.filter.take() {
@@ -619,6 +667,9 @@ fn validate_facet(
 }
 
 fn validate_plan(descriptor: &IndexDescriptor, plan: &SearchQuery) -> Result<(), FrameworkError> {
+    if let Some(filter) = &plan.filter {
+        filter.validate(descriptor)?;
+    }
     descriptor.validate()?;
     if plan.limit == 0 || plan.hits_cap == Some(0) {
         return Err(FrameworkError::param(
@@ -668,7 +719,10 @@ fn validate_plan(descriptor: &IndexDescriptor, plan: &SearchQuery) -> Result<(),
         }
     }
     for name in plan.highlight.iter().chain(plan.crop.keys()) {
-        if descriptor.attribute(name)?.ty != AttributeType::Text {
+        if !matches!(
+            descriptor.attribute(name)?.ty,
+            AttributeType::Text | AttributeType::TextList
+        ) {
             return Err(FrameworkError::param(format!(
                 "highlight attribute '{name}' must be text"
             )));
@@ -853,7 +907,7 @@ async fn retrieve(
             embedder.profile(),
             settings.index_time.dimensions,
         )?;
-        let semantic = engine
+        let mut semantic = engine
             .semantic(
                 descriptor,
                 &generation,
@@ -863,6 +917,9 @@ async fn retrieve(
             )
             .await?;
         validate_candidates(descriptor, &semantic.candidates)?;
+        semantic.candidates.retain(|candidate| {
+            !matches_negative(&candidate.document, &settings, &query.expanded.negatives)
+        });
         let semantic_keys = semantic
             .candidates
             .iter()
@@ -925,6 +982,22 @@ async fn retrieve(
         facet_stats,
         hits_cap,
     })
+}
+
+fn matches_negative(
+    document: &SearchDocument,
+    settings: &IndexSettings,
+    negatives: &[String],
+) -> bool {
+    !negatives.is_empty()
+        && settings
+            .index_time
+            .searchable_attributes
+            .iter()
+            .filter_map(|attribute| document.attributes.get(&attribute.name))
+            .filter_map(AttributeValue::searchable_text)
+            .flat_map(|text| super::expansion::tokenize(&text))
+            .any(|word| negatives.contains(&word))
 }
 
 fn validate_candidates(
@@ -1004,7 +1077,7 @@ fn format_fields(
         if let Some(text) = document
             .attributes
             .get(name)
-            .and_then(AttributeValue::as_text)
+            .and_then(AttributeValue::searchable_text)
         {
             // Crop uses source spans; native markup cannot be safely cropped after insertion.
             let formatted = if !plan.crop.contains_key(name) {
@@ -1020,7 +1093,7 @@ fn format_fields(
                 match formatted {
                     Some(formatted) => formatted,
                     None => highlight(
-                        text,
+                        &text,
                         &query.expanded,
                         &settings.query,
                         plan.crop.get(name).copied(),
@@ -1089,8 +1162,8 @@ fn value_identity(value: Option<&AttributeValue>) -> String {
     }
 }
 
-fn enough_representatives(
-    candidates: &[EngineCandidate],
+fn enough_representatives<'a>(
+    candidates: impl IntoIterator<Item = &'a EngineCandidate>,
     settings: &IndexSettings,
     plan: &SearchQuery,
     cap: usize,
@@ -1248,6 +1321,9 @@ impl FederatedBuilder {
         for index in &self.indexes {
             let entry = SearchRegistry::by_index(index)?;
             let descriptor = (entry.descriptor)();
+            if let Some(filter) = &self.plan.filter {
+                filter.validate(descriptor)?;
+            }
             let plan = bind_grammar(descriptor, self.plan.clone(), self.grammar.clone())?;
             let retrieved = retrieve(descriptor, &plan, &viewer).await?;
             total = total.saturating_add(retrieved.total.value());

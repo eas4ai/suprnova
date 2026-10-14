@@ -250,3 +250,86 @@ fn typo_thresholds_count_source_characters_before_diacritic_expansion() {
     assert_eq!(expanded.terms[0].alternatives, ["assass"]);
     assert!(expanded.terms[0].typo_alternatives.is_empty());
 }
+
+#[test]
+fn correction_skips_long_tokens_and_limits_query_tokens() {
+    let long = "a".repeat(65);
+    let near = format!("{}b", "a".repeat(64));
+    let vocabulary = Vocabulary {
+        words: [(near, 2), ("house".into(), 1)].into_iter().collect(),
+    };
+    let expanded = expand(
+        &QueryText::parse(&format!("{long} {}", vec!["hosue"; 33].join(" "))),
+        &QuerySettings::default(),
+        &vocabulary,
+        64,
+    )
+    .unwrap();
+    assert_eq!(expanded.terms[0].alternatives, [long]);
+    assert!(expanded.terms[31].alternatives.contains(&"house".into()));
+    assert_eq!(expanded.terms[33].alternatives, ["hosue"]);
+}
+
+#[test]
+fn vocabulary_prunes_long_candidates_and_short_circuits_exact_matches() {
+    let long = "a".repeat(65);
+    let vocabulary = Vocabulary {
+        words: [
+            (long.clone(), 2),
+            (format!("{}b", "a".repeat(64)), 3),
+            ("z".repeat(100_000), 1),
+            ("house".into(), 1),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    // Oversized tokens still retain their exact identity without distance work.
+    assert_eq!(vocabulary.within(&long, 1), vec![(long, 2)]);
+    assert_eq!(vocabulary.within("hosue", 1), vec![("house".into(), 1)]);
+    let boundary = "a".repeat(64);
+    let candidate = format!("{boundary}b");
+    let boundary_vocabulary = Vocabulary {
+        words: [(candidate.clone(), 1)].into_iter().collect(),
+    };
+    assert_eq!(
+        boundary_vocabulary.within(&boundary, 1),
+        vec![(candidate, 1)]
+    );
+    let huge = "a".repeat(100_000);
+    let vocabulary = Vocabulary {
+        words: [(huge.clone(), 1)].into_iter().collect(),
+    };
+    assert_eq!(vocabulary.within(&huge, 2), vec![(huge, 1)]);
+}
+
+#[test]
+fn expansion_rejects_excessive_query_size() {
+    assert!(
+        expand(
+            &QueryText::parse(&"x".repeat(65_537)),
+            &QuerySettings::default(),
+            &Vocabulary::default(),
+            64
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn overflowing_numeric_tokens_do_not_receive_corrections() {
+    let vocabulary = Vocabulary {
+        words: [
+            ("1e998".into(), 10),
+            ("nanx".into(), 10),
+            ("infx".into(), 10),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let mut settings = QuerySettings::default();
+    settings.typo_tolerance.one_edit_min_length = 1;
+    for token in ["1e999", "NaN", "inf", "Infinity", "12345"] {
+        let expanded = expand(&QueryText::parse(token), &settings, &vocabulary, 64).unwrap();
+        assert_eq!(expanded.terms[0].alternatives, [token.to_lowercase()]);
+    }
+}

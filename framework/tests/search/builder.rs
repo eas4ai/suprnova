@@ -715,6 +715,7 @@ struct DecoratedEngine {
     inner: CollectionEngine,
     inject_attribute: bool,
     unsafe_highlights: bool,
+    index_calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 #[async_trait::async_trait]
 impl suprnova::SearchEngine for DecoratedEngine {
@@ -772,12 +773,22 @@ impl suprnova::SearchEngine for DecoratedEngine {
     ) -> Result<suprnova::IndexSettings, suprnova::FrameworkError> {
         self.inner.read_settings(index, generation).await
     }
+    async fn stored_hashes(
+        &self,
+        index: &suprnova::IndexDescriptor,
+        generation: &suprnova::GenerationId,
+        documents: &[suprnova::IndexedDocument],
+    ) -> Result<std::collections::BTreeMap<String, String>, suprnova::FrameworkError> {
+        self.inner.stored_hashes(index, generation, documents).await
+    }
     async fn index(
         &self,
         index: &suprnova::IndexDescriptor,
         generation: &suprnova::GenerationId,
         docs: &[suprnova::IndexedDocument],
     ) -> Result<suprnova::WriteOutcome, suprnova::FrameworkError> {
+        self.index_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.index(index, generation, docs).await
     }
     async fn remove(
@@ -887,6 +898,7 @@ async fn raw_and_federated_projections_reject_undeclared_fields_returned_by_a_dr
                     inner: CollectionEngine::new(),
                     inject_attribute: true,
                     unsafe_highlights: false,
+                    index_calls: Arc::default(),
                 }),
             )
             .unwrap();
@@ -927,6 +939,7 @@ async fn unsafe_native_highlights_fall_back_to_escaped_framework_formatting() {
                     inner: CollectionEngine::new(),
                     inject_attribute: false,
                     unsafe_highlights: true,
+                    index_calls: Arc::default(),
                 }),
             )
             .unwrap();
@@ -942,6 +955,482 @@ async fn unsafe_native_highlights_fall_back_to_escaped_framework_formatting() {
             assert!(!formatted.contains("<script"));
             assert!(formatted.contains("&lt;script&gt;"));
             assert!(formatted.contains("<em>Rust</em>"));
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn hydration_callback_cannot_restore_deleted_hits_without_index_opt_in() {
+    let _db = database().await;
+    SearchConfig::scope(
+        config(),
+        SearchRegistry::isolated(async {
+            let model = note("Rust deleted", true, 0).await;
+            let entry = SearchRegistry::by_index(SearchArchive::descriptor().name).unwrap();
+            let document = (entry.load_document)(&model.id.to_string())
+                .await
+                .unwrap()
+                .unwrap();
+            SearchIndexJob {
+                index: document.index,
+                key: document.key,
+                source_version: document.source_version,
+                op: suprnova::IndexOperation::Index,
+                generation: None,
+            }
+            .handle()
+            .await
+            .unwrap();
+            suprnova::without_syncing_to_search(|| async { model.delete().await.map(|_| ()) })
+                .await
+                .unwrap();
+            assert!(
+                SearchArchive::search("Rust")
+                    .query(|query| query.with_trashed())
+                    .get()
+                    .await
+                    .unwrap()
+                    .hits
+                    .is_empty()
+            );
+            assert!(
+                SearchArchive::search("Rust")
+                    .query(|query| query.with_trashed())
+                    .keys()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                SearchArchive::search("Rust")
+                    .query(|query| query.with_trashed())
+                    .raw()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn deeply_nested_typed_filters_return_an_error_without_overflowing() {
+    // A child process isolates stack-abort regressions from the rest of the suite.
+    const CHILD: &str = "SUPRNOVA_DEEP_FILTER_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "builder::deeply_nested_typed_filters_return_an_error_without_overflowing",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let _db = database().await;
+    SearchConfig::scope(
+        config(),
+        SearchRegistry::isolated(async {
+            for shape in 0..3 {
+                let mut filter =
+                    suprnova::Filter::Eq("owner_id".into(), AttributeValue::Integer(0));
+                for _ in 0..100_000 {
+                    filter = match shape {
+                        0 => suprnova::Filter::Not(Box::new(filter)),
+                        1 => suprnova::Filter::And(vec![filter]),
+                        _ => suprnova::Filter::Or(vec![filter]),
+                    };
+                }
+                let error = SearchNote::search("Rust")
+                    .filter(filter)
+                    .get()
+                    .await
+                    .unwrap_err();
+                assert!(matches!(error, suprnova::FrameworkError::ParamError { .. }));
+                assert!(error.to_string().contains("nesting exceeds 64"));
+            }
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn semantic_and_hybrid_results_exclude_negative_words_in_searchable_lists() {
+    let _db = database().await;
+    SearchConfig::scope(
+        config(),
+        SearchRegistry::isolated(async {
+            SearchRegistry::register_embedder("fake", Arc::new(FakeEmbedder::new(8).unwrap()))
+                .unwrap();
+            let descriptor = SearchNote::descriptor();
+            let engine = SearchRegistry::engine_for(descriptor.name).unwrap();
+            let mut settings = descriptor.index_settings();
+            settings.index_time.embedder = Some("fake".into());
+            settings.index_time.dimensions = Some(8);
+            let generation = suprnova::GenerationId::new("negative_semantic").unwrap();
+            engine
+                .create_generation(descriptor, &settings, &generation)
+                .await
+                .unwrap();
+            engine
+                .switch_generation(descriptor, None, generation)
+                .await
+                .unwrap();
+            let blocked = note("Rust forbidden", true, 0).await;
+            index(&blocked).await;
+            let listed = note("Rust listed", true, 0)
+                .await
+                .update(suprnova::attrs! { tags: vec!["FORBIDDEN"] })
+                .await
+                .unwrap();
+            index(&listed).await;
+            let allowed = note("Rust permitted", true, 0).await;
+            index(&allowed).await;
+            for ratio in [0.5, 1.0] {
+                let result = SearchNote::search("Rust -forbidden")
+                    .hybrid(ratio)
+                    .get()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    result
+                        .hits
+                        .iter()
+                        .map(|hit| hit.key.clone())
+                        .collect::<Vec<_>>(),
+                    [allowed.id.to_string()]
+                );
+            }
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn pagination_refills_candidates_dropped_by_live_scope_checks() {
+    let _db = database().await;
+    SearchConfig::scope(
+        config(),
+        SearchRegistry::isolated(async {
+            let a = note("Rust same", true, 0).await;
+            let b = note("Rust same", true, 0).await;
+            let c = note("Rust same", true, 0).await;
+            index(&a).await;
+            index(&b).await;
+            index(&c).await;
+            a.update(suprnova::attrs! { owner_id: 9 }).await.unwrap();
+            let first = SearchNote::search("Rust")
+                .hits_cap(2)
+                .paginate(1, 1)
+                .await
+                .unwrap();
+            assert_eq!(first.hits[0].key, b.id.to_string());
+            let second = SearchNote::search("Rust")
+                .hits_cap(2)
+                .paginate(1, 2)
+                .await
+                .unwrap();
+            assert_eq!(
+                second
+                    .hits
+                    .iter()
+                    .map(|hit| hit.key.clone())
+                    .collect::<Vec<_>>(),
+                [c.id.to_string()]
+            );
+            assert_eq!(
+                SearchNote::search("Rust")
+                    .hits_cap(2)
+                    .get()
+                    .await
+                    .unwrap()
+                    .hits
+                    .len(),
+                2
+            );
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn searchable_text_lists_are_joined_for_highlights_and_crops() {
+    let _db = database().await;
+    SearchConfig::scope(
+        config(),
+        SearchRegistry::isolated(async {
+            let model = note("Unrelated", true, 0)
+                .await
+                .update(suprnova::attrs! { tags: vec!["before <script>", "Rust", "after after"] })
+                .await
+                .unwrap();
+            index(&model).await;
+            let result = SearchNote::search("rust")
+                .highlight(["tags"])
+                .get()
+                .await
+                .unwrap();
+            assert_eq!(
+                result.hits[0].formatted["tags"],
+                "before &lt;script&gt; <em>Rust</em> after after"
+            );
+            let cropped = SearchNote::search("rust")
+                .crop("tags", 8)
+                .get()
+                .await
+                .unwrap();
+            let text = &cropped.hits[0].formatted["tags"];
+            assert!(text.contains("<em>Rust</em>"));
+            assert!(text.contains("..."));
+            assert!(!text.contains("<script>"));
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+struct CountingEmbedder {
+    inner: FakeEmbedder,
+    calls: std::sync::atomic::AtomicUsize,
+}
+#[async_trait::async_trait]
+impl suprnova::Embedder for CountingEmbedder {
+    fn profile(&self) -> &suprnova::ModelProfile {
+        suprnova::Embedder::profile(&self.inner)
+    }
+    async fn embed_documents(
+        &self,
+        inputs: &[suprnova::EmbedInput],
+    ) -> Result<Vec<suprnova::Embedding>, suprnova::FrameworkError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        suprnova::Embedder::embed_documents(&self.inner, inputs).await
+    }
+    async fn embed_query(
+        &self,
+        text: &str,
+    ) -> Result<suprnova::Embedding, suprnova::FrameworkError> {
+        suprnova::Embedder::embed_query(&self.inner, text).await
+    }
+}
+
+#[tokio::test]
+async fn unchanged_writes_skip_embedding_and_indexing_but_preserve_the_version_watermark() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let _db = database().await;
+    SearchConfig::scope(
+        config(),
+        SearchRegistry::isolated(async {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            SearchRegistry::register_engine(
+                "collection",
+                Arc::new(DecoratedEngine {
+                    inner: CollectionEngine::new(),
+                    inject_attribute: false,
+                    unsafe_highlights: false,
+                    index_calls: calls.clone(),
+                }),
+            )
+            .unwrap();
+            let embedder = Arc::new(CountingEmbedder {
+                inner: FakeEmbedder::new(8).unwrap(),
+                calls: Default::default(),
+            });
+            SearchRegistry::register_embedder("counting", embedder.clone()).unwrap();
+            let descriptor = SearchNote::descriptor();
+            let engine = SearchRegistry::engine_for(descriptor.name).unwrap();
+            let mut settings = descriptor.index_settings();
+            settings.index_time.embedder = Some("counting".into());
+            settings.index_time.dimensions = Some(8);
+            let generation = suprnova::GenerationId::new("hash_skip").unwrap();
+            engine
+                .create_generation(descriptor, &settings, &generation)
+                .await
+                .unwrap();
+            engine
+                .switch_generation(descriptor, None, generation.clone())
+                .await
+                .unwrap();
+            let model = note("Unchanged", true, 0).await;
+            for version in [10, 20] {
+                SearchIndexJob {
+                    index: descriptor.name.into(),
+                    key: model.id.to_string(),
+                    source_version: version,
+                    op: suprnova::IndexOperation::Index,
+                    generation: None,
+                }
+                .handle()
+                .await
+                .unwrap();
+            }
+            assert_eq!(embedder.calls.load(SeqCst), 1);
+            assert_eq!(calls.load(SeqCst), 1);
+            let mut stale = model.to_search_document().unwrap();
+            stale.source_version = 15;
+            stale
+                .attributes
+                .insert("title".into(), AttributeValue::Text("Stale".into()));
+            let result = engine
+                .index(
+                    descriptor,
+                    &generation,
+                    &[suprnova::IndexedDocument {
+                        content_hash: stale.content_hash(&settings.index_time.digest()),
+                        document: stale,
+                        dense: None,
+                        sparse: None,
+                    }],
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.skipped_older, 1);
+            assert_eq!(
+                SearchNote::search("Unchanged").keys().await.unwrap(),
+                [model.id.to_string()]
+            );
+            // A settings identity change must force fresh embeddings in the new generation.
+            settings.index_time.searchable_attributes[0].weight += 1.0;
+            let next = suprnova::GenerationId::new("hash_skip_new").unwrap();
+            engine
+                .create_generation(descriptor, &settings, &next)
+                .await
+                .unwrap();
+            engine
+                .switch_generation(descriptor, Some(generation), next)
+                .await
+                .unwrap();
+            index(&model).await;
+            assert_eq!(embedder.calls.load(SeqCst), 2);
+            assert_eq!(calls.load(SeqCst), 3);
+            let changed = model
+                .update(suprnova::attrs! { title: "Changed" })
+                .await
+                .unwrap();
+            index(&changed).await;
+            assert_eq!(embedder.calls.load(SeqCst), 3);
+            assert_eq!(calls.load(SeqCst), 4);
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn refills_reuse_the_hydration_callback_and_stop_at_the_live_hits_cap() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let _db = database().await;
+    SearchConfig::scope(
+        config(),
+        SearchRegistry::isolated(async {
+            let a = note("Rust same", true, 0).await;
+            let b = note("Rust same", true, 0).await;
+            let c = note("Rust same", true, 0).await;
+            let d = note("Rust same", true, 0).await;
+            for model in [&a, &b, &c, &d] {
+                index(model).await;
+            }
+            let calls = Arc::new(AtomicUsize::new(0));
+            let callback_calls = calls.clone();
+            let keys = vec![b.id, c.id, d.id];
+            let result = SearchNote::search("Rust")
+                .hits_cap(2)
+                .query(move |query| {
+                    callback_calls.fetch_add(1, SeqCst);
+                    query.where_in("id", keys)
+                })
+                .get()
+                .await
+                .unwrap();
+            assert_eq!(calls.load(SeqCst), 1);
+            assert_eq!(
+                result
+                    .hits
+                    .iter()
+                    .map(|hit| hit.key.clone())
+                    .collect::<Vec<_>>(),
+                [b.id.to_string(), c.id.to_string()]
+            );
+            let keys = SearchNote::search("Rust")
+                .hits_cap(2)
+                .query(|query| query.where_in("id", Vec::<i64>::new()))
+                .keys()
+                .await
+                .unwrap();
+            assert!(keys.is_empty());
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn refills_preserve_live_group_members_and_distinct_representatives() {
+    let _db = database().await;
+    SearchConfig::scope(
+        config(),
+        SearchRegistry::isolated(async {
+            let a = note("Rust same", true, 0).await;
+            let b = note("Rust same", true, 0).await;
+            let c = note("Rust same", true, 0).await;
+            let d = note("Rust same", true, 0)
+                .await
+                .update(suprnova::attrs! { category: "books" })
+                .await
+                .unwrap();
+            let e = note("Rust same", true, 0)
+                .await
+                .update(suprnova::attrs! { category: "books" })
+                .await
+                .unwrap();
+            for model in [&a, &b, &c, &d, &e] {
+                index(model).await;
+            }
+            a.update(suprnova::attrs! { owner_id: 9 }).await.unwrap();
+            let groups = SearchNote::search("Rust")
+                .hits_cap(2)
+                .group_by("category", 2)
+                .get()
+                .await
+                .unwrap();
+            assert_eq!(groups.hits.len(), 2);
+            assert_eq!(groups.hits[0].key, b.id.to_string());
+            assert_eq!(groups.hits[0].group_members[0].key, c.id.to_string());
+            assert_eq!(groups.hits[1].key, d.id.to_string());
+            assert_eq!(groups.hits[1].group_members[0].key, e.id.to_string());
+            let descriptor = SearchNote::descriptor();
+            let engine = SearchRegistry::engine_for(descriptor.name).unwrap();
+            let generation = SearchRegistry::generation_for(descriptor.name)
+                .await
+                .unwrap();
+            let mut settings = engine.read_settings(descriptor, &generation).await.unwrap();
+            settings.query.distinct_attribute = Some("category".into());
+            engine
+                .write_settings(descriptor, &generation, &settings)
+                .await
+                .unwrap();
+            let distinct = SearchNote::search("Rust").hits_cap(2).get().await.unwrap();
+            assert_eq!(
+                distinct
+                    .hits
+                    .iter()
+                    .map(|hit| hit.key.clone())
+                    .collect::<Vec<_>>(),
+                [b.id.to_string(), d.id.to_string()]
+            );
         }),
     )
     .await

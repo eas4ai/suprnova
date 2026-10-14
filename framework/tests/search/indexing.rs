@@ -515,3 +515,35 @@ async fn removing_all_search_documents_clears_orphaned_keys_across_bounded_chunk
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn reordered_timestamp_free_import_cannot_resurrect_a_newer_removal() {
+    let _db = database().await;
+    let _queue = Queue::fake();
+    SearchConfig::scope(
+        config(true),
+        SearchRegistry::isolated(async {
+            let model = note("Tombstone", true, 0).await;
+            let keys = vec![model.id.to_string()];
+            searchable::<SearchNote>(&keys).await.unwrap();
+            unsearchable::<SearchNote>(&keys).await.unwrap();
+            let jobs = suprnova::queue::testing::pending_jobs();
+            assert_eq!(jobs.len(), 2);
+            let indexed_version = jobs[0].payload["keys"][0][1].as_i64().unwrap();
+            let removed_version = jobs[1].payload["keys"][0][1].as_i64().unwrap();
+            assert!(indexed_version > 0);
+            assert!(removed_version > indexed_version);
+            suprnova::queue::worker::dispatch_by_name(&jobs[1].name, jobs[1].payload.clone())
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            suprnova::queue::worker::dispatch_by_name(&jobs[0].name, jobs[0].payload.clone())
+                .await
+                .unwrap();
+            let engine = SearchRegistry::engine_for(SearchNote::descriptor().name).unwrap();
+            assert_eq!(count(engine.as_ref()).await, 0);
+        }),
+    )
+    .await
+    .unwrap();
+}

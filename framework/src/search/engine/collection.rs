@@ -154,15 +154,7 @@ fn fields(document: &SearchDocument, settings: &IndexSettings) -> Vec<(String, V
         .iter()
         .filter_map(|a| {
             document.attributes.get(&a.name).map(|v| {
-                let text = match v {
-                    AttributeValue::Text(s) => s.clone(),
-                    AttributeValue::List(vs) => vs
-                        .iter()
-                        .filter_map(AttributeValue::as_text)
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    _ => String::new(),
-                };
+                let text = v.searchable_text().unwrap_or_default();
                 (a.name.clone(), tokenize(&text), f64::from(a.weight))
             })
         })
@@ -520,6 +512,28 @@ impl SearchEngine for CollectionEngine {
             generations: true,
             ..EngineCapabilities::default()
         }
+    }
+    async fn stored_hashes(
+        &self,
+        index: &IndexDescriptor,
+        id: &GenerationId,
+        documents: &[IndexedDocument],
+    ) -> Result<BTreeMap<String, String>, FrameworkError> {
+        let mut state = self.write()?;
+        let generation = generation_mut(&mut state, index, id)?;
+        let mut hashes = BTreeMap::new();
+        for proposed in documents {
+            if let Some(stored) = generation.documents.get_mut(&proposed.document.key) {
+                if stored.content_hash == proposed.content_hash {
+                    stored.document.source_version = stored
+                        .document
+                        .source_version
+                        .max(proposed.document.source_version);
+                }
+                hashes.insert(proposed.document.key.clone(), stored.content_hash.clone());
+            }
+        }
+        Ok(hashes)
     }
     async fn current_generation(
         &self,

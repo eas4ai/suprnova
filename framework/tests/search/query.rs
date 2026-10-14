@@ -139,7 +139,7 @@ fn geo_grammar_requires_one_declared_geo_attribute() -> Result<(), suprnova::Fra
     };
     descriptor.attributes.push(geo.clone());
     assert!(
-        matches!(Filter::parse("_geoRadius(10, -20, 1000)",&descriptor)?,Filter::GeoRadius(name,_,radius) if name=="location" && radius == 1000.0)
+        matches!(Filter::parse("_geoRadius(10, -20, 1000)",&descriptor)?,Filter::GeoRadius(ref name,_,radius) if name=="location" && radius == 1000.0)
     );
     for grammar in [
         "_geoRadius(91, 0, 1)",
@@ -155,4 +155,22 @@ fn geo_grammar_requires_one_declared_geo_attribute() -> Result<(), suprnova::Fra
     });
     assert!(Filter::parse("_geoRadius(0, 0, 1)", &descriptor).is_err());
     Ok(())
+}
+
+#[test]
+fn filter_grammar_rejects_nesting_beyond_the_ast_bound() {
+    let grammar = format!("{}title = 'rust'{}", "NOT (".repeat(100), ")".repeat(100));
+    assert!(
+        Filter::parse(&grammar, &descriptor())
+            .unwrap_err()
+            .to_string()
+            .contains("nesting exceeds 64")
+    );
+}
+
+#[test]
+fn grammar_and_typed_filters_share_the_64_level_bound() {
+    let grammar = format!("{}title = 'rust'", "NOT ".repeat(64));
+    Filter::parse(&grammar, &descriptor()).unwrap();
+    assert!(Filter::parse(&format!("NOT {grammar}"), &descriptor()).is_err());
 }

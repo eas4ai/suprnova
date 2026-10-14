@@ -23,14 +23,37 @@ pub struct Vocabulary {
     pub words: BTreeMap<String, u64>,
 }
 
+const MAX_CORRECTION_SCALARS: usize = 64;
+const MAX_CORRECTION_TOKENS: usize = 32;
+const MAX_QUERY_BYTES: usize = 65_536;
+const MAX_QUERY_TOKENS: usize = 1_024;
+
 impl Vocabulary {
     /// Damerau distance recognizes adjacent transpositions as one typing error.
+    /// Correction is limited to 64 Unicode scalars per query token. Longer tokens
+    /// retain exact matches only. Candidate lengths must fit the edit budget before
+    /// distance is computed, bounding each expansion comparison to at most 64 by 66.
     pub fn within(&self, word: &str, budget: usize) -> Vec<(String, u64)> {
+        let length = word.chars().take(MAX_CORRECTION_SCALARS + 1).count();
         let mut candidates: Vec<_> = self
             .words
             .iter()
             .filter(|(candidate, df)| {
-                **df > 0 && strsim::damerau_levenshtein(word, candidate) <= budget
+                if **df == 0 {
+                    return false;
+                }
+                if word == candidate.as_str() {
+                    return true;
+                }
+                if length > MAX_CORRECTION_SCALARS || budget == 0 {
+                    return false;
+                }
+                let candidate_length = candidate
+                    .chars()
+                    .take(length.saturating_add(budget).saturating_add(1))
+                    .count();
+                length.abs_diff(candidate_length) <= budget
+                    && strsim::damerau_levenshtein(word, candidate) <= budget
             })
             .map(|(candidate, df)| (candidate.clone(), *df))
             .collect();
@@ -90,6 +113,9 @@ pub(crate) fn normalize_word(word: &str) -> String {
 /// Phrase alternatives rank by their least-frequent token because the word vocabulary
 /// has no phrase frequencies; the original always retains one slot within the cap.
 /// Typo thresholds count original Unicode scalars before transliteration expands them.
+/// Only the first 32 query tokens receive correction, and tokens longer than 64
+/// scalars skip correction. Queries exceeding 65536 bytes or 1024 source tokens
+/// return a parameter error, including programmatically constructed query text.
 pub fn expand(
     query: &QueryText,
     settings: &QuerySettings,
@@ -99,6 +125,20 @@ pub fn expand(
     if cap == 0 {
         return Err(FrameworkError::param(
             "SEARCH_EXPANSION_TERMS must be positive",
+        ));
+    }
+    let tokens = query
+        .words
+        .iter()
+        .chain(query.phrases.iter().flatten())
+        .chain(&query.negatives);
+    let (bytes, count) = tokens.fold((0usize, 0usize), |(bytes, count), token| {
+        (bytes.saturating_add(token.len()), count.saturating_add(1))
+    });
+    if query.original.len() > MAX_QUERY_BYTES || bytes > MAX_QUERY_BYTES || count > MAX_QUERY_TOKENS
+    {
+        return Err(FrameworkError::param(
+            "search query exceeds 65536 bytes or 1024 tokens",
         ));
     }
     let stop: BTreeSet<_> = settings
@@ -111,9 +151,8 @@ pub fn expand(
         .iter()
         .flat_map(|word| word.unicode_words())
         .flat_map(|source| {
-            tokenize(source)
-                .into_iter()
-                .map(move |word| (word, source.chars().count()))
+            let length = source.chars().count();
+            tokenize(source).into_iter().map(move |word| (word, length))
         })
         .filter(|(word, _)| !stop.contains(word))
         .unzip();
@@ -138,7 +177,11 @@ pub fn expand(
         let original = words[at..at + width].join(" ");
         let mut alternatives = synonym_targets(&original, &synonyms, vocabulary);
         let budget = correction_budget(&original, settings, width, source_lengths[at]);
-        let corrections = if budget > 0 {
+        let corrections = if budget > 0
+            && at < MAX_CORRECTION_TOKENS
+            && source_lengths[at] <= MAX_CORRECTION_SCALARS
+            && original.chars().take(MAX_CORRECTION_SCALARS + 1).count() <= MAX_CORRECTION_SCALARS
+        {
             vocabulary.within(&original, budget)
         } else {
             Vec::new()
@@ -229,8 +272,7 @@ fn correction_budget(
         .disable_on_words
         .iter()
         .any(|word| normalize_word(word) == original);
-    let numeric =
-        original.parse::<f64>().is_ok_and(f64::is_finite) || original.chars().all(char::is_numeric);
+    let numeric = original.parse::<f64>().is_ok() || original.chars().all(char::is_numeric);
     if !tolerance.enabled || width > 1 || disabled || numeric {
         return 0;
     }

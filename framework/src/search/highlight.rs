@@ -13,13 +13,15 @@ pub fn validate_tags(pre: &str, post: &str) -> Result<(), FrameworkError> {
         .strip_prefix('<')
         .and_then(|tag| tag.strip_suffix('>'))
         .ok_or_else(|| FrameworkError::param("highlight_pre_tag"))?;
-    let (name, rest) = inner.split_once(char::is_whitespace).unwrap_or((inner, ""));
+    // HTML whitespace excludes Unicode spaces and ASCII vertical tab.
+    let html_space = |ch: char| matches!(ch, ' ' | '\t' | '\n' | '\r' | '\u{000c}');
+    let (name, rest) = inner.split_once(html_space).unwrap_or((inner, ""));
     if !["mark", "em", "strong", "b", "span"].contains(&name) || post != format!("</{name}>") {
         return Err(FrameworkError::param(
             "highlight tags must use matching mark, em, strong, b or span elements",
         ));
     }
-    let rest = rest.trim();
+    let rest = rest.trim_matches(html_space);
     if !rest.is_empty() {
         let value = rest
             .strip_prefix("class=")
