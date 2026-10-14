@@ -423,6 +423,70 @@ fn host_grant_scratch() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("hardening-magick-host-grant")
 }
 
+/// Where the denial test keeps the account's policies.
+#[cfg(unix)]
+fn user_denial_scratch() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("hardening-magick-user-denial")
+}
+
+/// A denial the account keeps in its own ImageMagick directory still
+/// applies to the driver's runs: in `$HOME/.config/ImageMagick`, which the
+/// driver's `HOME` would otherwise hide, and in `$XDG_CONFIG_HOME/ImageMagick`.
+/// The framework's policy outranks a grant there, never a denial.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn hardening_a_user_dir_denial_still_applies_in_the_real_binary() {
+    let scratch = user_denial_scratch();
+    let _ = std::fs::remove_dir_all(&scratch);
+    let denial = "<policymap>\n  <policy domain=\"coder\" rights=\"none\" pattern=\"PNG\" />\n</policymap>\n";
+    let home = scratch.join("home").join(".config").join("ImageMagick");
+    let xdg = scratch.join("xdg").join("ImageMagick");
+    for dir in [&home, &xdg] {
+        std::fs::create_dir_all(dir).expect("create the policy directory");
+        std::fs::write(dir.join("policy.xml"), denial).expect("write the denial");
+    }
+    for case in ["home", "xdg"] {
+        let output = {
+            let _env = crate::env_lock::lock_env();
+            let mut child = crate::own_process::child_command(
+                "image_magick_driver::hardening_a_user_dir_denial_still_applies_in_the_real_binary_child",
+            );
+            child.env("HARDENING_MAGICK_DENIAL", case);
+            match case {
+                "home" => child
+                    .env("HOME", scratch.join("home"))
+                    .env_remove("XDG_CONFIG_HOME"),
+                _ => child.env("XDG_CONFIG_HOME", scratch.join("xdg")),
+            };
+            child.output().expect("the child runs")
+        };
+        crate::own_process::assert_child_passed(&output);
+    }
+}
+
+/// Runs only in the child process the denial test starts, under an account
+/// policy that denies the PNG coder. The driver's policy check passes, as a
+/// denial never reopens what the framework denies, and the PNG run is
+/// refused by ImageMagick's security policy.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires a host ImageMagick 7 binary"]
+fn hardening_a_user_dir_denial_still_applies_in_the_real_binary_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let case = std::env::var("HARDENING_MAGICK_DENIAL").expect("the parent names the case");
+    let err = driver()
+        .dimensions(RED_PNG_1X1)
+        .expect_err("the account's denial of the PNG coder applies to the run")
+        .to_string();
+    assert!(
+        err.contains("security policy"),
+        "{case}: ImageMagick's security policy refuses the PNG read: {err}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 #[ignore = "requires a host ImageMagick 7 binary"]
@@ -466,7 +530,9 @@ fn hardening_a_host_grant_is_outranked_in_the_real_binary() {
                 // The same, marked stealth, so the listing does not show it.
                 "stealth" => child.env("XDG_CONFIG_HOME", scratch.join("stealth")),
                 // In the account's own `~/.config/ImageMagick`, which the
-                // driver's `HOME` takes the place of.
+                // driver puts on the configure path before its own
+                // directory's last entry, since its `HOME` takes the
+                // account's place.
                 _ => child.env("HOME", scratch.join("home")),
             };
             child.output().expect("the child runs")
@@ -608,9 +674,11 @@ fn hardening_a_host_grant_is_outranked_in_the_real_binary_child() {
         // The stealth file holds no entry the listing shows, so it has no
         // `Path:` line of its own.
         "stealth" => {}
+        // The driver puts the account's own directory on the configure
+        // path, so its file is read, before the framework's, and outranked.
         "home" => assert!(
-            !named(scratch.join("home").join(".config").join("ImageMagick")),
-            "{case}: the account's own file is not read: {paths:?}"
+            named(scratch.join("home").join(".config").join("ImageMagick")),
+            "{case}: the account's own file is read before the framework's: {paths:?}"
         ),
         other => panic!("unknown case {other}"),
     }

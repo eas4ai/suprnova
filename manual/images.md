@@ -728,8 +728,9 @@ not autodetection is on. Before each run, the driver writes the policy as
 that the file holds exactly the framework's text, and writes it again
 when it does not. The driver then starts ImageMagick with `HOME` naming
 that directory, and with `MAGICK_CONFIGURE_PATH` naming the directory
-that holds the file first and last, around any value you set. The policy
-denies the following:
+that holds the file first and last, around any value you set and the
+service account's own ImageMagick directory (`$XDG_CONFIG_HOME/ImageMagick`,
+else `$HOME/.config/ImageMagick`). The policy denies the following:
 
 - The coders that fetch from the network: `URL`, `HTTP`, `HTTPS`, and
   `FTP`.
@@ -769,11 +770,12 @@ configuration directory, then `$XDG_CONFIG_HOME/ImageMagick`, then
 read wins. The driver's `HOME` is its policy directory, so Suprnova's
 denials outrank a grant in any other file, including an entry marked
 `stealth="true"`. Your own denials still apply. To add a policy of your
-own, put it in a directory on `MAGICK_CONFIGURE_PATH` or in
-`$XDG_CONFIG_HOME/ImageMagick`. A `policy.xml`, or any other ImageMagick
-configuration file, in the service account's own `~/.config/ImageMagick`
-doesn't apply to the driver's runs, because ImageMagick reads the
-driver's directory as `HOME`.
+own, put it in a directory on `MAGICK_CONFIGURE_PATH`, in
+`$XDG_CONFIG_HOME/ImageMagick`, or in the service account's own
+`~/.config/ImageMagick`: the driver puts that directory on
+`MAGICK_CONFIGURE_PATH` after your value, so a `policy.xml` or any other
+ImageMagick configuration file there applies to its runs as it did
+before, under Suprnova's policy.
 
 The driver checks that order on the binary it runs. Before the first run
 of each process, it starts the same binary as `magick -list policy`,
