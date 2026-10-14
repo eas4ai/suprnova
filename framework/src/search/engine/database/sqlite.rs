@@ -99,7 +99,7 @@ fn term(term: &ExpandedTerm, disable_typos: bool) -> String {
 }
 
 fn positive(settings: &IndexSettings, query: &ExpandedQuery) -> String {
-    let mut groups = query
+    let terms = query
         .terms
         .iter()
         .map(|item| {
@@ -124,6 +124,29 @@ fn positive(settings: &IndexSettings, query: &ExpandedQuery) -> String {
             format!("({})", fields.join(" OR "))
         })
         .collect::<Vec<_>>();
+    let optional = query
+        .terms
+        .iter()
+        .zip(&terms)
+        .filter(|(term, _)| !term.required)
+        .map(|(_, rendered)| rendered.as_str())
+        .collect::<Vec<_>>();
+    let mut groups = Vec::new();
+    if !optional.is_empty() {
+        groups.push(if optional.len() == 1 {
+            optional[0].to_owned()
+        } else {
+            format!("({})", optional.join(" OR "))
+        });
+    }
+    groups.extend(
+        query
+            .terms
+            .iter()
+            .zip(terms)
+            .filter(|(term, _)| term.required)
+            .map(|(_, rendered)| rendered),
+    );
     groups.extend(
         query
             .phrases
@@ -171,29 +194,29 @@ pub(super) fn predicate(
     })
 }
 
-/// Native relevance keeps attribute weights in the database ranking model.
-pub(super) fn score(
+/// Materialize native scores once instead of parsing the MATCH query for every row.
+pub(super) fn ranked_matches(
     table: &str,
     settings: &IndexSettings,
     query: &ExpandedQuery,
     sql: &mut Sql,
-) -> Result<String, FrameworkError> {
+) -> Result<Option<String>, FrameworkError> {
     let positive = positive(settings, query);
     if positive.is_empty() || settings.index_time.searchable_attributes.is_empty() {
-        return Ok("0.0".into());
+        return Ok(None);
     }
     let fts = sql.ident(&format!("{table}_fts"));
     let weights = settings
         .index_time
         .searchable_attributes
         .iter()
-        .map(|a| sql.bind(a.weight))
+        .map(|attribute| sql.bind(attribute.weight))
         .collect::<Vec<_>>()
         .join(", ");
     let value = sql.bind(positive);
-    Ok(format!(
-        "COALESCE((SELECT -bm25({fts}, {weights}) FROM {fts} WHERE rowid=s.rowid AND {fts} MATCH {value}), 0.0)"
-    ))
+    Ok(Some(format!(
+        "SELECT rowid, -bm25({fts}, {weights}) AS score FROM {fts} WHERE {fts} MATCH {value}"
+    )))
 }
 
 /// Native match markers let the caller escape source text before inserting trusted tags.
@@ -252,11 +275,26 @@ pub(super) fn snippet(
 mod tests {
     use super::*;
     #[test]
+    fn word_groups_are_optional_but_phrases_and_negatives_stay_required() {
+        let query = crate::search::expand(
+            &crate::search::QueryText::parse("apple pie -green \"fresh baked\""),
+            &crate::search::QuerySettings::default(),
+            &crate::search::Vocabulary::default(),
+            64,
+        )
+        .unwrap();
+        assert_eq!(
+            positive(&IndexSettings::default(), &query),
+            r#"(("apple") OR ("pie"*)) AND "fresh baked""#
+        );
+    }
+    #[test]
     fn sqlite_alternatives_keep_prefix_on_original() {
         let term = ExpandedTerm {
             original: "rust".into(),
             alternatives: vec!["rust".into(), "trust".into(), "rust language".into()],
             prefix: true,
+            required: false,
             typo_alternatives: vec!["trust".into()],
         };
         assert_eq!(

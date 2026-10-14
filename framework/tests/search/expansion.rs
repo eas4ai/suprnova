@@ -187,6 +187,7 @@ fn quoted_synonym_sources_remain_one_phrase_or_group_and_respect_direction() {
     assert!(expanded.phrases.is_empty());
     assert_eq!(expanded.terms[0].alternatives, ["new york", "nyc"]);
     assert!(!expanded.terms[0].prefix);
+    assert!(expanded.terms[0].required);
     let reverse = expand(
         &QueryText::parse("\"nyc\""),
         &settings,

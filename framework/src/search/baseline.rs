@@ -997,7 +997,7 @@ where
     ))
 }
 
-fn descriptor() -> IndexDescriptor {
+pub(super) fn descriptor() -> IndexDescriptor {
     IndexDescriptor {
         name: INDEX,
         model_table: INDEX,

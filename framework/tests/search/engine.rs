@@ -104,6 +104,7 @@ async fn typo_expansion_respects_attributes_that_disable_corrections()
                 original: "applf".into(),
                 alternatives: vec!["apple".into()],
                 prefix: false,
+                required: false,
                 typo_alternatives: vec!["apple".into()],
             }],
             phrases: vec![],
@@ -288,5 +289,74 @@ async fn expired_tombstones_do_not_reject_a_new_removal() -> Result<(), suprnova
         .await?;
     assert_eq!(outcome.written, 1);
     assert_eq!(outcome.skipped_older, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn word_disjunction_keeps_phrases_and_exclusions_required()
+-> Result<(), suprnova::FrameworkError> {
+    use std::collections::BTreeMap;
+    use suprnova::search::{
+        AttributeValue, EngineQuery, GenerationId, IndexedDocument, QueryText, SearchDocument,
+        expand,
+    };
+    let descriptor = typo_prefix_descriptor();
+    let engine = CollectionEngine::new();
+    let generation = GenerationId::default();
+    let settings = descriptor.index_settings();
+    engine
+        .create_generation(&descriptor, &settings, &generation)
+        .await?;
+    let documents = [
+        ("both", "apple pie fresh baked"),
+        ("one", "apple tart fresh baked"),
+        ("phrase", "tart crust fresh baked"),
+        ("reversed", "apple pie baked fresh"),
+        ("negative", "apple pie fresh baked green"),
+    ]
+    .into_iter()
+    .map(|(key, text)| {
+        let document = SearchDocument {
+            index: descriptor.name.into(),
+            key: key.into(),
+            source_version: 1,
+            attributes: BTreeMap::from([("body".into(), AttributeValue::Text(text.into()))]),
+            embed_text: None,
+            title: None,
+        };
+        IndexedDocument {
+            content_hash: document.content_hash(&settings.index_time.digest()),
+            document,
+            dense: None,
+            sparse: None,
+        }
+    })
+    .collect::<Vec<_>>();
+    engine.index(&descriptor, &generation, &documents).await?;
+    let vocabulary = engine.vocabulary(&descriptor, &generation).await?;
+    for (text, expected) in [
+        (r#"apple pie -green "fresh baked""#, vec!["both", "one"]),
+        (r#""fresh baked" -green"#, vec!["both", "one", "phrase"]),
+        ("-green", vec!["both", "one", "phrase", "reversed"]),
+    ] {
+        let q = EngineQuery {
+            expanded: expand(&QueryText::parse(text), &settings.query, &vocabulary, 64)?,
+            filter: None,
+            sort: vec![],
+            depth: 100,
+            highlights: false,
+            crop: Default::default(),
+        };
+        let result = engine.query(&descriptor, &generation, &q).await?;
+        assert_eq!(
+            result
+                .candidates
+                .iter()
+                .map(|hit| hit.document.key.as_str())
+                .collect::<Vec<_>>(),
+            expected,
+            "{text}"
+        );
+    }
     Ok(())
 }

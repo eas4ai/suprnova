@@ -59,14 +59,20 @@ fn term(term: &ExpandedTerm, disable_typos: bool) -> String {
     if alternatives.is_empty() {
         alternatives.push(literal(&term.original, term.prefix));
     }
-    format!("+({})", alternatives.join(" "))
+    format!("({})", alternatives.join(" "))
 }
 
 fn render(query: &ExpandedQuery, disable_typos: bool) -> String {
     let mut groups = query
         .terms
         .iter()
-        .map(|item| term(item, disable_typos))
+        .map(|item| {
+            format!(
+                "{}{}",
+                if item.required { "+" } else { "" },
+                term(item, disable_typos)
+            )
+        })
         .collect::<Vec<_>>();
     groups.extend(
         query
@@ -106,6 +112,23 @@ fn matches(columns: &[String], query: String, sql: &mut Sql) -> String {
     )
 }
 
+fn native_predicate(query: &ExpandedQuery, columns: &[String], sql: &mut Sql) -> String {
+    let native = format!("({}) > 0", matches(columns, render(query, false), sql));
+    let optional = query
+        .terms
+        .iter()
+        .filter(|item| !item.required)
+        .map(|item| term(item, false))
+        .collect::<Vec<_>>();
+    if !optional.is_empty()
+        && (!query.phrases.is_empty() || query.terms.iter().any(|item| item.required))
+    {
+        let words = matches(columns, optional.join(" "), sql);
+        return format!("({native}) AND (({words}) > 0)");
+    }
+    native
+}
+
 /// Bound lexical clauses preserve shared expansion and exclusion semantics.
 pub(super) fn predicate(
     _table: &str,
@@ -128,13 +151,9 @@ pub(super) fn predicate(
     }
     let has_positive = !query.terms.is_empty() || !query.phrases.is_empty();
     if has_positive && query.typo_disabled_attributes.is_empty() {
-        return Ok(format!(
-            "({}) > 0",
-            matches(&columns, render(query, false), sql)
-        ));
+        return Ok(native_predicate(query, &columns, sql));
     }
-    let mut clauses = Vec::new();
-    for item in &query.terms {
+    let mut clauses = super::word_predicates(query, |item| {
         let alternatives = attributes
             .iter()
             .map(|attribute| {
@@ -152,8 +171,8 @@ pub(super) fn predicate(
                 )
             })
             .collect::<Vec<_>>();
-        clauses.push(format!("({})", alternatives.join(" OR ")));
-    }
+        Ok(format!("({})", alternatives.join(" OR ")))
+    })?;
     for phrase in &query.phrases {
         clauses.push(format!(
             "({}) > 0",
@@ -213,25 +232,29 @@ pub(super) fn score(
 mod tests {
     use super::*;
     #[test]
-    fn mysql_boolean_groups_keep_required_synonyms_prefixes_and_exclusions() {
-        let query = ExpandedQuery {
-            terms: vec![ExpandedTerm {
-                original: "rust".into(),
-                alternatives: vec!["rust".into(), "trust".into(), "rust language".into()],
-                prefix: true,
-                typo_alternatives: vec!["trust".into()],
-            }],
-            phrases: vec![vec!["database".into(), "engine".into()]],
-            negatives: vec!["slow".into()],
-            ..ExpandedQuery::default()
-        };
+    fn word_groups_are_optional_but_phrases_and_negatives_stay_required() {
+        let query = crate::search::expand(
+            &crate::search::QueryText::parse("apple pie -green \"fresh baked\""),
+            &crate::search::QuerySettings::default(),
+            &crate::search::Vocabulary::default(),
+            64,
+        )
+        .unwrap();
         assert_eq!(
             render(&query, false),
-            "+(rust* \"trust\" \"rust language\") +\"database engine\" -\"slow\""
+            r#"("apple") (pie*) +"fresh baked" -"green""#
+        );
+    }
+    #[test]
+    fn mysql_boolean_groups_keep_optional_synonyms_prefixes_and_required_phrases() {
+        let query = super::super::expansion_fixture();
+        assert_eq!(
+            render(&query, false),
+            "(rust* \"trust\" \"rust language\") +\"database engine\" -\"slow\""
         );
         assert_eq!(
             render(&query, true),
-            "+(rust* \"rust language\") +\"database engine\" -\"slow\""
+            "(rust* \"rust language\") +\"database engine\" -\"slow\""
         );
     }
     #[test]
