@@ -1,7 +1,14 @@
-//! Console commands resolve declared indexes before invoking the generation coordinator.
+//! Console commands: the index and generation commands resolve declared indexes before
+//! invoking the generation coordinator; the baseline command measures relevance and latency.
 
-use super::{generations, registry::SearchRegistry};
-use crate::FrameworkError;
+use super::{
+    CollectionEngine, DatabaseSearchEngine, QdrantSearchEngine, SearchConfig, SearchEmbedder,
+    baseline::{Baseline, BaselineFloors, Calibration, Fixture, fixture_directory},
+    generations,
+    registry::SearchRegistry,
+};
+use crate::{DB, DatabaseConfig, FrameworkError};
+use std::path::PathBuf;
 use suprnova_macros::command;
 
 fn parse_args(
@@ -139,4 +146,194 @@ async fn status(args: Vec<String>) -> Result<(), FrameworkError> {
         generations::status(index, prune).await?;
     }
     Ok(())
+}
+
+#[suprnova_macros::command(
+    name = "search:baseline",
+    description = "Calibrate rival relevance floors or run warm engine baselines"
+)]
+async fn search_baseline(args: Vec<String>) -> Result<(), FrameworkError> {
+    let (action, engines) = arguments(&args)?;
+    let directory = fixture_directory();
+    if action == "calibrate" {
+        let services = Calibration::from_env()?;
+        let tolerance = std::env::var("SEARCH_BASELINE_TOLERANCE").map_or(Ok(0.05), |s| {
+            s.parse::<f64>()
+                .map_err(|_| FrameworkError::param("SEARCH_BASELINE_TOLERANCE: requires a number"))
+        })?;
+        let fixture = Fixture::load(&directory)?;
+        let floors = BaselineFloors::load(directory.join("baseline.json"))?;
+        let calibrated = services.run(&fixture, &floors, tolerance).await?;
+        calibrated.write(directory.join("baseline.json"))?;
+        crate::console::line(
+            "Calibrated framework/tests/search/fixtures/baseline.json - review and commit the replacement floors.",
+        );
+        return Ok(());
+    }
+    let baseline = Baseline::load(directory)?;
+    let config = SearchConfig::current()?;
+    let embedder = if config.embedder == SearchEmbedder::None {
+        None
+    } else {
+        super::boot::boot().await?;
+        Some(SearchRegistry::embedder_named(
+            "search_baseline",
+            config.embedder.as_str(),
+        )?)
+    };
+    let allow = std::env::var("SEARCH_BASELINE_ALLOW_UNCALIBRATED").as_deref() == Ok("1");
+    let mut failures = Vec::new();
+    for engine in engines {
+        let result = if engine == "collection" {
+            baseline
+                .run(&engine, &CollectionEngine::new(), embedder.as_deref())
+                .await
+        } else {
+            run_persistent(&baseline, &engine, embedder.as_deref()).await
+        };
+        let record = result?;
+        let output = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../target/search-baseline/{engine}.json"));
+        record.write(output)?;
+        baseline.print(&record)?;
+        if let Err(error) = baseline.assert_record(&record, allow) {
+            failures.push(error.to_string());
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(FrameworkError::param(failures.join("; ")))
+    }
+}
+
+fn arguments(args: &[String]) -> Result<(String, Vec<String>), FrameworkError> {
+    let Some(action) = args
+        .first()
+        .filter(|a| matches!(a.as_str(), "run" | "calibrate"))
+    else {
+        return Err(FrameworkError::param(
+            "search:baseline requires calibrate or run [--engine collection|sqlite|postgres|mysql|qdrant]",
+        ));
+    };
+    if action == "calibrate" {
+        if args.len() != 1 {
+            return Err(FrameworkError::param(
+                "search:baseline calibrate takes no arguments",
+            ));
+        }
+        return Ok((action.clone(), vec![]));
+    }
+    let engine = match &args[1..] {
+        [] => None,
+        [flag, value] if flag == "--engine" => Some(value.as_str()),
+        [arg] => arg.strip_prefix("--engine="),
+        _ => {
+            return Err(FrameworkError::param(
+                "search:baseline run accepts one --engine option",
+            ));
+        }
+    };
+    if !args[1..].is_empty() && engine.is_none() {
+        return Err(FrameworkError::param(
+            "search:baseline run: invalid --engine option",
+        ));
+    }
+    let engines = match engine {
+        None => vec!["collection".into(), "sqlite".into()],
+        Some(engine)
+            if matches!(
+                engine,
+                "collection" | "sqlite" | "postgres" | "mysql" | "qdrant"
+            ) =>
+        {
+            vec![engine.into()]
+        }
+        Some(_) => {
+            return Err(FrameworkError::param(
+                "search:baseline --engine must be collection, sqlite, postgres, mysql or qdrant",
+            ));
+        }
+    };
+    Ok((action.clone(), engines))
+}
+async fn run_persistent(
+    baseline: &Baseline,
+    engine: &str,
+    embedder: Option<&dyn super::Embedder>,
+) -> Result<super::baseline::BaselineRecord, FrameworkError> {
+    let variable = match engine {
+        "sqlite" | "qdrant" => None,
+        "postgres" => Some("PG_TEST_URL"),
+        "mysql" => Some("MYSQL_TEST_URL"),
+        _ => {
+            return Err(FrameworkError::param(
+                "search baseline: invalid persistent engine",
+            ));
+        }
+    };
+    let url = variable
+        .map(crate::config::try_env_required::<String>)
+        .transpose()?
+        .unwrap_or_else(|| "sqlite::memory:".into());
+    if url.trim().is_empty() {
+        return Err(FrameworkError::param(format!(
+            "{}: requires a disposable baseline database URL",
+            variable.unwrap_or("DATABASE_URL")
+        )));
+    }
+    let name = format!("baseline_{}", uuid::Uuid::new_v4().simple());
+    DB::register_named(
+        &name,
+        DatabaseConfig::builder()
+            .url(url)
+            .min_connections(1)
+            .max_connections(1)
+            .idle_timeout(0)
+            .max_lifetime(0)
+            .logging(false)
+            .build(),
+    )
+    .await
+    .map_err(|_| {
+        FrameworkError::database(format!(
+            "search baseline {engine}: cannot connect to the disposable database"
+        ))
+    })?;
+    DB::with_default_connection(name, async {
+        let connection = DB::connection()?;
+        let backend = connection.get_database_backend();
+        if matches!(
+            (engine, backend),
+            (
+                "sqlite",
+                sea_orm::DbBackend::Postgres | sea_orm::DbBackend::MySql
+            ) | (
+                "postgres",
+                sea_orm::DbBackend::Sqlite | sea_orm::DbBackend::MySql
+            ) | (
+                "mysql",
+                sea_orm::DbBackend::Sqlite | sea_orm::DbBackend::Postgres
+            )
+        ) {
+            return Err(FrameworkError::param(format!(
+                "search baseline {engine}: database URL selects the wrong engine"
+            )));
+        }
+        let manager = sea_orm_migration::SchemaManager::new(connection.inner());
+        for migration in super::migrations() {
+            migration.up(&manager).await.map_err(|e| {
+                FrameworkError::database(format!("search baseline migrations: {e}"))
+            })?;
+        }
+        if engine == "qdrant" {
+            let driver = QdrantSearchEngine::from_env()?;
+            baseline.run(engine, &driver, embedder).await
+        } else {
+            baseline
+                .run(engine, &DatabaseSearchEngine::new(), embedder)
+                .await
+        }
+    })
+    .await
 }

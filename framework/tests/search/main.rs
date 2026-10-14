@@ -1,5 +1,7 @@
 //! Search core behavior and driver conformance share one integration binary.
 #[cfg(feature = "testing")]
+mod baseline;
+#[cfg(feature = "testing")]
 mod builder;
 #[cfg(feature = "testing")]
 mod commands;
