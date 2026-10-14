@@ -22,3 +22,8 @@ mod highlight;
 #[cfg(feature = "testing")]
 mod indexing;
 mod query;
+
+#[cfg(feature = "search-fastembed")]
+mod embedder_fastembed;
+mod embedder_http;
+mod embedder_http_openrouter;

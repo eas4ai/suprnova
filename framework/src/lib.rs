@@ -634,17 +634,23 @@ pub use search::{
     DocumentLoader, EmbedInput, EmbedSource, Embedder, Embedding, EngineCandidate,
     EngineCapabilities, EngineQuery, EngineResult, ExpandedQuery, ExpandedTerm, FacetDistribution,
     FacetOrder, FacetRange, FacetStats, FacetValue, FakeEmbedder, FederatedBuilder, FederatedHit,
-    FederatedRank, FederatedResults, Filter, GenerationId, GeoPoint, GroupBy, Hit, IndexDescriptor,
-    IndexOperation, IndexSettings, IndexTimeSettings, IndexedDocument, InputKinds, LanguageConfig,
-    MediaPart, ModelFiles, ModelProfile, NullEngine, Pooling, Precision, QuerySettings, QueryText,
-    RawHit, Rerank, Reranker, Search, SearchBuilder, SearchConfig, SearchDocument, SearchDriver,
-    SearchEmbedder, SearchEngine, SearchFilter, SearchIndexJob, SearchPagination, SearchQuery,
-    SearchRegistry, SearchResults, Searchable, SearchableDecl, SearchableEntry, SettingsChange,
-    Sort, SortDirection, SparseEmbedding, Synonym, Total, TypoTolerance, Viewer, Vocabulary,
+    FederatedRank, FederatedResults, Filter, GenerationId, GeoPoint, GroupBy, Hit, HttpEmbedder,
+    HttpEmbedderConfig, IndexDescriptor, IndexOperation, IndexSettings, IndexTimeSettings,
+    IndexedDocument, InputKinds, LanguageConfig, MediaPart, ModelFiles, ModelProfile,
+    ModelProvenance, NullEngine, Pooling, Precision, QuerySettings, QueryText, RawHit, Rerank,
+    Reranker, Search, SearchBuilder, SearchConfig, SearchDocument, SearchDriver, SearchEmbedder,
+    SearchEngine, SearchFilter, SearchIndexJob, SearchPagination, SearchQuery, SearchRegistry,
+    SearchResults, Searchable, SearchableDecl, SearchableEntry, SettingsChange, Sort,
+    SortDirection, SparseEmbedding, Synonym, Total, TypoTolerance, Viewer, Vocabulary,
     WeightedAttribute, WriteKind, WriteOutcome, after_model_write, apply_scope, default_profile,
     embedding_profile, embedding_profile_names, evaluate_scope, expand, federated_rrf, highlight,
     make_all_searchable, normalize, paginate, remove_all_from_search, searchable, tokenize,
     unsearchable, validate_embedding, validate_tags, weighted_rrf, without_syncing_to_search,
+};
+#[cfg(feature = "search-fastembed")]
+pub use search::{
+    FastembedConfig, FastembedEmbedder, FastembedReranker, ManifestFile, ModelManifest,
+    ModelSource, precision_files,
 };
 #[cfg(feature = "vector-pinecone")]
 pub use vector::PineconeVectorDriver;

@@ -4,6 +4,8 @@
 //! without external services. Database search resolves on the application connection;
 //! applications register external drivers at bootstrap.
 
+/// Bootstrap pins model configuration before indexing or retrieval begins.
+pub mod boot;
 pub mod builder;
 pub mod config;
 pub mod document;
@@ -26,12 +28,18 @@ pub use builder::{FederatedBuilder, SearchBuilder, SearchFilter};
 pub use config::{SearchConfig, SearchDriver, SearchEmbedder};
 pub use document::{AttributeType, AttributeValue, GeoPoint, SearchDocument};
 pub use embedder::fake::FakeEmbedder;
+#[cfg(feature = "search-fastembed")]
+pub use embedder::fastembed::{
+    FastembedConfig, FastembedEmbedder, FastembedReranker, ManifestFile, ModelManifest,
+    ModelSource, precision_files,
+};
+pub use embedder::http::{HttpEmbedder, HttpEmbedderConfig};
 pub use embedder::profiles::{
     default_profile, names as embedding_profile_names, profile as embedding_profile,
 };
 pub use embedder::{
-    EmbedInput, Embedder, Embedding, InputKinds, MediaPart, ModelFiles, ModelProfile, Pooling,
-    Precision, SparseEmbedding, validate_embedding,
+    EmbedInput, Embedder, Embedding, InputKinds, MediaPart, ModelFiles, ModelProfile,
+    ModelProvenance, Pooling, Precision, SparseEmbedding, validate_embedding,
 };
 pub use engine::collection::CollectionEngine;
 pub use engine::database::DatabaseSearchEngine;
@@ -146,6 +154,11 @@ where
 pub struct Search;
 
 impl Search {
+    /// Install the deployment embedder once so model call sites never construct providers.
+    pub async fn boot() -> Result<(), FrameworkError> {
+        boot::boot().await
+    }
+
     /// Index names are validated when the terminal method runs, including duplicates.
     pub fn federated(indexes: impl IntoIterator<Item = impl Into<String>>) -> FederatedBuilder {
         FederatedBuilder::new(indexes.into_iter().map(Into::into).collect())

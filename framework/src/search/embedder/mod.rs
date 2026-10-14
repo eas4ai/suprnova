@@ -7,8 +7,19 @@ use std::collections::BTreeMap;
 
 /// A deterministic provider makes semantic pipeline tests independent of inference services.
 pub mod fake;
+/// ONNX inference and pinned artifacts remain optional for lexical and HTTP deployments.
+#[cfg(feature = "search-fastembed")]
+pub mod fastembed;
+#[cfg(feature = "search-fastembed")]
+mod fastembed_rerank;
+/// Deployment-owned OpenAI-compatible inference keeps credentials off request-controlled URLs.
+pub mod http;
+#[cfg(feature = "search-fastembed")]
+mod model_cache;
 /// Named profiles encode each model's preparation and inference conventions.
 pub mod profiles;
+#[cfg(feature = "search-fastembed")]
+mod text_graph;
 
 /// Pooling is explicit because token outputs alone do not identify a sentence embedding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +86,9 @@ pub struct ModelFiles {
     pub special_tokens_map: String,
     /// Providers populate sha256 hex digests after resolving a revision.
     pub sha256: BTreeMap<String, String>,
+    /// The persisted manifest digest binds the artifact set to generation provenance.
+    #[serde(default)]
+    pub manifest_sha256: Option<String>,
 }
 
 impl Default for ModelFiles {
@@ -87,6 +101,7 @@ impl Default for ModelFiles {
             tokenizer_config: "tokenizer_config.json".into(),
             special_tokens_map: "special_tokens_map.json".into(),
             sha256: BTreeMap::new(),
+            manifest_sha256: None,
         }
     }
 }
@@ -98,7 +113,7 @@ pub struct ModelProfile {
     pub id: String,
     /// Providers pin this revision on first resolution and persist it with generations.
     pub revision: Option<String>,
-    /// Native dimensions are validated before any supported truncation.
+    /// Dimensions identify stored vectors; providers retain a native profile before truncation.
     pub dimensions: usize,
     /// Providers truncate with their actual tokenizer, counting prefixes and special tokens.
     pub max_tokens: usize,
@@ -122,7 +137,50 @@ pub struct ModelProfile {
     pub files: ModelFiles,
 }
 
+/// Generations can retain inference provenance without depending on a provider's cache layout.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelProvenance {
+    /// The model identifies the intended embedding space.
+    pub id: String,
+    /// A resolved revision prevents a moving repository reference from changing an index silently.
+    pub revision: Option<String>,
+    /// A manifest digest identifies the exact cached artifact set.
+    pub manifest_sha256: Option<String>,
+    /// Individual hashes make artifact identity inspectable across providers.
+    pub files: BTreeMap<String, String>,
+}
+
 impl ModelProfile {
+    /// Return validated provenance for storage alongside a generation's settings.
+    pub fn provenance(&self) -> Result<ModelProvenance, FrameworkError> {
+        self.validate()?;
+        Ok(ModelProvenance {
+            id: self.id.clone(),
+            revision: self.revision.clone(),
+            manifest_sha256: self.files.manifest_sha256.clone(),
+            files: self.files.sha256.clone(),
+        })
+    }
+
+    /// Expose stored dimensions after a provider-wide Matryoshka choice so core validation agrees.
+    pub fn with_dimensions(&self, dimensions: Option<usize>) -> Result<Self, FrameworkError> {
+        self.validate()?;
+        let target = dimensions.unwrap_or(self.dimensions);
+        if target != self.dimensions && !self.truncation_dims.contains(&target) {
+            return Err(FrameworkError::param(format!(
+                "SEARCH_EMBED_DIMENSIONS unsupported {target} for {}",
+                self.id
+            )));
+        }
+        let mut profile = self.clone();
+        profile.dimensions = target;
+        profile.normalize |= target != self.dimensions;
+        profile
+            .truncation_dims
+            .retain(|dimension| *dimension < target);
+        Ok(profile)
+    }
+
     /// Reject malformed profiles before inference or generation creation.
     pub fn validate(&self) -> Result<(), FrameworkError> {
         if self.id.trim().is_empty() || self.dimensions == 0 || self.max_tokens == 0 {

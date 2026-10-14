@@ -464,6 +464,8 @@ impl Server {
         // no silent downgrade. See `Cache::bootstrap` for the contract.
         Cache::bootstrap().await?;
 
+        crate::search::boot::boot().await?;
+
         // Prove the Live instance ledger's backend is there, on the same
         // fail-closed terms: a distributed ledger driver whose tables are
         // missing or whose Redis answers nothing must stop the boot rather
