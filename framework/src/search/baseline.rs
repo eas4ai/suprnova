@@ -19,9 +19,35 @@ use std::{
 
 const INDEX: &str = "search_baseline";
 const HYBRID_RATIO: f32 = 0.5;
-const LATENCY_SCOPE: &str = "warm engine query: parsing, expansion, retrieval, query inference and fusion; fixed vocabulary; no hydration";
+const LATENCY_SCOPE: &str = "warm engine query: parsing, expansion, retrieval and fusion; query inference timed separately; fixed vocabulary; no hydration";
 const MAX_FIXTURE_BYTES: usize = 10_000_000;
 static DATABASE_VECTORS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Rival release binaries require comparable optimized engine measurements.
+/// The gate runs the baseline tests under `--cargo-profile release` for the budget.
+pub fn optimized_build() -> bool {
+    !cfg!(debug_assertions)
+}
+
+/// Relevance floors apply in every build; latency budgets require comparable builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetCheck {
+    /// Fail when the engine's p95 exceeds the committed budget.
+    Enforce,
+    /// Validate and report timing without enforcing the budget in an unoptimized build.
+    Report,
+}
+impl BudgetCheck {
+    /// The gate uses `--cargo-profile release` to compare with rival release binaries.
+    /// Development builds report timing while still checking relevance floors.
+    pub fn for_build() -> Self {
+        if optimized_build() {
+            Self::Enforce
+        } else {
+            Self::Report
+        }
+    }
+}
 
 /// Corpus projections are identical for framework and rival indexes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,13 +290,25 @@ impl Latency {
             p99_ms: percentile(99),
         })
     }
+    fn validate(&self) -> Result<(), FrameworkError> {
+        if !self.p50_ms.is_finite()
+            || !self.p95_ms.is_finite()
+            || !self.p99_ms.is_finite()
+            || self.p50_ms < 0.0
+            || self.p50_ms > self.p95_ms
+            || self.p95_ms > self.p99_ms
+        {
+            return Err(FrameworkError::param("search baseline: invalid latency"));
+        }
+        Ok(())
+    }
 }
 /// Quality and timing share the same measured pass after a full warm-up pass.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Measurement {
     /// Macro average over every judged fixture query.
     pub ndcg_at_10: f64,
-    /// One sample per query, including expansion and hybrid inference.
+    /// One engine sample per query, including expansion but excluding query inference.
     pub latency: Latency,
     /// Sample count makes accidental query omissions visible.
     pub queries: usize,
@@ -280,18 +318,12 @@ impl Measurement {
         if self.queries == 0
             || !self.ndcg_at_10.is_finite()
             || !(0.0..=1.0).contains(&self.ndcg_at_10)
-            || !self.latency.p50_ms.is_finite()
-            || !self.latency.p95_ms.is_finite()
-            || !self.latency.p99_ms.is_finite()
-            || self.latency.p50_ms < 0.0
-            || self.latency.p50_ms > self.latency.p95_ms
-            || self.latency.p95_ms > self.latency.p99_ms
         {
             return Err(FrameworkError::param(
                 "search baseline.json: invalid measurement",
             ));
         }
-        Ok(())
+        self.latency.validate()
     }
 }
 /// Unavailable rival measurements are null, never guessed scores or versions.
@@ -310,7 +342,7 @@ pub struct Rivals {
     /// Typesense uses query_by=title,text.
     pub typesense: Rival,
 }
-/// Calibration changes relevance floors while preserving committed local engine budgets.
+/// Calibration derives relevance floors and engine budgets from the same rival pass.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaselineFloors {
     /// False closes the normal gate until the developer runs calibration.
@@ -377,6 +409,16 @@ impl BaselineFloors {
                     })?
                     .validate()?;
             }
+            let derived = self.rival_budget()?;
+            if self
+                .p95_budgets_ms
+                .values()
+                .any(|budget| (*budget - derived).abs() / derived > 1e-9)
+            {
+                return Err(FrameworkError::param(
+                    "search baseline.json: p95 budgets must be two times the slower rival's p95",
+                ));
+            }
             if self
                 .calibrated_at
                 .as_ref()
@@ -412,6 +454,20 @@ impl BaselineFloors {
         };
         Ok(score(&self.rivals.meilisearch)?.max(score(&self.rivals.typesense)?))
     }
+    fn rival_budget(&self) -> Result<f64, FrameworkError> {
+        let p95 = |r: &Rival| {
+            r.lexical.as_ref().map(|m| m.latency.p95_ms).ok_or_else(|| {
+                FrameworkError::param("search baseline.json: rival measurement is absent")
+            })
+        };
+        let budget = 2.0 * p95(&self.rivals.meilisearch)?.max(p95(&self.rivals.typesense)?);
+        if !budget.is_finite() || budget <= 0.0 {
+            return Err(FrameworkError::param(
+                "search baseline.json: rival-derived p95 budget must be finite and positive",
+            ));
+        }
+        Ok(budget)
+    }
 }
 
 /// Every run keeps enough identity to compare results without relying on console logs.
@@ -441,6 +497,8 @@ pub struct BaselineRecord {
     pub lexical: Measurement,
     /// Real-provider hybrid ranking and latency, absent for lexical-only runs.
     pub hybrid: Option<Measurement>,
+    /// The model's warm query inference cost is separate from the engine's budget.
+    pub query_inference: Option<Latency>,
     /// Explicit benchmark default avoids mislabeling the core lexical ratio as hybrid.
     pub hybrid_ratio: f32,
 }
@@ -652,6 +710,20 @@ impl Baseline {
         let vocabulary_prepare_ms = prepare_started.elapsed().as_secs_f64() * 1000.0;
         let vocabulary = vocabulary.as_ref();
         let run = |query: FixtureQuery, hybrid: bool| async move {
+            let (vector, query_inference_ms) = if let Some(provider) = embedder.filter(|_| hybrid) {
+                let start = Instant::now();
+                let vector = provider.embed_query(&query.text).await?;
+                let inference_ms = start.elapsed().as_secs_f64() * 1000.0;
+                let vector = validate_embedding(
+                    vector.dense,
+                    provider.profile(),
+                    settings.index_time.dimensions,
+                )?;
+                (Some(vector), Some(inference_ms))
+            } else {
+                (None, None)
+            };
+            let start = Instant::now();
             let expanded = expand(
                 &QueryText::parse(&query.text),
                 &settings.query,
@@ -677,15 +749,16 @@ impl Baseline {
                     .map(|c| c.document.key)
                     .collect::<Vec<_>>()
             };
-            let Some(provider) = embedder.filter(|_| hybrid) else {
-                return Ok(keys(lexical));
+            let finish = |keys| {
+                Ok(QuerySample {
+                    keys,
+                    engine_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    query_inference_ms,
+                })
             };
-            let vector = provider.embed_query(&query.text).await?;
-            let vector = validate_embedding(
-                vector.dense,
-                provider.profile(),
-                settings.index_time.dimensions,
-            )?;
+            let Some(vector) = vector else {
+                return finish(keys(lexical));
+            };
             if let Some(mut native) = driver
                 .hybrid(index, generation, &plan, &vector.dense, HYBRID_RATIO)
                 .await?
@@ -697,7 +770,7 @@ impl Baseline {
                         &plan.expanded.negatives,
                     )
                 });
-                return Ok(keys(native));
+                return finish(keys(native));
             }
             let mut semantic = driver
                 .semantic(
@@ -711,19 +784,22 @@ impl Baseline {
             semantic.candidates.retain(|c| {
                 !super::builder::matches_negative(&c.document, settings, &plan.expanded.negatives)
             });
-            Ok(weighted_rrf(&[
-                (1.0 - f64::from(HYBRID_RATIO), keys(lexical)),
-                (f64::from(HYBRID_RATIO), keys(semantic)),
-            ])
-            .into_iter()
-            .map(|(key, _)| key)
-            .collect())
+            finish(
+                weighted_rrf(&[
+                    (1.0 - f64::from(HYBRID_RATIO), keys(lexical)),
+                    (f64::from(HYBRID_RATIO), keys(semantic)),
+                ])
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect(),
+            )
         };
-        let lexical = measure(&self.fixture, |q| run(q, false)).await?;
-        let hybrid = if embedder.is_some() {
-            Some(measure(&self.fixture, |q| run(q, true)).await?)
+        let (lexical, _) = measure_queries(&self.fixture, |q| run(q, false)).await?;
+        let (hybrid, query_inference) = if embedder.is_some() {
+            let (measurement, inference) = measure_queries(&self.fixture, |q| run(q, true)).await?;
+            (Some(measurement), inference)
         } else {
-            None
+            (None, None)
         };
         Ok(BaselineRecord {
             engine: engine.into(),
@@ -738,14 +814,17 @@ impl Baseline {
             vocabulary_prepare_ms,
             lexical,
             hybrid,
+            query_inference,
             hybrid_ratio: HYBRID_RATIO,
         })
     }
-    /// Apply the stronger rival's floor and the committed per-engine latency ceiling.
+    /// Apply relevance floors in every build and the engine budget when requested.
+    /// The gate uses `--cargo-profile release` for latency comparisons with rival binaries.
     pub fn assert_record(
         &self,
         record: &BaselineRecord,
         allow_uncalibrated: bool,
+        budget_check: BudgetCheck,
     ) -> Result<(), FrameworkError> {
         self.floors.require_calibrated(allow_uncalibrated)?;
         if record.latency_scope != self.floors.latency_scope
@@ -778,6 +857,14 @@ impl Baseline {
                 "search baseline hybrid record requires its model profile, provenance and benchmark ratio",
             ));
         }
+        if record.hybrid.is_some() != record.query_inference.is_some() {
+            return Err(FrameworkError::param(
+                "search baseline query_inference is required only for hybrid records",
+            ));
+        }
+        if let Some(inference) = &record.query_inference {
+            inference.validate()?;
+        }
         let budget = self
             .floors
             .p95_budgets_ms
@@ -801,7 +888,12 @@ impl Baseline {
                     "search baseline record query count differs",
                 ));
             }
-            if measurement.latency.p95_ms > *budget {
+            if budget_check == BudgetCheck::Report {
+                crate::console::line(format!(
+                    "search baseline {} {mode}: Report p95 {:.3} ms, budget {budget:.3} ms; budget not enforced: BudgetCheck::Report selected; comparable rival latency requires an optimized build",
+                    record.engine, measurement.latency.p95_ms
+                ));
+            } else if measurement.latency.p95_ms > *budget {
                 return Err(FrameworkError::param(format!(
                     "search baseline {} {mode} p95 {:.3} ms exceeds {budget:.3} ms",
                     record.engine, measurement.latency.p95_ms
@@ -833,32 +925,78 @@ impl Baseline {
     }
 }
 
+struct QuerySample {
+    keys: Vec<String>,
+    engine_ms: f64,
+    query_inference_ms: Option<f64>,
+}
+
 async fn measure<F, Fut>(fixture: &Fixture, mut query: F) -> Result<Measurement, FrameworkError>
 where
     F: FnMut(FixtureQuery) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<String>, FrameworkError>>,
 {
+    let (measurement, _) = measure_queries(fixture, |q| {
+        let start = Instant::now();
+        let result = query(q);
+        async move {
+            let keys = result.await?;
+            Ok(QuerySample {
+                keys,
+                engine_ms: start.elapsed().as_secs_f64() * 1000.0,
+                query_inference_ms: None,
+            })
+        }
+    })
+    .await?;
+    Ok(measurement)
+}
+
+async fn measure_queries<F, Fut>(
+    fixture: &Fixture,
+    mut query: F,
+) -> Result<(Measurement, Option<Latency>), FrameworkError>
+where
+    F: FnMut(FixtureQuery) -> Fut,
+    Fut: std::future::Future<Output = Result<QuerySample, FrameworkError>>,
+{
     for q in &fixture.queries {
         query(q.clone()).await?;
     }
     let mut samples = Vec::with_capacity(fixture.queries.len());
+    let mut inference = Vec::with_capacity(fixture.queries.len());
     let mut score = 0.0;
     for q in &fixture.queries {
-        let start = Instant::now();
-        let keys = query(q.clone()).await?;
-        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        let sample = query(q.clone()).await?;
+        samples.push(sample.engine_ms);
+        if let Some(ms) = sample.query_inference_ms {
+            inference.push(ms);
+        }
         let judgments = fixture
             .qrels
             .get(&q.id)
             .ok_or_else(|| FrameworkError::param("search baseline qrels.tsv: missing query"))?;
-        score += ndcg_at_10(&keys, judgments)?;
+        score += ndcg_at_10(&sample.keys, judgments)?;
     }
-    Ok(Measurement {
-        ndcg_at_10: score / fixture.queries.len() as f64,
-        latency: Latency::from_samples(&samples)?,
-        queries: fixture.queries.len(),
-    })
+    let query_inference = if inference.is_empty() {
+        None
+    } else if inference.len() == fixture.queries.len() {
+        Some(Latency::from_samples(&inference)?)
+    } else {
+        return Err(FrameworkError::param(
+            "search baseline: incomplete query inference samples",
+        ));
+    };
+    Ok((
+        Measurement {
+            ndcg_at_10: score / fixture.queries.len() as f64,
+            latency: Latency::from_samples(&samples)?,
+            queries: fixture.queries.len(),
+        },
+        query_inference,
+    ))
 }
+
 fn descriptor() -> IndexDescriptor {
     IndexDescriptor {
         name: INDEX,

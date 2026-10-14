@@ -20,8 +20,8 @@
     "mysql": 30000,
     "qdrant": 2000
   },
-  "budget_comment": "Measured 2026-10-14 on this shared machine with unoptimized dev/test builds, full SciFact, and cached EmbeddingGemma-2 fp32. Local budgets are twice the largest lexical or hybrid p95 across completed test and console trials, rounded up to whole seconds: collection 5658.024 ms, sqlite 601.174 ms, qdrant 670.860 ms. Corpus inference used SEARCH_EMBED_BATCH=8 and is outside query timing. Postgres and MySQL retain unmeasured provisional 30000 ms estimates because PG_TEST_URL and MYSQL_TEST_URL were unset; measure and replace those limits before relying on them. Rival relevance calibration has not run.",
+  "budget_comment": "Provisional p95 budgets in milliseconds; rival calibration has not run. search:baseline calibrate replaces these numbers with two times the slower rival's p95, measured with the rivals' nDCG@10 after a full warm-up pass.",
   "calibrated_at": null,
   "tree_hash": null,
-  "latency_scope": "warm engine query: parsing, expansion, retrieval, query inference and fusion; fixed vocabulary; no hydration"
+  "latency_scope": "warm engine query: parsing, expansion, retrieval and fusion; query inference timed separately; fixed vocabulary; no hydration"
 }
