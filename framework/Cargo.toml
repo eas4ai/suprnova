@@ -208,6 +208,8 @@ percent-encoding = "2.3.2"
 # Transliterates the ASCII `filename` fallback of `Content-Disposition`, the
 # way Laravel's `Str::ascii` does. Already in the build through `fake`.
 deunicode = "1.6.2"
+strsim = "0.11"
+unicode-segmentation = "1"
 httpdate = "1.0.3"
 argon2 = "0.5.3"
 md-5 = "0.11.0"
@@ -634,3 +636,7 @@ path = "tests/live/assets.rs"
 [[test]]
 name = "live_async_backpressure"
 path = "tests/live/async_backpressure.rs"
+
+[[test]]
+name = "search"
+path = "tests/search/main.rs"
