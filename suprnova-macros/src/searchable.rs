@@ -519,6 +519,9 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
 
         ::suprnova::inventory::submit! {
             ::suprnova::search::SearchableEntry {
+                search: |plan, grammar, viewer| ::std::boxed::Box::pin(
+                    ::suprnova::search::builder::search_projected::<#model>(plan, grammar, viewer)
+                ),
                 type_id: || ::std::any::TypeId::of::<#model>(),
                 model_name: || ::std::any::type_name::<#model>(),
                 connection: <#model as ::suprnova::eloquent::EloquentModel>::default_connection_name,

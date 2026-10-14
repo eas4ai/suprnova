@@ -213,6 +213,12 @@ async fn scaffold_notes_on_laravels_users(engine: Engine) {
     }
     let _bound = support::bind(&db.conn);
 
+    // Fresh kits provision their notes index at boot before scoped writes.
+    Note::initialize_search()
+        .await
+        .expect("initialize scaffold notes search");
+    suprnova::Queue::set_driver(std::sync::Arc::new(suprnova::SyncQueueDriver::new()));
+
     for (user_id, title) in [(1u64, "Taylor's note"), (2u64, "Abigail's note")] {
         <Note as Model>::create(attrs! {
             user_id: user_id,

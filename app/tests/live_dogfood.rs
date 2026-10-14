@@ -1499,3 +1499,221 @@ async fn the_upload_widget_drives_the_shipped_protocol_and_finalizes_through_the
         "the view counts the finalized attachment: {reply}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_box_mounts_the_scoped_library_island_with_bounded_native_input() {
+    let app = setup_app(3).await;
+    let session = seed_session(&app).await;
+    let reply = get(&app, "/live/search", Some(&session)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let html = reply.text();
+    for needle in [
+        "sn-search-box",
+        "role=\"combobox\"",
+        "role=\"listbox\"",
+        "aria-expanded=\"false\"",
+        "live:model.debounce.250ms=\"query\"",
+        "data-sn-sequence=\"0\"",
+        "live:click=\"select\"",
+        "suprnova.search-box",
+        "/suprnova-ui/search-box/search-box.js",
+        "/suprnova-ui/search-box/search-box.css",
+    ] {
+        assert!(html.contains(needle), "missing {needle} in {html}");
+    }
+    assert_eq!(html.matches("data-suprnova-live-island").count(), 2);
+    let controls: Vec<_> = html
+        .split("<input")
+        .filter(|tag| tag.contains("role=\"combobox\""))
+        .map(|tag| (attribute(tag, "id"), attribute(tag, "aria-controls")))
+        .collect();
+    assert_eq!(
+        controls.len(),
+        2,
+        "two mounted native combobox inputs: {html}"
+    );
+    assert_ne!(
+        controls[0].0, controls[1].0,
+        "each mount owns a unique control identity"
+    );
+    for (id, listbox) in controls {
+        assert_eq!(listbox, format!("{id}-listbox"));
+        assert!(html.contains(&format!("id=\"{listbox}\" role=\"listbox\"")));
+        assert!(html.contains(&format!("for=\"{id}\"")));
+    }
+    assert!(!html.contains(" style="));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_box_accepts_hidden_string_model_proposals_and_emits_the_selected_key() {
+    use app::live::search_notes::SearchNote;
+    use suprnova::{Model, Searchable};
+
+    let app = setup_app(7).await;
+    suprnova::search::generations::create_index("dogfood_search_notes")
+        .await
+        .expect("initialize dogfood index");
+    let note = SearchNote::without_syncing_to_search(|| async {
+        SearchNote::create(
+            serde_json::json!({"title": "Journal", "body": "Research notes", "done": false}).into(),
+        )
+        .await
+    })
+    .await
+    .expect("seed searchable todo without queue synchronization");
+    let mut search_config = suprnova::SearchConfig::current().expect("search configuration");
+    search_config.queue = false;
+    suprnova::SearchConfig::scope(search_config, SearchNote::make_all_searchable())
+        .await
+        .expect("isolated synchronous import configuration")
+        .expect("import the seeded note");
+    let session = seed_session(&app).await;
+    let reply = get(&app, "/live/search", Some(&session)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let html = reply.text();
+    let snapshot = decoded_snapshot(island_tag(&html, "dogfood-search"));
+    let revision = snapshot_revision(&snapshot);
+    let query_reply = send(
+        app.addr,
+        action_request(
+            &app,
+            ActionSpec {
+                component: "suprnova.search-box",
+                document_key: "dogfood-search",
+                snapshot,
+                seed: false,
+                base_revision: &revision,
+                operations: serde_json::json!([
+                    {"field": "query", "kind": "sync_model"},
+                    {"field": "sequence", "kind": "sync_model"}
+                ]),
+                model_proposals: serde_json::json!({"query": "jourmal", "sequence": "1"}),
+                idempotency_key: &idempotency(87),
+            },
+            Some(&session),
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(query_reply.status, StatusCode::OK, "{}", query_reply.text());
+    let queried = query_reply.json();
+    let settings = SearchNote::descriptor().index_settings();
+    let highlighted = format!(
+        "{}Journal{}",
+        settings.query.highlight_pre_tag, settings.query.highlight_post_tag
+    );
+    assert!(
+        queried["render"]["html"]
+            .as_str()
+            .is_some_and(|html| html.contains(&highlighted)),
+        "a real fuzzy search renders the index's code-owned highlight tags: {queried}"
+    );
+    let snapshot = queried["snapshot"].clone();
+    let revision = snapshot_revision(&snapshot);
+    let key = note.id.to_string();
+    let reply = send(app.addr, action_request(&app, ActionSpec {
+        component: "suprnova.search-box", document_key: "dogfood-search", snapshot, seed: false,
+        base_revision: &revision,
+        operations: serde_json::json!([
+            {"field": "sequence", "kind": "sync_model"},
+            {"field": "selection", "kind": "sync_model"},
+            {"field": "position", "kind": "sync_model"},
+            {"name": "select", "arguments": {}, "kind": "invoke_action"}
+        ]),
+        model_proposals: serde_json::json!({"sequence": "1", "selection": key, "position": "0"}),
+        idempotency_key: &idempotency(88),
+    }, Some(&session), true)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let accepted = reply.json();
+    assert_eq!(accepted["outcome"], "accepted", "{accepted}");
+    assert_eq!(
+        accepted["events"][0]["name"], "search.selected",
+        "{accepted}"
+    );
+    assert_eq!(accepted["events"][0]["payload"]["key"], key, "{accepted}");
+
+    // A contradictory selection can leave no facet choices. Recovery must stay
+    // available independently of the engine's empty facet distribution.
+    let snapshot = accepted["snapshot"].clone();
+    let revision = snapshot_revision(&snapshot);
+    let filtered_reply = send(
+        app.addr,
+        action_request(
+            &app,
+            ActionSpec {
+                component: "suprnova.search-box",
+                document_key: "dogfood-search",
+                snapshot,
+                seed: false,
+                base_revision: &revision,
+                operations: serde_json::json!([{"field": "filters", "kind": "sync_model"}]),
+                model_proposals: serde_json::json!({"filters": ["done = false", "done = true"]}),
+                idempotency_key: &idempotency(89),
+            },
+            Some(&session),
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(
+        filtered_reply.status,
+        StatusCode::OK,
+        "{}",
+        filtered_reply.text()
+    );
+    let filtered = filtered_reply.json();
+    assert_eq!(
+        filtered["snapshot"]["body"]["state"]["hits"],
+        serde_json::json!([]),
+        "{filtered}"
+    );
+    assert!(
+        filtered["render"]["html"]
+            .as_str()
+            .is_some_and(|html| html.contains("live:click=\"clear_filters\"")),
+        "selected filters remain clearable when the facet list is empty: {filtered}"
+    );
+    let snapshot = filtered["snapshot"].clone();
+    let revision = snapshot_revision(&snapshot);
+    let cleared_reply = send(
+        app.addr,
+        action_request(
+            &app,
+            ActionSpec {
+                component: "suprnova.search-box",
+                document_key: "dogfood-search",
+                snapshot,
+                seed: false,
+                base_revision: &revision,
+                operations: invoke("clear_filters"),
+                model_proposals: serde_json::json!({}),
+                idempotency_key: &idempotency(90),
+            },
+            Some(&session),
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(
+        cleared_reply.status,
+        StatusCode::OK,
+        "{}",
+        cleared_reply.text()
+    );
+    let cleared = cleared_reply.json();
+    assert_eq!(
+        cleared["snapshot"]["body"]["state"]["filters"],
+        serde_json::json!([]),
+        "{cleared}"
+    );
+    assert_eq!(
+        cleared["snapshot"]["body"]["state"]["hits"][0]["key"], key,
+        "{cleared}"
+    );
+    assert!(
+        cleared["render"]["html"]
+            .as_str()
+            .is_some_and(|html| html.contains(&highlighted)),
+        "clearing the selected filters restores the available result: {cleared}"
+    );
+}

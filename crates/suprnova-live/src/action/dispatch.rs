@@ -365,10 +365,13 @@ impl IntoActionResult for ActionOutcome {
     }
 }
 
-impl<T: IntoActionResult> IntoActionResult for Result<T, ComponentError> {
+impl<T: IntoActionResult, E: Into<ComponentError>> IntoActionResult for Result<T, E> {
     fn into_action_result(self) -> Result<ActionResult, ActionError> {
-        self.map_err(|_| ActionError::new(ActionErrorKind::ComponentFailure))?
-            .into_action_result()
+        self.map_err(|error| {
+            let _: ComponentError = error.into();
+            ActionError::new(ActionErrorKind::ComponentFailure)
+        })?
+        .into_action_result()
     }
 }
 
@@ -446,3 +449,34 @@ impl fmt::Debug for ActionError {
 }
 
 impl Error for ActionError {}
+
+#[cfg(test)]
+mod converted_action_errors {
+    use super::{ActionErrorKind, ComponentError, IntoActionResult};
+
+    struct HostError;
+    impl From<HostError> for ComponentError {
+        fn from(_: HostError) -> Self {
+            Self::application_failure()
+        }
+    }
+
+    #[test]
+    fn converted_host_errors_and_existing_component_errors_remain_redacted() {
+        let host: Result<(), HostError> = Err(HostError);
+        assert_eq!(
+            host.into_action_result().expect_err("host failure").kind(),
+            ActionErrorKind::ComponentFailure
+        );
+        let existing: Result<(), ComponentError> = Err(ComponentError::contract_failure());
+        assert_eq!(
+            existing
+                .into_action_result()
+                .expect_err("component failure")
+                .kind(),
+            ActionErrorKind::ComponentFailure
+        );
+        let success: Result<(), HostError> = Ok(());
+        assert!(success.into_action_result().is_ok());
+    }
+}

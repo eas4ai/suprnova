@@ -91,7 +91,8 @@ pub(crate) fn edits(
     };
 
     let mut live_edits: Vec<(Range<usize>, String)> = Vec::new();
-    let needs_namespace = !modules.is_empty() || !register.is_empty();
+    let needs_namespace =
+        !modules.is_empty() || register.iter().any(|path| path.starts_with("crate::"));
     if needs_namespace && matches!(declared_namespace, Declaration::Missing) {
         live_edits.push(declare_module(
             &live_source,
@@ -169,7 +170,10 @@ impl Wanted<'_> {
         let declared = |file: Option<&syn::File>, module: &str| {
             file.is_some_and(|file| matches!(module_declaration(file, module), Declaration::Plain))
         };
-        if !declared(live, namespace_module) {
+        if (!self.modules.is_empty()
+            || self.register.iter().any(|path| path.starts_with("crate::")))
+            && !declared(live, namespace_module)
+        {
             lines.push(format!("{LIVE_MODULE}: pub mod {namespace_module};"));
         }
         for module in self.modules {
@@ -199,6 +203,12 @@ impl Wanted<'_> {
 fn full_paths(namespace_module: &str, entries: &[String]) -> Result<Vec<String>> {
     let mut paths: Vec<String> = Vec::new();
     for entry in entries {
+        if namespace_module == "suprnova" && entry == "suprnova::live::components::SearchBox" {
+            if !paths.contains(entry) {
+                paths.push(entry.clone());
+            }
+            continue;
+        }
         let segments: Vec<&str> = entry.split("::").collect();
         let (module, name) = match segments.as_slice() {
             ["crate", "live", namespace, module, name] if *namespace == namespace_module => {
@@ -806,6 +816,23 @@ mod tests {
             &[],
         )
         .expect("edits")
+    }
+
+    #[test]
+    fn the_framework_search_box_registers_without_an_application_namespace_module() {
+        let dir = project(SCAFFOLD);
+        let entries = strings(&["suprnova::live::components::SearchBox"]);
+        let changes = registration_edits(dir.path(), "suprnova", &[], &entries, &[])
+            .expect("framework registration");
+        write(dir.path(), &changes);
+        let source = std::fs::read_to_string(dir.path().join("src/live/mod.rs")).expect("module");
+        assert!(source.contains(".register::<suprnova::live::components::SearchBox>()?"));
+        assert!(!source.contains("pub mod suprnova;"));
+        assert!(!dir.path().join("src/live/suprnova").exists());
+        let again = registration_edits(dir.path(), "suprnova", &[], &entries, &[])
+            .expect("second registration");
+        assert_eq!(again, RegistrationEdits::Write(Vec::new()));
+        assert!(registration_edits(dir.path(), "acme", &[], &entries, &[]).is_err());
     }
 
     #[test]

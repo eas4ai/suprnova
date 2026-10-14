@@ -2,7 +2,7 @@
 
 use suprnova::Application;
 
-use {package_name}::{bootstrap, config, live, migrations, routes};
+use {package_name}::{bootstrap, config, live, migrations, routes, schedule};
 
 #[suprnova::main]
 async fn main() {
@@ -12,6 +12,7 @@ async fn main() {
         .http_bootstrap(|| async { bootstrap::register_http_stack() })
         .try_routes_async(|| async { live::routes_with_render_cache(routes::register()).await })
         .migrations::<migrations::Migrator>()
+        .schedule(schedule::register)
         .run()
         .await;
 }

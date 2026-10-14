@@ -14,6 +14,7 @@
 <link rel="stylesheet" href="{{ frame.root }}/suprnova-ui/checkbox/checkbox.css">
 <link rel="stylesheet" href="{{ frame.root }}/suprnova-ui/textarea/textarea.css">
 <link rel="stylesheet" href="{{ frame.root }}/suprnova-ui/search-input/search-input.css">
+<link rel="stylesheet" href="{{ frame.root }}/suprnova-ui/search-box/search-box.css">
 <link rel="stylesheet" href="{{ frame.root }}/suprnova-ui/form-actions/form-actions.css">
 <link rel="stylesheet" href="{{ frame.root }}/suprnova-ui/stat-card/stat-card.css">
 <link rel="stylesheet" href="{{ frame.root }}/suprnova-ui/list-group/list-group.css">
@@ -23,3 +24,5 @@
 <link rel="stylesheet" href="{{ frame.root }}/css/app.css">
 <script type="module" src="{{ frame.root }}/suprnova-ui/toast/toast.js"></script>
 <script type="module" src="{{ frame.root }}/suprnova-ui/password-input/password-input.js"></script>
+
+<script type="module" src="{{ frame.root }}/suprnova-ui/search-box/search-box.js"></script>

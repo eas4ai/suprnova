@@ -574,17 +574,60 @@ mod components {
             "#[model(debounce = 250)] query: String",
             "url_intent(CanonicalValue::Object(query))",
             "Note::owned_by(user.id)",
+            "Note::search(&self.search)",
+            ".highlight([\"title\", \"body\"])",
             ".latest_by(\"id\")",
             "minimum_protocol_version = 2",
         ] {
             assert!(contains(&list, part), "{part} in:\n{list}");
         }
+        assert!(!list.contains("contains_pattern") && !list.contains("LIKE ?"));
+        assert!(list.contains("result.total.value()"));
+        assert!(list.contains("usize::try_from(shown)"));
+        assert!(
+            !list.contains("usize::try_from(shown.saturating_add(1))"),
+            "search impressions only include displayed notes"
+        );
+        assert!(list.contains("TrustedHtml::framework_generated"));
+        assert!(
+            app.read("src/migrations/mod.rs")
+                .contains("suprnova::search::migrations()")
+        );
+        assert!(app.read("src/seeders/notes.rs").contains("Garden planning"));
+        let bootstrap = app.read("src/bootstrap.rs");
+        syn::parse_file(&bootstrap).expect("the executable scaffold bootstrap parses");
+        assert!(bootstrap.contains("Note::initialize_search()"));
+        assert!(
+            app.read("src/seeders/notes.rs")
+                .contains("Note::initialize_search().await?")
+        );
+        assert!(
+            app.read("tests/documents.rs")
+                .contains("index initialization is idempotent")
+        );
+        assert!(
+            app.read("tests/documents.rs")
+                .contains("TestContainer::scope(async")
+        );
+        assert!(contains(
+            &app.read("src/schedule.rs"),
+            r#"schedule.add(schedule.command("search:analytics-prune").daily())"#
+        ));
+        assert!(
+            app.read("cmd/main.rs")
+                .contains(".schedule(schedule::register)")
+        );
+        assert!(
+            app.read("tests/documents.rs")
+                .contains("/notes?search=oceam")
+        );
         let view = app.read("templates/live/note_list.html");
         for part in [
             "search_input::search_input(\"query\"",
             "more::load_more_list(\"notes\"",
             "more::load_more(\"load_more\", exhausted=!more)",
             "live:key=\"{{ note.key|live_key }}\"",
+            "trusted_html",
         ] {
             assert!(view.contains(part), "{part} in:\n{view}");
         }

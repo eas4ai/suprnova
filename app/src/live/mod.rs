@@ -10,6 +10,8 @@
 pub mod components;
 pub mod pages;
 pub mod providers;
+/// A dedicated searchable model keeps the gallery independent of existing application writes.
+pub mod search_notes;
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -37,9 +39,12 @@ use components::live_native_gallery::LiveNativeGallery;
 use components::navigation_gallery::NavigationGallery;
 use components::overlay_gallery::OverlayGallery;
 use providers::tenant::SingleTenant;
+use suprnova::live::components::SearchBox;
 
 /// The authenticated dashboard document.
 pub const DASHBOARD_PATH: &str = "/live";
+/// The scoped framework search component, mounted by index identity.
+pub const SEARCH_PATH: &str = "/live/search";
 /// The form gallery: every presentational library component on one page.
 pub const FORMS_PATH: &str = "/live/forms";
 /// The overlay gallery: every overlay and disclosure component on one page.
@@ -68,6 +73,7 @@ pub const REACQUIRE_PATH: &str = "/account/uploads/{handle}/reacquire";
 /// Builds the registry of every Live component in this application.
 pub fn registry() -> Result<LiveRegistry, RegistryError> {
     let registry = LiveRegistry::builder()
+        .register::<SearchBox>()?
         .register::<Counter>()?
         .register::<AvatarUploader>()?
         .register::<ActivityFeed>()?
@@ -119,6 +125,33 @@ impl DashboardMounts {
                 DASHBOARD_PATH,
                 "account",
                 "dashboard-account",
+            )?,
+        })
+    }
+}
+
+/// Declared mounts bind the library search component to the dogfood document.
+#[derive(Clone)]
+pub struct SearchMounts {
+    /// The index-backed search island.
+    pub search: LiveMount<SearchBox>,
+    /// A second mount proves control identities stay independent on one document.
+    pub secondary: LiveMount<SearchBox>,
+}
+
+impl SearchMounts {
+    /// Sharing this declaration keeps the route and document mount identities aligned.
+    pub fn declare() -> Result<Self, FrameworkError> {
+        Ok(Self {
+            search: LiveMount::<SearchBox>::identity_bound(
+                SEARCH_PATH,
+                "search",
+                "dogfood-search",
+            )?,
+            secondary: LiveMount::<SearchBox>::identity_bound(
+                SEARCH_PATH,
+                "secondary",
+                "dogfood-search-secondary",
             )?,
         })
     }
@@ -295,6 +328,7 @@ fn tenant() -> LiveTenantMiddleware {
 /// document routes with their islands.
 pub fn routes(router: Router) -> Result<Router, FrameworkError> {
     let dashboard = DashboardMounts::declare()?;
+    let search = SearchMounts::declare()?;
     let forms = FormsMounts::declare()?;
     let overlays = OverlaysMounts::declare()?;
     let feedback = FeedbackMounts::declare()?;
@@ -338,6 +372,18 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
         .try_live_mount(&dashboard.uploader)?
         .try_live_mount(&dashboard.feed)?
         .try_live_mount(&dashboard.account)?;
+    let handler_mounts = search.clone();
+    let router: Router = router
+        .get(SEARCH_PATH, move |request: Request| {
+            let mounts = handler_mounts.clone();
+            async move { pages::search(request, &mounts).await }
+        })
+        .middleware(AuthMiddleware::redirect_to("/login"))
+        .middleware(tenant())
+        .into();
+    let router = router
+        .try_live_mount(&search.search)?
+        .try_live_mount(&search.secondary)?;
     let handler_mounts = forms.clone();
     let router: Router = router
         .get(FORMS_PATH, move |request: Request| {

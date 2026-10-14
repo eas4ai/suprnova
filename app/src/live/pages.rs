@@ -462,3 +462,64 @@ pub async fn me(_request: Request) -> Response {
     .await;
     result.map_err(failed)
 }
+
+#[suprnova::view(path = "live/search.html")]
+struct SearchView<'a> {
+    bootstrap: &'a TrustedHtml,
+    search: &'a TrustedHtml,
+    secondary: &'a TrustedHtml,
+}
+
+/// A registered framework component receives only the server-owned index and page length.
+pub async fn search(request: Request, mounts: &super::SearchMounts) -> Response {
+    let result: Result<HttpResponse, FrameworkError> = async {
+        initialize_search_gallery().await?;
+        let mut document = LiveDocument::from_request(&request)?;
+        let parameters = CanonicalValue::Object(BTreeMap::from([
+            (
+                "index".to_owned(),
+                CanonicalValue::String("dogfood_search_notes".to_owned()),
+            ),
+            (
+                "per_page".to_owned(),
+                CanonicalValue::number(10.0)
+                    .map_err(|_| FrameworkError::internal("search per_page mount parameter"))?,
+            ),
+        ]));
+        let search = document
+            .mount(&mounts.search, parameters.clone(), MountFlags::empty())
+            .await?;
+        let secondary = document
+            .mount(&mounts.secondary, parameters, MountFlags::empty())
+            .await?;
+        let bootstrap = document.bootstrap(LiveBootstrapOptions::esm().with_suprnova_ui())?;
+        document
+            .render(
+                view("live/search.html")?,
+                &SearchView {
+                    bootstrap: bootstrap.html(),
+                    search: search.html(),
+                    secondary: secondary.html(),
+                },
+                intent()?,
+                AssetSet::empty(),
+            )
+            .map_err(FrameworkError::from)
+    }
+    .await;
+    result.map_err(failed)
+}
+
+async fn initialize_search_gallery() -> Result<(), FrameworkError> {
+    // Serialize only this dogfood index's first creation, never ordinary model writes.
+    static INITIALIZING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let index = "dogfood_search_notes";
+    let engine = suprnova::SearchRegistry::engine_for(index)?;
+    if engine.current_generation(index).await?.is_none() {
+        let _guard = INITIALIZING.lock().await;
+        if engine.current_generation(index).await?.is_none() {
+            suprnova::search::generations::create_index(index).await?;
+        }
+    }
+    Ok(())
+}

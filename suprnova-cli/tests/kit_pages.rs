@@ -507,15 +507,89 @@ mod backend {
                     app.kit
                 );
             }
-            // The filter matches title or body without regard to case, and
-            // a `%` or `_` in the search is text, not a wildcard.
-            for needle in ["LOWER(title) LIKE ?", "LOWER(body) LIKE ?", "ESCAPE '!'"] {
+            // Full-text search owns typo expansion, scope and escaped highlights.
+            for needle in [
+                "Note::search(&search)",
+                r#".highlight(["title", "body"])"#,
+                "pub highlight: Option<NoteHighlight>",
+                r#"#[searchable(index = "notes", scope = "own_notes")]"#,
+            ] {
                 assert!(
-                    contains(&notes, needle),
+                    contains(
+                        &format!("{}{}", notes, app.read("src/models/note.rs")),
+                        needle
+                    ),
                     "{}: the search filter must contain `{needle}`; got:\n{notes}",
                     app.kit
                 );
             }
+        });
+    }
+
+    #[test]
+    fn kit_search_ships_scoped_highlights_and_registered_seed_data() {
+        each_kit(|app| {
+            let model = app.read("src/models/note.rs");
+            assert!(contains(
+                &model,
+                r#"#[searchable(index = "notes", scope = "own_notes")]"#
+            ));
+            for attribute in [
+                "#[searchable(text)]",
+                "#[searchable(filterable)]",
+                "viewer.id()",
+            ] {
+                assert!(contains(&model, attribute), "{}: {attribute}", app.kit);
+            }
+            assert!(contains(
+                &app.read("src/schedule.rs"),
+                r#"schedule.add(schedule.command("search:analytics-prune").daily())"#
+            ));
+            assert!(
+                app.read("cmd/main.rs")
+                    .contains(".schedule(schedule::register)")
+            );
+            assert!(
+                model.contains("pub async fn initialize_search() -> Result<(), FrameworkError>")
+            );
+            let bootstrap = app.read("src/bootstrap.rs");
+            syn::parse_file(&bootstrap).expect("the executable scaffold bootstrap parses");
+            assert!(bootstrap.contains("Note::initialize_search()"));
+            assert!(
+                app.read("src/seeders/notes.rs")
+                    .contains("Note::initialize_search().await?")
+            );
+            let controller = app.read("src/controllers/notes.rs");
+            assert!(controller.contains("use suprnova::serde_json;"));
+            assert!(!controller.contains("contains_pattern") && !controller.contains("LIKE ?"));
+            assert!(controller.contains("cursor belongs to another search query"));
+            assert!(controller.contains("result.total.value()"));
+            assert!(controller.contains(".limit(per_page)"));
+            assert!(
+                !controller.contains("per_page + 1"),
+                "search impressions only include displayed notes"
+            );
+            assert!(
+                app.read("src/migrations/mod.rs")
+                    .contains("suprnova::search::migrations()")
+            );
+            assert!(
+                app.read("src/bootstrap.rs")
+                    .contains("suprnova::seed::register::<crate::seeders::notes::NotesSeeder>()")
+            );
+            assert!(app.read("src/seeders/notes.rs").contains("Garden planning"));
+            assert!(app.read(".env.example").contains("SEARCH_DRIVER=database"));
+            let extension = match app.kit {
+                "react" => "tsx",
+                "vue" => "vue",
+                _ => "svelte",
+            };
+            let page = app.read(&format!("frontend/src/pages/Notes/Index.{extension}"));
+            assert!(
+                page.contains("note.highlight.title") && page.contains("note.highlight.body"),
+                "{}: {page}",
+                app.kit
+            );
         });
     }
 
@@ -847,7 +921,7 @@ mod backend {
                 "export interface UserInfo {\n  id: number;\n  name: string;\n  email: string;\n}",
                 "export interface DashboardProps {\n  stats: Stats;\n  recent_notes: Array<NoteSummary>;\n}",
                 "export interface Stats {\n  notes: number;\n  written_today: number;\n}",
-                "export interface NoteSummary {\n  id: number;\n  title: string;\n  created_at: string;\n}",
+                "export interface NoteSummary {\n  id: number;\n  title: string;\n  created_at: string;\n  highlight: NoteHighlight | null;\n}",
                 "export interface NotesIndexProps {\n  notes: Array<NoteSummary>;\n  search: string;\n}",
                 "export interface NoteView {\n  id: number;\n  title: string;\n  body: string | null;\n  created_at: string;\n}",
                 "export interface NotesShowProps {\n  note: NoteView;\n}",

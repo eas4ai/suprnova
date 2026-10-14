@@ -1,18 +1,20 @@
 //! Notes: the signed-in user's own notes, listed, shown and written.
 //!
-//! Every query here starts from `Note::owned_by(user.id)`. A handler
-//! therefore never reads a note another user wrote, and asking for one by
+//! Ordinary reads use `Note::owned_by(user.id)` and search uses the
+//! index's viewer scope plus the owner filter. A handler never reads a note
+//! another user wrote, and asking for one by
 //! id is the same `404` as asking for an id that does not exist.
 //!
-//! The list pages by cursor (`cursor_paginate`), which the page's
-//! `InfiniteScroll` reads from the scroll metadata `Inertia::paginate`
-//! attaches: each next page is the rows after the last one shown, so a
-//! note written while the user scrolls neither repeats nor skips a row.
+//! The ordinary list pages with `cursor_paginate`; a searched list uses
+//! an encrypted query and ranked offset. `InfiniteScroll` reads either
+//! cursor from the scroll metadata `Inertia::paginate` attaches. Ranking
+//! remains stable across pages while the index is unchanged.
 
 use serde::Deserialize;
+use suprnova::serde_json;
 use suprnova::{
     Auth, CursorPaginator, FormRequest, FrameworkError, Inertia, InertiaProps, Model, Request,
-    Response, Validate, ValidationErrors, attrs, handler, inertia_response,
+    Response, Searchable, Validate, ValidationErrors, attrs, handler, inertia_response,
 };
 
 use crate::models::note::Note;
@@ -30,11 +32,23 @@ pub struct NoteSummary {
     pub id: u64,
     pub title: String,
     pub created_at: String,
+    /// Present for ranked search rows so frontends can render escaped matching text.
+    pub highlight: Option<NoteHighlight>,
+}
+
+/// Escaped title and body with the search engine's validated highlight tags.
+#[derive(InertiaProps)]
+pub struct NoteHighlight {
+    /// The core escapes source text before inserting its validated matching tags.
+    pub title: String,
+    /// The body preview follows the same escaped formatting contract as the title.
+    pub body: String,
 }
 
 impl From<Note> for NoteSummary {
     fn from(note: Note) -> Self {
         Self {
+            highlight: None,
             id: note.id,
             title: note.title,
             created_at: note
@@ -121,57 +135,81 @@ async fn current_user() -> Result<User, FrameworkError> {
         .ok_or(FrameworkError::Unauthorized)
 }
 
-/// The `LIKE` pattern for text that contains `search` in any case, or
-/// `None` when `search` is empty and every note matches.
-///
-/// `!` escapes the wildcards, so `50%` finds the text `50%` rather than
-/// every note that starts with `50`. It is `!` rather than `\` because
-/// MySQL reads a backslash inside a quoted string as an escape of its own.
-/// SQLite's `LOWER` folds ASCII letters only, so on SQLite a search
-/// ignores the case of ASCII letters alone.
-fn contains_pattern(search: &str) -> Option<String> {
-    if search.is_empty() {
-        return None;
-    }
-    let mut pattern = String::from("%");
-    for c in search.to_lowercase().chars() {
-        if matches!(c, '!' | '%' | '_') {
-            pattern.push('!');
-        }
-        pattern.push(c);
-    }
-    pattern.push('%');
-    Some(pattern)
-}
-
-/// `GET /notes?search=...` - the user's notes whose title or body contains
+/// `GET /notes?search=...` - the user's notes ranked by title and body for
 /// `search`, a page at a time, with `search` sent back for the input.
 #[handler]
 pub async fn index(req: Request) -> Response {
     let user = current_user().await?;
     let search = req.query_param("search").unwrap_or_default();
 
-    let mut notes = Note::owned_by(user.id);
-    if let Some(pattern) = contains_pattern(&search) {
-        // The pattern travels as a bound value; only the column names are
-        // in the SQL text. `?` is the portable placeholder.
-        notes = notes.where_raw(
-            "(LOWER(title) LIKE ? ESCAPE '!' OR LOWER(body) LIKE ? ESCAPE '!')",
-            vec![pattern.clone().into(), pattern.into()],
-        );
-    }
-    let page = notes.cursor_paginate(NOTES_PER_PAGE).await?;
-
-    // Send each row as a `NoteSummary`. The cursors stay valid: they hold a
-    // row's id, which the projection keeps. The scroll metadata reads the
-    // current cursor from the request's `cursor` parameter, the one
-    // `cursor_paginate` reads.
-    let rows = CursorPaginator::new(
-        page.data.into_iter().map(NoteSummary::from).collect(),
-        page.per_page,
-        page.next_cursor,
-        page.prev_cursor,
-    );
+    let rows = if search.is_empty() {
+        let page = Note::owned_by(user.id)
+            .cursor_paginate(NOTES_PER_PAGE)
+            .await?;
+        CursorPaginator::new(
+            page.data.into_iter().map(NoteSummary::from).collect(),
+            page.per_page,
+            page.next_cursor,
+            page.prev_cursor,
+        )
+    } else {
+        // Search ranks one list. Its encrypted cursor carries the query and
+        // offset so a cursor from another search cannot silently skip hits.
+        let offset = match req.query_param("cursor") {
+            Some(cursor) => {
+                let payload =
+                    CursorPaginator::<NoteSummary>::decode_cursor(&cursor).map_err(|_| {
+                        FrameworkError::param("cursor must be a valid encrypted search cursor")
+                    })?;
+                let (query, offset): (String, usize) = serde_json::from_str(&payload)
+                    .map_err(|_| FrameworkError::param("cursor must contain a search offset"))?;
+                if query != search {
+                    return Err(
+                        FrameworkError::param("cursor belongs to another search query").into(),
+                    );
+                }
+                offset
+            }
+            None => 0,
+        };
+        let per_page = NOTES_PER_PAGE as usize;
+        let result = Note::search(&search)
+            .filter(format!("user_id = {}", user.id))
+            .highlight(["title", "body"])
+            .offset(offset)
+            .limit(per_page)
+            .get()
+            .await?;
+        // Lexical search counts all matches, so impressions cover exactly this page.
+        let more = result.total.value() > (offset as u64).saturating_add(result.hits.len() as u64);
+        let notes = result
+            .hits
+            .into_iter()
+            .map(|hit| {
+                let mut note = NoteSummary::from(hit.model);
+                note.highlight = Some(NoteHighlight {
+                    title: hit.formatted.get("title").cloned().unwrap_or_default(),
+                    body: hit.formatted.get("body").cloned().unwrap_or_default(),
+                });
+                note
+            })
+            .collect();
+        let cursor = |offset| -> Result<String, FrameworkError> {
+            let payload = serde_json::to_string(&(&search, offset)).map_err(|error| {
+                FrameworkError::internal(format!("encoding search cursor: {error}"))
+            })?;
+            CursorPaginator::<NoteSummary>::try_encode_cursor(&payload)
+        };
+        CursorPaginator::new(
+            notes,
+            NOTES_PER_PAGE,
+            more.then(|| cursor(offset.saturating_add(per_page)))
+                .transpose()?,
+            (offset > 0)
+                .then(|| cursor(offset.saturating_sub(per_page)))
+                .transpose()?,
+        )
+    };
 
     Ok(Inertia::paginate("Notes/Index", "notes", rows)
         .with("search", search)

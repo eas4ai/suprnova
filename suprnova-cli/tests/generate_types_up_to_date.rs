@@ -180,6 +180,10 @@ fn intt_every_kit_ships_the_types_generate_types_writes_for_it() {
         let project = root.path().join(&name);
         let types = project.join("frontend/src/types/inertia-props.ts");
         let shipped = fs::read_to_string(&types).expect("read the shipped types");
+        assert!(
+            shipped.contains("highlight: NoteHighlight | null;"),
+            "{frontend}: search highlights must be typed"
+        );
 
         let out = Command::new(BIN)
             .arg("generate-types")

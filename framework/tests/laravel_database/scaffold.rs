@@ -45,7 +45,7 @@ impl MigratorTrait for Migrator {
         };
         use suprnova::rbac::migrations::{CreateRbacTables, RbacToSpatieLayout};
         use suprnova::session::migrations::{CreateSessionsTable, SessionUserKey};
-        vec![
+        let mut migrations: Vec<Box<dyn MigrationTrait>> = vec![
             Box::new(m20240101_000001_create_users_table::Migration),
             Box::new(m20240101_000002_create_sessions_table::Migration),
             Box::new(m20240101_000003_create_remember_tokens_table::Migration),
@@ -64,7 +64,9 @@ impl MigratorTrait for Migrator {
             Box::new(FeaturesToPennantLayout),
             Box::new(CreateRbacTables),
             Box::new(RbacToSpatieLayout),
-        ]
+        ];
+        migrations.extend(suprnova::search::migrations());
+        migrations
     }
 }
 

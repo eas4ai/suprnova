@@ -91,6 +91,9 @@ pub struct SearchPagination {
 /// A search response carries models, exact facets and the engine's counting accuracy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResults<M> {
+    /// A server-session-bound list identity permits validated click reporting when analytics is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impression: Option<String>,
     /// Hits remain in the final retrieval order after hydration.
     pub hits: Vec<Hit<M>>,
     /// A semantic leg marks its bounded count as estimated.

@@ -109,3 +109,6 @@ MAIL_FROM_NAME="Suprnova App"
 # file-backed second tier; leave it empty for the in-process tier alone.
 RENDER_CACHE_ENABLED=true
 RENDER_CACHE_L1_DIR=
+
+# Search uses the application database by default, including SQLite FTS5.
+SEARCH_DRIVER=database

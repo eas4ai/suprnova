@@ -10,6 +10,8 @@ pub mod assets;
 mod async_transport;
 pub(crate) mod async_updates;
 pub(crate) mod attestation;
+/// Scoped interactive controls registered explicitly by the application.
+pub mod components;
 mod config;
 pub(crate) mod context;
 mod document;
@@ -365,3 +367,12 @@ pub use upload_policy::{
 pub use validation::{
     ErrorBag, ValidationIssue, ValidationMessageId, ValidationStatus, ValidationText,
 };
+
+// Host errors retain their actionable context in the server log, while Live's
+// signed protocol exposes only the existing closed component failure category.
+impl From<crate::FrameworkError> for ComponentError {
+    fn from(error: crate::FrameworkError) -> Self {
+        tracing::warn!(error = %error, "Live component failed");
+        Self::application_failure()
+    }
+}

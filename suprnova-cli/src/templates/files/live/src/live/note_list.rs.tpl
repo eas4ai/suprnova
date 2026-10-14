@@ -1,4 +1,4 @@
-//! `NoteList`: the signed-in user's notes on `/notes`, newest first.
+//! `NoteList`: the signed-in user's notes on `/notes`, ranked when searched.
 //!
 //! The search box filters by title and text. Its applied value is bound to
 //! the URL's `?search=` query: the document mounts the list from it, and
@@ -8,12 +8,14 @@
 //! and never enter the snapshot, so the list a render shows is always the
 //! user's notes as the database holds them.
 //!
-//! Every query starts from `Note::owned_by(user.id)`, so the list never
-//! holds a note another user wrote.
+//! Ordinary reads use `Note::owned_by(user.id)`. Searches use the index's
+//! viewer scope and the owner filter, so the list never holds another
+//! user's note.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use suprnova::Searchable;
 use suprnova::live::action::{OutcomeMetadata, action_result, url_intent};
 use suprnova::live::{
     ActionOutcome, ActionResult, CanonicalValue, ComponentError, LiveComponent, live,
@@ -24,7 +26,7 @@ use crate::models::note::Note;
 
 /// The checked loop-key filter the rows use.
 pub mod filters {
-    pub use suprnova::view::filters::live_key;
+    pub use suprnova::view::filters::{live_key, trusted_html};
 }
 
 /// How many notes each page of the list adds.
@@ -40,6 +42,10 @@ pub struct NoteRow {
     pub key: String,
     /// The note's title.
     pub title: String,
+    /// Escaped and highlighted title from the framework search formatter.
+    pub highlight_title: Option<String>,
+    /// Escaped and highlighted body from the framework search formatter.
+    pub highlight_body: Option<String>,
     /// When the note was written, as RFC 3339 for the `datetime` attribute.
     pub created_at: String,
     /// When the note was written, as the row prints it.
@@ -52,6 +58,8 @@ impl From<Note> for NoteRow {
             key: format!("note-{}", note.id),
             id: note.id,
             title: note.title,
+            highlight_title: None,
+            highlight_body: None,
             created_at: note
                 .created_at
                 .map(|date| date.to_rfc3339())
@@ -62,29 +70,6 @@ impl From<Note> for NoteRow {
                 .unwrap_or_default(),
         }
     }
-}
-
-/// The `LIKE` pattern for text that contains `search` in any case, or
-/// `None` when `search` is empty and every note matches.
-///
-/// `!` escapes the wildcards, so `50%` finds the text `50%` rather than
-/// every note that starts with `50`. It is `!` rather than `\` because
-/// MySQL reads a backslash inside a quoted string as an escape of its own.
-/// SQLite's `LOWER` folds ASCII letters only, so on SQLite a search
-/// ignores the case of ASCII letters alone.
-fn contains_pattern(search: &str) -> Option<String> {
-    if search.is_empty() {
-        return None;
-    }
-    let mut pattern = String::from("%");
-    for c in search.to_lowercase().chars() {
-        if matches!(c, '!' | '%' | '_') {
-            pattern.push('!');
-        }
-        pattern.push(c);
-    }
-    pattern.push('%');
-    Some(pattern)
 }
 
 /// The searchable list, rendered by `live/note_list.html`.
@@ -149,41 +134,72 @@ impl NoteList {
         self.pages = self.pages.max(1).saturating_add(1);
     }
 
-    /// Reads the notes this render shows: the applied search, the pages
-    /// asked for, and one note more to tell whether there are more.
+    /// Reads the requested pages; search totals keep impressions limited to shown notes.
     #[rendering]
     pub async fn load(&mut self) -> Result<(), ComponentError> {
         let user = current_user().await?;
         let shown = self.pages.max(1).saturating_mul(NOTES_PER_PAGE);
-        let mut notes = Note::owned_by(user.id);
-        if let Some(pattern) = contains_pattern(&self.search) {
-            // The pattern travels as a bound value; only the column names
-            // are in the SQL text. `?` is the portable placeholder.
-            notes = notes.where_raw(
-                "(LOWER(title) LIKE ? ESCAPE '!' OR LOWER(body) LIKE ? ESCAPE '!')",
-                vec![pattern.clone().into(), pattern.into()],
-            );
-        }
-        let mut rows: Vec<NoteRow> = notes
-            .latest_by("id")
-            .limit(shown.saturating_add(1))
-            .get()
-            .await
-            .map_err(|error| failed("listing notes", error))?
-            .into_vec()
-            .into_iter()
-            .map(NoteRow::from)
-            .collect();
+        let limit = usize::try_from(shown).unwrap_or(usize::MAX);
+        let (mut rows, more): (Vec<NoteRow>, bool) = if self.search.is_empty() {
+            let rows: Vec<NoteRow> = Note::owned_by(user.id)
+                .latest_by("id")
+                .limit(shown.saturating_add(1))
+                .get()
+                .await
+                .map_err(|error| failed("listing notes", error))?
+                .into_vec()
+                .into_iter()
+                .map(NoteRow::from)
+                .collect();
+            let more = rows.len() > limit;
+            (rows, more)
+        } else {
+            let result = Note::search(&self.search)
+                .filter(format!("user_id = {}", user.id))
+                .highlight(["title", "body"])
+                .limit(limit)
+                .get()
+                .await
+                .map_err(|error| failed("searching notes", error))?;
+            let more = result.total.value() > result.hits.len() as u64;
+            let rows = result
+                .hits
+                .into_iter()
+                .map(|hit| {
+                    let mut row = NoteRow::from(hit.model);
+                    row.highlight_title = hit.formatted.get("title").cloned();
+                    row.highlight_body = hit.formatted.get("body").cloned();
+                    row
+                })
+                .collect();
+            (rows, more)
+        };
         let shown = usize::try_from(shown).unwrap_or(usize::MAX);
-        self.more = rows.len() > shown;
+        self.more = more;
         rows.truncate(shown);
         self.notes = rows;
         Ok(())
     }
 
+    /// Trusts only escaped fields produced by the search formatter, never raw note text.
+    pub fn highlight(
+        &self,
+        html: &str,
+    ) -> Result<suprnova::view::TrustedHtml, suprnova::FrameworkError> {
+        let reason = suprnova::view::TrustedMarkupReason::new(
+            "escaped search fields with validated highlight tags",
+        )
+        .map_err(|error| {
+            suprnova::FrameworkError::internal(format!("search highlight reason: {error}"))
+        })?;
+        suprnova::view::TrustedHtml::framework_generated(html.to_owned(), reason).map_err(|error| {
+            suprnova::FrameworkError::internal(format!("search highlight markup: {error}"))
+        })
+    }
+
     /// The text the list shows when the search matched nothing.
     pub fn no_results(&self) -> String {
-        format!("No note's title or text contains \"{}\".", self.search)
+        format!("No note's title or text matches \"{}\".", self.search)
     }
 
     /// A render whose result puts the applied search into the URL, or takes

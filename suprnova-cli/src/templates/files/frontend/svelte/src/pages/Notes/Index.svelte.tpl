@@ -12,8 +12,8 @@
   // `types/inertia-props.ts` types it, so `usePage()` takes no argument.
   const { root } = usePage().props
 
-  // The signed-in user's notes, newest first, a page at a time from a
-  // cursor paginator, and the search they were filtered by.
+  // The signed-in user's notes, ranked for search and newest first otherwise,
+  // one cursor page at a time, and the query that selected them.
   let { notes, search }: NotesIndexProps = $props()
 
   // The search box is remembered in the browser history entry, so Back
@@ -109,7 +109,10 @@
               pageProps={(_props, shared) => ({ ...shared, note })}
               class="flex justify-between gap-4"
             >
-              <span class="font-medium text-indigo-600 hover:text-indigo-500">{note.title}</span>
+              <div>
+              <span class="font-medium text-indigo-600 hover:text-indigo-500">{#if note.highlight}{@html note.highlight.title}{:else}{note.title}{/if}</span>
+              {#if note.highlight?.body}<p class="text-sm text-gray-500">{@html note.highlight.body}</p>{/if}
+              </div>
               <time class="shrink-0 text-sm text-gray-500" datetime={note.created_at}>
                 {formatDate(note.created_at)}
               </time>

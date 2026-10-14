@@ -4,6 +4,7 @@
 //! without external services. Database search resolves on the application connection;
 //! applications register external drivers at bootstrap.
 
+pub mod analytics;
 /// Bootstrap pins model configuration before indexing or retrieval begins.
 /// Judged relevance and warm latency make rival comparisons reproducible.
 pub mod baseline;
@@ -24,12 +25,13 @@ mod outbox;
 pub mod query;
 pub mod registry;
 pub mod results;
+pub mod routes;
 pub mod scope;
 pub mod settings;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use builder::{FederatedBuilder, SearchBuilder, SearchFilter};
+pub use builder::{FederatedBuilder, IndexSearchBuilder, SearchBuilder, SearchFilter};
 pub use config::{SearchConfig, SearchDriver, SearchEmbedder};
 pub use document::{AttributeType, AttributeValue, GeoPoint, SearchDocument};
 pub use embedder::fake::FakeEmbedder;
@@ -183,6 +185,31 @@ where
 pub struct Search;
 
 impl Search {
+    /// Resolve a model by its declared index so library widgets reuse generic hydration.
+    pub fn for_index(index: &str) -> Result<IndexSearchBuilder, FrameworkError> {
+        SearchRegistry::by_index(index)?;
+        Ok(IndexSearchBuilder::new(index.to_owned()))
+    }
+
+    /// Install a closed index allowlist while leaving application rate limiting configurable.
+    pub fn routes(indexes: &[&str]) -> Result<crate::Router, FrameworkError> {
+        crate::Router::new().try_search_endpoint(indexes)
+    }
+
+    /// Clicks must refer to a key and zero-based position actually shown to this session.
+    pub async fn click(impression: &str, key: &str, position: usize) -> Result<(), FrameworkError> {
+        analytics::click(impression, key, position).await
+    }
+
+    /// Retained query frequency supplies bounded type-ahead without retaining guest identities.
+    pub async fn suggest(
+        index: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, FrameworkError> {
+        analytics::suggest(index, prefix, limit).await
+    }
+
     /// Install the deployment embedder once so model call sites never construct providers.
     pub async fn boot() -> Result<(), FrameworkError> {
         boot::boot().await

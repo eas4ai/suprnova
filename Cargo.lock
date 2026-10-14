@@ -8403,6 +8403,7 @@ dependencies = [
  "hyper-tungstenite",
  "hyper-util",
  "icu_calendar",
+ "icu_casemap",
  "icu_datetime",
  "icu_decimal",
  "icu_experimental",

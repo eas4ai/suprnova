@@ -1031,7 +1031,13 @@ impl Resolver<'_> {
                 .manifest
                 .register
                 .iter()
-                .map(|entry| format!("crate::live::{ns_module}::{entry}"))
+                .map(|entry| {
+                    if shipped {
+                        format!("suprnova::live::{entry}")
+                    } else {
+                        format!("crate::live::{ns_module}::{entry}")
+                    }
+                })
                 .collect();
             for path in &recorded {
                 let retained = kept_modules.iter().any(|module| {

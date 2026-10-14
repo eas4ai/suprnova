@@ -1,8 +1,8 @@
 import { Form, Head, InfiniteScroll, Link, router, usePage, useRemember } from '@inertiajs/react'
 import type { NotesIndexProps } from '../../types/inertia-props'
 
-// `notes` is one page of the signed-in user's notes, newest first: the
-// handler builds it with `cursor_paginate` and sends it through
+// `notes` is one page of the signed-in user's notes, ranked for a search
+// and newest first otherwise. The handler sends its encrypted cursor through
 // `Inertia::paginate`, with the cursor of the next page in the page's
 // `scrollProps`. `search` is the filter it applied.
 export default function NotesIndex({ notes, search }: NotesIndexProps) {
@@ -123,7 +123,8 @@ export default function NotesIndex({ notes, search }: NotesIndexProps) {
                   pageProps={(_props, shared) => ({ ...shared, note })}
                   className="block hover:bg-gray-50"
                 >
-                  <span className="font-medium text-gray-900">{note.title}</span>
+                  <span className="font-medium text-gray-900">{note.highlight ? <span dangerouslySetInnerHTML={{ __html: note.highlight.title }} /> : note.title}</span>
+                  {note.highlight?.body && <p className="text-sm text-gray-500" dangerouslySetInnerHTML={{ __html: note.highlight.body }} />}
                   <time dateTime={note.created_at} className="ml-2 text-sm text-gray-500">
                     {note.created_at.slice(0, 10)}
                   </time>
