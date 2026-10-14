@@ -115,27 +115,34 @@ async fn every_document_renders_for_its_visitor() {
         .expect("a note");
         let client = guest.clone().acting_as(&user);
 
-        // The registered fixture is searchable through SQLite FTS5 and query expansion.
+        // The seeded fixture attaches to the first registered account and is
+        // searchable through SQLite FTS5 and query expansion.
+        let other = User::create("Grace Hopper", "grace@example.com", "correct horse battery")
+            .await
+            .expect("a second user");
         suprnova::seed::register::<{package_name}::seeders::notes::NotesSeeder>();
         suprnova::seed::run_one("NotesSeeder")
             .await
             .expect("seed searchable notes");
-        let explorer = User::find_by_email("notes@example.com")
-            .await
-            .expect("read seeded owner")
-            .expect("the seeder creates its owner");
         suprnova::seed::run_one("NotesSeeder")
             .await
             .expect("seeding again is safe");
         assert_eq!(
-            Note::owned_by(explorer.id)
+            Note::owned_by(user.id)
                 .count()
                 .await
                 .expect("seeded notes count"),
-            3
+            4,
+            "the first account owns its own note and the three seeded ones, once"
         );
-        let explorer_client = guest.clone().acting_as(&explorer);
-        explorer_client
+        assert_eq!(
+            Note::owned_by(other.id)
+                .count()
+                .await
+                .expect("other owner's notes count"),
+            0
+        );
+        client
             .get("/notes?search=oceam")
             .send()
             .await
@@ -148,10 +155,11 @@ async fn every_document_renders_for_its_visitor() {
             .send()
             .await
             .assert_status(302);
-        let other = client.get("/notes?search=oceam").send().await;
-        other.assert_ok();
+        let other_client = guest.clone().acting_as(&other);
+        let unseen = other_client.get("/notes?search=oceam").send().await;
+        unseen.assert_ok();
         assert!(
-            !other.body_text().contains("journal"),
+            !unseen.body_text().contains("journal"),
             "another owner sees no seeded note"
         );
 

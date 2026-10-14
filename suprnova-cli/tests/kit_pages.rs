@@ -569,10 +569,9 @@ mod backend {
                 !controller.contains("per_page + 1"),
                 "search impressions only include displayed notes"
             );
-            assert!(
-                app.read("src/migrations/mod.rs")
-                    .contains("suprnova::search::migrations()")
-            );
+            let migrator = app.read("src/migrations/mod.rs");
+            assert!(migrator.contains("suprnova::search::migrations()"));
+            assert!(migrator.contains("suprnova::recommendations::migrations()"));
             assert!(
                 app.read("src/bootstrap.rs")
                     .contains("suprnova::seed::register::<crate::seeders::notes::NotesSeeder>()")

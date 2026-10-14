@@ -33,6 +33,8 @@ impl MigratorTrait for Migrator {
         ];
         // The database search index and its durable indexing ledger.
         migrations.extend(suprnova::search::migrations());
+        // The starter recommender's events, models and recommendations.
+        migrations.extend(suprnova::recommendations::migrations());
         migrations
     }
 }

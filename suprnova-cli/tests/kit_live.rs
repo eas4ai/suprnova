@@ -589,10 +589,9 @@ mod components {
             "search impressions only include displayed notes"
         );
         assert!(list.contains("TrustedHtml::framework_generated"));
-        assert!(
-            app.read("src/migrations/mod.rs")
-                .contains("suprnova::search::migrations()")
-        );
+        let migrator = app.read("src/migrations/mod.rs");
+        assert!(migrator.contains("suprnova::search::migrations()"));
+        assert!(migrator.contains("suprnova::recommendations::migrations()"));
         assert!(app.read("src/seeders/notes.rs").contains("Garden planning"));
         let bootstrap = app.read("src/bootstrap.rs");
         syn::parse_file(&bootstrap).expect("the executable scaffold bootstrap parses");
