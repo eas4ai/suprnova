@@ -217,7 +217,10 @@ consults, Unicode isolation marks - is code-level configuration on
 
 Catalogs themselves are files, not env: `lang/<locale>/*.ftl` under
 `APP_BASE_PATH`. A missing `lang/` directory is not an error - the app
-boots with the framework's embedded English validation catalog.
+boots with the framework's embedded English validation catalog. The starter
+kits ship no translations or `lang/` directory, and their `.env` and
+`.env.example` omit the localization block. Add these variables when your
+application needs localization.
 
 ## Cache
 

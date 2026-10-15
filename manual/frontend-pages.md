@@ -175,7 +175,8 @@ suprnova make:inertia Dashboard --data
 
 The same `inertia_response!(&req, "Home", HomeProps { ... })` on the backend
 maps to one of these page files on the frontend. Props arrive as typed
-arguments via the generated `inertia-props.ts` types.
+arguments via the generated `inertia-props.ts` types. The kits render plain
+English and ship no translation modules or catalogs.
 
 ### Svelte 5
 
@@ -186,7 +187,6 @@ Runes-on. Props arrive via `$props()`:
 <script lang="ts">
   import Head from '../components/Head.svelte'
   import type { HomeProps } from '../types/inertia-props'
-  import { t } from '../lib/lang.svelte'
 
   let { title, message }: HomeProps = $props()
 </script>
@@ -195,7 +195,7 @@ Runes-on. Props arrive via `$props()`:
 <Head />
 
 <div class="mx-auto max-w-xl p-8 font-sans">
-  <h1 class="text-3xl font-bold">{t('welcome', { app: title })}</h1>
+  <h1 class="text-3xl font-bold">Welcome to {title}</h1>
   <p class="mt-2">{message}</p>
 </div>
 ```
@@ -216,15 +216,12 @@ comes from `createInertiaApp` (see [Layouts](#layouts)).
 // frontend/src/pages/Home.tsx
 import { Head } from '@inertiajs/react'
 import type { HomeProps } from '../types/inertia-props'
-import { useLang } from '../lib/lang'
 
 export default function Home({ title, message }: HomeProps) {
-  const { t } = useLang()
-
   return (
     <div className="font-sans p-8 max-w-xl mx-auto">
       <Head title="Welcome" />
-      <h1 className="text-3xl font-bold">{t('welcome', { app: title })}</h1>
+      <h1 className="text-3xl font-bold">Welcome to {title}</h1>
       <p className="mt-2">{message}</p>
     </div>
   )
@@ -247,7 +244,6 @@ callback appends the application's name, so a project scaffolded as
 <script setup lang="ts">
 import { Head } from '@inertiajs/vue3'
 import type { HomeProps } from '../types/inertia-props'
-import { t } from '../lib/lang'
 
 defineProps<HomeProps>()
 </script>
@@ -256,7 +252,7 @@ defineProps<HomeProps>()
   <Head title="Welcome" />
 
   <div class="font-sans p-8 max-w-xl mx-auto">
-    <h1 class="text-3xl font-bold">{{ t('welcome', { app: title }) }}</h1>
+    <h1 class="text-3xl font-bold">Welcome to {{ title }}</h1>
     <p class="mt-2">{{ message }}</p>
   </div>
 </template>

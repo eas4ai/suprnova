@@ -3,7 +3,6 @@ import { createInertiaApp } from '@inertiajs/svelte'
 import { hydrate, mount } from 'svelte'
 import AppLayout from './layouts/AppLayout.svelte'
 import GuestLayout from './layouts/GuestLayout.svelte'
-import { initLang } from './lib/lang.svelte'
 import { pageTitle } from './lib/title'
 
 // No hand-rolled CSRF header here, on purpose. The Inertia client this
@@ -42,38 +41,14 @@ createInertiaApp({
   serverHead: true,
   nonce,
   setup({ el, App, props }) {
-    // This entry runs in the browser only, so `el` is the mount element.
-    // The server renders through `ssr.ts`, which passes no `setup` and
-    // never runs `initLang`: `initLang` does a `fetch()`, which has no
-    // business running on the server (no absolute URL to fetch, no reason
-    // to block a render on a network round trip there). `t()`'s documented
-    // raw-key fallback covers whatever renders during that pass.
-    //
-    // Caution: loading `initLang` before mount/hydrate means a
-    // hydrating client's first paint carries real translations while
-    // the server-rendered markup it hydrates against still has `t()`'s
-    // untranslated fallback (SSR always skips `initLang` - see above) -
-    // a hydration content mismatch on any translated string. This
-    // scaffold accepts that trade-off (translate before first paint,
-    // for the common case) rather than deferring the catalog load until
-    // after hydration.
-    //
-    // `setup` is synchronous on purpose: `@inertiajs/svelte` types it as
-    // returning `SvelteRenderResult | void`, so an `async setup` (which
-    // returns a `Promise`) fails `svelte-check`. Chaining the catalog
-    // load onto the mount keeps the ordering above without the promise
-    // leaking out of `setup`.
+    // This entry runs in the browser; `ssr.ts` renders on the server.
     if (!el) {
       return
     }
-    const start = () => {
-      if (el.hasAttribute('data-server-rendered')) {
-        hydrate(App, { target: el, props })
-      } else {
-        mount(App, { target: el, props })
-      }
+    if (el.hasAttribute('data-server-rendered')) {
+      hydrate(App, { target: el, props })
+    } else {
+      mount(App, { target: el, props })
     }
-
-    void initLang(props.initialPage).then(start)
   },
 })

@@ -2,7 +2,6 @@ import './app.css'
 import { createInertiaApp } from '@inertiajs/react'
 import { createRoot, hydrateRoot } from 'react-dom/client'
 import { layout, title } from './lib/app'
-import { initLang, LangProvider } from './lib/lang'
 
 // No hand-rolled CSRF header here, on purpose. The Inertia client this
 // scaffold installs (`@inertiajs/*`, pinned `^3.8.0`) sends its visits over
@@ -39,31 +38,11 @@ createInertiaApp({
       return
     }
 
-    // `initLang` does a `fetch()`, which has no business running on the
-    // server (no absolute URL to fetch, no reason to block a render on a
-    // network round trip there), so `ssr.tsx` never calls it; `t()`'s
-    // documented raw-key fallback covers whatever renders during that pass.
-    //
-    // Caution: loading the catalog here, before mount/hydrate, means a
-    // hydrating client's first paint carries real translations while the
-    // server-rendered markup it hydrates against still has `t()`'s
-    // untranslated fallback (SSR always skips `initLang` - see above) - a
-    // hydration content mismatch on any translated string. This scaffold
-    // accepts that trade-off (translate before first paint, for the common
-    // case) rather than deferring the catalog load until after hydration.
-    // `initLang` never rejects: a failed fetch degrades to the fallback.
-    void initLang(props.initialPage).then(() => {
-      const app = (
-        <LangProvider>
-          <App {...props} />
-        </LangProvider>
-      )
-
-      if (el.hasAttribute('data-server-rendered')) {
-        hydrateRoot(el, app)
-      } else {
-        createRoot(el).render(app)
-      }
-    })
+    const app = <App {...props} />
+    if (el.hasAttribute('data-server-rendered')) {
+      hydrateRoot(el, app)
+    } else {
+      createRoot(el).render(app)
+    }
   },
 })

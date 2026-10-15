@@ -3,7 +3,6 @@ import { createInertiaApp } from '@inertiajs/vue3'
 import { createApp, createSSRApp, h } from 'vue'
 import AppLayout from './layouts/AppLayout.vue'
 import GuestLayout from './layouts/GuestLayout.vue'
-import { initLang } from './lib/lang'
 
 // No hand-rolled CSRF header here, on purpose. The Inertia client this
 // scaffold installs (`@inertiajs/*`, pinned `^3.8.0`) sends its visits over
@@ -56,20 +55,6 @@ createInertiaApp({
       : createApp({ render: () => h(App, props) })
     app.use(plugin)
 
-    // The catalog loads before the first mount, so the first paint
-    // carries real translations. `initLang` does a `fetch()`, which
-    // `ssr.ts` never runs (no absolute URL to fetch, no reason to block a
-    // render on a network round trip there); `t()`'s documented raw-key
-    // fallback covers whatever renders during that pass.
-    //
-    // Caution: loading the catalog before mount/hydrate means a hydrating
-    // client's first paint carries real translations while the
-    // server-rendered markup it hydrates against still has `t()`'s
-    // untranslated fallback - a hydration content mismatch on any
-    // translated string. This scaffold accepts that trade-off (translate
-    // before first paint, for the common case) rather than deferring the
-    // catalog load until after hydration. `initLang` never rejects: a
-    // failed load leaves `t()` on its raw-key fallback.
-    void initLang(props.initialPage).then(() => app.mount(el))
+    app.mount(el)
   },
 })

@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { Head, Link, usePage } from '@inertiajs/vue3'
-import { t } from '../lib/lang'
 
 // The public root the server shares with every page (`RootShare`): empty
 // at the host root, `/billing` behind a proxy that serves the app there.
@@ -15,12 +14,6 @@ const { root } = usePage().props
 // That is why they are declared here: no handler of yours renders
 // `Error` with a struct, so `suprnova generate-types` writes no
 // `Pages` entry for it in `types/inertia-props.ts`.
-//
-// `message` is the server's, so it arrives already localized only if
-// your handlers translate it; the chrome below uses `t()` like every
-// other page. That works because `src/bootstrap.rs` registers
-// `LocaleMiddleware` ahead of `Inertia::install` - keep it that way, or
-// this page renders in the default locale.
 interface ErrorProps {
   status: number
   message: string
@@ -38,11 +31,11 @@ defineProps<ErrorProps>()
       <h1 class="text-6xl font-extrabold text-gray-900">{{ status }}</h1>
       <p class="text-lg text-gray-700">{{ message }}</p>
       <p v-if="request_id" class="text-sm text-gray-500">
-        {{ t('error-reference') }}
+        Reference:
         <code class="bg-gray-100 px-1 rounded">{{ request_id }}</code>
       </p>
       <p>
-        <Link :href="`${root}/`" class="text-indigo-600 hover:text-indigo-500">{{ t('error-go-home') }}</Link>
+        <Link :href="`${root}/`" class="text-indigo-600 hover:text-indigo-500">Go home</Link>
       </p>
     </div>
   </div>

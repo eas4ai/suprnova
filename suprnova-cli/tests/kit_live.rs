@@ -227,7 +227,7 @@ mod no_node {
             "COPY templates/ ./templates/",
             "COPY templates/suprnova-ui/ ./templates/suprnova-ui/",
             "COPY public/ ./public/",
-            "COPY lang/ ./lang/",
+            "COPY Cargo.toml lan[g] ./lang-context/",
             &format!("cargo new --bin {NAME}"),
         ] {
             assert!(
@@ -728,9 +728,25 @@ mod routes {
             migrations.contains("Box::new(suprnova::render_cache::migration::Migration),"),
             "{migrations}"
         );
-        let catalog = app.read("lang/en/app.ftl");
-        for id in ["welcome = ", "error-reference = ", "error-go-home = "] {
-            assert!(catalog.contains(id), "{catalog}");
+        assert!(!app.root.join("lang").exists());
+        let home = app.read("src/controllers/home.rs");
+        assert!(
+            home.contains("format!(\"Welcome to {APP_NAME}\")"),
+            "{home}"
+        );
+        let errors = app.read("src/controllers/errors.rs");
+        assert!(
+            errors.contains("\"Reference:\".to_owned()")
+                && errors.contains("\"Go home\".to_owned()"),
+            "{errors}"
+        );
+        let views = app.read("src/views/mod.rs");
+        assert!(views.contains("lang: \"en\".to_owned()"), "{views}");
+        for source in [home, errors, views] {
+            assert!(
+                !source.contains("__!(") && !source.contains("Lang::"),
+                "{source}"
+            );
         }
     }
 }

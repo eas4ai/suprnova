@@ -8,7 +8,12 @@ date, and list formatting. The message format is
 ships - and the whole subsystem is on by default behind the
 `localization` feature.
 
-The shortest possible tour. Write a catalog:
+The starter kits render plain English and ship no translations: no `lang/`
+directory, browser wrapper, Fluent dependency or locale middleware. The
+framework's localization remains available for applications that need it.
+
+The shortest possible tour. Add catalogs and register
+[`LocaleMiddleware`](#locale-detection), then use the messages:
 
 ```ftl
 # lang/en/app.ftl
@@ -51,8 +56,9 @@ Three reasons this is a framework concern rather than a crate you pick:
   its text in Rust and half in Svelte/React/Vue. Two translation systems
   means two file formats, two review workflows, and two chances for the
   same sentence to drift. Suprnova serves the exact catalog the server
-  resolved from `/_suprnova/lang/<locale>.ftl`, and the starter kits
-  parse it with `@fluent/bundle` - one set of files, one source of truth.
+  resolved from `/_suprnova/lang/<locale>.ftl` for applications that add
+  browser translation. For server-rendered pages, translate in Rust and
+  pass the text in props so SSR and the browser render the same strings.
 - **Plurals and formats are CLDR data, not string concatenation.**
   English has two plural categories, Russian and Polish four, Arabic six.
   A number is `1,234.56` in `en-US` and `1.234,56` in `de-DE`. Fluent selects on
@@ -65,7 +71,8 @@ English fallback strings. Nothing else changes shape.
 
 ## File layout
 
-Catalogs live under `lang/`, one directory per locale:
+When you add translations, put catalogs under `lang/`, one directory per
+locale. The kits do not create this tree:
 
 ```
 myapp/
@@ -165,8 +172,8 @@ A Fluent message id cannot hold `::`, so a namespaced key is written
 `namespace__key` in a catalog: the message `bye` of the namespace
 `courier` is `courier__bye`, and its term `-brand` is `-courier__brand`.
 The served catalog the browser fetches holds them in that form, and the
-starter kits' `t()` encodes `t("courier::bye")` the same way before it
-looks the key up. Don't give your own messages ids of the form
+browser helper must encode `courier::bye` the same way before looking
+the key up. Don't give your own messages ids of the form
 `<namespace>__<key>`: they would collide with the namespace's.
 
 ### Why Suprnova diverges
@@ -579,8 +586,8 @@ fetch `pt-BR.ftl` too, and merge them client-side in JavaScript, using
 rules that would have to exactly match the server's. Flattening at load
 time instead means the served catalog is always one complete,
 self-contained file - the same contract the frontend already had before
-parent chains existed, so `@fluent/bundle` and the kit wrappers needed
-zero changes to support this feature.
+parent chains existed. A browser helper can parse it with
+`@fluent/bundle` without loading parent catalogs separately.
 
 ## Locale detection
 
@@ -610,25 +617,20 @@ Wire it up in `bootstrap.rs`, **after** the session middleware, since
 step 1 reads the session:
 
 ```rust
-use std::sync::Arc;
-use suprnova::{
-    global_middleware, App, LocaleMiddleware, LocaleShare, SessionConfig, SessionMiddleware,
-};
+use suprnova::{global_middleware, LocaleMiddleware, SessionConfig, SessionMiddleware};
 
 pub async fn register() {
     global_middleware!(SessionMiddleware::install(SessionConfig::from_env()).await);
 
     // Resolves the locale and binds it for the request.
     global_middleware!(LocaleMiddleware::from_env().expect("locale config"));
-
-    // Hands the frontend its locale + catalog URL on every Inertia page.
-    App::register_inertia_shared(Arc::new(LocaleShare));
 }
 ```
 
 `LocaleMiddleware::from_env()` reads `LocalizationConfig::from_env()`;
-`LocaleMiddleware::new(config)` takes one you built yourself. A
-scaffolded app has both lines already.
+`LocaleMiddleware::new(config)` takes one you built yourself. Starter
+kits register neither `LocaleMiddleware` nor `LocaleShare`; add locale
+detection when your application needs it.
 
 Register it **before** `Inertia::install` as well, if the app names an
 [Inertia error page](frontend-inertia-responses.md#error-pages). That
@@ -636,7 +638,7 @@ page is rendered by a middleware on the way out, after everything
 registered inside it has returned - so a locale scope opened inside the
 Inertia layer is already gone by then, and every error page would render
 in the default locale. Session outside locale outside Inertia is the
-order the scaffold uses.
+order to use when you add localization.
 
 Once it is wired, the Inertia document shell declares the active locale
 itself: `<html lang="ja">` for a visitor negotiated to Japanese, in the
@@ -928,61 +930,42 @@ path prefix, `catalog.url` starts with the public root, such as
 `/billing/_suprnova/lang/es.ftl?v=9f2c1ae4`, so the wrapper fetches it
 through the proxy as given.
 
-### The kit wrappers
+### Translated frontend props
 
-Each starter kit ships a ~100-line wrapper that reads that prop, fetches
-the catalog once, builds a `@fluent/bundle` bundle, and exposes `t()`.
-Call `initLang` once in your Inertia entry point (scaffolded apps
-already do):
+The kits ship no browser translation wrappers or `@fluent/bundle`
+dependency. For a page rendered on the server, translate with `Lang::get`
+in the handler and pass the text in props:
 
-```ts
-// frontend/src/main.ts
-import { createInertiaApp } from '@inertiajs/svelte'
-import { mount } from 'svelte'
-import { initLang } from './lib/lang.svelte'
-
-createInertiaApp({
-  resolve: (name) => { /* … unchanged … */ },
-  async setup({ el, App, props }) {
-    await initLang(props.initialPage)
-    mount(App, { target: el!, props })
-  },
-})
+```ftl
+# lang/en/app.ftl
+greeting = Welcome to Suprnova
 ```
 
-Then, in components:
+```rust
+use suprnova::{handler, inertia_response, InertiaProps, Lang, Request, Response};
 
-```svelte
-<!-- Svelte 5 -->
-<script lang="ts">
-  import { t, currentLocale } from '../lib/lang.svelte'
-</script>
+#[derive(InertiaProps)]
+pub struct GreetingProps {
+    pub heading: String,
+}
 
-<h1>{t('welcome', { app: 'Suprnova' })}</h1>
-<p>{currentLocale()}</p>
-```
-
-```tsx
-// React 19
-import { useLang } from '../lib/lang'
-
-export default function Home() {
-  const { t, locale } = useLang()
-  return <h1>{t('welcome', { app: 'Suprnova' })}</h1>
+#[handler]
+pub async fn greeting(req: Request) -> Response {
+    inertia_response!(&req, "Greeting", GreetingProps {
+        heading: Lang::get("greeting"),
+    })
 }
 ```
 
-```vue
-<!-- Vue 3.5 -->
-<script setup lang="ts">
-import { useLang } from '../lib/lang'
-const { t, locale } = useLang()
-</script>
+Render `heading` as text in the component. The SSR worker and browser
+receive the same prop, so their first renders agree without fetching a
+catalog before hydration.
 
-<template>
-  <h1>{{ t('welcome', { app: 'Suprnova' }) }}</h1>
-</template>
-```
+Loading a Fluent catalog in the browser through `LocaleShare` leaves
+translations as raw keys during SSR: the worker has not loaded that
+browser catalog. A page rendered on the server should not depend on it.
+`LocaleShare` and the catalog endpoint remain available for applications
+that choose browser translation and handle their own loading.
 
 Number and date formatting on the client uses the browser's built-in
 `Intl` - no ICU data is shipped to the browser.
@@ -1000,8 +983,8 @@ export type MessageKey =
   | "welcome"
 ```
 
-The wrappers type `t(key: MessageKey, …)`, so this is the same promise
-as [`inertia-props.ts`](frontend-typescript-types.md): rename a message
+An application helper can type `t(key: MessageKey, ...)`, giving the
+same promise as [`inertia-props.ts`](frontend-typescript-types.md): rename a message
 in Rust, regenerate, and the TypeScript compiler points at every call
 site that still uses the old id. `suprnova serve` watches `lang/`
 alongside `src/`, so the file regenerates as you edit catalogs.

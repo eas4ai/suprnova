@@ -11,7 +11,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@fluent/bundle": "^0.19.1",
     "@inertiajs/core": "^3.8.0",
     "@inertiajs/react": "^3.8.0",
     "react": "^19.2.8",

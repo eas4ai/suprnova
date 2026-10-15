@@ -203,3 +203,48 @@ fn intt_every_kit_ships_the_types_generate_types_writes_for_it() {
         );
     }
 }
+
+#[test]
+fn a_catalog_free_scaffold_generates_message_keys_only_after_catalogs_are_added() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(BIN)
+        .args([
+            "new",
+            "plain",
+            "--no-interaction",
+            "--no-git",
+            "--frontend",
+            "react",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("scaffold React kit");
+    assert!(out.status.success(), "{}", combined(&out));
+    let project = dir.path().join("plain");
+    assert!(!project.join("lang").exists());
+    let run = || {
+        let out = Command::new(BIN)
+            .arg("generate-types")
+            .current_dir(&project)
+            .output()
+            .expect("generate types");
+        assert!(out.status.success(), "{}", combined(&out));
+        combined(&out)
+    };
+    let text = run();
+    let output = project.join("frontend/src/types/lang-keys.ts");
+    assert!(!output.exists());
+    assert!(!text.contains("lang-keys.ts"), "{text}");
+    fs::create_dir_all(project.join("lang/en")).expect("create catalog directory");
+    fs::write(project.join("lang/en/app.ftl"), "greeting = Hello\n").expect("write catalog");
+    let text = run();
+    assert!(
+        text.contains("Generated ./frontend/src/types/lang-keys.ts"),
+        "{text}"
+    );
+    assert!(
+        fs::read_to_string(output)
+            .expect("message keys")
+            .contains("\"greeting\"")
+    );
+}

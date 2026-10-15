@@ -26,8 +26,8 @@
 use std::sync::Arc;
 
 use suprnova::{
-    App, Auth, AuthConfig, AuthManager, CsrfMiddleware, DB, EloquentUserProvider, LocaleMiddleware,
-    SessionConfig, SessionMiddleware, global_middleware,
+    App, Auth, AuthConfig, AuthManager, CsrfMiddleware, DB, EloquentUserProvider, SessionConfig,
+    SessionMiddleware, global_middleware,
 };
 
 use crate::controllers::errors::ErrorPage;
@@ -77,10 +77,9 @@ pub async fn register() {
 /// This kit installs no Inertia layer: every page is a server-rendered Live
 /// document, so there is no frontend build, no Vite manifest and no asset
 /// version to check. Order matters: the session first, because
-/// authentication, the CSRF check and the toast all read it; the locale
-/// next, since its detection checks the session; the error page after
-/// both, so an error page knows the visitor and their language; the
-/// request timeout after the error page, so its `503` reaches the error
+/// authentication, the CSRF check and the toast all read it; the error
+/// page next, so it knows the visitor; the request timeout after the
+/// error page, so its `503` reaches the error
 /// page too; and CSRF last, so its `419` reaches the error page on the way
 /// out.
 pub fn register_http_stack() {
@@ -92,15 +91,6 @@ pub fn register_http_stack() {
     // the session cookie and the XSRF cookie cannot drift apart.
     let session_config = SessionConfig::from_env();
     global_middleware!(SessionMiddleware::new(session_config.clone()));
-
-    // Locale detection - after SessionMiddleware, since its detection
-    // chain checks the session first (then cookie, then Accept-Language).
-    // Reads APP_LOCALE / APP_FALLBACK_LOCALE from the environment and
-    // scopes the detected locale for the rest of the request, so
-    // `Lang::get` / the `__!` macro resolve against it.
-    global_middleware!(
-        LocaleMiddleware::from_env().expect("locale config (APP_LOCALE / APP_FALLBACK_LOCALE)")
-    );
 
     // Every framework error response a browser asked for (a 404, a 403, a
     // 419, a 500 outside debug mode) renders as the error document,

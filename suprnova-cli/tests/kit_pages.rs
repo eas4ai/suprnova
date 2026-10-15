@@ -98,6 +98,69 @@ mod backend {
         }
     }
 
+    #[test]
+    fn starter_kits_ship_no_catalogs_or_locale_middleware() {
+        for kit in ["react", "vue", "svelte", "live", "api"] {
+            let app = Scaffold::new(kit);
+            assert!(!app.path("lang").exists(), "{kit} ships lang/");
+            let bootstrap = app.read("src/bootstrap.rs");
+            for absent in ["LocaleShare", "LocaleMiddleware"] {
+                assert!(!bootstrap.contains(absent), "{kit} registers {absent}");
+            }
+        }
+    }
+
+    #[test]
+    fn inertia_kits_ship_no_browser_translation_files() {
+        each_kit(|app| {
+            for path in [
+                "frontend/src/lib/lang.ts",
+                "frontend/src/lib/lang.svelte.ts",
+                "frontend/src/types/lang-keys.ts",
+            ] {
+                assert!(!app.path(path).exists(), "{} ships {path}", app.kit);
+            }
+            assert!(!app.read("frontend/package.json").contains("@fluent/bundle"));
+            let entry_ext = if app.kit == "react" { "tsx" } else { "ts" };
+            for path in [
+                format!("frontend/src/main.{entry_ext}"),
+                format!("frontend/src/ssr.{entry_ext}"),
+            ] {
+                let source = app.read(&path);
+                for absent in ["LangProvider", "initLang", "lib/lang", "await "] {
+                    assert!(
+                        !source.contains(absent),
+                        "{} {path} contains {absent}",
+                        app.kit
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn inertia_kit_pages_render_plain_english() {
+        for (kit, ext, heading) in [
+            ("react", "tsx", "Welcome to {title}"),
+            ("vue", "vue", "Welcome to {{ title }}"),
+            ("svelte", "svelte", "Welcome to {title}"),
+        ] {
+            let app = Scaffold::new(kit);
+            let home = app.read(&format!("frontend/src/pages/Home.{ext}"));
+            assert!(home.contains(heading), "{kit}: {home}");
+            let error = app.read(&format!("frontend/src/pages/Error.{ext}"));
+            assert!(
+                error.contains("Reference:") && error.contains("Go home"),
+                "{kit}: {error}"
+            );
+            for source in [&home, &error] {
+                for absent in ["lib/lang", "useLang", "t('welcome'", "t('error-"] {
+                    assert!(!source.contains(absent), "{kit}: {source}");
+                }
+            }
+        }
+    }
+
     /// Whether `haystack` contains `needle` once both lose their
     /// whitespace, so a call rustfmt wraps over several lines still
     /// matches the one-line form a test names.
@@ -188,12 +251,10 @@ mod backend {
         });
     }
 
-    /// The configuration call opts each kit into DevTools recording.
-    /// PAR-080: the Dockerfile `docker:init` writes carries `lang/` into
-    /// the runtime image, since `Localization::bootstrap` reads the
-    /// catalogs from the working directory at boot.
+    /// Docker builds accept a catalog-free scaffold and can still carry
+    /// catalogs an application adds later.
     #[test]
-    fn kit_full_stack_dockerfile_copies_lang_into_the_runtime_image() {
+    fn kit_full_stack_dockerfile_accepts_optional_catalogs() {
         let app = Scaffold::new("svelte");
         let output = Command::new(BIN)
             .arg("docker:init")
@@ -211,10 +272,11 @@ mod backend {
             .find("AS runtime")
             .expect("the Dockerfile has a runtime stage");
         assert!(
-            dockerfile[runtime..].contains("COPY lang/ ./lang/"),
-            "the runtime stage copies lang/:\n{dockerfile}"
+            dockerfile[runtime..].contains("/lang ./lang")
+                && dockerfile[..runtime].contains("COPY Cargo.toml lan[g] ./lang-context/"),
+            "catalogs are optional in the build context:\n{dockerfile}"
         );
-        assert!(app.path("lang/en/app.ftl").is_file());
+        assert!(!app.path("lang").exists());
     }
 
     #[test]
@@ -1626,7 +1688,6 @@ mod react {
                 "layout,",
                 "serverHead: true,",
                 "import { layout, title } from './lib/app'",
-                "<LangProvider>",
             ] {
                 assert!(body.contains(needle), "{file} lacks {needle}:\n{body}");
             }
@@ -1638,19 +1699,16 @@ mod react {
             "main.tsx must pass the nonce of <meta property=\"csp-nonce\">:\n{main}"
         );
         assert!(
-            main.contains("initLang(props.initialPage)"),
-            "main.tsx loads the catalog before the first render:\n{main}"
+            main.contains("const app = <App {...props} />"),
+            "main.tsx renders the app directly:\n{main}"
         );
         assert!(
             !ssr.contains("createServer(") && !ssr.contains("initLang("),
             "the plugin wraps ssr.tsx's createInertiaApp call in createServer, \
              and the SSR pass loads no catalog:\n{ssr}"
         );
-        for comment in ["XSRF-TOKEN", "hydration content mismatch"] {
-            assert!(
-                main.contains(comment),
-                "main.tsx lost the {comment} comment"
-            );
+        for marker in ["XSRF-TOKEN", "data-server-rendered"] {
+            assert!(main.contains(marker), "main.tsx lost {marker}");
         }
 
         let app = kit.read("src/lib/app.ts");

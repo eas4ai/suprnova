@@ -1,7 +1,7 @@
 //! The welcome page.
 
 use suprnova::live::LiveDocument;
-use suprnova::{__, FrameworkError, HttpResponse, Request, Response, handler};
+use suprnova::{FrameworkError, HttpResponse, Request, Response, handler};
 
 use crate::views::{self, APP_NAME, Frame, HomePage, Nav};
 
@@ -16,8 +16,7 @@ async fn page(req: &Request) -> Result<HttpResponse, FrameworkError> {
     let frame = Frame::live(&mut document, "Home", Nav::None).await?;
     let page = HomePage {
         frame,
-        // `welcome = Welcome to { $app }!` in `lang/en/app.ftl`.
-        welcome: __!("welcome", app: APP_NAME),
+        welcome: format!("Welcome to {APP_NAME}"),
     };
     views::render(document, "live/pages/home.html", &page)
 }

@@ -36,22 +36,69 @@ fn scaffold(tmp: &tempfile::TempDir, name: &str, kit: &str) -> PathBuf {
     tmp.path().join(name).join("frontend")
 }
 
-/// Run `npm <args>` in `frontend` and fail with its whole output when it
-/// does not succeed.
-fn npm(frontend: &Path, args: &[&str]) {
-    let out = Command::new("npm")
+/// Run a kit command and include its output if it fails.
+fn run(dir: &Path, program: &str, args: &[&str]) {
+    let out = Command::new(program)
         .args(args)
-        .current_dir(frontend)
+        .current_dir(dir)
         .output()
-        .unwrap_or_else(|e| panic!("run `npm {}`: {e}", args.join(" ")));
+        .unwrap_or_else(|e| panic!("run `{program} {}`: {e}", args.join(" ")));
     assert!(
         out.status.success(),
-        "`npm {}` failed in {}:\nstdout:\n{}\nstderr:\n{}",
+        "`{program} {}` failed in {}:\nstdout:\n{}\nstderr:\n{}",
         args.join(" "),
-        frontend.display(),
+        dir.display(),
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
+}
+
+/// Render the home page through the built worker with no localization props.
+fn assert_home_heading(frontend: &Path) {
+    let script = r#"
+import assert from 'node:assert/strict'
+import { Server } from 'node:http'
+import { pathToFileURL } from 'node:url'
+
+// An ephemeral port lets other worktrees run their own SSR checks.
+const listen = Server.prototype.listen
+let worker
+const listening = new Promise((resolve) => {
+  Server.prototype.listen = function (options, ...args) {
+    worker = this
+    this.once('listening', resolve)
+    return listen.call(this, { ...options, port: 0, host: '127.0.0.1' }, ...args)
+  }
+})
+const deadline = setTimeout(() => {
+  console.error('SSR worker did not finish the home heading check within 30 seconds')
+  process.exit(1)
+}, 30_000)
+try {
+  await import(pathToFileURL(`${process.cwd()}/bootstrap/ssr/ssr.js`))
+  await listening
+  const page = {
+    component: 'Home', url: '/', version: null, clearHistory: false, encryptHistory: false, flash: {},
+    props: {
+      title: 'SSR Fixture', message: 'First visit', root: '',
+      auth: { user: null }, errors: {},
+    },
+  }
+  const response = await fetch(`http://127.0.0.1:${worker.address().port}/render`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(page), signal: AbortSignal.timeout(10_000),
+  })
+  assert.equal(response.status, 200, await response.clone().text())
+  const rendered = await response.json()
+  const body = rendered.body.replace(/<!--[\s\S]*?-->/g, '')
+  assert.match(body, /<h1[^>]*>Welcome to SSR Fixture<\/h1>/)
+  assert.doesNotMatch(body, /<h1[^>]*>welcome<\/h1>/)
+} finally {
+  clearTimeout(deadline)
+  if (worker) await new Promise((resolve) => worker.close(resolve))
+}
+"#;
+    run(frontend, "node", &["--input-type=module", "--eval", script]);
 }
 
 #[test]
@@ -60,7 +107,7 @@ fn kit_svelte_type_checks_and_builds() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let frontend = scaffold(&tmp, "kitcheck", "svelte");
 
-    npm(&frontend, &["install", "--no-audit", "--no-fund"]);
+    run(&frontend, "npm", &["install", "--no-audit", "--no-fund"]);
     assert!(
         frontend
             .join("node_modules/@inertiajs/vite/package.json")
@@ -68,8 +115,8 @@ fn kit_svelte_type_checks_and_builds() {
         "the kit must install the Inertia Vite plugin"
     );
 
-    npm(&frontend, &["run", "check"]);
-    npm(&frontend, &["run", "build"]);
+    run(&frontend, "npm", &["run", "check"]);
+    run(&frontend, "npm", &["run", "build"]);
     assert!(
         frontend
             .join("../public/assets/.vite/manifest.json")
@@ -77,38 +124,20 @@ fn kit_svelte_type_checks_and_builds() {
         "`npm run build` must write the manifest the server reads"
     );
 
-    npm(&frontend, &["run", "build:ssr"]);
+    run(&frontend, "npm", &["run", "build:ssr"]);
     assert!(
         frontend.join("bootstrap/ssr/ssr.js").is_file(),
         "`npm run build:ssr` must land the bundle at frontend/bootstrap/ssr/ssr.js, \
          where `suprnova ssr:start` reads it"
     );
+    assert_home_heading(&frontend);
 }
 
 /// The React kit.
 mod react {
-    use std::path::Path;
-    use std::process::Command;
+    use super::run;
 
     const BIN: &str = env!("CARGO_BIN_EXE_suprnova");
-
-    /// Run `program args` in `dir` and fail with its whole output unless it
-    /// succeeds.
-    fn run(dir: &Path, program: &str, args: &[&str]) {
-        let output = Command::new(program)
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap_or_else(|e| panic!("spawn `{program} {}`: {e}", args.join(" ")));
-        assert!(
-            output.status.success(),
-            "`{program} {}` failed in {}:\n{}{}",
-            args.join(" "),
-            dir.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
 
     #[test]
     #[ignore = "installs npm packages and runs Vite; needs the network"]
@@ -143,31 +172,13 @@ mod react {
             "`npm run build:ssr` must land the SSR bundle at frontend/bootstrap/ssr/ssr.js, \
              the path `suprnova ssr:start` reads"
         );
+        super::assert_home_heading(&frontend);
     }
 }
 
 /// The Vue kit.
 mod vue {
-    use std::path::Path;
-    use std::process::Command;
-
-    /// Run `program args` in `dir` and fail the test with its output when it
-    /// exits unsuccessfully.
-    fn run(dir: &Path, program: &str, args: &[&str]) {
-        let out = Command::new(program)
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap_or_else(|e| panic!("spawn `{program} {}`: {e}", args.join(" ")));
-        assert!(
-            out.status.success(),
-            "`{program} {}` failed in {}:\nstdout:\n{}\nstderr:\n{}",
-            args.join(" "),
-            dir.display(),
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
+    use super::run;
 
     #[test]
     #[ignore = "installs the kit's npm packages and builds it; slow and needs the network"]
@@ -199,6 +210,7 @@ mod vue {
             "`npm run build:ssr` must write {}",
             bundle.display()
         );
+        super::assert_home_heading(&frontend);
         let manifest = tmp.path().join("kit_vue/public/assets/.vite/manifest.json");
         assert!(
             manifest.is_file(),

@@ -8,6 +8,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **A fresh Inertia starter app hydrates its first page without a mismatch.**
+  The React, Vue and Svelte kits loaded their Fluent catalog only in the
+  browser, so with server-side rendering, on by default since 4.0.0, the
+  server rendered the raw `welcome` key and the browser the translated
+  heading, and React reported a hydration error. New projects render the
+  same heading from the title prop in both places.
 - **A field shows its own validation message.** The Live response named each
   issue by its message identifier alone, so a `live:error` output under a
   rejected field read the runtime's generic "Validation failed" while the
@@ -58,6 +64,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   with `--sn-scroll-area-size` and left the token undefined, so the shared
   stylesheet never named it and the engine's token check failed. The shared
   stylesheet now defines it at 16rem; a page or a region still sets its own.
+
+### Changed
+
+- **Starter kits ship no translations.** React, Vue, Svelte, Live and API
+  scaffolds include no catalogs, browser translation modules or locale
+  middleware, and their pages render English text. The framework's
+  localization is unchanged. An existing application keeps its own files;
+  one that translates in the browser under server-side rendering renders
+  raw keys on the server, and the upgrade guide shows the two ways out:
+  remove the browser translations as new projects do, or translate on the
+  server with `Lang::get` and pass the text in props.
 
 ## 4.0.3 - 2026-10-13
 

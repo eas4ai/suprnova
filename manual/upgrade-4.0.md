@@ -806,6 +806,46 @@ let pipeline = ImagePipeline {
 
 **Do:** Nothing to do. Rename a locale you named `vendor`.
 
+### Starter kits ship no translations.
+
+**Before:** `suprnova new` gave a project `lang/en/app.ftl`, registered
+`LocaleMiddleware` and `LocaleShare` in its bootstrap, and in the React, Vue
+and Svelte kits a `src/lib/lang` module whose `t()` the home and error pages
+called.
+
+**Now:** A new project has none of them, and its pages render English text.
+The framework's localization is unchanged: catalogs you add under `lang/`,
+`Lang::get`, `LocaleMiddleware` and `LocaleShare` work as before.
+
+**Do:** Nothing to change. An existing project keeps its own files; the next
+section covers them under server-side rendering.
+
+### A fresh Inertia starter app hydrates its first page without a mismatch.
+
+**Before:** The React, Vue and Svelte kits translated their pages in the
+browser. With server-side rendering, on by default in 4.0, the server
+rendered the raw message key (`welcome`) because the catalog loads only in
+the browser, and the browser hydrated with the translated text, so React
+reported a hydration error and Vue and Svelte warned.
+
+**Now:** A new project's pages render the same text on the server and in
+the browser.
+
+**Do:** In a project scaffolded from an earlier release that keeps
+server-side rendering on, choose one:
+
+- Remove the kit's browser translations as a new project does: delete
+  `frontend/src/lib/lang.ts` (`lang.svelte.ts` in Svelte) and
+  `frontend/src/types/lang-keys.ts`, render the app without `LangProvider`
+  and without awaiting `initLang` in `main` and `ssr`, and replace each
+  `t()` call with its text.
+- Keep translations and move them to the server: call `Lang::get` (or
+  `__!`) in the handler and pass the text in the page's props, which the
+  server and the browser render alike. A Fluent catalog loaded in the
+  browser renders raw keys during server-side rendering, so a page rendered
+  on the server should not depend on it. See
+  [Localization](localization.md).
+
 ## Mail and notifications
 
 ### One attachment per name and bytes.
@@ -2806,11 +2846,11 @@ process restarts. A listing or probe that cannot be had refuses the run,
 and the next run checks again. A policy directory the driver cannot make,
 or a policy file it cannot write and check, refuses the run too.
 
-**Do:** Nothing to run, for most applications. A `policy.xml` in the
-service account's own `~/.config/ImageMagick` no longer applies to the
-driver's runs, and neither do the other ImageMagick configuration files
-there: put a policy of your own in a directory on `MAGICK_CONFIGURE_PATH`
-or in `$XDG_CONFIG_HOME/ImageMagick`, where its denials still apply. If
+**Do:** Nothing to run, for most applications. A policy of your own still
+applies: the service account's own ImageMagick directory
+(`$XDG_CONFIG_HOME/ImageMagick`, else `$HOME/.config/ImageMagick`) and the
+directories on your `MAGICK_CONFIGURE_PATH` are read before the framework's
+file, so their denials and configuration hold under its policy. If
 your application reads PostScript, EPS, PDF, XPS, or another of those
 formats through the `magick` driver under `IMAGE_MAGICK_AUTODETECT`, those
 reads now fail with a security policy error, and nothing reopens them:
@@ -2861,6 +2901,12 @@ observes, or touch only the framework's own tooling and tests.
 - **The component allowlist refuses test fakes, app-wide hooks and installs.** A component's Rust, and the allowlist that reads it, are new in 4.0.0; a 3.2.1 component carried no Rust.
 - **Every Live and Magnetar type a public signature leads to is named through `suprnova`.** It only adds paths, so code that built on 3.2.1 is unaffected.
 - **The dogfood application's password reset reports success only when both revocations succeed.** The dogfood application is not a published surface.
+- **A field shows its own validation message.** A field's `live:error` output is new in 4.0.0.
+- **A user who changes their own password stays signed in.** It is part of the section [A session or remember-me cookie from before a password change stops working](#a-session-or-remember-me-cookie-from-before-a-password-change-stops-working).
+- **A fresh scaffold is rustfmt-clean.** It changes only the files `suprnova new` writes.
+- **The account's own ImageMagick policy applies again.** It is part of the section [The `magick` driver runs ImageMagick under the framework's own policy](#the-magick-driver-runs-imagemagick-under-the-frameworks-own-policy).
+- **The framework's frames below a Live action fit Tokio's default stack.** It changes only how much stack the framework's own code uses.
+- **The scroll area's size token is defined.** It defines the token the shared stylesheet already read; a page or region that sets its own size is unchanged.
 
 ## Added entries that change behaviour
 
@@ -2933,11 +2979,12 @@ RFC 7231 form, and refuses a value that is neither.
 **Before:** The browser catalog held plain keys.
 
 **Now:** `Lang::add_namespace` reads a package's catalogs as
-`namespace::key`, the browser catalog holds them as `namespace__key`, and
-the starter kits' `t()` encodes keys the same way.
+`namespace::key`, and the browser catalog holds them as `namespace__key`.
 
-**Do:** Nothing to do. To read namespaced keys in a 3.2.1
-kit frontend, copy the key encoding from a new kit's `t()`.
+**Do:** New kits ship no translations or browser helper. For SSR, use
+`Lang::get("namespace::key")` in Rust and pass the text in props. If your
+existing application translates in the browser, encode namespaced keys
+as `namespace__key` in its helper before looking them up.
 
 ### A Web Push endpoint allowlist.
 
