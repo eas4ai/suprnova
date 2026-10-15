@@ -63,7 +63,7 @@ fn baseline_latency_nearest_rank() -> Result<(), FrameworkError> {
 
 #[test]
 fn baseline_rival_budgets_hand_computed() -> Result<(), FrameworkError> {
-    use suprnova::search::baseline::{Measurement, Rival};
+    use suprnova::search::baseline::{Measurement, Rival, RivalTrial};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("baseline.json");
     let mut floors = BaselineFloors::load(fixtures().join("baseline.json"))?;
@@ -72,6 +72,12 @@ fn baseline_rival_budgets_hand_computed() -> Result<(), FrameworkError> {
     for (meili, typesense, expected) in [(4.0, 7.5, 15.0), (9.0, 2.0, 18.0), (3.0, 3.0, 6.0)] {
         let rival = |version: &str, p95_ms| Rival {
             version: Some(version.into()),
+            settings: Some(serde_json::json!({"mode":"test"})),
+            grid: vec![RivalTrial {
+                settings: serde_json::json!({"mode":"test"}),
+                ndcg_at_10: 0.8,
+                p95_ms,
+            }],
             lexical: Some(Measurement {
                 ndcg_at_10: 0.8,
                 queries: 300,
@@ -167,8 +173,16 @@ fn baseline_fixture_rejects_broken_references_and_rows() -> Result<(), Framework
 
 #[test]
 fn baseline_uncalibrated_gate_is_closed() -> Result<(), FrameworkError> {
-    let mut floors = BaselineFloors::load(fixtures().join("baseline.json"))?;
-    floors.calibrated = false;
+    let floors = BaselineFloors::load(fixtures().join("baseline.json"))?;
+    assert!(!floors.calibrated);
+    assert!(floors.rivals.meilisearch.settings.is_none());
+    assert!(floors.rivals.meilisearch.grid.is_empty());
+    assert!(floors.rivals.typesense.settings.is_none());
+    assert!(floors.rivals.typesense.grid.is_empty());
+    let serialized = serde_json::to_value(&floors).unwrap();
+    for name in ["meilisearch", "typesense"] {
+        assert!(serialized["rivals"][name].get("settings").is_none());
+    }
     assert!(floors.require_calibrated(false).is_err());
     floors.require_calibrated(true)?;
     Ok(())
@@ -302,8 +316,10 @@ async fn baseline_qdrant() -> Result<(), FrameworkError> {
     .await
 }
 
-#[tokio::test]
-async fn baseline_calibration_uses_tasks_import_and_versions() -> Result<(), FrameworkError> {
+async fn calibrate_mock_rivals(
+    rejected_parameter: Option<(&str, &str)>,
+    tied: bool,
+) -> Result<BaselineFloors, FrameworkError> {
     use suprnova::search::baseline::Calibration;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -344,17 +360,31 @@ async fn baseline_calibration_uses_tasks_import_and_versions() -> Result<(), Fra
         .expect(4)
         .mount(&meili)
         .await;
-    Mock::given(method("POST"))
-        .and(path_regex("^/indexes/[^/]+/search$"))
-        .and(body_partial_json(
-            serde_json::json!({"q":"query","limit":10}),
-        ))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({"hits":[{"id":"d"}]})),
-        )
-        .expect(2)
-        .mount(&meili)
-        .await;
+    for strategy in ["last", "frequency", "all"] {
+        let hits = if strategy == "frequency" || (tied && strategy == "all") {
+            serde_json::json!([{"id":"d"}])
+        } else {
+            serde_json::json!([])
+        };
+        Mock::given(method("POST"))
+            .and(path_regex("^/indexes/[^/]+/search$"))
+            .and(body_partial_json(serde_json::json!({
+                "q":"query", "limit":10, "attributesToRetrieve":["id"],
+                "matchingStrategy":strategy
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"hits":hits}))
+                    .set_delay(std::time::Duration::from_millis(if strategy == "all" {
+                        40
+                    } else {
+                        0
+                    })),
+            )
+            .expect(2)
+            .mount(&meili)
+            .await;
+    }
     Mock::given(method("GET"))
         .and(path_regex("^/version$"))
         .respond_with(
@@ -380,17 +410,44 @@ async fn baseline_calibration_uses_tasks_import_and_versions() -> Result<(), Fra
         .expect(1)
         .mount(&typesense)
         .await;
-    Mock::given(method("GET"))
-        .and(path_regex("^/collections/[^/]+/documents/search$"))
-        .and(query_param("query_by", "title,text"))
-        .and(query_param("q", "query"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({"hits":[{"document":{"id":"d"}}]})),
-        )
-        .expect(2)
-        .mount(&typesense)
-        .await;
+    for threshold in ["1", "10"] {
+        for match_type in ["max_score", "sum_score"] {
+            let rejected = rejected_parameter.is_some_and(|(parameter, value)| {
+                (parameter == "drop_tokens_threshold" && value == threshold)
+                    || (parameter == "text_match_type" && value == match_type)
+            });
+            let hits = if threshold == "10" && (match_type == "sum_score" || tied) {
+                serde_json::json!([{"document":{"id":"d"}}])
+            } else {
+                serde_json::json!([])
+            };
+            Mock::given(method("GET"))
+                .and(path_regex("^/collections/[^/]+/documents/search$"))
+                .and(query_param("query_by", "title,text"))
+                .and(query_param("q", "query"))
+                .and(query_param("per_page", "10"))
+                .and(query_param("include_fields", "id"))
+                .and(query_param("drop_tokens_threshold", threshold))
+                .and(query_param("text_match_type", match_type))
+                .respond_with(if rejected {
+                    // The response body must never be copied into the error.
+                    ResponseTemplate::new(400).set_body_string("private server content")
+                } else {
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"hits":hits}))
+                        .set_delay(std::time::Duration::from_millis(
+                            if match_type == "sum_score" { 40 } else { 0 },
+                        ))
+                })
+                .expect(if rejected_parameter.is_none() {
+                    2..=2
+                } else {
+                    0..=2
+                })
+                .mount(&typesense)
+                .await;
+        }
+    }
     Mock::given(method("GET"))
         .and(path_regex("^/debug$"))
         .respond_with(
@@ -423,15 +480,29 @@ async fn baseline_calibration_uses_tasks_import_and_versions() -> Result<(), Fra
     .unwrap();
     std::fs::write(dir.path().join("LICENSE"), "CC BY 4.0 and ODC-By 1.0").unwrap();
     let fixture = Fixture::load(dir.path())?;
+    let before = std::fs::read(fixtures().join("baseline.json")).unwrap();
     let floors = BaselineFloors::load(fixtures().join("baseline.json"))?;
-    let calibrated = Calibration::new(
+    let result = Calibration::new(
         &meili.uri(),
         "test-meili",
         &typesense.uri(),
         "test-typesense",
     )?
     .run(&fixture, &floors, 0.05)
-    .await?;
+    .await;
+    meili.verify().await;
+    typesense.verify().await;
+    assert_eq!(
+        std::fs::read(fixtures().join("baseline.json")).unwrap(),
+        before
+    );
+    result
+}
+
+#[tokio::test]
+async fn baseline_calibration_uses_tasks_import_and_versions() -> Result<(), FrameworkError> {
+    let floors = BaselineFloors::load(fixtures().join("baseline.json"))?;
+    let calibrated = calibrate_mock_rivals(None, false).await?;
     assert!(calibrated.calibrated);
     assert_eq!(
         calibrated.rivals.meilisearch.version.as_deref(),
@@ -506,19 +577,218 @@ async fn baseline_calibration_uses_tasks_import_and_versions() -> Result<(), Fra
             .budget_comment
             .contains(&calibrated.calibrated_at.as_ref().unwrap()[..10])
     );
-    assert!(!calibrated.budget_comment.contains(&meili.uri()));
     assert!(!calibrated.budget_comment.contains("test-meili"));
-    assert!(!calibrated.budget_comment.contains(&typesense.uri()));
     assert!(!calibrated.budget_comment.contains("test-typesense"));
+    let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("baseline.json");
     calibrated.write(&output)?;
     assert_eq!(
         BaselineFloors::load(&output)?.p95_budgets_ms,
         calibrated.p95_budgets_ms
     );
-    println!("{}", calibrated.budget_comment);
-    meili.verify().await;
-    typesense.verify().await;
+    let serialized = serde_json::to_value(&calibrated).unwrap();
+    assert_eq!(
+        serde_json::to_value(BaselineFloors::load(&output)?).unwrap(),
+        serialized
+    );
+    for (name, count) in [("meilisearch", 3), ("typesense", 4)] {
+        let rival = &serialized["rivals"][name];
+        assert_eq!(rival["grid"].as_array().unwrap().len(), count);
+        assert!(
+            calibrated
+                .budget_comment
+                .contains(&rival["settings"].to_string())
+        );
+        let trials = rival["grid"].as_array().unwrap();
+        let chosen = trials
+            .iter()
+            .find(|trial| trial["settings"] == rival["settings"])
+            .unwrap();
+        assert_eq!(chosen["ndcg_at_10"], rival["lexical"]["ndcg_at_10"]);
+        assert_eq!(chosen["p95_ms"], rival["lexical"]["latency"]["p95_ms"]);
+    }
+    assert_eq!(
+        serialized["rivals"]["meilisearch"]["settings"],
+        serde_json::json!({"matchingStrategy":"frequency", "limit":10, "attributesToRetrieve":["id"]})
+    );
+    assert_eq!(
+        serialized["rivals"]["typesense"]["settings"],
+        serde_json::json!({"drop_tokens_threshold":10, "text_match_type":"sum_score",
+            "query_by":"title,text", "per_page":10, "include_fields":"id"})
+    );
+    let meili_grid = serialized["rivals"]["meilisearch"]["grid"]
+        .as_array()
+        .unwrap();
+    for (trial, strategy) in meili_grid.iter().zip(["last", "frequency", "all"]) {
+        assert_eq!(
+            trial["settings"],
+            serde_json::json!({
+                "matchingStrategy":strategy, "limit":10, "attributesToRetrieve":["id"]
+            })
+        );
+        assert_eq!(
+            trial["ndcg_at_10"],
+            if strategy == "frequency" { 1.0 } else { 0.0 }
+        );
+    }
+    let typesense_grid = serialized["rivals"]["typesense"]["grid"]
+        .as_array()
+        .unwrap();
+    for (trial, (threshold, match_type)) in typesense_grid.iter().zip([
+        (1, "max_score"),
+        (1, "sum_score"),
+        (10, "max_score"),
+        (10, "sum_score"),
+    ]) {
+        assert_eq!(
+            trial["settings"],
+            serde_json::json!({
+                "drop_tokens_threshold":threshold, "text_match_type":match_type,
+                "query_by":"title,text", "per_page":10, "include_fields":"id"
+            })
+        );
+        assert_eq!(
+            trial["ndcg_at_10"],
+            if threshold == 10 && match_type == "sum_score" {
+                1.0
+            } else {
+                0.0
+            }
+        );
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&calibrated.rivals).unwrap()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn baseline_calibration_ties_choose_lower_p95() -> Result<(), FrameworkError> {
+    let calibrated = calibrate_mock_rivals(None, true).await?;
+    let serialized = serde_json::to_value(calibrated).unwrap();
+    for name in ["meilisearch", "typesense"] {
+        let rival = &serialized["rivals"][name];
+        assert_eq!(
+            rival["grid"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|trial| trial["ndcg_at_10"].as_f64() == Some(1.0))
+                .count(),
+            2
+        );
+        let best = rival["grid"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|trial| trial["ndcg_at_10"].as_f64() == Some(1.0))
+            .min_by(|a, b| {
+                a["p95_ms"]
+                    .as_f64()
+                    .unwrap()
+                    .total_cmp(&b["p95_ms"].as_f64().unwrap())
+            })
+            .unwrap();
+        assert_eq!(rival["settings"], best["settings"]);
+        assert_eq!(rival["lexical"]["latency"]["p95_ms"], best["p95_ms"]);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn baseline_calibration_rejected_typesense_parameter_cleans_up_both_indexes() {
+    for rejected in [
+        ("drop_tokens_threshold", "10"),
+        ("text_match_type", "sum_score"),
+    ] {
+        let error = calibrate_mock_rivals(Some(rejected), false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("HTTP 400"), "{error}");
+        assert!(error.contains(rejected.0), "{error}");
+        assert!(!error.contains("private server content"));
+        assert!(!error.contains("test-typesense"));
+        assert!(!error.contains("test-meili"));
+    }
+}
+
+#[test]
+fn baseline_calibrated_load_requires_best_grid_trial() -> Result<(), FrameworkError> {
+    let floors = BaselineFloors::load(fixtures().join("baseline.json"))?;
+    let mut value = serde_json::to_value(floors).unwrap();
+    value["calibrated"] = serde_json::json!(true);
+    for name in ["meilisearch", "typesense"] {
+        let rival = &mut value["rivals"][name];
+        let score = rival["lexical"]["ndcg_at_10"].clone();
+        rival["settings"] = serde_json::json!({"mode":"best"});
+        rival["grid"] = serde_json::json!([
+            {"settings":{"mode":"weaker"},"ndcg_at_10":0.1,"p95_ms":1.0},
+            {"settings":{"mode":"best"},"ndcg_at_10":score,"p95_ms":rival["lexical"]["latency"]["p95_ms"]}
+        ]);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("baseline.json");
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    BaselineFloors::load(&path)?;
+    for name in ["meilisearch", "typesense"] {
+        for edit in [
+            "weaker",
+            "missing_settings",
+            "missing_grid",
+            "empty_grid",
+            "invalid_trial",
+            "invalid_p95",
+        ] {
+            let mut edited = value.clone();
+            match edit {
+                "weaker" => {
+                    edited["rivals"][name]["lexical"]["ndcg_at_10"] = serde_json::json!(0.1)
+                }
+                "missing_settings" | "missing_grid" => {
+                    let field = if edit == "missing_settings" {
+                        "settings"
+                    } else {
+                        "grid"
+                    };
+                    edited["rivals"][name]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove(field);
+                }
+                "empty_grid" => edited["rivals"][name]["grid"] = serde_json::json!([]),
+                "invalid_p95" => {
+                    edited["rivals"][name]["grid"][0]["p95_ms"] = serde_json::json!(-1.0)
+                }
+                _ => edited["rivals"][name]["grid"][0]["ndcg_at_10"] = serde_json::json!(2.0),
+            }
+            std::fs::write(&path, serde_json::to_vec(&edited).unwrap()).unwrap();
+            assert!(BaselineFloors::load(&path).is_err(), "{name}: {edit}");
+            edited["calibrated"] = serde_json::json!(false);
+            std::fs::write(&path, serde_json::to_vec(&edited).unwrap()).unwrap();
+            BaselineFloors::load(&path)?;
+        }
+        let score = value["rivals"][name]["lexical"]["ndcg_at_10"]
+            .as_f64()
+            .unwrap();
+        let mut rounded = value.clone();
+        rounded["rivals"][name]["lexical"]["ndcg_at_10"] = serde_json::json!(score * (1.0 + 1e-10));
+        std::fs::write(&path, serde_json::to_vec(&rounded).unwrap()).unwrap();
+        BaselineFloors::load(&path)?;
+    }
+    let mut zero = value;
+    for name in ["meilisearch", "typesense"] {
+        zero["rivals"][name]["lexical"]["ndcg_at_10"] = serde_json::json!(0.0);
+        for trial in zero["rivals"][name]["grid"].as_array_mut().unwrap() {
+            trial["ndcg_at_10"] = serde_json::json!(0.0);
+        }
+    }
+    std::fs::write(&path, serde_json::to_vec(&zero).unwrap()).unwrap();
+    BaselineFloors::load(&path)?;
+    zero["rivals"]["meilisearch"]["lexical"]["ndcg_at_10"] = serde_json::json!(1e-12);
+    std::fs::write(&path, serde_json::to_vec(&zero).unwrap()).unwrap();
+    assert!(BaselineFloors::load(&path).is_err());
     Ok(())
 }
 
@@ -553,12 +823,24 @@ async fn baseline_assertions_enforce_floors_budgets_and_identity() -> Result<(),
     };
     floors.rivals.meilisearch = suprnova::search::baseline::Rival {
         version: Some("test-meili".into()),
+        settings: Some(serde_json::json!({"mode":"test"})),
+        grid: vec![suprnova::search::baseline::RivalTrial {
+            settings: serde_json::json!({"mode":"test"}),
+            ndcg_at_10: 0.8,
+            p95_ms: 200.0,
+        }],
         lexical: Some(measurement.clone()),
     };
     let mut weaker = measurement;
     weaker.ndcg_at_10 = 0.5;
     floors.rivals.typesense = suprnova::search::baseline::Rival {
         version: Some("test-typesense".into()),
+        settings: Some(serde_json::json!({"mode":"test"})),
+        grid: vec![suprnova::search::baseline::RivalTrial {
+            settings: serde_json::json!({"mode":"test"}),
+            ndcg_at_10: 0.5,
+            p95_ms: 500.0,
+        }],
         lexical: Some(weaker),
     };
     // Relevance and speed are independent: Typesense is weaker but slower.
