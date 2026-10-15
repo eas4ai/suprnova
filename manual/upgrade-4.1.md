@@ -28,10 +28,39 @@ the new middleware. New full-stack scaffolds register it automatically.
    cargo check --all-targets
    ```
 
-2. Decide whether to install browser security headers, using the section below.
+2. Decide whether to install browser security headers and error reporting, using the sections below.
 3. Run your tests and exercise a browser first visit, error page and Live page.
 
 ## Added entries that change behaviour
+
+### Error reporting through Sentry-compatible trackers.
+
+**Before:** An application supplied its own Sentry SDK and `ErrorOccurred`
+listener. Background failures did not all reach that listener.
+
+**Now:** The built-in `sentry` driver sends errors to Rustrak, Sentry or
+GlitchTip. It is inert without a DSN. A bounded background queue, shared
+scrubbing and shutdown flushing cover requests and background work.
+
+**Do:** Remove the hand-written tracker listener and direct SDK capture for
+errors the framework reports, then set the project's DSN:
+
+```dotenv
+REPORTING_DRIVER=sentry
+REPORTING_DSN=http://your-project-key@127.0.0.1:8080/1
+```
+
+Use the DSN your tracker supplies. Existing `Exceptions::reportable`
+callbacks still run first; `.stop()` prevents tracker delivery. `log` and
+`null` drivers are also available. Logs and traces remain off until you set
+`REPORTING_LOGS` or `REPORTING_TRACES_SAMPLE_RATE`.
+
+For browser reporting, copy the current starter entry-point integration and
+install its Sentry package for your frontend. Set `VITE_REPORTING_DSN` at
+build time for an Inertia kit and `REPORTING_PUBLIC_DSN` on the server so
+CSP allows the tracker. Live needs only `REPORTING_PUBLIC_DSN`; its reporter
+is built into the runtime. See [Error Reporting](error-reporting.md) for
+all settings, the helpers and the local Rustrak commands.
 
 ### Security headers with per-request CSP nonces.
 
@@ -104,5 +133,6 @@ nonce plumbing so Inertia, Live and RenderCache agree on each request.
 
 ## Next
 
+- [Error Reporting](error-reporting.md) documents drivers, scrubbing and kits.
 - [Security Headers](security-headers.md) documents the policy and overrides.
 - [Upgrading to 4.0](upgrade-4.0.md) covers the preceding release.

@@ -527,36 +527,18 @@ errs.add_to_bag("billing", "card", "expired");
 entries (used by Precognition's `Precognition-Validate-Only` header
 internally).
 
-## Hooking observability with `ErrorOccurred`
+## Send errors to a tracker
 
-Every 5xx response fires an `ErrorOccurred` event - including the
-ones synthesised from panics. Listen the same way you listen for any
-event:
+Set `REPORTING_DSN` to send errors to Rustrak, Sentry or GlitchTip through
+Suprnova's built-in `sentry` driver. The reporter also receives background
+failures. You do not need an `ErrorOccurred` listener or a direct SDK call.
+See [Error Reporting](error-reporting.md) for local Rustrak, drivers,
+settings, scrubbing and browser reporting.
 
-```rust
-use std::sync::Arc;
-use suprnova::{ErrorOccurred, EventFacade, FrameworkError, Listener};
-
-pub struct SentryReporter;
-
-#[suprnova::async_trait]
-impl Listener<ErrorOccurred> for SentryReporter {
-    async fn handle(&self, evt: &ErrorOccurred) -> Result<(), FrameworkError> {
-        sentry::capture_message(&evt.error_message, sentry::Level::Error);
-        Ok(())
-    }
-}
-
-// In bootstrap.rs:
-// `listen` infers both generics from the listener type. It returns
-// `()` (the registration cannot fail), so no `?` and no Result.
-EventFacade::listen::<ErrorOccurred, SentryReporter>(Arc::new(SentryReporter)).await;
-```
-
-The event carries the raw error message (the wire body is still
-sanitised - see [Error Model](error-model.md)), the status, and the
-correlatable request id. To run code for failed queue jobs and console
-commands too, register a callback with `Exceptions::reportable`.
+`ErrorOccurred` remains an application event for 5xx responses, including
+responses built from panics. Its raw error message and request id can drive
+application-specific listeners. The event is not scrubbed for export;
+use the reporting driver when sending errors outside the application.
 
 ## Report errors with `Exceptions`
 
@@ -581,7 +563,9 @@ reported:
   console binary's commands and the application binary's (`queue:work`,
   `schedule:interrupt`, `down` and the others). The callbacks your
   `bootstrap` registered before it failed see the failure.
-- Every error you pass to `Exceptions::report`.
+- Scheduled task errors and caught panics, workflow step panics, supervisor
+  failures, WebSocket session failures and rescued Inertia props.
+- Every error you pass to `Exceptions::report` or the `report` helper.
 
 A report runs your callbacks in the order you registered them. Then it
 writes the `framework error` log line, with the status, the full source
@@ -589,7 +573,8 @@ chain, and the request id when there is one. When the framework builds a
 5xx for a failure it has already logged, such as a rate limiter that fails
 closed, you get that line, with its own fields, in place of the
 `framework error` line, so each failure is logged once. A callback with
-`stop()` does not hold back that line.
+`stop()` prevents subsequent callbacks and the reporting driver from receiving
+that error. An already-written log line is not removed.
 
 Register callbacks once, in `bootstrap.rs`. The parameter type of the
 closure decides which errors it receives:
@@ -615,8 +600,8 @@ pub fn register_reporting() {
     });
 
     // Only errors that wrap a `PaymentDeclined`. `stop()` keeps the
-    // callbacks after this one and the default log line from running
-    // for those errors.
+    // callbacks after this one, the default log line and the reporting
+    // driver from running for those errors.
     Exceptions::reportable(|error: &PaymentDeclined| {
         eprintln!("billing alert: {error}");
     })
@@ -827,6 +812,7 @@ and the lookup failure to a response.
 
 ## Next
 
+- [Error Reporting](error-reporting.md) - tracker drivers, helpers and scrubbing
 - [Error Model](error-model.md) - variants, conversion contract,
   5xx sanitisation, panic boundary, development error page
 - [Validation](validation.md) - `#[derive(Validate)]`, form requests,

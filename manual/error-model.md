@@ -77,12 +77,12 @@ catches everything, asks the handler "what do I render?", and emits
 the response. PHP's unwinding-exception model makes this natural.
 
 Rust has no unwinding exceptions in user code. Suprnova's equivalent
-is the `From<FrameworkError> for HttpResponse` impl plus the
-`ErrorOccurred` event. The conversion is the renderer; the event is
-where you hook observability (Sentry, PagerDuty, structured shippers).
-You don't register a handler class - the conversion is a function and
-listening for `ErrorOccurred` is the extension point. Same surface,
-different machinery.
+is the `From<FrameworkError> for HttpResponse` impl plus `Exceptions`.
+The conversion renders the response; `Exceptions` runs callbacks and sends
+unhandled failures through the configured `Reporter`. The built-in Sentry
+protocol driver reaches Rustrak, Sentry and GlitchTip. `ErrorOccurred`
+remains an application event for 5xx responses. See
+[Error Reporting](error-reporting.md) for configuration and scrubbing.
 
 ## `FrameworkError` - the canonical enum
 
@@ -887,6 +887,7 @@ The contract Suprnova gives you:
 
 ## Next
 
+- [Error Reporting](error-reporting.md) - tracker drivers, helpers and scrubbing
 - [Error Handling](errors.md) - the practical handler patterns that
   use this model
 - [Request Lifecycle](lifecycle.md) - where in the request flow the
