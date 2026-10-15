@@ -77,7 +77,7 @@ impl Vocabulary {
     }
 }
 
-/// An engine renders alternatives as one OR group, retaining AND between groups.
+/// Engines OR word groups and require phrases while retaining OR within each group.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExpandedQuery {
     /// Each group represents one original word or a multi-word synonym source.
@@ -100,6 +100,9 @@ pub struct ExpandedTerm {
     pub alternatives: Vec<String>,
     /// Prefix matching applies to the original, never to corrected alternatives.
     pub prefix: bool,
+    /// Quoted synonym groups remain required alongside the ordinary word disjunction.
+    #[serde(default)]
+    pub required: bool,
     /// Correction provenance lets engines honor attribute-specific typo exclusions.
     #[serde(default)]
     pub typo_alternatives: Vec<String>,
@@ -218,6 +221,7 @@ pub fn expand(
             typo_alternatives,
             original,
             prefix: width == 1 && at + width == words.len(),
+            required: false,
         });
         at += width;
     }
@@ -338,6 +342,7 @@ fn expand_phrases(
                 alternatives: rank_alternatives(&original, alternatives, cap),
                 original,
                 prefix: false,
+                required: true,
                 typo_alternatives: Vec::new(),
             });
         } else {

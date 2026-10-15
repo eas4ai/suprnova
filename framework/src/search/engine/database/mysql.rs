@@ -59,14 +59,31 @@ fn term(term: &ExpandedTerm, disable_typos: bool) -> String {
     if alternatives.is_empty() {
         alternatives.push(literal(&term.original, term.prefix));
     }
-    format!("+({})", alternatives.join(" "))
+    // The prefix alternative leads its group; see `ordered_terms`.
+    alternatives.sort_by_key(|alternative| !alternative.ends_with('*'));
+    format!("({})", alternatives.join(" "))
+}
+
+/// InnoDB's boolean parser, in MySQL 8.4 and MariaDB 12.3 alike, ignores a
+/// `word*` prefix term that follows a quoted term anywhere earlier in the same
+/// query: `"apple" orchard*` neither matches nor scores `orchard`, while
+/// `orchard* "apple"` does both. Boolean mode gives the order no meaning, so
+/// the prefix group is rendered first and every quoted alternative, phrase and
+/// exclusion follows it.
+fn ordered_terms(query: &ExpandedQuery) -> impl Iterator<Item = &ExpandedTerm> {
+    let (prefixed, rest): (Vec<_>, Vec<_>) = query.terms.iter().partition(|item| item.prefix);
+    prefixed.into_iter().chain(rest)
 }
 
 fn render(query: &ExpandedQuery, disable_typos: bool) -> String {
-    let mut groups = query
-        .terms
-        .iter()
-        .map(|item| term(item, disable_typos))
+    let mut groups = ordered_terms(query)
+        .map(|item| {
+            format!(
+                "{}{}",
+                if item.required { "+" } else { "" },
+                term(item, disable_typos)
+            )
+        })
         .collect::<Vec<_>>();
     groups.extend(
         query
@@ -84,10 +101,8 @@ fn render(query: &ExpandedQuery, disable_typos: bool) -> String {
 }
 
 fn ranking_query(query: &ExpandedQuery, disable_typos: bool) -> String {
-    let mut groups = query
-        .terms
-        .iter()
-        .map(|item| term(item, disable_typos).trim_start_matches('+').to_owned())
+    let mut groups = ordered_terms(query)
+        .map(|item| term(item, disable_typos))
         .collect::<Vec<_>>();
     groups.extend(
         query
@@ -104,6 +119,21 @@ fn matches(columns: &[String], query: String, sql: &mut Sql) -> String {
         "MATCH({}) AGAINST({value} IN BOOLEAN MODE)",
         columns.join(", ")
     )
+}
+
+fn native_predicate(query: &ExpandedQuery, columns: &[String], sql: &mut Sql) -> String {
+    let native = format!("({}) > 0", matches(columns, render(query, false), sql));
+    let optional = ordered_terms(query)
+        .filter(|item| !item.required)
+        .map(|item| term(item, false))
+        .collect::<Vec<_>>();
+    if !optional.is_empty()
+        && (!query.phrases.is_empty() || query.terms.iter().any(|item| item.required))
+    {
+        let words = matches(columns, optional.join(" "), sql);
+        return format!("({native}) AND (({words}) > 0)");
+    }
+    native
 }
 
 /// Bound lexical clauses preserve shared expansion and exclusion semantics.
@@ -128,13 +158,9 @@ pub(super) fn predicate(
     }
     let has_positive = !query.terms.is_empty() || !query.phrases.is_empty();
     if has_positive && query.typo_disabled_attributes.is_empty() {
-        return Ok(format!(
-            "({}) > 0",
-            matches(&columns, render(query, false), sql)
-        ));
+        return Ok(native_predicate(query, &columns, sql));
     }
-    let mut clauses = Vec::new();
-    for item in &query.terms {
+    let mut clauses = super::word_predicates(query, |item| {
         let alternatives = attributes
             .iter()
             .map(|attribute| {
@@ -152,8 +178,8 @@ pub(super) fn predicate(
                 )
             })
             .collect::<Vec<_>>();
-        clauses.push(format!("({})", alternatives.join(" OR ")));
-    }
+        Ok(format!("({})", alternatives.join(" OR ")))
+    })?;
     for phrase in &query.phrases {
         clauses.push(format!(
             "({}) > 0",
@@ -213,25 +239,65 @@ pub(super) fn score(
 mod tests {
     use super::*;
     #[test]
-    fn mysql_boolean_groups_keep_required_synonyms_prefixes_and_exclusions() {
+    fn word_groups_are_optional_but_phrases_and_negatives_stay_required() {
+        let query = crate::search::expand(
+            &crate::search::QueryText::parse("apple pie -green \"fresh baked\""),
+            &crate::search::QuerySettings::default(),
+            &crate::search::Vocabulary::default(),
+            64,
+        )
+        .unwrap();
+        assert_eq!(
+            render(&query, false),
+            r#"(pie*) ("apple") +"fresh baked" -"green""#
+        );
+        assert_eq!(
+            ranking_query(&query, false),
+            r#"(pie*) ("apple") "fresh baked""#
+        );
+    }
+    #[test]
+    fn the_prefix_group_and_its_wildcard_precede_every_quoted_term() {
         let query = ExpandedQuery {
-            terms: vec![ExpandedTerm {
-                original: "rust".into(),
-                alternatives: vec!["rust".into(), "trust".into(), "rust language".into()],
-                prefix: true,
-                typo_alternatives: vec!["trust".into()],
-            }],
-            phrases: vec![vec!["database".into(), "engine".into()]],
-            negatives: vec!["slow".into()],
+            terms: vec![
+                ExpandedTerm {
+                    original: "new york".into(),
+                    alternatives: vec!["new york".into(), "nyc".into()],
+                    prefix: false,
+                    required: true,
+                    typo_alternatives: vec![],
+                },
+                ExpandedTerm {
+                    original: "orch".into(),
+                    alternatives: vec!["orchid".into(), "orch".into()],
+                    prefix: true,
+                    required: false,
+                    typo_alternatives: vec!["orchid".into()],
+                },
+            ],
+            phrases: vec![vec!["fresh".into(), "baked".into()]],
+            negatives: vec!["green".into()],
             ..ExpandedQuery::default()
         };
         assert_eq!(
             render(&query, false),
-            "+(rust* \"trust\" \"rust language\") +\"database engine\" -\"slow\""
+            r#"(orch* "orchid") +("new york" "nyc") +"fresh baked" -"green""#
+        );
+        assert_eq!(
+            ranking_query(&query, true),
+            r#"(orch*) ("new york" "nyc") "fresh baked""#
+        );
+    }
+    #[test]
+    fn mysql_boolean_groups_keep_optional_synonyms_prefixes_and_required_phrases() {
+        let query = super::super::expansion_fixture();
+        assert_eq!(
+            render(&query, false),
+            "(rust* \"trust\" \"rust language\") +\"database engine\" -\"slow\""
         );
         assert_eq!(
             render(&query, true),
-            "+(rust* \"rust language\") +\"database engine\" -\"slow\""
+            "(rust* \"rust language\") +\"database engine\" -\"slow\""
         );
     }
     #[test]

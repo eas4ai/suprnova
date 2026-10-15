@@ -3,7 +3,8 @@
 //! Each generation is `search_<index>_<generation>`. Without embedding dimensions
 //! the named dense slot has size 1, carries no vector and is never queried. This
 //! preserves one schema for lexical-only and sparse-only indexes. Lexical retrieval
-//! without a sparse provider or query vector orders by source version descending.
+//! without a sparse provider or query vector sums native matched-word conditions.
+//! Single-group and empty queries retain source version as their tie-break.
 //! The framework supplies highlights. Prefixes use keyword token payloads because
 //! Qdrant's `match.prefix` applies to keyword values, not full-text tokens.
 //!
@@ -473,7 +474,10 @@ impl QdrantSearchEngine {
         ) {
             request.params.get_or_insert_default().exact = Some(true);
         }
-        request.limit = Some(256);
+        // Re-score the universe once per bounded page, rather than once per
+        // small fixed slice when a large result boundary contains many ties.
+        let page_size = depth.saturating_add(1).clamp(256, 4096) as u64;
+        request.limit = Some(page_size);
         request.offset = Some(0);
         candidates.clear();
         loop {
@@ -492,16 +496,19 @@ impl QdrantSearchEngine {
             });
             candidates.truncate(depth);
             let boundary = candidates.get(depth - 1).map(|c| c.score);
-            if len < 256 || matches!((tail,boundary),(Some(tail),Some(boundary)) if tail<boundary) {
+            if len < page_size as usize
+                || matches!((tail,boundary),(Some(tail),Some(boundary)) if tail<boundary)
+            {
                 break;
             }
-            request.offset = Some(request.offset.unwrap_or(0).saturating_add(256));
+            request.offset = Some(request.offset.unwrap_or(0).saturating_add(page_size));
         }
         Ok(candidates)
     }
     async fn lexical_prefetch(
         &self,
         index: &IndexDescriptor,
+        collection: &str,
         settings: &IndexSettings,
         q: &EngineQuery,
         vector: Option<&[f32]>,
@@ -550,6 +557,10 @@ impl QdrantSearchEngine {
                 .filter(filter)
                 .limit(q.depth as u64)
                 .build());
+        }
+        if q.expanded.terms.len() > 1 {
+            let count = self.exact_count(collection, filter.clone()).await?.value();
+            return Ok(word_prefetch(settings, q, filter, count));
         }
         let mut prefetch = qb::PrefetchQueryBuilder::default()
             .filter(filter)
@@ -619,7 +630,7 @@ impl QdrantSearchEngine {
             )
         })?;
         let prefetch = self
-            .lexical_prefetch(index, settings, &universe, vector, filter)
+            .lexical_prefetch(index, collection, settings, &universe, vector, filter)
             .await?;
         let mut kept = Vec::new();
         let mut offset = 0u64;
@@ -669,14 +680,15 @@ impl QdrantSearchEngine {
     ) -> Result<Vec<EngineCandidate>, FrameworkError> {
         let sparse_ranking = settings.index_time.sparse_model.is_some()
             && (!q.expanded.terms.is_empty() || !q.expanded.phrases.is_empty());
-        if !q.sort.is_empty() && (sparse_ranking || vector.is_some()) {
+        let word_ranking = q.expanded.terms.len() > 1;
+        if !q.sort.is_empty() && (sparse_ranking || vector.is_some() || word_ranking) {
             return self
                 .native_sorted(index, collection, settings, q, vector, filter)
                 .await;
         }
-        if q.sort.is_empty() && sparse_ranking {
+        if q.sort.is_empty() && (sparse_ranking || word_ranking) {
             let prefetch = self
-                .lexical_prefetch(index, settings, q, vector, filter)
+                .lexical_prefetch(index, collection, settings, q, vector, filter)
                 .await?;
             return self.run_prefetch(index, collection, prefetch).await;
         }
@@ -1747,8 +1759,15 @@ impl SearchEngine for QdrantSearchEngine {
             return Ok(Some(EngineResult { candidates, total }));
         }
         let prefetch = vec![
-            self.lexical_prefetch(index, &settings, q, Some(vector), lexical.clone())
-                .await?,
+            self.lexical_prefetch(
+                index,
+                &collection,
+                &settings,
+                q,
+                Some(vector),
+                lexical.clone(),
+            )
+            .await?,
             qb::PrefetchQueryBuilder::default()
                 .query(vector.to_vec())
                 .using("dense")
@@ -2022,6 +2041,32 @@ fn dictionary_range(filter: &Filter, value: &AttributeValue) -> bool {
     exact(value) || matches!(filter,Filter::Between(_,_,hi) if exact(hi))
 }
 
+// Native match-count scoring must see the complete lexical universe. A limited
+// source-version prefetch could otherwise omit a document matching more words.
+fn word_prefetch(
+    settings: &IndexSettings,
+    q: &EngineQuery,
+    filter: QFilter,
+    count: u64,
+) -> qb::PrefetchQuery {
+    qb::PrefetchQueryBuilder::default()
+        .prefetch(vec![
+            qb::PrefetchQueryBuilder::default()
+                .query(
+                    qb::OrderByBuilder::new("__source_version")
+                        .direction(qb::Direction::Desc as i32)
+                        .build(),
+                )
+                .filter(filter.clone())
+                .limit(count.max(1))
+                .build(),
+        ])
+        .query(predicates::word_score(settings, q))
+        .filter(filter)
+        .limit(q.depth as u64)
+        .build()
+}
+
 fn score_formula() -> qb::Query {
     qb::Formula {
         expression: Some(qb::Expression {
@@ -2034,7 +2079,9 @@ fn score_formula() -> qb::Query {
 
 fn grow_prefetch(prefetches: &mut [qb::PrefetchQuery], limit: u64, exact: bool) {
     for prefetch in prefetches {
-        prefetch.limit = Some(limit);
+        // A formula may deliberately prefetch its complete candidate universe.
+        // Looking ahead for ties must never shrink that universe.
+        prefetch.limit = Some(prefetch.limit.unwrap_or(0).max(limit));
         if exact
             && matches!(
                 prefetch.query.as_ref().and_then(|q| q.variant.as_ref()),

@@ -78,6 +78,43 @@ impl Sql {
         Statement::from_sql_and_values(self.dialect.backend(), text, self.values)
     }
 }
+// Field-specific checks use the same word disjunction as each native renderer.
+fn word_predicates(
+    query: &crate::search::ExpandedQuery,
+    mut render: impl FnMut(&crate::search::ExpandedTerm) -> Result<String, FrameworkError>,
+) -> Result<Vec<String>, FrameworkError> {
+    let mut required = Vec::new();
+    let mut optional = Vec::new();
+    for term in &query.terms {
+        let clause = render(term)?;
+        if term.required {
+            required.push(clause);
+        } else {
+            optional.push(clause);
+        }
+    }
+    if !optional.is_empty() {
+        required.push(format!("({})", optional.join(" OR ")));
+    }
+    Ok(required)
+}
+
+#[cfg(test)]
+fn expansion_fixture() -> crate::search::ExpandedQuery {
+    crate::search::ExpandedQuery {
+        terms: vec![crate::search::ExpandedTerm {
+            original: "rust".into(),
+            alternatives: vec!["rust".into(), "trust".into(), "rust language".into()],
+            prefix: true,
+            required: false,
+            typo_alternatives: vec!["trust".into()],
+        }],
+        phrases: vec![vec!["database".into(), "engine".into()]],
+        negatives: vec!["slow".into()],
+        ..crate::search::ExpandedQuery::default()
+    }
+}
+
 fn db_error(error: impl std::fmt::Display) -> FrameworkError {
     FrameworkError::database(format!("database search: {error}"))
 }
@@ -1448,8 +1485,14 @@ impl SearchEngine for DatabaseSearchEngine {
             .map(|(name, length)| (native_attribute(index, name), *length))
             .collect();
         let mut sql = Sql::new(dialect);
+        let ranked = if dialect == Dialect::Sqlite {
+            sqlite::ranked_matches(&table, &native_settings, &expanded, &mut sql)?
+        } else {
+            None
+        };
         let score = match dialect {
-            Dialect::Sqlite => sqlite::score(&table, &native_settings, &expanded, &mut sql)?,
+            Dialect::Sqlite if ranked.is_some() => "search_ranked.score".into(),
+            Dialect::Sqlite => "0.0".into(),
             Dialect::Postgres => postgres::score(&table, &native_settings, &expanded, &mut sql)?,
             _ => mysql::score(&table, &native_settings, &expanded, &mut sql)?,
         };
@@ -1492,8 +1535,15 @@ impl SearchEngine for DatabaseSearchEngine {
             format!("s.{}{collation} ASC", sql.ident("key")),
         ]);
         let limit = sql.bind(i64::try_from(q.depth).map_err(db_error)?);
+        let (with, join) = match ranked {
+            Some(ranked) => (
+                format!("WITH search_ranked AS MATERIALIZED ({ranked}) "),
+                " JOIN search_ranked ON search_ranked.rowid=s.rowid",
+            ),
+            None => (String::new(), ""),
+        };
         let text = format!(
-            "SELECT s.document_json,s.source_version,{score} AS score{formatted} FROM {} AS s WHERE {predicate} ORDER BY {} LIMIT {limit}",
+            "{with}SELECT s.document_json,s.source_version,{score} AS score{formatted} FROM {} AS s{join} WHERE {predicate} ORDER BY {} LIMIT {limit}",
             sql.ident(&table),
             order.join(",")
         );

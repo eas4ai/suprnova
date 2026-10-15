@@ -319,6 +319,28 @@ pub mod conformance {
                 == ["a"],
             "phrase order or adjacency was ignored",
         )?;
+        let disjunction = query(&engine, &index, &first, "apple orchard", None).await?;
+        let result = engine.query(&index, &first, &disjunction).await?;
+        check(
+            result.total.value() == 3
+                && result.candidates.iter().any(|hit| hit.document.key == "c"),
+            "a two-word query must return a document matching only one word",
+        )?;
+        let one = result.candidates.iter().find(|hit| hit.document.key == "c");
+        check(
+            one.is_some_and(|one| {
+                result
+                    .candidates
+                    .iter()
+                    .filter(|hit| matches!(hit.document.key.as_str(), "a" | "b"))
+                    .all(|both| both.score > one.score)
+                    && result
+                        .candidates
+                        .first()
+                        .is_some_and(|hit| hit.document.key != "c")
+            }),
+            "documents matching both query words must rank above one-word matches",
+        )?;
         let prefix = query(&engine, &index, &first, "orch", None).await?;
         check(
             engine.count(&index, &first, &prefix).await?.value() == 2,

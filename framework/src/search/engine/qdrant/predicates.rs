@@ -1,4 +1,4 @@
-//! Qdrant predicates keep AND between words and OR within each expansion group.
+//! Qdrant predicates OR words, require phrases and exclude negative words.
 use super::*;
 use qdrant_client::qdrant::{
     Condition, DatetimeRange, Filter as QFilter, GeoPoint as QGeo, GeoRadius, Range,
@@ -194,6 +194,49 @@ fn term_clause(
     }
     QFilter::should(clauses).into()
 }
+pub(super) fn word_clause(
+    settings: &IndexSettings,
+    q: &EngineQuery,
+    term: &crate::search::ExpandedTerm,
+) -> Condition {
+    let disabled = &q.expanded.typo_disabled_attributes;
+    if disabled.is_empty()
+        && settings
+            .query
+            .typo_tolerance
+            .disable_on_attributes
+            .is_empty()
+        && !term
+            .alternatives
+            .iter()
+            .chain(std::iter::once(&term.original))
+            .any(|a| a.contains(' '))
+    {
+        term_clause("__text", "__words", term, false)
+    } else {
+        QFilter::should(
+            settings
+                .index_time
+                .searchable_attributes
+                .iter()
+                .map(|attr| {
+                    term_clause(
+                        &format!("__search_{}", attr.name),
+                        &format!("__words_{}", attr.name),
+                        term,
+                        disabled.contains(&attr.name)
+                            || settings
+                                .query
+                                .typo_tolerance
+                                .disable_on_attributes
+                                .contains(&attr.name),
+                    )
+                }),
+        )
+        .into()
+    }
+}
+
 pub(super) fn lexical(
     settings: &IndexSettings,
     q: &EngineQuery,
@@ -202,45 +245,17 @@ pub(super) fn lexical(
     if let Some(f) = &q.filter {
         must.push(predicate(f)?);
     }
-    let disabled = &q.expanded.typo_disabled_attributes;
+    let mut words = Vec::new();
     for term in &q.expanded.terms {
-        if disabled.is_empty()
-            && settings
-                .query
-                .typo_tolerance
-                .disable_on_attributes
-                .is_empty()
-            && !term
-                .alternatives
-                .iter()
-                .chain(std::iter::once(&term.original))
-                .any(|a| a.contains(' '))
-        {
-            must.push(term_clause("__text", "__words", term, false));
+        let clause = word_clause(settings, q, term);
+        if term.required {
+            must.push(clause);
         } else {
-            must.push(
-                QFilter::should(
-                    settings
-                        .index_time
-                        .searchable_attributes
-                        .iter()
-                        .map(|attr| {
-                            term_clause(
-                                &format!("__search_{}", attr.name),
-                                &format!("__words_{}", attr.name),
-                                term,
-                                disabled.contains(&attr.name)
-                                    || settings
-                                        .query
-                                        .typo_tolerance
-                                        .disable_on_attributes
-                                        .contains(&attr.name),
-                            )
-                        }),
-                )
-                .into(),
-            );
+            words.push(clause);
         }
+    }
+    if !words.is_empty() {
+        must.push(QFilter::should(words).into());
     }
     for phrase in &q.expanded.phrases {
         // Separate fields prevent an artificial phrase across attribute boundaries.
@@ -277,5 +292,74 @@ fn timestamp(value: &chrono::DateTime<chrono::Utc>) -> qb::Timestamp {
     qb::Timestamp {
         seconds: value.timestamp(),
         nanos: value.timestamp_subsec_nanos() as i32,
+    }
+}
+
+/// Qdrant evaluates each group's native condition as 1 or 0 and sums the matches.
+pub(super) fn word_score(settings: &IndexSettings, q: &EngineQuery) -> qb::Query {
+    qb::Formula {
+        expression: Some(qb::Expression {
+            variant: Some(qb::expression::Variant::Sum(qb::SumExpression {
+                sum: q
+                    .expanded
+                    .terms
+                    .iter()
+                    .map(|term| qb::Expression {
+                        variant: Some(qb::expression::Variant::Condition(word_clause(
+                            settings, q, term,
+                        ))),
+                    })
+                    .collect(),
+            })),
+        }),
+        defaults: HashMap::new(),
+    }
+    .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn words_share_one_should_clause_and_phrases_and_negatives_keep_their_roles() {
+        let mut settings = IndexSettings::default();
+        settings
+            .index_time
+            .searchable_attributes
+            .push(crate::search::WeightedAttribute {
+                name: "body".into(),
+                weight: 1.0,
+            });
+        let q = EngineQuery {
+            expanded: crate::search::expand(
+                &crate::search::QueryText::parse(r#"apple pie -green "fresh baked""#),
+                &settings.query,
+                &Vocabulary::default(),
+                64,
+            )
+            .unwrap(),
+            filter: None,
+            sort: vec![],
+            depth: 10,
+            highlights: false,
+            crop: Default::default(),
+        };
+        let filter = lexical(&settings, &q).unwrap();
+        assert_eq!(filter.must.len(), 2);
+        assert_eq!(filter.must_not.len(), 1);
+        let Some(qb::condition::ConditionOneOf::Filter(words)) = &filter.must[0].condition_one_of
+        else {
+            panic!("word disjunction");
+        };
+        assert_eq!(words.should.len(), 2);
+        assert!(words.must.is_empty());
+        let Some(qb::query::Variant::Formula(formula)) = word_score(&settings, &q).variant else {
+            panic!("native match-count scoring");
+        };
+        let Some(qb::expression::Variant::Sum(sum)) = formula.expression.unwrap().variant else {
+            panic!("matched groups sum");
+        };
+        assert_eq!(sum.sum.len(), 2);
     }
 }

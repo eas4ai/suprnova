@@ -101,6 +101,7 @@ pub(super) fn query(text: &str) -> EngineQuery {
                 original: text.into(),
                 alternatives: vec![text.into()],
                 prefix: false,
+                required: false,
                 typo_alternatives: vec![],
             }],
             ..ExpandedQuery::default()

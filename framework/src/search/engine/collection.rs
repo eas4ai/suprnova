@@ -25,6 +25,12 @@ struct Generation {
     state: &'static str,
     settings: IndexSettings,
     documents: BTreeMap<String, IndexedDocument>,
+    postings: BTreeMap<String, BTreeMap<String, Posting>>,
+    lengths: BTreeMap<String, usize>,
+    document_words: BTreeMap<String, BTreeSet<String>>,
+    total_length: usize,
+    vocabulary: OnceLock<Arc<Vocabulary>>,
+    #[cfg(test)]
     tokenized: OnceLock<BTreeMap<String, Vec<Field>>>,
     tombstones: BTreeMap<String, (i64, Instant)>,
     flush: Option<(i64, Instant)>,
@@ -150,6 +156,7 @@ pub(super) fn validate_settings(
     }
     Ok(())
 }
+#[cfg(test)]
 struct Field {
     name: String,
     words: Vec<String>,
@@ -157,6 +164,7 @@ struct Field {
     frequencies: HashMap<String, usize>,
 }
 
+#[cfg(test)]
 impl Field {
     fn count(&self, word: &str, prefix: bool) -> usize {
         if prefix {
@@ -170,6 +178,7 @@ impl Field {
     }
 }
 
+#[cfg(test)]
 fn fields(document: &SearchDocument, settings: &IndexSettings) -> Vec<Field> {
     settings
         .index_time
@@ -195,6 +204,7 @@ fn fields(document: &SearchDocument, settings: &IndexSettings) -> Vec<Field> {
 }
 // The generation's write lock invalidates this cache before changing content or
 // settings. Matching and BM25 can borrow one immutable tokenization per document.
+#[cfg(test)]
 fn field_cache(generation: &Generation) -> &BTreeMap<String, Vec<Field>> {
     generation.tokenized.get_or_init(|| {
         generation
@@ -209,9 +219,11 @@ fn field_cache(generation: &Generation) -> &BTreeMap<String, Vec<Field>> {
             .collect()
     })
 }
+#[cfg(test)]
 fn phrase_matches(words: &[String], phrase: &[String]) -> bool {
     !phrase.is_empty() && words.windows(phrase.len()).any(|w| w == phrase)
 }
+#[cfg(test)]
 fn alternative_matches(field: &Field, alternative: &str, prefix: bool) -> usize {
     // Normalized single ASCII words need no allocation or transliteration.
     if !alternative.is_empty()
@@ -235,6 +247,7 @@ fn alternative_matches(field: &Field, alternative: &str, prefix: bool) -> usize 
         0
     }
 }
+#[cfg(test)]
 fn term_count(
     field: &Field,
     term: &crate::search::expansion::ExpandedTerm,
@@ -255,19 +268,310 @@ fn term_count(
         .max()
         .unwrap_or(0)
 }
+#[cfg(test)]
 fn lexical_matches(fs: &[Field], settings: &IndexSettings, q: &ExpandedQuery) -> bool {
-    q.terms.iter().all(|term| {
+    let word_matches = |term: &crate::search::ExpandedTerm| {
         fs.iter()
             .any(|field| term_count(field, term, settings, &q.typo_disabled_attributes) > 0)
-    }) && q
-        .phrases
-        .iter()
-        .all(|phrase| fs.iter().any(|field| phrase_matches(&field.words, phrase)))
+    };
+    (!q.terms.iter().any(|term| !term.required)
+        || q.terms
+            .iter()
+            .filter(|term| !term.required)
+            .any(word_matches))
+        && q.terms.iter().filter(|term| term.required).all(|term| {
+            fs.iter()
+                .any(|field| term_count(field, term, settings, &q.typo_disabled_attributes) > 0)
+        })
+        && q.phrases
+            .iter()
+            .all(|phrase| fs.iter().any(|field| phrase_matches(&field.words, phrase)))
         && !q.negatives.iter().any(|negative| {
             fs.iter()
                 .any(|field| alternative_matches(field, negative, false) > 0)
         })
 }
+/// Positions are separated by field so phrases never cross attribute boundaries.
+struct Posting {
+    positions: BTreeMap<usize, Vec<usize>>,
+}
+
+type FieldCounts<'a> = BTreeMap<&'a str, Vec<usize>>;
+
+fn remove_postings(g: &mut Generation, key: &str) {
+    if let Some(words) = g.document_words.remove(key) {
+        for word in words {
+            if let Some(postings) = g.postings.get_mut(&word) {
+                postings.remove(key);
+                if postings.is_empty() {
+                    g.postings.remove(&word);
+                }
+            }
+        }
+    }
+    if let Some(length) = g.lengths.remove(key) {
+        g.total_length -= length;
+    }
+}
+
+fn index_postings(g: &mut Generation, document: &SearchDocument) {
+    let mut unique = BTreeSet::new();
+    let mut length = 0;
+    for (field, attribute) in g
+        .settings
+        .index_time
+        .searchable_attributes
+        .iter()
+        .enumerate()
+    {
+        let words = document
+            .attributes
+            .get(&attribute.name)
+            .and_then(AttributeValue::searchable_text)
+            .map(|text| tokenize(&text))
+            .unwrap_or_default();
+        length += words.len();
+        for (position, word) in words.into_iter().enumerate() {
+            unique.insert(word.clone());
+            g.postings
+                .entry(word)
+                .or_default()
+                .entry(document.key.clone())
+                .or_insert_with(|| Posting {
+                    positions: BTreeMap::new(),
+                })
+                .positions
+                .entry(field)
+                .or_default()
+                .push(position);
+        }
+    }
+    g.total_length += length;
+    g.lengths.insert(document.key.clone(), length);
+    g.document_words.insert(document.key.clone(), unique);
+}
+
+fn phrase_counts<'a>(g: &'a Generation, phrase: &[String]) -> FieldCounts<'a> {
+    let mut counts = BTreeMap::new();
+    let Some(first) = phrase.first().and_then(|word| g.postings.get(word)) else {
+        return counts;
+    };
+    for (key, posting) in first {
+        for (field, positions) in &posting.positions {
+            let count = positions
+                .iter()
+                .filter(|start| {
+                    phrase.iter().enumerate().skip(1).all(|(offset, word)| {
+                        g.postings
+                            .get(word)
+                            .and_then(|docs| docs.get(key))
+                            .and_then(|posting| posting.positions.get(field))
+                            .is_some_and(|positions| {
+                                positions.binary_search(&(*start + offset)).is_ok()
+                            })
+                    })
+                })
+                .count();
+            if count > 0 {
+                counts.entry(key.as_str()).or_insert_with(|| {
+                    vec![0; g.settings.index_time.searchable_attributes.len()]
+                })[*field] = count;
+            }
+        }
+    }
+    counts
+}
+
+fn alternative_counts<'a>(g: &'a Generation, alternative: &str, prefix: bool) -> FieldCounts<'a> {
+    let parts = tokenize(alternative);
+    if parts.len() > 1 {
+        return phrase_counts(g, &parts);
+    }
+    let mut counts = BTreeMap::new();
+    let Some(word) = parts.first() else {
+        return counts;
+    };
+    // A sorted vocabulary bounds prefix work to the matching word range.
+    for (candidate, postings) in g.postings.range(word.clone()..) {
+        if if prefix {
+            !candidate.starts_with(word)
+        } else {
+            candidate != word
+        } {
+            break;
+        }
+        for (key, posting) in postings {
+            let fields = counts
+                .entry(key.as_str())
+                .or_insert_with(|| vec![0; g.settings.index_time.searchable_attributes.len()]);
+            for (field, positions) in &posting.positions {
+                fields[*field] += positions.len();
+            }
+        }
+        if !prefix {
+            break;
+        }
+    }
+    counts
+}
+
+fn term_frequencies<'a>(
+    g: &'a Generation,
+    q: &ExpandedQuery,
+    term: &crate::search::ExpandedTerm,
+) -> BTreeMap<&'a str, f64> {
+    let attributes = &g.settings.index_time.searchable_attributes;
+    let mut maxima: FieldCounts<'a> = BTreeMap::new();
+    for alternative in term
+        .alternatives
+        .iter()
+        .chain(std::iter::once(&term.original))
+        .collect::<BTreeSet<_>>()
+    {
+        let typo = term.typo_alternatives.contains(alternative);
+        for (key, counts) in
+            alternative_counts(g, alternative, term.prefix && alternative == &term.original)
+        {
+            for (field, count) in counts.into_iter().enumerate() {
+                if count == 0
+                    || (typo
+                        && (q.typo_disabled_attributes.contains(&attributes[field].name)
+                            || g.settings
+                                .query
+                                .typo_tolerance
+                                .disable_on_attributes
+                                .contains(&attributes[field].name)))
+                {
+                    continue;
+                }
+                let fields = maxima
+                    .entry(key)
+                    .or_insert_with(|| vec![0; attributes.len()]);
+                fields[field] = fields[field].max(count);
+            }
+        }
+    }
+    maxima
+        .into_iter()
+        .map(|(key, fields)| {
+            (
+                key,
+                fields
+                    .iter()
+                    .zip(attributes)
+                    .map(|(tf, attr)| *tf as f64 * f64::from(attr.weight))
+                    .sum(),
+            )
+        })
+        .collect()
+}
+
+fn word_candidates<'a>(
+    g: &'a Generation,
+    q: &ExpandedQuery,
+    groups: &[BTreeMap<&'a str, f64>],
+) -> BTreeMap<&'a str, f64> {
+    let mut candidates = BTreeMap::new();
+    let optional = q
+        .terms
+        .iter()
+        .enumerate()
+        .filter(|(_, term)| !term.required)
+        .collect::<Vec<_>>();
+    if optional.is_empty() {
+        if let Some(group) = groups.first() {
+            candidates.extend(group.keys().map(|key| (*key, 0.0)));
+        } else if let Some(phrase) = q.phrases.first() {
+            candidates.extend(phrase_counts(g, phrase).keys().map(|key| (*key, 0.0)));
+        } else {
+            candidates.extend(g.documents.keys().map(|key| (key.as_str(), 0.0)));
+        }
+    } else {
+        for (at, _) in optional {
+            candidates.extend(groups[at].keys().map(|key| (*key, 0.0)));
+        }
+    }
+    candidates
+}
+
+fn evaluate<'a>(g: &'a Generation, q: &EngineQuery) -> BTreeMap<&'a str, f64> {
+    let groups = q
+        .expanded
+        .terms
+        .iter()
+        .map(|term| term_frequencies(g, &q.expanded, term))
+        .collect::<Vec<_>>();
+    let mut candidates = word_candidates(g, &q.expanded, &groups);
+    for (_, group) in q
+        .expanded
+        .terms
+        .iter()
+        .zip(&groups)
+        .filter(|(term, _)| term.required)
+    {
+        candidates.retain(|key, _| group.contains_key(key));
+    }
+    let phrases = q
+        .expanded
+        .phrases
+        .iter()
+        .map(|phrase| phrase_counts(g, phrase))
+        .collect::<Vec<_>>();
+    for phrase in &phrases {
+        candidates.retain(|key, _| phrase.contains_key(key));
+    }
+    for negative in &q.expanded.negatives {
+        for key in alternative_counts(g, negative, false).keys() {
+            candidates.remove(key);
+        }
+    }
+    candidates.retain(|key, _| {
+        q.filter
+            .as_ref()
+            .is_none_or(|filter| filter.matches(&g.documents[*key].document))
+    });
+    let n = g.documents.len() as f64;
+    let average = g.total_length as f64 / n.max(1.0);
+    let denominators = candidates
+        .keys()
+        .map(|key| {
+            let length = g.lengths[*key] as f64;
+            (*key, 1.2 * (0.25 + 0.75 * length / average.max(1.0)))
+        })
+        .collect::<HashMap<_, _>>();
+    // Add only matched postings, in query-group order to preserve the scan's
+    // floating-point scores without visiting every group for every document.
+    for group in &groups {
+        let df = group.len() as f64;
+        let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
+        for (key, tf) in group {
+            if let Some(score) = candidates.get_mut(key) {
+                *score += idf * tf * 2.2 / (tf + denominators[key]).max(f64::MIN_POSITIVE);
+            }
+        }
+    }
+    for phrase in &phrases {
+        for (key, counts) in phrase {
+            if let Some(score) = candidates.get_mut(key) {
+                *score += counts
+                    .iter()
+                    .zip(&g.settings.index_time.searchable_attributes)
+                    .filter(|(count, _)| **count > 0)
+                    .map(|(_, attr)| f64::from(attr.weight))
+                    .sum::<f64>();
+            }
+        }
+    }
+    candidates
+}
+
+fn matching<'a>(g: &'a Generation, q: &EngineQuery) -> Vec<&'a IndexedDocument> {
+    evaluate(g, q)
+        .keys()
+        .map(|key| &g.documents[*key])
+        .collect()
+}
+
 pub(super) fn validate_query(
     index: &IndexDescriptor,
     q: &EngineQuery,
@@ -300,7 +604,8 @@ pub(super) fn validate_query(
     }
     Ok(())
 }
-fn matching<'a>(g: &'a Generation, q: &EngineQuery) -> Vec<&'a IndexedDocument> {
+#[cfg(test)]
+fn scan_matching<'a>(g: &'a Generation, q: &EngineQuery) -> Vec<&'a IndexedDocument> {
     let tokenized = field_cache(g);
     g.documents
         .values()
@@ -310,11 +615,13 @@ fn matching<'a>(g: &'a Generation, q: &EngineQuery) -> Vec<&'a IndexedDocument> 
         })
         .collect()
 }
+#[cfg(test)]
 struct Bm25Stats {
     average_length: f64,
     document_count: f64,
     frequencies: Vec<f64>,
 }
+#[cfg(test)]
 fn bm25_stats(g: &Generation, q: &ExpandedQuery) -> Bm25Stats {
     let documents = field_cache(g);
     let n = documents.len() as f64;
@@ -343,6 +650,7 @@ fn bm25_stats(g: &Generation, q: &ExpandedQuery) -> Bm25Stats {
         frequencies,
     }
 }
+#[cfg(test)]
 fn bm25(document: &SearchDocument, g: &Generation, q: &ExpandedQuery, stats: &Bm25Stats) -> f64 {
     let fs = &field_cache(g)[&document.key];
     let length = fs.iter().map(|field| field.words.len()).sum::<usize>() as f64;
@@ -547,6 +855,10 @@ fn apply_write(
         }
     }
     generation.tombstones.remove(key);
+    remove_postings(generation, key);
+    index_postings(generation, &document.document);
+    generation.vocabulary.take();
+    #[cfg(test)]
     generation.tokenized.take();
     generation.documents.insert(key.clone(), document.clone());
     outcome.written += 1;
@@ -705,6 +1017,12 @@ impl SearchEngine for CollectionEngine {
                 state: "building",
                 settings: settings.clone(),
                 documents: BTreeMap::new(),
+                postings: BTreeMap::new(),
+                lengths: BTreeMap::new(),
+                document_words: BTreeMap::new(),
+                total_length: 0,
+                vocabulary: OnceLock::new(),
+                #[cfg(test)]
                 tokenized: OnceLock::new(),
                 tombstones: BTreeMap::new(),
                 flush: None,
@@ -776,6 +1094,7 @@ impl SearchEngine for CollectionEngine {
                 index.name
             )));
         }
+        #[cfg(test)]
         g.tokenized.take();
         g.settings = settings.clone();
         Ok(())
@@ -835,7 +1154,10 @@ impl SearchEngine for CollectionEngine {
                 result.skipped_older += 1;
                 continue;
             }
+            remove_postings(g, key);
             g.documents.remove(key);
+            g.vocabulary.take();
+            #[cfg(test)]
             g.tokenized.take();
             g.tombstones.insert(key.clone(), (*version, now));
             result.written += 1;
@@ -851,19 +1173,27 @@ impl SearchEngine for CollectionEngine {
         validate_query(index, q)?;
         let state = self.read()?;
         let g = generation(&state, index, id)?;
-        let docs = matching(g, q);
-        let total = Total::Exact(docs.len() as u64);
-        let stats = bm25_stats(g, &q.expanded);
-        let mut candidates = docs
+        let evaluated = evaluate(g, q);
+        let total = Total::Exact(evaluated.len() as u64);
+        let mut ranked = evaluated.into_iter().collect::<Vec<_>>();
+        ranked.sort_by(|(ak, a), (bk, b)| {
+            crate::search::builder::compare_sort(
+                &g.documents[*ak].document,
+                &g.documents[*bk].document,
+                &q.sort,
+            )
+            .then_with(|| b.total_cmp(a))
+            .then_with(|| ak.cmp(bk))
+        });
+        ranked.truncate(q.depth);
+        let candidates = ranked
             .into_iter()
-            .map(|d| EngineCandidate {
-                document: d.document.clone(),
-                score: bm25(&d.document, g, &q.expanded, &stats),
+            .map(|(key, score)| EngineCandidate {
+                document: g.documents[key].document.clone(),
+                score,
                 highlights: None,
             })
-            .collect::<Vec<_>>();
-        candidates.sort_by(|a, b| sort_compare(a, b, &q.sort));
-        candidates.truncate(q.depth);
+            .collect();
         Ok(EngineResult { candidates, total })
     }
     async fn semantic(
@@ -1020,19 +1350,17 @@ impl SearchEngine for CollectionEngine {
     ) -> Result<Arc<Vocabulary>, FrameworkError> {
         let state = self.read()?;
         let g = generation(&state, index, id)?;
-        let mut words = BTreeMap::new();
-        for fs in field_cache(g).values() {
-            let unique = fs
-                .iter()
-                .flat_map(|field| field.words.iter())
-                .collect::<BTreeSet<_>>();
-            for word in unique {
-                *words.entry(word.clone()).or_insert(0) += 1;
-            }
-        }
-        Ok(Arc::new(Vocabulary {
-            words: words.into(),
-        }))
+        Ok(g.vocabulary
+            .get_or_init(|| {
+                Arc::new(Vocabulary {
+                    words: g
+                        .postings
+                        .iter()
+                        .map(|(word, postings)| (word.clone(), postings.len() as u64))
+                        .collect(),
+                })
+            })
+            .clone())
     }
     async fn count(
         &self,
@@ -1045,5 +1373,256 @@ impl SearchEngine for CollectionEngine {
         Ok(Total::Exact(
             matching(generation(&state, index, id)?, q).len() as u64,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::search::{baseline::Fixture, expansion::expand, query::QueryText};
+
+    fn descriptor() -> IndexDescriptor {
+        let mut index = crate::search::baseline::descriptor();
+        index.name = "postings_reference";
+        for attribute in &mut index.attributes {
+            attribute.filterable = true;
+            attribute.sortable = true;
+            attribute.facet = true;
+        }
+        index
+    }
+
+    fn document(
+        index: &IndexDescriptor,
+        key: &str,
+        title: &str,
+        text: &str,
+        version: i64,
+    ) -> IndexedDocument {
+        let document = SearchDocument {
+            index: index.name.into(),
+            key: key.into(),
+            source_version: version,
+            attributes: BTreeMap::from([
+                ("title".into(), AttributeValue::Text(title.into())),
+                ("text".into(), AttributeValue::Text(text.into())),
+            ]),
+            embed_text: None,
+            title: None,
+        };
+        IndexedDocument {
+            content_hash: document.content_hash("reference"),
+            document,
+            dense: None,
+            sparse: None,
+        }
+    }
+
+    async fn compare(
+        engine: &CollectionEngine,
+        index: &IndexDescriptor,
+        id: &GenerationId,
+        text: &str,
+    ) -> Result<(), FrameworkError> {
+        let settings = engine.read_settings(index, id).await?;
+        let vocabulary = engine.vocabulary(index, id).await?;
+        let mut q = EngineQuery {
+            expanded: expand(&QueryText::parse(text), &settings.query, &vocabulary, 64)?,
+            filter: None,
+            sort: vec![],
+            depth: 10,
+            highlights: false,
+            crop: Default::default(),
+        };
+        // Ranking, candidate totals, filtering and explicit sorts use the same oracle.
+        for mode in 0..3 {
+            if mode == 1 {
+                q.filter = Some(Filter::Ne(
+                    "title".into(),
+                    AttributeValue::Text("apple pie".into()),
+                ));
+            } else if mode == 2 {
+                q.sort = vec![Sort::Attribute {
+                    attribute: "title".into(),
+                    direction: SortDirection::Desc,
+                }];
+            }
+            let result = engine.query(index, id, &q).await?;
+            let state = engine.read()?;
+            let g = generation(&state, index, id)?;
+            let docs = scan_matching(g, &q);
+            assert_eq!(result.total.value(), docs.len() as u64, "{text}");
+            let stats = bm25_stats(g, &q.expanded);
+            let mut expected = docs
+                .into_iter()
+                .map(|d| EngineCandidate {
+                    document: d.document.clone(),
+                    score: bm25(&d.document, g, &q.expanded, &stats),
+                    highlights: None,
+                })
+                .collect::<Vec<_>>();
+            expected.sort_by(|a, b| sort_compare(a, b, &q.sort));
+            expected.truncate(10);
+            assert_eq!(
+                result
+                    .candidates
+                    .iter()
+                    .map(|hit| (&hit.document.key, hit.score))
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|hit| (&hit.document.key, hit.score))
+                    .collect::<Vec<_>>(),
+                "query {text:?}, mode {mode}",
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scifact_postings_equal_scan_for_fifty_queries() -> Result<(), FrameworkError> {
+        let fixture = Fixture::load(crate::search::baseline::fixture_directory())?;
+        let index = descriptor();
+        let engine = CollectionEngine::new();
+        let id = GenerationId::default();
+        engine
+            .create_generation(&index, &index.index_settings(), &id)
+            .await?;
+        let docs = fixture
+            .corpus
+            .iter()
+            .map(|d| document(&index, &d.id, &d.title, &d.text, 1))
+            .collect::<Vec<_>>();
+        for chunk in docs.chunks(200) {
+            engine.index(&index, &id, chunk).await?;
+        }
+        for q in fixture.queries.iter().take(50) {
+            compare(&engine, &index, &id, &q.text).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postings_equal_scan_after_versioned_writes_and_removals() -> Result<(), FrameworkError>
+    {
+        let index = descriptor();
+        let engine = CollectionEngine::new();
+        let id = GenerationId::default();
+        let mut settings = index.index_settings();
+        settings
+            .query
+            .typo_tolerance
+            .disable_on_attributes
+            .insert("title".into());
+        settings.index_time.searchable_attributes[0].weight = 2.0;
+        settings.query.synonyms.push(crate::search::Synonym {
+            terms: vec!["fresh baked".into(), "oven warm".into()],
+            one_way: false,
+        });
+        engine.create_generation(&index, &settings, &id).await?;
+        let docs = vec![
+            document(&index, "a", "apple pie", "fresh baked apple apple pie", 1),
+            document(&index, "b", "applesauce", "oven warm pie apple", 1),
+            document(&index, "c", "apple", "fresh baked green", 1),
+            document(&index, "d", "fresh", "baked apple pie", 1),
+        ];
+        engine.index(&index, &id, &docs).await?;
+        let queries = [
+            "apple pie",
+            "applr pie",
+            "apple appl",
+            "apple -green",
+            "-green",
+            "",
+            "\"fresh baked\"",
+            "apple \"fresh baked\" -green",
+            "apple \"pie fresh\"",
+            "apple -absent",
+        ];
+        for q in queries {
+            compare(&engine, &index, &id, q).await?;
+        }
+        let required = engine
+            .query(
+                &index,
+                &id,
+                &EngineQuery {
+                    expanded: expand(
+                        &QueryText::parse("apple \"fresh baked\" -green"),
+                        &settings.query,
+                        engine.vocabulary(&index, &id).await?.as_ref(),
+                        64,
+                    )?,
+                    filter: None,
+                    sort: vec![],
+                    depth: 10,
+                    highlights: false,
+                    crop: Default::default(),
+                },
+            )
+            .await?;
+        let mut keys = required
+            .candidates
+            .iter()
+            .map(|hit| hit.document.key.as_str())
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(keys, ["a", "b"]);
+        let changed = document(&index, "a", "banana", "banana orchard", 3);
+        engine
+            .index(&index, &id, std::slice::from_ref(&changed))
+            .await?;
+        assert_eq!(
+            engine
+                .index(&index, &id, &[docs[0].clone()])
+                .await?
+                .skipped_older,
+            1
+        );
+        assert_eq!(
+            engine
+                .remove(&index, &id, &[("a".into(), 2)])
+                .await?
+                .skipped_older,
+            1
+        );
+        engine.remove(&index, &id, &[("b".into(), 4)]).await?;
+        assert_eq!(
+            engine
+                .index(&index, &id, &[docs[1].clone()])
+                .await?
+                .skipped_tombstoned,
+            1
+        );
+        let mut same = changed.clone();
+        same.document.source_version = 5;
+        assert_eq!(
+            engine.index(&index, &id, &[same]).await?.skipped_unchanged,
+            1
+        );
+        assert_eq!(
+            engine
+                .remove(&index, &id, &[("a".into(), 4)])
+                .await?
+                .skipped_older,
+            1
+        );
+        for q in queries {
+            compare(&engine, &index, &id, q).await?;
+        }
+        engine
+            .remove(
+                &index,
+                &id,
+                &[("a".into(), 6), ("c".into(), 6), ("d".into(), 6)],
+            )
+            .await?;
+        assert!(engine.vocabulary(&index, &id).await?.words.is_empty());
+        let state = engine.read()?;
+        let g = generation(&state, &index, &id)?;
+        assert!(g.postings.is_empty());
+        assert!(g.lengths.is_empty());
+        assert_eq!(g.total_length, 0);
+        Ok(())
     }
 }

@@ -69,11 +69,27 @@ fn term(term: &ExpandedTerm, disable_typos: bool) -> String {
     format!("({})", alternatives.join(" | "))
 }
 fn render(query: &ExpandedQuery, disable_typos: bool) -> String {
-    let mut groups = query
+    let optional = query
         .terms
         .iter()
+        .filter(|item| !item.required)
         .map(|item| term(item, disable_typos))
         .collect::<Vec<_>>();
+    let mut groups = Vec::new();
+    if !optional.is_empty() {
+        groups.push(if optional.len() == 1 {
+            optional[0].clone()
+        } else {
+            format!("({})", optional.join(" | "))
+        });
+    }
+    groups.extend(
+        query
+            .terms
+            .iter()
+            .filter(|item| item.required)
+            .map(|item| term(item, disable_typos)),
+    );
     groups.extend(
         query
             .phrases
@@ -190,7 +206,7 @@ pub(super) fn predicate(
             .iter()
             .any(|item| item.alternatives.iter().any(|word| word.contains(' ')));
     if field_checks {
-        for item in &query.terms {
+        clauses.extend(super::word_predicates(query, |item| {
             let fields = settings
                 .index_time
                 .searchable_attributes
@@ -209,8 +225,8 @@ pub(super) fn predicate(
                     Ok(format!("{vector} @@ {query}"))
                 })
                 .collect::<Result<Vec<_>, FrameworkError>>()?;
-            clauses.push(format!("({})", fields.join(" OR ")));
-        }
+            Ok(format!("({})", fields.join(" OR ")))
+        })?);
         for words in &query.phrases {
             let fields = settings
                 .index_time
@@ -320,18 +336,22 @@ pub(super) fn highlights(
 mod tests {
     use super::*;
     #[test]
+    fn word_groups_are_optional_but_phrases_and_negatives_stay_required() {
+        let query = crate::search::expand(
+            &crate::search::QueryText::parse("apple pie -green \"fresh baked\""),
+            &crate::search::QuerySettings::default(),
+            &crate::search::Vocabulary::default(),
+            64,
+        )
+        .unwrap();
+        assert_eq!(
+            render(&query, false),
+            r#"((('apple')) | (('pie':*))) & ('fresh' <-> 'baked') & !('green')"#
+        );
+    }
+    #[test]
     fn postgres_renders_phrase_synonym_prefix_and_negative() {
-        let query = ExpandedQuery {
-            terms: vec![ExpandedTerm {
-                original: "rust".into(),
-                alternatives: vec!["rust".into(), "trust".into(), "rust language".into()],
-                prefix: true,
-                typo_alternatives: vec!["trust".into()],
-            }],
-            phrases: vec![vec!["database".into(), "engine".into()]],
-            negatives: vec!["slow".into()],
-            ..ExpandedQuery::default()
-        };
+        let query = super::super::expansion_fixture();
         assert_eq!(
             render(&query, false),
             "(('rust':*) | ('trust') | ('rust' <-> 'language')) & ('database' <-> 'engine') & !('slow')"
