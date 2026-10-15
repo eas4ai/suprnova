@@ -116,7 +116,8 @@ SEARCH_DRIVER=database
 # REPORTING_SEND_PII=false
 # REPORTING_LOGS=off
 # REPORTING_TRACES_SAMPLE_RATE=0
+# Live reports browser errors to this public DSN.
 # REPORTING_PUBLIC_DSN=
-# Inertia kits use this public DSN at build time. Set REPORTING_PUBLIC_DSN
-# on the server too, so the security policy allows the tracker connection.
+# Inertia kits read this public DSN at build time; the security policy
+# reads it from this file too and allows the tracker connection.
 # VITE_REPORTING_DSN=

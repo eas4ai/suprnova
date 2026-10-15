@@ -126,3 +126,63 @@ async fn report_004_hidden_context_and_secret_fields_never_reach_the_driver() {
     assert!(encoded.contains("visible"));
     assert!(events[0].payload["request"]["data"].is_null());
 }
+
+/// A signed-in user of the test's `admin` guard.
+#[derive(Clone)]
+struct Admin(String);
+
+impl suprnova::Authenticatable for Admin {
+    fn get_auth_identifier(&self) -> String {
+        self.0.clone()
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
+        self
+    }
+}
+
+/// A provider that knows nobody: the test signs its user in directly.
+struct Nobody;
+
+#[async_trait::async_trait]
+impl suprnova::UserProvider for Nobody {
+    async fn retrieve_by_id(
+        &self,
+        _id: &str,
+    ) -> Result<Option<Arc<dyn suprnova::Authenticatable>>, FrameworkError> {
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn report_003_a_named_guard_route_reports_its_own_user() {
+    suprnova::testing::TestContainer::scope(async {
+        Exceptions::reset();
+        let config = suprnova::AuthConfig::new("web")
+            .guard("admin", suprnova::GuardConfig::session("users"));
+        suprnova::testing::TestContainer::singleton(suprnova::AuthManager::new(config));
+        suprnova::Auth::register_provider("users", Arc::new(Nobody)).expect("provider");
+        let sink = Arc::new(Capture::default());
+        App::bind::<dyn Reporter>(sink.clone());
+        let client = TestClient::new(
+            Router::new()
+                .get("/admin/fail", |_req: suprnova::Request| async {
+                    Err::<HttpResponse, _>(HttpResponse::from(FrameworkError::internal(
+                        "admin failure",
+                    )))
+                })
+                .middleware(suprnova::AuthMiddleware::new().for_guard("admin")),
+            MiddlewareRegistry::new(),
+        )
+        .acting_as_with_guard(&Admin("9".to_owned()), "admin");
+        client.get("/admin/fail").send().await.assert_status(500);
+        let events = sink.0.lock().expect("capture");
+        assert_eq!(events.len(), 1);
+        // The admin guard's user 9, never the default guard's user 9.
+        assert_eq!(events[0].payload["user"]["id"], "admin:9");
+    })
+    .await;
+}
