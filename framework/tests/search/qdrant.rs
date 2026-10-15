@@ -1653,7 +1653,7 @@ async fn shared_generation_metadata_does_not_require_qdrant() -> Result<(), Fram
 
 #[tokio::test]
 #[ignore = "requires Qdrant at QDRANT_TEST_URL"]
-async fn word_ranking_keeps_the_full_prefetch_universe_qdrant() {
+async fn bm25_ranks_coverage_and_term_frequency_qdrant() {
     fixture(|engine, index, generation| {
         Box::pin(async move {
             engine
@@ -1661,24 +1661,39 @@ async fn word_ranking_keeps_the_full_prefetch_universe_qdrant() {
                 .await
                 .unwrap();
             let docs = [
-                ("a", "apple orchard", 10),
-                ("b", "apple basket", 9),
-                ("c", "apple orchard harvest", 1),
+                ("both", "apple orchard filler filler"),
+                ("repeated", "apple apple filler filler"),
+                ("once", "apple filler filler filler"),
+                ("unrelated", "banana filler filler filler"),
             ]
             .into_iter()
-            .map(|(key, text, version)| {
-                let mut doc = document(index, key, text, 1);
-                doc.document.source_version = version;
-                doc
-            })
+            .map(|(key, text)| document(index, key, text, 1))
             .collect::<Vec<_>>();
             engine.index(index, generation, &docs).await.unwrap();
-            let mut q = query(engine, index, generation, "apple orchard harvest").await;
-            q.depth = 1;
+            let q = query(engine, index, generation, "apple orchard").await;
             let hits = engine.query(index, generation, &q).await.unwrap();
             assert_eq!(hits.total.value(), 3);
-            assert_eq!(hits.candidates[0].document.key, "c");
-            assert_eq!(hits.candidates[0].score, 3.0);
+            assert_eq!(
+                hits.candidates
+                    .iter()
+                    .map(|c| c.document.key.as_str())
+                    .collect::<Vec<_>>(),
+                ["both", "repeated", "once"]
+            );
+            assert!(hits.candidates[0].score > hits.candidates[1].score);
+            assert!(hits.candidates[1].score > hits.candidates[2].score);
+            let mut shallow = q.clone();
+            shallow.depth = 1;
+            assert_eq!(
+                engine
+                    .query(index, generation, &shallow)
+                    .await
+                    .unwrap()
+                    .candidates[0]
+                    .document
+                    .key,
+                "both"
+            );
         })
     })
     .await;

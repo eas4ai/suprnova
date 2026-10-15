@@ -585,17 +585,47 @@ impl SearchRegistry {
 
     /// Generation settings can resolve their pinned provider independently of code defaults.
     pub fn embedder_named(index: &str, name: &str) -> Result<Arc<dyn Embedder>, FrameworkError> {
-        services()
+        if let Some(provider) = services()
             .embedders
             .read()
             .map_err(|_| poison())?
             .get(name)
             .cloned()
-            .ok_or_else(|| {
-                FrameworkError::param(format!(
-                    "SEARCH_EMBEDDER '{name}' for index '{index}' is not registered"
-                ))
-            })
+        {
+            return Ok(provider);
+        }
+        if name == "bm25" {
+            return Self::sparse_embedder(index, &super::IndexSettings::default());
+        }
+        Err(FrameworkError::param(format!(
+            "SEARCH_EMBEDDER '{name}' for index '{index}' is not registered"
+        )))
+    }
+
+    pub(crate) fn sparse_embedder(
+        index: &str,
+        settings: &super::IndexSettings,
+    ) -> Result<Arc<dyn Embedder>, FrameworkError> {
+        let name = settings
+            .index_time
+            .sparse_model
+            .as_deref()
+            .unwrap_or("bm25");
+        if name != "bm25" {
+            return Self::embedder_named(index, name);
+        }
+        let mut stop_words = std::collections::BTreeSet::new();
+        if let super::LanguageConfig::Qdrant {
+            stop_words: language_stop_words,
+            ..
+        } = &settings.index_time.language
+        {
+            stop_words.extend(language_stop_words.iter().cloned());
+        }
+        Ok(Arc::new(super::embedder::bm25::Bm25Embedder::new(
+            SearchConfig::current()?.bm25_average_length,
+            stop_words,
+        )?))
     }
 
     /// Cross-encoder providers can be installed without making the core depend on ONNX.

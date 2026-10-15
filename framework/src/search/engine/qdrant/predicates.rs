@@ -194,7 +194,7 @@ fn term_clause(
     }
     QFilter::should(clauses).into()
 }
-pub(super) fn word_clause(
+fn word_clause(
     settings: &IndexSettings,
     q: &EngineQuery,
     term: &crate::search::ExpandedTerm,
@@ -295,28 +295,6 @@ fn timestamp(value: &chrono::DateTime<chrono::Utc>) -> qb::Timestamp {
     }
 }
 
-/// Qdrant evaluates each group's native condition as 1 or 0 and sums the matches.
-pub(super) fn word_score(settings: &IndexSettings, q: &EngineQuery) -> qb::Query {
-    qb::Formula {
-        expression: Some(qb::Expression {
-            variant: Some(qb::expression::Variant::Sum(qb::SumExpression {
-                sum: q
-                    .expanded
-                    .terms
-                    .iter()
-                    .map(|term| qb::Expression {
-                        variant: Some(qb::expression::Variant::Condition(word_clause(
-                            settings, q, term,
-                        ))),
-                    })
-                    .collect(),
-            })),
-        }),
-        defaults: HashMap::new(),
-    }
-    .into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,12 +332,5 @@ mod tests {
         };
         assert_eq!(words.should.len(), 2);
         assert!(words.must.is_empty());
-        let Some(qb::query::Variant::Formula(formula)) = word_score(&settings, &q).variant else {
-            panic!("native match-count scoring");
-        };
-        let Some(qb::expression::Variant::Sum(sum)) = formula.expression.unwrap().variant else {
-            panic!("matched groups sum");
-        };
-        assert_eq!(sum.sum.len(), 2);
     }
 }

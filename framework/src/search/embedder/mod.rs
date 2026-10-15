@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub(crate) mod bm25;
 /// A deterministic provider makes semantic pipeline tests independent of inference services.
 pub mod fake;
 /// ONNX inference and pinned artifacts remain optional for lexical and HTTP deployments.
@@ -394,6 +395,19 @@ pub trait Embedder: Send + Sync {
     ) -> Result<Vec<Embedding>, FrameworkError>;
     /// Providers apply the profile query prefix before tokenization and inference.
     async fn embed_query(&self, text: &str) -> Result<Embedding, FrameworkError>;
+    /// Query-specific sparse weights default to the provider's existing sparse head.
+    async fn embed_sparse_query(&self, text: &str) -> Result<SparseEmbedding, FrameworkError> {
+        let mut vectors = self.embed_sparse(&[text.to_owned()]).await?;
+        if vectors.len() != 1 {
+            return Err(FrameworkError::param(format!(
+                "sparse model {}: expected one query embedding",
+                self.profile().id
+            )));
+        }
+        let vector = vectors.remove(0);
+        vector.validate()?;
+        Ok(vector)
+    }
     /// Optional sparse output fails explicitly when the provider has no sparse head.
     async fn embed_sparse(
         &self,
@@ -403,5 +417,17 @@ pub trait Embedder: Send + Sync {
             "embedding model {} does not support sparse embeddings",
             self.profile().id
         )))
+    }
+}
+
+#[cfg(test)]
+mod bm25_tests {
+    use crate::search::SearchRegistry;
+
+    #[tokio::test]
+    async fn bm25_is_available_without_an_optional_feature() {
+        let provider = SearchRegistry::embedder_named("test", "bm25").unwrap();
+        let vectors = provider.embed_sparse(&["apple".into()]).await.unwrap();
+        assert_eq!(vectors[0].indices, [280_767_167]);
     }
 }

@@ -3,8 +3,9 @@
 //! Each generation is `search_<index>_<generation>`. Without embedding dimensions
 //! the named dense slot has size 1, carries no vector and is never queried. This
 //! preserves one schema for lexical-only and sparse-only indexes. Lexical retrieval
-//! without a sparse provider or query vector sums native matched-word conditions.
-//! Single-group and empty queries retain source version as their tie-break.
+//! ranks sparse vectors with Qdrant's IDF modifier. The built-in BM25 encoder is
+//! the default; a named sparse provider overrides it. Text predicates filter words,
+//! phrases and exclusions without scoring them. Empty queries use source version.
 //! The framework supplies highlights. Prefixes use keyword token payloads because
 //! Qdrant's `match.prefix` applies to keyword values, not full-text tokens.
 //!
@@ -22,8 +23,8 @@
 //! Vocabulary reads scan token payloads; categorical, geo and multi-column sorts
 //! retain a bounded top-k while paging the full lexical universe. Ordered strings
 //! and large-integer ranges use exact keyword dictionaries because native numeric
-//! range bounds are f64. Sparse column weights are combined before indexing;
-//! a text-filter-only lexical leg has no column score to weight. Boundary score
+//! range bounds are f64. Named model column weights are combined before indexing;
+//! BM25 encodes the searchable text in attribute order. Boundary score
 //! ties require extra native pages and, for sparse composites, temporarily wider
 //! prefetches; returned candidates still obey the requested depth.
 mod predicates;
@@ -298,8 +299,7 @@ impl QdrantSearchEngine {
         let sparse = params
             .sparse_vectors_config
             .and_then(|c| c.map.get("sparse").copied());
-        if sparse.is_some() != settings.index_time.sparse_model.is_some()
-            || sparse.is_some_and(|v| v.modifier != Some(qb::Modifier::Idf as i32))
+        if sparse.is_none() || sparse.is_some_and(|v| v.modifier != Some(qb::Modifier::Idf as i32))
         {
             return Err(error(
                 &collection,
@@ -384,9 +384,6 @@ impl QdrantSearchEngine {
         settings: &IndexSettings,
         q: &EngineQuery,
     ) -> Result<Option<SparseEmbedding>, FrameworkError> {
-        let Some(provider) = &settings.index_time.sparse_model else {
-            return Ok(None);
-        };
         let text = q
             .expanded
             .terms
@@ -401,15 +398,8 @@ impl QdrantSearchEngine {
         if text.is_empty() {
             return Ok(None);
         }
-        let embedder = crate::search::SearchRegistry::embedder_named(index.name, provider)?;
-        let mut vectors = embedder.embed_sparse(&[text]).await?;
-        if vectors.len() != 1 {
-            return Err(error(
-                index.name,
-                format!("sparse model {provider}: expected one query embedding"),
-            ));
-        }
-        let vector = vectors.remove(0);
+        let embedder = crate::search::SearchRegistry::sparse_embedder(index.name, settings)?;
+        let vector = embedder.embed_sparse_query(&text).await?;
         vector.validate()?;
         Ok(Some(vector))
     }
@@ -508,7 +498,6 @@ impl QdrantSearchEngine {
     async fn lexical_prefetch(
         &self,
         index: &IndexDescriptor,
-        collection: &str,
         settings: &IndexSettings,
         q: &EngineQuery,
         vector: Option<&[f32]>,
@@ -557,10 +546,6 @@ impl QdrantSearchEngine {
                 .filter(filter)
                 .limit(q.depth as u64)
                 .build());
-        }
-        if q.expanded.terms.len() > 1 {
-            let count = self.exact_count(collection, filter.clone()).await?.value();
-            return Ok(word_prefetch(settings, q, filter, count));
         }
         let mut prefetch = qb::PrefetchQueryBuilder::default()
             .filter(filter)
@@ -630,7 +615,7 @@ impl QdrantSearchEngine {
             )
         })?;
         let prefetch = self
-            .lexical_prefetch(index, collection, settings, &universe, vector, filter)
+            .lexical_prefetch(index, settings, &universe, vector, filter)
             .await?;
         let mut kept = Vec::new();
         let mut offset = 0u64;
@@ -678,17 +663,15 @@ impl QdrantSearchEngine {
         vector: Option<&[f32]>,
         filter: QFilter,
     ) -> Result<Vec<EngineCandidate>, FrameworkError> {
-        let sparse_ranking = settings.index_time.sparse_model.is_some()
-            && (!q.expanded.terms.is_empty() || !q.expanded.phrases.is_empty());
-        let word_ranking = q.expanded.terms.len() > 1;
-        if !q.sort.is_empty() && (sparse_ranking || vector.is_some() || word_ranking) {
+        let sparse_ranking = !q.expanded.terms.is_empty() || !q.expanded.phrases.is_empty();
+        if !q.sort.is_empty() && (sparse_ranking || vector.is_some()) {
             return self
                 .native_sorted(index, collection, settings, q, vector, filter)
                 .await;
         }
-        if q.sort.is_empty() && (sparse_ranking || word_ranking) {
+        if q.sort.is_empty() && sparse_ranking {
             let prefetch = self
-                .lexical_prefetch(index, collection, settings, q, vector, filter)
+                .lexical_prefetch(index, settings, q, vector, filter)
                 .await?;
             return self.run_prefetch(index, collection, prefetch).await;
         }
@@ -984,9 +967,7 @@ fn schema(
             },
         ),
     ]);
-    if settings.index_time.sparse_model.is_some() {
-        schema.insert("__sparse_indices".into(), integer());
-    }
+    schema.insert("__sparse_indices".into(), integer());
     for attr in &index.attributes {
         if attr.filterable || attr.sortable || attr.facet {
             schema.insert(format!("__value_{}", attr.name), keyword());
@@ -1319,15 +1300,14 @@ impl SearchEngine for QdrantSearchEngine {
                 qb::Distance::Cosine,
             ),
         );
-        let mut builder = qb::CreateCollectionBuilder::new(&collection).vectors_config(vectors);
-        if settings.index_time.sparse_model.is_some() {
-            let mut sparse = qb::SparseVectorsConfigBuilder::default();
-            sparse.add_named_vector_params(
-                "sparse",
-                qb::SparseVectorParamsBuilder::default().modifier(qb::Modifier::Idf),
-            );
-            builder = builder.sparse_vectors_config(sparse);
-        }
+        let mut sparse = qb::SparseVectorsConfigBuilder::default();
+        sparse.add_named_vector_params(
+            "sparse",
+            qb::SparseVectorParamsBuilder::default().modifier(qb::Modifier::Idf),
+        );
+        let builder = qb::CreateCollectionBuilder::new(&collection)
+            .vectors_config(vectors)
+            .sparse_vectors_config(sparse);
         // A retry completes a partially created collection, but never mutates
         // the index-time identity of an already recorded generation.
         if let Some(old) = storage::settings_optional(index.name, generation).await? {
@@ -1461,6 +1441,28 @@ impl SearchEngine for QdrantSearchEngine {
         let _lock = self.mutations.lock().await;
         let collection = collection_name(index, generation)?;
         let settings = self.read_settings(index, generation).await?;
+        // Direct engine writes (including baselines) use the same default encoder as indexing.
+        let mut prepared;
+        let docs = if settings
+            .index_time
+            .sparse_model
+            .as_deref()
+            .unwrap_or("bm25")
+            == "bm25"
+            && docs.iter().any(|doc| doc.sparse.is_none())
+        {
+            prepared = docs.to_vec();
+            crate::search::indexing::embed_sparse_documents(
+                index.name,
+                &settings,
+                &mut prepared,
+                "qdrant",
+            )
+            .await?;
+            prepared.as_slice()
+        } else {
+            docs
+        };
         // Validate the complete batch before the first persistent change.
         for doc in docs {
             doc.document.validate(index)?;
@@ -1485,17 +1487,8 @@ impl SearchEngine for QdrantSearchEngine {
             }
             if let Some(sparse) = &doc.sparse {
                 sparse.validate()?;
-                if settings.index_time.sparse_model.is_none() {
-                    return Err(error(
-                        &collection,
-                        format!(
-                            "key {}: sparse vector supplied without a sparse model",
-                            doc.document.key
-                        ),
-                    ));
-                }
             }
-            if settings.index_time.sparse_model.is_some() && doc.sparse.is_none() {
+            if doc.sparse.is_none() {
                 return Err(error(
                     &collection,
                     format!(
@@ -1759,15 +1752,8 @@ impl SearchEngine for QdrantSearchEngine {
             return Ok(Some(EngineResult { candidates, total }));
         }
         let prefetch = vec![
-            self.lexical_prefetch(
-                index,
-                &collection,
-                &settings,
-                q,
-                Some(vector),
-                lexical.clone(),
-            )
-            .await?,
+            self.lexical_prefetch(index, &settings, q, Some(vector), lexical.clone())
+                .await?,
             qb::PrefetchQueryBuilder::default()
                 .query(vector.to_vec())
                 .using("dense")
@@ -2041,32 +2027,6 @@ fn dictionary_range(filter: &Filter, value: &AttributeValue) -> bool {
     exact(value) || matches!(filter,Filter::Between(_,_,hi) if exact(hi))
 }
 
-// Native match-count scoring must see the complete lexical universe. A limited
-// source-version prefetch could otherwise omit a document matching more words.
-fn word_prefetch(
-    settings: &IndexSettings,
-    q: &EngineQuery,
-    filter: QFilter,
-    count: u64,
-) -> qb::PrefetchQuery {
-    qb::PrefetchQueryBuilder::default()
-        .prefetch(vec![
-            qb::PrefetchQueryBuilder::default()
-                .query(
-                    qb::OrderByBuilder::new("__source_version")
-                        .direction(qb::Direction::Desc as i32)
-                        .build(),
-                )
-                .filter(filter.clone())
-                .limit(count.max(1))
-                .build(),
-        ])
-        .query(predicates::word_score(settings, q))
-        .filter(filter)
-        .limit(q.depth as u64)
-        .build()
-}
-
 fn score_formula() -> qb::Query {
     qb::Formula {
         expression: Some(qb::Expression {
@@ -2079,9 +2039,7 @@ fn score_formula() -> qb::Query {
 
 fn grow_prefetch(prefetches: &mut [qb::PrefetchQuery], limit: u64, exact: bool) {
     for prefetch in prefetches {
-        // A formula may deliberately prefetch its complete candidate universe.
-        // Looking ahead for ties must never shrink that universe.
-        prefetch.limit = Some(prefetch.limit.unwrap_or(0).max(limit));
+        prefetch.limit = Some(limit);
         if exact
             && matches!(
                 prefetch.query.as_ref().and_then(|q| q.variant.as_ref()),
