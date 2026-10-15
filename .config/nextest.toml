@@ -46,8 +46,21 @@ test-group = 'serial-binaries'
 # standing service. When that service wedges (MariaDB 12.3.1 took signal 11
 # during the fulltext load on 2026-10-14 and never answered again), the test
 # would otherwise wait forever and the gate step would die of its own timeout
-# with no name attached. Fifteen minutes is several times the slowest debug
-# measurement; a release-profile run finishes in well under one.
+# with no name attached. Fifteen minutes is several times the slowest lexical
+# debug measurement; a release-profile run finishes in well under one. The
+# hybrid tests are left out: they embed the whole corpus with the real model,
+# which takes about forty minutes per engine on a CPU.
 [[profile.default.overrides]]
-filter = 'binary(search) & test(/^baseline::(postgres_baseline|mysql_baseline|baseline_qdrant|baseline_collection|baseline_sqlite|baseline_collection_hybrid|baseline_sqlite_hybrid)$/)'
+filter = 'binary(search) & test(/^baseline::(postgres_baseline|mysql_baseline|baseline_qdrant|baseline_collection|baseline_sqlite)$/)'
 slow-timeout = { period = "180s", terminate-after = 5 }
+
+# A run with the embedding model configured (SEARCH_EMBEDDER set) turns every
+# engine baseline into a hybrid measurement that embeds the corpus first. Run
+# those with `--profile search-model`: its override is read before the
+# default profile's, so the baseline tests get six hours instead of fifteen
+# minutes, still bounded if a service wedges.
+[profile.search-model]
+
+[[profile.search-model.overrides]]
+filter = 'binary(search) & test(/^baseline::/)'
+slow-timeout = { period = "600s", terminate-after = 36 }
