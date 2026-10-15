@@ -15,7 +15,10 @@ use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-const PERMISSIONS: &str = "camera=(), microphone=(), geolocation=(), payment=(), usb=(), accelerometer=(), gyroscope=(), magnetometer=(), browsing-topics=(), display-capture=()";
+const STRICT_PERMISSIONS: &str = "camera=(), microphone=(), geolocation=(), payment=(), usb=(), accelerometer=(), gyroscope=(), magnetometer=(), browsing-topics=(), display-capture=()";
+// Balanced leaves `payment` alone: Stripe's Apple Pay and Google Pay buttons
+// use the Payment Request API from Stripe's frames.
+const BALANCED_PERMISSIONS: &str = "camera=(), microphone=(), geolocation=(), usb=(), accelerometer=(), gyroscope=(), magnetometer=(), browsing-topics=(), display-capture=()";
 
 tokio::task_local! {
     static POLICY: Arc<RwLock<SecurityHeaders>>;
@@ -52,8 +55,24 @@ impl SecurityHeaders {
             ContentSecurityPolicy::balanced()
         });
         for (name, value) in [
-            ("permissions-policy", PERMISSIONS),
-            ("cross-origin-opener-policy", "same-origin"),
+            (
+                "permissions-policy",
+                if strict {
+                    STRICT_PERMISSIONS
+                } else {
+                    BALANCED_PERMISSIONS
+                },
+            ),
+            // A popup sign-in or checkout window keeps its link to the page
+            // under balanced, so it can report back to the opener.
+            (
+                "cross-origin-opener-policy",
+                if strict {
+                    "same-origin"
+                } else {
+                    "same-origin-allow-popups"
+                },
+            ),
             (
                 "cross-origin-resource-policy",
                 if strict { "same-origin" } else { "same-site" },

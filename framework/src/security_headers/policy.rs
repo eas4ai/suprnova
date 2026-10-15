@@ -30,9 +30,12 @@ impl ContentSecurityPolicy {
         Self { template: "default-src 'self'; script-src 'nonce-{nonce}' 'strict-dynamic'; style-src 'self' 'nonce-{nonce}'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'".into() }
     }
 
-    /// Permits component style attributes while keeping executable scripts nonced.
+    /// Runs the application's own script files and nonced scripts, and keeps
+    /// component style attributes. No `'strict-dynamic'`: it would switch off
+    /// `'self'`, and the Live components load their scripts by plain tags from
+    /// the application's origin.
     pub fn balanced() -> Self {
-        Self { template: "default-src 'self'; script-src 'self' 'nonce-{nonce}' 'strict-dynamic'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'".into() }
+        Self { template: "default-src 'self'; script-src 'self' 'nonce-{nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'".into() }
     }
 
     pub(crate) fn uses_nonce(&self) -> bool {

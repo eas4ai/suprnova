@@ -81,15 +81,32 @@ async fn sec_002_balanced_and_relaxed_have_the_documented_headers() {
     response
         .assert_header("strict-transport-security", "max-age=31536000")
         .assert_header("x-frame-options", "SAMEORIGIN")
-        .assert_header("cross-origin-opener-policy", "same-origin")
+        .assert_header("cross-origin-opener-policy", "same-origin-allow-popups")
         .assert_header("cross-origin-resource-policy", "same-site");
     assert!(response.header("cross-origin-embedder-policy").is_none());
+    let permissions = response.header("permissions-policy").expect("permissions");
+    for feature in ["camera", "microphone", "geolocation", "usb"] {
+        assert!(
+            permissions.contains(&format!("{feature}=()")),
+            "{permissions}"
+        );
+    }
+    assert!(
+        !permissions.contains("payment"),
+        "balanced keeps payment for wallet buttons: {permissions}"
+    );
     assert!(
         response
             .header("content-security-policy")
             .unwrap()
             .contains("style-src 'self' 'unsafe-inline'")
     );
+    // Same-origin script files run (the Live components' tags carry no
+    // nonce), so balanced must not carry 'strict-dynamic', which switches
+    // 'self' off in browsers that support it.
+    let csp = response.header("content-security-policy").unwrap();
+    assert!(csp.contains("script-src 'self' 'nonce-"), "{csp}");
+    assert!(!csp.contains("'strict-dynamic'"), "{csp}");
     let relaxed = client(SecurityHeaders::relaxed())
         .get("https://localhost/")
         .send()
