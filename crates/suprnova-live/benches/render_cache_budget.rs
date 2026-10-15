@@ -335,6 +335,7 @@ impl C64Fixture {
             observed.insert_digest([u8::try_from(index)?; 32], 1)?;
         }
         let header = EntryHeader {
+            published_with_nonce_policy: false,
             key: key.clone(),
             class: RepresentationClass::PublicShared,
             variance: VarianceDescriptor::new(),
@@ -556,6 +557,7 @@ impl CompositeFixture {
         }
         let input = key_input("/catalog/{category}/stitched", 8)?;
         let header = EntryHeader {
+            published_with_nonce_policy: false,
             key: RenderKey::derive(&input, &keys)?,
             class: RepresentationClass::PublicShellStitched,
             variance: VarianceDescriptor::new(),

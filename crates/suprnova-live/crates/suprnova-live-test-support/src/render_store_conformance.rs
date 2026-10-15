@@ -909,6 +909,7 @@ fn encoded_entry(
 ) -> Bytes {
     let entry = CompleteEntry::new(
         EntryHeader {
+            published_with_nonce_policy: false,
             key: key_for(keys, name),
             class: RepresentationClass::PublicShared,
             variance: VarianceDescriptor::new(),
@@ -940,6 +941,7 @@ fn composite_entry_for(
 ) -> CompositeEntry {
     CompositeEntry::new(
         EntryHeader {
+            published_with_nonce_policy: false,
             key: key_for(keys, name),
             class: RepresentationClass::PublicShellStitched,
             variance: VarianceDescriptor::new(),

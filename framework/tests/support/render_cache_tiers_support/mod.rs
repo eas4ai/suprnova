@@ -113,6 +113,7 @@ pub fn encoded_entry(pattern: &str) -> Bytes {
     let ring = keys();
     let entry = CompleteEntry::new(
         EntryHeader {
+            published_with_nonce_policy: false,
             key: RenderKey::for_test(&ring, pattern),
             class: RepresentationClass::PublicShared,
             variance: VarianceDescriptor::new(),

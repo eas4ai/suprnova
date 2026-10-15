@@ -307,6 +307,16 @@ impl MiddlewareRegistry {
         &self.global
     }
 
+    /// Find the configured policy without executing application middleware.
+    /// Typed boxing retains a copy beside the weak identity entry; reading this
+    /// registry preserves its boot-time snapshot across other server instances.
+    pub(crate) fn security_headers(&self) -> Option<crate::SecurityHeaders> {
+        self.global
+            .iter()
+            .rev()
+            .find_map(super::identity::security_headers_of)
+    }
+
     /// Number of global middleware. Convenience for tests and
     /// diagnostics so callers don't have to write `.global_middleware().len()`.
     pub fn len(&self) -> usize {

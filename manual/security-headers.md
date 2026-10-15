@@ -1,7 +1,7 @@
 # Security Headers
 
 `SecurityHeaders` adds browser security policy to responses through Suprnova's
-own middleware chain. New full-stack projects register the balanced preset.
+own middleware chain. New projects in every kit, including API projects, register the balanced preset.
 Existing applications opt in by registering the middleware; upgrading alone
 does not change their responses.
 
@@ -14,7 +14,11 @@ Use typed registration: `global_middleware!`, `MiddlewareRegistry::append` or
 `prepend`, or `Server::middleware`. Those APIs retain the type that ordering
 and the server error boundary need; a manually erased middleware closure
 does not retain that information. The built-in request-id scope stays outside
-the application stack.
+the application stack. Typed registration also retains a copy of the configured
+policy beside the middleware's identity. The server reads that copy from its
+own registry snapshot for health and catalogue responses and the WebSocket
+response boundary. These paths need no application middleware execution and
+keep the same configured policy across panic recovery.
 Route and group security overrides run immediately inside it, before RenderCache
 lookup. The response returns through security headers last, so cache hits and
 error pages retain their policy.
@@ -143,6 +147,23 @@ header identifying its destination. Your application or reporting service
 must accept the browser's violation reports. Programmatic equivalents are
 `.report_only(true)` and `.report_to(Some("https://reports.example.com/csp"))?`.
 Pass `None` to `report_to` to remove the destination.
+
+The enforcing and report-only headers are independent policies. To keep an
+enforcing policy while testing another, add the reporting policy by name:
+
+```rust,ignore
+let headers = suprnova::SecurityHeaders::strict().header(
+    "Content-Security-Policy-Report-Only",
+    Some("default-src 'self'; script-src 'nonce-{nonce}'; object-src 'none'"),
+)?;
+```
+
+Both policies use the same request nonce. A nonce is generated when either
+policy needs one, and each nonce policy is emitted only for HTML. Setting or
+removing either header by name changes only that header. `.report_only(true)`
+moves the preset's policy to report-only; `.report_only(false)` moves it back.
+The typed `.content_security_policy(...)` builder updates the policy in that
+selected mode.
 
 ## HSTS and HTTPS
 
@@ -273,8 +294,18 @@ fn router() -> Result<Router, FrameworkError> {
 }
 ```
 
-Use `.content_security_policy(None)` on the override to turn off CSP for that
-route or group. A route override can change or turn off any middleware header;
+Use `.content_security_policy(None)` on the override to turn off the policy
+in the global builder's selected mode for that route or group. Use the named
+header API to control the enforcing and report-only policies independently:
+
+```rust,ignore
+let route_policy = suprnova::SecurityHeadersOverride::new()
+    .header("Content-Security-Policy-Report-Only", None)?;
+```
+
+This removes only the report-only policy. An inherited enforcing CSP keeps its
+nonce. Removing the enforcing header likewise leaves a report-only policy
+and its nonce intact. A route override can change or turn off any middleware header;
 a header the handler already set still wins. Review frame permissions together:
 `X-Frame-Options` and CSP's `frame-ancestors` should describe the same access.
 
@@ -284,6 +315,10 @@ A Complete page under a nonce CSP renders on every request. RenderCache never
 stores that complete rendering, since replaying it would reuse a nonce. A
 stitched Live document can be cached: each hit fills its nonce holes and
 nonce-bearing headers with the current request's nonce, so body and CSP agree.
+After a nonce policy is enabled, an entry published without it must render
+again and replace the stored entry before replay. A stitched page with no
+nonce-bearing content can then replay as Complete; it still records that it
+was published under the nonce policy.
 See [RenderCache](render-cache.md).
 
 ### Why Suprnova diverges

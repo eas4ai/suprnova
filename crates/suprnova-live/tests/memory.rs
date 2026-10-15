@@ -252,6 +252,7 @@ fn composite_entry(keys: &SnapshotKeyRing) -> CompositeEntry {
             surrounding_digest(&graph, &shell, index).expect("surrounding");
     }
     let header = EntryHeader {
+        published_with_nonce_policy: false,
         key: RenderKey::for_test(keys, "/composite"),
         class: RepresentationClass::PublicShellStitched,
         variance: VarianceDescriptor::new(),

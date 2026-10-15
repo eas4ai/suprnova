@@ -1155,6 +1155,7 @@ mod tests {
     /// build several entries with distinct keys.
     pub(super) fn header_for(keys: &SnapshotKeyRing, pattern: &str) -> EntryHeader {
         EntryHeader {
+            published_with_nonce_policy: false,
             key: RenderKey::for_test(keys, pattern),
             class: RepresentationClass::PublicShellStitched,
             variance: VarianceDescriptor::new(),

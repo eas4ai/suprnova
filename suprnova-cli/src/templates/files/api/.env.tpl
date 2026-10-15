@@ -22,3 +22,9 @@ DATABASE_URL=sqlite://database.sqlite
 
 # PostgreSQL example:
 # DATABASE_URL=postgres://user:pass@localhost:5432/{package_name}
+
+# Browser security headers also protect JSON responses without a nonce CSP.
+SECURITY_HEADERS=balanced
+SECURITY_HEADERS_CSP_REPORT_ONLY=false
+# SECURITY_HEADERS_CSP_REPORT_TO=https://reports.example.com/csp
+SECURITY_HEADERS_HSTS_PRELOAD=false

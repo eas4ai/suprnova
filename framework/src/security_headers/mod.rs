@@ -32,6 +32,7 @@ tokio::task_local! {
 pub struct SecurityHeaders {
     headers: BTreeMap<String, String>,
     csp: Option<ContentSecurityPolicy>,
+    csp_report_only: Option<ContentSecurityPolicy>,
     report_only: bool,
     report_to: Option<String>,
 }
@@ -117,6 +118,7 @@ impl SecurityHeaders {
         Self {
             headers: BTreeMap::new(),
             csp: None,
+            csp_report_only: None,
             report_only: false,
             report_to: None,
         }
@@ -150,10 +152,10 @@ impl SecurityHeaders {
                 ));
             }
         };
-        policy.report_only = read_bool(
+        policy = policy.report_only(read_bool(
             "SECURITY_HEADERS_CSP_REPORT_ONLY",
             read("SECURITY_HEADERS_CSP_REPORT_ONLY")?,
-        )?;
+        )?);
         let preload = read_bool(
             "SECURITY_HEADERS_HSTS_PRELOAD",
             read("SECURITY_HEADERS_HSTS_PRELOAD")?,
@@ -180,9 +182,11 @@ impl SecurityHeaders {
             validate_value(&name, value)?;
         }
         match name.as_str() {
-            "content-security-policy" | "content-security-policy-report-only" => {
+            "content-security-policy" => {
                 self.csp = value.map(ContentSecurityPolicy::new).transpose()?;
-                self.report_only = name == "content-security-policy-report-only";
+            }
+            "content-security-policy-report-only" => {
+                self.csp_report_only = value.map(ContentSecurityPolicy::new).transpose()?;
             }
             "reporting-endpoints" if value.is_none() => {
                 self.report_to = None;
@@ -201,12 +205,25 @@ impl SecurityHeaders {
 
     /// Replaces or disables the nonce policy before the handler renders its tags.
     pub fn content_security_policy(mut self, policy: Option<ContentSecurityPolicy>) -> Self {
-        self.csp = policy;
+        if self.report_only {
+            self.csp_report_only = policy;
+        } else {
+            self.csp = policy;
+        }
         self
     }
 
-    /// Switches CSP to reporting without adding an enforced policy header.
+    /// Moves the selected policy between enforcing and report-only mode.
+    /// Named header changes remain independent; this builder selects the mode
+    /// used by [`Self::content_security_policy`] without duplicating a preset.
     pub fn report_only(mut self, enabled: bool) -> Self {
+        if enabled != self.report_only {
+            if enabled {
+                self.csp_report_only = self.csp.take();
+            } else {
+                self.csp = self.csp_report_only.take();
+            }
+        }
         self.report_only = enabled;
         self
     }
@@ -253,10 +270,43 @@ impl SecurityHeaders {
         self
     }
 
+    /// Apply the same policy to server-built responses while preserving their
+    /// body, status and existing headers. A surrounding scope supplies the
+    /// effective request nonce when application middleware has already run.
+    pub(crate) fn decorate_server_response<B>(
+        &self,
+        mut response: hyper::Response<B>,
+        secure: bool,
+    ) -> hyper::Response<B> {
+        let metadata =
+            HttpResponse::new().with_headers(response.headers().iter().filter_map(
+                |(name, value)| value.to_str().ok().map(|value| (name.as_str(), value)),
+            ));
+        let local = Config::is_development();
+        let origin = if local { vite_origin() } else { None };
+        let decorated = self
+            .decorate(
+                metadata,
+                secure,
+                local,
+                CspNonce::current().as_deref(),
+                origin.as_deref(),
+            )
+            .into_hyper();
+        for (name, value) in decorated.headers() {
+            response
+                .headers_mut()
+                .entry(name.clone())
+                .or_insert_with(|| value.clone());
+        }
+        response
+    }
+
     fn uses_nonce(&self) -> bool {
         self.csp
-            .as_ref()
-            .is_some_and(ContentSecurityPolicy::uses_nonce)
+            .iter()
+            .chain(self.csp_report_only.iter())
+            .any(ContentSecurityPolicy::uses_nonce)
     }
 
     fn decorate(
@@ -275,7 +325,14 @@ impl SecurityHeaders {
                 response = response.header(name, value);
             }
         }
-        if let Some(csp) = &self.csp {
+        for (name, csp) in [
+            ("content-security-policy", self.csp.as_ref()),
+            (
+                "content-security-policy-report-only",
+                self.csp_report_only.as_ref(),
+            ),
+        ] {
+            let Some(csp) = csp else { continue };
             let html = response.header_value("content-type").is_some_and(|value| {
                 value
                     .split(';')
@@ -283,11 +340,6 @@ impl SecurityHeaders {
                     .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/html"))
             });
             if !csp.uses_nonce() || html {
-                let name = if self.report_only {
-                    "content-security-policy-report-only"
-                } else {
-                    "content-security-policy"
-                };
                 if response.header_value(name).is_none() {
                     response =
                         response.header(name, csp.render(nonce, origin, self.report_to.is_some()));
@@ -406,7 +458,7 @@ impl Middleware for SecurityHeadersOverride {
                 };
             }
             if let Some(csp) = &self.csp {
-                policy.csp = csp.clone();
+                policy = policy.content_security_policy(csp.clone());
             }
             policy
         };
@@ -456,6 +508,32 @@ pub(crate) async fn scope_response<F: std::future::Future<Output = HttpResponse>
                     nonce.get().as_deref(),
                     origin.as_deref(),
                 )
+            }),
+        )
+        .await
+}
+
+/// Keep policy changes alive across every upgrade fallback, including a panic
+/// after route overrides and refusals before application middleware can run.
+pub(crate) async fn scope_server_response<B, F>(
+    policy: Option<SecurityHeaders>,
+    secure: bool,
+    future: F,
+) -> hyper::Response<B>
+where
+    F: std::future::Future<Output = hyper::Response<B>>,
+{
+    let Some(policy) = policy else {
+        return future.await;
+    };
+    let effective = Arc::new(RwLock::new(policy));
+    POLICY
+        .scope(
+            effective.clone(),
+            CspNonce::scope_state(NonceState::default(), async move {
+                let response = future.await;
+                let policy = effective.read().unwrap_or_else(|p| p.into_inner()).clone();
+                policy.decorate_server_response(response, secure)
             }),
         )
         .await

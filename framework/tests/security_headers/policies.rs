@@ -345,3 +345,32 @@ async fn sec_002_server_error_callback_json_has_no_nonce_policy() {
     assert!(response.header("content-security-policy").is_none());
     assert_eq!(response.json()["component"], "Error");
 }
+
+#[tokio::test]
+async fn sec_002_report_only_builder_preserves_typed_policy_updates_and_switches_back() {
+    let _scope = production();
+    let policy = SecurityHeaders::strict()
+        .report_only(true)
+        .content_security_policy(Some(suprnova::ContentSecurityPolicy::balanced()))
+        .report_only(true);
+    let report = client(policy.clone()).get("/").send().await;
+    assert!(report.header("content-security-policy").is_none());
+    assert!(
+        report
+            .header("content-security-policy-report-only")
+            .unwrap()
+            .contains(&report.body_text())
+    );
+    let enforced = client(policy.report_only(false)).get("/").send().await;
+    assert!(
+        enforced
+            .header("content-security-policy-report-only")
+            .is_none()
+    );
+    assert!(
+        enforced
+            .header("content-security-policy")
+            .unwrap()
+            .contains(&enforced.body_text())
+    );
+}
