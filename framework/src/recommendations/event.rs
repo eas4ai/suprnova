@@ -276,7 +276,7 @@ impl RecommendationEvent {
             },
             target: Some(target),
             surface: surface.into(),
-            occurred_at: Utc::now(),
+            occurred_at: crate::clock::now(),
             access_scope: Some(serde_json::to_value(filter).map_err(|e| {
                 FrameworkError::internal(format!("serialize recommendation scope: {e}"))
             })?),

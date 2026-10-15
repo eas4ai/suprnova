@@ -360,7 +360,7 @@ pub(super) async fn record_tombstone_on<C: ConnectionTrait>(
             generation.as_str().into(),
             key.into(),
             version.into(),
-            chrono::Utc::now().timestamp().into(),
+            crate::clock::now().timestamp().into(),
         ])
         .map_err(|e| error(index, e))?
         .on_conflict(

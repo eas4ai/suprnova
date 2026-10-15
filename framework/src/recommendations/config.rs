@@ -127,7 +127,7 @@ impl RecommendConfig {
                 "RECOMMEND_LOCK_TTL_SECS exceeds the platform clock range",
             ));
         }
-        if chrono::Utc::now()
+        if crate::clock::now()
             .checked_sub_signed(chrono::Duration::days(i64::from(self.popularity_window)))
             .is_none()
         {

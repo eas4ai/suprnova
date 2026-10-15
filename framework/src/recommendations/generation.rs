@@ -7,7 +7,6 @@ use super::{
     storage,
 };
 use crate::{Cache, DB, FrameworkError, Viewer};
-use chrono::Utc;
 use sea_orm::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -183,7 +182,7 @@ async fn begin(
     .await?;
     let run = RecommendationRun {
         id: id.into(),
-        started_at: Utc::now()
+        started_at: crate::clock::now()
             .timestamp_micros()
             .max(last_start.saturating_add(1)),
         duration_ms: 0,

@@ -216,7 +216,7 @@ pub(crate) async fn popularity(
     high_water: i64,
     config: &RecommendConfig,
 ) -> Result<BTreeMap<RecommendationTarget, i64>, FrameworkError> {
-    let cutoff = chrono::Utc::now()
+    let cutoff = crate::clock::now()
         .checked_sub_signed(chrono::Duration::days(i64::from(config.popularity_window)))
         .ok_or_else(|| {
             FrameworkError::param(
