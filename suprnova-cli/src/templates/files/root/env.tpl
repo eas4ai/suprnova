@@ -107,3 +107,16 @@ RENDER_CACHE_L1_DIR=
 
 # Search uses the application database by default, including SQLite FTS5.
 SEARCH_DRIVER=database
+
+# Error reporting. Copy a project's DSN from Rustrak, Sentry or GlitchTip.
+# No DSN sends nothing; logs, transactions and browser reports are opt-in.
+# REPORTING_DRIVER=sentry
+# REPORTING_DSN=
+# REPORTING_RELEASE=
+# REPORTING_SEND_PII=false
+# REPORTING_LOGS=off
+# REPORTING_TRACES_SAMPLE_RATE=0
+# REPORTING_PUBLIC_DSN=
+# Inertia kits use this public DSN at build time. Set REPORTING_PUBLIC_DSN
+# on the server too, so the security policy allows the tracker connection.
+# VITE_REPORTING_DSN=

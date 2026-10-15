@@ -5,6 +5,9 @@ use std::process::Command;
 
 const BIN: &str = env!("CARGO_BIN_EXE_suprnova");
 
+#[path = "new_project/report_008.rs"]
+mod report_008;
+
 #[cfg(unix)]
 #[test]
 fn a_dangling_symlink_at_the_project_path_is_refused() {

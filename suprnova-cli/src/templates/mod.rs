@@ -2280,10 +2280,21 @@ pub struct GeneratedCompose {
     pub minio_password: Option<String>,
 }
 
+/// Preserve the original service-selection API when a tracker is not requested.
 pub fn docker_compose_template(
     project_name: &str,
     include_mailpit: bool,
     include_minio: bool,
+) -> GeneratedCompose {
+    docker_compose_template_with_rustrak(project_name, include_mailpit, include_minio, false)
+}
+
+/// Generate local services with an optional Sentry-compatible tracker.
+pub fn docker_compose_template_with_rustrak(
+    project_name: &str,
+    include_mailpit: bool,
+    include_minio: bool,
+    include_rustrak: bool,
 ) -> GeneratedCompose {
     let mailpit_service = if include_mailpit {
         include_str!("files/docker/mailpit.service.tpl").replace("{project_name}", project_name)
@@ -2304,11 +2315,28 @@ pub fn docker_compose_template(
         None => String::new(),
     };
 
-    let additional_volumes = if include_minio {
-        "\n  minio_data:".to_string()
+    let rustrak_service = if include_rustrak {
+        // Rustrak requires at least 64 characters. Two independent service
+        // passwords provide 64 URL-safe characters without a fixed secret.
+        let session_secret = format!(
+            "{}{}",
+            crate::commands::key_generate::generate_service_password(),
+            crate::commands::key_generate::generate_service_password(),
+        );
+        include_str!("files/docker/rustrak.service.tpl")
+            .replace("{project_name}", project_name)
+            .replace("{rustrak_session_secret}", &session_secret)
     } else {
         String::new()
     };
+
+    let mut additional_volumes = String::new();
+    if include_minio {
+        additional_volumes.push_str("\n  minio_data:");
+    }
+    if include_rustrak {
+        additional_volumes.push_str("\n  rustrak_data:");
+    }
 
     let db_password = crate::commands::key_generate::generate_service_password();
 
@@ -2317,6 +2345,7 @@ pub fn docker_compose_template(
         .replace("{db_password}", &db_password)
         .replace("{mailpit_service}", &mailpit_service)
         .replace("{minio_service}", &minio_service)
+        .replace("{rustrak_service}", &rustrak_service)
         .replace("{additional_volumes}", &additional_volumes);
 
     GeneratedCompose {

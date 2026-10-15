@@ -8,11 +8,22 @@ use crate::commands::cargo_meta;
 use crate::templates;
 use crate::ui;
 
-pub fn run(with_mailpit: bool, with_minio: bool) {
+/// Let callers handle generation failures while preserving the original service selection.
+pub fn run(with_mailpit: bool, with_minio: bool) -> std::io::Result<()> {
+    run_with_rustrak(with_mailpit, with_minio, false)
+}
+
+/// Return filesystem failures so only the CLI dispatcher decides when to exit.
+pub fn run_with_rustrak(
+    with_mailpit: bool,
+    with_minio: bool,
+    with_rustrak: bool,
+) -> std::io::Result<()> {
     if !Path::new("Cargo.toml").exists() {
-        ui::error("Cargo.toml not found");
-        ui::hint("Make sure you're in a Suprnova project root directory.");
-        std::process::exit(1);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Cargo.toml not found; run docker:compose from a Suprnova project root directory",
+        ));
     }
 
     let project_name = get_project_name();
@@ -21,22 +32,34 @@ pub fn run(with_mailpit: bool, with_minio: bool) {
     if compose_path.exists() {
         ui::warning("docker-compose.yml already exists");
         ui::hint("Remove or rename the existing docker-compose.yml to generate a new one.");
-        std::process::exit(0);
+        return Ok(());
     }
 
-    let (include_mailpit, include_minio) = prompt_for_services(with_mailpit, with_minio);
+    let (include_mailpit, include_minio, include_rustrak) =
+        prompt_for_services(with_mailpit, with_minio, with_rustrak);
 
-    let generated =
-        templates::docker_compose_template(&project_name, include_mailpit, include_minio);
-    if let Err(e) = fs::write(compose_path, &generated.yaml) {
-        ui::error(&format!("Failed to write docker-compose.yml: {}", e));
-        std::process::exit(1);
-    }
+    let generated = if include_rustrak {
+        templates::docker_compose_template_with_rustrak(
+            &project_name,
+            include_mailpit,
+            include_minio,
+            true,
+        )
+    } else {
+        templates::docker_compose_template(&project_name, include_mailpit, include_minio)
+    };
+    crate::secure_fs::write_private(compose_path, &generated.yaml).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("Failed to write docker-compose.yml: {error}"),
+        )
+    })?;
     ui::success("Created docker-compose.yml");
 
     update_gitignore();
 
-    print_instructions(&generated, include_mailpit, include_minio);
+    print_instructions(&generated, include_mailpit, include_minio, include_rustrak);
+    Ok(())
 }
 
 fn get_project_name() -> String {
@@ -48,9 +71,13 @@ fn get_project_name() -> String {
     })
 }
 
-fn prompt_for_services(with_mailpit: bool, with_minio: bool) -> (bool, bool) {
-    if with_mailpit || with_minio {
-        return (with_mailpit, with_minio);
+fn prompt_for_services(
+    with_mailpit: bool,
+    with_minio: bool,
+    with_rustrak: bool,
+) -> (bool, bool, bool) {
+    if with_mailpit || with_minio || with_rustrak {
+        return (with_mailpit, with_minio, with_rustrak);
     }
 
     ui::br();
@@ -70,9 +97,15 @@ fn prompt_for_services(with_mailpit: bool, with_minio: bool) -> (bool, bool) {
         .interact()
         .unwrap_or(false);
 
+    let include_rustrak = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("Include Rustrak (error reporting)?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+
     ui::br();
 
-    (include_mailpit, include_minio)
+    (include_mailpit, include_minio, include_rustrak)
 }
 
 fn update_gitignore() {
@@ -100,7 +133,12 @@ fn update_gitignore() {
     }
 }
 
-fn print_instructions(generated: &templates::GeneratedCompose, has_mailpit: bool, has_minio: bool) {
+fn print_instructions(
+    generated: &templates::GeneratedCompose,
+    has_mailpit: bool,
+    has_minio: bool,
+    has_rustrak: bool,
+) {
     ui::br();
 
     // Every port is published on 127.0.0.1 by the template, so naming
@@ -117,11 +155,18 @@ fn print_instructions(generated: &templates::GeneratedCompose, has_mailpit: bool
         services.push("MinIO API ····· 127.0.0.1:9000".to_string());
         services.push("MinIO Console · http://127.0.0.1:9001".to_string());
     }
+    if has_rustrak {
+        services.push("Rustrak ······· http://127.0.0.1:8080".to_string());
+    }
     let service_refs: Vec<&str> = services.iter().map(String::as_str).collect();
     ui::panel("Services", &service_refs);
 
     ui::br();
     ui::hint("Start:");
+    if has_rustrak {
+        ui::hint("Set RUSTRAK_CREATE_SUPERUSER to email:password for the first admin.");
+        ui::hint("Keep the generated session key in docker-compose.yml across restarts.");
+    }
     ui::command("docker compose up -d");
     ui::br();
     ui::hint("Update your .env:");
@@ -136,6 +181,13 @@ fn print_instructions(generated: &templates::GeneratedCompose, has_mailpit: bool
         ui::br();
         ui::hint("MinIO root credentials (also in docker-compose.yml):");
         ui::command(&format!("suprnova / {minio_password}"));
+    }
+    if has_rustrak {
+        ui::br();
+        ui::hint("Create a project in Rustrak and copy its DSN into REPORTING_DSN.");
+        ui::hint(
+            "Live uses REPORTING_PUBLIC_DSN. Inertia requires both REPORTING_PUBLIC_DSN and VITE_REPORTING_DSN.",
+        );
     }
     ui::br();
     ui::hint("Services are published on 127.0.0.1 only. To reach them from");
