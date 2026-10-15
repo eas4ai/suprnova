@@ -753,6 +753,42 @@ mod tests {
         assert!(!if_none_match_hits(None, etag));
     }
 
+    /// RDOC-005: with a nonce, every executable script and every
+    /// modulepreload, preload and stylesheet link the bootstrap writes
+    /// carries it, in both delivery forms and with the suprnova-ui base. The
+    /// configuration element never executes and needs none.
+    #[test]
+    fn rdoc_005_every_bootstrap_script_and_link_carries_the_nonce() {
+        let required: BTreeSet<RequiredCapability> =
+            [RequiredCapability::Uploads, RequiredCapability::AsyncUpdates]
+                .into_iter()
+                .collect();
+        for options in [LiveBootstrapOptions::esm(), LiveBootstrapOptions::classic()] {
+            let options = options
+                .with_stimulus()
+                .with_suprnova_ui()
+                .with_nonce("rdoc5nonce");
+            let config = LiveConfig::builder()
+                .build()
+                .expect("the default limits are legal");
+            let bootstrap =
+                render_bootstrap(&options, &required, config, (1, 1)).expect("bootstrap renders");
+            let html = bootstrap.html().as_str();
+            let tags: Vec<&str> = html
+                .split('<')
+                .filter(|tag| tag.starts_with("script") || tag.starts_with("link"))
+                .filter(|tag| !tag.contains("type=\"application/json\""))
+                .collect();
+            assert!(tags.len() >= 4, "too few tags to judge in:\n{html}");
+            for tag in tags {
+                assert!(
+                    tag.contains("nonce=\"rdoc5nonce\""),
+                    "<{tag} lacks the nonce in:\n{html}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn nonces_are_bounded_base64_tokens() {
         assert!(valid_nonce("r4nd0m+/="));
