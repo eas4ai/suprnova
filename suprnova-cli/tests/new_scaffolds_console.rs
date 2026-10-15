@@ -40,18 +40,56 @@ fn read(p: impl AsRef<std::path::Path>) -> String {
         .unwrap_or_else(|e| panic!("read {}: {e}", p.as_ref().display()))
 }
 
+/// The framework's default features other than `testing`, read from its
+/// own manifest, so a default added there cannot be left out of new apps.
+fn framework_production_defaults() -> Vec<String> {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../framework/Cargo.toml");
+    let manifest: toml::Table = read(&manifest).parse().expect("framework manifest parses");
+    manifest["features"]["default"]
+        .as_array()
+        .expect("the framework declares default features")
+        .iter()
+        .map(|feature| {
+            feature
+                .as_str()
+                .expect("feature names are strings")
+                .to_owned()
+        })
+        .filter(|feature| feature != "testing")
+        .collect()
+}
+
 /// Pins the production build shape (design doc section 5.1): the
-/// production dependency turns default features off and lists the eleven
-/// non-`testing` defaults, and a dev-dependency turns `testing` back on
+/// production dependency turns default features off and lists every
+/// non-`testing` default, and a dev-dependency turns `testing` back on
 /// for tests only.
 fn assert_production_build_shape(cargo: &str) {
-    let production_features = "default-features = false, features = [\"filesystem\", \
-         \"database-sqlite\", \"database-postgres\", \"database-mysql\", \"vector-mariadb\", \
-         \"vector-pgvector\", \"web-push\", \"localization\", \"magnetar-oauth\", \"media\", \"queue-sqs\"] }";
+    let production = cargo
+        .split("[dev-dependencies]")
+        .next()
+        .and_then(|section| section.lines().find(|line| line.starts_with("suprnova = ")))
+        .expect("Cargo.toml declares the production suprnova dependency");
     assert!(
-        cargo.contains(production_features),
-        "Cargo.toml's production dependency must turn default features off \
-         and list the eleven non-testing defaults: {cargo}"
+        production.contains("default-features = false, features = ["),
+        "Cargo.toml's production dependency must turn default features off: {production}"
+    );
+    let listed: Vec<String> = production
+        .split("features = [")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .expect("the production dependency lists its features")
+        .split(',')
+        .map(|feature| feature.trim().trim_matches('"').to_owned())
+        .filter(|feature| !feature.is_empty())
+        .collect();
+    let mut expected = framework_production_defaults();
+    let mut listed_sorted = listed.clone();
+    expected.sort();
+    listed_sorted.sort();
+    assert_eq!(
+        listed_sorted, expected,
+        "Cargo.toml's production dependency must list every non-testing default \
+         of the framework: {production}"
     );
     assert!(
         cargo.contains("[dev-dependencies]"),

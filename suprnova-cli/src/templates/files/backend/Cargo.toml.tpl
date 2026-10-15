@@ -58,7 +58,7 @@ path = "src/bin/console.rs"
 # Production build shape: default features off, the ten non-`testing`
 # defaults listed explicitly, so the binaries above never carry a test
 # seam. See the manual, "Production build shape" (deployment.md).
-suprnova = {{ git = "https://github.com/eas4ai/suprnova.git", {framework_pin}, default-features = false, features = ["filesystem", "database-sqlite", "database-postgres", "database-mysql", "vector-mariadb", "vector-pgvector", "web-push", "localization", "magnetar-oauth", "media", "queue-sqs"] }}
+suprnova = {{ git = "https://github.com/eas4ai/suprnova.git", {framework_pin}, default-features = false, features = ["filesystem", "database-sqlite", "database-postgres", "database-mysql", "vector-mariadb", "vector-pgvector", "web-push", "localization", "magnetar-oauth", "media", "queue-sqs", "reporting-sentry"] }}
 tokio = {{ version = "1", features = ["full"] }}
 sea-orm-migration = {{ version = "2.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-native-tls"] }}
 sea-orm = {{ version = "2.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-native-tls", "macros", "with-chrono", "postgres-use-serial-pk"] }}
