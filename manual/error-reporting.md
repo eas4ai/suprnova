@@ -121,7 +121,7 @@ deduplication window. These delivery limits are programmatic settings.
 | `REPORTING_LOGS` | `off` | Sends structured Sentry logs at or above the selected level. |
 | `REPORTING_TRACES_SAMPLE_RATE` | `0` | Fraction of request and job transactions to send, from `0` to `1`. |
 | `REPORTING_PUBLIC_DSN` | unset | Public browser DSN for Live and the security policy's tracker origin. |
-| `VITE_REPORTING_DSN` | unset | Public browser DSN for Svelte, React and Vue starter builds. |
+| `VITE_REPORTING_DSN` | unset | Public browser DSN for Svelte, React and Vue starter builds, and a tracker origin the security policy allows. |
 
 Logs and transactions use the same DSN as errors. Both are off by default;
 error reporting alone does not opt in to either. For example:
@@ -215,12 +215,15 @@ counts without exposing event data or tracker credentials.
 
 ## Browser reports
 
-Set the public DSN for the kit you use. It is a browser ingestion address;
-never put a tracker account password or API token there.
+Set the public DSN for the kit you use: `VITE_REPORTING_DSN` for a Svelte,
+React or Vue starter, `REPORTING_PUBLIC_DSN` for Live. It is a browser
+ingestion address; never put a tracker account password or API token there.
 
 ```dotenv
-REPORTING_PUBLIC_DSN=http://your-project-key@127.0.0.1:8080/1
+# Svelte, React or Vue
 VITE_REPORTING_DSN=http://your-project-key@127.0.0.1:8080/1
+# Live
+REPORTING_PUBLIC_DSN=http://your-project-key@127.0.0.1:8080/1
 ```
 
 Svelte, React and Vue starters load Sentry's browser package only when
@@ -234,11 +237,15 @@ loaded.
 
 Live uses its built-in runtime reporter, configured by
 `REPORTING_PUBLIC_DSN`, without a third-party script. It covers uncaught
-errors, unhandled rejections and Live runtime failures. `SecurityHeaders`
-allows the configured public tracker origin in `connect-src`. Set
-`REPORTING_PUBLIC_DSN` on the server for an Inertia kit too, so its policy
-allows the DSN compiled into the frontend. The two public values should
-name the same tracker.
+errors, unhandled rejections and Live runtime failures.
+
+`SecurityHeaders` allows the tracker origin of each public DSN it finds in
+the environment, `REPORTING_PUBLIC_DSN` and `VITE_REPORTING_DSN`, in
+`connect-src`, so the scaffold's own policy does not block the reports. A
+value that is not a public DSN stops the application at boot with an error
+naming the setting. The server reads `VITE_REPORTING_DSN` from the same
+`.env` the build reads; a deployment that passes it to the build alone must
+give the server the same value.
 
 ### Why Suprnova diverges
 

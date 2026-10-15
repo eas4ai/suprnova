@@ -63,7 +63,7 @@ and transactions are opt-in, independent of error reporting. See
 | `REPORTING_LOGS` | `off` | log level | Sends Sentry logs at or above this threshold. |
 | `REPORTING_TRACES_SAMPLE_RATE` | `0` | fraction, `0..=1` | Fraction of request and job transactions sent. |
 | `REPORTING_PUBLIC_DSN` | none | Sentry DSN | Configures Live browser reporting and allows the tracker's origin in CSP `connect-src`. |
-| `VITE_REPORTING_DSN` | none | Sentry DSN | Build-time public DSN for Svelte, React and Vue kits; unset loads no reporter. |
+| `VITE_REPORTING_DSN` | none | Sentry DSN | Build-time public DSN for Svelte, React and Vue kits; unset loads no reporter. The server reads it too and allows the tracker's origin in CSP `connect-src`. |
 
 ## Application
 

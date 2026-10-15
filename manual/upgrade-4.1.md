@@ -67,10 +67,10 @@ callbacks still run first; `.stop()` prevents tracker delivery. `log` and
 `REPORTING_LOGS` or `REPORTING_TRACES_SAMPLE_RATE`.
 
 For browser reporting, copy the current starter entry-point integration and
-install its Sentry package for your frontend. Set `VITE_REPORTING_DSN` at
-build time for an Inertia kit and `REPORTING_PUBLIC_DSN` on the server so
-CSP allows the tracker. Live needs only `REPORTING_PUBLIC_DSN`; its reporter
-is built into the runtime. See [Error Reporting](error-reporting.md) for
+install its Sentry package for your frontend. Set `VITE_REPORTING_DSN` for an
+Inertia kit; the build reads it, and `SecurityHeaders` reads the same value
+to allow the tracker in CSP. Live needs only `REPORTING_PUBLIC_DSN`; its
+reporter is built into the runtime. See [Error Reporting](error-reporting.md) for
 all settings, the helpers and the local Rustrak commands.
 
 ### Security headers with per-request CSP nonces.

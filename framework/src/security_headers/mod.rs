@@ -35,7 +35,7 @@ pub struct SecurityHeaders {
     csp_report_only: Option<ContentSecurityPolicy>,
     report_only: bool,
     report_to: Option<String>,
-    reporting_dsn: Option<String>,
+    reporting_dsns: Vec<String>,
 }
 
 impl SecurityHeaders {
@@ -122,7 +122,7 @@ impl SecurityHeaders {
             csp_report_only: None,
             report_only: false,
             report_to: None,
-            reporting_dsn: None,
+            reporting_dsns: Vec::new(),
         }
     }
 
@@ -171,11 +171,12 @@ impl SecurityHeaders {
                 )
             })?;
         }
-        let public_dsn = read("REPORTING_PUBLIC_DSN")?.filter(|value| !value.is_empty());
-        if let Some(dsn) = &public_dsn {
-            reporting_origin(dsn)?;
+        for name in PUBLIC_DSN_SETTINGS {
+            if let Some(dsn) = read(name)?.filter(|value| !value.is_empty()) {
+                reporting_origin(&dsn).map_err(|_| invalid_public_dsn(name))?;
+                policy.reporting_dsns.push(dsn);
+            }
         }
-        policy.reporting_dsn = public_dsn;
         Ok(policy.hsts_preload(preload))
     }
 
@@ -332,7 +333,11 @@ impl SecurityHeaders {
                 response = response.header(name, value);
             }
         }
-        let public_dsn = self.reporting_dsn.clone().or_else(public_reporting_dsn);
+        let public_dsns = if self.reporting_dsns.is_empty() {
+            public_reporting_dsns()
+        } else {
+            self.reporting_dsns.clone()
+        };
         for (name, csp) in [
             ("content-security-policy", self.csp.as_ref()),
             (
@@ -342,11 +347,13 @@ impl SecurityHeaders {
         ] {
             let Some(csp) = csp else { continue };
             // Boot validates configured values. Direct preset builders also pick
-            // up a valid public DSN, so their default policy cannot block reports.
-            let csp = match csp.clone().with_reporting_dsn(public_dsn.as_deref()) {
-                Ok(csp) => csp,
-                Err(_) => csp.clone(),
-            };
+            // up valid public DSNs, so their default policy cannot block reports.
+            let mut csp = csp.clone();
+            for dsn in &public_dsns {
+                if let Ok(widened) = csp.clone().with_reporting_dsn(Some(dsn)) {
+                    csp = widened;
+                }
+            }
             let html = response.header_value("content-type").is_some_and(|value| {
                 value
                     .split(';')
@@ -593,6 +600,20 @@ fn vite_origin() -> Option<String> {
     matches!(url.scheme(), "http" | "https").then(|| url.origin().ascii_serialization())
 }
 
+/// The settings that name a public browser DSN: Live's runtime reporter reads
+/// `REPORTING_PUBLIC_DSN`, the Inertia kits' builds read `VITE_REPORTING_DSN`
+/// from the same `.env`. The policy allows the tracker origin of each, so
+/// setting either one is enough for its reports to get through.
+const PUBLIC_DSN_SETTINGS: [&str; 2] = ["REPORTING_PUBLIC_DSN", "VITE_REPORTING_DSN"];
+
+/// The boot error for a public DSN setting that is not a public DSN. It names
+/// the setting and never echoes the value, which may hold a credential.
+fn invalid_public_dsn(name: &str) -> FrameworkError {
+    FrameworkError::internal(format!(
+        "{name}: expected a public HTTP(S) Sentry DSN without a password, query or fragment"
+    ))
+}
+
 /// Rejects private credentials before a DSN can enter browser markup or headers.
 pub(crate) fn reporting_origin(dsn: &str) -> Result<String, FrameworkError> {
     let invalid = || {
@@ -628,6 +649,16 @@ pub(crate) fn reporting_origin(dsn: &str) -> Result<String, FrameworkError> {
         return Err(invalid());
     }
     Ok(url.origin().ascii_serialization())
+}
+
+/// Every valid public DSN the environment names, for a policy built without
+/// the environment. The server DSN is deliberately never one of them.
+fn public_reporting_dsns() -> Vec<String> {
+    PUBLIC_DSN_SETTINGS
+        .into_iter()
+        .filter_map(crate::config::env_optional::<String>)
+        .filter(|dsn| !dsn.is_empty() && reporting_origin(dsn).is_ok())
+        .collect()
 }
 
 /// The server DSN is deliberately never a fallback for the browser's public key.
@@ -741,6 +772,58 @@ mod reporting_tests {
         })
         .unwrap_err();
         assert!(error.to_string().contains("REPORTING_PUBLIC_DSN"));
+        assert!(!error.to_string().contains("private-secret"));
+    }
+
+    #[test]
+    fn report_007_a_vite_only_public_dsn_opens_connect_src() {
+        // An Inertia kit reports with the DSN its build read from
+        // VITE_REPORTING_DSN; the server's policy must allow it even when
+        // REPORTING_PUBLIC_DSN is unset.
+        let policy = SecurityHeaders::from_values(|key| {
+            Ok(match key {
+                "SECURITY_HEADERS" => Some("balanced".to_string()),
+                "VITE_REPORTING_DSN" => Some("https://public@vite-tracker.test/7".to_string()),
+                _ => None,
+            })
+        })
+        .unwrap();
+        let response =
+            policy.decorate(HttpResponse::html("page"), true, false, Some("nonce"), None);
+        let header = response.header_value("content-security-policy").unwrap();
+        assert!(
+            header.contains("connect-src 'self' https://vite-tracker.test"),
+            "{header}"
+        );
+        assert!(!header.contains("public@"), "{header}");
+    }
+
+    #[test]
+    fn report_007_both_public_dsns_open_both_origins() {
+        let policy = SecurityHeaders::from_values(|key| {
+            Ok(match key {
+                "SECURITY_HEADERS" => Some("strict".to_string()),
+                "REPORTING_PUBLIC_DSN" => Some("https://public@live-tracker.test/1".to_string()),
+                "VITE_REPORTING_DSN" => Some("https://public@vite-tracker.test/7".to_string()),
+                _ => None,
+            })
+        })
+        .unwrap();
+        let response =
+            policy.decorate(HttpResponse::html("page"), true, false, Some("nonce"), None);
+        let header = response.header_value("content-security-policy").unwrap();
+        assert!(header.contains("https://live-tracker.test"), "{header}");
+        assert!(header.contains("https://vite-tracker.test"), "{header}");
+    }
+
+    #[test]
+    fn report_007_a_private_vite_dsn_fails_naming_it_without_echoing_it() {
+        let error = SecurityHeaders::from_values(|name| {
+            Ok((name == "VITE_REPORTING_DSN")
+                .then(|| "https://public:private-secret@tracker.test/42".to_string()))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("VITE_REPORTING_DSN"), "{error}");
         assert!(!error.to_string().contains("private-secret"));
     }
 
