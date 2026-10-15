@@ -2677,3 +2677,17 @@ fn intt_the_dogfood_frontend_declares_inertias_core() {
          `npm install --package-lock-only` in app/frontend"
     );
 }
+
+/// Keep the API kit's fallible security setup aligned with the other kits.
+#[test]
+fn api_bootstrap_registers_fallible_security_headers_first() {
+    let bootstrap = read("src/templates/files/api/src/bootstrap.rs.tpl");
+    assert!(bootstrap.contains("pub fn try_register_http_stack() -> Result<(), FrameworkError>"));
+    assert_eq!(
+        bootstrap
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("global_middleware!(")),
+        Some("global_middleware!(SecurityHeaders::from_env()?);")
+    );
+}
