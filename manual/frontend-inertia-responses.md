@@ -2295,15 +2295,16 @@ The framework hands the template these parts:
   [SSR](#ssr) head carries a `<title>` of its own, because a document shows
   only its first title. A template that writes its own `<title>` leaves this
   part out.
-- `head`: the `csrf-token` meta tag, the SSR head when the SSR server rendered
-  the page, and the Vite tags, in that order.
+- `head`: the `csrf-token` meta tag, the `csp-nonce` meta element under a nonce
+  policy, the SSR head when the SSR server rendered the page, and the Vite tags.
 - `body`: the page data element and the mount element, or the SSR body, which
   carries both.
 - `lang`: the document's language, the locale in effect for the request.
 - `csrf_token`: the session's CSRF token, for a template that places it
   itself. It is empty outside a session.
-- `nonce`: the request's CSP nonce, for the template's own inline scripts. It
-  is `None`: no nonce policy supplies one.
+- `nonce`: the request's CSP nonce as `Option<&str>`, for the template's own
+  scripts. It is present under a nonce policy and `None` without one. See
+  [Security Headers](security-headers.md) for script examples and policy setup.
 - `ssr`: whether the SSR server rendered this response. A template places
   fallback head content under `{% if !ssr %}`, for the pages whose own `Head`
   did not run on the server.

@@ -2,6 +2,7 @@
 
 - ## Prologue
     - [Changelog](../CHANGELOG.md)
+    - [Upgrading to 4.1](upgrade-4.1.md)
     - [Upgrading to 4.0](upgrade-4.0.md)
     - [Contribution Guide](contributions.md)
 - ## Getting Started
@@ -29,6 +30,7 @@
     - [Middleware](middleware.md)
     - [CSRF Protection](csrf.md)
     - [CORS](cors.md)
+    - [Security Headers](security-headers.md)
     - [Controllers](controllers.md)
     - [Requests](requests.md)
     - [Responses](responses.md)

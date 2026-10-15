@@ -4,7 +4,27 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
-## 4.0.4 - 2026-10-13
+## 4.1.0 - 2026-10-15
+
+### Added
+
+- **Security headers with per-request CSP nonces.** `SecurityHeaders` provides
+  strict, balanced and relaxed presets, validated environment configuration,
+  report-only CSP and violation reporting, HTTPS-only HSTS, and route or group
+  overrides. New full-stack projects register it before every other global
+  middleware; existing applications opt in by registering it. The manual
+  covers every header and the [upgrade guide](manual/upgrade-4.1.md) shows the
+  registration.
+
+### Fixed
+
+- **Framework scripts and asset links share the request's CSP nonce.** Inertia
+  documents and error pages, Vite tags, Head links and scripts, Live bootstrap
+  assets and stitched RenderCache hits use the nonce the middleware generated.
+  The document exposes it to Vite and Inertia's client through the `csp-nonce`
+  meta element. Complete nonce pages render on every request.
+
+## 4.0.4 - 2026-10-15
 
 ### Fixed
 
