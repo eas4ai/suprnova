@@ -47,6 +47,8 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use super::FrameworkError;
 
+tokio::task_local! { static SUPPRESSED: bool; }
+
 /// A callback that runs the application's closure when an error is of the
 /// closure's type, and says whether it did.
 type Run = dyn Fn(&FrameworkError) -> bool + Send + Sync;
@@ -67,6 +69,9 @@ struct Reporter {
 struct Registry {
     reporters: Vec<Arc<Reporter>>,
     dont_retry: Vec<Arc<DontRetry>>,
+    dont_report: Vec<Arc<DontRetry>>,
+    deduplicate: bool,
+    reported: Vec<(usize, String, std::time::Instant)>,
 }
 
 /// Every critical section only pushes, clones or clears a list, all code
@@ -76,6 +81,9 @@ struct Registry {
 static REGISTRY: RwLock<Registry> = RwLock::new(Registry {
     reporters: Vec::new(),
     dont_retry: Vec::new(),
+    dont_report: Vec::new(),
+    deduplicate: false,
+    reported: Vec::new(),
 });
 
 /// The application's error reporting: Laravel's `Exceptions` facade over
@@ -97,6 +105,13 @@ static REGISTRY: RwLock<Registry> = RwLock::new(Registry {
 pub struct Exceptions;
 
 impl Exceptions {
+    /// Preserve a caught panic's payload and location through normal callbacks.
+    pub fn report_panic(message: &str, location: Option<&str>) {
+        crate::reporting::event::with_panic(message, location, || {
+            Self::report(&FrameworkError::internal(message));
+        });
+    }
+
     /// Register `callback` to run for every reported error of type `E`,
     /// before the default log line.
     ///
@@ -151,9 +166,21 @@ impl Exceptions {
     /// [`FrameworkError::AlreadyReported`] is not reported: it says the
     /// user has seen the failure already.
     pub fn report(error: &FrameworkError) {
-        if !Self::run_callbacks(error) {
-            return;
+        if let Err(failure) = Self::try_report(error) {
+            tracing::warn!(error = %failure, "error reporter rejected an event");
         }
+    }
+
+    pub(crate) fn without_reporting<T>(f: impl FnOnce() -> T) -> T {
+        SUPPRESSED.sync_scope(true, f)
+    }
+
+    /// Surface a custom driver's failure to explicit callers without failing HTTP paths.
+    pub fn try_report(error: &FrameworkError) -> Result<(), FrameworkError> {
+        if !Self::run_callbacks(error) {
+            return Ok(());
+        }
+        crate::Reporting::report(error)?;
         let request_id = crate::logging::current_request_id().map(|id| id.as_str().to_string());
         tracing::error!(
             status = error.status_code(),
@@ -161,6 +188,7 @@ impl Exceptions {
             request_id = ?request_id,
             "framework error"
         );
+        Ok(())
     }
 
     /// Report `error`, a failure its call site has already written its own
@@ -177,14 +205,69 @@ impl Exceptions {
     /// [`ReportableHandler::stop`] stops the later callbacks and not that
     /// line.
     pub(crate) fn report_logged(error: &FrameworkError) {
-        Self::run_callbacks(error);
+        if Self::run_callbacks(error) {
+            let _ = crate::Reporting::report(error);
+        }
+    }
+
+    pub(crate) fn report_captured(
+        error: &FrameworkError,
+        event: crate::ReportingEvent,
+        reporter: &dyn crate::Reporter,
+    ) -> Result<(), FrameworkError> {
+        if Self::run_callbacks(error) {
+            reporter.report(event)?;
+        }
+        Ok(())
     }
 
     /// Run the callbacks that receive `error`, in registration order, and
     /// say whether the default log line is still due: not for a silent
     /// error, and not for one a stopping callback received.
     fn run_callbacks(error: &FrameworkError) -> bool {
-        if error.is_silent() {
+        if SUPPRESSED.try_with(|value| *value).unwrap_or(false)
+            || error.is_silent()
+            || crate::reporting::already_reported_engine_error(error)
+            || error.status_code() < 500
+        {
+            return false;
+        }
+        let predicates = read_registry(|registry| registry.dont_report.clone());
+        if predicates
+            .iter()
+            .any(|predicate| catch_unwind(AssertUnwindSafe(|| predicate(error))).unwrap_or(false))
+        {
+            return false;
+        }
+        let key = (std::ptr::from_ref(error).addr(), error.to_string());
+        let now = std::time::Instant::now();
+        let window = crate::App::get::<crate::ReportingConfig>()
+            .unwrap_or_default()
+            .duplicate_window;
+        let duplicate = {
+            let mut registry = REGISTRY.write().unwrap_or_else(PoisonError::into_inner);
+            if registry.deduplicate {
+                registry
+                    .reported
+                    .retain(|(_, _, reported)| now.duration_since(*reported) < window);
+                if registry
+                    .reported
+                    .iter()
+                    .any(|(address, message, _)| (*address, message) == (key.0, &key.1))
+                {
+                    true
+                } else {
+                    if registry.reported.len() >= 4096 {
+                        registry.reported.remove(0);
+                    }
+                    registry.reported.push((key.0, key.1, now));
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if duplicate {
             return false;
         }
         let reporters = read_registry(|registry| registry.reporters.clone());
@@ -199,6 +282,21 @@ impl Exceptions {
             }
         }
         true
+    }
+
+    /// Suppress an expected error type before callbacks and tracker delivery.
+    pub fn dont_report<E: std::error::Error + 'static>() {
+        Self::dont_report_when(|error| matching::<E>(error).is_some());
+    }
+
+    /// Suppress expected failures without changing how they are answered.
+    pub fn dont_report_when<F: Fn(&FrameworkError) -> bool + Send + Sync + 'static>(predicate: F) {
+        write_registry(|registry| registry.dont_report.push(Arc::new(predicate)));
+    }
+
+    /// Suppress repeated reports within the configured duplicate window, including callbacks.
+    pub fn dont_report_duplicates() {
+        write_registry(|registry| registry.deduplicate = true);
     }
 
     /// End a queued job's retries when it fails with an error of type

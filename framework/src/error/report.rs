@@ -364,6 +364,9 @@ fn install_location_hook() {
                     }));
                 });
             }
+            if !in_panic_boundary() {
+                crate::reporting::hook::capture(info);
+            }
             previous(info);
         }));
     });
@@ -571,4 +574,48 @@ mod tests {
         );
         assert_eq!(panic.location, None);
     }
+
+    #[tokio::test]
+    async fn an_engine_non_string_payload_keeps_its_known_panic_location() {
+        let caught = catch_panic(async {
+            let line = line!() + 2;
+            let _ = std::panic::catch_unwind(|| {
+                std::panic::panic_any(17usize);
+            });
+            let location = recorded_panic_location("non-string panic payload")
+                .expect("the hook recorded this non-string panic");
+            assert!(location.starts_with(&format!("{}:{line}:", file!())));
+        })
+        .await;
+        assert!(caught.is_ok(), "the engine already contained the panic");
+    }
+}
+
+pub(crate) fn in_panic_boundary() -> bool {
+    LAST_PANIC.try_with(|_| ()).is_ok()
+}
+
+pub(crate) fn recorded_panic_location(message: &str) -> Option<String> {
+    LAST_PANIC
+        .try_with(|slot| {
+            let hooked = slot.take();
+            let location = hooked
+                .as_ref()
+                .filter(|panic| {
+                    panic
+                        .message
+                        .as_deref()
+                        .unwrap_or("non-string panic payload")
+                        == message
+                })
+                .map(|panic| panic.location.clone());
+            slot.set(hooked);
+            location
+        })
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn install_reporting_hook() {
+    install_location_hook();
 }

@@ -1,8 +1,9 @@
 //! Panic-contained deterministic component lifecycle executor.
 
+use crate::panic_observer::catch_unwind_reported as catch_unwind;
 use std::fmt;
 use std::future::Future;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 
 use crate::action::{
     ActionError, ActionErrorKind, ActionResult, RawActionArguments, TransactionPolicy,

@@ -1034,3 +1034,18 @@ macro_rules! expect {
         $crate::testing::Expect::new($value, concat!(file!(), ":", line!()))
     };
 }
+
+/// Error tracker drivers share the framework exception pipeline.
+pub mod reporting;
+#[cfg(feature = "reporting-sentry")]
+pub use reporting::SentryReporter;
+pub use reporting::{
+    LogReporter, NullReporter, Reporter, Reporting, ReportingConfig, ReportingDriver,
+    ReportingEvent,
+};
+
+pub use reporting::{report, report_if, report_unless, rescue};
+
+pub use reporting::ReportingMetrics;
+
+pub use reporting::ReportingKind;

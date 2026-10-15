@@ -10,11 +10,14 @@ use thiserror::Error;
 
 pub(crate) mod debug_page;
 pub(crate) mod frames;
+pub(crate) mod redaction;
 mod report;
 mod reporting;
 
 pub use report::ErrorReport;
-pub(crate) use report::{CaughtPanic, catch_panic};
+pub(crate) use report::{
+    CaughtPanic, catch_panic, in_panic_boundary, install_reporting_hook, recorded_panic_location,
+};
 pub use reporting::{Exceptions, ReportableHandler};
 
 /// Trait for errors that can be converted to HTTP responses
