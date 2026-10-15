@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.alert",
+  "version": 1,
+  "root": "suprnova-ui/alert",
+  "files": [
+    "alert.html",
+    "alert.css"
+  ],
+  "elements": []
+}

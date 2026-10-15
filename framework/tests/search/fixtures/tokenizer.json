@@ -1,0 +1,1 @@
+{"version": "1.0", "truncation": null, "padding": null, "added_tokens": [], "normalizer": null, "pre_tokenizer": {"type": "WhitespaceSplit"}, "post_processor": null, "decoder": null, "model": {"type": "WordLevel", "vocab": {"[PAD]": 0, "[UNK]": 1, "low": 2, "middle": 17, "high": 1000}, "unk_token": "[UNK]"}}
