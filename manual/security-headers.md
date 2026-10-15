@@ -1,7 +1,7 @@
 # Security Headers
 
 `SecurityHeaders` adds browser security policy to responses through Suprnova's
-own middleware chain. New full-stack projects register the balanced preset.
+own middleware chain. New projects in every kit, including API projects, register the balanced preset.
 Existing applications opt in by registering the middleware; upgrading alone
 does not change their responses.
 
@@ -148,6 +148,23 @@ must accept the browser's violation reports. Programmatic equivalents are
 `.report_only(true)` and `.report_to(Some("https://reports.example.com/csp"))?`.
 Pass `None` to `report_to` to remove the destination.
 
+The enforcing and report-only headers are independent policies. To keep an
+enforcing policy while testing another, add the reporting policy by name:
+
+```rust,ignore
+let headers = suprnova::SecurityHeaders::strict().header(
+    "Content-Security-Policy-Report-Only",
+    Some("default-src 'self'; script-src 'nonce-{nonce}'; object-src 'none'"),
+)?;
+```
+
+Both policies use the same request nonce. A nonce is generated when either
+policy needs one, and each nonce policy is emitted only for HTML. Setting or
+removing either header by name changes only that header. `.report_only(true)`
+moves the preset's policy to report-only; `.report_only(false)` moves it back.
+The typed `.content_security_policy(...)` builder updates the policy in that
+selected mode.
+
 ## HSTS and HTTPS
 
 `Strict-Transport-Security` is sent only when `Request::secure()` is true and
@@ -277,8 +294,18 @@ fn router() -> Result<Router, FrameworkError> {
 }
 ```
 
-Use `.content_security_policy(None)` on the override to turn off CSP for that
-route or group. A route override can change or turn off any middleware header;
+Use `.content_security_policy(None)` on the override to turn off the policy
+in the global builder's selected mode for that route or group. Use the named
+header API to control the enforcing and report-only policies independently:
+
+```rust,ignore
+let route_policy = suprnova::SecurityHeadersOverride::new()
+    .header("Content-Security-Policy-Report-Only", None)?;
+```
+
+This removes only the report-only policy. An inherited enforcing CSP keeps its
+nonce. Removing the enforcing header likewise leaves a report-only policy
+and its nonce intact. A route override can change or turn off any middleware header;
 a header the handler already set still wins. Review frame permissions together:
 `X-Frame-Options` and CSP's `frame-ancestors` should describe the same access.
 
