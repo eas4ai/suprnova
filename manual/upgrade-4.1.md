@@ -42,8 +42,19 @@ listener. Background failures did not all reach that listener.
 GlitchTip. It is inert without a DSN. A bounded background queue, shared
 scrubbing and shutdown flushing cover requests and background work.
 
-**Do:** Remove the hand-written tracker listener and direct SDK capture for
-errors the framework reports, then set the project's DSN:
+**Do:** A scaffolded application turns the framework's default features off
+and lists the ones it keeps. Add `reporting-sentry` to that list in
+`Cargo.toml`, or the `sentry` driver is not compiled in:
+
+```toml
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.1.0", default-features = false, features = [
+    # ...the features already listed...
+    "reporting-sentry",
+] }
+```
+
+Remove the hand-written tracker listener and direct SDK capture for errors
+the framework reports, then set the project's DSN:
 
 ```dotenv
 REPORTING_DRIVER=sentry
