@@ -716,18 +716,60 @@ fn add_sparse(
     }
     Ok(())
 }
-async fn embed_sparse_documents(
+async fn embed_bm25_documents(
+    settings: &super::IndexSettings,
+    indexed: &mut [IndexedDocument],
+    embedder: &dyn super::Embedder,
+) -> Result<(), FrameworkError> {
+    let mut inputs = Vec::new();
+    let mut positions = Vec::new();
+    for (position, doc) in indexed
+        .iter()
+        .enumerate()
+        .filter(|(_, doc)| doc.sparse.is_none())
+    {
+        let text = settings
+            .index_time
+            .searchable_attributes
+            .iter()
+            .map(|attr| sparse_source(&doc.document, attr))
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        inputs.push(text);
+        positions.push(position);
+    }
+    let vectors = embedder.embed_sparse(&inputs).await?;
+    if vectors.len() != positions.len() {
+        return Err(FrameworkError::param("bm25: wrong embedding count"));
+    }
+    for (position, vector) in positions.into_iter().zip(vectors) {
+        vector.validate()?;
+        indexed[position].sparse = Some(vector);
+    }
+    Ok(())
+}
+
+pub(super) async fn embed_sparse_documents(
     index: &str,
     settings: &super::IndexSettings,
     indexed: &mut [IndexedDocument],
+    driver: &str,
 ) -> Result<(), FrameworkError> {
-    let Some(provider) = &settings.index_time.sparse_model else {
+    let provider = settings
+        .index_time
+        .sparse_model
+        .as_deref()
+        .or_else(|| (driver == "qdrant").then_some("bm25"));
+    let Some(provider) = provider else {
         return Ok(());
     };
     if indexed.is_empty() {
         return Ok(());
     }
-    let embedder = SearchRegistry::embedder_named(index, provider)?;
+    let embedder = SearchRegistry::sparse_embedder(index, settings)?;
+    if provider == "bm25" {
+        return embed_bm25_documents(settings, indexed, embedder.as_ref()).await;
+    }
     let mut inputs = Vec::new();
     let mut weights = Vec::new();
     for (position, doc) in indexed.iter().enumerate() {
@@ -847,7 +889,7 @@ async fn write_documents(
             );
         }
     }
-    embed_sparse_documents(index, &settings, &mut indexed).await?;
+    embed_sparse_documents(index, &settings, &mut indexed, engine.name()).await?;
     let removals: Vec<_> = remaining
         .into_iter()
         .map(|(key, version)| (key.to_owned(), version))
@@ -1404,4 +1446,179 @@ where
         .await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod sparse_tests {
+    use super::*;
+    use crate::search::{
+        AttributeValue, Embedder, Embedding, FakeEmbedder, IndexSettings, LanguageConfig,
+        ModelProfile, SparseEmbedding, WeightedAttribute,
+    };
+    use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn bm25_uses_whole_searchable_document_and_index_stop_words() {
+        let mut settings = IndexSettings::default();
+        settings.index_time.searchable_attributes = vec![
+            WeightedAttribute {
+                name: "title".into(),
+                weight: 1.0,
+            },
+            WeightedAttribute {
+                name: "body".into(),
+                weight: 1.0,
+            },
+        ];
+        settings.query.stop_words.insert("the".into());
+        settings.index_time.language = LanguageConfig::Qdrant {
+            tokenizer: "word".into(),
+            stemmer: None,
+            stop_words: vec!["and".into()],
+            folding: true,
+        };
+        let document = SearchDocument {
+            index: "test".into(),
+            key: "1".into(),
+            source_version: 1,
+            attributes: BTreeMap::from([
+                ("title".into(), AttributeValue::Text("the apple".into())),
+                ("body".into(), AttributeValue::Text("and apple pie".into())),
+                ("other".into(), AttributeValue::Text("banana".into())),
+            ]),
+            embed_text: None,
+            title: None,
+        };
+        let mut docs = vec![IndexedDocument {
+            document,
+            content_hash: "test".into(),
+            dense: None,
+            sparse: None,
+        }];
+        let expected = SearchRegistry::sparse_embedder("test", &settings)
+            .unwrap()
+            .embed_sparse(&["the apple apple pie".into()])
+            .await
+            .unwrap()
+            .remove(0);
+        embed_sparse_documents("test", &settings, &mut docs, "qdrant")
+            .await
+            .unwrap();
+        assert_eq!(docs[0].sparse.as_ref(), Some(&expected));
+        settings.query.stop_words.clear();
+        docs[0].sparse = None;
+        embed_sparse_documents("test", &settings, &mut docs, "qdrant")
+            .await
+            .unwrap();
+        assert_eq!(docs[0].sparse.as_ref(), Some(&expected));
+        settings.index_time.sparse_model = Some("bm25".into());
+        docs[0].sparse = None;
+        embed_sparse_documents("test", &settings, &mut docs, "qdrant")
+            .await
+            .unwrap();
+        assert_eq!(docs[0].sparse.as_ref(), Some(&expected));
+        let query = SearchRegistry::sparse_embedder("test", &settings)
+            .unwrap()
+            .embed_sparse_query("the apple and pie")
+            .await
+            .unwrap();
+        assert_eq!(query.indices, expected.indices);
+        assert_eq!(query.values, [1.0, 1.0, 1.0]);
+        settings.index_time.sparse_model = None;
+        docs[0].sparse = None;
+        for driver in ["database", "collection"] {
+            embed_sparse_documents("test", &settings, &mut docs, driver)
+                .await
+                .unwrap();
+            assert!(docs[0].sparse.is_none());
+        }
+        docs[0].document.attributes.remove("body");
+        assert!(
+            embed_sparse_documents("test", &settings, &mut docs, "qdrant")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("body")
+        );
+    }
+
+    struct WeightedSparse(FakeEmbedder);
+
+    #[async_trait::async_trait]
+    impl Embedder for WeightedSparse {
+        fn profile(&self) -> &ModelProfile {
+            self.0.profile()
+        }
+        async fn embed_documents(
+            &self,
+            inputs: &[EmbedInput],
+        ) -> Result<Vec<Embedding>, FrameworkError> {
+            self.0.embed_documents(inputs).await
+        }
+        async fn embed_query(&self, text: &str) -> Result<Embedding, FrameworkError> {
+            self.0.embed_query(text).await
+        }
+        async fn embed_sparse(
+            &self,
+            texts: &[String],
+        ) -> Result<Vec<SparseEmbedding>, FrameworkError> {
+            Ok(texts
+                .iter()
+                .map(|text| SparseEmbedding {
+                    indices: vec![7, 11],
+                    values: vec![text.len() as f32, 1.0],
+                })
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn named_sparse_models_keep_weighted_attribute_merging() {
+        SearchRegistry::isolated(async {
+            SearchRegistry::register_embedder(
+                "weighted-test",
+                std::sync::Arc::new(WeightedSparse(FakeEmbedder::new(3).unwrap())),
+            )
+            .unwrap();
+            let mut settings = IndexSettings::default();
+            settings.index_time.sparse_model = Some("weighted-test".into());
+            settings.index_time.searchable_attributes = vec![
+                WeightedAttribute {
+                    name: "title".into(),
+                    weight: 2.0,
+                },
+                WeightedAttribute {
+                    name: "body".into(),
+                    weight: 3.0,
+                },
+            ];
+            let document = SearchDocument {
+                index: "test".into(),
+                key: "1".into(),
+                source_version: 1,
+                attributes: BTreeMap::from([
+                    ("title".into(), AttributeValue::Text("apple".into())),
+                    ("body".into(), AttributeValue::Text("apple pie".into())),
+                ]),
+                embed_text: None,
+                title: None,
+            };
+            let doc = IndexedDocument {
+                document,
+                content_hash: "test".into(),
+                dense: None,
+                sparse: None,
+            };
+            let mut docs = vec![doc.clone(), doc];
+            embed_sparse_documents("test", &settings, &mut docs, "collection")
+                .await
+                .unwrap();
+            for doc in docs {
+                let vector = doc.sparse.unwrap();
+                assert_eq!(vector.indices, [7, 11]);
+                assert_eq!(vector.values, [37.0, 5.0]);
+            }
+        })
+        .await;
+    }
 }

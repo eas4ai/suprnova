@@ -800,9 +800,11 @@ async fn weighted_hybrid_and_semantic_fake_vectors_qdrant() {
                 .create_generation(index, &settings, generation)
                 .await
                 .unwrap();
+            // "b" is one token longer than "a": BM25 saturation then orders the
+            // lexical leg deterministically instead of leaving a tie to Qdrant.
             let mut docs = vec![
                 document(index, "a", "apple orchard", 1),
-                document(index, "b", "green apple", 2),
+                document(index, "b", "green apple basket", 2),
                 document(index, "c", "purple banana", 3),
             ];
             for doc in &mut docs {
@@ -822,6 +824,13 @@ async fn weighted_hybrid_and_semantic_fake_vectors_qdrant() {
             engine.index(index, generation, &docs).await.unwrap();
             let q = query(engine, index, generation, "apple").await;
             let vector = fake.embed_query("purple banana").await.unwrap().dense;
+            // The lexical leg is the built-in BM25 sparse ranking, so the native
+            // reference below fuses the same two legs the engine fuses.
+            let sparse = SearchRegistry::embedder_named(index.name, "bm25")
+                .unwrap()
+                .embed_sparse_query("apple")
+                .await
+                .unwrap();
             let lexical = engine
                 .hybrid(index, generation, &q, &vector, 0.0)
                 .await
@@ -850,8 +859,11 @@ async fn weighted_hybrid_and_semantic_fake_vectors_qdrant() {
                     qb::QueryPointsBuilder::new(&collection)
                         .prefetch(vec![
                             qb::PrefetchQueryBuilder::default()
-                                .query(vector.clone())
-                                .using("dense")
+                                .query(qb::Query::from(qb::VectorInput::new_sparse(
+                                    sparse.indices.clone(),
+                                    sparse.values.clone(),
+                                )))
+                                .using("sparse")
                                 .filter(engine.render_filter(index, generation, &q).await.unwrap())
                                 .limit(100u64)
                                 .build(),
@@ -1653,7 +1665,7 @@ async fn shared_generation_metadata_does_not_require_qdrant() -> Result<(), Fram
 
 #[tokio::test]
 #[ignore = "requires Qdrant at QDRANT_TEST_URL"]
-async fn word_ranking_keeps_the_full_prefetch_universe_qdrant() {
+async fn bm25_ranks_coverage_and_term_frequency_qdrant() {
     fixture(|engine, index, generation| {
         Box::pin(async move {
             engine
@@ -1661,24 +1673,39 @@ async fn word_ranking_keeps_the_full_prefetch_universe_qdrant() {
                 .await
                 .unwrap();
             let docs = [
-                ("a", "apple orchard", 10),
-                ("b", "apple basket", 9),
-                ("c", "apple orchard harvest", 1),
+                ("both", "apple orchard filler filler"),
+                ("repeated", "apple apple filler filler"),
+                ("once", "apple filler filler filler"),
+                ("unrelated", "banana filler filler filler"),
             ]
             .into_iter()
-            .map(|(key, text, version)| {
-                let mut doc = document(index, key, text, 1);
-                doc.document.source_version = version;
-                doc
-            })
+            .map(|(key, text)| document(index, key, text, 1))
             .collect::<Vec<_>>();
             engine.index(index, generation, &docs).await.unwrap();
-            let mut q = query(engine, index, generation, "apple orchard harvest").await;
-            q.depth = 1;
+            let q = query(engine, index, generation, "apple orchard").await;
             let hits = engine.query(index, generation, &q).await.unwrap();
             assert_eq!(hits.total.value(), 3);
-            assert_eq!(hits.candidates[0].document.key, "c");
-            assert_eq!(hits.candidates[0].score, 3.0);
+            assert_eq!(
+                hits.candidates
+                    .iter()
+                    .map(|c| c.document.key.as_str())
+                    .collect::<Vec<_>>(),
+                ["both", "repeated", "once"]
+            );
+            assert!(hits.candidates[0].score > hits.candidates[1].score);
+            assert!(hits.candidates[1].score > hits.candidates[2].score);
+            let mut shallow = q.clone();
+            shallow.depth = 1;
+            assert_eq!(
+                engine
+                    .query(index, generation, &shallow)
+                    .await
+                    .unwrap()
+                    .candidates[0]
+                    .document
+                    .key,
+                "both"
+            );
         })
     })
     .await;

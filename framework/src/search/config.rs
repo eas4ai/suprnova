@@ -76,6 +76,8 @@ pub struct SearchConfig {
     pub hits_cap: usize,
     /// SEARCH_FUSION_DEPTH bounds each hybrid retrieval leg.
     pub fusion_depth: usize,
+    /// SEARCH_BM25_AVERAGE_LENGTH is the fixed BM25 document length in tokens (default 256).
+    pub bm25_average_length: usize,
     /// SEARCH_TOMBSTONE_HOURS retains removals against delayed retries.
     pub tombstone_hours: u64,
     /// SEARCH_ANALYTICS opts into retaining search activity.
@@ -100,6 +102,7 @@ impl Default for SearchConfig {
             expansion_terms: 64,
             hits_cap: 1000,
             fusion_depth: 200,
+            bm25_average_length: 256,
             tombstone_hours: 24,
             analytics: false,
             analytics_retention_days: 90,
@@ -121,6 +124,7 @@ struct RawSearchConfig {
     expansion_terms: Option<String>,
     hits_cap: Option<String>,
     fusion_depth: Option<String>,
+    bm25_average_length: Option<String>,
     tombstone_hours: Option<String>,
     analytics: Option<String>,
     analytics_retention_days: Option<String>,
@@ -167,6 +171,7 @@ impl SearchConfig {
             ("SEARCH_EXPANSION_TERMS", self.expansion_terms),
             ("SEARCH_HITS_CAP", self.hits_cap),
             ("SEARCH_FUSION_DEPTH", self.fusion_depth),
+            ("SEARCH_BM25_AVERAGE_LENGTH", self.bm25_average_length),
         ] {
             if value == 0 {
                 return Err(FrameworkError::param(name));
@@ -241,6 +246,11 @@ impl SearchConfig {
                 default.fusion_depth,
                 "SEARCH_FUSION_DEPTH",
             )?,
+            bm25_average_length: parse(
+                raw.bm25_average_length,
+                default.bm25_average_length,
+                "SEARCH_BM25_AVERAGE_LENGTH",
+            )?,
             tombstone_hours: parse(
                 raw.tombstone_hours,
                 default.tombstone_hours,
@@ -299,6 +309,31 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("SEARCH_ANALYTICS")
+        );
+    }
+
+    #[test]
+    fn bm25_average_length_requires_positive_tokens() {
+        assert_eq!(SearchConfig::default().bm25_average_length, 256);
+        for value in ["0", "-1", "potato", "NaN", "1.5"] {
+            let raw = RawSearchConfig {
+                bm25_average_length: Some(value.into()),
+                ..Default::default()
+            };
+            assert!(
+                SearchConfig::from_raw(raw)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("SEARCH_BM25_AVERAGE_LENGTH")
+            );
+        }
+        let raw = RawSearchConfig {
+            bm25_average_length: Some("128".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            SearchConfig::from_raw(raw).unwrap().bm25_average_length,
+            128
         );
     }
 
