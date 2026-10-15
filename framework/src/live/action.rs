@@ -284,12 +284,15 @@ pub(crate) async fn handle(request: Request) -> Response {
     let (service, completion) = runtime.endpoint_service(upload_context);
     // Session-only fields the request's components staged reach the
     // session only once the outcome is accepted, below.
-    let ((response, failure), staged_session) =
-        super::session_state::scope(service.handle_reported(endpoint_request)).await;
+    let (((response, failure), staged_session), panic_reported) =
+        crate::reporting::capture_engine_reports(super::session_state::scope(
+            service.handle_reported(endpoint_request),
+        ))
+        .await;
     let completed = response.status.is_success();
     let projected = project_response(response);
     if let Some(error) = failure {
-        return report_endpoint_failure(projected, &error);
+        return report_endpoint_failure(projected, &error, panic_reported);
     }
     if !completed || projected.is_err() {
         return projected;
@@ -354,8 +357,15 @@ fn error_response(kind: EndpointErrorKind) -> Response {
 /// it went over, reported without the report's own line. Any other refusal
 /// below 500 stays the bare closed answer it was: a report would make it an
 /// error response the Inertia error decision hands to the application.
-fn report_endpoint_failure(projected: Response, error: &EndpointError) -> Response {
+fn report_endpoint_failure(
+    projected: Response,
+    error: &EndpointError,
+    panic_reported: bool,
+) -> Response {
     let attach = |response: HttpResponse| match size_breach(error) {
+        _ if panic_reported && error.kind() == EndpointErrorKind::KernelUnavailable => {
+            response.with_error_report_from(error)
+        }
         Some(breach) => {
             tracing::warn!(limit = %breach, "Live response was refused");
             response.with_reported_logged_error_from(&breach)
@@ -1200,7 +1210,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_oversized_request_reports_the_limit_its_size_and_the_key() {
+    fn an_oversized_request_keeps_its_limit_after_an_independent_engine_panic() {
         use suprnova_live::endpoint::LiveEndpointConfig;
         use suprnova_live::protocol::{ProtocolLimitConfig, ProtocolLimits};
         use suprnova_live::snapshot::SnapshotLimits;
@@ -1228,18 +1238,21 @@ mod tests {
         let error = config
             .inspect_mount(&[b'x'; 100], media)
             .expect_err("a body over the configured limit");
-        let response = endpoint_failure(&error);
-        let (Ok(response) | Err(response)) = response;
-        assert_eq!(response.status_code(), 413);
-        let report = response
-            .error_report()
-            .expect("the refusal carries a report");
-        let message = report.chain().first().expect("one message");
-        assert_eq!(
-            message,
-            "Suprnova Live request size limit exceeded: measured 100 bytes, configured 64 bytes. \
-             Raise LIVE_MAX_REQUEST_BYTES in the application's .env file to allow it."
-        );
+        for panic_reported in [false, true] {
+            let response =
+                report_endpoint_failure(error_response(error.kind()), &error, panic_reported);
+            let (Ok(response) | Err(response)) = response;
+            assert_eq!(response.status_code(), 413);
+            let report = response
+                .error_report()
+                .expect("the refusal carries a report");
+            let message = report.chain().first().expect("one message");
+            assert_eq!(
+                message,
+                "Suprnova Live request size limit exceeded: measured 100 bytes, configured 64 bytes. \
+                 Raise LIVE_MAX_REQUEST_BYTES in the application's .env file to allow it."
+            );
+        }
     }
 
     #[test]

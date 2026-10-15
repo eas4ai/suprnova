@@ -742,7 +742,12 @@ impl<'a> LiveDocument<'a> {
                         &context,
                     )
                     .await
-                    .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount))?;
+                    .map_err(|error| {
+                        LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount)
+                            .with_reported_panic(crate::reporting::already_reported_engine_error(
+                                &error,
+                            ))
+                    })?;
                 crate::render_cache::live::record_mount(
                     LiveMountKind::PublicSeed,
                     Some(output.expires_at().get()),
@@ -794,8 +799,11 @@ impl<'a> LiveDocument<'a> {
                         ),
                     ))
                     .await;
-                let output = output
-                    .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount))?;
+                let output = output.map_err(|error| {
+                    LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount).with_reported_panic(
+                        crate::reporting::already_reported_engine_error(&error),
+                    )
+                })?;
                 super::session_state::commit(staged_session);
                 crate::render_cache::live::record_mount(LiveMountKind::IdentityBound, None);
                 let (html, metadata) = output.into_document_parts();
@@ -992,14 +1000,29 @@ pub enum LiveDocumentErrorKind {
 }
 
 /// Redacted Live document failure.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq)]
 pub struct LiveDocumentError {
     kind: LiveDocumentErrorKind,
+    panic_reported: bool,
+}
+
+impl PartialEq for LiveDocumentError {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
 }
 
 impl LiveDocumentError {
     const fn new(kind: LiveDocumentErrorKind) -> Self {
-        Self { kind }
+        Self {
+            kind,
+            panic_reported: false,
+        }
+    }
+
+    const fn with_reported_panic(mut self, reported: bool) -> Self {
+        self.panic_reported = reported;
+        self
     }
 
     /// Returns the stable closed failure class.
@@ -1044,7 +1067,13 @@ impl Error for LiveDocumentError {}
 
 impl From<LiveDocumentError> for FrameworkError {
     #[track_caller]
-    fn from(_: LiveDocumentError) -> Self {
-        FrameworkError::internal("Live document request was rejected")
+    fn from(error: LiveDocumentError) -> Self {
+        // The original panic already reached the reporter. This safe wrapper
+        // still produces a 500 and keeps its in-process diagnostic.
+        if error.panic_reported {
+            crate::reporting::reported_engine_error("Live document request was rejected")
+        } else {
+            FrameworkError::internal("Live document request was rejected")
+        }
     }
 }

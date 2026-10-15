@@ -41,11 +41,9 @@ use crate::queue::middleware::{JobMiddleware, Next};
 use crate::queue::outcome::JobOutcome;
 use crate::queue::retry::{delay_after_failure, next_delay};
 use crate::telemetry::Metrics;
-use futures::FutureExt;
 use futures::future::BoxFuture;
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -362,8 +360,9 @@ pub async fn run_through_middleware(env: Envelope) -> Result<JobOutcome, Framewo
     // The same holds for the container scope: the job gets one of its own,
     // so its scoped bindings are built for the job, as on a worker, and not
     // taken from the request that dispatched it.
-    let context = env.context.clone();
-    let job = crate::context::Context::restored(context, run_pipeline(env));
+    let context = crate::Context::hydrate(env.context.as_ref());
+    context.reporting.start("queue.job", &env.job_name);
+    let job = crate::context::Context::scope(context, run_pipeline(env));
     crate::container::scope::run_in_new_scope(job).await
 }
 
@@ -402,25 +401,41 @@ where
 
 /// One attempt as the worker catches it: the pipeline's result with the
 /// error a middleware failed the job for, or the panic that ended it.
-type CaughtAttempt = Result<
-    (Result<JobOutcome, FrameworkError>, Option<FrameworkError>),
-    Box<dyn std::any::Any + Send>,
->;
+type CaughtAttempt =
+    Result<(Result<JobOutcome, FrameworkError>, Option<FrameworkError>), crate::error::CaughtPanic>;
 
 /// What a caught attempt amounts to: its outcome, and the error a middleware
 /// failed it for. A panic is an error, as a thrown exception is to Laravel's
 /// worker.
-fn dispatch_outcome(caught: CaughtAttempt) -> (DispatchOutcome, Option<FrameworkError>) {
+struct PanicDetails {
+    message: String,
+    location: Option<String>,
+}
+
+fn dispatch_outcome(
+    caught: CaughtAttempt,
+) -> (
+    DispatchOutcome,
+    Option<FrameworkError>,
+    Option<PanicDetails>,
+) {
     match caught {
-        Ok((Ok(outcome), failed_by)) => (DispatchOutcome::Settled(outcome), failed_by),
-        Ok((Err(e), _)) => (DispatchOutcome::Failed(e), None),
-        Err(panic_payload) => (
-            DispatchOutcome::Failed(FrameworkError::internal(format!(
+        Ok((Ok(outcome), failed_by)) => (DispatchOutcome::Settled(outcome), failed_by, None),
+        Ok((Err(error), _)) => (DispatchOutcome::Failed(error), None, None),
+        Err(panic) => {
+            let message = format!(
                 "job panicked: {}",
-                crate::server::panic_payload_message(&panic_payload)
-            ))),
-            None,
-        ),
+                crate::server::panic_payload_message(&panic.payload)
+            );
+            (
+                DispatchOutcome::Failed(FrameworkError::internal(message.clone())),
+                None,
+                Some(PanicDetails {
+                    message,
+                    location: panic.location,
+                }),
+            )
+        }
     }
 }
 
@@ -1043,6 +1058,7 @@ async fn run_labelled_worker(
         // trace id the job reads. Laravel restores the context on
         // `JobProcessing` for the same reason.
         let job_context = crate::context::Context::hydrate(env.context.as_ref());
+        job_context.reporting.start("queue.job", &env.job_name);
         // One container scope for this attempt, entered wherever the context
         // is: the attempt's scoped bindings are built once, shared by the job
         // and its lifecycle events, and dropped when the attempt settles.
@@ -1165,17 +1181,16 @@ async fn run_labelled_worker(
         // through the existing retry / dead-letter path. Without the boundary,
         // a panic would unwind out of `run_worker`, kill the worker task, and
         // strand the envelope's reservation until visibility expiry.
-        let dispatch_fut = AssertUnwindSafe(in_attempt(
+        let dispatch_fut = crate::error::catch_panic(in_attempt(
             job_scope.clone(),
             job_context.clone(),
             attempt_recording_failure(run_pipeline(env_for_dispatch)),
-        ))
-        .catch_unwind();
+        ));
 
-        let (outcome, failed_by_error) = match timeout_opt {
+        let (outcome, failed_by_error, panic_details) = match timeout_opt {
             Some(t) => match tokio::time::timeout(t, dispatch_fut).await {
                 Ok(caught) => dispatch_outcome(caught),
-                Err(_elapsed) => (DispatchOutcome::TimedOut(t), None),
+                Err(_elapsed) => (DispatchOutcome::TimedOut(t), None, None),
             },
             None => dispatch_outcome(dispatch_fut.await),
         };
@@ -1346,9 +1361,15 @@ async fn run_labelled_worker(
                             .await;
                         }
                     }
-                    // Laravel's `runJob` reports the error `process`
-                    // rethrows, once the attempt has settled (PAR-111).
-                    crate::error::Exceptions::report(&e);
+                    // Report after settlement, retaining the original panic
+                    // location without reporting the hook and its wrapper twice.
+                    match &panic_details {
+                        Some(panic) => crate::error::Exceptions::report_panic(
+                            &panic.message,
+                            panic.location.as_deref(),
+                        ),
+                        None => crate::error::Exceptions::report(&e),
+                    }
                 }
                 DispatchOutcome::TimedOut(t) => {
                     // Laravel's alarm handler fails the job first, then raises
