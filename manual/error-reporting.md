@@ -225,8 +225,12 @@ VITE_REPORTING_DSN=http://your-project-key@127.0.0.1:8080/1
 
 Svelte, React and Vue starters load Sentry's browser package only when
 `VITE_REPORTING_DSN` is set. They report uncaught errors, unhandled
-rejections and framework render or hydration failures. Rebuild the frontend
-after changing the Vite setting. With no value the reporter is not loaded.
+rejections and framework render or hydration failures. The package loads in
+its own chunk while the application mounts, so the first page does not wait
+for it; an error raised before it is ready, such as a hydration failure on
+the first render, is held (up to 32) and sent once it loads. Rebuild the
+frontend after changing the Vite setting. With no value the reporter is not
+loaded.
 
 Live uses its built-in runtime reporter, configured by
 `REPORTING_PUBLIC_DSN`, without a third-party script. It covers uncaught

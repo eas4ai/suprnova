@@ -35,15 +35,54 @@ function redactBrowserText(text: string): string {
   return (redacted + urls.slice(cursor)).slice(0, 16_384)
 }
 
-// Keep the SDK in its own chunk, and finish installing its global handlers
-// before mounting. An unset public DSN never imports or initializes a reporter.
+type Sentry = typeof import('@sentry/svelte')
+
+// The SDK loads in its own chunk while the application mounts, so the first
+// page never waits for it. Errors raised before it is ready, a hydration
+// error included, wait in a short queue and are sent once it is. An unset
+// public DSN installs nothing and never imports the SDK.
+const reportingDsn = import.meta.env.VITE_REPORTING_DSN
+const earlyReports: Array<(sentry: Sentry) => void> = []
+// `undefined` while the SDK loads, `null` once it could not.
+let reporter: Sentry | null | undefined = reportingDsn ? undefined : null
+
+function report(send: (sentry: Sentry) => void) {
+  if (reporter) send(reporter)
+  else if (reporter === undefined && earlyReports.length < 32) earlyReports.push(send)
+}
+
+function reportEarlyError(event: ErrorEvent) {
+  report((sentry) => sentry.captureException(event.error ?? event.message))
+}
+
+function reportEarlyRejection(event: PromiseRejectionEvent) {
+  report((sentry) => sentry.captureException(event.reason))
+}
+
+function stopEarlyReporting() {
+  window.removeEventListener('error', reportEarlyError)
+  window.removeEventListener('unhandledrejection', reportEarlyRejection)
+}
+
+if (reportingDsn) {
+  window.addEventListener('error', reportEarlyError)
+  window.addEventListener('unhandledrejection', reportEarlyRejection)
+  // Svelte recovers from a hydration mismatch after logging it, so the log
+  // line is the only signal. Watch for it from the first render.
+  const original = console.warn
+  console.warn = (...args: unknown[]) => {
+    const message = args.filter((value): value is string => typeof value === 'string').join(' ')
+    if (/hydrat/i.test(message)) report((sentry) => sentry.captureException(new Error('Svelte hydration mismatch')))
+    original.apply(console, args)
+  }
+}
+
 async function loadReporting() {
-  const dsn = import.meta.env.VITE_REPORTING_DSN
-  if (!dsn) return undefined
+  if (!reportingDsn) return
   try {
     const sentry = await import('@sentry/svelte')
     sentry.init({
-      dsn,
+      dsn: reportingDsn,
       sendDefaultPii: false,
       sendClientReports: false,
       // Native global handlers and framework hooks own errors. Callback wrappers
@@ -76,22 +115,19 @@ async function loadReporting() {
         return event
       },
     })
-    // Frameworks can recover from hydration mismatches after logging them.
-    // Capture only that diagnostic, before any SDK console error deduplication.
-    const original = console.warn
-    console.warn = (...args: unknown[]) => {
-      const message = args.filter((value): value is string => typeof value === 'string').join(' ')
-      if (/hydrat/i.test(message)) sentry.captureException(new Error('Svelte hydration mismatch'))
-      original.apply(console, args)
-    }
-    return sentry
+    // The SDK's own global handlers take over from here.
+    stopEarlyReporting()
+    reporter = sentry
+    for (const send of earlyReports.splice(0)) send(sentry)
   } catch (error) {
     // A blocked SDK chunk must leave the application usable.
+    stopEarlyReporting()
+    reporter = null
+    earlyReports.length = 0
     console.error('Browser reporting could not initialize', error)
-    return undefined
   }
 }
-const reporting = loadReporting()
+void loadReporting()
 
 // No hand-rolled CSRF header here, on purpose. The Inertia client this
 // scaffold installs (`@inertiajs/*`, pinned `^3.8.0`) sends its visits over
@@ -112,7 +148,7 @@ const reporting = loadReporting()
 const nonce =
   document.querySelector<HTMLMetaElement>('meta[property="csp-nonce"]')?.nonce || undefined
 
-reporting.then((sentry) => createInertiaApp({
+createInertiaApp({
   // `@inertiajs/vite` turns this into the page resolver: `Notes/Index`
   // loads `./pages/Notes/Index.svelte`, each page in its own chunk.
   pages: './pages',
@@ -138,7 +174,7 @@ reporting.then((sentry) => createInertiaApp({
         // Svelte otherwise silently discards a broken hydration tree and mounts.
         hydrate(App, { target: el, props, recover: false })
       } catch (error) {
-        sentry?.captureException(error)
+        report((sentry) => sentry.captureException(error))
         el.replaceChildren()
         mount(App, { target: el, props })
       }
@@ -146,8 +182,7 @@ reporting.then((sentry) => createInertiaApp({
       mount(App, { target: el, props })
     }
   },
-})).catch(async (error: unknown) => {
-  const sentry = await reporting
-  sentry?.captureException(error)
+}).catch((error: unknown) => {
+  report((sentry) => sentry.captureException(error))
   console.error('Application bootstrap failed', error)
 })
