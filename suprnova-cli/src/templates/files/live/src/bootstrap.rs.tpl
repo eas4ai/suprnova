@@ -26,8 +26,8 @@
 use std::sync::Arc;
 
 use suprnova::{
-    App, Auth, AuthConfig, AuthManager, CsrfMiddleware, DB, EloquentUserProvider, SessionConfig,
-    SessionMiddleware, global_middleware,
+    App, Auth, AuthConfig, AuthManager, CsrfMiddleware, DB, EloquentUserProvider, FrameworkError,
+    SecurityHeaders, SessionConfig, SessionMiddleware, global_middleware,
 };
 
 use crate::controllers::errors::ErrorPage;
@@ -83,6 +83,13 @@ pub async fn register() {
 /// page too; and CSRF last, so its `419` reaches the error page on the way
 /// out.
 pub fn register_http_stack() {
+    try_register_http_stack().expect("Invalid HTTP middleware configuration");
+}
+
+/// Keep invalid security configuration visible to callers that can return errors.
+pub fn try_register_http_stack() -> Result<(), FrameworkError> {
+    // Outside the error pages and RenderCache so every response is protected.
+    global_middleware!(SecurityHeaders::from_env()?);
     // Global middleware (runs on every request in registration order)
     global_middleware!(middleware::LoggingMiddleware);
 
@@ -119,4 +126,5 @@ pub fn register_http_stack() {
     // `SameSite`, `Domain`, `Path` and lifetime onto the `XSRF-TOKEN`
     // cookie, so it survives `SESSION_SECURE=false` over local HTTP.
     global_middleware!(CsrfMiddleware::new().with_session_config(&session_config));
+    Ok(())
 }
