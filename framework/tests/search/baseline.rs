@@ -810,7 +810,9 @@ async fn baseline_calibration_failed_task_cleans_up() -> Result<(), FrameworkErr
         .mount(&meili)
         .await;
     let fixture = Fixture::load(fixtures())?;
-    let floors = BaselineFloors::load(fixtures().join("baseline.json"))?;
+    let committed = fixtures().join("baseline.json");
+    let before = std::fs::read(&committed).map_err(|e| FrameworkError::internal(e.to_string()))?;
+    let floors = BaselineFloors::load(&committed)?;
     let error = Calibration::new(
         &meili.uri(),
         "test-meili",
@@ -825,7 +827,11 @@ async fn baseline_calibration_failed_task_cleans_up() -> Result<(), FrameworkErr
     assert!(!message.contains("sensitive server content"));
     assert!(!message.contains("test-meili"));
     assert!(typesense.received_requests().await.unwrap().is_empty());
-    assert!(!floors.calibrated);
+    // A failed calibration leaves the committed floors exactly as they were.
+    assert_eq!(
+        std::fs::read(&committed).map_err(|e| FrameworkError::internal(e.to_string()))?,
+        before
+    );
     meili.verify().await;
     Ok(())
 }
