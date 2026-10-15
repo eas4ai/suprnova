@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "workload": "A8/16",
+  "state_bytes": 8192,
+  "html_bytes": 16384,
+  "control_overhead_bytes": 213,
+  "snapshot_overhead_bytes": 603,
+  "warmup_iterations": 500,
+  "measured_samples": 40,
+  "batch_iterations": 100,
+  "p50_microseconds": 67.84530000000001,
+  "p95_microseconds": 69.04335,
+  "stages": [
+    "verify",
+    "hydrate",
+    "dehydrate",
+    "canonicalize",
+    "sign"
+  ],
+  "profile": "release",
+  "fixture_sha256": "fb09402ef2756df65f00c95f879ab88753696e5ecb1c42df816f905a990e7153",
+  "measured_at_unix_ms": 1787343018495,
+  "environment": {
+    "classification": "local_exploratory",
+    "operating_system": "linux",
+    "architecture": "x86_64",
+    "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900K",
+    "selected_cpu_affinity": "0-7",
+    "selected_cpu_count": 8,
+    "memory_bytes": 100993097728,
+    "kernel": "Linux 7.0.0-29-generic",
+    "cpu_governor": "powersave",
+    "rustc": "rustc 1.91.1 (ed61e7d7e 2025-11-07)",
+    "database": "not_used_by_snapshot_processing",
+    "provider_versions": {
+      "snapshot_key_ring": "in_process_v1"
+    },
+    "dedicated_vcpus_attested": false,
+    "warm_filesystem_cache": true,
+    "loopback_providers": true,
+    "s1_requirements_met": false
+  }
+}
