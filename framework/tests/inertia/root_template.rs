@@ -811,6 +811,93 @@ async fn rdoc_006_error_pages_render_through_the_chosen_template_without_view_da
     assert!(!body.contains("content=\"admin\""), "{body}");
 }
 
+/// Error navigation renders its chosen root inside the request nonce scope,
+/// including React's inline development preamble and every Vite asset tag.
+#[tokio::test]
+async fn rdoc_005_error_pages_keep_the_request_nonce_in_the_chosen_root_template() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "rdoc_005_error_pages_keep_the_request_nonce_in_the_chosen_root_template",
+    )
+    .await
+    {
+        return;
+    }
+    suprnova::register_global_middleware(suprnova::SecurityHeaders::balanced());
+    suprnova::Inertia::install(&chosen().frontend(Frontend::React).error_page("Error"))
+        .expect("a development install");
+    let router: suprnova::Router = suprnova::Router::new()
+        .get("/admin/denied", |_req| async {
+            let response: suprnova::Response = Ok(HttpResponse::text("never reached"));
+            response
+        })
+        .middleware(Deny)
+        .into();
+    let addr = serve(router, suprnova::MiddlewareRegistry::from_global()).await;
+    let browser = [("Accept", "text/html")];
+    let mut previous = None;
+    for (path, expected_status) in [("/admin/missing", 404), ("/admin/denied", 403)] {
+        let (status, headers, body) = crate::http_wire::request(addr, "GET", path, &browser).await;
+        assert_eq!(status, expected_status, "{body}");
+        let policy = headers.get("content-security-policy").expect("nonce CSP");
+        let nonce = policy
+            .split("'nonce-")
+            .nth(1)
+            .and_then(|rest| rest.split('\'').next())
+            .expect("the policy's nonce");
+        assert_ne!(previous.as_deref(), Some(nonce));
+        previous = Some(nonce.to_string());
+        assert!(
+            body.contains("<meta name=\"layout\" content=\"admin\">"),
+            "{body}"
+        );
+        assert!(
+            body.contains(&format!("<meta property=\"csp-nonce\" nonce=\"{nonce}\">")),
+            "{body}"
+        );
+        assert!(body.contains("@react-refresh"), "{body}");
+        let tags: Vec<_> = body
+            .split('<')
+            .filter(|tag| tag.starts_with("script") || tag.starts_with("link"))
+            .filter(|tag| !tag.contains("type=\"application/json\""))
+            .collect();
+        assert!(tags.len() >= 3, "{body}");
+        for tag in tags {
+            assert!(tag.contains(&format!("nonce=\"{nonce}\"")), "<{tag}");
+        }
+    }
+}
+
+/// RDOC-005: each starter forwards the DOM nonce property to Inertia so
+/// client-injected progress and dialog styles use the document's policy.
+#[test]
+fn rdoc_005_every_frontend_entry_passes_the_meta_nonce_to_inertia() {
+    let templates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../suprnova-cli/src/templates/files/frontend");
+    for (frontend, entry) in [
+        ("react", "src/main.tsx.tpl"),
+        ("svelte", "src/main.ts.tpl"),
+        ("vue", "src/main.ts.tpl"),
+    ] {
+        let source = std::fs::read_to_string(templates.join(frontend).join(entry))
+            .expect("frontend entry template");
+        let (read, options) = source
+            .split_once("createInertiaApp({")
+            .expect("Inertia setup");
+        let read = read.split_once("const nonce =").expect("nonce binding").1;
+        assert!(
+            read.contains(
+                "document.querySelector<HTMLMetaElement>('meta[property=\"csp-nonce\"]')?.nonce"
+            ),
+            "{frontend}: the nonce must come from the meta element's DOM property"
+        );
+        assert!(
+            options.lines().any(|line| line.trim() == "nonce,"),
+            "{frontend}: createInertiaApp must receive the nonce"
+        );
+    }
+}
+
 /// RDOC-001: `AssertableInertia` reads the page data element whatever its
 /// id, so a first visit rendered under another `mount_id` is assertable,
 /// through the framework's document and through a root template alike.

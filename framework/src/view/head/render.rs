@@ -28,6 +28,27 @@ pub(super) struct Tag {
 }
 
 impl Tag {
+    /// Stamp after custom attributes are assembled so one request has one nonce.
+    fn stamp_nonce(&mut self, nonce: &str) {
+        let policy_link = self.element == "link"
+            && self.attributes.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("rel")
+                    && value.as_deref().is_some_and(|value| {
+                        value.split_ascii_whitespace().any(|rel| {
+                            ["preload", "modulepreload", "stylesheet"]
+                                .iter()
+                                .any(|candidate| rel.eq_ignore_ascii_case(candidate))
+                        })
+                    })
+            });
+        if self.element == "script" || policy_link {
+            self.attributes
+                .retain(|(name, _)| !name.eq_ignore_ascii_case("nonce"));
+            self.attributes
+                .push(("nonce".to_string(), Some(nonce.to_string())));
+        }
+    }
+
     fn new(key: impl Into<String>, element: &'static str) -> Self {
         Self {
             key: key.into(),
@@ -336,6 +357,11 @@ pub(super) fn tags(data: &HeadData, request_url: Option<&str>) -> Vec<Tag> {
         tag.content = Some(Content::Json(schema.to_value()));
         tags.push(tag);
     }
+    if let Some(nonce) = crate::CspNonce::current() {
+        for tag in &mut tags {
+            tag.stamp_nonce(&nonce);
+        }
+    }
     tags
 }
 
@@ -485,5 +511,49 @@ mod tests {
         let attributes = data["attributes"].as_object().expect("the attributes");
         assert_eq!(attributes.len(), 2, "{data}");
         assert!(attributes.contains_key("rel") && attributes.contains_key("hreflang"));
+    }
+}
+
+#[cfg(test)]
+mod nonce_tests {
+    use super::super::builder::HeadBuilder;
+
+    #[tokio::test]
+    async fn rdoc_005_head_script_and_style_links_carry_the_request_nonce() {
+        crate::CspNonce::scope(Some("request-nonce".to_string()), async {
+            let html = HeadBuilder::default()
+                .preload("/main.js")
+                .link("modulepreload", "/chunk.js")
+                .link("stylesheet", "/main.css")
+                .schema(crate::head::Schema::of("Organization"))
+                .preconnect("https://example.test")
+                .dns_prefetch("https://example.test")
+                .prefetch("/next")
+                .render_html();
+            for expected in [
+                "href=\"/main.js\"",
+                "href=\"/chunk.js\"",
+                "href=\"/main.css\"",
+                "application/ld+json",
+            ] {
+                assert!(html.contains(expected), "{html}");
+            }
+            for tag in html
+                .as_str()
+                .split('<')
+                .filter(|tag| tag.starts_with("link") || tag.starts_with("script"))
+            {
+                let needs_nonce = tag.starts_with("script")
+                    || ["preload", "modulepreload", "stylesheet"]
+                        .iter()
+                        .any(|rel| tag.contains(&format!("rel=\"{rel}\"")));
+                assert_eq!(
+                    tag.contains("nonce=\"request-nonce\""),
+                    needs_nonce,
+                    "<{tag}"
+                );
+            }
+        })
+        .await;
     }
 }

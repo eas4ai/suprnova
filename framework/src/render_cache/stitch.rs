@@ -239,7 +239,9 @@ async fn assemble_hit(
         .segments
         .iter()
         .any(|segment| matches!(segment, Segment::Nested { .. }));
-    let nonce = if entry.needs_nonce() || has_nested {
+    let nonce = if let Some(nonce) = request.csp_nonce() {
+        Some(nonce)
+    } else if entry.needs_nonce() || has_nested {
         match fresh_nonce() {
             Ok(nonce) => Some(nonce),
             Err(_) => return fail_document(request, next).await,

@@ -3113,6 +3113,11 @@ fn build_html_response<P: Serialize + ?Sized>(
     html.push_str("<meta name=\"csrf-token\" content=\"");
     html.push_str(&csrf_attr);
     html.push_str("\">\n");
+    if let Some(nonce) = crate::CspNonce::current() {
+        html.push_str("<meta property=\"csp-nonce\" nonce=\"");
+        html.push_str(&escape_html_attr(&nonce));
+        html.push_str("\">\n");
+    }
     if title_line {
         html.push_str("<title>");
         html.push_str(&title_html);
@@ -3326,6 +3331,39 @@ fn escape_html_text(s: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn rdoc_005_default_document_stamps_nonce_and_leaves_page_data_inert() {
+        use http_body_util::BodyExt as _;
+        crate::CspNonce::scope(Some("request-nonce".to_string()), async {
+            let config = InertiaConfig::new()
+                .development(true)
+                .frontend(super::super::config::Frontend::React);
+            let response =
+                build_html_response(&json!({"component":"Home"}), &config, None, None, None)
+                    .expect("HTML response");
+            let bytes = response
+                .into_hyper()
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            let html = std::str::from_utf8(&bytes).expect("UTF-8");
+            assert!(
+                html.contains("<meta property=\"csp-nonce\" nonce=\"request-nonce\">"),
+                "{html}"
+            );
+            for tag in html.split('<').filter(|tag| tag.starts_with("script")) {
+                assert_eq!(
+                    tag.contains("nonce=\"request-nonce\""),
+                    !tag.contains("type=\"application/json\""),
+                    "<{tag}"
+                );
+            }
+        })
+        .await;
+    }
 
     /// A request whose path and query is one `String` the test built, so a
     /// test can tell the page URL that is this buffer from a copy of it.

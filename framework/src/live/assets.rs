@@ -138,7 +138,8 @@ impl LiveBootstrapOptions {
         self
     }
 
-    /// Stamps every emitted script element with a Content Security Policy nonce.
+    /// Stamps every emitted script and script or style link with a CSP nonce.
+    /// Without an explicit value, the bootstrap uses the current request's nonce.
     #[must_use]
     pub fn with_nonce(mut self, nonce: impl Into<String>) -> Self {
         self.nonce = Some(nonce.into());
@@ -147,9 +148,9 @@ impl LiveBootstrapOptions {
 
     /// The requested Content Security Policy nonce, before validation.
     ///
-    /// Read only by `LiveDocument::bootstrap`, and only once
-    /// [`render_bootstrap`] has already accepted these options, so what it
-    /// returns is the exact nonce the emitted script elements carry.
+    /// `LiveDocument::bootstrap` resolves the request fallback before rendering
+    /// and records this value only after [`render_bootstrap`] validates it, so
+    /// cache holes track the nonce the emitted scripts and links carry.
     pub(crate) fn nonce(&self) -> Option<&str> {
         self.nonce.as_deref()
     }
@@ -489,7 +490,8 @@ pub(crate) fn render_bootstrap(
     protocol: (u16, u16),
 ) -> Result<LiveBootstrap, BootstrapFailure> {
     let catalog = live_asset_catalog().map_err(|_| BootstrapFailure::AssetsUnavailable)?;
-    let nonce = match options.nonce.as_deref() {
+    let request_nonce = crate::CspNonce::current();
+    let nonce = match options.nonce.as_deref().or(request_nonce.as_deref()) {
         None => None,
         Some(value) if valid_nonce(value) => Some(value),
         Some(_) => return Err(BootstrapFailure::InvalidNonce),
@@ -517,15 +519,20 @@ pub(crate) fn render_bootstrap(
     html.push_str(&config_element(catalog.identity(), config, protocol));
     if options.suprnova_ui {
         let styles = catalog.artifact(ArtifactRole::UiStyles);
-        html.push_str(&stylesheet_link(&catalog.url(styles.file()), styles.sri()));
+        html.push_str(&stylesheet_link(
+            &catalog.url(styles.file()),
+            styles.sri(),
+            nonce,
+        ));
     }
     let core_artifact = catalog.artifact(core);
     let core_url = escape_html_attr(&catalog.url(core_artifact.file()));
     match strategy {
         LiveBootstrapStrategy::Esm => {
             html.push_str(&format!(
-                "<link rel=\"modulepreload\" href=\"{core_url}\" integrity=\"{}\" crossorigin=\"anonymous\">",
-                core_artifact.sri()
+                "<link rel=\"modulepreload\" href=\"{core_url}\" integrity=\"{}\" crossorigin=\"anonymous\"{}>",
+                core_artifact.sri(),
+                nonce_attribute(nonce)
             ));
             for role in &optional {
                 let artifact = catalog.artifact(*role);
@@ -543,8 +550,9 @@ pub(crate) fn render_bootstrap(
         }
         LiveBootstrapStrategy::Classic => {
             html.push_str(&format!(
-                "<link rel=\"preload\" as=\"script\" href=\"{core_url}\" integrity=\"{}\" crossorigin=\"anonymous\">",
-                core_artifact.sri()
+                "<link rel=\"preload\" as=\"script\" href=\"{core_url}\" integrity=\"{}\" crossorigin=\"anonymous\"{}>",
+                core_artifact.sri(),
+                nonce_attribute(nonce)
             ));
             for role in &optional {
                 let artifact = catalog.artifact(*role);
@@ -584,10 +592,11 @@ pub(crate) fn render_bootstrap(
 // `APP_URL`, so each is attribute-escaped: a root with no character that
 // escaping changes writes the same bytes as before.
 
-fn stylesheet_link(url: &str, sri: &str) -> String {
+fn stylesheet_link(url: &str, sri: &str, nonce: Option<&str>) -> String {
     let url = escape_html_attr(url);
     format!(
-        "<link rel=\"stylesheet\" href=\"{url}\" integrity=\"{sri}\" crossorigin=\"anonymous\">"
+        "<link rel=\"stylesheet\" href=\"{url}\" integrity=\"{sri}\" crossorigin=\"anonymous\"{}>",
+        nonce_attribute(nonce)
     )
 }
 
@@ -751,6 +760,90 @@ mod tests {
         assert!(if_none_match_hits(Some("*"), etag));
         assert!(!if_none_match_hits(Some("\"abd\""), etag));
         assert!(!if_none_match_hits(None, etag));
+    }
+
+    /// RDOC-005: with a nonce, every executable script and every
+    /// modulepreload, preload and stylesheet link the bootstrap writes
+    /// carries it, in both delivery forms and with the suprnova-ui base. The
+    /// configuration element never executes and needs none.
+    #[test]
+    fn rdoc_005_every_bootstrap_script_and_link_carries_the_nonce() {
+        let required: BTreeSet<RequiredCapability> = [
+            RequiredCapability::Uploads,
+            RequiredCapability::AsyncUpdates,
+        ]
+        .into_iter()
+        .collect();
+        for options in [LiveBootstrapOptions::esm(), LiveBootstrapOptions::classic()] {
+            let options = options
+                .with_stimulus()
+                .with_suprnova_ui()
+                .with_nonce("rdoc5nonce");
+            let config = LiveConfig::builder()
+                .build()
+                .expect("the default limits are legal");
+            let bootstrap =
+                render_bootstrap(&options, &required, config, (1, 1)).expect("bootstrap renders");
+            let html = bootstrap.html().as_str();
+            let tags: Vec<&str> = html
+                .split('<')
+                .filter(|tag| tag.starts_with("script") || tag.starts_with("link"))
+                .filter(|tag| !tag.contains("type=\"application/json\""))
+                .collect();
+            assert!(tags.len() >= 4, "too few tags to judge in:\n{html}");
+            for tag in tags {
+                assert!(
+                    tag.contains("nonce=\"rdoc5nonce\""),
+                    "<{tag} lacks the nonce in:\n{html}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rdoc_005_bootstrap_uses_the_request_nonce_unless_the_caller_names_one() {
+        crate::CspNonce::scope(Some("request-nonce".to_string()), async {
+            let required = [
+                RequiredCapability::Uploads,
+                RequiredCapability::AsyncUpdates,
+            ]
+            .into_iter()
+            .collect();
+            for options in [LiveBootstrapOptions::esm(), LiveBootstrapOptions::classic()] {
+                for explicit in [false, true] {
+                    let options = options.clone().with_stimulus().with_suprnova_ui();
+                    let options = if explicit {
+                        options.with_nonce("explicit-nonce")
+                    } else {
+                        options
+                    };
+                    let expected = if explicit {
+                        "nonce=\"explicit-nonce\""
+                    } else {
+                        "nonce=\"request-nonce\""
+                    };
+                    let bootstrap = render_bootstrap(
+                        &options,
+                        &required,
+                        LiveConfig::builder().build().expect("default config"),
+                        (1, 1),
+                    )
+                    .expect("bootstrap");
+                    let tags: Vec<_> = bootstrap
+                        .html()
+                        .as_str()
+                        .split('<')
+                        .filter(|tag| tag.starts_with("script") || tag.starts_with("link"))
+                        .filter(|tag| !tag.contains("type=\"application/json\""))
+                        .collect();
+                    assert!(tags.len() >= 4, "{}", bootstrap.html().as_str());
+                    for tag in tags {
+                        assert!(tag.contains(expected), "<{tag}");
+                    }
+                }
+            }
+        })
+        .await;
     }
 
     #[test]
