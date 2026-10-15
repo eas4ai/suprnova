@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use serde_json::json;
 #[cfg(feature = "localization")]
-use suprnova::{App, LocaleShare, RootShare};
+use suprnova::LocaleShare;
 use suprnova::{
-    HttpResponse, InertiaConfig, InertiaResponse, InertiaValidationRedirectMiddleware,
-    InertiaVersionMiddleware, MiddlewareRegistry, Request, Router, SessionConfig,
+    App, HttpResponse, InertiaConfig, InertiaResponse, InertiaValidationRedirectMiddleware,
+    InertiaVersionMiddleware, MiddlewareRegistry, Request, RootShare, Router, SessionConfig,
     SessionMiddleware,
 };
 
@@ -366,7 +366,6 @@ async fn pfx_005_the_vite_tags_carry_the_root_escaped_and_never_on_a_cdn() {
 
 /// A backend template of the scaffold, read from the CLI crate beside the
 /// framework.
-#[cfg(feature = "localization")]
 fn scaffold_template(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -378,7 +377,6 @@ fn scaffold_template(name: &str) -> String {
 
 /// Run a statement and give back its source text, so a test runs exactly
 /// the statement it compares with a template.
-#[cfg(feature = "localization")]
 macro_rules! run_quoted {
     ($($code:tt)*) => {{
         $($code)*;
@@ -386,13 +384,10 @@ macro_rules! run_quoted {
     }};
 }
 
-#[cfg(feature = "localization")]
 fn without_whitespace(text: &str) -> String {
     text.split_whitespace().collect()
 }
 
-// `LocaleShare` compiles with the `localization` feature alone.
-#[cfg(feature = "localization")]
 #[tokio::test]
 async fn pfx_012_root_share_gives_every_page_the_root() {
     if crate::own_process_async::delegate(
@@ -406,9 +401,7 @@ async fn pfx_012_root_share_gives_every_page_the_root() {
     support::install("http://localhost");
     // The scaffold's own registration, run here as a scaffolded application
     // runs it on every HTTP boot.
-    let registration = run_quoted!(App::register_inertia_shared(Arc::new(RootShare::around(
-        Arc::new(LocaleShare)
-    ))));
+    let registration = run_quoted!(App::register_inertia_shared(Arc::new(RootShare::new())));
     let bootstrap = scaffold_template("bootstrap.rs.tpl");
     let registrations: Vec<&str> = bootstrap
         .lines()
@@ -444,13 +437,38 @@ async fn pfx_012_root_share_gives_every_page_the_root() {
         &[("x-forwarded-prefix", PREFIX), ("x-inertia", "true")],
     )
     .await;
+    assert_eq!(behind.json()["props"]["root"], "/billing");
+
+    let at_host_root = support::get(address, "/page", &[("x-inertia", "true")]).await;
+    assert_eq!(at_host_root.json()["props"]["root"], "");
+}
+
+// `LocaleShare` compiles with the `localization` feature alone.
+#[cfg(feature = "localization")]
+#[tokio::test]
+async fn pfx_012_root_share_carries_another_provider() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "pfx_012_root_share_carries_another_provider",
+    )
+    .await
+    {
+        return;
+    }
+    support::install("http://localhost");
+    App::register_inertia_shared(Arc::new(RootShare::around(Arc::new(LocaleShare))));
+    let address = support::serve(page_router(), MiddlewareRegistry::new()).await;
+
+    let behind = support::get(
+        address,
+        "/page",
+        &[("x-forwarded-prefix", PREFIX), ("x-inertia", "true")],
+    )
+    .await;
     let props = &behind.json()["props"];
     assert_eq!(props["root"], "/billing");
     assert!(
         props["lang"].is_object(),
         "the carried provider's prop: {props}"
     );
-
-    let at_host_root = support::get(address, "/page", &[("x-inertia", "true")]).await;
-    assert_eq!(at_host_root.json()["props"]["root"], "");
 }
