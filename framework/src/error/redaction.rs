@@ -37,8 +37,9 @@ pub(crate) fn header_value_is_secret(name: &str) -> bool {
         || names_a_secret(name)
 }
 
-/// Whether `name` contains `token`, `secret`, `password`, `key` or
-/// `signature`, in any letter case.
+/// Whether `name` contains one of `SECRET_NAME_PARTS` (`token`, `secret`,
+/// `password`, `key`, `signature`, `csrf`, `xsrf`, `session`, `cookie` or
+/// `authorization`), in any letter case.
 pub(crate) fn names_a_secret(name: &str) -> bool {
     let name = name.to_lowercase();
     SECRET_NAME_PARTS.iter().any(|part| name.contains(part))

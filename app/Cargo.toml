@@ -18,7 +18,7 @@ name = "console"
 path = "src/bin/console.rs"
 
 [dependencies]
-# Production build shape: default features off, the eleven non-`testing`
+# Production build shape: default features off, the twelve non-`testing`
 # defaults listed explicitly, so the binaries below never carry a test
 # seam. See manual/deployment.md, "Production build shape".
 suprnova = { path = "../framework", default-features = false, features = [
@@ -26,6 +26,7 @@ suprnova = { path = "../framework", default-features = false, features = [
     "vector-mariadb", "vector-pgvector", "web-push", "localization", "magnetar-oauth",
     "media",
     "queue-sqs",
+    "reporting-sentry",
 ] }
 tokio = { version = "1", features = ["full"] }
 sea-orm-migration = { version = "2.0", features = ["sqlx-sqlite", "sqlx-mysql", "sqlx-postgres", "runtime-tokio-rustls"] }
