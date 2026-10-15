@@ -1,5 +1,6 @@
 import './app.css'
 import { createInertiaApp } from '@inertiajs/react'
+import type { ErrorInfo } from 'react'
 import { createRoot, hydrateRoot } from 'react-dom/client'
 import { layout, title } from './lib/app'
 
@@ -33,15 +34,46 @@ function redactBrowserText(text: string): string {
   return (redacted + urls.slice(cursor)).slice(0, 16_384)
 }
 
-// Keep the SDK in its own chunk, and finish installing its global handlers
-// before mounting. An unset public DSN never imports or initializes a reporter.
+type Sentry = typeof import('@sentry/react')
+
+// The SDK loads in its own chunk while the application mounts, so the first
+// page never waits for it. Errors raised before it is ready, a hydration
+// error included, wait in a short queue and are sent once it is. An unset
+// public DSN installs nothing and never imports the SDK.
+const reportingDsn = import.meta.env.VITE_REPORTING_DSN
+const earlyReports: Array<(sentry: Sentry) => void> = []
+// `undefined` while the SDK loads, `null` once it could not.
+let reporter: Sentry | null | undefined = reportingDsn ? undefined : null
+
+function report(send: (sentry: Sentry) => void) {
+  if (reporter) send(reporter)
+  else if (reporter === undefined && earlyReports.length < 32) earlyReports.push(send)
+}
+
+function reportEarlyError(event: ErrorEvent) {
+  report((sentry) => sentry.captureException(event.error ?? event.message))
+}
+
+function reportEarlyRejection(event: PromiseRejectionEvent) {
+  report((sentry) => sentry.captureException(event.reason))
+}
+
+function stopEarlyReporting() {
+  window.removeEventListener('error', reportEarlyError)
+  window.removeEventListener('unhandledrejection', reportEarlyRejection)
+}
+
+if (reportingDsn) {
+  window.addEventListener('error', reportEarlyError)
+  window.addEventListener('unhandledrejection', reportEarlyRejection)
+}
+
 async function loadReporting() {
-  const dsn = import.meta.env.VITE_REPORTING_DSN
-  if (!dsn) return undefined
+  if (!reportingDsn) return
   try {
     const sentry = await import('@sentry/react')
     sentry.init({
-      dsn,
+      dsn: reportingDsn,
       sendDefaultPii: false,
       sendClientReports: false,
       // Native global handlers and framework hooks own errors. Callback wrappers
@@ -74,14 +106,19 @@ async function loadReporting() {
         return event
       },
     })
-    return sentry
+    // The SDK's own global handlers take over from here.
+    stopEarlyReporting()
+    reporter = sentry
+    for (const send of earlyReports.splice(0)) send(sentry)
   } catch (error) {
     // A blocked SDK chunk must leave the application usable.
+    stopEarlyReporting()
+    reporter = null
+    earlyReports.length = 0
     console.error('Browser reporting could not initialize', error)
-    return undefined
   }
 }
-const reporting = loadReporting()
+void loadReporting()
 
 // No hand-rolled CSRF header here, on purpose. The Inertia client this
 // scaffold installs (`@inertiajs/*`, pinned `^3.8.0`) sends its visits over
@@ -101,7 +138,7 @@ const reporting = loadReporting()
 const nonce =
   document.querySelector<HTMLMetaElement>('meta[property="csp-nonce"]')?.nonce || undefined
 
-reporting.then((sentry) => createInertiaApp({
+createInertiaApp({
   // The Inertia Vite plugin replaces `pages` with a resolver that loads
   // `./pages/<name>.tsx`, each page in its own chunk.
   pages: './pages',
@@ -118,10 +155,10 @@ reporting.then((sentry) => createInertiaApp({
       return
     }
 
-    const errorOptions = sentry ? {
-      onUncaughtError: sentry.reactErrorHandler(),
-      onCaughtError: sentry.reactErrorHandler(),
-      onRecoverableError: sentry.reactErrorHandler(),
+    const errorOptions = reportingDsn ? {
+      onUncaughtError: (error: unknown, info: ErrorInfo) => report((sentry) => sentry.reactErrorHandler()(error, info)),
+      onCaughtError: (error: unknown, info: ErrorInfo) => report((sentry) => sentry.reactErrorHandler()(error, info)),
+      onRecoverableError: (error: unknown, info: ErrorInfo) => report((sentry) => sentry.reactErrorHandler()(error, info)),
     } : {}
     const app = <App {...props} />
     if (el.hasAttribute('data-server-rendered')) {
@@ -130,8 +167,7 @@ reporting.then((sentry) => createInertiaApp({
       createRoot(el, errorOptions).render(app)
     }
   },
-})).catch(async (error: unknown) => {
-  const sentry = await reporting
-  sentry?.captureException(error)
+}).catch((error: unknown) => {
+  report((sentry) => sentry.captureException(error))
   console.error('Application bootstrap failed', error)
 })
