@@ -725,7 +725,9 @@ async fn hits_cap_is_applied_after_distinct_and_grouping() {
 }
 
 struct DecoratedEngine {
-    inner: CollectionEngine,
+    inner: Arc<dyn suprnova::SearchEngine>,
+    query_depths: Arc<std::sync::Mutex<Vec<usize>>>,
+    semantic_depths: Arc<std::sync::Mutex<Vec<usize>>>,
     inject_attribute: bool,
     unsafe_highlights: bool,
     index_calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -733,7 +735,7 @@ struct DecoratedEngine {
 #[async_trait::async_trait]
 impl suprnova::SearchEngine for DecoratedEngine {
     fn name(&self) -> &str {
-        "collection"
+        self.inner.name()
     }
     fn capabilities(&self) -> suprnova::EngineCapabilities {
         let mut caps = self.inner.capabilities();
@@ -818,6 +820,7 @@ impl suprnova::SearchEngine for DecoratedEngine {
         generation: &suprnova::GenerationId,
         q: &suprnova::EngineQuery,
     ) -> Result<suprnova::EngineResult, suprnova::FrameworkError> {
+        self.query_depths.lock().unwrap().push(q.depth);
         let mut result = self.inner.query(index, generation, q).await?;
         for candidate in &mut result.candidates {
             if self.inject_attribute {
@@ -843,6 +846,7 @@ impl suprnova::SearchEngine for DecoratedEngine {
         filter: Option<&suprnova::Filter>,
         depth: usize,
     ) -> Result<suprnova::EngineResult, suprnova::FrameworkError> {
+        self.semantic_depths.lock().unwrap().push(depth);
         self.inner
             .semantic(index, generation, vector, filter, depth)
             .await
@@ -908,7 +912,9 @@ async fn raw_and_federated_projections_reject_undeclared_fields_returned_by_a_dr
             SearchRegistry::register_engine(
                 "collection",
                 Arc::new(DecoratedEngine {
-                    inner: CollectionEngine::new(),
+                    inner: Arc::new(CollectionEngine::new()),
+                    query_depths: Arc::default(),
+                    semantic_depths: Arc::default(),
                     inject_attribute: true,
                     unsafe_highlights: false,
                     index_calls: Arc::default(),
@@ -949,7 +955,9 @@ async fn unsafe_native_highlights_fall_back_to_escaped_framework_formatting() {
             SearchRegistry::register_engine(
                 "collection",
                 Arc::new(DecoratedEngine {
-                    inner: CollectionEngine::new(),
+                    inner: Arc::new(CollectionEngine::new()),
+                    query_depths: Arc::default(),
+                    semantic_depths: Arc::default(),
                     inject_attribute: false,
                     unsafe_highlights: true,
                     index_calls: Arc::default(),
@@ -1255,7 +1263,9 @@ async fn unchanged_writes_skip_embedding_and_indexing_but_preserve_the_version_w
             SearchRegistry::register_engine(
                 "collection",
                 Arc::new(DecoratedEngine {
-                    inner: CollectionEngine::new(),
+                    inner: Arc::new(CollectionEngine::new()),
+                    query_depths: Arc::default(),
+                    semantic_depths: Arc::default(),
                     inject_attribute: false,
                     unsafe_highlights: false,
                     index_calls: calls.clone(),
@@ -1452,6 +1462,424 @@ async fn refills_preserve_live_group_members_and_distinct_representatives() {
                     .collect::<Vec<_>>(),
                 [b.id.to_string(), d.id.to_string()]
             );
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+async fn assert_page_boundaries(depths: &std::sync::Mutex<Vec<usize>>, sqlite: bool) {
+    let first = SearchNote::search("Rust")
+        .facets(["category"])
+        .facet_stats(["rank"])
+        .paginate(10, 1)
+        .await
+        .unwrap();
+    let observed = depths.lock().unwrap()[0];
+    println!(
+        "{} first page engine depth: {observed}",
+        if sqlite { "sqlite" } else { "collection" }
+    );
+    assert_eq!(observed, 11);
+    assert_eq!(first.hits.len(), 10);
+    assert_eq!(first.total, Total::Exact(24));
+    assert_eq!(
+        first.facets["category"]
+            .iter()
+            .map(|value| value.count)
+            .sum::<u64>(),
+        24
+    );
+    assert_eq!(first.facet_stats["rank"].max, AttributeValue::Integer(23));
+    assert!(first.pagination.has_more);
+    for (filter, expected_len) in [("rank < 20", 10), ("rank < 19", 9)] {
+        let page = SearchNote::search("Rust")
+            .filter(filter)
+            .sort_by("rank", SortDirection::Asc)
+            .paginate(10, 2)
+            .await
+            .unwrap();
+        assert_eq!(page.hits.len(), expected_len);
+        assert!(!page.pagination.has_more);
+        let simple = SearchNote::search("Rust")
+            .filter(filter)
+            .sort_by("rank", SortDirection::Asc)
+            .simple_paginate(10, 2)
+            .await
+            .unwrap();
+        assert_eq!(simple.hits.len(), expected_len);
+        assert!(!simple.pagination.has_more);
+    }
+    let beyond = SearchNote::search("Rust")
+        .offset(24)
+        .limit(10)
+        .get()
+        .await
+        .unwrap();
+    assert!(beyond.hits.is_empty());
+    assert!(!beyond.pagination.has_more);
+    let capped = SearchNote::search("Rust")
+        .hits_cap(10)
+        .paginate(10, 1)
+        .await
+        .unwrap();
+    assert_eq!(capped.hits.len(), 10);
+    assert!(!capped.pagination.has_more);
+    assert_eq!(capped.total, Total::Exact(24));
+    depths.lock().unwrap().clear();
+    let overflow = SearchNote::search("Rust")
+        .offset(usize::MAX)
+        .limit(10)
+        .get()
+        .await
+        .unwrap();
+    assert!(overflow.hits.is_empty());
+    assert!(!overflow.pagination.has_more);
+    assert_eq!(depths.lock().unwrap()[0], 1000);
+    depths.lock().unwrap().clear();
+}
+
+async fn assert_rerank_depth(depths: &std::sync::Mutex<Vec<usize>>, models: &[SearchNote]) {
+    SearchRegistry::register_reranker("reverse-keys", Arc::new(ReverseKeys)).unwrap();
+    let reranked = SearchNote::search("Rust")
+        .sort_by("rank", SortDirection::Asc)
+        .rerank("reverse-keys", 15)
+        .limit(2)
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(depths.lock().unwrap()[0], 15);
+    assert_eq!(reranked.hits[0].key, models[14].id.to_string());
+    assert_eq!(reranked.hits[1].key, models[13].id.to_string());
+}
+
+async fn assert_federated_pages(depths: &std::sync::Mutex<Vec<usize>>, models: &[SearchNote]) {
+    let indexes = [
+        SearchNote::descriptor().name,
+        SearchArchive::descriptor().name,
+    ];
+    for model in models {
+        SearchIndexJob {
+            index: indexes[1].into(),
+            key: model.id.to_string(),
+            source_version: 0,
+            op: suprnova::IndexOperation::Index,
+            generation: None,
+        }
+        .handle()
+        .await
+        .unwrap();
+    }
+    let all = Search::federated(indexes)
+        .search("Rust")
+        .limit(48)
+        .keys()
+        .await
+        .unwrap();
+    let mut pages = Vec::new();
+    depths.lock().unwrap().clear();
+    for page in 1..=7 {
+        let result = Search::federated(indexes)
+            .search("Rust")
+            .paginate(7, page)
+            .await
+            .unwrap();
+        assert_eq!(result.pagination.has_more, page < 7);
+        pages.extend(result.hits.into_iter().map(|hit| (hit.index, hit.key)));
+    }
+    assert_eq!(depths.lock().unwrap()[..2], [8, 8]);
+    assert_eq!(pages, all);
+    depths.lock().unwrap().clear();
+}
+
+async fn assert_collapsed_pages(depths: &std::sync::Mutex<Vec<usize>>, models: &[SearchNote]) {
+    let groups = SearchNote::search("Rust")
+        .sort_by("rank", SortDirection::Asc)
+        .group_by("category", 2)
+        .paginate(2, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        groups
+            .hits
+            .iter()
+            .map(|hit| hit.key.clone())
+            .collect::<Vec<_>>(),
+        [models[14].id.to_string(), models[16].id.to_string()]
+    );
+    assert_eq!(
+        groups.hits[0].group_members[0].key,
+        models[15].id.to_string()
+    );
+    assert!(groups.pagination.has_more);
+    assert_eq!(depths.lock().unwrap()[0], 5);
+    assert!(depths.lock().unwrap().len() > 1);
+    let descriptor = SearchNote::descriptor();
+    let engine = SearchRegistry::engine_for(descriptor.name).unwrap();
+    let generation = SearchRegistry::generation_for(descriptor.name)
+        .await
+        .unwrap();
+    let mut settings = engine.read_settings(descriptor, &generation).await.unwrap();
+    settings.query.distinct_attribute = Some("category".into());
+    engine
+        .write_settings(descriptor, &generation, &settings)
+        .await
+        .unwrap();
+    let distinct = SearchNote::search("Rust")
+        .sort_by("rank", SortDirection::Asc)
+        .paginate(2, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        distinct
+            .hits
+            .iter()
+            .map(|hit| hit.key.clone())
+            .collect::<Vec<_>>(),
+        [models[14].id.to_string(), models[16].id.to_string()]
+    );
+    settings.query.distinct_attribute = None;
+    engine
+        .write_settings(descriptor, &generation, &settings)
+        .await
+        .unwrap();
+}
+
+async fn assert_hydration_refills(depths: &std::sync::Mutex<Vec<usize>>, models: &[SearchNote]) {
+    suprnova::without_syncing_to_search(|| async {
+        models[0]
+            .clone()
+            .update(suprnova::attrs! { owner_id: 9 })
+            .await
+            .unwrap();
+        models[1].clone().delete().await
+    })
+    .await
+    .unwrap();
+    let _queue = Queue::fake();
+    depths.lock().unwrap().clear();
+    let scoped = SearchNote::search("Rust")
+        .sort_by("rank", SortDirection::Asc)
+        .limit(3)
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(
+        scoped
+            .hits
+            .iter()
+            .map(|hit| hit.key.clone())
+            .collect::<Vec<_>>(),
+        [
+            models[2].id.to_string(),
+            models[3].id.to_string(),
+            models[4].id.to_string()
+        ]
+    );
+    assert!(scoped.pagination.has_more);
+    assert_eq!(scoped.total, Total::Exact(24));
+    assert_eq!(depths.lock().unwrap().as_slice(), [4, 8]);
+    depths.lock().unwrap().clear();
+    let federated = Search::federated([SearchNote::descriptor().name])
+        .search("Rust")
+        .filter("rank >= 0")
+        .paginate(3, 1)
+        .await
+        .unwrap();
+    let mut expected = models[2..]
+        .iter()
+        .map(|model| model.id.to_string())
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(
+        federated
+            .hits
+            .iter()
+            .map(|hit| hit.key.clone())
+            .collect::<Vec<_>>(),
+        expected[..3]
+    );
+    assert!(federated.pagination.has_more);
+    depths.lock().unwrap().clear();
+    let visible_ids = models[3..].iter().map(|model| model.id).collect::<Vec<_>>();
+    let live = SearchNote::search("Rust")
+        .sort_by("rank", SortDirection::Asc)
+        .query(move |query| query.where_in("id", visible_ids))
+        .limit(3)
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(
+        live.hits
+            .iter()
+            .map(|hit| hit.key.clone())
+            .collect::<Vec<_>>(),
+        [
+            models[3].id.to_string(),
+            models[4].id.to_string(),
+            models[5].id.to_string()
+        ]
+    );
+    assert!(live.pagination.has_more);
+    assert_eq!(live.total, Total::Exact(24));
+    assert_eq!(depths.lock().unwrap().as_slice(), [4, 8]);
+}
+
+async fn page_depth_contract(sqlite: bool) {
+    let _db = database().await;
+    if sqlite {
+        for migration in suprnova::search::migrations() {
+            migration
+                .up(&sea_orm_migration::SchemaManager::new(
+                    suprnova::DB::connection().unwrap().inner(),
+                ))
+                .await
+                .unwrap();
+        }
+    }
+    SearchConfig::scope(
+        config(),
+        SearchRegistry::isolated(async {
+            let depths = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let inner: Arc<dyn suprnova::SearchEngine> = if sqlite {
+                Arc::new(suprnova::search::DatabaseSearchEngine::new())
+            } else {
+                Arc::new(CollectionEngine::new())
+            };
+            SearchRegistry::register_engine(
+                "collection",
+                Arc::new(DecoratedEngine {
+                    inner,
+                    query_depths: depths.clone(),
+                    semantic_depths: Arc::default(),
+                    inject_attribute: false,
+                    unsafe_highlights: false,
+                    index_calls: Arc::default(),
+                }),
+            )
+            .unwrap();
+            if sqlite {
+                for descriptor in [SearchNote::descriptor(), SearchArchive::descriptor()] {
+                    let engine = SearchRegistry::engine_for(descriptor.name).unwrap();
+                    let generation = suprnova::GenerationId::default();
+                    engine
+                        .create_generation(descriptor, &descriptor.index_settings(), &generation)
+                        .await
+                        .unwrap();
+                    engine
+                        .switch_generation(descriptor, None, generation)
+                        .await
+                        .unwrap();
+                }
+            }
+            let mut models = Vec::new();
+            for rank in 0..24 {
+                let category = if rank < 12 {
+                    "early".into()
+                } else {
+                    format!("group{}", rank / 2)
+                };
+                let model = suprnova::without_syncing_to_search(|| async {
+                    note("Rust identical", true, 0)
+                        .await
+                        .update(suprnova::attrs! { rank: rank, category: category })
+                        .await
+                })
+                .await
+                .unwrap();
+                index(&model).await;
+                models.push(model);
+            }
+            assert_page_boundaries(&depths, sqlite).await;
+            assert_rerank_depth(&depths, &models).await;
+            assert_federated_pages(&depths, &models).await;
+            assert_collapsed_pages(&depths, &models).await;
+            assert_hydration_refills(&depths, &models).await;
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn collection_pages_request_lookahead_and_refill_representatives() {
+    page_depth_contract(false).await;
+}
+
+#[tokio::test]
+async fn sqlite_pages_request_lookahead_and_refill_representatives() {
+    page_depth_contract(true).await;
+}
+
+#[tokio::test]
+async fn hybrid_deep_pages_raise_both_fusion_legs_to_the_lookahead() {
+    let _db = database().await;
+    SearchConfig::scope(
+        config(),
+        SearchRegistry::isolated(async {
+            let lexical = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let semantic = Arc::new(std::sync::Mutex::new(Vec::new()));
+            SearchRegistry::register_engine(
+                "collection",
+                Arc::new(DecoratedEngine {
+                    inner: Arc::new(CollectionEngine::new()),
+                    query_depths: lexical.clone(),
+                    semantic_depths: semantic.clone(),
+                    inject_attribute: false,
+                    unsafe_highlights: false,
+                    index_calls: Arc::default(),
+                }),
+            )
+            .unwrap();
+            SearchRegistry::register_embedder("fake", Arc::new(FakeEmbedder::new(8).unwrap()))
+                .unwrap();
+            let descriptor = SearchNote::descriptor();
+            let engine = SearchRegistry::engine_for(descriptor.name).unwrap();
+            let mut settings = descriptor.index_settings();
+            settings.index_time.embedder = Some("fake".into());
+            settings.index_time.dimensions = Some(8);
+            settings.query.fusion_depth = 5;
+            settings.query.hits_cap = 20;
+            let generation = suprnova::GenerationId::new("page_depth_hybrid").unwrap();
+            engine
+                .create_generation(descriptor, &settings, &generation)
+                .await
+                .unwrap();
+            engine
+                .switch_generation(descriptor, None, generation)
+                .await
+                .unwrap();
+            for _ in 0..24 {
+                index(&note("Rust identical", true, 0).await).await;
+            }
+            for (offset, limit, depth) in [(0, 2, 5), (7, 3, 11), (18, 5, 20)] {
+                lexical.lock().unwrap().clear();
+                semantic.lock().unwrap().clear();
+                let result = SearchNote::search("Rust")
+                    .hybrid(0.5)
+                    .offset(offset)
+                    .limit(limit)
+                    .get()
+                    .await
+                    .unwrap();
+                assert_eq!(lexical.lock().unwrap().as_slice(), [depth]);
+                assert_eq!(semantic.lock().unwrap().as_slice(), [depth]);
+                assert_eq!(result.hits.len(), if offset == 18 { 2 } else { limit });
+                assert_eq!(result.pagination.has_more, offset != 18);
+            }
+            lexical.lock().unwrap().clear();
+            semantic.lock().unwrap().clear();
+            let capped = SearchNote::search("Rust")
+                .hybrid(0.5)
+                .hits_cap(2)
+                .limit(1)
+                .get()
+                .await
+                .unwrap();
+            assert_eq!(capped.hits.len(), 1);
+            assert!(capped.pagination.has_more);
+            assert_eq!(lexical.lock().unwrap().as_slice(), [5]);
+            assert_eq!(semantic.lock().unwrap().as_slice(), [5]);
         }),
     )
     .await

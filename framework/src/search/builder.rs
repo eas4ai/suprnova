@@ -515,25 +515,12 @@ where
                     hydrated.allowed.iter().map(|(ranked, _)| &ranked.candidate),
                     &retrieved.settings,
                     plan,
-                    retrieved.hits_cap,
+                    retrieved.needed,
                 )
             {
                 break;
             }
-            retrieved.query.depth = retrieved.query.depth.saturating_mul(2).min(universe);
-            let engine = SearchRegistry::engine_for(descriptor.name)?;
-            let page = engine
-                .query(descriptor, &retrieved.generation, &retrieved.query)
-                .await?;
-            validate_candidates(descriptor, &page.candidates)?;
-            retrieved.candidates = page
-                .candidates
-                .into_iter()
-                .map(|candidate| RankedCandidate {
-                    rank_score: candidate.score,
-                    candidate,
-                })
-                .collect();
+            refill_lexical(descriptor, retrieved, universe).await?;
         }
         Ok(hydrated)
     }
@@ -911,6 +898,12 @@ struct Prepared {
     query: EngineQuery,
     ratio: f32,
     hits_cap: usize,
+    needed: usize,
+}
+
+// One extra representative distinguishes a full last page from a page with a successor.
+pub(super) fn lexical_depth(offset: usize, limit: usize, hits_cap: usize) -> usize {
+    offset.saturating_add(limit).saturating_add(1).min(hits_cap)
 }
 
 async fn prepare(
@@ -944,10 +937,13 @@ async fn prepare(
         &vocabulary,
         config.expansion_terms,
     )?;
+    let needed = lexical_depth(plan.offset, plan.limit, hits_cap)
+        .max(plan.rerank.as_ref().map_or(0, |rerank| rerank.depth))
+        .min(hits_cap);
     let depth = if ratio > 0.0 {
-        settings.query.fusion_depth
+        settings.query.fusion_depth.max(needed)
     } else {
-        hits_cap
+        needed
     };
     let query = EngineQuery {
         expanded,
@@ -964,6 +960,7 @@ async fn prepare(
         query,
         ratio,
         hits_cap,
+        needed,
     })
 }
 
@@ -982,6 +979,80 @@ struct Retrieved {
     facets: FacetDistribution,
     facet_stats: FacetStats,
     hits_cap: usize,
+    needed: usize,
+}
+
+async fn refill_lexical(
+    descriptor: &IndexDescriptor,
+    retrieved: &mut Retrieved,
+    universe: usize,
+) -> Result<(), FrameworkError> {
+    retrieved.query.depth = retrieved.query.depth.saturating_mul(2).min(universe);
+    let engine = SearchRegistry::engine_for(descriptor.name)?;
+    let page = engine
+        .query(descriptor, &retrieved.generation, &retrieved.query)
+        .await?;
+    validate_candidates(descriptor, &page.candidates)?;
+    retrieved.candidates = page
+        .candidates
+        .into_iter()
+        .map(|candidate| RankedCandidate {
+            rank_score: candidate.score,
+            candidate,
+        })
+        .collect();
+    Ok(())
+}
+
+async fn federated_live_documents(
+    descriptor: &IndexDescriptor,
+    retrieved: &mut Retrieved,
+    plan: &SearchQuery,
+    viewer: &Viewer,
+) -> Result<HashMap<String, SearchDocument>, FrameworkError> {
+    let entry = SearchRegistry::by_index(descriptor.name)?;
+    let universe = usize::try_from(retrieved.total.value()).unwrap_or(usize::MAX);
+    let lexical = plan
+        .hybrid_ratio
+        .unwrap_or(retrieved.settings.query.hybrid_ratio)
+        == 0.0;
+    loop {
+        let keys = retrieved
+            .candidates
+            .iter()
+            .map(|ranked| ranked.candidate.document.key.clone())
+            .collect();
+        let live_by_key: HashMap<_, _> = (entry.load_documents)(keys)
+            .await?
+            .into_iter()
+            .map(|document| (document.key.clone(), document))
+            .collect();
+        let eligible = retrieved
+            .candidates
+            .iter()
+            .filter(|ranked| {
+                live_by_key
+                    .get(&ranked.candidate.document.key)
+                    .is_some_and(|live| {
+                        (entry.evaluate_scope)(viewer, live)
+                            && !(descriptor.soft_delete
+                                && !plan.with_trashed
+                                && matches!(
+                                    live.attributes.get("__soft_deleted"),
+                                    Some(AttributeValue::Bool(true))
+                                ))
+                    })
+            })
+            .map(|ranked| &ranked.candidate);
+        if !lexical
+            || retrieved.candidates.len() < retrieved.query.depth
+            || retrieved.query.depth >= universe
+            || enough_representatives(eligible, &retrieved.settings, plan, retrieved.needed)
+        {
+            return Ok(live_by_key);
+        }
+        refill_lexical(descriptor, retrieved, universe).await?;
+    }
 }
 
 async fn retrieve(
@@ -997,13 +1068,14 @@ async fn retrieve(
         query,
         ratio,
         hits_cap,
+        needed,
     } = prepared;
     let mut query = query;
     let mut lexical = engine.query(descriptor, &generation, &query).await?;
     if ratio == 0.0 && (settings.query.distinct_attribute.is_some() || plan.group.is_some()) {
         while lexical.candidates.len()
             < usize::try_from(lexical.total.value()).unwrap_or(usize::MAX)
-            && !enough_representatives(&lexical.candidates, &settings, plan, hits_cap)
+            && !enough_representatives(&lexical.candidates, &settings, plan, needed)
         {
             let previous = lexical.candidates.len();
             query.depth = query
@@ -1085,7 +1157,7 @@ async fn retrieve(
                     &generation,
                     &vector.dense,
                     query.filter.as_ref(),
-                    settings.query.fusion_depth,
+                    query.depth,
                 )
                 .await?;
             validate_candidates(descriptor, &semantic.candidates)?;
@@ -1155,6 +1227,7 @@ async fn retrieve(
         facets,
         facet_stats,
         hits_cap,
+        needed,
     })
 }
 
@@ -1342,7 +1415,7 @@ fn enough_representatives<'a>(
     candidates: impl IntoIterator<Item = &'a EngineCandidate>,
     settings: &IndexSettings,
     plan: &SearchQuery,
-    cap: usize,
+    needed: usize,
 ) -> bool {
     let mut distinct = BTreeSet::new();
     let mut groups = BTreeMap::<String, usize>::new();
@@ -1367,11 +1440,11 @@ fn enough_representatives<'a>(
             count += 1;
         }
     }
-    count >= cap
+    count >= needed
         && plan.group.as_ref().is_none_or(|group| {
             group_order
                 .iter()
-                .take(cap)
+                .take(needed)
                 .all(|identity| groups[identity] >= group.per_group)
         })
 }
@@ -1501,21 +1574,13 @@ impl FederatedBuilder {
                 filter.validate(descriptor)?;
             }
             let plan = bind_grammar(descriptor, self.plan.clone(), self.grammar.clone())?;
-            let retrieved = retrieve(descriptor, &plan, &viewer).await?;
+            let mut retrieved = retrieve(descriptor, &plan, &viewer).await?;
+            let mut live_by_key =
+                federated_live_documents(descriptor, &mut retrieved, &plan, &viewer).await?;
             total = total.saturating_add(retrieved.total.value());
             estimated |= matches!(retrieved.total, Total::Estimated(_));
             facets.insert(index.clone(), retrieved.facets);
             facet_stats.insert(index.clone(), retrieved.facet_stats);
-            let candidate_keys = retrieved
-                .candidates
-                .iter()
-                .map(|ranked| ranked.candidate.document.key.clone())
-                .collect();
-            let live_documents = (entry.load_documents)(candidate_keys).await?;
-            let mut live_by_key: HashMap<_, _> = live_documents
-                .into_iter()
-                .map(|document| (document.key.clone(), document))
-                .collect();
             let mut seen_distinct = BTreeSet::new();
             let mut keys = Vec::new();
             for ranked in retrieved.candidates {

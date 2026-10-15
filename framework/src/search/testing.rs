@@ -206,6 +206,91 @@ pub mod conformance {
             crop: Default::default(),
         })
     }
+    async fn page_slices(
+        engine: &Arc<dyn SearchEngine>,
+        index: &IndexDescriptor,
+        settings: &IndexSettings,
+    ) -> Result<(), FrameworkError> {
+        let generation = GenerationId::new("conformance_pages")?;
+        engine
+            .create_generation(index, settings, &generation)
+            .await?;
+        let documents = (0..28)
+            .rev()
+            .map(|i| {
+                document(
+                    index,
+                    &format!("page{i:02}"),
+                    "orchard apple",
+                    Some(i % 4),
+                    if i % 2 == 0 { "fruit" } else { "basket" },
+                    true,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        engine.index(index, &generation, &documents).await?;
+        let plain = query(engine, index, &generation, "orchard", None).await?;
+        let mut sorted = plain.clone();
+        sorted.sort = vec![Sort::Attribute {
+            attribute: "number".into(),
+            direction: SortDirection::Asc,
+        }];
+        let mut filtered = plain.clone();
+        filtered.filter = Some(Filter::Eq(
+            "category".into(),
+            AttributeValue::Text("fruit".into()),
+        ));
+        for plan in [plain, sorted, filtered] {
+            let all = engine.query(index, &generation, &plan).await?;
+            let keys = all
+                .candidates
+                .iter()
+                .map(|hit| hit.document.key.clone())
+                .collect::<Vec<_>>();
+            let mut expected = (0..28)
+                .filter(|i| plan.filter.is_none() || i % 2 == 0)
+                .collect::<Vec<_>>();
+            expected.sort_by_key(|i| (if plan.sort.is_empty() { 0 } else { i % 4 }, *i));
+            let expected = expected
+                .into_iter()
+                .map(|i| format!("page{i:02}"))
+                .collect::<Vec<_>>();
+            check(
+                keys == expected,
+                "equal-score pages must break ties by key after explicit sort",
+            )?;
+            check(
+                all.total.value() == expected.len() as u64,
+                "page total is not exact",
+            )?;
+            for size in [1, 2, 3, 7] {
+                let mut pages = Vec::new();
+                for offset in (0..keys.len()).step_by(size) {
+                    let mut page = plan.clone();
+                    page.depth = offset + size + 1;
+                    let result = engine.query(index, &generation, &page).await?;
+                    check(
+                        result.total == all.total,
+                        "candidate depth changed the exact total",
+                    )?;
+                    pages.extend(
+                        result
+                            .candidates
+                            .into_iter()
+                            .skip(offset)
+                            .take(size)
+                            .map(|hit| hit.document.key),
+                    );
+                }
+                check(
+                    pages == keys,
+                    "concatenated pages differ from the complete ranked list",
+                )?;
+            }
+        }
+        engine.drop_generation(index, &generation).await?;
+        Ok(())
+    }
     /// A fresh corpus verifies every mandatory engine behavior using isolated generations.
     ///
     /// The fixture uses three-dimensional dense vectors when semantic checks are enabled.
@@ -220,6 +305,7 @@ pub mod conformance {
         let first = GenerationId::new("conformance_a")?;
         let second = GenerationId::new("conformance_b")?;
         let settings = index.index_settings();
+        page_slices(&engine, &index, &settings).await?;
         let original_generation = engine.current_generation(index.name).await?;
         engine.create_generation(&index, &settings, &first).await?;
         check(
