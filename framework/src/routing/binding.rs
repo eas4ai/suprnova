@@ -1088,7 +1088,8 @@ pub(crate) fn missing_answer_handler(handler: Arc<BoxedHandler>) -> Arc<BoxedHan
 /// the middleware's result when that result is a 404, so every middleware
 /// outside it, the global ones included, sees it on its way out.
 pub(crate) fn missing_answer_middleware(middleware: BoxedMiddleware) -> BoxedMiddleware {
-    Arc::new(move |request: Request, next: Next| {
+    let original = middleware.clone();
+    let wrapped: BoxedMiddleware = Arc::new(move |request: Request, next: Next| {
         let middleware = middleware.clone();
         Box::pin(async move {
             match request.missing_answer().cloned() {
@@ -1096,7 +1097,9 @@ pub(crate) fn missing_answer_middleware(middleware: BoxedMiddleware) -> BoxedMid
                 None => middleware(request, next).await,
             }
         })
-    })
+    });
+    crate::middleware::inherit_identity(&original, &wrapped);
+    wrapped
 }
 
 /// Box a `missing()` handler the way a route handler is boxed, keeping its
