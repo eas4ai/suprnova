@@ -1,8 +1,0 @@
-<!doctype html>
-<html lang="en">
-<head><title>{{ title }}</title></head>
-<body>
-<p id="app">{% if let Ok(name) = "app_name"|value::<&str> %}{{ name }}{% else %}no app name{% endif %}</p>
-<p id="viewer">{% if let Ok(viewer) = "viewer"|value::<String> %}{{ viewer }}{% else %}nobody{% endif %}</p>
-</body>
-</html>
