@@ -8,8 +8,9 @@
 //! already completed with a value or an error. A panicking destructor proves the host or
 //! component is in an undefined state, which is more severe than the failure it had reported.
 
+use crate::panic_observer::catch_unwind_reported as catch_unwind;
 use std::future::{Future, poll_fn};
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::task::Poll;
 
@@ -183,5 +184,84 @@ mod tests {
             panicked,
         ));
         assert_eq!(after_err, Err(Outcome::Panicked));
+    }
+    #[test]
+    fn panic_observer_receives_construction_poll_and_drop_payloads() {
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = messages.clone();
+        crate::set_panic_observer(std::sync::Arc::new(move |message, kind| {
+            observed
+                .lock()
+                .expect("observer lock")
+                .push((message.to_string(), kind));
+        }))
+        .expect("register observer");
+        let _ = catch_isolated(
+            || -> super::IsolatedFuture<'static, Result<u8, ()>> {
+                panic!("observer construction")
+            },
+            map,
+            panicked,
+        );
+        let _ = block_on(run_isolated(
+            || {
+                Box::pin(async {
+                    if std::hint::black_box(true) {
+                        panic!("observer poll");
+                    }
+                    Ok::<u8, ()>(0)
+                })
+            },
+            map,
+            panicked,
+        ));
+        let _ = block_on(poll_isolated(
+            Box::pin(DropPanic {
+                output: Some(Ok::<u8, ()>(1)),
+            }),
+            map,
+            panicked,
+        ));
+        let _ = crate::panic_observer::catch_unwind_reported(std::panic::AssertUnwindSafe(|| {
+            std::panic::panic_any(17usize);
+        }));
+        let _ = crate::panic_observer::catch_unwind_observed(std::panic::AssertUnwindSafe(|| {
+            panic!("diagnostic observer panic");
+        }));
+        let messages = messages.lock().expect("observer lock");
+        for expected in [
+            "observer construction",
+            "observer poll",
+            "drop panic",
+            "non-string panic payload",
+        ] {
+            assert!(
+                messages
+                    .iter()
+                    .any(|(message, kind)| message == expected
+                        && *kind == crate::PanicKind::Operation),
+                "missing {expected:?} in {messages:?}"
+            );
+        }
+        assert!(
+            messages
+                .iter()
+                .any(|(message, kind)| message == "diagnostic observer panic"
+                    && *kind == crate::PanicKind::Observer)
+        );
+        drop(messages);
+        crate::set_panic_observer(std::sync::Arc::new(|_, _| panic!("broken observer")))
+            .expect("replace observer");
+        let outcome = block_on(run_isolated(
+            || -> super::IsolatedFuture<'static, Result<u8, ()>> { panic!("still isolated") },
+            map,
+            panicked,
+        ));
+        assert_eq!(
+            outcome,
+            Err(Outcome::Panicked),
+            "a broken observer must not unwind the engine"
+        );
+        crate::set_panic_observer(std::sync::Arc::new(|_, _| {})).expect("clear observer");
     }
 }

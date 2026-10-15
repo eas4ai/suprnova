@@ -51,7 +51,9 @@
 //! carries `Cache-Control: no-store` and a `Content-Security-Policy` that
 //! allows no script.
 
-use std::borrow::Cow;
+#[cfg(test)]
+use super::redaction::redact_url_passwords;
+use super::redaction::{REDACTED, header_value_is_secret, names_a_secret, redact_text};
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
@@ -75,21 +77,6 @@ type Body = BoxBody<Bytes, Infallible>;
 /// `script-src` is needed to forbid them.
 const CONTENT_SECURITY_POLICY: &str =
     "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
-
-/// What a redacted value is shown as.
-const REDACTED: &str = "[redacted]";
-
-/// A header or query parameter whose name contains one of these, in any
-/// letter case, has its value redacted.
-const SECRET_NAME_PARTS: &[&str] = &["token", "secret", "password", "key", "signature"];
-
-/// Headers whose values are always redacted.
-const CREDENTIAL_HEADERS: &[&str] = &[
-    "authorization",
-    "proxy-authorization",
-    "cookie",
-    "set-cookie",
-];
 
 tokio::task_local! {
     /// The request being served with debug on, and what the server learns
@@ -795,135 +782,6 @@ impl Html {
         }
         self
     }
-}
-
-/// Whether a header's value is redacted on the page.
-fn header_value_is_secret(name: &str) -> bool {
-    CREDENTIAL_HEADERS
-        .iter()
-        .any(|credential| name.eq_ignore_ascii_case(credential))
-        || names_a_secret(name)
-}
-
-/// Whether `name` contains `token`, `secret`, `password`, `key` or
-/// `signature`, in any letter case.
-fn names_a_secret(name: &str) -> bool {
-    let name = name.to_lowercase();
-    SECRET_NAME_PARTS.iter().any(|part| name.contains(part))
-}
-
-/// `text` with every secret the page must not show replaced: the value of
-/// each parameter whose name names a secret
-/// ([`redact_secret_parameters`]), and the password of each URL
-/// ([`redact_url_passwords`]).
-///
-/// Every value the page shows from the request or the error goes through
-/// this, not only the query: a `Referer`, an `X-Original-URI` or an
-/// error message can carry the same URL.
-fn redact_text(text: &str) -> Cow<'_, str> {
-    match redact_secret_parameters(text) {
-        Cow::Borrowed(text) => redact_url_passwords(text),
-        Cow::Owned(text) => Cow::Owned(redact_url_passwords(&text).into_owned()),
-    }
-}
-
-/// Whether `c` ends a parameter's name, looking back from its `=`.
-fn ends_parameter_name(c: char) -> bool {
-    c.is_ascii_whitespace()
-        || matches!(
-            c,
-            '?' | '&' | ';' | ',' | '#' | '/' | '"' | '\'' | '<' | '>' | '`'
-        )
-}
-
-/// Whether `c` ends a parameter's value. A value may hold `=`, `,`, `/`
-/// and `?`, so none of them ends it.
-fn ends_parameter_value(c: char) -> bool {
-    c.is_ascii_whitespace() || matches!(c, '&' | ';' | '#' | '"' | '\'' | '<' | '>' | '`')
-}
-
-/// `text` with the value of every `name=value` parameter whose name
-/// contains `token`, `secret`, `password`, `key` or `signature` replaced.
-///
-/// It reads parameters wherever they stand: in a URL's query, a bare
-/// query string, matrix parameters after `;`, a fragment such as
-/// `#access_token=...`, or a `key=value` list. Names are
-/// percent-decoded before they are checked, so `api%5Fkey` counts. A
-/// parameter that only looks like one is redacted too: hiding a value
-/// that was not secret costs less than showing one that was.
-fn redact_secret_parameters(text: &str) -> Cow<'_, str> {
-    if !text.contains('=') {
-        return Cow::Borrowed(text);
-    }
-    let mut redacted = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(equals) = rest.find('=') {
-        let (before, from_equals) = rest.split_at(equals);
-        let value_and_rest = &from_equals[1..];
-        // Every delimiter is one ASCII byte, so `at + 1` is a boundary.
-        let name_start = before.rfind(ends_parameter_name).map_or(0, |at| at + 1);
-        let name = decoded_parameter_name(&before[name_start..]);
-        let value_end = value_and_rest
-            .find(ends_parameter_value)
-            .unwrap_or(value_and_rest.len());
-        redacted.push_str(before);
-        redacted.push('=');
-        if value_end > 0 && names_a_secret(&name) {
-            redacted.push_str(REDACTED);
-        } else {
-            redacted.push_str(&value_and_rest[..value_end]);
-        }
-        rest = &value_and_rest[value_end..];
-    }
-    redacted.push_str(rest);
-    Cow::Owned(redacted)
-}
-
-/// A parameter name, percent-decoded the way a query string is.
-fn decoded_parameter_name(raw: &str) -> String {
-    url::form_urlencoded::parse(raw.as_bytes())
-        .next()
-        .map(|(name, _)| name.into_owned())
-        .unwrap_or_default()
-}
-
-/// `text` with the password of every `scheme://user:password@host` URL
-/// replaced, and the rest of the URL kept readable.
-///
-/// A URL runs from `://` to the next whitespace or quote. Its user info
-/// ends at the last `@` in it and the password starts after the first `:`
-/// in the user info, so a password holding an unencoded `/`, `?` or `#`,
-/// as generated secrets often do, is still found. A URL whose path holds
-/// both `:` and `@` loses more than its password; that over-redaction is
-/// the safe side.
-fn redact_url_passwords(text: &str) -> Cow<'_, str> {
-    if !text.contains("://") {
-        return Cow::Borrowed(text);
-    }
-    let mut redacted = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find("://") {
-        let (head, tail) = rest.split_at(at + 3);
-        redacted.push_str(head);
-        let end = tail
-            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`'))
-            .unwrap_or(tail.len());
-        let url = &tail[..end];
-        let credentials = url
-            .rfind('@')
-            .and_then(|at_sign| url[..at_sign].find(':').map(|colon| (colon, at_sign)));
-        match credentials {
-            Some((colon, at_sign)) => {
-                redacted.push_str(&url[..=colon]);
-                redacted.push_str(REDACTED);
-                redacted.push_str(&url[at_sign..]);
-            }
-            None => redacted.push_str(url),
-        }
-        rest = &tail[end..];
-    }
-    redacted.push_str(rest);
-    Cow::Owned(redacted)
 }
 
 /// Whether one of the `Accept` values lists `text/html`.

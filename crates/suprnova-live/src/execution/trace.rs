@@ -1,6 +1,7 @@
 //! Closed execution phases exposed to host-neutral tracing.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use crate::panic_observer::catch_unwind_observed as catch_unwind;
+use std::panic::AssertUnwindSafe;
 
 /// One ordered boundary in an accepted Live operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

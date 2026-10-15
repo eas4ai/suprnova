@@ -12,6 +12,7 @@ categories = ["web-programming::http-server", "asynchronous"]
 readme = "README.md"
 
 [dependencies]
+sentry = { version = "0.49", optional = true, default-features = false, features = ["reqwest", "rustls", "backtrace", "logs"] }
 askama = "=0.16.0"
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["full"] }
@@ -342,6 +343,7 @@ xattr = { version = "1.6.1", optional = true }
 
 [features]
 default = [
+    "reporting-sentry",
     "testing",
     "filesystem",
     "database-sqlite",
@@ -358,6 +360,7 @@ default = [
 # drivers; a feature at all so a minimal profile carries no AWS signing code.
 # It takes `filesystem` because large jobs overflow onto a disk, and opendal's
 # S3 service already brings the same reqsign crates.
+reporting-sentry = ["dep:sentry"]
 queue-sqs = ["filesystem", "dep:reqsign-aws-v4", "dep:reqsign-core", "dep:reqsign-file-read-tokio"]
 # Exposes framework test hooks such as encryption-key installation, a
 # force-the-next-encrypt-call-to-fail switch, and request query overrides.

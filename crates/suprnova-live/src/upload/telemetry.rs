@@ -1,6 +1,7 @@
 //! Closed, redacted telemetry for upload cleanup reconciliation.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use crate::panic_observer::catch_unwind_observed as catch_unwind;
+use std::panic::AssertUnwindSafe;
 
 use crate::identity::UnixMillis;
 

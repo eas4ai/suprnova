@@ -33,6 +33,8 @@ pub mod host;
 /// Validated protocol and snapshot identity types.
 pub mod identity;
 mod isolation;
+mod panic_observer;
+pub use panic_observer::{PanicKind, PanicObserverError, set_panic_observer};
 /// Tier-independent instance revision authority and the complete Tier 0 provider.
 pub mod ledger;
 /// Resource limits applied at external boundaries.

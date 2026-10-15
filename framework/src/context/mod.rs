@@ -82,6 +82,7 @@ use std::sync::{Arc, RwLock};
 /// reason the hidden bag exists.
 #[derive(Default, Clone)]
 pub struct ContextStore {
+    pub(crate) reporting: crate::reporting::scope::ReportScope,
     data: Arc<DashMap<String, Value>>,
     hidden: Arc<DashMap<String, Value>>,
     query: Arc<DashMap<String, String>>,
@@ -109,6 +110,7 @@ impl ContextStore {
             q.insert(k, v);
         }
         Self {
+            reporting: Default::default(),
             data: Arc::new(DashMap::new()),
             hidden: Arc::new(DashMap::new()),
             query: Arc::new(q),
@@ -129,6 +131,7 @@ impl ContextStore {
             Arc::new(map)
         };
         Self {
+            reporting: Default::default(),
             data: fill(&snapshot.data),
             hidden: fill(&snapshot.hidden),
             query: Arc::new(DashMap::new()),
