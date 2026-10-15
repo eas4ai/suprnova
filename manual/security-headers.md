@@ -48,8 +48,8 @@ no headers.
 | `X-Frame-Options` | `DENY` | `SAMEORIGIN` | `SAMEORIGIN` |
 | `X-Content-Type-Options` | `nosniff` | `nosniff` | `nosniff` |
 | `Referrer-Policy` | `no-referrer` | `strict-origin-when-cross-origin` | `strict-origin-when-cross-origin` |
-| `Permissions-Policy` | `camera=(), microphone=(), geolocation=(), payment=(), usb=(), accelerometer=(), gyroscope=(), magnetometer=(), browsing-topics=(), display-capture=()` | Same as strict | Omitted |
-| `Cross-Origin-Opener-Policy` | `same-origin` | `same-origin` | Omitted |
+| `Permissions-Policy` | `camera=(), microphone=(), geolocation=(), payment=(), usb=(), accelerometer=(), gyroscope=(), magnetometer=(), browsing-topics=(), display-capture=()` | Strict's list without `payment=()` | Omitted |
+| `Cross-Origin-Opener-Policy` | `same-origin` | `same-origin-allow-popups` | Omitted |
 | `Cross-Origin-Embedder-Policy` | `require-corp` | Omitted | Omitted |
 | `Cross-Origin-Resource-Policy` | `same-origin` | `same-site` | Omitted |
 
@@ -62,10 +62,15 @@ default-src 'self'; script-src 'nonce-N' 'strict-dynamic'; style-src 'self' 'non
 Balanced's CSP is:
 
 ```text
-default-src 'self'; script-src 'self' 'nonce-N' 'strict-dynamic'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'
+default-src 'self'; script-src 'self' 'nonce-N'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'
 ```
 
-`N` represents the fresh request nonce. Balanced permits inline style
+`N` represents the fresh request nonce. Balanced runs script files from the
+application's own origin, such as the Live components' scripts under
+`/suprnova-ui/`, and any script that carries the nonce. An inline script an
+attacker injects carries no nonce and is blocked. Strict adds
+`'strict-dynamic'` and drops `'self'`, so under strict every script tag needs
+the nonce, the Live components' tags included. Balanced permits inline style
 attributes because components and kits use them. Adding a nonce to `style-src`
 would disable that permission. Strict requires authorized style elements and
 does not permit inline style attributes.
@@ -211,18 +216,34 @@ value:
 
 The same shape authorizes an analytics tag or a script you host yourself. An
 Askama view outside Inertia can receive `CspNonce::current()` as a field. Copy
-the nonce only from the current request. Script access may also require
-`connect-src`, `frame-src` or image permissions for the service's actual
-origins; configure those in your custom CSP. Consult the service's integration
-requirements when choosing them.
+the nonce only from the current request.
 
-To permit a script by origin instead, replace `script-src` in a custom policy
-and omit `'strict-dynamic'`, which causes supporting browsers to ignore origin
-allowlists when the policy contains a nonce. For example:
+The nonce lets the script run. What the script then loads still meets the
+rest of the policy, and the balanced policy's `default-src 'self'` blocks
+another origin's frames, API calls and the scripts it loads itself. Stripe.js,
+for example, also needs its own origin, its frames and its API. Add them to a
+custom policy that keeps the nonce:
 
 ```rust,ignore
 let csp = suprnova::ContentSecurityPolicy::new(
-    "default-src 'self'; script-src 'self' https://analytics.example.com; object-src 'none'; base-uri 'self'; frame-ancestors 'self'",
+    "default-src 'self'; script-src 'self' 'nonce-{nonce}' https://js.stripe.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https:; connect-src 'self' https://api.stripe.com; frame-src https://js.stripe.com https://hooks.stripe.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'",
+)?;
+let headers = suprnova::SecurityHeaders::balanced().content_security_policy(Some(csp));
+```
+
+Balanced leaves `payment` out of `Permissions-Policy`, so Stripe's Apple Pay
+and Google Pay buttons work, and sends `Cross-Origin-Opener-Policy:
+same-origin-allow-popups`, so a popup sign-in or checkout window can report
+back to the page. Strict turns both off.
+
+To permit another origin's scripts without a nonce on each tag, add the origin
+to `script-src` in a custom policy. Under strict this does not work:
+`'strict-dynamic'` makes supporting browsers ignore origin allowlists, so give
+the tag the nonce instead. For example:
+
+```rust,ignore
+let csp = suprnova::ContentSecurityPolicy::new(
+    "default-src 'self'; script-src 'self' 'nonce-{nonce}' https://analytics.example.com; object-src 'none'; base-uri 'self'; frame-ancestors 'self'",
 )?;
 let headers = suprnova::SecurityHeaders::balanced().content_security_policy(Some(csp));
 ```

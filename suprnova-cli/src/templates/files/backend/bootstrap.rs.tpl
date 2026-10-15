@@ -112,7 +112,8 @@ pub async fn register() {
 /// stale client), locale and CSRF after the session they both depend on,
 /// and the request timeout between the Inertia layer and CSRF.
 pub fn register_http_stack() {
-    try_register_http_stack().expect("Invalid HTTP middleware configuration");
+    try_register_http_stack()
+        .expect("HTTP stack: check the SECURITY_HEADERS settings; production also needs a built frontend manifest");
 }
 
 /// Keep invalid security configuration visible to callers that can return errors.

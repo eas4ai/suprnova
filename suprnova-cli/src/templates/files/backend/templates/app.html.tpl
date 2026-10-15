@@ -6,9 +6,8 @@
     {# The application's own head content goes here: a favicon, fonts, meta tags. #}
     {{ title }}
     {{ head }}
-    {% if let Some(nonce) = nonce %}
-    <!-- An application script: <script nonce="{{ nonce }}" src="/js/app.js"></script> -->
-    {% endif %}
+    {# An application script runs under the page's policy with the request's nonce:
+       {% if let Some(nonce) = nonce %}<script nonce="{{ nonce }}" src="/js/app.js"></script>{% endif %} #}
   </head>
   <body>
     {{ body }}

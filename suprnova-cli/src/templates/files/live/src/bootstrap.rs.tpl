@@ -90,7 +90,8 @@ pub async fn register() {
 /// page too; and CSRF last, so its `419` reaches the error page on the way
 /// out.
 pub fn register_http_stack() {
-    try_register_http_stack().expect("Invalid HTTP middleware configuration");
+    try_register_http_stack()
+        .expect("HTTP stack: check the SECURITY_HEADERS settings");
 }
 
 /// Keep invalid security configuration visible to callers that can return errors.
