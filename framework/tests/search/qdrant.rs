@@ -800,9 +800,11 @@ async fn weighted_hybrid_and_semantic_fake_vectors_qdrant() {
                 .create_generation(index, &settings, generation)
                 .await
                 .unwrap();
+            // "b" is one token longer than "a": BM25 saturation then orders the
+            // lexical leg deterministically instead of leaving a tie to Qdrant.
             let mut docs = vec![
                 document(index, "a", "apple orchard", 1),
-                document(index, "b", "green apple", 2),
+                document(index, "b", "green apple basket", 2),
                 document(index, "c", "purple banana", 3),
             ];
             for doc in &mut docs {
@@ -822,6 +824,13 @@ async fn weighted_hybrid_and_semantic_fake_vectors_qdrant() {
             engine.index(index, generation, &docs).await.unwrap();
             let q = query(engine, index, generation, "apple").await;
             let vector = fake.embed_query("purple banana").await.unwrap().dense;
+            // The lexical leg is the built-in BM25 sparse ranking, so the native
+            // reference below fuses the same two legs the engine fuses.
+            let sparse = SearchRegistry::embedder_named(index.name, "bm25")
+                .unwrap()
+                .embed_sparse_query("apple")
+                .await
+                .unwrap();
             let lexical = engine
                 .hybrid(index, generation, &q, &vector, 0.0)
                 .await
@@ -850,8 +859,11 @@ async fn weighted_hybrid_and_semantic_fake_vectors_qdrant() {
                     qb::QueryPointsBuilder::new(&collection)
                         .prefetch(vec![
                             qb::PrefetchQueryBuilder::default()
-                                .query(vector.clone())
-                                .using("dense")
+                                .query(qb::Query::from(qb::VectorInput::new_sparse(
+                                    sparse.indices.clone(),
+                                    sparse.values.clone(),
+                                )))
+                                .using("sparse")
                                 .filter(engine.render_filter(index, generation, &q).await.unwrap())
                                 .limit(100u64)
                                 .build(),
