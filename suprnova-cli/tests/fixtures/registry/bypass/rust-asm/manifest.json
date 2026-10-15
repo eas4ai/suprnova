@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-asm",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}

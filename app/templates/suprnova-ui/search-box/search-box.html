@@ -1,0 +1,32 @@
+{# A scoped search island. Only core-escaped formatted fields cross trusted_html. #}
+{% import "suprnova-ui/search-input/search-input.html" as search_input %}
+{% macro search_box(name, label, query, hits, facets, filters, impression, sequence=0, control_id="query") %}
+<sn-search-box class="sn-search-box" live:key="{{ name }}-search-box" live:preserve.self>
+<label for="{{ control_id }}">{{ label }}</label>
+{% call search_input::search_input(name, "Search", query, "", true, control_id) %}{% endcall %}
+<p id="{{ control_id }}-hint">Use the arrow keys to choose a result and Enter to select it.</p>
+<p id="{{ control_id }}-error" role="status" aria-live="polite"></p>
+<input type="hidden" name="sequence" value="{{ sequence }}" live:model.debounce.250ms="sequence" data-sn-search-sequence>
+<input type="hidden" name="selection" value="" live:model="selection" data-sn-search-selection>
+<input type="hidden" name="position" value="0" live:model="position" data-sn-search-position>
+<button type="button" live:click="select" data-sn-search-select hidden>Select result</button>
+<ul class="sn-search-box-listbox" id="{{ control_id }}-listbox" role="listbox" aria-label="{{ label }} results" data-sn-query="{{ query }}" data-sn-sequence="{{ sequence }}" data-sn-impression="{{ impression }}" live:key="{{ control_id|live_key_digest }}-listbox" hidden>
+{% for hit in hits %}
+<li class="sn-search-box-option" id="{{ control_id }}-option-{{ hit.key()|live_key_digest }}" role="option" aria-selected="false" data-sn-key="{{ hit.key() }}" data-sn-position="{{ loop.index0 }}" live:key="{{ hit.key()|live_key_digest }}">
+{% for field in hit.formatted() %}<span class="sn-search-box-field">{% let markup = hit.highlight(field.0)? %}{{ markup|trusted_html }}</span>{% endfor %}
+{% if hit.formatted().is_empty() %}{{ hit.key() }}{% endif %}
+</li>
+{% endfor %}
+</ul>
+{% if !filters.is_empty() %}
+<button type="button" live:key="{{ control_id|live_key_digest }}-clear-filters" live:click="clear_filters">Clear filters</button>
+{% endif %}
+{% if !facets.is_empty() %}
+<fieldset class="sn-search-box-facets"><legend>Filter results</legend>
+{% for facet in facets %}
+<label><input type="checkbox" name="filters" value="{{ facet.filter }}"{% if filters.contains(facet.filter|ref) %} checked{% endif %} data-suprnova-live-collection live:key="{{ facet.filter|live_key_digest }}" live:model="filters"> {{ facet.attribute }}: {{ facet.label }} ({{ facet.count }})</label>
+{% endfor %}
+</fieldset>
+{% endif %}
+</sn-search-box>
+{% endmacro %}
