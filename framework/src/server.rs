@@ -1620,14 +1620,15 @@ async fn dispatch_chain(
     let secure = request.secure();
     let visit = Arc::new(crate::inertia::visit::Visit::capture(&request));
     let decision = crate::inertia::ServerErrorDecision::prepare(&request);
-    // Boxed, as the request future is in `handle_request_with_peer`: this
-    // future holds the chain's and the decision's, and each of the three
-    // dispatch sites would otherwise carry a copy of it on the stack of the
-    // task that polls the request, which overflows with debug on.
-    Box::pin(crate::security_headers::scope_response(
+    // Boxed before the security scope holds it, as the request future is in
+    // `handle_request_with_peer`: this future holds the chain's and the
+    // decision's, and the scope's wrappers and each of the three dispatch
+    // sites would otherwise carry a copy of it on the stack of the task that
+    // polls the request, which overflows with debug on.
+    crate::security_headers::scope_response(
         security_headers,
         secure,
-        crate::inertia::visit::scope(visit, async move {
+        Box::pin(crate::inertia::visit::scope(visit, async move {
             let response =
                 execute_chain_safely(chain, request, handler, method, path, request_id.clone())
                     .await;
@@ -1657,8 +1658,8 @@ async fn dispatch_chain(
             } else {
                 decided.header("X-Request-Id", request_id.as_str())
             }
-        }),
-    ))
+        })),
+    )
     .await
 }
 
@@ -1778,7 +1779,14 @@ async fn handle_ws_upgrade(
     crate::security_headers::scope_server_response(
         middleware_registry.security_headers(),
         secure,
-        handle_ws_upgrade_inner(req, ws_match, middleware_registry, peer_ip, live_metadata),
+        // Boxed, so the scope's wrappers hold a pointer, not the upgrade.
+        Box::pin(handle_ws_upgrade_inner(
+            req,
+            ws_match,
+            middleware_registry,
+            peer_ip,
+            live_metadata,
+        )),
     )
     .await
 }

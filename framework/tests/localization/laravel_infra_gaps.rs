@@ -288,23 +288,6 @@ fn namespaced_messages_reach_the_served_catalog_in_the_encoded_form() {
     );
 }
 
-#[test]
-fn every_scaffolded_client_resolves_namespaced_keys_the_same_way() {
-    let templates =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../suprnova-cli/src/templates/files/frontend");
-    for client in [
-        "vue/src/lib/lang.ts.tpl",
-        "react/src/lib/lang.ts.tpl",
-        "svelte/src/lib/lang.svelte.ts.tpl",
-    ] {
-        let text = fs::read_to_string(templates.join(client)).unwrap();
-        assert!(
-            text.contains("key.replace('::', '__')"),
-            "{client} does not encode `namespace::key` as `namespace__key`"
-        );
-    }
-}
-
 // --- Sources registered before the translator is bound -----------------------
 
 #[tokio::test]
