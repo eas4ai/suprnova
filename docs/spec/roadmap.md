@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: security-headers
+Current: error-reporting
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -1287,3 +1287,36 @@ Requirements: SEC-001, SEC-002, SEC-003, SEC-004, SEC-005, SEC-006, RDOC-005
    bound to a violating example before the start. Done when every
    requirement has a current pass on a committed tree and the review is
    recorded.
+
+## error-reporting
+
+Requirements: REPORT-001, REPORT-002, REPORT-003, REPORT-004, REPORT-005, REPORT-006, REPORT-007, REPORT-008, REPORT-009, REPORT-010
+
+58. error-reporting - Rustrak support, which the developer named on
+   2026-10-15 ("https://github.com/rustrak/rustrak add this next before
+   finishing search and include it with the security headers fix in the
+   next release"), with logs, traces and browser reporting included
+   ("yes"). In the order the work depends:
+   - the `Reporter` trait with the `sentry`, `log` and `null` drivers, the
+     `sentry` driver on the official `sentry` crate behind the default
+     `reporting-sentry` feature and inert without a DSN (REPORT-001)
+   - reporting every unhandled error the framework catches, Laravel's
+     helpers and suppression settings (REPORT-002), the event's metadata
+     and breadcrumbs (REPORT-003), one redaction shared with the debug page
+     (REPORT-004), a bounded background queue with dedupe and a shutdown
+     flush (REPORT-005), opt-in logs and transactions (REPORT-006)
+   - browser reporting in the kits, `SecurityHeaders` allowing the
+     tracker's origin (REPORT-007); the `docker:compose` Rustrak service and
+     the env rows (REPORT-008); the manual chapter (REPORT-009); the
+     standing gate container and the real-delivery tests (REPORT-010)
+   Delivery: `framework/src/reporting/` with crate-root re-exports, the
+   shared redaction in `framework/src/error/`, Live's panic observer and
+   browser reporter, the three Inertia kits' lazy SDK loading, the
+   `docker:compose` option, the integration test binary `error_reporting`
+   under `framework/tests/`, `manual/error-reporting.md` linked from
+   `manual/documentation.md`, `manual/env-vars.md` rows and changelog
+   entries under the open version. Mechanism: `error-reporting` (the
+   `error_reporting` binary, the scaffold tests named `report_`, and the
+   ignored tests ending in `_rustrak` against the standing Rustrak), bound
+   to a violating example before the start. Done when every requirement
+   has a current pass on a committed tree and the review is recorded.

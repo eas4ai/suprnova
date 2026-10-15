@@ -107,6 +107,7 @@ rather than duplicates.
 | Serving under a path prefix (the trusted `X-Forwarded-Prefix`, one public root for every browser URL, cookie paths and cache keys; issue #142) | PFX | path-prefix.md | Agreed |
 | Inertia root template (an application-owned first-visit document, per-request choice, view data, the nonce; issue #143) | RDOC | inertia-root-template.md | RDOC-001 to RDOC-004 and RDOC-006 Agreed 2026-10-07, RDOC-002 revised 2026-10-08; RDOC-005 Agreed 2026-10-15 |
 | Security headers (a built-in middleware for CSP with nonces, HSTS and the rest; issue #143's last item) | SEC | security-headers.md | Agreed 2026-10-15 |
+| Error reporting (a `Reporter` trait with a Sentry-protocol driver for Rustrak, Sentry and GlitchTip, every unhandled error reported, scrubbing, bounded delivery, opt-in logs and traces, browser reporting in the kits) | REPORT | error-reporting.md | Agreed 2026-10-15 |
 | Images (EXIF orientation, metadata stripping, and the rest of Laravel's Image API; issue #145) | IMG | images.md | Agreed |
 | Running on a Laravel database (the whole database Laravel 13 created: Laravel's layouts for the framework's tables, the application's data, and sharing the database with a Laravel application; issue #141) | LDB | laravel-database.md | Agreed |
 | Data cache (the developer's original design: query results keyed by hash, deleted by writes to their tables, triggered by the route; apart from any rendering; built with the search work) | QCACHE | data-cache.md | Draft |
