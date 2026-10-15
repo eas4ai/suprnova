@@ -288,6 +288,10 @@ A Complete page under a nonce CSP renders on every request. RenderCache never
 stores that complete rendering, since replaying it would reuse a nonce. A
 stitched Live document can be cached: each hit fills its nonce holes and
 nonce-bearing headers with the current request's nonce, so body and CSP agree.
+After a nonce policy is enabled, an entry published without it must render
+again and replace the stored entry before replay. A stitched page with no
+nonce-bearing content can then replay as Complete; it still records that it
+was published under the nonce policy.
 See [RenderCache](render-cache.md).
 
 ### Why Suprnova diverges

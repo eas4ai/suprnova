@@ -975,11 +975,11 @@ impl RenderCacheMiddleware {
             LookupOutcome::Miss.record();
             return render_and_publish(runtime, request, next, policy, job, 0).await;
         };
-        // A stitched route may already hold a Complete entry published
-        // before a nonce policy was enabled. It cannot be replayed either.
-        if crate::CspNonce::current().is_some() && found.complete().is_some() {
-            LookupOutcome::Bypass.record();
-            return Ok(next(request).await);
+        // Nonce holes are not evidence of publication under this policy:
+        // even an empty document must be republished once, then may replay.
+        if crate::CspNonce::current().is_some() && !found.header().published_with_nonce_policy {
+            LookupOutcome::Miss.record();
+            return render_and_publish(runtime, request, next, policy, job, 0).await;
         }
 
         let coherence = match coherence(runtime, job.key(), policy, found.header()).await {
@@ -2332,9 +2332,11 @@ async fn render_and_publish(
             match lookup(runtime, policy, job.key()).await {
                 Ok(Some(found)) => {
                     // A concurrent leader may have rendered without this
-                    // request's policy. Waiting does not make its Complete
-                    // rendering reusable under a nonce policy.
-                    if crate::CspNonce::current().is_some() && found.complete().is_some() {
+                    // request's policy. Waiting does not authorize replay of
+                    // a rendering published without a nonce policy.
+                    if crate::CspNonce::current().is_some()
+                        && !found.header().published_with_nonce_policy
+                    {
                         LookupOutcome::Bypass.record();
                         return Ok(next(request).await);
                     }
@@ -2849,10 +2851,21 @@ async fn lead_render(
             return Ok(response);
         }
     };
-    // A stitched publisher can return Complete when the document contains
-    // neither slots nor nonce holes. The outer policy still forbids storing
-    // that finished rendering, even before its CSP reaches the response.
-    if crate::CspNonce::current().is_some() && matches!(entry, DecodedEntry::Complete(_)) {
+    // A stitched document without nonce-bearing content may store as Complete.
+    // Hand-built pages without a Live capture must still never store a nonce
+    // in their body or any replayable header, before the outer CSP is added.
+    if let Some(nonce) = crate::CspNonce::current().filter(|nonce| !nonce.is_empty())
+        && let DecodedEntry::Complete(complete) = &entry
+        && (complete
+            .body()
+            .windows(nonce.len())
+            .any(|bytes| bytes == nonce.as_bytes())
+            || complete
+                .header()
+                .headers
+                .iter()
+                .any(|(_, value)| value.contains(&nonce)))
+    {
         LookupOutcome::Declined(LookupDeclineReason::NonceSourcePolicy).record();
         let _ = runtime.coordinator.release(lease).await;
         return Ok(response);
@@ -3772,6 +3785,7 @@ fn entry_header(
         .collect();
     let safe_headers = SafeHeaders::from_pairs(safe_pairs).ok()?;
     Some(EntryHeader {
+        published_with_nonce_policy: crate::CspNonce::current().is_some(),
         key: job.key().clone(),
         class,
         variance: job.variance().clone(),
@@ -4323,6 +4337,7 @@ mod tests {
     fn entry_for(key: &RenderKey) -> CompleteEntry {
         CompleteEntry::new(
             EntryHeader {
+                published_with_nonce_policy: false,
                 key: key.clone(),
                 class: RepresentationClass::PublicShared,
                 variance: VarianceDescriptor::new(),

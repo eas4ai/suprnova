@@ -88,6 +88,7 @@ fn entry_with(
 ) -> CompleteEntry {
     CompleteEntry::new(
         EntryHeader {
+            published_with_nonce_policy: false,
             key: RenderKey::for_test(keys, pattern),
             class: RepresentationClass::PublicShared,
             variance,

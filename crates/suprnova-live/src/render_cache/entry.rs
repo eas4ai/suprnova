@@ -16,14 +16,10 @@ use crate::crypto::SnapshotKeyRing;
 
 /// Entry format version.
 ///
-/// Bump this whenever ANY stored shape changes, including adding a field to a
-/// segment kind or to a header. `decode` refuses an entry whose version is not
-/// this one, so the bump is what makes an older build reject a newer entry
-/// outright instead of understanding half of it. The segment types are serde
-/// enums without `deny_unknown_fields`, so a field added without a bump is
-/// silently dropped by an older build, which is exactly the half-understood
-/// entry this version gate exists to prevent.
-pub const ENTRY_FORMAT_VERSION: u16 = 1;
+/// Bump this whenever a stored shape changes, so older builds reject shapes
+/// they cannot fully enforce. The decoder also accepts version 1 and treats
+/// every such entry as published without a nonce policy.
+pub const ENTRY_FORMAT_VERSION: u16 = 2;
 const MAGIC: &[u8; 4] = b"SNRC";
 
 /// Decoding bounds.
@@ -173,6 +169,11 @@ impl Validator {
 /// Everything about a Complete entry except its body.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EntryHeader {
+    /// Prevent replay under a nonce policy unless the original render used one,
+    /// even when that render produced no nonce-bearing tags or header holes.
+    /// Missing in legacy entries, which must render again under a nonce policy.
+    #[serde(default)]
+    pub published_with_nonce_policy: bool,
     /// Lookup key.
     #[serde(with = "render_key_serde")]
     pub key: RenderKey,
@@ -490,7 +491,7 @@ pub fn decode(
         return Err(invalid());
     }
     let version = u16::from_be_bytes([bytes[4], bytes[5]]);
-    if version != ENTRY_FORMAT_VERSION {
+    if version != 1 && version != ENTRY_FORMAT_VERSION {
         return Err(RenderCacheError::new(
             RenderCacheErrorKind::EntryUnsupported,
         ));
@@ -536,7 +537,10 @@ pub fn decode(
         EntryKind::Complete => {
             let header: EntryHeader =
                 serde_json::from_slice(header_bytes).map_err(|_| invalid())?;
-            let header = rebuild_header(header, limits)?;
+            let mut header = rebuild_header(header, limits)?;
+            if version == 1 {
+                header.published_with_nonce_policy = false;
+            }
             let entry = CompleteEntry::new(header, body);
             if entry.validator() != &Validator::Strong(stored_digest) {
                 return Err(invalid());
@@ -546,7 +550,10 @@ pub fn decode(
         EntryKind::Composite => {
             let composite: CompositeHeader =
                 serde_json::from_slice(header_bytes).map_err(|_| invalid())?;
-            let header = rebuild_header(composite.entry, limits)?;
+            let mut header = rebuild_header(composite.entry, limits)?;
+            if version == 1 {
+                header.published_with_nonce_policy = false;
+            }
             // A Composite entry is only ever produced for the shell-stitched
             // class; a header claiming any other class is not a defect the
             // integrity tag could ever have caught (a valid tag only proves
@@ -681,6 +688,7 @@ mod tests {
     fn complete_entry(keys: &SnapshotKeyRing) -> CompleteEntry {
         CompleteEntry::new(
             EntryHeader {
+                published_with_nonce_policy: false,
                 key: RenderKey::for_test(keys, "/kind-byte"),
                 class: RepresentationClass::PublicShared,
                 variance: VarianceDescriptor::new(),
@@ -698,6 +706,36 @@ mod tests {
             },
             Bytes::from_static(b"<!doctype html><html><body>hi</body></html>"),
         )
+    }
+
+    #[test]
+    fn nonce_publication_flag_round_trips_and_legacy_entries_default_to_false() {
+        let keys = keys();
+        let mut header = complete_entry(&keys).header().clone();
+        header.published_with_nonce_policy = true;
+        let entry = CompleteEntry::new(header.clone(), Bytes::from_static(b"no nonce tags"));
+        let encoded = encode(&entry, &keys).expect("encode current entry");
+        assert!(
+            decode(&encoded, &keys, &EntryLimits::default())
+                .unwrap()
+                .header()
+                .published_with_nonce_policy
+        );
+
+        let mut legacy_header = serde_json::to_value(header).unwrap();
+        legacy_header
+            .as_object_mut()
+            .unwrap()
+            .remove("published_with_nonce_policy");
+        let mut legacy =
+            super::encode_raw_header_for_test(&legacy_header, entry.body(), &keys).to_vec();
+        legacy[4..6].copy_from_slice(&1_u16.to_be_bytes());
+        let signed_len = legacy.len() - 32;
+        let mac = integrity(&keys, &legacy[..signed_len]);
+        legacy[signed_len..].copy_from_slice(&mac);
+        let decoded =
+            decode(&Bytes::from(legacy), &keys, &EntryLimits::default()).expect("legacy decode");
+        assert!(!decoded.header().published_with_nonce_policy);
     }
 
     /// The format defines exactly two kind bytes. Any other byte is refused

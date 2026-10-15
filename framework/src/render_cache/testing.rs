@@ -681,6 +681,7 @@ pub async fn publish_bare_entry_for_test(
     let runtime = super::RenderCache::runtime().expect("RenderCache installed");
     let key = RenderKey::for_test(&runtime.keys, fixture_pattern);
     let header = EntryHeader {
+        published_with_nonce_policy: false,
         key: key.clone(),
         class,
         variance: VarianceDescriptor::new(),

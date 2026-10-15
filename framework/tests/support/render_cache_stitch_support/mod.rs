@@ -79,6 +79,9 @@ pub mod filters {
 /// per-principal markup.
 pub const STITCHED_PATH: &str = "/stitch/dashboard";
 
+/// A Live document without bootstrap tags, links or islands needs no nonce holes.
+pub const NONCE_FREE_PATH: &str = "/stitch/nonce-free";
+
 /// A stitched shell around one public-seed island. Nothing in the document
 /// is principal-specific, so the whole document is a Complete representation
 /// even under the stitched class - the case that proves declaring the class
@@ -404,6 +407,13 @@ pub async fn boot_with_security_headers() -> Arc<Harness> {
     boot_configured(generous_freshness(), Providers::Embedded, true).await
 }
 
+/// Refresh the server snapshot after enabling policy, preserving its warmed cache.
+pub fn enable_security_headers(harness: &mut Harness) {
+    suprnova::middleware::register_global_middleware(suprnova::SecurityHeaders::balanced());
+    suprnova::middleware::register_global_middleware(RequestNonceMarker);
+    harness.middleware = Arc::new(MiddlewareRegistry::from_global());
+}
+
 struct RequestNonceMarker;
 
 #[async_trait::async_trait]
@@ -612,6 +622,42 @@ async fn boot_configured(
             .try_render_cache(path, stitched_policy(freshness))
             .unwrap_or_else(|_| panic!("attach stitched render cache policy for {path}"));
     }
+
+    let nonce_free_mount =
+        LiveMount::<DogfoodCounter>::public_seed(NONCE_FREE_PATH, "counter", "nonce-free")
+            .expect("declare nonce-free route");
+    router = router
+        .get(NONCE_FREE_PATH, |request: Request| async move {
+            increment(&HANDLER_RENDERS, NONCE_FREE_PATH);
+            let result = (|| {
+                let document =
+                    LiveDocument::from_request(&request).map_err(FrameworkError::from)?;
+                let empty = TrustedHtml::framework_static(
+                    "",
+                    TrustedMarkupReason::new("empty nonce-free fixture").expect("reason"),
+                )
+                .expect("empty markup");
+                document
+                    .render(
+                        dogfood_view()?,
+                        &DogfoodDocument {
+                            bootstrap: &empty,
+                            island: &empty,
+                        },
+                        DocumentResponseIntent::html(StatusCode::OK)
+                            .map_err(|_| FrameworkError::internal("response intent"))?,
+                        AssetSet::empty(),
+                    )
+                    .map_err(FrameworkError::from)
+            })();
+            into_response(result)
+        })
+        .into();
+    router = router
+        .try_live_mount(&nonce_free_mount)
+        .expect("register nonce-free mount")
+        .try_render_cache(NONCE_FREE_PATH, stitched_policy(generous_freshness()))
+        .expect("nonce-free cache policy");
 
     let mut render_cache_config = RenderCacheConfig::from_env()
         .expect("the test environment configures a valid render cache")
