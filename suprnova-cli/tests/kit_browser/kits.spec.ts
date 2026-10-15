@@ -269,7 +269,8 @@ test('PAR-079: instant Notes/Show renders row props and useRemember restores sea
   await expect(search).toHaveValue('Kit note');
   const link = rows(page).first();
   const href = (await link.getAttribute('href'))!;
-  const title = (await link.locator('span').innerText()).trim();
+  // The row's title span; a highlighted title nests another span inside it.
+  const title = (await link.locator('span').first().innerText()).trim();
   const pathname = new URL(href, page.url()).pathname;
   const delayed = await hold(page, `**${pathname}`, request => request.method() === 'GET');
   // Dispatch the click without hovering: a warmed prefetch would hide an
@@ -340,8 +341,11 @@ test('PAR-079/080: creating a note preserves the active search and matching rows
   await search.fill(term);
   await search.press('Tab');
   await filtered;
-  await expect(rows(page)).toHaveCount(1);
+  // Search ranks every note that shares a word with the term, the exact
+  // title first, so the list holds more than the one match.
+  await expect(rows(page).first()).toContainText(term);
   await expect(rows(page).filter({ hasText: term })).toHaveCount(1);
+  const matching = await rows(page).count();
 
   const form = page.locator('form').filter({ has: page.locator('#title') });
   const delayed = await hold(page, '**/notes', request => request.method() === 'POST');
@@ -356,8 +360,8 @@ test('PAR-079/080: creating a note preserves the active search and matching rows
   await expect(page).toHaveURL(url => url.pathname === '/notes'
     && url.searchParams.get('search') === term);
   await expect(search).toHaveValue(term);
-  await expect(rows(page)).toHaveCount(1);
-  await expect(rows(page).filter({ hasText: term })).toHaveCount(1);
+  await expect(rows(page)).toHaveCount(matching);
+  await expect(rows(page).first()).toContainText(term);
   await expect(rows(page).filter({ hasText: 'Created outside the search' })).toHaveCount(0);
 });
 
