@@ -413,6 +413,38 @@ fn payload_text(payload: &(dyn Any + Send)) -> Option<&str> {
         .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
 }
 
+/// Let a catch boundary own its panic instead of queueing a second report.
+pub(crate) fn in_panic_boundary() -> bool {
+    LAST_PANIC.try_with(|_| ()).is_ok()
+}
+
+/// Keep the hook location available until a caught Live panic is reported.
+pub(crate) fn recorded_panic_location(message: &str) -> Option<String> {
+    LAST_PANIC
+        .try_with(|slot| {
+            let hooked = slot.take();
+            let location = hooked
+                .as_ref()
+                .filter(|panic| {
+                    panic
+                        .message
+                        .as_deref()
+                        .unwrap_or("non-string panic payload")
+                        == message
+                })
+                .map(|panic| panic.location.clone());
+            slot.set(hooked);
+            location
+        })
+        .ok()
+        .flatten()
+}
+
+/// Observe panics outside a request before an application starts work.
+pub(crate) fn install_reporting_hook() {
+    install_location_hook();
+}
+
 #[cfg(test)]
 mod tests {
     //! The rules of the report itself: how a chain is walked, how each
@@ -589,33 +621,4 @@ mod tests {
         .await;
         assert!(caught.is_ok(), "the engine already contained the panic");
     }
-}
-
-pub(crate) fn in_panic_boundary() -> bool {
-    LAST_PANIC.try_with(|_| ()).is_ok()
-}
-
-pub(crate) fn recorded_panic_location(message: &str) -> Option<String> {
-    LAST_PANIC
-        .try_with(|slot| {
-            let hooked = slot.take();
-            let location = hooked
-                .as_ref()
-                .filter(|panic| {
-                    panic
-                        .message
-                        .as_deref()
-                        .unwrap_or("non-string panic payload")
-                        == message
-                })
-                .map(|panic| panic.location.clone());
-            slot.set(hooked);
-            location
-        })
-        .ok()
-        .flatten()
-}
-
-pub(crate) fn install_reporting_hook() {
-    install_location_hook();
 }
