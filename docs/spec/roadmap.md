@@ -1250,3 +1250,40 @@ Delivers backlog item magick-driver-keeps-the-accounts-user-policy: The magick d
 Requirements: PAR-192
 
 Delivers backlog item framework-frames-under-a-live-action: The deeper issue behind defect 122c1056 (Shawn 2026-10-11 19:55: make sure the bigger issue is notated): in a debug build the framework's own frames below a Live action use about 1.75 to 1.8 MiB of stack before the action runs (measured by lane k under gdb: about 930 KB in the hyper server, after-response and task-local frames, about 360 KB in the Live endpoint and executor, most of the rest in the session and RenderCache middleware; registration overflows at RUST_MIN_STACK=1.75 MiB inside its first email-regex compile). The 8 MiB runtime thread stack the main macro now sets gives actions room; it does not make the frames smaller. Fix: box the large futures and shrink the frames in the server, the middleware chain and the Live engine so a debug build runs a Live action within Tokio's 2 MiB default, with a measurement in the test suite that fails when the frames below an action grow past a budget.
+
+## security-headers
+
+Requirements: SEC-001, SEC-002, SEC-003, SEC-004, SEC-005, SEC-006, RDOC-005
+
+57. security-headers - the last item of issue #143, which the developer put
+   ahead of the search work on 2026-10-15 ("143 should have already been
+   done before search"; the search commitment was superseded the same
+   morning). In the order the work depends:
+   - the `SecurityHeaders` middleware on the framework's own `Middleware`
+     trait, with strict, balanced and relaxed presets, configured from the
+     environment or a builder, outermost of the global middleware (SEC-001),
+     and every header SEC-002 names, HSTS decided by `Request::secure`
+   - a fresh nonce for every HTML request under a nonce policy, readable by
+     application code and views, and stamped on every script and script or
+     style link the framework writes: the Inertia document with its
+     `csp-nonce` meta element, the development preamble, `Vite::tags`, the
+     `Head` facade's links and Live's bootstrap (SEC-003, RDOC-005);
+     RenderCache's stitched hits take that nonce instead of minting one
+   - route and group overrides, a response's own header winning (SEC-004);
+     nonce pages rendered on every request (SEC-005); the manual (SEC-006)
+   The data cache the 2026-10-05 draft tied to nonce pages moved to the
+   search work ("ok let's move it", 2026-10-15).
+   Delivery: `framework/src/security_headers/` with crate-root re-exports;
+   the nonce read by the Inertia writer, the root template's `nonce` part,
+   `Vite::tags`, the `Head` facade, `LiveBootstrapOptions` and RenderCache's
+   stitch; every kit's scaffold registering the balanced preset with nonces
+   as its outermost global middleware, mirrored in `scaffold_snapshot`; the
+   dogfood application; the integration test binary `security_headers`
+   under `framework/tests/`; `manual/security-headers.md` linked from
+   `manual/documentation.md`, `manual/env-vars.md` rows, the upgrade guide
+   and changelog entries under the open version. Mechanisms:
+   `security-headers` (the `security_headers` binary and the scaffold tests
+   named `sec_`) and `inertia-root-template` extended to RDOC-005, each
+   bound to a violating example before the start. Done when every
+   requirement has a current pass on a committed tree and the review is
+   recorded.

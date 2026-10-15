@@ -1,6 +1,6 @@
 # Inertia root template
 
-Status: Agreed 2026-10-07 (RDOC-005 Draft)
+Status: Agreed 2026-10-07 (RDOC-005 Agreed 2026-10-15)
 Prefix: RDOC
 
 Drafted 2026-10-05 from issue #143 (an application-owned root document for
@@ -12,10 +12,11 @@ independent reader the same day and again at `c34ee7b15`, where no cited
 file had changed. RDOC-001 to RDOC-004 and RDOC-006 are built in the
 Inertia protocol commitment (the parity rows RF-01, RS-02, RS-05 and BL-04,
 ruled on 2026-10-07); RDOC-005 takes the request's nonce from SEC-003, so it
-is built in the commitment that builds security headers (SEC) and the data
-cache. Laravel adapter references cite
+is built in the commitment that builds security headers (SEC). Laravel adapter references cite
 `reference/inertia-laravel-2.0.25/src/`; Inertia client references cite
-`reference/inertia-3.7.1/packages/core/src/`.
+`reference/inertia-3.7.1/packages/core/src/`. Those trees have since been
+replaced by `reference/inertia-laravel-3.5.1/` and `reference/inertia-3.8.0/`;
+the section observed at `16d607aad` cites the new ones.
 
 ## Observed at 2bd4bd53d
 
@@ -78,6 +79,42 @@ Status: Observed
   every page is titled `Suprnova` (`framework/src/inertia/config.rs:519`).
   The scaffold's Dockerfile copies `cmd/` and `src/` and no `templates/`
   (`suprnova-cli/src/templates/files/docker/Dockerfile.tpl:55-56`).
+
+## Observed at 16d607aad, for RDOC-005
+
+Status: Observed
+
+Re-checked on 2026-10-15, after RDOC-001 to RDOC-004 and RDOC-006 were built.
+
+- `build_html_response` writes the default document
+  (`framework/src/inertia/response.rs:3052-3157`, its head at `3103-3122`);
+  a root template is chosen at `response.rs:1701-1717`. Neither writes a
+  `csp-nonce` meta element (`response.rs:3103-3122`;
+  `framework/src/inertia/root_template.rs:276-288`).
+- The root template's `nonce` part exists and is always `None`
+  (`root_template.rs:137-139,236`); the scaffold's root template places
+  `{{ head }}` (`suprnova-cli/src/templates/files/backend/templates/app.html.tpl:8`).
+- The Vite tags come from `vite::shell_tags` (`response.rs:3064`) and carry
+  no nonce: the development preamble (`framework/src/inertia/vite.rs:237-245`),
+  modulepreload (`vite.rs:298`), scripts (`vite.rs:316-318`) and stylesheets
+  (`vite.rs:320-322`). The public `Vite::tags` and `Vite::to_html`
+  (`vite.rs:57-78`) write the same tags for pages outside Inertia.
+- The `Head` facade writes into the document head (`response.rs:3168-3170`),
+  including `rel=preload` hints and custom links
+  (`framework/src/view/head/render.rs:272-281`;
+  `framework/src/view/head/builder.rs:1243,1349-1355`), with no nonce.
+- The scaffold entries already read `<meta property="csp-nonce">` and pass
+  its nonce to `createInertiaApp`
+  (`suprnova-cli/src/templates/files/frontend/react/src/main.tsx.tpl:16-33`;
+  `svelte/src/main.ts.tpl:18-42`; `vue/src/main.ts.tpl:23-42`). The Inertia
+  client stamps that nonce on the styles it injects
+  (`reference/inertia-3.8.0/packages/core/src/dialog.ts:54-57`;
+  `progress-component.ts:290-293`).
+- Live's bootstrap stamps a caller's nonce on its scripts
+  (`framework/src/live/assets.rs:141-146,594-612`) but not on its
+  modulepreload, preload and stylesheet links (`assets.rs:520,527,546`).
+- Error pages render through the root template choice with the captured
+  request (`framework/src/inertia/error_page_middleware.rs:232,289,492`).
 
 ## Requirements
 
@@ -144,7 +181,7 @@ client injects.
 Falsifier: under a nonce policy, a `<script>` that is not `type="application/json"`, or a `<link>` with rel `stylesheet`, `modulepreload` or `preload`, that the framework writes into an Inertia first visit, an Inertia error page or a Live bootstrap whose caller names no nonce lacks `nonce` equal to the request's (in development with the React preamble, production, the legacy fallback, ESM, classic, and with the suprnova-ui base); the document lacks `<meta property="csp-nonce">` carrying the request's nonce; or a scaffold entry does not pass that nonce to `createInertiaApp`.
 Mechanism: `inertia-root-template`.
 Rationale: Vite's runtime reads its nonce from that meta element and the Inertia client from `createInertiaApp`'s options; without them a scaffold under a nonce policy renders unstyled in development and loses code-split CSS in production.
-Status: Draft
+Status: Agreed 2026-10-15
 
 [RDOC-006] Error pages rendered through Inertia MUST use the root template
 the chooser picks for the captured request, without view data, since the
