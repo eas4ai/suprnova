@@ -5,7 +5,7 @@
 //! Middleware order matters. Requests flow through the stack top-to-bottom;
 //! responses travel back bottom-to-top:
 //!
-//!   TimeoutMiddleware -> BearerTokenMiddleware -> IncludeMiddleware -> handlers
+//!   SecurityHeaders -> TimeoutMiddleware -> BearerTokenMiddleware -> IncludeMiddleware -> handlers
 //!
 //! # Switching databases
 //!
@@ -23,8 +23,8 @@
 //! extra config.
 
 use suprnova::{
-    BearerTokenMiddleware, DB, IncludeMiddleware, MagnetarConfig, PasskeyConfig,
-    boot::initialize_crypt_or_exit, global_middleware, init_magnetar,
+    BearerTokenMiddleware, DB, FrameworkError, IncludeMiddleware, MagnetarConfig, PasskeyConfig,
+    SecurityHeaders, boot::initialize_crypt_or_exit, global_middleware, init_magnetar,
 };
 
 /// Register global middleware and services.
@@ -50,9 +50,21 @@ pub async fn register() {
         .await
         .expect("Failed to initialize Magnetar");
 
+    register_http_stack();
+}
+
+/// Reject invalid security configuration before accepting requests.
+pub fn register_http_stack() {
+    try_register_http_stack().expect("HTTP stack: check the SECURITY_HEADERS settings");
+}
+
+/// Let embedders report invalid security configuration as a boot error.
+pub fn try_register_http_stack() -> Result<(), FrameworkError> {
+    global_middleware!(SecurityHeaders::from_env()?);
+
     // Request timeout - a 30-second ceiling on the time to a response, so a
     // slow handler or a hung query cannot hold a connection open
-    // indefinitely; past it the request answers `503`. First, so it bounds
+    // indefinitely; past it the request answers `503`. Before authentication, so it bounds
     // the token lookup and every handler, a handler's read of the request
     // body included. Streaming responses (SSE) and WebSocket upgrades are
     // exempt by design - see `suprnova::timeout`. A per-route
@@ -68,4 +80,5 @@ pub async fn register() {
     // ?fields[type]=field1,field2 query parameters into task-locals
     // so Resource::collection / Resource::single can resolve them.
     global_middleware!(IncludeMiddleware);
+    Ok(())
 }

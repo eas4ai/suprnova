@@ -39,18 +39,14 @@ fn a_dangling_symlink_at_the_project_path_is_refused() {
 
 /// Scaffolds `name` with `frontend` under `dir` and returns its path.
 fn scaffold(dir: &std::path::Path, name: &str, frontend: &str) -> std::path::PathBuf {
-    let output = Command::new(BIN)
-        .args([
-            "new",
-            name,
-            "--no-interaction",
-            "--no-git",
-            "--frontend",
-            frontend,
-        ])
-        .current_dir(dir)
-        .output()
-        .expect("spawn");
+    let mut command = Command::new(BIN);
+    command.args(["new", name, "--no-interaction", "--no-git"]);
+    if frontend == "api" {
+        command.arg("--api");
+    } else {
+        command.args(["--frontend", frontend]);
+    }
+    let output = command.current_dir(dir).output().expect("spawn");
     assert!(
         output.status.success(),
         "`suprnova new {name} --frontend {frontend}` failed:\n{}{}",
@@ -67,7 +63,7 @@ fn scaffold(dir: &std::path::Path, name: &str, frontend: &str) -> std::path::Pat
 #[test]
 fn sec_001_a_new_project_registers_security_headers_outermost() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    for frontend in ["svelte", "react", "vue", "live"] {
+    for frontend in ["svelte", "react", "vue", "live", "api"] {
         let name = format!("guarded-{frontend}");
         let project = scaffold(tmp.path(), &name, frontend);
         let bootstrap = std::fs::read_to_string(project.join("src/bootstrap.rs"))
@@ -89,7 +85,7 @@ fn sec_001_a_new_project_registers_security_headers_outermost() {
 #[test]
 fn sec_001_each_kit_configures_headers_and_explains_application_scripts() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    for frontend in ["svelte", "react", "vue", "live"] {
+    for frontend in ["svelte", "react", "vue", "live", "api"] {
         let project = scaffold(tmp.path(), &format!("policy-{frontend}"), frontend);
         let bootstrap =
             std::fs::read_to_string(project.join("src/bootstrap.rs")).expect("bootstrap source");
@@ -97,7 +93,7 @@ fn sec_001_each_kit_configures_headers_and_explains_application_scripts() {
             bootstrap.contains("SecurityHeaders::from_env()"),
             "{frontend}"
         );
-        if frontend != "live" {
+        if !["live", "api"].contains(&frontend) {
             let template =
                 std::fs::read_to_string(project.join("templates/app.html")).expect("root template");
             assert!(template.contains("Some(nonce)"), "{frontend}");
@@ -116,6 +112,7 @@ fn sec_001_environment_templates_select_balanced_headers_without_preload() {
     for template in [
         include_str!("../src/templates/files/root/env.tpl"),
         include_str!("../src/templates/files/root/env.example.tpl"),
+        include_str!("../src/templates/files/api/.env.tpl"),
     ] {
         for setting in [
             "SECURITY_HEADERS=balanced",
