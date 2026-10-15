@@ -11,6 +11,7 @@ async fn sec_004_route_and_group_can_change_or_disable_every_header() {
     let _scope = super::policies::production();
     let names = [
         "content-security-policy",
+        "content-security-policy-report-only",
         "strict-transport-security",
         "x-frame-options",
         "x-content-type-options",
@@ -33,7 +34,14 @@ async fn sec_004_route_and_group_can_change_or_disable_every_header() {
             .middleware(override_policy);
         let client = TestClient::new(
             router,
-            MiddlewareRegistry::new().append(SecurityHeaders::strict()),
+            MiddlewareRegistry::new().append(
+                SecurityHeaders::strict()
+                    .header(
+                        "content-security-policy-report-only",
+                        Some("script-src 'nonce-{nonce}'"),
+                    )
+                    .unwrap(),
+            ),
         );
         for path in ["https://localhost/group", "https://localhost/route"] {
             let response = client.get(path).send().await;
@@ -253,4 +261,133 @@ async fn sec_004_route_and_group_can_disable_generated_reporting_endpoints() {
                 .contains("report-to")
         );
     }
+}
+
+#[tokio::test]
+async fn sec_004_removing_report_only_keeps_the_enforcing_policy_and_nonce() {
+    let _scope = super::policies::production();
+    let router = Router::new()
+        .get("/", |request: Request| async move {
+            Ok(HttpResponse::html(request.csp_nonce().unwrap_or_default()))
+        })
+        .middleware(
+            SecurityHeadersOverride::new()
+                .header("Content-Security-Policy-Report-Only", None)
+                .unwrap(),
+        );
+    let response = TestClient::new(
+        router,
+        MiddlewareRegistry::new().append(SecurityHeaders::strict()),
+    )
+    .get("/")
+    .send()
+    .await;
+    assert_eq!(
+        response.body_text().len(),
+        22,
+        "enforcing CSP still requires a nonce"
+    );
+    assert!(
+        response
+            .header("content-security-policy")
+            .expect("enforcing policy")
+            .contains(&response.body_text())
+    );
+    assert!(
+        response
+            .header("content-security-policy-report-only")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn sec_004_enforcing_and_report_only_policies_change_independently() {
+    let _scope = super::policies::production();
+    for via_route in [false, true] {
+        for removed in [
+            None,
+            Some("content-security-policy"),
+            Some("content-security-policy-report-only"),
+        ] {
+            let mut router: Router = Router::new()
+                .get("/", |request: Request| async move {
+                    Ok(HttpResponse::html(request.csp_nonce().unwrap_or_default()))
+                })
+                .into();
+            if let Some(name) = removed.filter(|_| via_route) {
+                router = router
+                    .get("/override", |request: Request| async move {
+                        Ok(HttpResponse::html(request.csp_nonce().unwrap_or_default()))
+                    })
+                    .middleware(SecurityHeadersOverride::new().header(name, None).unwrap())
+                    .into();
+            }
+            let mut policy = SecurityHeaders::strict()
+                .header(
+                    "Content-Security-Policy-Report-Only",
+                    Some("script-src 'nonce-{nonce}'; object-src 'none'"),
+                )
+                .unwrap();
+            if let Some(name) = removed.filter(|_| !via_route) {
+                policy = policy.header(name, None).unwrap();
+            }
+            let response = TestClient::new(router, MiddlewareRegistry::new().append(policy))
+                .get(if removed.is_some() && via_route {
+                    "/override"
+                } else {
+                    "/"
+                })
+                .send()
+                .await;
+            let nonce = response.body_text();
+            assert_eq!(nonce.len(), 22);
+            for name in [
+                "content-security-policy",
+                "content-security-policy-report-only",
+            ] {
+                if removed == Some(name) {
+                    assert!(response.header(name).is_none());
+                } else {
+                    assert!(
+                        response
+                            .header(name)
+                            .unwrap_or_else(|| panic!("missing {name}"))
+                            .contains(&format!("'nonce-{nonce}'"))
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn sec_004_route_can_add_a_report_only_nonce_policy_on_its_own() {
+    let _scope = super::policies::production();
+    let router = Router::new()
+        .get("/", |request: Request| async move {
+            Ok(HttpResponse::html(request.csp_nonce().unwrap_or_default()))
+        })
+        .middleware(
+            SecurityHeadersOverride::new()
+                .header(
+                    "content-security-policy-report-only",
+                    Some("script-src 'nonce-{nonce}'"),
+                )
+                .unwrap(),
+        );
+    let response = TestClient::new(
+        router,
+        MiddlewareRegistry::new().append(SecurityHeaders::relaxed()),
+    )
+    .get("/")
+    .send()
+    .await;
+    assert!(response.header("content-security-policy").is_none());
+    assert_eq!(response.body_text().len(), 22);
+    assert!(
+        response
+            .header("content-security-policy-report-only")
+            .unwrap()
+            .contains(&response.body_text())
+    );
 }
