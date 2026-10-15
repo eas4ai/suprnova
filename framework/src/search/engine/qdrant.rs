@@ -419,7 +419,7 @@ impl QdrantSearchEngine {
             .query(query)
             .filter(filter)
             .limit(depth as u64)
-            .with_payload(true);
+            .with_payload(hit_payload(index));
         if let Some(using) = using {
             builder = builder.using(using);
         }
@@ -575,7 +575,7 @@ impl QdrantSearchEngine {
         let mut builder = qb::QueryPointsBuilder::new(collection)
             .prefetch(prefetch.prefetch)
             .limit(depth)
-            .with_payload(true);
+            .with_payload(hit_payload(index));
         if let Some(query) = prefetch.query {
             builder = builder.query(query);
         }
@@ -624,7 +624,7 @@ impl QdrantSearchEngine {
                 .prefetch(prefetch.prefetch.clone())
                 .limit(256)
                 .offset(offset)
-                .with_payload(true);
+                .with_payload(hit_payload(index));
             if let Some(query) = &prefetch.query {
                 builder = builder.query(query.clone());
             }
@@ -1163,6 +1163,20 @@ fn payload(
     data.insert("__embed_text".into(), json!(doc.document.embed_text));
     data.insert("__title".into(), json!(doc.document.title));
     Payload::try_from(Value::Object(data)).map_err(|e| error(index.name, e))
+}
+/// A hit decodes from these fields alone (see [`decode_document`]). Each
+/// point also carries the search copies of its text and its word lists for
+/// filtering; selecting the fields keeps those on the server instead of
+/// sending them with every candidate of every query.
+fn hit_payload(index: &IndexDescriptor) -> qb::with_payload_selector::SelectorOptions {
+    let mut fields = vec![
+        "__key".to_owned(),
+        "__source_version".to_owned(),
+        "__embed_text".to_owned(),
+        "__title".to_owned(),
+    ];
+    fields.extend(index.attributes.iter().map(|attr| attr.name.to_owned()));
+    qb::with_payload_selector::SelectorOptions::Include(qb::PayloadIncludeSelector { fields })
 }
 fn decode_document(
     index: &IndexDescriptor,
@@ -1775,7 +1789,7 @@ impl SearchEngine for QdrantSearchEngine {
                     .query(query)
                     .filter(scope.clone())
                     .limit(q.depth.saturating_mul(2) as u64)
-                    .with_payload(true),
+                    .with_payload(hit_payload(index)),
             )
             .await;
         let candidates = match response {
