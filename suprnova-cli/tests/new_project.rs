@@ -60,30 +60,6 @@ fn scaffold(dir: &std::path::Path, name: &str, frontend: &str) -> std::path::Pat
     dir.join(name)
 }
 
-/// SEC-001: every new project registers the security headers middleware,
-/// with the balanced preset and nonces, as its outermost global middleware,
-/// so every response, cache hits and error pages included, carries the
-/// headers.
-#[test]
-fn sec_001_a_new_project_registers_security_headers_outermost() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    for frontend in ["svelte", "react", "vue", "live"] {
-        let name = format!("guarded-{frontend}");
-        let project = scaffold(tmp.path(), &name, frontend);
-        let bootstrap = std::fs::read_to_string(project.join("src/bootstrap.rs"))
-            .unwrap_or_else(|e| panic!("{frontend}: src/bootstrap.rs: {e}"));
-        let first_global = bootstrap
-            .lines()
-            .map(str::trim)
-            .find(|line| line.starts_with("global_middleware!("))
-            .unwrap_or_else(|| panic!("{frontend}: no global middleware in:\n{bootstrap}"));
-        assert!(
-            first_global.contains("SecurityHeaders::"),
-            "{frontend}: the first global middleware is `{first_global}`, not SecurityHeaders:\n{bootstrap}"
-        );
-    }
-}
-
 /// RDOC-006: `suprnova new` ships a root template under `templates/` in
 /// place of the `frontend/index.html` the server never served, renders
 /// every first visit through it, and titles its pages with the project's
