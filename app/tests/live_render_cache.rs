@@ -1,7 +1,7 @@
-//! The dogfood public document is served from the RenderCache and its
-//! cached seed still promotes, and the dogfood dashboard is served as a
-//! stitched document: one shared shell whose islands are re-mounted for
-//! whoever is asking.
+//! The default nonce policy renders Complete pages afresh. Cache-behavior
+//! fixtures explicitly select relaxed security to prove Complete entry
+//! contracts, while the default dashboard keeps its nonce-bearing stitched
+//! shell and re-mounts islands for whoever is asking.
 //!
 //! Ruling R78: asserting only that the route responds would pass whether the
 //! representation was stored or silently declined, so every claim here is
@@ -28,17 +28,61 @@ mod test_environment;
 
 use hyper::{Method, StatusCode};
 use live_support::{
-    ActionSpec, action_request, advance_clock_ms, decoded_snapshot, empty, get, idempotency,
-    invoke, island_tag, render_counter, request, seed_session, seed_session_named, send, setup_app,
-    setup_app_on_the_database_profile, setup_app_with_clock,
+    ActionSpec, CacheBoot, Reply, action_request, advance_clock_ms, decoded_snapshot, empty, get,
+    idempotency, invoke, island_tag, render_counter, request, seed_session, seed_session_named,
+    send, setup_app, setup_app_with_clock, setup_app_with_security_headers,
 };
 use serde_json::Value;
+use suprnova::SecurityHeaders;
 use suprnova::render_cache::console::{epoch_advance_report_for_test, inspect_report_for_test};
 use suprnova::render_cache::{EntryKind, RenderCache, RepresentationClass};
 
+fn assert_document_nonce(response: &Reply) -> &str {
+    let nonce = response
+        .header("content-security-policy")
+        .and_then(|policy| policy.split_once("'nonce-"))
+        .and_then(|(_, rest)| rest.split_once('\''))
+        .map(|(nonce, _)| nonce)
+        .expect("the application declares a request nonce");
+    let html = response.text();
+    assert!(html.contains(&format!("nonce=\"{nonce}\"")));
+    for attribute in html.split("nonce=\"").skip(1) {
+        assert_eq!(attribute.split('"').next(), Some(nonce));
+    }
+    nonce
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sec_005_default_balanced_complete_pages_render_on_every_request() {
+    let app = setup_app(2).await;
+    let before = render_counter::renders();
+    let first = get(&app, "/live/public", None).await;
+    let second = get(&app, "/live/public", None).await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text());
+    assert_eq!(second.status, StatusCode::OK, "{}", second.text());
+    assert_eq!(render_counter::renders(), before + 2);
+    assert_ne!(
+        assert_document_nonce(&first),
+        assert_document_nonce(&second)
+    );
+    assert!(
+        RenderCache::inspect_route_for_test("/live/public")
+            .await
+            .is_none()
+    );
+    assert_eq!(
+        RenderCache::store_inspection()
+            .await
+            .expect("store inspection")
+            .entries,
+        0
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_public_document_is_a_hit_whose_seed_still_promotes() {
-    let app = setup_app(4).await;
+    let app =
+        setup_app_with_security_headers(4, CacheBoot::FromEnv, SecurityHeaders::relaxed()).await;
 
     // 1. The first anonymous request renders.
     let before = render_counter::renders();
@@ -265,6 +309,12 @@ async fn the_dashboard_is_stitched_per_principal_from_one_shared_shell() {
     let before = render_counter::renders();
     let second = get(&app, "/live", Some(&bob)).await;
     assert_eq!(second.status, StatusCode::OK, "{}", second.text());
+    let first_nonce = assert_document_nonce(&first);
+    let second_nonce = assert_document_nonce(&second);
+    assert_ne!(
+        first_nonce, second_nonce,
+        "each request authorizes fresh scripts"
+    );
     assert_eq!(
         render_counter::renders(),
         before + 1,
@@ -315,9 +365,9 @@ async fn the_dashboard_is_stitched_per_principal_from_one_shared_shell() {
         rest
     };
     assert_eq!(
-        shell(&first.text()),
-        shell(&second.text()),
-        "the two documents differ only in their island tags"
+        shell(&first.text()).replace(first_nonce, "<nonce>"),
+        shell(&second.text()).replace(second_nonce, "<nonce>"),
+        "the two documents differ only in their island tags and request nonce"
     );
 
     // 5. The same login on the same session keeps the scope its island was
@@ -326,6 +376,9 @@ async fn the_dashboard_is_stitched_per_principal_from_one_shared_shell() {
     //    requests comparable at all.
     let repeat = get(&app, "/live", Some(&alice)).await;
     assert_eq!(repeat.status, StatusCode::OK, "{}", repeat.text());
+    let repeat_nonce = assert_document_nonce(&repeat);
+    assert_ne!(repeat_nonce, first_nonce);
+    assert_ne!(repeat_nonce, second_nonce);
     assert_eq!(repeat.header("cache-control"), Some("private, no-store"));
     assert_eq!(
         decoded_snapshot(island_tag(&repeat.text(), "dashboard-counter"))["body"]["scope"],
@@ -381,7 +434,8 @@ async fn the_dashboard_is_stitched_per_principal_from_one_shared_shell() {
 /// against an entry nothing invalidated, which is what makes them the proof.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_orm_write_invalidates_the_todos_document_through_generations() {
-    let app = setup_app(10).await;
+    let app =
+        setup_app_with_security_headers(10, CacheBoot::FromEnv, SecurityHeaders::relaxed()).await;
 
     // 1. The first request renders and publishes.
     let before = render_counter::renders();
@@ -501,7 +555,8 @@ fn todo_count(html: &str) -> usize {
 /// and a third visitor - who shares nothing with either - renders.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_private_document_is_cached_per_principal_and_never_crosses() {
-    let app = setup_app(10).await;
+    let app =
+        setup_app_with_security_headers(10, CacheBoot::FromEnv, SecurityHeaders::relaxed()).await;
     let ada = seed_session_named(&app, "Ada Lovelace").await;
     let grace = seed_session_named(&app, "Grace Hopper").await;
 
@@ -620,7 +675,8 @@ async fn the_private_document_is_cached_per_principal_and_never_crosses() {
 /// HEAD for the metadata alone. Neither renders.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn conditional_and_head_requests_are_answered_from_the_stored_entry() {
-    let app = setup_app(6).await;
+    let app =
+        setup_app_with_security_headers(6, CacheBoot::FromEnv, SecurityHeaders::relaxed()).await;
 
     let first = get(&app, "/live/todos", None).await;
     assert_eq!(first.status, StatusCode::OK, "{}", first.text());
@@ -667,7 +723,8 @@ async fn conditional_and_head_requests_are_answered_from_the_stored_entry() {
 /// downstream mistakes it for current - and refreshed behind the request.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_service_is_marked_and_rebuilt_in_the_background() {
-    let app = setup_app_with_clock(8).await;
+    let app =
+        setup_app_with_security_headers(8, CacheBoot::TestClock, SecurityHeaders::relaxed()).await;
 
     // 1. Publish, at the clock's starting reading.
     let before = render_counter::renders();
@@ -730,7 +787,9 @@ async fn stale_service_is_marked_and_rebuilt_in_the_background() {
 /// boot can produce.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_database_profile_serves_a_hit_through_the_sql_stores() {
-    let app = setup_app_on_the_database_profile(6).await;
+    let app =
+        setup_app_with_security_headers(6, CacheBoot::DatabaseProfile, SecurityHeaders::relaxed())
+            .await;
 
     let before = render_counter::renders();
     let first = get(&app, "/live/todos", None).await;
@@ -765,7 +824,8 @@ async fn the_database_profile_serves_a_hit_through_the_sql_stores() {
 /// `render-cache:epoch-advance` puts every stored entry out of reach.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_operator_commands_inspect_without_a_body_and_advance_the_epoch() {
-    let app = setup_app(8).await;
+    let app =
+        setup_app_with_security_headers(8, CacheBoot::FromEnv, SecurityHeaders::relaxed()).await;
 
     let before = render_counter::renders();
     let first = get(&app, "/live/todos", None).await;

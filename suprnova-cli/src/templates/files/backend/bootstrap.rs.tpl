@@ -28,8 +28,9 @@ use std::sync::Arc;
 #[allow(unused_imports)]
 use suprnova::{
     App, Auth, AuthConfig, AuthManager, CsrfMiddleware, DB, DevToolsConfig, EloquentUserProvider,
-    Frontend, IncludeMiddleware, Inertia, InertiaConfig, InertiaRootTemplate, OriginPolicy,
-    RootShare, SessionConfig, SessionMiddleware, bind, global_middleware, singleton,
+    FrameworkError, Frontend, IncludeMiddleware, Inertia, InertiaConfig, InertiaRootTemplate,
+    OriginPolicy, RootShare, SecurityHeaders, SessionConfig, SessionMiddleware, bind,
+    global_middleware, singleton,
 };
 
 use crate::middleware;
@@ -111,6 +112,13 @@ pub async fn register() {
 /// stale client), locale and CSRF after the session they both depend on,
 /// and the request timeout between the Inertia layer and CSRF.
 pub fn register_http_stack() {
+    try_register_http_stack().expect("Invalid HTTP middleware configuration");
+}
+
+/// Keep invalid security configuration visible to callers that can return errors.
+pub fn try_register_http_stack() -> Result<(), FrameworkError> {
+    // Outside the error pages and RenderCache so every response is protected.
+    global_middleware!(SecurityHeaders::from_env()?);
     // Global middleware (runs on every request in registration order)
     global_middleware!(middleware::LoggingMiddleware);
 
@@ -193,8 +201,7 @@ pub fn register_http_stack() {
             // enabled(false) or INERTIA_DEVTOOLS_ENABLED=false turns it off.
             .devtools(DevToolsConfig::new())
             .error_page("Error"),
-    )
-    .expect("Inertia install failed (production needs a built frontend manifest)");
+    )?;
 
     // Request timeout - a 30-second ceiling on the time to a response, so a
     // slow handler or a hung query cannot hold a connection open
@@ -240,4 +247,5 @@ pub fn register_http_stack() {
     // the user's name and the sign-out link from it. `SharedData` in
     // `src/props/shared.rs` types it for `suprnova generate-types`.
     App::inertia_share_lazy("auth", crate::props::shared::Auth::current);
+    Ok(())
 }

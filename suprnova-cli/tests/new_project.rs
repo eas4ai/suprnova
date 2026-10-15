@@ -60,6 +60,77 @@ fn scaffold(dir: &std::path::Path, name: &str, frontend: &str) -> std::path::Pat
     dir.join(name)
 }
 
+/// SEC-001: every new project registers the security headers middleware,
+/// with the balanced preset and nonces, as its outermost global middleware,
+/// so every response, cache hits and error pages included, carries the
+/// headers.
+#[test]
+fn sec_001_a_new_project_registers_security_headers_outermost() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for frontend in ["svelte", "react", "vue", "live"] {
+        let name = format!("guarded-{frontend}");
+        let project = scaffold(tmp.path(), &name, frontend);
+        let bootstrap = std::fs::read_to_string(project.join("src/bootstrap.rs"))
+            .unwrap_or_else(|e| panic!("{frontend}: src/bootstrap.rs: {e}"));
+        let first_global = bootstrap
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("global_middleware!("))
+            .unwrap_or_else(|| panic!("{frontend}: no global middleware in:\n{bootstrap}"));
+        assert!(
+            first_global.contains("SecurityHeaders::"),
+            "{frontend}: the first global middleware is `{first_global}`, not SecurityHeaders:\n{bootstrap}"
+        );
+    }
+}
+
+/// SEC-001: the generated bootstrap rejects bad environment configuration,
+/// and each Inertia root template shows how to authorize application scripts.
+#[test]
+fn sec_001_each_kit_configures_headers_and_explains_application_scripts() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for frontend in ["svelte", "react", "vue", "live"] {
+        let project = scaffold(tmp.path(), &format!("policy-{frontend}"), frontend);
+        let bootstrap =
+            std::fs::read_to_string(project.join("src/bootstrap.rs")).expect("bootstrap source");
+        assert!(
+            bootstrap.contains("SecurityHeaders::from_env()"),
+            "{frontend}"
+        );
+        if frontend != "live" {
+            let template =
+                std::fs::read_to_string(project.join("templates/app.html")).expect("root template");
+            assert!(template.contains("Some(nonce)"), "{frontend}");
+            assert!(
+                template.contains(r#"<script nonce="{{ nonce }}" src="/js/app.js"></script>"#),
+                "{frontend}: application script example needs the request nonce"
+            );
+        }
+    }
+}
+
+/// SEC-001 and SEC-002: new projects select balanced headers and leave HSTS
+/// preload and CSP enforcement changes explicit in the shipped templates.
+#[test]
+fn sec_001_environment_templates_select_balanced_headers_without_preload() {
+    for template in [
+        include_str!("../src/templates/files/root/env.tpl"),
+        include_str!("../src/templates/files/root/env.example.tpl"),
+    ] {
+        for setting in [
+            "SECURITY_HEADERS=balanced",
+            "SECURITY_HEADERS_CSP_REPORT_ONLY=false",
+            "# SECURITY_HEADERS_CSP_REPORT_TO=https://reports.example.com/csp",
+            "SECURITY_HEADERS_HSTS_PRELOAD=false",
+        ] {
+            assert!(
+                template.lines().any(|line| line == setting),
+                "missing {setting}"
+            );
+        }
+    }
+}
+
 /// RDOC-006: `suprnova new` ships a root template under `templates/` in
 /// place of the `frontend/index.html` the server never served, renders
 /// every first visit through it, and titles its pages with the project's
