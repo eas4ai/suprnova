@@ -3,6 +3,44 @@ use std::time::Duration;
 use suprnova::serde_json::json;
 use suprnova::{ReportingConfig, ReportingEvent, ReportingKind};
 
+#[derive(Debug, thiserror::Error)]
+#[error("posting the shipment failed")]
+struct ShipmentFailure {
+    #[source]
+    cause: std::io::Error,
+}
+
+#[test]
+fn report_003_outbound_event_preserves_every_error_chain_message() {
+    let (dsn, received) = receiver();
+    let config = ReportingConfig::default().dsn(dsn);
+    let driver = config.build().expect("driver");
+    let error = suprnova::FrameworkError::from_external(ShipmentFailure {
+        cause: std::io::Error::other("shipment volume is full"),
+    });
+    driver
+        .report(ReportingEvent::from_error_with_config(&error, &config))
+        .expect("report");
+    assert!(driver.flush(Duration::from_secs(3)).expect("flush"));
+    let body = String::from_utf8(
+        received
+            .recv_timeout(Duration::from_secs(1))
+            .expect("envelope"),
+    )
+    .expect("UTF-8");
+    let event: serde_json::Value =
+        serde_json::from_str(body.lines().nth(2).expect("event item")).expect("event JSON");
+    let values = event["exception"]["values"]
+        .as_array()
+        .expect("error chain");
+    for message in ["posting the shipment failed", "shipment volume is full"] {
+        assert!(
+            values.iter().any(|value| value["value"] == message),
+            "outbound chain lost {message}: {values:?}",
+        );
+    }
+}
+
 #[test]
 fn report_004_error_text_never_sends_header_or_quoted_credentials() {
     let (dsn, received) = receiver();
