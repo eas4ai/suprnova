@@ -59,13 +59,24 @@ fn term(term: &ExpandedTerm, disable_typos: bool) -> String {
     if alternatives.is_empty() {
         alternatives.push(literal(&term.original, term.prefix));
     }
+    // The prefix alternative leads its group; see `ordered_terms`.
+    alternatives.sort_by_key(|alternative| !alternative.ends_with('*'));
     format!("({})", alternatives.join(" "))
 }
 
+/// InnoDB's boolean parser, in MySQL 8.4 and MariaDB 12.3 alike, ignores a
+/// `word*` prefix term that follows a quoted term anywhere earlier in the same
+/// query: `"apple" orchard*` neither matches nor scores `orchard`, while
+/// `orchard* "apple"` does both. Boolean mode gives the order no meaning, so
+/// the prefix group is rendered first and every quoted alternative, phrase and
+/// exclusion follows it.
+fn ordered_terms(query: &ExpandedQuery) -> impl Iterator<Item = &ExpandedTerm> {
+    let (prefixed, rest): (Vec<_>, Vec<_>) = query.terms.iter().partition(|item| item.prefix);
+    prefixed.into_iter().chain(rest)
+}
+
 fn render(query: &ExpandedQuery, disable_typos: bool) -> String {
-    let mut groups = query
-        .terms
-        .iter()
+    let mut groups = ordered_terms(query)
         .map(|item| {
             format!(
                 "{}{}",
@@ -90,10 +101,8 @@ fn render(query: &ExpandedQuery, disable_typos: bool) -> String {
 }
 
 fn ranking_query(query: &ExpandedQuery, disable_typos: bool) -> String {
-    let mut groups = query
-        .terms
-        .iter()
-        .map(|item| term(item, disable_typos).trim_start_matches('+').to_owned())
+    let mut groups = ordered_terms(query)
+        .map(|item| term(item, disable_typos))
         .collect::<Vec<_>>();
     groups.extend(
         query
@@ -114,9 +123,7 @@ fn matches(columns: &[String], query: String, sql: &mut Sql) -> String {
 
 fn native_predicate(query: &ExpandedQuery, columns: &[String], sql: &mut Sql) -> String {
     let native = format!("({}) > 0", matches(columns, render(query, false), sql));
-    let optional = query
-        .terms
-        .iter()
+    let optional = ordered_terms(query)
         .filter(|item| !item.required)
         .map(|item| term(item, false))
         .collect::<Vec<_>>();
@@ -242,7 +249,43 @@ mod tests {
         .unwrap();
         assert_eq!(
             render(&query, false),
-            r#"("apple") (pie*) +"fresh baked" -"green""#
+            r#"(pie*) ("apple") +"fresh baked" -"green""#
+        );
+        assert_eq!(
+            ranking_query(&query, false),
+            r#"(pie*) ("apple") "fresh baked""#
+        );
+    }
+    #[test]
+    fn the_prefix_group_and_its_wildcard_precede_every_quoted_term() {
+        let query = ExpandedQuery {
+            terms: vec![
+                ExpandedTerm {
+                    original: "new york".into(),
+                    alternatives: vec!["new york".into(), "nyc".into()],
+                    prefix: false,
+                    required: true,
+                    typo_alternatives: vec![],
+                },
+                ExpandedTerm {
+                    original: "orch".into(),
+                    alternatives: vec!["orchid".into(), "orch".into()],
+                    prefix: true,
+                    required: false,
+                    typo_alternatives: vec!["orchid".into()],
+                },
+            ],
+            phrases: vec![vec!["fresh".into(), "baked".into()]],
+            negatives: vec!["green".into()],
+            ..ExpandedQuery::default()
+        };
+        assert_eq!(
+            render(&query, false),
+            r#"(orch* "orchid") +("new york" "nyc") +"fresh baked" -"green""#
+        );
+        assert_eq!(
+            ranking_query(&query, true),
+            r#"(orch*) ("new york" "nyc") "fresh baked""#
         );
     }
     #[test]
