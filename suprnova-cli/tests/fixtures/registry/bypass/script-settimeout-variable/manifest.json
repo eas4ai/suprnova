@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-settimeout-variable",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
