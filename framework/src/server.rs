@@ -1625,45 +1625,43 @@ async fn dispatch_chain(
     let secure = request.secure();
     let visit = Arc::new(crate::inertia::visit::Visit::capture(&request));
     let decision = crate::inertia::ServerErrorDecision::prepare(&request);
-    // Boxed before the security scope holds it, as the request future is in
-    // `handle_request_with_peer`: this future holds the chain's and the
-    // decision's, and the scope's wrappers and each of the three dispatch
-    // sites would otherwise carry a copy of it on the stack of the task that
-    // polls the request, which overflows with debug on.
+    // Boxed before the visit and security scopes hold it, as the request
+    // future is in `handle_request_with_peer`: this future holds the chain's
+    // and the decision's, and the scopes' wrappers and each of the three
+    // dispatch sites would otherwise carry a copy of it on the stack of the
+    // task that polls the request, which overflows with debug on.
+    let dispatch: futures::future::BoxFuture<'_, HttpResponse> = Box::pin(async move {
+        let response =
+            execute_chain_safely(chain, request, handler, method, path, request_id.clone()).await;
+        let Some(decision) = decision else {
+            return response;
+        };
+        // Boxed: deciding may render a page, a large future, which only
+        // the requests that reach this line pay for. Caught: the callback
+        // is application code, and a panic in it is a bug the boundary
+        // reports as the same 500 `execute_chain_safely` answers a
+        // handler's with, instead of unwinding the connection's task and
+        // closing the connection on the client.
+        let decided = match crate::logging::REQUEST_ID
+            .scope(
+                request_id.clone(),
+                crate::error::catch_panic(Box::pin(decision.decide(response))),
+            )
+            .await
+        {
+            Ok(decided) => decided,
+            Err(panic) => panic_into_response(panic, method.as_str(), path, request_id.as_str()),
+        };
+        if decided.header_value("X-Request-Id").is_some() {
+            decided
+        } else {
+            decided.header("X-Request-Id", request_id.as_str())
+        }
+    });
     crate::security_headers::scope_response(
         security_headers,
         secure,
-        Box::pin(crate::inertia::visit::scope(visit, async move {
-            let response =
-                execute_chain_safely(chain, request, handler, method, path, request_id.clone())
-                    .await;
-            let Some(decision) = decision else {
-                return response;
-            };
-            // Boxed: deciding may render a page, a large future, which only
-            // the requests that reach this line pay for. Caught: the callback
-            // is application code, and a panic in it is a bug the boundary
-            // reports as the same 500 `execute_chain_safely` answers a
-            // handler's with, instead of unwinding the connection's task and
-            // closing the connection on the client.
-            let decided = match crate::logging::REQUEST_ID
-                .scope(
-                    request_id.clone(),
-                    crate::error::catch_panic(Box::pin(decision.decide(response))),
-                )
-                .await
-            {
-                Ok(decided) => decided,
-                Err(panic) => {
-                    panic_into_response(panic, method.as_str(), path, request_id.as_str())
-                }
-            };
-            if decided.header_value("X-Request-Id").is_some() {
-                decided
-            } else {
-                decided.header("X-Request-Id", request_id.as_str())
-            }
-        })),
+        crate::inertia::visit::scope(visit, dispatch),
     )
     .await
 }
