@@ -10,3 +10,5 @@ mod delivery;
 #[cfg(feature = "reporting-sentry")]
 mod privacy;
 mod logs_traces;
+#[cfg(feature = "reporting-sentry")]
+mod rustrak;
