@@ -53,6 +53,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   assets and stitched RenderCache hits use the nonce the middleware generated.
   The document exposes it to Vite and Inertia's client through the `csp-nonce`
   meta element. Complete nonce pages render on every request.
+- **The Live starter's Name boxes show the right name.** The register form's
+  Name box started with the word "name", and the profile form showed "name"
+  instead of the user's display name, so saving it unchanged renamed the
+  user. Both now read the component's own field.
 
 ## 4.0.4 - 2026-10-15
 
