@@ -9,3 +9,4 @@ mod serialization;
 mod delivery;
 #[cfg(feature = "reporting-sentry")]
 mod privacy;
+mod logs_traces;
