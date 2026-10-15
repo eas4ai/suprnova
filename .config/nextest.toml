@@ -41,3 +41,13 @@ test-group = 'serial-binaries'
 [[profile.default.overrides]]
 filter = 'binary(model_key_type)'
 test-group = 'serial-binaries'
+
+# The engine baseline tests load 5,183 documents and run 600 queries against a
+# standing service. When that service wedges (MariaDB 12.3.1 took signal 11
+# during the fulltext load on 2026-10-14 and never answered again), the test
+# would otherwise wait forever and the gate step would die of its own timeout
+# with no name attached. Fifteen minutes is several times the slowest debug
+# measurement; a release-profile run finishes in well under one.
+[[profile.default.overrides]]
+filter = 'binary(search) & test(/^baseline::(postgres_baseline|mysql_baseline|baseline_qdrant|baseline_collection|baseline_sqlite|baseline_collection_hybrid|baseline_sqlite_hybrid)$/)'
+slow-timeout = { period = "180s", terminate-after = 5 }
