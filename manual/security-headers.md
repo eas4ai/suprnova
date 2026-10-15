@@ -14,7 +14,11 @@ Use typed registration: `global_middleware!`, `MiddlewareRegistry::append` or
 `prepend`, or `Server::middleware`. Those APIs retain the type that ordering
 and the server error boundary need; a manually erased middleware closure
 does not retain that information. The built-in request-id scope stays outside
-the application stack.
+the application stack. Typed registration also retains a copy of the configured
+policy beside the middleware's identity. The server reads that copy from its
+own registry snapshot for health and catalogue responses and the WebSocket
+response boundary. These paths need no application middleware execution and
+keep the same configured policy across panic recovery.
 Route and group security overrides run immediately inside it, before RenderCache
 lookup. The response returns through security headers last, so cache hits and
 error pages retain their policy.

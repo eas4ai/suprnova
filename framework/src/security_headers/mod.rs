@@ -253,6 +253,38 @@ impl SecurityHeaders {
         self
     }
 
+    /// Apply the same policy to server-built responses while preserving their
+    /// body, status and existing headers. A surrounding scope supplies the
+    /// effective request nonce when application middleware has already run.
+    pub(crate) fn decorate_server_response<B>(
+        &self,
+        mut response: hyper::Response<B>,
+        secure: bool,
+    ) -> hyper::Response<B> {
+        let metadata =
+            HttpResponse::new().with_headers(response.headers().iter().filter_map(
+                |(name, value)| value.to_str().ok().map(|value| (name.as_str(), value)),
+            ));
+        let local = Config::is_development();
+        let origin = if local { vite_origin() } else { None };
+        let decorated = self
+            .decorate(
+                metadata,
+                secure,
+                local,
+                CspNonce::current().as_deref(),
+                origin.as_deref(),
+            )
+            .into_hyper();
+        for (name, value) in decorated.headers() {
+            response
+                .headers_mut()
+                .entry(name.clone())
+                .or_insert_with(|| value.clone());
+        }
+        response
+    }
+
     fn uses_nonce(&self) -> bool {
         self.csp
             .as_ref()
@@ -456,6 +488,32 @@ pub(crate) async fn scope_response<F: std::future::Future<Output = HttpResponse>
                     nonce.get().as_deref(),
                     origin.as_deref(),
                 )
+            }),
+        )
+        .await
+}
+
+/// Keep policy changes alive across every upgrade fallback, including a panic
+/// after route overrides and refusals before application middleware can run.
+pub(crate) async fn scope_server_response<B, F>(
+    policy: Option<SecurityHeaders>,
+    secure: bool,
+    future: F,
+) -> hyper::Response<B>
+where
+    F: std::future::Future<Output = hyper::Response<B>>,
+{
+    let Some(policy) = policy else {
+        return future.await;
+    };
+    let effective = Arc::new(RwLock::new(policy));
+    POLICY
+        .scope(
+            effective.clone(),
+            CspNonce::scope_state(NonceState::default(), async move {
+                let response = future.await;
+                let policy = effective.read().unwrap_or_else(|p| p.into_inner()).clone();
+                policy.decorate_server_response(response, secure)
             }),
         )
         .await

@@ -55,6 +55,7 @@ struct Known {
     /// The alias and parsed arguments the box was resolved from, when a
     /// route named it.
     alias: Option<String>,
+    security_headers: Option<crate::SecurityHeaders>,
 }
 
 #[derive(Default)]
@@ -80,6 +81,9 @@ fn key(boxed: &BoxedMiddleware) -> usize {
 /// Box `middleware` and remember its type, so the priority list can order
 /// it. Every registration point boxes through this.
 pub(crate) fn boxed_as<M: Middleware + 'static>(middleware: M) -> BoxedMiddleware {
+    let security_headers = (&middleware as &dyn std::any::Any)
+        .downcast_ref::<crate::SecurityHeaders>()
+        .cloned();
     let boxed = into_boxed(middleware);
     // A poisoned table is recovered, as the registries beside it are: a
     // panic elsewhere must not stop middleware from being registered.
@@ -91,6 +95,7 @@ pub(crate) fn boxed_as<M: Middleware + 'static>(middleware: M) -> BoxedMiddlewar
             middleware: Arc::downgrade(&boxed),
             type_id: Some(TypeId::of::<M>()),
             alias: None,
+            security_headers,
         },
     );
     boxed
@@ -115,6 +120,7 @@ pub(crate) fn name_as(boxed: &BoxedMiddleware, identity: String) {
                     middleware: Arc::downgrade(boxed),
                     type_id: None,
                     alias: Some(identity),
+                    security_headers: None,
                 },
             );
         }
@@ -125,11 +131,17 @@ pub(crate) fn name_as(boxed: &BoxedMiddleware, identity: String) {
 /// Only wrappers of known boxes write; weak entries are swept like registrations.
 pub(crate) fn inherit_identity(source: &BoxedMiddleware, wrapper: &BoxedMiddleware) {
     let mut table = table().write().unwrap_or_else(|p| p.into_inner());
-    let Some((type_id, alias)) = table
+    let Some((type_id, alias, security_headers)) = table
         .known
         .get(&key(source))
         .filter(|known| is_entry_of(known, source))
-        .map(|known| (known.type_id, known.alias.clone()))
+        .map(|known| {
+            (
+                known.type_id,
+                known.alias.clone(),
+                known.security_headers.clone(),
+            )
+        })
     else {
         return;
     };
@@ -140,6 +152,7 @@ pub(crate) fn inherit_identity(source: &BoxedMiddleware, wrapper: &BoxedMiddlewa
             middleware: Arc::downgrade(wrapper),
             type_id,
             alias,
+            security_headers,
         },
     );
 }
@@ -152,6 +165,15 @@ pub(crate) fn alias_of(boxed: &BoxedMiddleware) -> Option<String> {
         return None;
     }
     known.alias.clone()
+}
+
+/// Keep each server's policy tied to its own live registration snapshot.
+pub(crate) fn security_headers_of(boxed: &BoxedMiddleware) -> Option<crate::SecurityHeaders> {
+    let table = table().read().unwrap_or_else(|p| p.into_inner());
+    let known = table.known.get(&key(boxed))?;
+    is_entry_of(known, boxed)
+        .then(|| known.security_headers.clone())
+        .flatten()
 }
 
 /// The middleware type `boxed` was registered as, when it was registered
