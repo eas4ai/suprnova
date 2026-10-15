@@ -17,10 +17,7 @@ import { pageTitle } from './lib/title'
 //
 // The options match `main.ts`, so the markup the server renders is the
 // markup the browser hydrates: the same pages, the same layout, the same
-// title. `initLang` never runs on the server (see `main.ts`'s `setup`), so
-// `t()` falls back to raw-key rendering for this pass; `lib/lang.svelte.ts`
-// is plain module state with no context requirement, so nothing wraps the
-// app here.
+// title.
 createInertiaApp({
   pages: './pages',
   layout: (name) => (name.startsWith('auth/') ? GuestLayout : AppLayout),

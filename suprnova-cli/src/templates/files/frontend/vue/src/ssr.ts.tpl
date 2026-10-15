@@ -19,13 +19,6 @@ import GuestLayout from './layouts/GuestLayout.vue'
 // (`packages/vue3/src/createInertiaApp.ts`), and with no `setup` it mounts
 // the page in a `createSSRApp` with the Inertia plugin.
 //
-// `initLang` is skipped here, same as `main.ts`'s `setup()`: there is no
-// absolute URL to `fetch()` from inside the SSR worker, so the catalog
-// never loads server-side and `t()` falls back to its raw-key rendering
-// for the SSR pass. `lib/lang.ts`'s `useLang()` is a module-level
-// composable with no context requirement, unlike React's, so no
-// provider wrapper is needed here.
-//
 // Keep the options below in step with `main.ts`: the browser hydrates the
 // markup this renders, and a layout or title that differs between the two
 // is a hydration mismatch. There is no `nonce` here: the server has no

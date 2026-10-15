@@ -100,6 +100,14 @@ COPY frontend/src/pages/ ./frontend/src/pages/
 # build` had just succeeded.
 COPY --from=frontend-builder /app/public/assets ./public/assets
 
+# Application catalogs are optional; fresh kits ship no lang/ directory.
+# Cargo.toml keeps COPY valid when the glob matches nothing.
+COPY Cargo.toml lan[g] ./lang-context/
+RUN mkdir -p lang \
+    && rm lang-context/Cargo.toml \
+    && cp -R lang-context/. lang/ \
+    && rm -rf lang-context
+
 # Build the application (single unified binary)
 RUN rm ./target/release/deps/{package_name}* 2>/dev/null || true && cargo build --release
 
@@ -136,9 +144,8 @@ COPY --from=backend-builder /app/{package_name}/database/schema ./database/schem
 # Copy public assets
 COPY --from=backend-builder /app/{package_name}/public ./public
 
-# The localization catalogs `Localization::bootstrap` reads at boot, which
-# the pages' `lang` share and `__!` lookups read from.
-COPY lang/ ./lang/
+# Application catalogs, when present in the build context.
+COPY --from=backend-builder /app/{package_name}/lang ./lang
 
 # Set ownership
 RUN chown -R appuser:appuser /app

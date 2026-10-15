@@ -48,10 +48,6 @@ const BOOTSTRAP: &str = include_str!("files/live/src/bootstrap.rs.tpl");
 const FILES: &[(&str, &str)] = &[
     (".gitignore", include_str!("files/live/gitignore.tpl")),
     (
-        "lang/en/app.ftl",
-        include_str!("files/live/lang/app.ftl.tpl"),
-    ),
-    (
         "public/css/app.css",
         include_str!("files/live/public/css/app.css.tpl"),
     ),

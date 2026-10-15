@@ -430,13 +430,6 @@ pub(crate) fn create_project(
     fs::create_dir_all(project_path.join("templates"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
 
-    // Localization catalogs. `Localization::bootstrap` looks for
-    // `<project>/lang/` at boot, so this must exist (with a starter
-    // catalog, which each kit writes) for an Inertia kit's `lang` share and
-    // the Live kit's `__!` lookups to have anything to read.
-    fs::create_dir_all(project_path.join("lang/en"))
-        .map_err(|e| format!("Failed to create directories: {}", e))?;
-
     // === Backend files ===
 
     // Write Cargo.toml
@@ -666,8 +659,7 @@ pub(crate) fn create_project(
 
 /// Writes what an Inertia kit adds to the shared backend: the HTTP
 /// handlers and routes, the Inertia bootstrap and root document, the props
-/// the pages read, the localization catalog the frontend's `t()` reads, and
-/// the Vite project under `frontend/`.
+/// the pages read, and the Vite project under `frontend/`.
 fn write_inertia_kit(
     project_path: &Path,
     project_name: &str,
@@ -793,20 +785,13 @@ fn write_inertia_kit(
     )
     .map_err(|e| format!("Failed to write src/props/shared.rs: {}", e))?;
 
-    // Write lang/en/app.ftl
-    fs::write(
-        project_path.join("lang/en/app.ftl"),
-        templates::lang_app_ftl(),
-    )
-    .map_err(|e| format!("Failed to write lang/en/app.ftl: {}", e))?;
-
     // === Frontend files ===
     templates::scaffold_frontend(project_path, project_name, frontend)
 }
 
 /// Writes what the Live kit adds to the shared backend (PAR-192): its
-/// gitignore and localization catalog, the document controllers, views,
-/// layouts and Live components, the stylesheet `public/css/app.css`, and
+/// gitignore, document controllers, views, layouts and Live components,
+/// the stylesheet `public/css/app.css`, and
 /// the shipped library components its views import, installed the way
 /// `live:add` installs them so a later `live:add` keeps them current.
 fn write_live_kit(

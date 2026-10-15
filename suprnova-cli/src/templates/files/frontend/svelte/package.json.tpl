@@ -11,7 +11,6 @@
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
-    "@fluent/bundle": "^0.19.1",
     "@inertiajs/core": "^3.8.0",
     "@inertiajs/svelte": "^3.8.0",
     "svelte": "^5.56.8"

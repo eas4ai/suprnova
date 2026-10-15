@@ -24,7 +24,7 @@ add the `database-mongodb` feature to the `suprnova` dependency:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.0.3", features = ["database-mongodb"] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.0.4", features = ["database-mongodb"] }
 ```
 
 The feature brings the `mongodb` driver and the `bson` crate. You don't add

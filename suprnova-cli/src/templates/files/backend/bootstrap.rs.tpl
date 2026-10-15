@@ -28,9 +28,8 @@ use std::sync::Arc;
 #[allow(unused_imports)]
 use suprnova::{
     App, Auth, AuthConfig, AuthManager, CsrfMiddleware, DB, DevToolsConfig, EloquentUserProvider,
-    Frontend, IncludeMiddleware, Inertia, InertiaConfig, InertiaRootTemplate, LocaleMiddleware,
-    LocaleShare, OriginPolicy, RootShare, SessionConfig, SessionMiddleware, bind,
-    global_middleware, singleton,
+    Frontend, IncludeMiddleware, Inertia, InertiaConfig, InertiaRootTemplate, OriginPolicy,
+    RootShare, SessionConfig, SessionMiddleware, bind, global_middleware, singleton,
 };
 
 use crate::middleware;
@@ -121,25 +120,6 @@ pub fn register_http_stack() {
     let session_config = SessionConfig::from_env();
     global_middleware!(SessionMiddleware::new(session_config.clone()));
 
-    // Locale detection - after SessionMiddleware, since its detection
-    // chain checks the session first (then cookie, then Accept-Language).
-    // Reads APP_LOCALE / APP_FALLBACK_LOCALE from the environment and
-    // scopes the detected locale for the rest of the request, so
-    // `Lang::get` / the `__!` macro resolve against it.
-    //
-    // And **before** `Inertia::install` below, which is the part that is
-    // easy to get wrong. A middleware's post-`next` code runs after every
-    // middleware inside it has already returned, so the error-page
-    // middleware that `Inertia::install` registers renders its page once
-    // this middleware's locale scope has been popped. Registered the
-    // other way round, every error page - and only error pages - would
-    // render with the app's default locale instead of the visitor's. The
-    // Inertia layer reads nothing from localization, so this order costs
-    // nothing.
-    global_middleware!(
-        LocaleMiddleware::from_env().expect("locale config (APP_LOCALE / APP_FALLBACK_LOCALE)")
-    );
-
     // Inertia protocol layer, four middlewares in one call: the headers
     // middleware (`Vary: X-Inertia` on every response, and an empty `200` on an
     // Inertia visit substituted with a `303` back), the version middleware
@@ -152,8 +132,8 @@ pub fn register_http_stack() {
     // its messages instead of surfacing a raw 422). Naming an `error_page`
     // below adds a fifth: the error-page middleware.
     //
-    // This sits here, after SessionMiddleware and LocaleMiddleware, rather
-    // than beside the container wiring below, for two reasons. It registers
+    // This sits here, after SessionMiddleware, rather than beside the
+    // container wiring below, for two reasons. It registers
     // middleware of its own, so moving it would silently move the whole
     // Inertia layer within the chain.
     // And the version middleware re-flashes the session before it bounces a
@@ -194,15 +174,14 @@ pub fn register_http_stack() {
     // `status`, `message`, and `request_id` when the error carried one.
     //
     // The error page covers everything registered *after* this call inside
-    // the visitor's session and locale, which is why CSRF sits below it: a
+    // the visitor's session, which is why CSRF sits below it: a
     // middleware that answers without calling `next` hands its response to
     // nothing registered inside it, so a CSRF rejection above this line
     // would reach the error page only at the server, after the whole stack,
-    // once the session and locale scopes have closed - no flash, and the
-    // default locale. An app that does need the error page further out - an
-    // outer rate limiter, an auth guard - registers
+    // once the session scope has closed - no flash. An app that needs the
+    // error page further out - an outer rate limiter, an auth guard - registers
     // `InertiaErrorPageMiddleware::new("Error")` itself, after
-    // `LocaleMiddleware`, before this call, and before the middleware whose
+    // `SessionMiddleware`, before this call, and before the middleware whose
     // rejections it should cover; `Inertia::install` sees that registration
     // and keeps it where you put it.
     Inertia::install(
@@ -253,10 +232,8 @@ pub fn register_http_stack() {
     // Inertia shared data on every Inertia response: the `root` prop, the
     // public root every page builds its URLs from, so the same frontend
     // build runs at `/` and behind a proxy that serves the app under a
-    // path prefix; and the `lang` prop (active locale, fallback, and where
-    // to fetch its Fluent catalog), which the frontend kit's `lib/lang.ts`
-    // wrapper reads via `initLang(page)`.
-    App::register_inertia_shared(Arc::new(RootShare::around(Arc::new(LocaleShare))));
+    // path prefix.
+    App::register_inertia_shared(Arc::new(RootShare::new()));
 
     // The signed-in user, or none, on every page under `auth`, read from
     // the request's session each time a response sends it. A layout shows

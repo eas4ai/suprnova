@@ -138,7 +138,9 @@ RenderCache declines to store the page.
 To choose the form a reader sees in a translated message, use the plural
 categories of a Fluent message instead; see
 [Localization](localization.md). `Str::plural` is for words in your own
-code, such as a table or a label built from a model's name.
+code, such as a table or a label built from a model's name. The starter
+kits render plain English and ship no translation catalogs; localization
+is available when your application needs it.
 
 ## Markdown
 

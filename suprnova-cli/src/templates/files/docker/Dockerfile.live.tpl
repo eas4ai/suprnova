@@ -55,6 +55,14 @@ RUN mkdir -p database/schema \
     && if [ -d database-context/schema ]; then cp -R database-context/schema/. database/schema/; fi \
     && rm -rf database-context
 
+# Application catalogs are optional; fresh kits ship no lang/ directory.
+# Cargo.toml keeps COPY valid when the glob matches nothing.
+COPY Cargo.toml lan[g] ./lang-context/
+RUN mkdir -p lang \
+    && rm lang-context/Cargo.toml \
+    && cp -R lang-context/. lang/ \
+    && rm -rf lang-context
+
 # Build the application (single unified binary)
 RUN rm ./target/release/deps/{package_name}* 2>/dev/null || true && cargo build --release
 
@@ -93,10 +101,10 @@ COPY --from=backend-builder /app/{package_name}/database/schema ./database/schem
 # each request, and the application refuses to start without them.
 COPY templates/suprnova-ui/ ./templates/suprnova-ui/
 
-# The kit's stylesheet and any other static file, served from `public/`,
-# and the localization catalogs `Localization::bootstrap` reads at boot.
+# The kit's stylesheet and any other static file, served from `public/`.
 COPY public/ ./public/
-COPY lang/ ./lang/
+# Application catalogs, when present in the build context.
+COPY --from=backend-builder /app/{package_name}/lang ./lang
 
 # Set ownership
 RUN chown -R appuser:appuser /app

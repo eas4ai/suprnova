@@ -1,7 +1,6 @@
 <script lang="ts">
   import { Link, usePage } from '@inertiajs/svelte'
   import Head from '../components/Head.svelte'
-  import { t } from '../lib/lang.svelte'
 
   // The public root the server shares with every page (`RootShare`): empty
   // at the host root, `/billing` behind a proxy that serves the app there.
@@ -16,12 +15,6 @@
   // That is why they are declared here: no handler of yours renders
   // `Error` with a struct, so `suprnova generate-types` writes no
   // `Pages` entry for it in `types/inertia-props.ts`.
-  //
-  // `message` is the server's, so it arrives already localized only if
-  // your handlers translate it; the chrome below uses `t()` like every
-  // other page. That works because `src/bootstrap.rs` registers
-  // `LocaleMiddleware` ahead of `Inertia::install` - keep it that way, or
-  // this page renders in the default locale.
   interface ErrorProps {
     status: number
     message: string
@@ -38,11 +31,11 @@
   <p class="text-lg text-gray-700">{message}</p>
   {#if request_id}
     <p class="text-sm text-gray-500">
-      {t('error-reference')}
+      Reference:
       <code class="rounded bg-gray-100 px-1">{request_id}</code>
     </p>
   {/if}
   <p>
-    <Link href={`${root}/`} class="text-indigo-600 hover:text-indigo-500">{t('error-go-home')}</Link>
+    <Link href={`${root}/`} class="text-indigo-600 hover:text-indigo-500">Go home</Link>
   </p>
 </div>
