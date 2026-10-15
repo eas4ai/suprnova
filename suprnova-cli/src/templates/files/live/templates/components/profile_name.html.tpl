@@ -6,7 +6,7 @@
 {% call card::card("profile", "Display name", kind="section") %}
 <form class="kit-form" live:submit.prevent="save">
 <div class="kit-field"{% if errors.has("name") %} data-invalid{% endif %}>
-{% call field::field("name", "Name", hint=errors.get("name"), required=true) %}{% call input::input("name", required=true, autocomplete="name", value=name) %}{% endcall %}{% endcall %}
+{% call field::field("name", "Name", hint=errors.get("name"), required=true) %}{% call input::input("name", required=true, autocomplete="name", value=component.name) %}{% endcall %}{% endcall %}
 </div>
 <p class="kit-form-status" live:error.live.polite="save"></p>
 {% call actions::form_actions() %}

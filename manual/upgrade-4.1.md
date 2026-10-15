@@ -136,6 +136,28 @@ A Live bootstrap that supplies no nonce inherits the current request nonce.
 Avoid supplying a different nonce. Applications without a nonce policy keep
 their existing markup.
 
+### The Live starter's Name boxes show the right name.
+
+**Before:** In an application scaffolded with `--frontend live`, the register
+form's Name box started with the word "name", and the profile form showed
+"name" instead of the user's display name. Saving the profile form unchanged
+renamed the user "name".
+
+**Now:** New Live applications read the component's own `name` field.
+
+**Do:** In an existing Live application, change the Name input in
+`templates/live/components/register_form.html` and
+`templates/live/components/profile_name.html`. Inside the `field` macro's call
+block, `name` is the macro's own parameter, so read the field through
+`component`:
+
+```diff
+-{% call input::input("name", required=true, autocomplete="name", value=name) %}
++{% call input::input("name", required=true, autocomplete="name", value=component.name) %}
+```
+
+A user already renamed "name" sets their name again on the profile page.
+
 ### Why Suprnova diverges
 
 Laravel provides `FrameGuard` and `Vite::useCspNonce`; its applications add
