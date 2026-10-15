@@ -1,0 +1,43 @@
+{
+  "calibrated": false,
+  "fixture_sha256": "dfcd40669cd0f82678814fcc9af2751f086ec0ce9d63d3b8054770991b0cc5f7",
+  "fixture_license": "SciFact claims and judgments: CC BY 4.0; S2ORC abstracts: ODC-By 1.0; see LICENSE",
+  "tolerance": 0.05,
+  "rivals": {
+    "meilisearch": {
+      "version": "1.55.0",
+      "lexical": {
+        "ndcg_at_10": 0.37745906023030584,
+        "latency": {
+          "p50_ms": 1.103122,
+          "p95_ms": 2.767554,
+          "p99_ms": 3.50342
+        },
+        "queries": 300
+      }
+    },
+    "typesense": {
+      "version": "30.2",
+      "lexical": {
+        "ndcg_at_10": 0.33484450668421656,
+        "latency": {
+          "p50_ms": 15.888702,
+          "p95_ms": 50.456052,
+          "p99_ms": 72.434077
+        },
+        "queries": 300
+      }
+    }
+  },
+  "latency_scope": "warm engine query: parsing, expansion, retrieval and fusion; query inference timed separately; fixed vocabulary; no hydration",
+  "p95_budgets_ms": {
+    "collection": 100.912104,
+    "mysql": 100.912104,
+    "postgres": 100.912104,
+    "qdrant": 100.912104,
+    "sqlite": 100.912104
+  },
+  "budget_comment": "Calibrated 2026-10-15T03:02:46.185843274+00:00: Meilisearch 1.55.0 p95 2.767554 ms; Typesense 30.2 p95 50.456052 ms. Every engine budget is two times the slower rival's p95, measured over the same queries as nDCG@10 after a full warm-up pass.",
+  "calibrated_at": "2026-10-15T03:02:46.185843274+00:00",
+  "tree_hash": "745ea2dc53a527bb0d7898fc8c3500881a16c583"
+}
