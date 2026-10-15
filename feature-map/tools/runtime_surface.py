@@ -44,6 +44,10 @@ ENDPOINTS = [
      "framework/src/live/routes.rs", "super::ui_assets::LIVE_UI_ASSET_ROUTE,"),
     ("/webhooks/payments/{provider}", "POST", "`suprnova::payments::webhook_routes(db)`, merged by the app",
      "framework/src/payments/webhook_route.rs", '.post("/webhooks/payments/{provider}"'),
+    ("/search", "GET", "`Search::routes` / `Router::try_search_endpoint`; explicit index allowlist",
+     "framework/src/search/routes.rs", '.try_get("/search",'),
+    ("/search/click", "POST", "`Search::routes` / `Router::try_search_endpoint`; session-bound clicks with CSRF",
+     "framework/src/search/routes.rs", '.try_post("/search/click",'),
 ]
 
 TABLES = [

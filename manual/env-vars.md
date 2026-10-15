@@ -413,16 +413,94 @@ after it registers its disks, because that call checks the default disk too. To
 register the same configuration under a name of your own, use
 `S3Config::from_env()`. See [Filesystem](filesystem.md).
 
-## Vector search
+## Search
 
-The four external vector drivers read their connection from the environment when you
-call their `from_env()` constructor. Nothing reads these variables at boot. You
-choose the driver in Rust and register it in `bootstrap()`. See [Vector](vector.md).
+See [Search](search.md) for models, settings, engines, indexing, and the
+baseline. Search configuration is strict: its boolean fields accept Rust's
+`true` or `false`, and malformed or zero positive limits fail with the variable
+name. Registered typed configuration can override environment defaults. Local
+inference requires the opt-in `search-fastembed` feature; its `ort` build script
+downloads ONNX Runtime at compile time. The default build downloads nothing.
 
 | Var | Default | Type | Purpose |
 |---|---|---|---|
-| `QDRANT_URL` | none - required | `String` | The gRPC URL of Qdrant, port 6334 by default. `QdrantVectorDriver::from_env()` fails when it is unset or blank. |
-| `QDRANT_API_KEY` | unset | `String` | The key of Qdrant Cloud, or of a self-hosted instance that asks for one. |
+| `SEARCH_DRIVER` | `database` | `String` | Default engine: `database`, `qdrant`, `collection`, or `null`. Per-index registration can override it. |
+| `SEARCH_EMBEDDER` | `none` | `String` | Dense provider: `none`, `http`, or `fastembed`. A positive semantic ratio without a provider fails. |
+| `SEARCH_QUEUE` | `true` | `bool` | Queue indexing after commit. False runs deferred inline work; scoped model writes synchronize inline after commit regardless. |
+| `SEARCH_QUEUE_CONNECTION` | unset | `Option<String>` | Registered queue connection for search jobs; unset uses the queue default. A supplied value must be nonempty. |
+| `SEARCH_QUEUE_NAME` | unset | `Option<String>` | Queue name for search jobs; unset uses the queue default. A supplied value must be nonempty. |
+| `SEARCH_CHUNK` | `500` | `usize` | Positive bulk import and removal chunk size. |
+| `SEARCH_EXPANSION_TERMS` | `64` | `usize` | Positive alternative cap per query word, including the original. |
+| `SEARCH_HITS_CAP` | `1000` | `usize` | Positive accessible-hit cap; supplies the default index setting and bounds endpoint pages. |
+| `SEARCH_FUSION_DEPTH` | `200` | `usize` | Positive candidate depth per hybrid leg when code keeps the default setting. |
+| `SEARCH_BM25_AVERAGE_LENGTH` | `256` | `usize` | Positive token-length normalization constant for Qdrant's built-in BM25 sparse provider. Reindex when you change it. |
+| `SEARCH_TOMBSTONE_HOURS` | `24` | `u64` | Positive removal-fence retention against delayed indexing retries. Schedule pruning. |
+| `SEARCH_ANALYTICS` | `false` | `bool` | Retain queries, session-bound impressions, and validated clicks. The analytics-enabled JSON endpoint requires session middleware. |
+| `SEARCH_ANALYTICS_RETENTION_DAYS` | `90` | `u64` | Positive retention window for analytics, suggestions, and click validation; applied by `search:analytics-prune`. |
+| `SEARCH_ANALYTICS_VIEWER` | `false` | `bool` | Retain authenticated viewer ids in query rows. Never records a guest identity there. |
+| `SEARCH_MODEL_CACHE` | `storage/search/models` | `String` / `PathBuf` | Nonempty verified local model cache root, including manifests and reranker artifacts. |
+| `SEARCH_EMBED_BASE_URL` | none - required for HTTP | `String` | OpenAI-compatible base URL; the provider appends `/embeddings`. HTTPS except explicit loopback hosts; no credentials, query, fragment, or redirects. |
+| `SEARCH_EMBED_MODEL` | fastembed: `hf:onnx-community/embeddinggemma-2-ONNX`; HTTP: required | `String` | Dense model identity. Local inference accepts a named model, `hf:owner/repository[@revision]`, or `path:directory`. |
+| `SEARCH_EMBED_API_KEY` | unset | `Option<String>` | Optional HTTP bearer key, sent only to the pinned embedding destination. |
+| `SEARCH_EMBED_DIMENSIONS` | native profile; unknown HTTP model probes once | `Option<usize>` | Positive requested dimensions; local reductions must be supported by the profile. Vectors are validated and normalized after truncation. |
+| `SEARCH_EMBED_BATCH` | `64` | `usize` | Positive HTTP/local inference batch bound and local reranker batch size. Dynamic quantization uses singleton inference. |
+| `SEARCH_EMBED_TIMEOUT_SECS` | `30` | `u64` | Positive HTTP request deadline including body receipt. |
+| `SEARCH_EMBED_MAX_RESPONSE_BYTES` | `16777216` | `usize` | Positive streamed HTTP response cap, 16 MiB by default. |
+| `SEARCH_EMBED_RETRIES` | `3` | `u32` | Additional HTTP attempts for 429 or 5xx only; at most 16. |
+| `SEARCH_EMBED_QUERY_PREFIX` | shipped profile; unknown HTTP model: empty | `Option<String>` | Query preparation for unknown HTTP models. Known models keep their profile's prefix. |
+| `SEARCH_EMBED_DOCUMENT_TEMPLATE` | shipped profile; unknown HTTP model: `{text}` | `Option<String>` | Document preparation for unknown HTTP models; placeholders are `{title}` and `{text}`. Known models keep their profile. |
+| `SEARCH_EMBED_PRECISION` | `fp32` | `String` | Local graph variant: `fp32`, `int8`, or `q4`. fp16 is refused. |
+| `SEARCH_EMBED_SPARSE_MODEL` | unset | `Option<String>` | Optional fastembed sparse head, including BGE-M3. Select its registered provider in the generation's `sparse_model`; Qdrant otherwise uses built-in `bm25`. |
+| `SEARCH_VECTOR_STORE` | index name | `String` | Registered Vector store for the database engine's semantic leg. |
+| `SEARCH_VOCABULARY_REFRESH` | `1000` | `i64` | Positive Postgres write interval for refreshing the native `ts_stat` vocabulary; builds also refresh it. |
+| `SEARCH_QDRANT_TIMEOUT_SECS` | `10` | `u64` | Positive per-call Qdrant search timeout. |
+| `QDRANT_URL` | none - required for Qdrant | `String` | Qdrant gRPC URL, normally port 6334. Search boot and `QdrantSearchEngine::from_env` read it; `QdrantVectorDriver::from_env` also uses it. |
+| `QDRANT_API_KEY` | unset | `Option<String>` | Qdrant Cloud or self-hosted API key, shared by search and vector constructors. |
+| `SEARCH_BASELINE_MEILISEARCH_URL` | none - required for calibration | `String` | Meilisearch HTTP service used by `search:baseline calibrate`. |
+| `SEARCH_BASELINE_MEILISEARCH_KEY` | none - required for calibration | `String` | Meilisearch calibration key. |
+| `SEARCH_BASELINE_TYPESENSE_URL` | none - required for calibration | `String` | Typesense HTTP service used by `search:baseline calibrate`. |
+| `SEARCH_BASELINE_TYPESENSE_KEY` | none - required for calibration | `String` | Typesense calibration key. |
+| `SEARCH_BASELINE_TOLERANCE` | `0.05` | `f64` | Finite absolute lexical nDCG@10 allowance below the stronger rival, from 0 to 1, written during calibration. |
+| `SEARCH_BASELINE_ALLOW_UNCALIBRATED` | unset | `String` | Exactly `1` permits provisional uncalibrated measurements; other values keep the uncalibrated gate closed. |
+| `PG_TEST_URL` | none - required for Postgres baseline/tests | `String` | Disposable Postgres database for search service tests and `search:baseline run --engine postgres`. |
+| `MYSQL_TEST_URL` | none - required for MySQL/MariaDB baseline/tests | `String` | Disposable MySQL or MariaDB database for search service tests and the `mysql` baseline. |
+| `QDRANT_TEST_URL` | none - required for Qdrant tests | `String` | Qdrant gRPC service for ignored search tests. The console uses `QDRANT_URL` instead. |
+
+The last three rows configure the repository's tests and baseline tools, not
+application search connections. Calibration writes p95 budgets as two times
+the slower rival's measured p95 and re-derives them on load. No environment
+variable overrides that budget. Model downloads at runtime are separate from
+the ONNX Runtime download during a feature-enabled build.
+
+## Recommendations
+
+See [Recommendations](recommendations.md) for event classes, runs, provenance,
+and application-owned retention. Numeric bounds must be positive, fit the
+supported signed range, and fit the clock/calendar where applicable.
+Booleans accept `true` or `false`; invalid values fail with the variable name.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `RECOMMEND_ENABLED` | `false` | `bool` | Forward validated search impressions and clicks automatically. Does not disable explicit event recording or generation. |
+| `RECOMMEND_HISTORY` | `500` | `usize` | Newest positive and negative events per actor combined; seen impressions are aggregated separately. |
+| `RECOMMEND_PEERS` | `200` | `usize` | Maximum sampled peers, ordered by most recent shared positive activity. |
+| `RECOMMEND_POPULARITY_WINDOW` | `30` | `u32` | UTC days of positive events contributing popularity. |
+| `RECOMMEND_LOCK_TTL_SECS` | `3600` | `u64` | Renewable generation cache-lock lifetime in seconds. |
+| `RECOMMEND_EVENT_TYPES` | `{}` | JSON object | Map from event name to `{"class":"positive\|negative\|seen","score":N}`. Base scores are bounded to -1000000 through 1000000; weight adds integer basis points divided by 20. |
+
+The engine never prunes the event stream automatically. Your retention policy
+uses `recommendations:prune --older-than <days>` explicitly.
+
+## Vector search
+
+The four external vector drivers read their connection from the environment when you
+call their `from_env()` constructor. You choose the vector driver in Rust and
+register it in `bootstrap()`. Qdrant search also reads its shared variables
+during search bootstrap. See [Vector](vector.md).
+The shared Qdrant variables are listed under [Search](#search).
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
 | `MARIADB_URL` | none - see `DATABASE_URL` | `String` | The URL of the MariaDB that holds the vectors. `MariaDbVectorDriver::from_env()` reads it first. |
 | `PGVECTOR_URL` | none - see `DATABASE_URL` | `String` | The Postgres URL that holds the vectors. `PgVectorDriver::from_env()` reads it first. |
 | `DATABASE_URL` | none | `String` | Fallback when the driver's own URL is unset or blank. MariaDB accepts schemes `mariadb` or `mysql`; pgvector accepts `postgres` or `postgresql`. A URL of another engine is not taken. |

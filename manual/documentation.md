@@ -79,6 +79,8 @@
     - [Feature Flags](feature-flags.md)
     - [Observability](observability.md)
     - [Vector Search](vector.md)
+    - [Search](search.md)
+    - [Recommendations](recommendations.md)
 - ## Security
     - [Authentication](authentication.md)
     - [Auth Flows](auth-flows.md)
