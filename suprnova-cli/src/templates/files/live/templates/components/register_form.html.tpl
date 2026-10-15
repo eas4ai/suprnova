@@ -5,7 +5,7 @@
 {% import "suprnova-ui/form-actions/form-actions.html" as actions %}
 <form class="kit-form" live:submit.prevent="register">
 <div class="kit-field"{% if errors.has("name") %} data-invalid{% endif %}>
-{% call field::field("name", "Name", hint=errors.get("name"), required=true) %}{% call input::input("name", required=true, autocomplete="name", value=name) %}{% endcall %}{% endcall %}
+{% call field::field("name", "Name", hint=errors.get("name"), required=true) %}{% call input::input("name", required=true, autocomplete="name", value=component.name) %}{% endcall %}{% endcall %}
 </div>
 <div class="kit-field"{% if errors.has("email") %} data-invalid{% endif %}>
 {% call field::field("email", "Email", hint=errors.get("email"), required=true) %}{% call input::input("email", kind="email", required=true, autocomplete="email", value=email) %}{% endcall %}{% endcall %}

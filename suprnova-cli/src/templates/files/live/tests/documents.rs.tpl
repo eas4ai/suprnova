@@ -94,6 +94,12 @@ async fn every_document_renders_for_its_visitor() {
                 .assert_see(r#"data-layout="guest""#)
                 .assert_see(&island(component));
         }
+        // A visitor's Name box starts empty, not with the field's own name.
+        guest
+            .get("/register")
+            .send()
+            .await
+            .assert_see(r#"aria-describedby="name-hint name-error" required value="""#);
         guest
             .get("/")
             .send()
@@ -179,7 +185,9 @@ async fn every_document_renders_for_its_visitor() {
             .assert_see(r#"data-layout="app""#)
             .assert_see(&island("profile-name"))
             .assert_see(&island("note-stats"))
-            .assert_see("Ada Lovelace");
+            .assert_see("Ada Lovelace")
+            // The profile form shows the user's own name in its Name box.
+            .assert_see(r#"aria-describedby="name-hint name-error" required value="Ada Lovelace""#);
         client
             .get("/notes")
             .send()
