@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-builtin-math-random",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
