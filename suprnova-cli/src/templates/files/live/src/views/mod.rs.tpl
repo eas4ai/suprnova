@@ -12,7 +12,7 @@
 
 use suprnova::live::{LiveBootstrapOptions, LiveDocument};
 use suprnova::view::{AssetSet, DocumentResponseIntent, TrustedHtml, ViewName};
-use suprnova::{Auth, FrameworkError, HttpResponse, Lang, StatusCode};
+use suprnova::{Auth, FrameworkError, HttpResponse, StatusCode};
 
 use crate::flash::Toast;
 use crate::models::user::User;
@@ -71,7 +71,7 @@ pub struct Frame {
     pub title: String,
     /// The application's name.
     pub app_name: &'static str,
-    /// The language of the request, for `<html lang>`.
+    /// The language of the English document, for `<html lang>`.
     pub lang: String,
     /// The public root every link starts from: empty at the host root,
     /// `/billing` behind a proxy that serves the application there.
@@ -111,7 +111,7 @@ impl Frame {
         Ok(Self {
             title: title.to_owned(),
             app_name: APP_NAME,
-            lang: Lang::locale().to_string(),
+            lang: "en".to_owned(),
             root: suprnova::url::root(),
             bootstrap: None,
             user,
@@ -150,7 +150,7 @@ pub fn render<T: suprnova::view::ViewTemplate>(
 #[suprnova::view(path = "live/pages/home.html")]
 pub struct HomePage {
     pub frame: Frame,
-    /// The headline, from the `welcome` message of `lang/<locale>/app.ftl`.
+    /// The English welcome heading.
     pub welcome: String,
 }
 

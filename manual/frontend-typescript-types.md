@@ -737,10 +737,10 @@ The helpers build the same URLs the backend's `route()` helper builds:
 
 If the app has a `lang/` catalog tree, the generator also writes
 `frontend/src/types/lang-keys.ts`: a `MessageKey` string-literal union
-of every Fluent message id the frontend can resolve. The starter kits'
-`t()` wrapper types its key argument as `MessageKey`, so a typo'd or
-deleted key is a TypeScript error pointing at the component - the same
-promise `inertia-props.ts` makes for props, extended to translations.
+of every Fluent message id the frontend can resolve. The starter kits
+ship no translations, catalog tree or `lang-keys.ts`. If you add catalogs
+and a browser translation helper, you can type its key argument as
+`MessageKey` so a misspelled or deleted key is a TypeScript error.
 
 The ids come from `lang/<APP_LOCALE>/*.ftl`, unioned across the
 locale's configured fallback parents (`APP_LOCALE_PARENTS`) - so a
@@ -754,9 +754,9 @@ resolve. See [Localization](localization.md) for the chain itself.
 The file follows the same rules as the other two: fixed path,
 auto-generated header, deterministic sorted output, never hand-edited.
 When no `.ftl` file yields any id, the file is removed rather than
-emitted empty - a kit importing `MessageKey` then fails to compile
-until the catalog has ids again, which is loud, like every other drift
-in this pipeline.
+emitted empty - application code importing `MessageKey` then fails to
+compile until the catalog has ids again, like every other drift in this
+pipeline.
 
 ## When it runs
 

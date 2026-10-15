@@ -2,10 +2,7 @@ use suprnova::{InertiaProps, Request, Response, handler, inertia_response};
 
 #[derive(InertiaProps)]
 pub struct HomeProps {
-    /// The app name, interpolated into the frontend's
-    /// `welcome = Welcome to { $app }!` Fluent message (see
-    /// `lang/en/app.ftl`) as `$app` - not a full sentence. The page
-    /// builds the actual translated headline via `t('welcome', { app: title })`.
+    /// The app name the page uses in its welcome heading.
     pub title: String,
     pub message: String,
 }

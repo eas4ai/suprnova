@@ -22,7 +22,7 @@
 use suprnova::serde_json::Value;
 use suprnova::view::ViewTemplate;
 use suprnova::{
-    __, Config, FrameworkError, HttpResponse, Middleware, Next, Request, Response, async_trait,
+    Config, FrameworkError, HttpResponse, Middleware, Next, Request, Response, async_trait,
 };
 
 use crate::views::{ErrorDocument, Frame, Nav};
@@ -124,9 +124,8 @@ async fn page(response: &HttpResponse) -> Result<String, FrameworkError> {
         status,
         message,
         request_id: field("request_id"),
-        // `lang/en/app.ftl` holds both, so a new locale translates them.
-        reference: __!("error-reference"),
-        go_home: __!("error-go-home"),
+        reference: "Reference:".to_owned(),
+        go_home: "Go home".to_owned(),
     };
     let mut html = String::new();
     view.render_view(&mut html)
