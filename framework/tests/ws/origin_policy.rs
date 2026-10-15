@@ -372,6 +372,13 @@ async fn allow_list_rejects_missing_origin() {
 
 #[tokio::test]
 async fn handler_err_sends_close_1011() {
+    let reported = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = reported.clone();
+    suprnova::Exceptions::reportable(move |error: &FrameworkError| {
+        if error.to_string().contains("simulated handler failure") {
+            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
     // Connect with AllowAny so the upgrade succeeds, then verify the
     // server sends a Close frame with code 1011 (Error) when the handler
     // returns Err - matching the documented `WebSocketHandler` contract.
@@ -408,5 +415,9 @@ async fn handler_err_sends_close_1011() {
         CloseCode::Error,
         "expected Close 1011 (Error) on handler Err; got {:?}",
         frame.code
+    );
+    assert!(
+        reported.load(std::sync::atomic::Ordering::SeqCst),
+        "WebSocket session error must reach Exceptions"
     );
 }

@@ -453,15 +453,30 @@ async fn run_with_restart(supervisor: Arc<dyn Supervisor>, cancel: CancellationT
         // restart starts from fresh scoped values, as it starts from a fresh
         // task.
         let run = async move { sv.run(cancel_for_run).await };
-        let handle = tokio::spawn(crate::container::scope::run_in_new_scope(run));
+        let handle = tokio::spawn(crate::error::catch_panic(
+            crate::container::scope::run_in_new_scope(run),
+        ));
         // Must outlive the `handle.await` below - see `AbortChildOnDrop`.
         let _abort_child = AbortChildOnDrop(handle.abort_handle());
 
         let outcome: Result<(), String> = match handle.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(format!("{e}")),
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(error))) => {
+                crate::Exceptions::report(&error);
+                Err(error.to_string())
+            }
+            Ok(Err(panic)) => {
+                let message = crate::server::panic_payload_message(&panic.payload);
+                crate::Exceptions::report_panic(
+                    &format!("supervisor '{}' panicked: {message}", supervisor.name()),
+                    panic.location.as_deref(),
+                );
+                Err(format!("panic: {message}"))
+            }
             Err(join_err) if join_err.is_panic() => {
-                Err(format!("panic: {}", panic_payload(join_err)))
+                let message = panic_payload(join_err);
+                crate::Exceptions::report_panic(&message, None);
+                Err(format!("panic: {message}"))
             }
             Err(join_err) => Err(format!("join error: {join_err}")),
         };

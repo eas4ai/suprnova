@@ -124,18 +124,53 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = ()>,
 {
-    use futures::FutureExt as _;
-    let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(hook)) {
-        Ok(future) => std::panic::AssertUnwindSafe(future).catch_unwind().await,
-        Err(payload) => Err(payload),
-    };
-    outcome.map_err(|payload| {
-        format!(
-            "the bootstrap panicked: {}",
-            crate::server::panic_payload_message(&payload)
-        )
-        .into()
-    })
+    crate::error::catch_panic(async move { hook().await })
+        .await
+        .map_err(|panic| {
+            Box::new(BootPanic {
+                message: format!(
+                    "the bootstrap panicked: {}",
+                    crate::server::panic_payload_message(&panic.payload)
+                ),
+                location: panic.location,
+            }) as BootError
+        })
+}
+
+/// Keep the original panic location until the command's normal report point.
+#[derive(Debug)]
+struct BootPanic {
+    message: String,
+    location: Option<String>,
+}
+
+impl std::fmt::Display for BootPanic {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for BootPanic {}
+
+/// Preserve a caught bootstrap panic through the command's contextual wrapper.
+pub(crate) fn framework_error(message: String, error: BootError) -> crate::FrameworkError {
+    match error.downcast::<BootPanic>() {
+        Ok(panic) => crate::FrameworkError::from_external_with(message, *panic),
+        Err(_) => crate::FrameworkError::internal(message),
+    }
+}
+
+/// Report at the existing command boundary, after the failed bootstrap unwinds.
+pub(crate) fn report_error(error: &crate::FrameworkError) {
+    match error
+        .external_source()
+        .and_then(|source| source.downcast_ref::<BootPanic>())
+    {
+        Some(panic) => {
+            crate::Exceptions::report_panic(&error.to_string(), panic.location.as_deref())
+        }
+        None => crate::Exceptions::report(error),
+    }
 }
 
 /// How long the end of a booted process waits for the supervisors its
@@ -155,6 +190,20 @@ const SUPERVISOR_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
 pub(crate) async fn finish_process() {
     crate::supervisor::SupervisorRegistry::shutdown(SUPERVISOR_DRAIN).await;
     crate::events::drain_queued_at_shutdown().await;
+}
+
+/// Flush after all work has drained, without blocking an async worker or
+/// keeping a process open past the sender's shutdown deadline.
+pub(crate) async fn flush_reporting() {
+    let deadline = std::time::Duration::from_secs(2);
+    let flush = tokio::task::spawn_blocking(move || crate::Reporting::flush(deadline));
+    match tokio::time::timeout(deadline, flush).await {
+        Ok(Ok(Ok(true))) => {}
+        Ok(Ok(Ok(false))) => tracing::warn!("error reporting flush deadline expired"),
+        Ok(Ok(Err(error))) => tracing::warn!(%error, "error reporting flush failed"),
+        Ok(Err(error)) => tracing::warn!(%error, "error reporting flush task failed"),
+        Err(_) => tracing::warn!("error reporting flush deadline expired"),
+    }
 }
 
 /// Every runtime driver, in the order `Server::run` boots them.

@@ -90,8 +90,6 @@ pub use task::{BoxedFuture, BoxedTask, Task, TaskEntry, TaskHandler, TaskResult}
 
 use crate::error::FrameworkError;
 use chrono_tz::Tz;
-use futures::FutureExt;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
@@ -716,16 +714,7 @@ where
             // name, and push it into the inline result vec like any other
             // failure.
             let name = task.name.clone();
-            let panic_name = name.clone();
-            let result = match AssertUnwindSafe(task.run()).catch_unwind().await {
-                Ok(r) => r,
-                Err(payload) => {
-                    let msg = crate::server::panic_payload_message(&payload);
-                    Err(FrameworkError::internal(format!(
-                        "scheduled task '{panic_name}' panicked: {msg}"
-                    )))
-                }
-            };
+            let result = report_task_outcome(&name, crate::error::catch_panic(task.run()).await);
             inline.push((name, result));
         }
     }
@@ -735,7 +724,6 @@ where
 /// Spawn a scheduled task with the same election and panic boundary as inline work.
 fn spawn_background_task(task: &TaskEntry, joinset: &mut JoinSet<ScheduledTaskJoin>) {
     let name = task.name.clone();
-    let panic_name = name.clone();
     let guard_name = name.clone();
     let handler: BoxedTask = Arc::clone(&task.task);
     let without_overlapping = task.without_overlapping;
@@ -744,7 +732,7 @@ fn spawn_background_task(task: &TaskEntry, joinset: &mut JoinSet<ScheduledTaskJo
     let one_server_ttl = task.one_server_ttl;
     let state = Arc::clone(&task.state);
     joinset.spawn(async move {
-        let outcome = AssertUnwindSafe(async move {
+        let outcome = crate::error::catch_panic(async move {
             task::run_handler_with_optional_overlap_guard(
                 &guard_name,
                 handler,
@@ -756,16 +744,34 @@ fn spawn_background_task(task: &TaskEntry, joinset: &mut JoinSet<ScheduledTaskJo
             )
             .await
         })
-        .catch_unwind()
         .await;
-        let result = match outcome {
-            Ok(r) => r,
-            Err(_payload) => Err(FrameworkError::internal(format!(
-                "scheduled task '{panic_name}' panicked"
-            ))),
-        };
+        let result = report_task_outcome(&name, outcome);
         (name, result)
     });
+}
+
+/// Inline and spawned tasks share one reporting boundary, so a caught
+/// panic keeps its original location and no caller reports it a second time.
+fn report_task_outcome(
+    name: &str,
+    outcome: Result<TaskResult, crate::error::CaughtPanic>,
+) -> TaskResult {
+    match outcome {
+        Ok(result) => {
+            if let Err(error) = &result {
+                crate::Exceptions::report(error);
+            }
+            result
+        }
+        Err(panic) => {
+            let message = format!(
+                "scheduled task '{name}' panicked: {}",
+                crate::server::panic_payload_message(&panic.payload),
+            );
+            crate::Exceptions::report_panic(&message, panic.location.as_deref());
+            Err(FrameworkError::internal(message))
+        }
+    }
 }
 
 /// Drain every remaining task in `joinset` and append its result to `out`.

@@ -311,7 +311,10 @@ async fn spawn_panicking_server() -> u16 {
     let router =
         Arc::new(Router::new().ws_with_config("/ws/panic", PanickingHandler, open_ws_config()));
     let middleware = Arc::new(MiddlewareRegistry::new());
+    spawn_reporting_server(router, middleware).await
+}
 
+async fn spawn_reporting_server(router: Arc<Router>, middleware: Arc<MiddlewareRegistry>) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind free port");
@@ -354,6 +357,16 @@ async fn spawn_panicking_server() -> u16 {
 /// observes Close(1011) on the wire rather than a TCP reset.
 #[tokio::test]
 async fn ws_handler_panic_sends_close_1011_to_peer() {
+    let reported = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = reported.clone();
+    suprnova::Exceptions::reportable(move |error: &FrameworkError| {
+        if error
+            .to_string()
+            .contains("deliberate WS handler panic for isolation test")
+        {
+            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
     let port = spawn_panicking_server().await;
     let url = format!("ws://127.0.0.1:{port}/ws/panic");
 
@@ -383,4 +396,142 @@ async fn ws_handler_panic_sends_close_1011_to_peer() {
         }
         other => panic!("expected Close(1011), got {other:?}"),
     }
+    assert!(
+        reported.load(std::sync::atomic::Ordering::SeqCst),
+        "caught WebSocket panic must reach Exceptions"
+    );
+}
+
+#[derive(Default)]
+struct WsReports(std::sync::Mutex<Vec<suprnova::ReportingEvent>>);
+impl suprnova::Reporter for WsReports {
+    fn report(&self, event: suprnova::ReportingEvent) -> Result<(), FrameworkError> {
+        self.0.lock().expect("WS reports lock").push(event);
+        Ok(())
+    }
+    fn flush(&self, _: Duration) -> Result<bool, FrameworkError> {
+        Ok(true)
+    }
+}
+
+struct ReportingIdentity;
+#[async_trait]
+impl suprnova::Middleware for ReportingIdentity {
+    async fn handle(&self, request: Request, next: suprnova::Next) -> suprnova::Response {
+        next(request.with_auth_user_id("ws-report-user")).await
+    }
+}
+
+struct ReportingPanickingHandler;
+#[async_trait]
+impl WebSocketHandler for ReportingPanickingHandler {
+    async fn handle(&self, _socket: WsSocket, _request: Request) -> Result<(), FrameworkError> {
+        suprnova::Log::info("WS session reporting breadcrumb");
+        panic!("WS session reporting payload");
+    }
+}
+
+struct ReportingPanicMiddleware;
+#[async_trait]
+impl suprnova::Middleware for ReportingPanicMiddleware {
+    async fn handle(&self, _request: Request, _next: suprnova::Next) -> suprnova::Response {
+        panic!("WS middleware reporting payload");
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn report_003_websocket_session_retains_upgrade_metadata_and_breadcrumbs() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let subscriber = suprnova::logging::build_subscriber(suprnova::LogConfig::default())
+        .expect("logging subscriber");
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let _container = suprnova::container::testing::TestContainer::fake();
+    suprnova::Exceptions::reset();
+    let reports = Arc::new(WsReports::default());
+    suprnova::App::bind::<dyn suprnova::Reporter>(reports.clone());
+    suprnova::Reporting::bootstrap().expect("boot reporting");
+    let router = Arc::new(Router::new().ws_with_config(
+        "/ws/report/{room}",
+        ReportingPanickingHandler,
+        open_ws_config(),
+    ));
+    let middleware = Arc::new(MiddlewareRegistry::new().append(ReportingIdentity));
+    let port = spawn_reporting_server(router, middleware).await;
+    let mut request = format!("ws://127.0.0.1:{port}/ws/report/blue?token=ws-private-token")
+        .into_client_request()
+        .expect("client request");
+    request
+        .headers_mut()
+        .insert("x-request-id", "ws-report-id".parse().expect("header"));
+    let (mut socket, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("upgrade");
+    let _ = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .expect("close deadline");
+    let reports = reports.0.lock().expect("WS reports lock").clone();
+    let event = reports
+        .iter()
+        .find(|event| {
+            event
+                .payload
+                .to_string()
+                .contains("WS session reporting payload")
+        })
+        .expect("session event");
+    assert_eq!(event.payload["exception"]["values"][0]["type"], "panic");
+    assert_eq!(
+        event.payload["request"]["method"], "GET",
+        "session retains the upgrade request"
+    );
+    assert_eq!(event.payload["transaction"], "/ws/report/{room}");
+    assert_eq!(event.payload["tags"]["request_id"], "ws-report-id");
+    assert_eq!(event.payload["user"]["id"], "ws-report-user");
+    assert!(
+        event.payload["breadcrumbs"]
+            .to_string()
+            .contains("WS session reporting breadcrumb")
+    );
+    assert!(event.payload.to_string().contains("e2e.rs"));
+    assert!(!event.payload.to_string().contains("ws-private-token"));
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn report_002_websocket_middleware_panic_keeps_type_and_original_location() {
+    let _container = suprnova::container::testing::TestContainer::fake();
+    suprnova::Exceptions::reset();
+    let reports = Arc::new(WsReports::default());
+    suprnova::App::bind::<dyn suprnova::Reporter>(reports.clone());
+    suprnova::Reporting::bootstrap().expect("boot reporting");
+    let router =
+        Arc::new(Router::new().ws_with_config("/ws/report/{room}", EchoHandler, open_ws_config()));
+    let middleware = Arc::new(MiddlewareRegistry::new().append(ReportingPanicMiddleware));
+    let port = spawn_reporting_server(router, middleware).await;
+    assert!(
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws/report/blue"))
+            .await
+            .is_err()
+    );
+    let reports = reports.0.lock().expect("WS reports lock").clone();
+    let event = reports
+        .iter()
+        .find(|event| {
+            event
+                .payload
+                .to_string()
+                .contains("WS middleware reporting payload")
+        })
+        .expect("middleware panic event");
+    let exception = &event.payload["exception"]["values"][0];
+    assert_eq!(
+        exception["type"], "panic",
+        "middleware panic keeps its original kind"
+    );
+    assert!(
+        exception["stacktrace"].to_string().contains("e2e.rs"),
+        "middleware panic keeps its original location: {exception}"
+    );
+    assert_eq!(event.payload["transaction"], "/ws/report/{room}");
 }

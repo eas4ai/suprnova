@@ -63,9 +63,7 @@ use crate::config::Config;
 use crate::error::FrameworkError;
 use crate::workflow::types::ClaimedWorkflow;
 use chrono::Duration as ChronoDuration;
-use futures::FutureExt;
 use rand::RngExt;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -524,11 +522,12 @@ async fn process_claimed_workflow(
     // they share the run's scope and resolve the scoped values the body
     // resolves. A retry is a new claim and gets a new scope.
     let run = ctx.enter(async { (entry.run)(&claimed.input).await });
-    let body = AssertUnwindSafe(crate::container::scope::run_in_new_scope(run));
-    let result = match body.catch_unwind().await {
+    let body = crate::container::scope::run_in_new_scope(run);
+    let mut panic_reported = false;
+    let result = match crate::error::catch_panic(body).await {
         Ok(inner) => inner,
         Err(panic) => {
-            let msg = crate::server::panic_payload_message(&panic);
+            let msg = crate::server::panic_payload_message(&panic.payload);
             tracing::error!(
                 workflow_id = claimed.id,
                 workflow_name = %claimed.name,
@@ -537,9 +536,10 @@ async fn process_claimed_workflow(
                 panic = %msg,
                 "workflow handler panicked - routing through retry/fail path"
             );
-            Err(FrameworkError::internal(format!(
-                "workflow handler panicked: {msg}"
-            )))
+            let message = format!("workflow handler panicked: {msg}");
+            crate::Exceptions::report_panic(&message, panic.location.as_deref());
+            panic_reported = true;
+            Err(FrameworkError::internal(message))
         }
     };
 
@@ -549,6 +549,9 @@ async fn process_claimed_workflow(
                 .await?;
         }
         Err(err) => {
+            if !panic_reported {
+                crate::Exceptions::report(&err);
+            }
             if claimed.attempts < claimed.max_attempts {
                 // A worker claims the run when `next_run_at <= NOW()` of the
                 // database, so the retry is stamped from the wall clock: a
@@ -1357,6 +1360,16 @@ mod tests {
     // was caught and folded into the result accounting).
     #[tokio::test]
     async fn test_panic_requeues_under_budget() {
+        let reported = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = reported.clone();
+        crate::Exceptions::reportable(move |error: &FrameworkError| {
+            if error
+                .to_string()
+                .contains("workflow handler panicked: boom")
+            {
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
         let _db = setup_db().await;
 
         let workflow_name = format!("{}::{}", module_path!(), "panicking_workflow");
@@ -1383,6 +1396,10 @@ mod tests {
 
         let status = store::get_workflow_status(handle.id()).await.unwrap();
         assert_eq!(status, WorkflowStatus::Pending, "row must be requeued");
+        assert!(
+            reported.load(std::sync::atomic::Ordering::SeqCst),
+            "caught workflow panic must reach Exceptions"
+        );
 
         let record = store::get_workflow_record(handle.id()).await.unwrap();
         let err = record

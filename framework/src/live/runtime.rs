@@ -1639,16 +1639,18 @@ impl LiveRuntime {
         // handler future that awaits a mount. Unboxed, a debug build of a
         // page mounting several islands came within a few KiB of tokio's
         // 2 MiB worker stack.
-        Box::pin(self.graph.public_mount.mount_component_for_document(
-            document,
-            key,
-            parameters,
-            flags,
-            document_path,
-            context,
+        let (output, panic_reported) = crate::reporting::capture_engine_reports(Box::pin(
+            self.graph.public_mount.mount_component_for_document(
+                document,
+                key,
+                parameters,
+                flags,
+                document_path,
+                context,
+            ),
         ))
-        .await
-        .map_err(|error| {
+        .await;
+        output.map_err(|error| {
             // The framework error carries no engine detail, so the closed engine kinds are
             // recorded here for an operator.
             match mount_limit(error.cause()) {
@@ -1664,7 +1666,18 @@ impl LiveRuntime {
                     "Live public mount was rejected"
                 ),
             }
-            FrameworkError::internal("Live public mount was rejected")
+            let primary_panic = panic_reported
+                && match error.cause() {
+                    Some(suprnova_live::mount::MountFailure::Lifecycle(kind)) => {
+                        kind == suprnova_live::component::LifecycleErrorKind::Panicked
+                    }
+                    _ => true,
+                };
+            if primary_panic {
+                crate::reporting::reported_engine_error("Live public mount was rejected")
+            } else {
+                FrameworkError::internal("Live public mount was rejected")
+            }
         })
     }
 
@@ -1675,26 +1688,39 @@ impl LiveRuntime {
         context: &TrustedLiveRequestContext,
     ) -> Result<PrivateMountOutput, FrameworkError> {
         // Boxed for the reason `mount_public_component` gives.
-        Box::pin(self.graph.private_mount.mount(document, request, context))
-            .await
-            .map_err(|error| {
-                // The framework error carries no engine detail, so the closed engine kinds are
-                // recorded here for an operator.
-                match mount_limit(error.cause()) {
-                    Some(limit) => tracing::warn!(
-                        kind = ?error.kind(),
-                        cause = ?error.cause(),
-                        limit = %limit,
-                        "Live private mount was rejected"
-                    ),
-                    None => tracing::warn!(
-                        kind = ?error.kind(),
-                        cause = ?error.cause(),
-                        "Live private mount was rejected"
-                    ),
-                }
+        let (output, panic_reported) = crate::reporting::capture_engine_reports(Box::pin(
+            self.graph.private_mount.mount(document, request, context),
+        ))
+        .await;
+        output.map_err(|error| {
+            // The framework error carries no engine detail, so the closed engine kinds are
+            // recorded here for an operator.
+            match mount_limit(error.cause()) {
+                Some(limit) => tracing::warn!(
+                    kind = ?error.kind(),
+                    cause = ?error.cause(),
+                    limit = %limit,
+                    "Live private mount was rejected"
+                ),
+                None => tracing::warn!(
+                    kind = ?error.kind(),
+                    cause = ?error.cause(),
+                    "Live private mount was rejected"
+                ),
+            }
+            let primary_panic = panic_reported
+                && match error.cause() {
+                    Some(suprnova_live::mount::MountFailure::Lifecycle(kind)) => {
+                        kind == suprnova_live::component::LifecycleErrorKind::Panicked
+                    }
+                    _ => true,
+                };
+            if primary_panic {
+                crate::reporting::reported_engine_error("Live private mount was rejected")
+            } else {
                 FrameworkError::internal("Live private mount was rejected")
-            })
+            }
+        })
     }
 
     pub(crate) fn readiness(&self) -> RuntimeReadiness {

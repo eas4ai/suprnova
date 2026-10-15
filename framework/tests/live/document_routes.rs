@@ -45,6 +45,11 @@ pub struct PublicCounter {
 #[live]
 impl PublicCounter {
     #[action]
+    pub fn reporting_panic(&mut self) {
+        panic!("Live action panic payload");
+    }
+
+    #[action]
     pub fn increment(&mut self) {
         self.count += 1;
     }
@@ -1230,4 +1235,173 @@ async fn accepted_flash_without_a_session_scope_fails_closed() {
         .expect("build absent-session flash inspection request");
     let (_, _, body) = dispatch_request(router, session_only, get).await;
     assert_eq!(&body[..], b"missing");
+}
+
+#[derive(LiveComponent)]
+#[live(
+    name = "tests.reporting-panic",
+    view = "live/tests/public-counter.html"
+)]
+pub struct ReportingPanicComponent {
+    #[public]
+    count: u64,
+}
+
+#[live]
+impl ReportingPanicComponent {
+    #[mount]
+    pub fn mount() -> Self {
+        panic!("Live mount panic payload");
+    }
+}
+
+#[derive(Default)]
+struct ReportingEvents(Mutex<Vec<suprnova::ReportingEvent>>);
+impl suprnova::Reporter for ReportingEvents {
+    fn report(&self, event: suprnova::ReportingEvent) -> Result<(), FrameworkError> {
+        self.0.lock().expect("reporting events lock").push(event);
+        Ok(())
+    }
+    fn flush(&self, _: std::time::Duration) -> Result<bool, FrameworkError> {
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn report_002_live_mount_panic_reports_one_payload_without_the_closed_wrapper() {
+    ensure_crypt();
+    let _container = TestContainer::fake();
+    App::init();
+    suprnova::Exceptions::reset();
+    let events = Arc::new(ReportingEvents::default());
+    App::bind::<dyn suprnova::Reporter>(events.clone());
+    suprnova::Reporting::bootstrap().expect("install engine reporting observer");
+    App::singleton(
+        LiveRegistry::builder()
+            .register::<ReportingPanicComponent>()
+            .expect("register panic component")
+            .build(),
+    );
+    let mount = LiveMount::<ReportingPanicComponent>::public_seed(
+        "/reporting-panic",
+        "panic",
+        "reporting-panic",
+    )
+    .expect("declare panic mount");
+    let handler_mount = mount.clone();
+    let router: Router = Router::new()
+        .get("/reporting-panic", move |request: Request| {
+            let mount = handler_mount.clone();
+            async move {
+                let result: Result<(), FrameworkError> = async {
+                    let mut document = LiveDocument::from_request(&request)?;
+                    document
+                        .mount(
+                            &mount,
+                            CanonicalValue::Object(BTreeMap::new()),
+                            MountFlags::empty(),
+                        )
+                        .await?;
+                    Ok(())
+                }
+                .await;
+                result
+                    .map(|()| HttpResponse::text("mounted"))
+                    .map_err(HttpResponse::from)
+            }
+        })
+        .into();
+    let router = router
+        .try_live()
+        .expect("install endpoint")
+        .try_live_mount(&mount)
+        .expect("register mount");
+    prepare_live_router_for_test(&router).expect("prepare runtime");
+    let (status, body) = dispatch_one(router, "/reporting-panic").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!String::from_utf8_lossy(&body).contains("Live mount panic payload"));
+    let events = events.0.lock().expect("reporting events lock").clone();
+    assert_eq!(
+        events.len(),
+        1,
+        "report the panic once, preserving its safe 500 wrapper: {events:?}"
+    );
+    assert!(
+        events[0]
+            .payload
+            .to_string()
+            .contains("Live mount panic payload")
+    );
+    assert!(events[0].payload.to_string().contains("document_routes.rs"));
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn report_002_live_action_panic_reports_one_payload_while_refreshing_the_client() {
+    ensure_crypt();
+    let _container = TestContainer::fake();
+    App::init();
+    suprnova::Exceptions::reset();
+    let events = Arc::new(ReportingEvents::default());
+    App::bind::<dyn suprnova::Reporter>(events.clone());
+    suprnova::Reporting::bootstrap().expect("install engine reporting observer");
+    App::singleton(
+        LiveRegistry::builder()
+            .register::<PublicCounter>()
+            .expect("register action component")
+            .build(),
+    );
+    let mount = LiveMount::<PublicCounter>::public_seed(
+        "/catalog/{section}",
+        "counter",
+        "reporting-action",
+    )
+    .expect("declare action mount");
+    let router = Arc::new(response_intent_router(&mount));
+    let get = hyper::Request::builder()
+        .uri("/catalog/books")
+        .body(Full::new(Bytes::new()))
+        .expect("build document request");
+    let (status, _, body) =
+        dispatch_request(router.clone(), Arc::new(MiddlewareRegistry::new()), get).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        events.0.lock().expect("events lock").is_empty(),
+        "successful mount reports nothing"
+    );
+    let request = live_action_request(
+        decoded_snapshot(&body),
+        "reporting-action",
+        "reporting_panic",
+        "0",
+        "AAECAwQFBgcICQoLDA0ODw",
+        "EBESExQVFhcYGRobHB0eHw",
+    );
+    let (status, _, body) = dispatch_request(
+        router,
+        Arc::new(MiddlewareRegistry::new().append(ActionFacts)),
+        request,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "closed refresh response: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(!String::from_utf8_lossy(&body).contains("Live action panic payload"));
+    let events = events.0.lock().expect("events lock").clone();
+    assert_eq!(
+        events.len(),
+        1,
+        "one panic report even though the client gets a safe refresh: {events:?}"
+    );
+    assert!(
+        events[0]
+            .payload
+            .to_string()
+            .contains("Live action panic payload")
+    );
+    assert!(events[0].payload.to_string().contains("document_routes.rs"));
 }

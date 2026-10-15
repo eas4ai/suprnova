@@ -324,6 +324,7 @@ where
         Err(e) => return handle_clap_error(e),
     };
     io::set_verbosity(verbosity_of(&matches));
+    crate::Reporting::bootstrap()?;
 
     if let Some((name, sub_matches)) = matches.subcommand() {
         if let Some(entry) = find(name) {
@@ -346,16 +347,20 @@ where
                     Err(e) => Err(e),
                 };
                 if let Err(e) = booted {
-                    let error = FrameworkError::internal(format!("console bootstrap failed: {e}"));
+                    let error = crate::app::process_boot::framework_error(
+                        format!("console bootstrap failed: {e}"),
+                        e,
+                    );
                     // Laravel's console kernel reports a failure of its
                     // bootstrap through the handler, as it reports what a
                     // command throws (PAR-111). The bootstrap ran first, so
                     // the callbacks it registered see it. Before the drain,
                     // so the queued listeners a reporter starts are awaited.
-                    crate::error::Exceptions::report(&error);
+                    crate::app::process_boot::report_error(&error);
                     // The bootstrap already ran and may have started
                     // supervisors: they are drained as after a command.
                     crate::app::process_boot::finish_process().await;
+                    crate::app::process_boot::flush_reporting().await;
                     // Written past the verbosity: `-q` silences the
                     // command, and never the reason it did not run.
                     io::write_errors(&format!("error: {}\n", error.message()));
@@ -394,6 +399,7 @@ where
             if booted {
                 crate::app::process_boot::finish_process().await;
             }
+            crate::app::process_boot::flush_reporting().await;
             // The file log channels buffer; a command's last records reach
             // the file before the process exits.
             crate::logging::Log::flush();
