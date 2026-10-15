@@ -8,6 +8,7 @@ mod live_dogfood_support;
 #[cfg(feature = "testing")]
 #[path = "../support/live_markup.rs"]
 mod live_markup;
+mod manual;
 mod overrides;
 mod policies;
 #[cfg(feature = "testing")]
