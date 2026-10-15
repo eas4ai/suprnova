@@ -1,5 +1,5 @@
 //! REST calibration uses isolated resources, bounded requests and atomic floor publication.
-use super::{BaselineFloors, Fixture, Measurement, Rival, Rivals, measure, tree_hash};
+use super::{BaselineFloors, Fixture, Measurement, Rival, RivalTrial, Rivals, measure, tree_hash};
 use crate::FrameworkError;
 use reqwest::{
     Method, Url,
@@ -253,28 +253,26 @@ impl Calibration {
         for value in floors.p95_budgets_ms.values_mut() {
             *value = budget;
         }
-        let meili = floors.rivals.meilisearch.lexical.as_ref().ok_or_else(|| {
+        let meili_rival = &floors.rivals.meilisearch;
+        let typesense_rival = &floors.rivals.typesense;
+        let meili = meili_rival.lexical.as_ref().ok_or_else(|| {
             FrameworkError::internal("search baseline Meilisearch: missing measurement")
         })?;
-        let typesense = floors.rivals.typesense.lexical.as_ref().ok_or_else(|| {
+        let typesense = typesense_rival.lexical.as_ref().ok_or_else(|| {
             FrameworkError::internal("search baseline Typesense: missing measurement")
         })?;
         floors.budget_comment = format!(
-            "Calibrated {}: Meilisearch {} p95 {:.6} ms; Typesense {} p95 {:.6} ms. Every engine budget is two times the slower rival's p95, measured over the same queries as nDCG@10 after a full warm-up pass.",
+            "Calibrated {}: Meilisearch {} settings {} p95 {:.6} ms; Typesense {} settings {} p95 {:.6} ms. Every engine budget is two times the slower rival's p95, measured over the same queries as nDCG@10 after a full warm-up pass.",
             floors.calibrated_at.as_deref().unwrap_or_default(),
-            floors
-                .rivals
-                .meilisearch
-                .version
-                .as_deref()
-                .unwrap_or_default(),
+            meili_rival.version.as_deref().unwrap_or_default(),
+            meili_rival.settings.as_ref().ok_or_else(|| {
+                FrameworkError::internal("search baseline Meilisearch: missing chosen settings")
+            })?,
             meili.latency.p95_ms,
-            floors
-                .rivals
-                .typesense
-                .version
-                .as_deref()
-                .unwrap_or_default(),
+            typesense_rival.version.as_deref().unwrap_or_default(),
+            typesense_rival.settings.as_ref().ok_or_else(|| {
+                FrameworkError::internal("search baseline Typesense: missing chosen settings")
+            })?,
             typesense.latency.p95_ms,
         );
         floors.tree_hash = tree_hash();
@@ -311,24 +309,24 @@ impl Calibration {
             }
             let version = service.json(Method::GET, "version", None).await?;
             let version = version_string(&version, "pkgVersion", "Meilisearch")?;
-            let lexical = measure(fixture, |q| {
-                let path = format!("{path}/search");
-                async move {
-                    let result = service
-                        .json(
-                            Method::POST,
-                            &path,
-                            Some(json!({"q":q.text,"limit":10,"attributesToRetrieve":["id"]})),
-                        )
-                        .await?;
-                    hit_ids(&result, false, "Meilisearch")
-                }
-            })
-            .await?;
-            Ok(Rival {
-                version: Some(version),
-                lexical: Some(lexical),
-            })
+            let mut trials = Vec::new();
+            for strategy in ["last", "frequency", "all"] {
+                let settings = json!({
+                    "matchingStrategy":strategy, "limit":10, "attributesToRetrieve":["id"]
+                });
+                let lexical = measure(fixture, |q| {
+                    let path = format!("{path}/search");
+                    let mut body = settings.clone();
+                    body["q"] = json!(q.text);
+                    async move {
+                        let result = service.json(Method::POST, &path, Some(body)).await?;
+                        hit_ids(&result, false, "Meilisearch")
+                    }
+                })
+                .await?;
+                trials.push((settings, lexical));
+            }
+            select_rival(version, trials)
         }
         .await;
         let cleanup = service.meili_task(Method::DELETE, &path, None).await;
@@ -351,18 +349,75 @@ impl Calibration {
             }
             let version = service.json(Method::GET, "debug", None).await?;
             let version = version_string(&version, "version", "Typesense")?;
-            let lexical: Measurement = measure(fixture, |q| {
-                let path = format!("{path}/documents/search");
-                async move {
-                    let body = service.request(Method::GET, &path, &[("q",&q.text),("query_by","title,text"),("per_page","10"),("include_fields","id")], None, true).await?;
-                    hit_ids(&service.decode(&path, &body)?, true, "Typesense")
+            let mut trials = Vec::new();
+            for threshold in [1, 10] {
+                let threshold_string = threshold.to_string();
+                let threshold_param = threshold_string.as_str();
+                for match_type in ["max_score", "sum_score"] {
+                    let settings = json!({
+                        "drop_tokens_threshold":threshold, "text_match_type":match_type,
+                        "query_by":"title,text", "per_page":10, "include_fields":"id"
+                    });
+                    let lexical = measure(fixture, |q| {
+                        let path = format!("{path}/documents/search");
+                        async move {
+                            let body = service
+                                .request(
+                                    Method::GET,
+                                    &path,
+                                    &[
+                                        ("q", &q.text),
+                                        ("query_by", "title,text"),
+                                        ("per_page", "10"),
+                                        ("include_fields", "id"),
+                                        ("drop_tokens_threshold", threshold_param),
+                                        ("text_match_type", match_type),
+                                    ],
+                                    None,
+                                    true,
+                                )
+                                .await
+                                .map_err(|error| FrameworkError::internal(format!(
+                                    "{error}; Typesense search parameters: drop_tokens_threshold={threshold}, text_match_type={match_type}"
+                                )))?;
+                            hit_ids(&service.decode(&path, &body)?, true, "Typesense")
+                        }
+                    })
+                    .await?;
+                    trials.push((settings, lexical));
                 }
-            }).await?;
-            Ok(Rival { version: Some(version), lexical: Some(lexical) })
+            }
+            select_rival(version, trials)
         }.await;
         let cleanup = service.json(Method::DELETE, &path, None).await.map(|_| ());
         finish(result, cleanup, "Typesense")
     }
+}
+fn select_rival(
+    version: String,
+    trials: Vec<(Value, Measurement)>,
+) -> Result<Rival, FrameworkError> {
+    let (settings, lexical) = trials
+        .iter()
+        .max_by(|(_, left), (_, right)| {
+            left.ndcg_at_10
+                .total_cmp(&right.ndcg_at_10)
+                .then_with(|| right.latency.p95_ms.total_cmp(&left.latency.p95_ms))
+        })
+        .ok_or_else(|| FrameworkError::internal("search baseline: empty rival calibration grid"))?;
+    Ok(Rival {
+        version: Some(version),
+        lexical: Some(lexical.clone()),
+        settings: Some(settings.clone()),
+        grid: trials
+            .into_iter()
+            .map(|(settings, measurement)| RivalTrial {
+                settings,
+                ndcg_at_10: measurement.ndcg_at_10,
+                p95_ms: measurement.latency.p95_ms,
+            })
+            .collect(),
+    })
 }
 fn version_string(value: &Value, key: &str, service: &str) -> Result<String, FrameworkError> {
     match value.get(key) {

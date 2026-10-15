@@ -333,6 +333,61 @@ pub struct Rival {
     pub version: Option<String>,
     /// Lexical measurements have no dependency on a rival embedding provider.
     pub lexical: Option<Measurement>,
+    /// Search parameters of the chosen trial, excluding each fixture query's text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<serde_json::Value>,
+    /// Every measured configuration makes the calibration choice reviewable.
+    #[serde(default)]
+    pub grid: Vec<RivalTrial>,
+}
+/// Search-time settings and their measured quality and warm p95 on the fixture.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RivalTrial {
+    /// Exact search parameters, excluding each fixture query's text.
+    pub settings: serde_json::Value,
+    /// Macro average over every judged fixture query.
+    pub ndcg_at_10: f64,
+    /// Warm nearest-rank p95 in milliseconds from the measured pass.
+    pub p95_ms: f64,
+}
+impl Rival {
+    fn validate_calibrated(&self) -> Result<(), FrameworkError> {
+        if !self.version.as_ref().is_some_and(|v| !v.trim().is_empty()) {
+            return Err(FrameworkError::param(
+                "search baseline.json: calibrated rival lacks its version",
+            ));
+        }
+        let measurement = self.lexical.as_ref().ok_or_else(|| {
+            FrameworkError::param(
+                "search baseline.json: calibrated rival lacks lexical measurement",
+            )
+        })?;
+        measurement.validate()?;
+        if self.settings.is_none() || self.grid.is_empty() {
+            return Err(FrameworkError::param(
+                "search baseline.json: calibrated rival requires chosen settings and a non-empty grid",
+            ));
+        }
+        let mut best = 0.0_f64;
+        for trial in &self.grid {
+            if !trial.ndcg_at_10.is_finite()
+                || !(0.0..=1.0).contains(&trial.ndcg_at_10)
+                || !trial.p95_ms.is_finite()
+                || trial.p95_ms < 0.0
+            {
+                return Err(FrameworkError::param(
+                    "search baseline.json: invalid rival grid measurement",
+                ));
+            }
+            best = best.max(trial.ndcg_at_10);
+        }
+        if (measurement.ndcg_at_10 - best).abs() > best * 1e-9 {
+            return Err(FrameworkError::param(
+                "search baseline.json: rival nDCG@10 must equal its best grid trial",
+            ));
+        }
+        Ok(())
+    }
 }
 /// Each rival is retained separately so a weak rival cannot lower the gate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -394,20 +449,7 @@ impl BaselineFloors {
         }
         if self.calibrated {
             for rival in [&self.rivals.meilisearch, &self.rivals.typesense] {
-                if !rival.version.as_ref().is_some_and(|v| !v.trim().is_empty()) {
-                    return Err(FrameworkError::param(
-                        "search baseline.json: calibrated rival lacks its version",
-                    ));
-                }
-                rival
-                    .lexical
-                    .as_ref()
-                    .ok_or_else(|| {
-                        FrameworkError::param(
-                            "search baseline.json: calibrated rival lacks lexical measurement",
-                        )
-                    })?
-                    .validate()?;
+                rival.validate_calibrated()?;
             }
             let derived = self.rival_budget()?;
             if self
