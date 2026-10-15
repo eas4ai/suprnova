@@ -1,0 +1,66 @@
+[profile.default]
+status-level = "fail"
+failure-output = "immediate"
+
+[profile.ci]
+fail-fast = false
+
+[test-groups]
+serial-binaries = { max-threads = 1 }
+# The laravel_database tests reset and reload one throwaway database per
+# engine (scripts/check-laravel-database.sh makes one of each), so the tests
+# of one engine run one at a time. SQLite tests use a file each and run free.
+laravel-database-postgres = { max-threads = 1 }
+laravel-database-mysql = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(paginated_users_e2e)'
+test-group = 'serial-binaries'
+
+[[profile.default.overrides]]
+filter = 'binary(laravel_database) & test(/_postgres$/)'
+test-group = 'laravel-database-postgres'
+
+[[profile.default.overrides]]
+filter = 'binary(laravel_database) & test(/_mysql$/)'
+test-group = 'laravel-database-mysql'
+
+# A real-clock fairness assertion over an SSE transport: it holds when the
+# machine is not saturated by other test processes, so it runs alone.
+[[profile.default.overrides]]
+filter = 'binary(live_async_backpressure) & test(=a_chatty_island_cannot_starve_its_sibling_on_one_transport)'
+threads-required = "num-test-threads"
+
+# Schema dump engine cases reset one disposable database per engine.
+# A mutex inside each test process cannot serialize nextest processes.
+[[profile.default.overrides]]
+filter = 'binary(schema_dump) & test(/^engines::/)'
+test-group = 'serial-binaries'
+
+# Each key-type/settings fixture starts a cargo check in a shared target directory.
+[[profile.default.overrides]]
+filter = 'binary(model_key_type)'
+test-group = 'serial-binaries'
+
+# The engine baseline tests load 5,183 documents and run 600 queries against a
+# standing service. When that service wedges (MariaDB 12.3.1 took signal 11
+# during the fulltext load on 2026-10-14 and never answered again), the test
+# would otherwise wait forever and the gate step would die of its own timeout
+# with no name attached. Fifteen minutes is several times the slowest lexical
+# debug measurement; a release-profile run finishes in well under one. The
+# hybrid tests are left out: they embed the whole corpus with the real model,
+# which takes about forty minutes per engine on a CPU.
+[[profile.default.overrides]]
+filter = 'binary(search) & test(/^baseline::(postgres_baseline|mysql_baseline|baseline_qdrant|baseline_collection|baseline_sqlite)$/)'
+slow-timeout = { period = "180s", terminate-after = 5 }
+
+# A run with the embedding model configured (SEARCH_EMBEDDER set) turns every
+# engine baseline into a hybrid measurement that embeds the corpus first. Run
+# those with `--profile search-model`: its override is read before the
+# default profile's, so the baseline tests get six hours instead of fifteen
+# minutes, still bounded if a service wedges.
+[profile.search-model]
+
+[[profile.search-model.overrides]]
+filter = 'binary(search) & test(/^baseline::/)'
+slow-timeout = { period = "600s", terminate-after = 36 }
