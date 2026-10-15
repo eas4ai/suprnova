@@ -40,9 +40,7 @@ impl Error for PanicObserverError {}
 /// panic is contained too.
 ///
 /// Returns an error if the observer registry is poisoned.
-pub fn set_panic_observer(
-    observer: Arc<dyn Fn(&str, PanicKind) + Send + Sync>,
-) -> Result<(), PanicObserverError> {
+pub fn set_panic_observer(observer: Arc<Observer>) -> Result<(), PanicObserverError> {
     let previous = {
         let mut slot = OBSERVER.write().map_err(|_| PanicObserverError)?;
         slot.replace(observer)
