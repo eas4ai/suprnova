@@ -127,7 +127,9 @@ mod backend {
                 format!("frontend/src/ssr.{entry_ext}"),
             ] {
                 let source = app.read(&path);
-                for absent in ["LangProvider", "initLang", "lib/lang", "await "] {
+                // An optional reporting SDK loads asynchronously; translation
+                // files and their initialization remain absent.
+                for absent in ["LangProvider", "initLang", "lib/lang"] {
                     assert!(
                         !source.contains(absent),
                         "{} {path} contains {absent}",

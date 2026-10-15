@@ -633,6 +633,16 @@ fn valid_nonce(value: &str) -> bool {
 /// value: the server's configuration is their single source, so the browser
 /// never enforces a limit tighter than the one set here.
 fn config_element(identity: &str, config: LiveConfig, protocol: (u16, u16)) -> String {
+    let dsn = crate::security_headers::public_reporting_dsn();
+    config_element_with_reporting(identity, config, protocol, dsn.as_deref())
+}
+
+fn config_element_with_reporting(
+    identity: &str,
+    config: LiveConfig,
+    protocol: (u16, u16),
+    reporting_dsn: Option<&str>,
+) -> String {
     let morph = config.morph();
     // The store's total size is the server's own business; the browser gets
     // the limits it applies before it sends anything.
@@ -732,6 +742,9 @@ fn config_element(identity: &str, config: LiveConfig, protocol: (u16, u16)) -> S
             number(upload.max_pending_files() as u64),
         ),
     ];
+    if let Some(dsn) = reporting_dsn {
+        entries.push(("reporting_dsn", serde_json::Value::String(dsn.to_owned())));
+    }
     entries.sort_by(|left, right| left.0.cmp(right.0));
     let mut object = serde_json::Map::new();
     for (name, value) in entries {
@@ -980,5 +993,23 @@ mod tests {
         ));
         assert!(element.contains("\"protocol\":{\"maximum\":2,\"minimum\":1}"));
         assert!(!element.contains('<') || element.matches('<').count() == 2);
+    }
+}
+
+#[cfg(test)]
+mod reporting_tests {
+    use super::*;
+
+    #[test]
+    fn report_007_live_config_exposes_only_the_explicit_public_dsn() {
+        let configured = config_element_with_reporting(
+            "test",
+            LiveConfig::default(),
+            (1, 2),
+            Some("https://public@tracker.test/42"),
+        );
+        assert!(configured.contains("\"reporting_dsn\":\"https://public@tracker.test/42\""));
+        let unset = config_element_with_reporting("test", LiveConfig::default(), (1, 2), None);
+        assert!(!unset.contains("reporting_dsn"));
     }
 }

@@ -1,3 +1,4 @@
+import type { BrowserErrorReporter } from "./reporting.js";
 import { DocumentRuntime } from "../islands/discovery.js";
 import type { JsonValue } from "../canonical.js";
 import { RuntimeCallRegistry, type RuntimeCallRegistration } from "../extensions/calls.js";
@@ -46,6 +47,7 @@ export interface RuntimeContext {
   readonly extensionDeadlineMs?: number;
   readonly stimulus?: StimulusBootstrapOptions;
   readonly bootstrapOptions?: BootstrapOptions;
+  readonly reporter?: BrowserErrorReporter;
 }
 
 export class SuprnovaLiveRuntime implements RuntimeHandle, RuntimeFeatureDriverRegistrationHost {
@@ -58,6 +60,7 @@ export class SuprnovaLiveRuntime implements RuntimeHandle, RuntimeFeatureDriverR
     const ledger = new ResourceLedgerImpl();
     bindResourceLedger(this, ledger);
     installInternalResourceCountProbe(this, ledger);
+    if (context.reporter !== undefined) ledger.add("extension", () => context.reporter?.dispose());
     this.#effects = new EffectRegistry({
       diagnostics: context.diagnostics,
       scheduler: context.ports.scheduler,

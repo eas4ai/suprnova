@@ -5,6 +5,94 @@ import AppLayout from './layouts/AppLayout.svelte'
 import GuestLayout from './layouts/GuestLayout.svelte'
 import { pageTitle } from './lib/title'
 
+// Exception text can include copied URLs or credentials even without request context.
+function redactBrowserText(text: string): string {
+  const bounded = text.slice(0, 16_384)
+  const urls = bounded.replace(/https?:\/\/[^\s)]+/gu, (value) => {
+    try {
+      const url = new URL(value)
+      return `${url.origin}${url.pathname}`
+    } catch {
+      return '[URL]'
+    }
+  })
+  const fields = /(^|[\s?&#;,{"'])([^\s?&#;=,:{}"'<>`]+)(["']?\s*[:=]\s*)/gu
+  let redacted = ''
+  let cursor = 0
+  let match: RegExpExecArray | null
+  while ((match = fields.exec(urls)) !== null) {
+    const name = match[2] ?? ''
+    // Decode valid escapes even beside an invalid percent sign.
+    const decoded = new URLSearchParams(`${name}=`).keys().next().value ?? name
+    if (!/(?:password|token|secret|key|signature|authorization|cookie|[cx]srf|session)/iu.test(decoded)) continue
+    // Error text has no trustworthy value boundary. Discard the rest of a
+    // credential line, including every cookie and quoted or malformed value.
+    const lineEnd = urls.slice(fields.lastIndex).search(/[\r\n]/u)
+    redacted += `${urls.slice(cursor, fields.lastIndex)}[REDACTED]`
+    cursor = lineEnd === -1 ? urls.length : fields.lastIndex + lineEnd
+    fields.lastIndex = cursor
+  }
+  return (redacted + urls.slice(cursor)).slice(0, 16_384)
+}
+
+// Keep the SDK in its own chunk, and finish installing its global handlers
+// before mounting. An unset public DSN never imports or initializes a reporter.
+async function loadReporting() {
+  const dsn = import.meta.env.VITE_REPORTING_DSN
+  if (!dsn) return undefined
+  try {
+    const sentry = await import('@sentry/svelte')
+    sentry.init({
+      dsn,
+      sendDefaultPii: false,
+      sendClientReports: false,
+      // Native global handlers and framework hooks own errors. Callback wrappers
+      // can temporarily suppress an independent rejection while deduplicating.
+      integrations: (defaults) => [
+        ...defaults.filter((integration) => !['Breadcrumbs', 'HttpContext', 'BrowserSession', 'Vue', 'BrowserApiErrors'].includes(integration.name)),
+      ],
+      beforeSend(event) {
+        // Vue and Svelte emit recoverable hydration failures through the console.
+        // Other console logs are not error events.
+        if (event.logger === 'console' && !/hydrat/i.test(event.message ?? '')) return null
+        if (event.message) event.message = redactBrowserText(event.message)
+        for (const exception of event.exception?.values ?? []) {
+          if (exception.type) exception.type = redactBrowserText(exception.type)
+          if (exception.value) exception.value = redactBrowserText(exception.value)
+          for (const frame of exception.stacktrace?.frames ?? []) {
+            if (frame.function) frame.function = redactBrowserText(frame.function)
+            if (frame.filename) frame.filename = redactBrowserText(frame.filename)
+            delete frame.vars
+            delete frame.pre_context
+            delete frame.context_line
+            delete frame.post_context
+          }
+        }
+        // Browser state, component props, cookies and URLs are never error context.
+        delete event.request
+        delete event.user
+        delete event.extra
+        delete event.breadcrumbs
+        return event
+      },
+    })
+    // Frameworks can recover from hydration mismatches after logging them.
+    // Capture only that diagnostic, before any SDK console error deduplication.
+    const original = console.warn
+    console.warn = (...args: unknown[]) => {
+      const message = args.filter((value): value is string => typeof value === 'string').join(' ')
+      if (/hydrat/i.test(message)) sentry.captureException(new Error('Svelte hydration mismatch'))
+      original.apply(console, args)
+    }
+    return sentry
+  } catch (error) {
+    // A blocked SDK chunk must leave the application usable.
+    console.error('Browser reporting could not initialize', error)
+    return undefined
+  }
+}
+const reporting = loadReporting()
+
 // No hand-rolled CSRF header here, on purpose. The Inertia client this
 // scaffold installs (`@inertiajs/*`, pinned `^3.8.0`) sends its visits over
 // XMLHttpRequest and, whenever the `XSRF-TOKEN` cookie the Suprnova CSRF
@@ -24,7 +112,7 @@ import { pageTitle } from './lib/title'
 const nonce =
   document.querySelector<HTMLMetaElement>('meta[property="csp-nonce"]')?.nonce || undefined
 
-createInertiaApp({
+reporting.then((sentry) => createInertiaApp({
   // `@inertiajs/vite` turns this into the page resolver: `Notes/Index`
   // loads `./pages/Notes/Index.svelte`, each page in its own chunk.
   pages: './pages',
@@ -46,9 +134,20 @@ createInertiaApp({
       return
     }
     if (el.hasAttribute('data-server-rendered')) {
-      hydrate(App, { target: el, props })
+      try {
+        // Svelte otherwise silently discards a broken hydration tree and mounts.
+        hydrate(App, { target: el, props, recover: false })
+      } catch (error) {
+        sentry?.captureException(error)
+        el.replaceChildren()
+        mount(App, { target: el, props })
+      }
     } else {
       mount(App, { target: el, props })
     }
   },
+})).catch(async (error: unknown) => {
+  const sentry = await reporting
+  sentry?.captureException(error)
+  console.error('Application bootstrap failed', error)
 })

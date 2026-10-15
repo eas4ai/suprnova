@@ -1,6 +1,7 @@
 import { CanonicalError, DEFAULT_CANONICAL_LIMITS, parseCanonicalJson } from "../canonical.js";
 import { validLiveLimits, type LiveLimits } from "../limits.js";
 import { RUNTIME_CONFIG_LIMITS, boundedInteger } from "./limits.js";
+import { reportingEndpoint } from "./reporting.js";
 import type { BootstrapOptions, RuntimeConfig } from "./types.js";
 
 export const CONFIG_ELEMENT_ID = "suprnova-live-config";
@@ -65,7 +66,8 @@ export type RuntimeConfigErrorCode =
   | "config_response_limit"
   | "config_queue_limit"
   | "config_parallel_limit"
-  | "config_asset_identity";
+  | "config_asset_identity"
+  | "config_reporting_dsn";
 
 export type RuntimeConfigErrorSource = "document_config" | "bootstrap_options";
 
@@ -202,6 +204,23 @@ function protocolVersion(value: unknown): value is 1 | 2 {
   return value === 1 || value === 2;
 }
 
+function expectedConfigKeys(config: Record<string, unknown>): readonly string[] {
+  return config["reporting_dsn"] === undefined
+    ? CONFIG_KEYS
+    : [...CONFIG_KEYS, "reporting_dsn"].sort();
+}
+
+function parseReportingOptions(value: unknown): Pick<RuntimeConfig, "reportingDsn"> {
+  if (value === undefined) return {};
+  try {
+    if (typeof value !== "string") throw new TypeError();
+    reportingEndpoint(value);
+    return { reportingDsn: value };
+  } catch {
+    throw new RuntimeConfigError("config_reporting_dsn");
+  }
+}
+
 export function parseRuntimeConfig(
   document: Document,
   options: BootstrapOptions = {},
@@ -221,7 +240,7 @@ export function parseRuntimeConfig(
     throw configFailure(error);
   }
   const config = record(parsed);
-  if (config === null || !exactKeys(config, CONFIG_KEYS)) {
+  if (config === null || !exactKeys(config, expectedConfigKeys(config))) {
     throw new RuntimeConfigError("config_shape");
   }
   if (config["runtime_contract_version"] !== 1) {
@@ -275,5 +294,6 @@ export function parseRuntimeConfig(
     maxQueuedPerIsland,
     maxParallelPerIsland,
     assetIdentity,
+    ...parseReportingOptions(config["reporting_dsn"]),
   });
 }
