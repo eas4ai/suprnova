@@ -35,6 +35,7 @@ pub struct SecurityHeaders {
     csp_report_only: Option<ContentSecurityPolicy>,
     report_only: bool,
     report_to: Option<String>,
+    reporting_dsn: Option<String>,
 }
 
 impl SecurityHeaders {
@@ -121,6 +122,7 @@ impl SecurityHeaders {
             csp_report_only: None,
             report_only: false,
             report_to: None,
+            reporting_dsn: None,
         }
     }
 
@@ -169,6 +171,11 @@ impl SecurityHeaders {
                 )
             })?;
         }
+        let public_dsn = read("REPORTING_PUBLIC_DSN")?.filter(|value| !value.is_empty());
+        if let Some(dsn) = &public_dsn {
+            reporting_origin(dsn)?;
+        }
+        policy.reporting_dsn = public_dsn;
         Ok(policy.hsts_preload(preload))
     }
 
@@ -325,6 +332,7 @@ impl SecurityHeaders {
                 response = response.header(name, value);
             }
         }
+        let public_dsn = self.reporting_dsn.clone().or_else(public_reporting_dsn);
         for (name, csp) in [
             ("content-security-policy", self.csp.as_ref()),
             (
@@ -333,6 +341,12 @@ impl SecurityHeaders {
             ),
         ] {
             let Some(csp) = csp else { continue };
+            // Boot validates configured values. Direct preset builders also pick
+            // up a valid public DSN, so their default policy cannot block reports.
+            let csp = match csp.clone().with_reporting_dsn(public_dsn.as_deref()) {
+                Ok(csp) => csp,
+                Err(_) => csp.clone(),
+            };
             let html = response.header_value("content-type").is_some_and(|value| {
                 value
                     .split(';')
@@ -579,6 +593,49 @@ fn vite_origin() -> Option<String> {
     matches!(url.scheme(), "http" | "https").then(|| url.origin().ascii_serialization())
 }
 
+/// Rejects private credentials before a DSN can enter browser markup or headers.
+pub(crate) fn reporting_origin(dsn: &str) -> Result<String, FrameworkError> {
+    let invalid = || {
+        FrameworkError::internal(
+            "REPORTING_PUBLIC_DSN: expected a public HTTP(S) Sentry DSN without a password, query or fragment",
+        )
+    };
+    if dsn
+        .chars()
+        .any(|character| character.is_control() || character.is_whitespace())
+        || dsn.contains('\\')
+    {
+        return Err(invalid());
+    }
+    let url = url::Url::parse(dsn).map_err(|_| invalid())?;
+    let project = url
+        .path_segments()
+        .and_then(|mut parts| parts.next_back())
+        .unwrap_or_default();
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || url.username().is_empty()
+        || !url
+            .username()
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || project.is_empty()
+        || !project.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(invalid());
+    }
+    Ok(url.origin().ascii_serialization())
+}
+
+/// The server DSN is deliberately never a fallback for the browser's public key.
+pub(crate) fn public_reporting_dsn() -> Option<String> {
+    crate::config::env_optional::<String>("REPORTING_PUBLIC_DSN")
+        .filter(|dsn| !dsn.is_empty() && reporting_origin(dsn).is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,6 +725,48 @@ mod tests {
             "script-src '{nonce}'",
         ] {
             assert!(ContentSecurityPolicy::new(csp).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod reporting_tests {
+    use super::*;
+
+    #[test]
+    fn report_007_environment_policy_rejects_private_dsns_without_echoing_them() {
+        let error = SecurityHeaders::from_values(|name| {
+            Ok((name == "REPORTING_PUBLIC_DSN")
+                .then(|| "https://public:private-secret@tracker.test/42".to_string()))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("REPORTING_PUBLIC_DSN"));
+        assert!(!error.to_string().contains("private-secret"));
+    }
+
+    #[test]
+    fn report_007_every_csp_preset_permits_only_the_public_tracker_origin() {
+        for preset in ["strict", "balanced", "relaxed", "off"] {
+            let policy = SecurityHeaders::from_values(|key| {
+                Ok(match key {
+                    "SECURITY_HEADERS" => Some(preset.to_string()),
+                    "REPORTING_PUBLIC_DSN" => {
+                        Some("https://public@tracker.test/prefix/42".to_string())
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap();
+            let response =
+                policy.decorate(HttpResponse::html("page"), true, false, Some("nonce"), None);
+            if matches!(preset, "strict" | "balanced") {
+                let header = response.header_value("content-security-policy").unwrap();
+                assert!(header.contains("connect-src 'self' https://tracker.test"));
+                assert_eq!(header.matches("https://tracker.test").count(), 1);
+                assert!(!header.contains("public@"));
+            } else {
+                assert!(response.header_value("content-security-policy").is_none());
+            }
         }
     }
 }

@@ -1,12 +1,13 @@
 import { parseRuntimeConfig } from "./runtime/config.js";
-import { CoreRuntimeDiagnostics } from "./runtime/diagnostics.js";
+import { BrowserErrorReporter } from "./runtime/reporting.js";
+import { CoreRuntimeDiagnostics, type RuntimeDiagnosticSink } from "./runtime/diagnostics.js";
 import {
   productionRuntimePorts,
   resolveRuntimePorts,
   type RuntimePortOverrides,
 } from "./runtime/ports.js";
 import { SuprnovaLiveRuntime, type RuntimeHandle, type RuntimeStatus } from "./runtime/runtime.js";
-import type { BootstrapOptions } from "./runtime/types.js";
+import type { BootstrapOptions, DiagnosticMode } from "./runtime/types.js";
 import { adoptClassicFeatures } from "./features/global.js";
 import {
   ENGINE_VERSION,
@@ -62,6 +63,21 @@ function existingRuntime(host: RuntimeHost): RuntimeHandle | null {
   throw new Error("runtime_symbol_conflict");
 }
 
+function reportingDiagnostics(
+  mode: DiagnosticMode,
+  reporter: BrowserErrorReporter | undefined,
+): RuntimeDiagnosticSink {
+  const core = new CoreRuntimeDiagnostics(mode);
+  if (reporter === undefined) return core;
+  return {
+    record(input, context) {
+      core.record(input, context);
+      reporter.record(input);
+    },
+    limit: core.limit.bind(core),
+  };
+}
+
 export function boot(options: BootstrapOptions = {}): RuntimeHandle {
   const document = options.document ?? globalThis.document;
   const window = runtimeWindow(document);
@@ -77,21 +93,33 @@ export function boot(options: BootstrapOptions = {}): RuntimeHandle {
   }
 
   const config = parseRuntimeConfig(document, options);
-  const diagnostics = new CoreRuntimeDiagnostics(options.diagnostics ?? "errors");
-  const ports = resolveRuntimePorts(productionRuntimePorts(window), portOverrides(options));
-  const runtime = new SuprnovaLiveRuntime({
-    bootstrapOptions: options,
-    document,
-    config,
-    diagnostics,
-    ports,
-    ...(options.effects === undefined ? {} : { effects: options.effects }),
-    ...(options.calls === undefined ? {} : { calls: options.calls }),
-    ...(options.extensionDeadlineMs === undefined
-      ? {}
-      : { extensionDeadlineMs: options.extensionDeadlineMs }),
-    ...(options.stimulus === undefined ? {} : { stimulus: options.stimulus }),
-  });
+  const reporter =
+    config.reportingDsn === undefined
+      ? undefined
+      : new BrowserErrorReporter(window, config.reportingDsn);
+  let runtime: SuprnovaLiveRuntime;
+  try {
+    const diagnostics = reportingDiagnostics(options.diagnostics ?? "errors", reporter);
+    const ports = resolveRuntimePorts(productionRuntimePorts(window), portOverrides(options));
+    runtime = new SuprnovaLiveRuntime({
+      bootstrapOptions: options,
+      ...(reporter === undefined ? {} : { reporter }),
+      document,
+      config,
+      diagnostics,
+      ports,
+      ...(options.effects === undefined ? {} : { effects: options.effects }),
+      ...(options.calls === undefined ? {} : { calls: options.calls }),
+      ...(options.extensionDeadlineMs === undefined
+        ? {}
+        : { extensionDeadlineMs: options.extensionDeadlineMs }),
+      ...(options.stimulus === undefined ? {} : { stimulus: options.stimulus }),
+    });
+  } catch (error: unknown) {
+    reporter?.capture(error);
+    reporter?.dispose();
+    throw error;
+  }
   Object.defineProperty(host, RUNTIME_SYMBOL, {
     configurable: false,
     enumerable: false,

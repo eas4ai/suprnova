@@ -27,4 +27,5 @@ export interface RuntimeConfig {
   readonly maxQueuedPerIsland: number;
   readonly maxParallelPerIsland: number;
   readonly assetIdentity: string;
+  readonly reportingDsn?: string;
 }

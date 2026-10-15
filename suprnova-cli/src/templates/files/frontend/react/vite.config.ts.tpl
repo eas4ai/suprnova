@@ -8,6 +8,8 @@ export default defineConfig(({ isSsrBuild }) => ({
   // server's tags put it: the same build runs at `/` and behind a proxy that
   // serves the application under a path prefix such as `/billing`.
   base: './',
+  // The application's root .env owns public Vite settings as well as server config.
+  envDir: '..',
   plugins: [
     // The Inertia plugin turns `pages: './pages'` in both entries into a
     // resolver over `src/pages/**/*.tsx`, and turns `src/ssr.tsx` into the
