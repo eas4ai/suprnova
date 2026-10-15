@@ -1,14 +1,21 @@
 //! Error reporting contract, transport and runtime coverage.
 
 mod drivers;
-mod filtering;
-mod hook;
+
+mod manual;
 mod paths;
+
+mod filtering;
+
 mod event;
 mod serialization;
+
 mod delivery;
-#[cfg(feature = "reporting-sentry")]
-mod privacy;
 mod logs_traces;
 #[cfg(feature = "reporting-sentry")]
 mod rustrak;
+
+mod hook;
+
+#[cfg(feature = "reporting-sentry")]
+mod privacy;

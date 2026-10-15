@@ -48,6 +48,23 @@ See [Security Headers](security-headers.md) for presets and nonce handling.
 | `SECURITY_HEADERS_CSP_REPORT_TO` | none | URL | Adds the CSP `report-to` directive and a `Reporting-Endpoints` destination for violation reports. |
 | `SECURITY_HEADERS_HSTS_PRELOAD` | `false` | `bool` | Adds `preload` to HSTS when opted in. HSTS is sent only on secure requests outside local development. |
 
+## Error reporting
+
+The `sentry` driver is inert without a DSN. All settings are optional. Logs
+and transactions are opt-in, independent of error reporting. See
+[Error Reporting](error-reporting.md) for Rustrak and browser setup.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `REPORTING_DRIVER` | `sentry` | `String` | Selects `sentry`, `log` or `null`. |
+| `REPORTING_DSN` | none | Sentry DSN | Destination for server errors, logs and transactions. |
+| `REPORTING_RELEASE` | application package version | `String` | Release name attached to events. |
+| `REPORTING_SEND_PII` | `false` | literal `true` / `false` | Opts in to the user's email and IP; user id is included without it. Unlike the generic boolean convention above, this setting accepts only lowercase `true` or `false`. |
+| `REPORTING_LOGS` | `off` | log level | Sends Sentry logs at or above this threshold. |
+| `REPORTING_TRACES_SAMPLE_RATE` | `0` | fraction, `0..=1` | Fraction of request and job transactions sent. |
+| `REPORTING_PUBLIC_DSN` | none | Sentry DSN | Configures Live browser reporting and allows the tracker's origin in CSP `connect-src`. |
+| `VITE_REPORTING_DSN` | none | Sentry DSN | Build-time public DSN for Svelte, React and Vue kits; unset loads no reporter. |
+
 ## Application
 
 The `APP_*` family is the framework's identity and crypto root. These
