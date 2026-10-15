@@ -248,7 +248,7 @@ impl Calibration {
             meilisearch,
             typesense,
         };
-        floors.calibrated_at = Some(chrono::Utc::now().to_rfc3339());
+        floors.calibrated_at = Some(crate::clock::now().to_rfc3339());
         let budget = floors.rival_budget()?;
         for value in floors.p95_budgets_ms.values_mut() {
             *value = budget;

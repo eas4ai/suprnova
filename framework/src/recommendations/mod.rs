@@ -147,7 +147,7 @@ impl Recommend {
                 "recommendations retention requires --older-than greater than zero",
             ));
         }
-        let cutoff = chrono::Utc::now()
+        let cutoff = crate::clock::now()
             .checked_sub_signed(chrono::Duration::days(i64::from(older_than_days)))
             .ok_or_else(|| {
                 FrameworkError::param(

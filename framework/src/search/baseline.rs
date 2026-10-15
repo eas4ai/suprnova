@@ -809,7 +809,7 @@ impl Baseline {
             calibrated: self.floors.calibrated,
             tree_hash: tree_hash(),
             fixture_sha256: self.fixture.sha256.clone(),
-            measured_at: chrono::Utc::now().to_rfc3339(),
+            measured_at: crate::clock::now().to_rfc3339(),
             latency_scope: LATENCY_SCOPE.into(),
             vocabulary_prepare_ms,
             lexical,

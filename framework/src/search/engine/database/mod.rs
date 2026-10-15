@@ -274,7 +274,7 @@ fn decode(row: &QueryResult) -> Result<SearchDocument, FrameworkError> {
     Ok(doc)
 }
 fn now() -> i64 {
-    chrono::Utc::now().timestamp()
+    crate::clock::now().timestamp()
 }
 fn vector_id(index: &str, generation: &GenerationId, doc: &IndexedDocument) -> String {
     let identity = serde_json::json!([

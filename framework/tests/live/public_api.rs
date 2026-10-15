@@ -773,15 +773,23 @@ fn public_signatures_name_only_types_an_application_can_reach() {
         let owner = path[0].as_str();
         // A trait its own crate keeps private, the supertrait that seals a
         // trait, is one no one outside may name or implement, by design.
+        // A trait named only by the framework's own Live components is the
+        // component macro's contract: a shipped component implements it
+        // through the macro exactly as an application's component does,
+        // through `live::__private`, which no application names, so that
+        // impl is the macro's and not surface an application can use.
         if let (Some(json), Some(exported)) = (engines.get(owner), exported.get(owner)) {
             let engine = Crate { name: owner, json };
             let segments: Vec<&str> = path.iter().map(String::as_str).collect();
             let entries = engine.path_entries(&segments);
-            let sealed = !entries.is_empty()
-                && entries
+            let all_traits =
+                !entries.is_empty() && entries.iter().all(|(_, kind)| *kind == "trait");
+            let sealed = all_traits && entries.iter().all(|(id, _)| !exported.contains(id));
+            let macro_contract = all_traits
+                && users
                     .iter()
-                    .all(|(id, kind)| *kind == "trait" && !exported.contains(id));
-            if sealed {
+                    .all(|user| user.starts_with("suprnova::live::components::"));
+            if sealed || macro_contract {
                 continue;
             }
         }
