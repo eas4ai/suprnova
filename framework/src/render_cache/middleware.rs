@@ -885,6 +885,13 @@ impl RenderCacheMiddleware {
         pattern: &str,
         policy: &RenderCachePolicy,
     ) -> Result<Response, ProviderFailure> {
+        // The outer security middleware adds its CSP after this middleware
+        // returns, so response headers cannot reveal this request's nonce
+        // policy yet. A Complete page must render afresh under that policy.
+        if crate::CspNonce::current().is_some() && !is_stitched(policy) {
+            LookupOutcome::Bypass.record();
+            return Ok(next(request).await);
+        }
         if !declared_query_ok(&request, policy) {
             LookupOutcome::Bypass.record();
             return Ok(next(request).await);
@@ -968,6 +975,12 @@ impl RenderCacheMiddleware {
             LookupOutcome::Miss.record();
             return render_and_publish(runtime, request, next, policy, job, 0).await;
         };
+        // A stitched route may already hold a Complete entry published
+        // before a nonce policy was enabled. It cannot be replayed either.
+        if crate::CspNonce::current().is_some() && found.complete().is_some() {
+            LookupOutcome::Bypass.record();
+            return Ok(next(request).await);
+        }
 
         let coherence = match coherence(runtime, job.key(), policy, found.header()).await {
             Ok(coherence) => coherence,
@@ -2318,6 +2331,13 @@ async fn render_and_publish(
             wait.wait().await;
             match lookup(runtime, policy, job.key()).await {
                 Ok(Some(found)) => {
+                    // A concurrent leader may have rendered without this
+                    // request's policy. Waiting does not make its Complete
+                    // rendering reusable under a nonce policy.
+                    if crate::CspNonce::current().is_some() && found.complete().is_some() {
+                        LookupOutcome::Bypass.record();
+                        return Ok(next(request).await);
+                    }
                     // Fix round 1, item 4: the leader may have declined to
                     // publish (a moved dependency, an ineligible response,
                     // an overflowed report, an uncacheable classification)
@@ -2829,6 +2849,14 @@ async fn lead_render(
             return Ok(response);
         }
     };
+    // A stitched publisher can return Complete when the document contains
+    // neither slots nor nonce holes. The outer policy still forbids storing
+    // that finished rendering, even before its CSP reaches the response.
+    if crate::CspNonce::current().is_some() && matches!(entry, DecodedEntry::Complete(_)) {
+        LookupOutcome::Declined(LookupDeclineReason::NonceSourcePolicy).record();
+        let _ = runtime.coordinator.release(lease).await;
+        return Ok(response);
+    }
     store_entry(runtime, &lease, policy, &job, &entry, &observed, now).await;
     let _ = runtime.coordinator.release(lease).await;
     // The validator this client is given describes the bytes this client is
@@ -3435,6 +3463,11 @@ async fn render_under_collector(
     Result<GenerationSet, RenderObservationFailure>,
 ) {
     Collector::scope(async move {
+        // Begin the capture with the request's nonce so scripts emitted by
+        // views and Head share Live's hole-cutting contract, even when no
+        // bootstrap was responsible for introducing the nonce.
+        let nonce = crate::CspNonce::current();
+        live::record_bootstrap_nonce(nonce.as_deref());
         if observes_permission_generation {
             collector::observe(collector::permission_version_identity());
         }

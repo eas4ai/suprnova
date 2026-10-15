@@ -803,6 +803,21 @@ impl Request {
         self.parts.headers.get(name).and_then(|v| v.to_str().ok())
     }
 
+    /// Application scripts share the middleware's request nonce with asset writers.
+    pub fn csp_nonce(&self) -> Option<String> {
+        self.csp_nonce_state().and_then(|state| state.get())
+    }
+
+    pub(crate) fn set_csp_nonce(&mut self, state: crate::security_headers::NonceState) {
+        self.parts.extensions.insert(state);
+    }
+
+    pub(crate) fn csp_nonce_state(&self) -> Option<&crate::security_headers::NonceState> {
+        self.parts
+            .extensions
+            .get::<crate::security_headers::NonceState>()
+    }
+
     /// Whether the client asks for validation, before route middleware opts in.
     pub fn is_attempting_precognition(&self) -> bool {
         self.header("Precognition")

@@ -15,9 +15,10 @@
 //! hand for `.middleware_boxed(...)`, so making it a struct would break
 //! them to serve the priority list.
 //!
-//! The table is written at registration only. [`into_boxed`] itself writes
-//! nothing, because the request path calls it for every request, and a
-//! table that grew with every request would be a leak. A middleware boxed
+//! Registrations and request-boundary wrappers of known middleware write
+//! the table. Dropped wrappers are swept with the other weak entries.
+//! [`into_boxed`] itself writes nothing, because ordinary request wrappers
+//! have no registration metadata to retain. A middleware boxed
 //! by hand or by `into_boxed` has no known type, and the priority list
 //! leaves it where it is.
 //!
@@ -120,6 +121,29 @@ pub(crate) fn name_as(boxed: &BoxedMiddleware, identity: String) {
     }
 }
 
+/// Preserve registration metadata when a request boundary wraps a middleware.
+/// Only wrappers of known boxes write; weak entries are swept like registrations.
+pub(crate) fn inherit_identity(source: &BoxedMiddleware, wrapper: &BoxedMiddleware) {
+    let mut table = table().write().unwrap_or_else(|p| p.into_inner());
+    let Some((type_id, alias)) = table
+        .known
+        .get(&key(source))
+        .filter(|known| is_entry_of(known, source))
+        .map(|known| (known.type_id, known.alias.clone()))
+    else {
+        return;
+    };
+    sweep(&mut table);
+    table.known.insert(
+        key(wrapper),
+        Known {
+            middleware: Arc::downgrade(wrapper),
+            type_id,
+            alias,
+        },
+    );
+}
+
 /// The alias `boxed` was resolved from, when an alias produced it.
 pub(crate) fn alias_of(boxed: &BoxedMiddleware) -> Option<String> {
     let table = table().read().unwrap_or_else(|p| p.into_inner());
@@ -209,20 +233,24 @@ fn sweep(table: &mut Table) {
 /// Order `chain` by the priority list, the way Laravel's `SortedMiddleware`
 /// does.
 ///
-/// Only middleware named in the list move, and only forward: when one
+/// Apart from the server prefix and enforced security policy placement,
+/// only middleware named in the list move, and only forward: when one
 /// stands behind a middleware that the list places after it, it is moved
 /// to just before that one. Everything else keeps its place relative to
 /// its neighbours. So a middleware registered after `AuthMiddleware` still
 /// runs after it, whatever the list moves in front of it.
 ///
-/// An empty list, which an application sets with
-/// `set_middleware_priority([])`, returns the chain as it was given after
-/// one read of the list. The list starts with four entries, so a chain of
+/// Security headers always run first, followed by route security overrides,
+/// so cache hits cannot skip policy changes. An empty priority list leaves
+/// every other middleware in registration order. The list starts with four entries, so a chain of
 /// two or more middleware is otherwise ranked: one lookup of its type for
 /// each middleware.
-pub(crate) fn sort_by_priority(chain: Vec<BoxedMiddleware>) -> Vec<BoxedMiddleware> {
+pub(crate) fn sort_by_priority(
+    chain: Vec<BoxedMiddleware>,
+    outermost: usize,
+) -> Vec<BoxedMiddleware> {
     let priority = super::middleware_priority();
-    if priority.is_empty() || chain.len() < 2 {
+    if chain.len() < 2 {
         return chain;
     }
     let ranks: Vec<Option<usize>> = chain
@@ -234,6 +262,19 @@ pub(crate) fn sort_by_priority(chain: Vec<BoxedMiddleware>) -> Vec<BoxedMiddlewa
         .collect();
     let mut order: Vec<usize> = (0..chain.len()).collect();
     sort_order(&mut order, &ranks);
+    // Security policy must surround short-circuiting caches and error pages.
+    // Route overrides run next, before any cache can answer without the route.
+    order.sort_by_key(|index| {
+        if *index < outermost {
+            0
+        } else {
+            match type_of(&chain[*index]) {
+                Some(id) if id == TypeId::of::<crate::SecurityHeaders>() => 1,
+                Some(id) if id == TypeId::of::<crate::SecurityHeadersOverride>() => 2,
+                _ => 3,
+            }
+        }
+    });
 
     let mut slots: Vec<Option<BoxedMiddleware>> = chain.into_iter().map(Some).collect();
     order

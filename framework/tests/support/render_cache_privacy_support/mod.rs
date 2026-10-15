@@ -1293,12 +1293,8 @@ pub const CONSTANT_SCOPED_ROUTE: &str = "/privacy/constant-scoped/{id}";
 
 // ── Reading an emitted island ──────────────────────────────────────────
 
-/// The island-markup readers, defined once in
-/// [`crate::render_cache_support`] and re-exported here: this suite and the
-/// stitch suite held byte-identical copies until task 8, and "which bytes
-/// are the island and which are the shell around it" has to mean the same
-/// thing in both.
-pub use crate::render_cache_support::{attribute, decoded_snapshot, island_tag};
+/// Shared readers keep island and shell assertions consistent across suites.
+pub use crate::live_markup::{attribute, decoded_snapshot, island_tag};
 
 /// The scope the island on [`STITCHED_ROUTE`] was mounted under, as it
 /// reached the client.

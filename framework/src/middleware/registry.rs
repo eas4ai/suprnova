@@ -16,7 +16,8 @@ static GLOBAL_MIDDLEWARE: OnceLock<RwLock<Vec<(TypeId, BoxedMiddleware)>>> = Onc
 /// Register a global middleware that runs on every request.
 ///
 /// Called by the `global_middleware!` macro. Middleware runs in
-/// registration order.
+/// registration order, subject to the priority list and enforced security
+/// policy placement in [`super::MiddlewareChain::execute`].
 ///
 /// Registration is **idempotent per middleware type**: registering the
 /// same `Middleware` type twice keeps only the first registration. This

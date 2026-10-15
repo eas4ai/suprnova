@@ -20,6 +20,7 @@ use std::sync::Arc;
 /// 3. The actual route handler (innermost)
 pub struct MiddlewareChain {
     middleware: Vec<BoxedMiddleware>,
+    outermost: usize,
 }
 
 impl MiddlewareChain {
@@ -27,6 +28,7 @@ impl MiddlewareChain {
     pub fn new() -> Self {
         Self {
             middleware: Vec::new(),
+            outermost: 0,
         }
     }
 
@@ -42,14 +44,23 @@ impl MiddlewareChain {
     pub fn with_capacity(n: usize) -> Self {
         Self {
             middleware: Vec::with_capacity(n),
+            outermost: 0,
         }
     }
 
     /// Add middleware to the chain
     ///
-    /// Middleware are executed in the order they are added.
+    /// Registration order is retained except for security policy placement
+    /// and the configured priority list (see [`Self::execute`]).
     pub fn push(&mut self, middleware: BoxedMiddleware) {
         self.middleware.push(middleware);
+    }
+
+    /// Reserve a server lifecycle wrapper outside application policy sorting.
+    /// This keeps request-id scope around security and its error handling.
+    pub(crate) fn push_outermost(&mut self, middleware: BoxedMiddleware) {
+        self.middleware.insert(self.outermost, middleware);
+        self.outermost += 1;
     }
 
     /// Add multiple middleware to the chain
@@ -57,14 +68,29 @@ impl MiddlewareChain {
         self.middleware.extend(middleware);
     }
 
+    /// Avoid a server policy scope when the application did not install one.
+    pub(crate) fn has_security_headers(&self) -> bool {
+        self.middleware.iter().any(|middleware| {
+            super::identity::type_of(middleware)
+                == Some(std::any::TypeId::of::<crate::SecurityHeaders>())
+        })
+    }
+
     /// Execute the middleware chain with the given request and final handler
     ///
     /// The chain is executed from outside-in:
-    /// - First middleware added runs first
+    /// - Security policy and route overrides precede other application middleware
+    /// - Other middleware keep registration order unless priority moves them
     /// - Each middleware can call `next(request)` to continue the chain
     /// - The final handler is called at the end of the chain
     ///
     /// # Priority
+    ///
+    /// Typed [`SecurityHeaders`](crate::SecurityHeaders) registration always
+    /// runs outside caches and error middleware. Route and group
+    /// [`SecurityHeadersOverride`](crate::SecurityHeadersOverride) instances run
+    /// immediately inside it, before cache lookup. The server's request-id
+    /// lifecycle wrapper remains outside application middleware.
     ///
     /// The middleware priority list
     /// ([`append_middleware_priority`](crate::middleware::append_middleware_priority))
@@ -94,7 +120,7 @@ impl MiddlewareChain {
             // No middleware - call handler directly
             return dispatch(request, &handler).await;
         }
-        let middleware = super::identity::sort_by_priority(self.middleware);
+        let middleware = super::identity::sort_by_priority(self.middleware, self.outermost);
 
         // Build the chain from inside-out
         // Start with the actual handler as the innermost "next"

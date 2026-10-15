@@ -28,6 +28,12 @@ VITE_PORT=5765
 # contract (manual/env-vars.md).
 SUPRNOVA_FRONTEND={frontend}
 
+# Response security. Balanced includes a fresh CSP nonce for HTML scripts.
+SECURITY_HEADERS=balanced
+SECURITY_HEADERS_CSP_REPORT_ONLY=false
+# SECURITY_HEADERS_CSP_REPORT_TO=https://reports.example.com/csp
+SECURITY_HEADERS_HSTS_PRELOAD=false
+
 # Database (SQLite by default, change to postgres://user:pass@localhost:5432/dbname for PostgreSQL)
 DATABASE_URL=sqlite://./database.db
 DB_MAX_CONNECTIONS=10

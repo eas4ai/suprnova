@@ -315,7 +315,7 @@ mod backend {
         ] {
             let dir = tempfile::tempdir().expect("tempdir");
             let bootstrap = scaffold_bootstrap(dir.path(), &["--frontend", kit]);
-            let stack = function(&bootstrap, "register_http_stack");
+            let stack = function(&bootstrap, "try_register_http_stack");
             let session = position(stack, "global_middleware!(SessionMiddleware::new(", kit);
             let error_page = position(stack, error_page, kit);
             let timeout = position(stack, TIMEOUT, kit);
@@ -904,7 +904,7 @@ mod backend {
                 );
             }
             let bootstrap = app.read("src/bootstrap.rs");
-            let http_stack = function(&bootstrap, "register_http_stack");
+            let http_stack = function(&bootstrap, "try_register_http_stack");
             assert!(
                 contains(
                     http_stack,

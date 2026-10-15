@@ -35,6 +35,19 @@ registration pattern.
 Where a starter `.env` ships a key the framework never reads
 (`MAIL_FROM_ADDRESS`), it's called out at the end of this chapter.
 
+## Security headers
+
+These variables are read by `SecurityHeaders::from_env()` when an application
+registers the middleware. Invalid values return an error naming the variable.
+See [Security Headers](security-headers.md) for presets and nonce handling.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `SECURITY_HEADERS` | `balanced` | `String` | Selects `strict`, `balanced`, `relaxed` or `off`. Only registration turns the middleware on. |
+| `SECURITY_HEADERS_CSP_REPORT_ONLY` | `false` | `bool` | Sends `Content-Security-Policy-Report-Only` instead of an enforced CSP. |
+| `SECURITY_HEADERS_CSP_REPORT_TO` | none | URL | Adds the CSP `report-to` directive and a `Reporting-Endpoints` destination for violation reports. |
+| `SECURITY_HEADERS_HSTS_PRELOAD` | `false` | `bool` | Adds `preload` to HSTS when opted in. HSTS is sent only on secure requests outside local development. |
+
 ## Application
 
 The `APP_*` family is the framework's identity and crypto root. These

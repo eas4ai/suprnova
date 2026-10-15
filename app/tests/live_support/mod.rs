@@ -5,7 +5,7 @@
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -25,8 +25,8 @@ use suprnova::render_cache::{CoordinatorConfig, L1Config, Profile, RenderCacheCo
 use suprnova::session::driver::database::DatabaseSessionDriver;
 use suprnova::session::{SessionData, SessionStore, generate_csrf_token, generate_session_id};
 use suprnova::{
-    App, EncryptionKey, MiddlewareRegistry, Model, SessionConfig, UserProvider, attrs, bind,
-    handle_request,
+    App, EncryptionKey, MiddlewareRegistry, Model, SecurityHeaders, SessionConfig, UserProvider,
+    attrs, bind, handle_request,
 };
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -67,11 +67,16 @@ impl TestApp {
     }
 }
 
-/// The global middleware stack is process-wide; register it once so the
-/// session and CSRF middleware run exactly once per request.
-fn http_stack_once() {
-    static STACK: OnceLock<()> = OnceLock::new();
-    STACK.get_or_init(app::bootstrap::register_http_stack);
+/// Rebuilds the stack under the fixture lock so a cache test's explicit
+/// policy cannot leak into another test's default application boot.
+fn http_stack(security_headers: Option<SecurityHeaders>) {
+    suprnova::middleware::clear_global_middleware_for_test();
+    if let Some(policy) = security_headers {
+        // Registration is idempotent per type, so the real bootstrap keeps
+        // this fixture's explicit policy when it registers its default.
+        suprnova::middleware::register_global_middleware(policy);
+    }
+    app::bootstrap::register_http_stack();
 }
 
 /// A true render count for the RenderCache dogfood proof.
@@ -168,17 +173,22 @@ pub enum CacheBoot {
 }
 
 pub async fn setup_app(accepts: usize) -> TestApp {
-    boot(accepts, CacheBoot::FromEnv).await
+    boot(accepts, CacheBoot::FromEnv, None).await
 }
 
 /// Boots with an adjustable RenderCache clock; see [`advance_clock_ms`].
 pub async fn setup_app_with_clock(accepts: usize) -> TestApp {
-    boot(accepts, CacheBoot::TestClock).await
+    boot(accepts, CacheBoot::TestClock, None).await
 }
 
-/// Boots on the Database profile's providers; see [`CacheBoot::DatabaseProfile`].
-pub async fn setup_app_on_the_database_profile(accepts: usize) -> TestApp {
-    boot(accepts, CacheBoot::DatabaseProfile).await
+/// Gives cache-behavior tests an explicit policy while normal boots retain
+/// the application's balanced nonce policy and its Complete-page safeguards.
+pub async fn setup_app_with_security_headers(
+    accepts: usize,
+    cache: CacheBoot,
+    security_headers: SecurityHeaders,
+) -> TestApp {
+    boot(accepts, cache, Some(security_headers)).await
 }
 
 /// Moves this application's RenderCache clock forward by `delta_ms`.
@@ -207,7 +217,11 @@ fn unix_now_ms() -> u64 {
         .expect("Unix milliseconds fit in u64")
 }
 
-async fn boot(accepts: usize, cache: CacheBoot) -> TestApp {
+async fn boot(
+    accepts: usize,
+    cache: CacheBoot,
+    security_headers: Option<SecurityHeaders>,
+) -> TestApp {
     crate::test_environment::testing();
     let lock = TEST_LOCK.lock().await;
     suprnova::Crypt::init(EncryptionKey::generate());
@@ -247,7 +261,7 @@ async fn boot(accepts: usize, cache: CacheBoot) -> TestApp {
     // the global middleware chain, so the session, locale, and feature
     // middleware this registers have to already be there for the cache
     // middleware to land after them, exactly as a deployment orders them.
-    http_stack_once();
+    http_stack(security_headers);
     let mut render_cache_clock = None;
     let mut config = RenderCacheConfig::from_env().expect("render cache configuration");
     // Pinned on every boot, whatever the variant: an ambient

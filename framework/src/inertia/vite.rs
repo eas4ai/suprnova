@@ -234,13 +234,14 @@ pub(crate) fn dev_server_tags(config: &InertiaConfig, server: &str, entries: &[&
             .replace('\'', "\\'")
             .replace('<', "\\u003c");
         out.push_str(&format!(
-            "<script type=\"module\">\n\
+            "<script type=\"module\"{}>\n\
              import RefreshRuntime from '{js_server}/@react-refresh'\n\
              RefreshRuntime.injectIntoGlobalHook(window)\n\
              window.$RefreshReg$ = () => {{}}\n\
              window.$RefreshSig$ = () => (type) => type\n\
              window.__vite_plugin_react_preamble_installed__ = true\n\
-             </script>\n"
+             </script>\n",
+            nonce_attribute()
         ));
     }
     for entry in entries.iter().filter(|entry| is_css_path(entry)) {
@@ -295,8 +296,9 @@ fn manifest_tags(
     }
     for chunk in &preloads {
         out.push_str(&format!(
-            "<link rel=\"modulepreload\" href=\"{}\">\n",
-            url(chunk)
+            "<link rel=\"modulepreload\" href=\"{}\"{}>\n",
+            url(chunk),
+            nonce_attribute()
         ));
     }
     Ok(out)
@@ -314,11 +316,24 @@ fn legacy_tags(config: &InertiaConfig) -> String {
 }
 
 fn script_tag(src: &str) -> String {
-    format!("<script type=\"module\" src=\"{src}\"></script>\n")
+    format!(
+        "<script type=\"module\" src=\"{src}\"{}></script>\n",
+        nonce_attribute()
+    )
 }
 
 fn stylesheet_tag(href: &str) -> String {
-    format!("<link rel=\"stylesheet\" href=\"{href}\">\n")
+    format!(
+        "<link rel=\"stylesheet\" href=\"{href}\"{}>\n",
+        nonce_attribute()
+    )
+}
+
+/// Keep the legacy tag bytes when no request policy supplies a nonce.
+fn nonce_attribute() -> String {
+    crate::CspNonce::current()
+        .map(|nonce| format!(" nonce=\"{}\"", escape_html_attr(&nonce)))
+        .unwrap_or_default()
 }
 
 fn push_unique(list: &mut Vec<String>, item: String) {
@@ -361,6 +376,81 @@ fn asset_base(assets_base_url: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rdoc_005_vite_tags_stamp_the_request_nonce_in_every_asset_mode() {
+        crate::CspNonce::scope(Some("request-nonce".to_string()), async {
+            let config = InertiaConfig::new().frontend(Frontend::React);
+            let manifest = ViteManifest::from_entries(std::collections::HashMap::from([
+                (
+                    "src/main.tsx".into(),
+                    super::super::manifest::ManifestEntry {
+                        file: "main.js".into(),
+                        css: vec!["main.css".into()],
+                        imports: vec!["_chunk".into()],
+                        is_entry: true,
+                    },
+                ),
+                (
+                    "_chunk".into(),
+                    super::super::manifest::ManifestEntry {
+                        file: "chunk.js".into(),
+                        css: vec![],
+                        imports: vec![],
+                        is_entry: false,
+                    },
+                ),
+            ]));
+            let outputs = [
+                dev_server_tags(
+                    &config,
+                    &config.vite_dev_server,
+                    &["src/main.tsx", "src/main.css"],
+                ),
+                manifest_tags(&config, &manifest, &["src/main.tsx"])
+                    .unwrap_or_else(|_| panic!("fixture manifest entries must resolve")),
+                legacy_tags(&config),
+            ];
+            for html in outputs {
+                let tags: Vec<_> = html
+                    .split('<')
+                    .filter(|tag| tag.starts_with("script") || tag.starts_with("link"))
+                    .collect();
+                assert!(tags.len() >= 2, "{html}");
+                for tag in tags {
+                    assert!(tag.contains("nonce=\"request-nonce\""), "<{tag}");
+                }
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn rdoc_005_public_vite_facade_stamps_the_request_nonce() {
+        let _container = crate::testing::TestContainer::fake();
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        crate::Inertia::install(
+            &InertiaConfig::new()
+                .development(true)
+                .frontend(Frontend::React)
+                .manifest_path(directory.path().join("missing.json"))
+                .ssr_hot_file(directory.path().join("missing-hot")),
+        )
+        .expect("install Inertia");
+        crate::CspNonce::scope(Some("request-nonce".to_string()), async {
+            for html in [
+                Vite::to_html().expect("configured tags"),
+                Vite::tags(["src/other.ts"]).expect("explicit tags"),
+            ] {
+                assert!(html.contains("@react-refresh"), "{html}");
+                assert!(html.contains("/@vite/client"), "{html}");
+                for tag in html.split('<').filter(|tag| tag.starts_with("script")) {
+                    assert!(tag.contains("nonce=\"request-nonce\""), "<{tag}");
+                }
+            }
+        })
+        .await;
+    }
 
     #[test]
     fn css_paths_follow_laravels_extensions() {

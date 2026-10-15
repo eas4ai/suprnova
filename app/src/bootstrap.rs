@@ -32,8 +32,9 @@ use suprnova::queue::worker::register_job;
 use suprnova::{
     App, CsrfMiddleware, DB, DevToolsConfig, EloquentUserProvider, EventFacade, FrameworkError,
     IncludeMiddleware, Inertia, InertiaConfig, InertiaRequestExt, InertiaRootTemplate,
-    InertiaSharedData, LocaleMiddleware, LocaleShare, Prop, SessionBlock, SessionConfig,
-    SessionMiddleware, Storage, SupervisorRegistry, UserProvider, bind, global_middleware,
+    InertiaSharedData, LocaleMiddleware, LocaleShare, Prop, SecurityHeaders, SessionBlock,
+    SessionConfig, SessionMiddleware, Storage, SupervisorRegistry, UserProvider, bind,
+    global_middleware,
 };
 
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
@@ -363,6 +364,14 @@ pub fn inertia_version() -> String {
 ///    user-scoped `is_enabled!` calls resolve against the right scope.
 ///    After the session, so `Auth::id()` returns the live user id.
 pub fn register_http_stack() {
+    try_register_http_stack()
+        .expect("HTTP stack: check the SECURITY_HEADERS settings; production also needs a built frontend manifest");
+}
+
+/// Keep invalid security configuration visible to callers that can return errors.
+pub fn try_register_http_stack() -> Result<(), FrameworkError> {
+    // Outside the error pages and RenderCache so every response is protected.
+    global_middleware!(SecurityHeaders::from_env()?);
     global_middleware!(middleware::LoggingMiddleware);
     global_middleware!(suprnova::TimeoutMiddleware::default());
     global_middleware!(IncludeMiddleware);
@@ -381,8 +390,7 @@ pub fn register_http_stack() {
         LocaleMiddleware::from_env().expect("locale config (APP_LOCALE / APP_FALLBACK_LOCALE)")
     );
 
-    Inertia::install(&inertia_config())
-        .expect("Inertia install failed (CFG-01: fails closed in production without a built frontend manifest)");
+    Inertia::install(&inertia_config())?;
 
     // Live requests verify the browser's `Sec-Fetch-Site` proof on their
     // own; every other state change keeps token validation.
@@ -405,6 +413,7 @@ pub fn register_http_stack() {
     );
 
     global_middleware!(FeatureMiddleware::new());
+    Ok(())
 }
 
 /// The Inertia shared data every page carries: the static values through

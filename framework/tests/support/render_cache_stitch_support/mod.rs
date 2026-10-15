@@ -398,6 +398,25 @@ pub async fn boot() -> Arc<Harness> {
     boot_with_stitched_freshness(generous_freshness(), Providers::Embedded).await
 }
 
+/// Boots the real stitched document path with request nonce policy enabled,
+/// so tests compare cached markup against the nonce this request received.
+pub async fn boot_with_security_headers() -> Arc<Harness> {
+    boot_configured(generous_freshness(), Providers::Embedded, true).await
+}
+
+struct RequestNonceMarker;
+
+#[async_trait::async_trait]
+impl Middleware for RequestNonceMarker {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let nonce = request.csp_nonce();
+        next(request).await.map(|response| match nonce {
+            Some(nonce) => response.header("x-test-request-nonce", nonce),
+            None => response,
+        })
+    }
+}
+
 /// [`boot`] on the Database deployment profile: the same routes, policies,
 /// guards, and counters, over a database carrying both render cache
 /// migrations, with `L1Config::Database` and `CoordinatorConfig::Database`
@@ -456,12 +475,24 @@ async fn boot_with_stitched_freshness(
     stitched_freshness: FreshnessPolicy,
     providers: Providers,
 ) -> Arc<Harness> {
+    boot_configured(stitched_freshness, providers, false).await
+}
+
+async fn boot_configured(
+    stitched_freshness: FreshnessPolicy,
+    providers: Providers,
+    security_headers: bool,
+) -> Arc<Harness> {
     static CRYPT_ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     CRYPT_ONCE.get_or_init(|| {
         suprnova::Crypt::init(suprnova::EncryptionKey::generate());
     });
     suprnova::App::init();
     suprnova::middleware::clear_global_middleware_for_test();
+    if security_headers {
+        suprnova::middleware::register_global_middleware(suprnova::SecurityHeaders::balanced());
+        suprnova::middleware::register_global_middleware(RequestNonceMarker);
+    }
 
     let guard = TestContainer::fake();
     fixture();
@@ -1031,18 +1062,14 @@ pub struct StitchDocument<'a> {
     pub island: &'a TrustedHtml,
 }
 
-/// The island-markup readers, defined once in
-/// [`crate::render_cache_support`] and re-exported here: this suite and the
-/// privacy suite held byte-identical copies until task 8, and separating an
-/// island's per-principal markup from the shell bytes around it is exactly
-/// the distinction an assembled stitched document has to get right.
-pub use crate::render_cache_support::{decoded_snapshot, island_tag};
+/// Shared readers keep island and shell assertions consistent across suites.
+pub use crate::live_markup::{decoded_snapshot, island_tag};
 // `attribute` is used only by `the_stored_shell_holds_no_island_markup_and_no_signed_snapshot`,
 // which is gated on the `testing` feature (it needs `RenderCache::shell_for_test`),
 // so the re-export is gated the same way instead of going unused under the
 // minimal profile.
 #[cfg(feature = "testing")]
-pub use crate::render_cache_support::attribute;
+pub use crate::live_markup::attribute;
 
 /// One dispatched response: status, an accessor for a header, and the body.
 pub struct TestResponse {
