@@ -411,6 +411,7 @@ The trait is intentionally small so the bar to ship a new driver stays low. If a
 
 ## Next
 
+- [Search](search.md) - searchable models, native lexical ranking, and hybrid retrieval
 - [Deployment](deployment.md) - the MariaDB-as-default-production
   recommendation in context
 - [Database](database.md) - multi-driver SeaORM setup, including

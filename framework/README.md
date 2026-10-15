@@ -34,6 +34,7 @@ drivers they use.
 | `broadcasting-fanout` | No | SeaStreamer-backed cross-process broadcasting fanout. |
 | `otel` | No | OpenTelemetry tracing and export integration. |
 | `vector-pinecone` | No | The Pinecone vector driver (REST; no extra dependencies). |
+| `search-fastembed` | No | Local ONNX embeddings, sparse models, and cross-encoder reranking; the `ort` build script downloads ONNX Runtime at compile time. |
 
 For example, a service using only SQLite, Postgres, and broadcasting fanout can
 exclude filesystem, MySQL, MariaDB vector, and web-push dependencies:

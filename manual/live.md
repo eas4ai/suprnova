@@ -782,6 +782,13 @@ response and island HTML limits follow the request limit down unless set.
 
 ## Component library
 
+You can install `search-box` with `suprnova live:add search-box`. It combines
+the `search-input` control with scoped model results, checked highlights,
+facets, keyboard selection, and rejection of stale results. Mount the registered
+`suprnova::live::components::SearchBox` with an index and page size; selection
+emits `suprnova:search.selected` with the index and key. See
+[Search](search.md) for parameters, analytics, and the selection contract.
+
 Suprnova ships the foundations of a component library for Live: a token
 stylesheet with a base layer, and a form family of presentational components
 built on native controls and the `live:model`, `live:error`, and

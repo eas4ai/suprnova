@@ -9,9 +9,21 @@ use crate::{
     },
 };
 
-fn configuration(settings: &IndexSettings) -> Result<&str, FrameworkError> {
+/// The text search configuration a generation built with the server's language
+/// uses: its own copy of the server's `default_text_search_config`, made when the
+/// generation's table is created, so a later change to the server default cannot
+/// split the generation's stored vectors from its queries.
+pub(super) fn pinned_configuration(table: &str) -> Result<String, FrameworkError> {
+    let name = format!("{table}_ts");
+    super::identifier(&name)?;
+    Ok(name)
+}
+
+/// The value cast to `regconfig` in every statement: a named configuration as the
+/// developer wrote it, or the generation's pinned copy as a quoted identifier.
+fn configuration(table: &str, settings: &IndexSettings) -> Result<String, FrameworkError> {
     let name = match &settings.index_time.language {
-        LanguageConfig::Server => "simple",
+        LanguageConfig::Server => return Ok(format!("\"{}\"", pinned_configuration(table)?)),
         LanguageConfig::Postgres { configuration } => configuration,
         language => {
             return Err(FrameworkError::param(format!(
@@ -20,18 +32,27 @@ fn configuration(settings: &IndexSettings) -> Result<&str, FrameworkError> {
         }
     };
     super::identifier(name).map_err(|_|FrameworkError::param(format!("search Postgres configuration {name:?}: requires [A-Za-z_][A-Za-z0-9_]* and at most 64 bytes")))?;
-    Ok(name)
+    Ok(name.to_owned())
 }
 
 /// Native index DDL keeps language configuration fixed for a generation.
 pub(super) fn ddl(table: &str, settings: &IndexSettings) -> Result<Vec<String>, FrameworkError> {
-    configuration(settings)?;
-    Ok(vec![
+    let mut statements = Vec::new();
+    if settings.index_time.language == LanguageConfig::Server {
+        let name = pinned_configuration(table)?;
+        statements.push(format!(
+            "DO $$ BEGIN EXECUTE format('CREATE TEXT SEARCH CONFIGURATION %I (COPY = %s)', '{name}', current_setting('default_text_search_config')::regconfig::text); END $$"
+        ));
+    } else {
+        configuration(table, settings)?;
+    }
+    statements.extend([
         format!(
             "ALTER TABLE \"{table}\" ADD COLUMN search_vector tsvector NOT NULL DEFAULT ''::tsvector"
         ),
         format!("CREATE INDEX \"{table}_gin\" ON \"{table}\" USING GIN (search_vector)"),
-    ])
+    ]);
+    Ok(statements)
 }
 
 fn lexeme(text: &str) -> String {
@@ -120,20 +141,22 @@ fn ranking_query(query: &ExpandedQuery, disable_typos: bool) -> String {
 }
 
 fn tsquery(
+    table: &str,
     settings: &IndexSettings,
     query: String,
     sql: &mut Sql,
 ) -> Result<String, FrameworkError> {
-    let config = sql.bind(configuration(settings)?.to_owned());
+    let config = sql.bind(configuration(table, settings)?);
     let query = sql.bind(query);
     Ok(format!("to_tsquery({config}::text::regconfig, {query})"))
 }
 fn column_vector(
+    table: &str,
     settings: &IndexSettings,
     column: &str,
     sql: &mut Sql,
 ) -> Result<String, FrameworkError> {
-    let config = sql.bind(configuration(settings)?.to_owned());
+    let config = sql.bind(configuration(table, settings)?);
     Ok(format!(
         "to_tsvector({config}::text::regconfig, COALESCE({column}, ''))"
     ))
@@ -151,8 +174,12 @@ fn weights(settings: &IndexSettings) -> Vec<f32> {
 }
 
 /// Stored vectors let the GIN index serve candidate selection without re-tokenizing rows.
-pub(super) fn vector(settings: &IndexSettings, sql: &mut Sql) -> Result<String, FrameworkError> {
-    configuration(settings)?;
+pub(super) fn vector(
+    table: &str,
+    settings: &IndexSettings,
+    sql: &mut Sql,
+) -> Result<String, FrameworkError> {
+    configuration(table, settings)?;
     let weights = weights(settings);
     let vectors = settings
         .index_time
@@ -160,7 +187,7 @@ pub(super) fn vector(settings: &IndexSettings, sql: &mut Sql) -> Result<String, 
         .iter()
         .map(|attribute| {
             let column = sql.ident(&attribute.name);
-            let document = column_vector(settings, &column, sql)?;
+            let document = column_vector(table, settings, &column, sql)?;
             let class = weights
                 .iter()
                 .position(|weight| *weight == attribute.weight)
@@ -179,7 +206,7 @@ pub(super) fn vector(settings: &IndexSettings, sql: &mut Sql) -> Result<String, 
 
 /// Bound lexical clauses preserve shared expansion and exclusion semantics.
 pub(super) fn predicate(
-    _table: &str,
+    table: &str,
     settings: &IndexSettings,
     query: &ExpandedQuery,
     sql: &mut Sql,
@@ -195,7 +222,7 @@ pub(super) fn predicate(
         }
         .into());
     }
-    let native = tsquery(settings, render(query, false), sql)?;
+    let native = tsquery(table, settings, render(query, false), sql)?;
     let mut clauses = vec![format!("s.search_vector @@ {native}")];
     // Concatenated tsvectors can join the end of one field to the next field.
     // Field checks preserve phrase adjacency and field-specific typo exclusions.
@@ -213,8 +240,9 @@ pub(super) fn predicate(
                 .iter()
                 .map(|attribute| {
                     let column = format!("s.{}", sql.ident(&attribute.name));
-                    let vector = column_vector(settings, &column, sql)?;
+                    let vector = column_vector(table, settings, &column, sql)?;
                     let query = tsquery(
+                        table,
                         settings,
                         term(
                             item,
@@ -234,8 +262,8 @@ pub(super) fn predicate(
                 .iter()
                 .map(|attribute| {
                     let column = format!("s.{}", sql.ident(&attribute.name));
-                    let vector = column_vector(settings, &column, sql)?;
-                    let query = tsquery(settings, phrase(&words.join(" "), false), sql)?;
+                    let vector = column_vector(table, settings, &column, sql)?;
+                    let query = tsquery(table, settings, phrase(&words.join(" "), false), sql)?;
                     Ok(format!("{vector} @@ {query}"))
                 })
                 .collect::<Result<Vec<_>, FrameworkError>>()?;
@@ -247,7 +275,7 @@ pub(super) fn predicate(
 
 /// Native relevance keeps attribute weights in the database ranking model.
 pub(super) fn score(
-    _table: &str,
+    table: &str,
     settings: &IndexSettings,
     query: &ExpandedQuery,
     sql: &mut Sql,
@@ -267,9 +295,11 @@ pub(super) fn score(
             .map(|value| format!("{value}::real"))
             .collect::<Vec<_>>()
             .join(", ");
-        let query = tsquery(settings, render(query, false), sql)?;
+        let query = tsquery(table, settings, render(query, false), sql)?;
+        // Normalization 1 divides by one plus the log of the document length, so
+        // a long abstract does not outrank a short one by size alone.
         return Ok(format!(
-            "ts_rank_cd(ARRAY[{weights}], s.search_vector, {query})"
+            "ts_rank(ARRAY[{weights}], s.search_vector, {query}, 1)"
         ));
     }
     // PostgreSQL has four weight classes. Per-column native rank preserves additional weights.
@@ -280,8 +310,9 @@ pub(super) fn score(
         .map(|attribute| {
             let weight = sql.bind(attribute.weight);
             let column = format!("s.{}", sql.ident(&attribute.name));
-            let vector = column_vector(settings, &column, sql)?;
+            let vector = column_vector(table, settings, &column, sql)?;
             let query = tsquery(
+                table,
                 settings,
                 ranking_query(
                     query,
@@ -289,7 +320,7 @@ pub(super) fn score(
                 ),
                 sql,
             )?;
-            Ok(format!("{weight} * ts_rank_cd({vector}, {query})"))
+            Ok(format!("{weight} * ts_rank({vector}, {query}, 1)"))
         })
         .collect::<Result<Vec<_>, FrameworkError>>()?;
     Ok(ranks.join(" + "))
@@ -297,7 +328,7 @@ pub(super) fn score(
 
 /// Native match markers let the caller escape source text before inserting trusted tags.
 pub(super) fn highlights(
-    _table: &str,
+    table: &str,
     settings: &IndexSettings,
     query: &ExpandedQuery,
     sql: &mut Sql,
@@ -310,9 +341,10 @@ pub(super) fn highlights(
         .searchable_attributes
         .iter()
         .map(|attribute| {
-            let config = sql.bind(configuration(settings)?.to_owned());
+            let config = sql.bind(configuration(table, settings)?);
             let column = format!("s.{}", sql.ident(&attribute.name));
             let native = tsquery(
+                table,
                 settings,
                 render(
                     query,
@@ -360,6 +392,44 @@ mod tests {
             term(&query.terms[0], true),
             "(('rust':*) | ('rust' <-> 'language'))"
         );
+    }
+    #[test]
+    fn server_language_pins_a_copy_of_the_server_default_for_the_generation() {
+        let settings = IndexSettings::default();
+        assert_eq!(settings.index_time.language, LanguageConfig::Server);
+        let statements = ddl("search_books_v1", &settings).unwrap();
+        assert!(statements[0].contains("CREATE TEXT SEARCH CONFIGURATION %I (COPY = %s)"));
+        assert!(statements[0].contains("'search_books_v1_ts'"));
+        assert!(statements[0].contains("current_setting('default_text_search_config')::regconfig"));
+        assert_eq!(
+            configuration("search_books_v1", &settings).unwrap(),
+            "\"search_books_v1_ts\""
+        );
+        let mut named = settings.clone();
+        named.index_time.language = LanguageConfig::Postgres {
+            configuration: "english".into(),
+        };
+        let statements = ddl("search_books_v1", &named).unwrap();
+        assert!(
+            statements
+                .iter()
+                .all(|s| !s.contains("TEXT SEARCH CONFIGURATION"))
+        );
+        assert_eq!(configuration("search_books_v1", &named).unwrap(), "english");
+    }
+    #[test]
+    fn ranking_is_ts_rank_normalized_by_document_length() {
+        let mut settings = IndexSettings::default();
+        settings.index_time.searchable_attributes = vec![crate::search::WeightedAttribute {
+            name: "body".into(),
+            weight: 1.0,
+        }];
+        let query = super::super::expansion_fixture();
+        let mut sql = Sql::new(super::super::Dialect::Postgres);
+        let score = score("search_books_v1", &settings, &query, &mut sql).unwrap();
+        assert!(score.starts_with("ts_rank(ARRAY["), "{score}");
+        assert!(score.ends_with(", 1)"), "{score}");
+        assert!(!score.contains("ts_rank_cd"));
     }
     #[test]
     fn postgres_configuration_requires_plain_identifier() {

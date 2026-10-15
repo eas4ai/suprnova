@@ -8,6 +8,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Model search.** `Searchable` and the typed `Model::search` builder provide
+  native database, Qdrant, collection and null engines, filters, facets,
+  highlights, scopes and generation rebuilds. Hybrid search uses fastembed
+  or OpenAI-compatible HTTP embeddings, with EmbeddingGemma 2 as the default
+  local model. Opt-in analytics, query suggestions, JSON search and click
+  routes, the Live search-box, the kits' notes search and a judged relevance
+  and latency baseline complete the search surface.
+- **Starter recommendations.** `Recommend` records immutable, deduplicated
+  events and reads scoped collaborative recommendations with affinity,
+  popularity and recent-document fallbacks. Completed runs carry projected
+  explanations, metrics and event provenance; commands generate snapshots,
+  report status and apply application-owned retention.
+- **Opt-in local search inference.** The `search-fastembed` feature enables
+  local embeddings, sparse models and reranking. It is off by default; its
+  `ort` build script downloads ONNX Runtime at compile time. The default
+  search build downloads nothing.
 - **pgvector driver.** `PgVectorDriver` joins the vector drivers behind the
   `vector-pgvector` default feature: a Postgres application stores and
   searches embeddings in its own database.

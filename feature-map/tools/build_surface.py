@@ -118,6 +118,8 @@ PATH_RULES = {
     "framework/src/routing/": "routing",
     "framework/src/static_files": "routing",
     "framework/src/schedule/": "scheduling",
+    "framework/src/search/": "search",
+    "framework/src/recommendations/": "recommendations",
     "framework/src/seed/": "seeding",
     "framework/src/server.rs": "lifecycle",
     "framework/src/session/": "session",
@@ -202,7 +204,8 @@ CLI_RULES = [  # (binary, command prefix, chapter)
     ("console", "render-cache:", "render-cache-operations"), ("console", "__suprnova:live-tool", "live"),
 ]
 ENDPOINT_RULES = [("/_suprnova/health", "deployment"), ("/_suprnova/lang", "localization"),
-                  ("/__live", "live"), ("/suprnova-ui", "live"), ("/webhooks/payments", "payments")]
+                  ("/__live", "live"), ("/suprnova-ui", "live"), ("/webhooks/payments", "payments"),
+                  ("/search/click", "search"), ("/search", "search")]
 TABLE_RULES = [  # (source-path prefix, chapter)
     ("framework/src/rbac/", "authorization"), ("framework/src/features/", "feature-flags"),
     ("framework/src/workflow/", "workflows"), ("framework/src/auth_flows/", "auth-flows"),
