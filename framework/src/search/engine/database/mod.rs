@@ -814,6 +814,27 @@ async fn drop_tables<C: ConnectionTrait>(
             .await
             .map_err(db_error)?;
     }
+    drop_pinned_configuration(conn, table, dialect).await
+}
+/// A Postgres generation built with the server's language owns a copy of the
+/// server's text search configuration (see `postgres::pinned_configuration`);
+/// it goes with the generation's table.
+async fn drop_pinned_configuration<C: ConnectionTrait>(
+    conn: &C,
+    table: &str,
+    dialect: Dialect,
+) -> Result<(), FrameworkError> {
+    if dialect != Dialect::Postgres {
+        return Ok(());
+    }
+    let sql = Sql::new(dialect);
+    let name = postgres::pinned_configuration(table)?;
+    conn.execute_unprepared(&format!(
+        "DROP TEXT SEARCH CONFIGURATION IF EXISTS {}",
+        sql.ident(&name)
+    ))
+    .await
+    .map_err(db_error)?;
     Ok(())
 }
 
@@ -1028,15 +1049,18 @@ impl SearchEngine for DatabaseSearchEngine {
             {
                 return Err(error);
             }
-            drop_created(conn.inner(), &created_tables, dialect)
-                .await
-                .map_err(|cleanup| {
-                    db_error(format!(
-                        "index {} generation {}: {error}; cleanup failed: {cleanup}",
-                        index.name,
-                        generation.as_str()
-                    ))
-                })?;
+            async {
+                drop_created(conn.inner(), &created_tables, dialect).await?;
+                drop_pinned_configuration(conn.inner(), &table, dialect).await
+            }
+            .await
+            .map_err(|cleanup| {
+                db_error(format!(
+                    "index {} generation {}: {error}; cleanup failed: {cleanup}",
+                    index.name,
+                    generation.as_str()
+                ))
+            })?;
             let mut sql = Sql::new(dialect);
             let i = sql.bind(index.name.to_owned());
             let g = sql.bind(generation.as_str().to_owned());
@@ -2125,7 +2149,7 @@ async fn write_document(
     if dialect == Dialect::Postgres {
         let mut sql = Sql::new(dialect);
         let native = native_settings(index, settings);
-        let vector = postgres::vector(&native, &mut sql)?;
+        let vector = postgres::vector(table, &native, &mut sql)?;
         let k = sql.bind(key.clone());
         let text = format!(
             "UPDATE {} AS s SET search_vector={vector} WHERE s.{}={k}",
