@@ -157,6 +157,23 @@ mod no_node {
         assert!(!gitignore.contains("frontend/"), "{gitignore}");
     }
 
+    // The developer's ruling of 2026-10-15: the Live kit carries no Sentry
+    // browser SDK; Live reports through the reporter built into its runtime.
+    #[test]
+    fn kit_live_ships_no_sentry_browser_sdk() {
+        let app = Scaffold::new();
+        for file in files_under(&app.root) {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            assert!(
+                !text.contains("@sentry/") && !text.contains("sentry-cdn"),
+                "the Live kit loads a Sentry browser SDK in {}",
+                file.display()
+            );
+        }
+    }
+
     #[test]
     fn kit_live_env_names_the_kit_and_runs_no_vite() {
         let app = Scaffold::new();
