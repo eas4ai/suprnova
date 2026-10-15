@@ -9,6 +9,8 @@ mod env_lock;
 mod env_snapshot;
 #[path = "../support/live_dogfood_support/mod.rs"]
 mod live_dogfood_support;
+#[path = "../support/live_markup.rs"]
+mod live_markup;
 #[path = "../support/own_process.rs"]
 pub mod own_process;
 #[path = "../support/own_process_async.rs"]

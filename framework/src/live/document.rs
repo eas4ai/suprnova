@@ -829,7 +829,7 @@ impl<'a> LiveDocument<'a> {
     /// roles always cover every island.
     pub fn bootstrap(
         &mut self,
-        options: LiveBootstrapOptions,
+        mut options: LiveBootstrapOptions,
     ) -> Result<LiveBootstrap, LiveDocumentError> {
         if self.bootstrapped {
             return Err(LiveDocumentError::new(
@@ -865,6 +865,13 @@ impl<'a> LiveDocument<'a> {
                 .max()
                 .unwrap_or(1),
         );
+        // Resolve the fallback before rendering so RenderCache records the
+        // exact nonce the scripts and links carry, including implicit values.
+        if options.nonce().is_none()
+            && let Some(nonce) = crate::CspNonce::current()
+        {
+            options = options.with_nonce(nonce);
+        }
         let bootstrap = render_bootstrap(&options, &required, self.runtime.config(), protocol)
             .map_err(|failure| {
                 LiveDocumentError::new(match failure {

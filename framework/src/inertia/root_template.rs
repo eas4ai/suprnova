@@ -124,7 +124,8 @@ pub struct InertiaRootParts<'a> {
     /// first title only. A template that writes its own `<title>` leaves
     /// this out.
     pub title: InertiaRootTitle<'a>,
-    /// The `csrf-token` meta tag, the document head [`Head`](crate::Head)
+    /// The `csrf-token` meta tag, the request's `csp-nonce` meta element
+    /// when a nonce policy applies, the document head [`Head`](crate::Head)
     /// resolved, the SSR head when the SSR server rendered the page, and
     /// the Vite tags, in that order.
     pub head: InertiaRootHead<'a>,
@@ -134,8 +135,8 @@ pub struct InertiaRootParts<'a> {
     pub lang: &'a str,
     /// The session's CSRF token, empty outside a session.
     pub csrf_token: &'a str,
-    /// The request's CSP nonce. `None`: no nonce policy supplies one
-    /// (RDOC-005).
+    /// The request's CSP nonce, for application scripts the template adds.
+    /// `None` when no nonce policy supplies one (RDOC-005).
     pub nonce: Option<&'a str>,
     /// Whether the SSR server rendered this response, for a template that
     /// places fallback head content when it did not.
@@ -210,12 +211,14 @@ pub(super) fn render(
     template: ApplicationTemplate,
     inputs: RootInputs<'_>,
 ) -> Result<HttpResponse, FrameworkError> {
+    let nonce = crate::CspNonce::current();
     let parts = InertiaRootParts {
         title: InertiaRootTitle {
             title: inputs.title,
         },
         head: InertiaRootHead {
             csrf_token: inputs.csrf_token,
+            nonce: nonce.as_deref(),
             head_tags: inputs.head_tags,
             ssr_head: inputs.ssr_head,
             assets: inputs.assets,
@@ -233,7 +236,7 @@ pub(super) fn render(
         },
         lang: inputs.lang,
         csrf_token: inputs.csrf_token,
-        nonce: None,
+        nonce: nonce.as_deref(),
         ssr: inputs.ssr_body.is_some(),
         view: inputs.view,
     };
@@ -264,10 +267,11 @@ impl fmt::Display for InertiaRootTitle<'_> {
     }
 }
 
-/// The head part: the `csrf-token` meta tag, the document head `Head`
-/// resolved, the SSR head and the Vite tags.
+/// The head part: the `csrf-token` and optional `csp-nonce` meta tags, the
+/// document head `Head` resolved, the SSR head and the Vite tags.
 pub struct InertiaRootHead<'a> {
     csrf_token: &'a str,
+    nonce: Option<&'a str>,
     head_tags: &'a str,
     ssr_head: &'a str,
     assets: &'a str,
@@ -278,6 +282,11 @@ impl fmt::Display for InertiaRootHead<'_> {
         f.write_str("<meta name=\"csrf-token\" content=\"")?;
         write_escaped(f, self.csrf_token, true)?;
         f.write_str("\">\n")?;
+        if let Some(nonce) = self.nonce {
+            f.write_str("<meta property=\"csp-nonce\" nonce=\"")?;
+            write_escaped(f, nonce, true)?;
+            f.write_str("\">\n")?;
+        }
         f.write_str(self.head_tags)?;
         if !self.ssr_head.is_empty() {
             f.write_str(self.ssr_head)?;
@@ -380,4 +389,52 @@ fn write_escaped(f: &mut fmt::Formatter<'_>, text: &str, attribute: bool) -> fmt
         rest = &rest[at + 1..];
     }
     f.write_str(rest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt as _;
+
+    #[tokio::test]
+    async fn rdoc_005_root_parts_expose_the_request_nonce_and_head_meta() {
+        let template = ApplicationTemplate {
+            name: "nonce-parts",
+            render: |parts, output| {
+                assert_eq!(parts.nonce, Some("request-nonce"));
+                write!(output, "{}{}", parts.head, parts.body).map_err(|_| TemplateFailure::Failed)
+            },
+        };
+        crate::CspNonce::scope(Some("request-nonce".to_string()), async {
+            let response = render(
+                template,
+                RootInputs {
+                    page: &serde_json::json!({}),
+                    title: None,
+                    csrf_token: "csrf",
+                    head_tags: "",
+                    ssr_head: "",
+                    ssr_body: None,
+                    assets: "",
+                    lang: "en",
+                    mount_id: "app",
+                    view: &InertiaViewData::default(),
+                },
+            )
+            .expect("the template renders");
+            let bytes = response
+                .into_hyper()
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            let html = std::str::from_utf8(&bytes).expect("UTF-8");
+            assert!(
+                html.contains("<meta property=\"csp-nonce\" nonce=\"request-nonce\">"),
+                "{html}"
+            );
+        })
+        .await;
+    }
 }
