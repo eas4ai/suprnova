@@ -1068,7 +1068,11 @@ async fn route_request(
                 request = request.with_trusted_proxies(cfg.trusted_proxies);
             }
             let request_id = crate::logging::request_id::resolve_request_id(&request);
-            return health_response(probe_db, &request_id).await;
+            let response = health_response(probe_db, &request_id).await;
+            return match middleware_registry.security_headers() {
+                Some(policy) => policy.decorate_server_response(response, request.secure()),
+                None => response,
+            };
         }
     }
 
@@ -1097,18 +1101,28 @@ async fn route_request(
         && let Ok(translator) = App::resolve_make::<dyn Translator>()
         && let Some(catalog) = translator.catalog(&locale)
     {
-        let request = Request::new(req);
+        let mut request = Request::new(req);
+        if let Some(ip) = peer_ip {
+            request = request.with_peer_addr(ip);
+        }
+        if let Some(cfg) = Config::get::<crate::config::AppConfig>() {
+            request = request.with_trusted_proxies(cfg.trusted_proxies);
+        }
         let request_id = crate::logging::request_id::resolve_request_id(&request);
         let if_none_match = request
             .headers()
             .get("if-none-match")
             .and_then(|v| v.to_str().ok());
-        return catalog_response(
+        let response = catalog_response(
             &catalog,
             request.query().unwrap_or(""),
             if_none_match,
             &request_id,
         );
+        return match middleware_registry.security_headers() {
+            Some(policy) => policy.decorate_server_response(response, request.secure()),
+            None => response,
+        };
     }
 
     // Inertia context comes off the live Request via header helpers
@@ -1752,6 +1766,24 @@ pub(crate) fn panic_payload_message(p: &Box<dyn std::any::Any + Send>) -> String
 }
 
 async fn handle_ws_upgrade(
+    req: hyper::Request<hyper::body::Incoming>,
+    ws_match: crate::routing::WsMatch,
+    middleware_registry: Arc<MiddlewareRegistry>,
+    peer_ip: Option<std::net::IpAddr>,
+    live_metadata: Option<crate::live::context::LiveRouteMetadata>,
+) -> hyper::Response<ServerBody> {
+    let trusted = Config::get::<crate::config::AppConfig>()
+        .is_some_and(|config| config.trusted_proxies.trusts(peer_ip));
+    let secure = Request::head_is_secure(req.uri(), req.headers(), trusted);
+    crate::security_headers::scope_server_response(
+        middleware_registry.security_headers(),
+        secure,
+        handle_ws_upgrade_inner(req, ws_match, middleware_registry, peer_ip, live_metadata),
+    )
+    .await
+}
+
+async fn handle_ws_upgrade_inner(
     mut req: hyper::Request<hyper::body::Incoming>,
     ws_match: crate::routing::WsMatch,
     middleware_registry: Arc<MiddlewareRegistry>,

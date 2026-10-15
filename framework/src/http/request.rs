@@ -1009,21 +1009,39 @@ impl Request {
     /// distinguish a real proxy hop from a spoofed `X-Forwarded-Proto`
     /// without an allowlist.
     pub fn secure(&self) -> bool {
-        if let Some(scheme) = self.parts.uri.scheme_str()
+        Self::head_is_secure(
+            &self.parts.uri,
+            &self.parts.headers,
+            self.peer_is_trusted_proxy(),
+        )
+    }
+
+    /// Keep pre-chain server responses on the same proxy trust rules as routed requests.
+    pub(crate) fn head_is_secure(
+        uri: &hyper::Uri,
+        headers: &hyper::HeaderMap,
+        trusted_peer: bool,
+    ) -> bool {
+        if let Some(scheme) = uri.scheme_str()
             && scheme.eq_ignore_ascii_case("https")
         {
             return true;
         }
-        if !self.peer_is_trusted_proxy() {
+        if !trusted_peer {
             return false;
         }
-        if let Some(proto) = self.header("X-Forwarded-Proto") {
+        if let Some(proto) = headers
+            .get("X-Forwarded-Proto")
+            .and_then(|value| value.to_str().ok())
+        {
             let first = proto.split(',').next().unwrap_or("").trim();
             if first.eq_ignore_ascii_case("https") {
                 return true;
             }
         }
-        if let Some(ssl) = self.header("X-Forwarded-Ssl")
+        if let Some(ssl) = headers
+            .get("X-Forwarded-Ssl")
+            .and_then(|value| value.to_str().ok())
             && ssl.trim().eq_ignore_ascii_case("on")
         {
             return true;
