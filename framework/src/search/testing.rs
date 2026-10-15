@@ -586,8 +586,12 @@ pub mod conformance {
             )?;
         }
         let vocabulary = engine.vocabulary(&index, &first).await?;
+        // An engine's vocabulary holds its indexed forms: the word itself, or
+        // the stem a stemming configuration (Postgres `english`) stores, here `appl`.
         check(
-            vocabulary.words.get("apple") == Some(&3),
+            vocabulary.words.iter().any(|(word, count)| {
+                word.len() >= 4 && "apple".starts_with(word.as_str()) && *count == 3
+            }),
             "vocabulary does not contain document frequencies",
         )?;
         let mut newer = corpus[0].clone();

@@ -531,12 +531,17 @@ attributes, versions, hashes, and generation metadata beside native indexes.
 | Dialect | Native index and rank | Tokenization, stemming, stop words, minimum length | Prefixes, phrases, highlights |
 |---|---|---|---|
 | SQLite | FTS5 external-content table, triggers, weighted `bm25()` | `unicode61` by default, case/diacritic folding, no stop list or server minimum; optional `porter unicode61` stems English | Last-word `*`, adjacent quoted phrases; native `highlight()` and `snippet()` matches |
-| Postgres | Stored weighted `tsvector`, GIN, `ts_rank_cd` | Default `simple` configuration preserves unstemmed words and has no stop list; `english` supplies native stemming and stop words; no InnoDB minimum | `:*`, `<->` phrase adjacency; native `ts_headline` matches |
+| Postgres | Stored weighted `tsvector`, GIN, `ts_rank` normalized by document length | The server's `default_text_search_config` by default, copied when a generation is created so a later server change cannot split its vectors from its queries; a named configuration overrides it (`english` stems and drops stop words, `simple` keeps every word); no InnoDB minimum | `:*`, `<->` phrase adjacency; native `ts_headline` matches |
 | MySQL | Per-column FULLTEXT plus combined FULLTEXT, weighted sum of `MATCH ... AGAINST (... IN BOOLEAN MODE)` | Server parser and collation; no framework stemming; InnoDB minimum commonly 3 and server stop words apply | Native `*` and quoted phrases, subject to indexed tokens; framework formatting |
 | MariaDB | Same FULLTEXT and weighted boolean relevance path | Server parser and collation; no framework stemming; server token minimum and stop words apply | Native `*` and quoted phrases, subject to indexed tokens; framework formatting |
 
 Postgres maps descending distinct attribute weights to its four A/B/C/D
-classes; weights beyond four classes share D. MySQL/MariaDB text matching
+classes; weights beyond four classes share D. A generation built with the
+server's language owns a text search configuration named after its table with
+a `_ts` suffix; the engine drops it with the generation. Ranking uses `ts_rank`
+rather than `ts_rank_cd`: cover density rewards query words that sit close
+together, which suits all-word queries, while a search matches any query
+word. MySQL/MariaDB text matching
 follows the index collation, while filters and facets preserve exact values.
 `search:status` reports `innodb_ft_min_token_size`, `innodb_ft_enable_stopword`,
 and the server/user stop-word table settings. Configure these on the server and
