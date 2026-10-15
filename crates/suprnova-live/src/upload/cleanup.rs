@@ -1,9 +1,10 @@
 //! Fenced, bounded cleanup reconciliation for temporary uploads.
 
+use crate::panic_observer::catch_unwind_reported as catch_unwind;
 use std::fmt;
 use std::mem::size_of;
 use std::num::NonZeroUsize;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -659,6 +659,9 @@ enum Commands {
         /// Include MinIO S3-compatible storage service
         #[arg(long)]
         with_minio: bool,
+        /// Include Rustrak error reporting service
+        #[arg(long)]
+        with_rustrak: bool,
     },
     /// Run the database seeders (all of them, or the one named)
     #[command(name = "db:seed")]
@@ -1088,8 +1091,17 @@ fn main() {
         Commands::DockerCompose {
             with_mailpit,
             with_minio,
+            with_rustrak,
         } => {
-            commands::docker_compose::run(with_mailpit, with_minio);
+            let result = if with_rustrak {
+                commands::docker_compose::run_with_rustrak(with_mailpit, with_minio, true)
+            } else {
+                commands::docker_compose::run(with_mailpit, with_minio)
+            };
+            if let Err(error) = result {
+                ui::error(&error.to_string());
+                std::process::exit(1);
+            }
         }
         Commands::DbSeed {
             seeder,

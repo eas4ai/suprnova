@@ -18,7 +18,6 @@ use crate::middleware::{Middleware, MiddlewareChain, MiddlewareRegistry, into_bo
 use crate::routing::Router;
 use crate::telemetry::{OtelConfig, init_telemetry};
 use bytes::Bytes;
-use futures::FutureExt;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::server::conn::http1;
@@ -27,7 +26,6 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, OnceLock};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
@@ -432,6 +430,7 @@ impl Server {
     /// listener loop. Returns when the shutdown signal arrives and all
     /// in-flight HTTP + WS tasks have drained.
     pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        crate::Reporting::bootstrap()?;
         if !self.prepared {
             let _ = Self::prepare_config()?;
             let runtime = crate::live::LiveRuntime::bind()?;
@@ -761,6 +760,10 @@ impl Server {
         // flush so listener spans land in the batch.
         crate::events::drain_queued_at_shutdown().await;
 
+        // Work and listeners have stopped producing events, so the sender
+        // can drain its final accepted reports before the runtime ends.
+        crate::app::process_boot::flush_reporting().await;
+
         // Flush buffered telemetry before returning. Safe to call when
         // OTel is disabled - guard just no-ops.
         guard.shutdown().await;
@@ -812,6 +815,7 @@ pub async fn handle_request_with_peer(
     // The request future is boxed before it is wrapped: it is large, and
     // each wrapper would otherwise move a copy of it through the stack of
     // the task that polls it, which deep render paths cannot spare.
+    let reporting_scope = crate::reporting::scope::ReportScope::http(&req, peer_ip);
     let root = request_root(&req, peer_ip);
     let file_request = crate::http::file_response::FileRequest::capture(&req);
     let request = Box::pin(crate::bus::after_response::response(serve_request(
@@ -820,11 +824,12 @@ pub async fn handle_request_with_peer(
         req,
         peer_ip,
     )));
-    let response = crate::container::scope::run_in_new_scope(crate::routing::root::scope(
-        root,
-        file_request.serve(request),
-    ))
-    .await;
+    let response = reporting_scope
+        .run(crate::container::scope::run_in_new_scope(
+            crate::routing::root::scope(root, file_request.serve(request)),
+        ))
+        .await;
+    reporting_scope.note_status(response.status().as_u16());
     close_after_timeout(response)
 }
 
@@ -1622,45 +1627,43 @@ async fn dispatch_chain(
     let secure = request.secure();
     let visit = Arc::new(crate::inertia::visit::Visit::capture(&request));
     let decision = crate::inertia::ServerErrorDecision::prepare(&request);
-    // Boxed before the security scope holds it, as the request future is in
-    // `handle_request_with_peer`: this future holds the chain's and the
-    // decision's, and the scope's wrappers and each of the three dispatch
-    // sites would otherwise carry a copy of it on the stack of the task that
-    // polls the request, which overflows with debug on.
+    // Boxed before the visit and security scopes hold it, as the request
+    // future is in `handle_request_with_peer`: this future holds the chain's
+    // and the decision's, and the scopes' wrappers and each of the three
+    // dispatch sites would otherwise carry a copy of it on the stack of the
+    // task that polls the request, which overflows with debug on.
+    let dispatch: futures::future::BoxFuture<'_, HttpResponse> = Box::pin(async move {
+        let response =
+            execute_chain_safely(chain, request, handler, method, path, request_id.clone()).await;
+        let Some(decision) = decision else {
+            return response;
+        };
+        // Boxed: deciding may render a page, a large future, which only
+        // the requests that reach this line pay for. Caught: the callback
+        // is application code, and a panic in it is a bug the boundary
+        // reports as the same 500 `execute_chain_safely` answers a
+        // handler's with, instead of unwinding the connection's task and
+        // closing the connection on the client.
+        let decided = match crate::logging::REQUEST_ID
+            .scope(
+                request_id.clone(),
+                crate::error::catch_panic(Box::pin(decision.decide(response))),
+            )
+            .await
+        {
+            Ok(decided) => decided,
+            Err(panic) => panic_into_response(panic, method.as_str(), path, request_id.as_str()),
+        };
+        if decided.header_value("X-Request-Id").is_some() {
+            decided
+        } else {
+            decided.header("X-Request-Id", request_id.as_str())
+        }
+    });
     crate::security_headers::scope_response(
         security_headers,
         secure,
-        Box::pin(crate::inertia::visit::scope(visit, async move {
-            let response =
-                execute_chain_safely(chain, request, handler, method, path, request_id.clone())
-                    .await;
-            let Some(decision) = decision else {
-                return response;
-            };
-            // Boxed: deciding may render a page, a large future, which only
-            // the requests that reach this line pay for. Caught: the callback
-            // is application code, and a panic in it is a bug the boundary
-            // reports as the same 500 `execute_chain_safely` answers a
-            // handler's with, instead of unwinding the connection's task and
-            // closing the connection on the client.
-            let decided = match crate::logging::REQUEST_ID
-                .scope(
-                    request_id.clone(),
-                    crate::error::catch_panic(Box::pin(decision.decide(response))),
-                )
-                .await
-            {
-                Ok(decided) => decided,
-                Err(panic) => {
-                    panic_into_response(panic, method.as_str(), path, request_id.as_str())
-                }
-            };
-            if decided.header_value("X-Request-Id").is_some() {
-                decided
-            } else {
-                decided.header("X-Request-Id", request_id.as_str())
-            }
-        })),
+        crate::inertia::visit::scope(visit, dispatch),
     )
     .await
 }
@@ -1692,6 +1695,7 @@ async fn execute_chain_safely(
     path: &str,
     request_id: RequestId,
 ) -> HttpResponse {
+    crate::reporting::scope::note_request(&request, request_id.as_str());
     match crate::error::catch_panic(chain.execute(request, handler)).await {
         Ok(result) => result.unwrap_or_else(|e| e),
         // The panic unwound the original `REQUEST_ID` scope, so the
@@ -1740,9 +1744,12 @@ pub(crate) fn panic_into_response(
         request_id = %request_id,
         "request middleware or handler panicked - translating to 500"
     );
-    HttpResponse::from(crate::error::FrameworkError::internal(format!(
-        "request handler panicked: {msg}"
-    )))
+    crate::Exceptions::report_panic(&msg, panic.location.as_deref());
+    crate::Exceptions::without_reporting(|| {
+        HttpResponse::from(crate::error::FrameworkError::internal(format!(
+            "request handler panicked: {msg}"
+        )))
+    })
     // The panic replaces the `Internal` error the conversion above
     // reported: its message and location are what a developer needs, not
     // the wrapper's text.
@@ -1778,19 +1785,23 @@ async fn handle_ws_upgrade(
     let trusted = Config::get::<crate::config::AppConfig>()
         .is_some_and(|config| config.trusted_proxies.trusts(peer_ip));
     let secure = Request::head_is_secure(req.uri(), req.headers(), trusted);
-    crate::security_headers::scope_server_response(
-        middleware_registry.security_headers(),
-        secure,
-        // Boxed, so the scope's wrappers hold a pointer, not the upgrade.
-        Box::pin(handle_ws_upgrade_inner(
-            req,
-            ws_match,
-            middleware_registry,
-            peer_ip,
-            live_metadata,
-        )),
-    )
-    .await
+    let reporting_scope = crate::reporting::scope::current()
+        .unwrap_or_else(|| crate::reporting::scope::ReportScope::http(&req, peer_ip));
+    reporting_scope
+        .run(crate::security_headers::scope_server_response(
+            middleware_registry.security_headers(),
+            secure,
+            // Boxed, so the scope's wrappers hold a pointer, not the upgrade.
+            Box::pin(handle_ws_upgrade_inner(
+                req,
+                ws_match,
+                middleware_registry,
+                peer_ip,
+                live_metadata,
+                reporting_scope.clone(),
+            )),
+        ))
+        .await
 }
 
 async fn handle_ws_upgrade_inner(
@@ -1799,6 +1810,7 @@ async fn handle_ws_upgrade_inner(
     middleware_registry: Arc<MiddlewareRegistry>,
     peer_ip: Option<std::net::IpAddr>,
     live_metadata: Option<crate::live::context::LiveRouteMetadata>,
+    reporting_scope: crate::reporting::scope::ReportScope,
 ) -> hyper::Response<ServerBody> {
     use crate::middleware::MiddlewareChain;
     use crate::routing::BoxedHandler;
@@ -1917,6 +1929,7 @@ async fn handle_ws_upgrade_inner(
     // attached to any rejection response the chain produces.
     let request_id = crate::logging::request_id::resolve_request_id(&initial_request);
     crate::error::debug_page::note_request_id(request_id.as_str());
+    crate::reporting::scope::note_request(&initial_request, request_id.as_str());
 
     // A WebSocket upgrade is an HTTP GET, so the SAME middleware chain an
     // ordinary request gets applies here, in the SAME fixed order:
@@ -1950,8 +1963,9 @@ async fn handle_ws_upgrade_inner(
                         // the session/auth middleware has run and its ambient
                         // request-scoped state is live *here* - and only here.
                         // It unwinds when `chain.execute` returns, before the
-                        // session task is spawned, and only `REQUEST_ID` is
-                        // carried across that boundary on purpose.
+                        // session task is spawned. The request id and its
+                        // reporting snapshot cross that boundary, while
+                        // ambient auth and session state stay with the GET.
                         //
                         // So a WebSocket handler had no way to learn who
                         // connected, even though the upgrade was fully
@@ -1959,7 +1973,9 @@ async fn handle_ws_upgrade_inner(
                         // id onto the request - which does cross the spawn -
                         // is what lets a channel authorize on server-derived
                         // identity instead of something the client typed.
-                        let req = match crate::session::auth_user_id() {
+                        let req = match crate::auth::request_state::current_user_id()
+                            .or_else(crate::session::auth_user_id)
+                        {
                             Some(id) => req.with_auth_user_id(id),
                             None => req,
                         };
@@ -2025,13 +2041,12 @@ async fn handle_ws_upgrade_inner(
                     route = %pattern,
                     "websocket middleware panicked - aborting upgrade"
                 );
-                // Reported as the HTTP path reports a panic: as the
-                // `Internal` error `panic_into_response` converts (PAR-111).
-                // Logged just above, with the route, so the report skips
-                // its own line.
-                crate::error::Exceptions::report_logged(&crate::error::FrameworkError::internal(
-                    format!("websocket middleware panicked: {msg}"),
-                ));
+                crate::logging::REQUEST_ID.sync_scope(request_id.clone(), || {
+                    crate::Exceptions::report_panic(
+                        &format!("websocket middleware panicked: {msg}"),
+                        panic.location.as_deref(),
+                    );
+                });
                 return HttpResponse::text(
                     "internal error: websocket upgrade aborted (middleware panicked)",
                 )
@@ -2112,6 +2127,10 @@ async fn handle_ws_upgrade_inner(
         }
     };
 
+    // Authentication may have changed the request during the upgrade chain.
+    // Capture the final identity before the session takes ownership of it.
+    crate::reporting::scope::note_request(&suprnova_req, request_id.as_str());
+
     // What middleware asked to keep for the life of the connection, such as
     // a slot of a per-address connection cap. Taken off the request here and
     // moved into the session task below: the handler owns the request and
@@ -2184,21 +2203,22 @@ async fn handle_ws_upgrade_inner(
                 // the forwarder drain. `outbound`, `heartbeat_handle`, and
                 // `forwarder_handle` are extracted above, so they survive the
                 // panic and the cleanup proceeds normally.
-                let result = match AssertUnwindSafe(handler.handle(socket, suprnova_req))
-                    .catch_unwind()
-                    .await
+                let (result, panic_reported) = match crate::error::catch_panic(async {
+                    handler.handle(socket, suprnova_req).await
+                })
+                .await
                 {
-                    Ok(r) => r,
-                    Err(payload) => {
-                        let msg = panic_payload_message(&payload);
+                    Ok(result) => (result, false),
+                    Err(panic) => {
+                        let msg = panic_payload_message(&panic.payload);
                         tracing::error!(
                             panic = %msg,
                             route = %pattern,
                             "websocket handler panicked - sending Close(1011)"
                         );
-                        Err(crate::error::FrameworkError::internal(format!(
-                            "websocket handler panicked: {msg}"
-                        )))
+                        let message = format!("websocket handler panicked: {msg}");
+                        crate::Exceptions::report_panic(&message, panic.location.as_deref());
+                        (Err(crate::error::FrameworkError::internal(message)), true)
                     }
                 };
 
@@ -2242,6 +2262,9 @@ async fn handle_ws_upgrade_inner(
                         ));
                         let _ = outbound.send(close).await;
                         tracing::error!(error = %e, "websocket handler returned error - sent Close 1011");
+                        if !panic_reported {
+                            crate::Exceptions::report_logged(&e);
+                        }
                     }
                 }
                 // Drop outbound so the bridge task exits and the
@@ -2262,6 +2285,10 @@ async fn handle_ws_upgrade_inner(
             }
             Err(e) => {
                 tracing::error!(error = %e, "hyper upgrade failed");
+                crate::Exceptions::report_logged(&crate::FrameworkError::from_external_with(
+                    "WebSocket upgrade failed",
+                    e,
+                ));
             }
         }
     }
@@ -2272,13 +2299,10 @@ async fn handle_ws_upgrade_inner(
     // the id directly around the post-upgrade session task so the handler's
     // logs (and any work it spawns) carry the request id.
     //
-    // Only REQUEST_ID follows the handler - deliberately NOT the request
-    // `Context` bag (query params, flash). A WebSocket session is long-lived
-    // and is not serving the originating GET's per-request state; the handler
-    // reads anything it needs from the upgrade request directly via
-    // `suprnova_req`. This matches `spawn_with_request_id`, which likewise
-    // carries only the id into spawned work.
+    // The reporting snapshot and its breadcrumbs follow the session, while
+    // the request Context bag (query parameters and flash) stays with the GET.
     let handler_task = crate::logging::REQUEST_ID.scope(request_id, handler_task);
+    let handler_task = async move { reporting_scope.run(handler_task).await };
 
     // The session is a unit of work of its own, so it gets a container scope
     // of its own, outermost. It does not share the upgrade request's scope,

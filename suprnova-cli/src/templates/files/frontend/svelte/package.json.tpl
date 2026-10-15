@@ -11,6 +11,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
+    "@sentry/svelte": "10.76.1",
     "@inertiajs/core": "^3.8.0",
     "@inertiajs/svelte": "^3.8.0",
     "svelte": "^5.56.8"

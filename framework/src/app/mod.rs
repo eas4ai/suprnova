@@ -1324,6 +1324,7 @@ where
         if let Some(config_fn) = config_fn {
             config_fn();
         }
+        crate::Reporting::bootstrap()?;
 
         // What the command boots, from the one table that says so. The server
         // (no command, `serve`, `web:run`) boots through `Server` itself. A
@@ -1332,10 +1333,11 @@ where
             .command
             .as_ref()
             .map_or(ProcessBoot::Work, Commands::boot);
-        let booted = !matches!(
+        let server_command = matches!(
             cli.command,
             None | Some(Commands::Serve { .. } | Commands::WebRun { .. })
-        ) && boot != ProcessBoot::Migrations;
+        );
+        let booted = !server_command && boot != ProcessBoot::Migrations;
 
         // The exit status of a command that succeeded or reported its own
         // failure; SSR commands and the queue memory limit can return another status.
@@ -1544,7 +1546,7 @@ where
         // drain below, so the queued listeners a reporter starts are
         // awaited too.
         if let Err(e) = &result {
-            crate::error::Exceptions::report(e);
+            process_boot::report_error(e);
         }
         if let (Err(e), Failures::Print) = (&result, failures)
             && !e.is_silent()
@@ -1558,6 +1560,11 @@ where
         // task still running would end with it.
         if booted || result.is_err() {
             process_boot::finish_process().await;
+        }
+        // A successful server already flushed after its own drains. Every
+        // command, and a server that failed during boot, finishes here.
+        if !server_command || result.is_err() {
+            process_boot::flush_reporting().await;
         }
         // Every command ends here; the file log channels buffer, and nothing
         // a worker wrote before it ended may be lost.
@@ -2332,7 +2339,12 @@ where
     ) -> Result<(), FrameworkError> {
         Self::boot_process(boot, bootstrap_fn)
             .await
-            .map_err(|e| failed(format!("suprnova: {command} bootstrap error: {e}")))
+            .map_err(|error| {
+                process_boot::framework_error(
+                    format!("suprnova: {command} bootstrap error: {error}"),
+                    error,
+                )
+            })
     }
 
     /// Run the boot hooks for an HTTP server process: the process-wide hook
@@ -2483,7 +2495,12 @@ where
                 Ok(()) => process_boot::boot_after_hook(boot).await,
                 Err(e) => Err(e),
             };
-        booted.map_err(|e| failed(format!("suprnova: {name} bootstrap error: {e}")))?;
+        booted.map_err(|error| {
+            process_boot::framework_error(
+                format!("suprnova: {name} bootstrap error: {error}"),
+                error,
+            )
+        })?;
         let Some(inertia) = crate::App::inertia_registry().installed_config() else {
             return Err(failed(format!(
                 "suprnova: {name} reads the Inertia configuration, and none is installed. \
@@ -3207,8 +3224,20 @@ mod process_exit_tests {
             .enable_all()
             .build()
             .expect("a runtime");
+        struct FlushProbe;
+        impl crate::Reporter for FlushProbe {
+            fn report(&self, _: crate::ReportingEvent) -> Result<(), crate::FrameworkError> {
+                Ok(())
+            }
+            fn flush(&self, _: std::time::Duration) -> Result<bool, crate::FrameworkError> {
+                REPORTER_FLUSHED.store(true, Ordering::SeqCst);
+                Ok(true)
+            }
+        }
+        static REPORTER_FLUSHED: AtomicBool = AtomicBool::new(false);
         runtime.block_on(async {
             let app = Application::new().bootstrap(|| async {
+                crate::App::bind::<dyn crate::Reporter>(std::sync::Arc::new(FlushProbe));
                 SupervisorRegistry::spawn(std::sync::Arc::new(BootstrapSupervisor)).await;
                 for _ in 0..200 {
                     if STARTED.load(Ordering::SeqCst) {
@@ -3229,6 +3258,10 @@ mod process_exit_tests {
         assert!(
             STOPPED.load(Ordering::SeqCst),
             "the command returned with the bootstrap's supervisor still running"
+        );
+        assert!(
+            REPORTER_FLUSHED.load(Ordering::SeqCst),
+            "the command must flush reporting after its supervisors stop"
         );
     }
 

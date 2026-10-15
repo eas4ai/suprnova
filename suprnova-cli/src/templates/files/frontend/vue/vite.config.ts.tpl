@@ -8,6 +8,8 @@ export default defineConfig(({ isSsrBuild }) => ({
   // server's tags put it: the same build runs at `/` and behind a proxy that
   // serves the application under a path prefix such as `/billing`.
   base: './',
+  // The application's root .env owns public Vite settings as well as server config.
+  envDir: '..',
   // `inertia()` (Inertia 3.8.0, `packages/vite/src/index.ts`) does three
   // things here. It turns `pages: './pages'` in both entries into a
   // resolver over `src/pages/**/*.vue`. In development it serves the SSR

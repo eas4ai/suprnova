@@ -3,7 +3,7 @@
 Suprnova ships two CLI commands that generate Docker artifacts you can
 adopt verbatim or modify. `docker:init` writes a multi-stage `Dockerfile` + `.dockerignore` for production. `docker:compose` writes a
 `docker-compose.yml` for local development services (database, cache, and
-optionally Mailpit + MinIO). Both commands write into the current project
+optionally Mailpit, MinIO and Rustrak). Both commands write into the current project
 root; neither tries to drive your container runtime.
 
 ## docker:init
@@ -113,9 +113,10 @@ per-developer overrides locally without committing them.
 |--------|-------------|
 | `--with-mailpit` | Include the Mailpit email-testing service |
 | `--with-minio` | Include MinIO (S3-compatible object storage) |
+| `--with-rustrak` | Include Rustrak (Sentry-compatible error tracking) |
 
-If you pass neither flag, the command prompts interactively for both.
-Passing either flag skips the prompt and uses the flag values you gave.
+If you pass no service flags, the command prompts for each optional service.
+Passing any service flag skips the prompts and uses the flags you gave.
 
 ### What you always get
 
@@ -140,6 +141,7 @@ When you opt in:
 |---------|--------------:|-------|
 | Mailpit | 1025 (SMTP), 8025 (UI) | `axllent/mailpit:latest` |
 | MinIO | 9000 (S3 API), 9001 (Console) | `minio/minio:latest` |
+| Rustrak | 8080 (API and dashboard) | `rustrak/rustrak-server:v0.16.4` |
 
 Mailpit defaults to accepting any SMTP auth so you don't have to
 configure credentials during development; the web UI at
@@ -147,6 +149,24 @@ configure credentials during development; the web UI at
 root user defaults to `suprnova`; its password is generated per project
 and printed once by `docker:compose`. Override them with
 `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`.
+
+Rustrak stores its database and source maps in `rustrak_data`. Its generated
+`SESSION_SECRET_KEY` is at least 64 random characters and stays in the
+Compose file; keep it across restarts. The service publishes on loopback,
+sets `PUBLIC_URL` to that address and disables telemetry. Before its first
+start, set `RUSTRAK_CREATE_SUPERUSER` to `email:password`. Compose refuses
+to start without this value, so there is no shared default account:
+
+```bash
+suprnova docker:compose --with-rustrak
+export RUSTRAK_CREATE_SUPERUSER="admin@example.com:$(openssl rand -hex 24)"
+docker compose up -d
+```
+
+Save those initial credentials, sign in at `http://127.0.0.1:8080`, create
+a project and set `REPORTING_DSN` to its DSN. The account bootstrap only
+runs while the database has no users. See [Error Reporting](error-reporting.md)
+for server and browser configuration, or for a plain `docker run` setup.
 
 ### Running the stack
 
@@ -166,8 +186,9 @@ docker compose down -v
 
 ### Wiring `.env` to compose
 
-The compose file uses `${VAR:-default}` syntax everywhere, so you can
-override anything by setting it in `.env` or your shell. A typical
+The Compose file uses environment interpolation for service settings.
+Set overrides in `.env` or your shell; Rustrak requires an explicit initial
+admin value through `${RUSTRAK_CREATE_SUPERUSER:?...}`. A typical
 `.env` for the default stack:
 
 ```env
@@ -209,6 +230,7 @@ The full set of overridable ports:
 | `MAILPIT_UI_PORT` | Mailpit UI | 8025 |
 | `MINIO_API_PORT` | MinIO S3 | 9000 |
 | `MINIO_CONSOLE_PORT` | MinIO Console | 9001 |
+| `RUSTRAK_PORT` | Rustrak API and dashboard | 8080 |
 
 ### Customising the compose file
 
@@ -250,10 +272,11 @@ and the platform guides for fully-worked examples:
 | Command | Writes | When to use |
 |---------|--------|-------------|
 | `suprnova docker:init` | `Dockerfile`, `.dockerignore` | Building production images |
-| `suprnova docker:compose` | `docker-compose.yml` | Bringing up local Postgres/Redis/Mailpit/MinIO |
+| `suprnova docker:compose` | `docker-compose.yml` | Bringing up local Postgres/Redis/Mailpit/MinIO/Rustrak |
 
 ## Next
 
+- [Error Reporting](error-reporting.md) - Rustrak, drivers and browser reports
 - [Deployment](deployment.md) - the platform-agnostic deployment checklist
 - [Railway](deployment-railway.md) - managed PaaS with build-from-git
 - [Digital Ocean](deployment-digital-ocean.md) - App Platform deploys

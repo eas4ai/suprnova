@@ -2468,41 +2468,7 @@ async fn resolve_props(
                             };
                             Ok(TaskOutcome::Insert { key, value: v })
                         }
-                        Err(e) => {
-                            // Render the full source chain once and reuse it
-                            // for both the log and the event - otherwise a
-                            // `FrameworkError::External` would report only
-                            // its context line and drop the wrapped failure,
-                            // the same reason `http/response.rs` renders the
-                            // chain before logging its 5xx.
-                            let logged = crate::error::render_error_chain(&e);
-                            tracing::warn!(
-                                prop_key = %key,
-                                error = %logged,
-                                "inertia deferred prop resolver failed; rescued per spec",
-                            );
-                            // Build the event on the current task so the
-                            // REQUEST_ID task-local is in scope (a spawned
-                            // task wouldn't inherit it). The dispatch
-                            // itself is spawned per the documented
-                            // ErrorOccurred best-effort contract - see
-                            // `events/builtins.rs` and the matching
-                            // pattern in `http/response.rs` - so we do
-                            // not block the Inertia partial-response
-                            // collector on listener execution.
-                            let evt = crate::events::ErrorOccurred {
-                                error_message: logged,
-                                status_code: 500,
-                                request_id: crate::logging::current_request_id()
-                                    .map(|id| id.as_str().to_string()),
-                            };
-                            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                                handle.spawn(async move {
-                                    let _ = crate::events::EventFacade::dispatch(evt).await;
-                                });
-                            }
-                            Ok(TaskOutcome::Rescued { key })
-                        }
+                        Err(e) => Ok(rescued_outcome(key, e)),
                     }
                 }));
             }
@@ -2655,8 +2621,8 @@ impl InertiaRequestExt for TestRequest {
 
 /// Report a rescued deferred prop's failure - the log line and the
 /// best-effort `ErrorOccurred` event - and the outcome that leaves its key
-/// out of `props` and lists it under `rescuedProps`. Used by the scroll
-/// loader arm of `resolve_props`; the resolver arm reports the same way.
+/// out of `props` and lists it under `rescuedProps`. Shared by ordinary
+/// resolvers and scroll loaders so both pass through Exceptions.
 fn rescued_outcome(key: String, e: FrameworkError) -> TaskOutcome {
     let logged = crate::error::render_error_chain(&e);
     tracing::warn!(
@@ -2664,6 +2630,7 @@ fn rescued_outcome(key: String, e: FrameworkError) -> TaskOutcome {
         error = %logged,
         "inertia deferred prop resolver failed; rescued per spec",
     );
+    crate::error::Exceptions::report_logged(&e);
     let evt = crate::events::ErrorOccurred {
         error_message: logged,
         status_code: 500,

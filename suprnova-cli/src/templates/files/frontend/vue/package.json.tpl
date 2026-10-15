@@ -11,6 +11,7 @@
     "check": "vue-tsc --noEmit"
   },
   "dependencies": {
+    "@sentry/vue": "10.76.1",
     "@inertiajs/core": "^3.8.0",
     "@inertiajs/vue3": "^3.8.0",
     "vue": "^3.5.40"

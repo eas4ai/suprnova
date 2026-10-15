@@ -28,3 +28,13 @@ SECURITY_HEADERS=balanced
 SECURITY_HEADERS_CSP_REPORT_ONLY=false
 # SECURITY_HEADERS_CSP_REPORT_TO=https://reports.example.com/csp
 SECURITY_HEADERS_HSTS_PRELOAD=false
+
+# Error reporting. Copy a project's DSN from Rustrak, Sentry or GlitchTip.
+# No DSN sends nothing; logs, transactions and browser reports are opt-in.
+# REPORTING_DRIVER=sentry
+# REPORTING_DSN=
+# REPORTING_RELEASE=
+# REPORTING_SEND_PII=false
+# REPORTING_LOGS=off
+# REPORTING_TRACES_SAMPLE_RATE=0
+# REPORTING_PUBLIC_DSN=

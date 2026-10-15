@@ -112,6 +112,19 @@ describe("bounded runtime configuration", () => {
     expect(config.endpoint.href).toBe("https://app.example.test/_suprnova/live");
   });
 
+  it("accepts an optional public reporting DSN without adding a default reporter", () => {
+    expect(parseRuntimeConfig(configDocument([encoded()])).reportingDsn).toBeUndefined();
+    expect(
+      parseRuntimeConfig(
+        configDocument([encoded({ reporting_dsn: "https://public@tracker.test/42" })]),
+      ).reportingDsn,
+    ).toBe("https://public@tracker.test/42");
+    expectConfigFailure(
+      [encoded({ reporting_dsn: "https://public:secret@tracker.test/42" })],
+      "config_reporting_dsn",
+    );
+  });
+
   it("rejects missing, duplicate, wrong-type, unknown, and DOM-privilege config", () => {
     expectConfigFailure([], "config_missing");
     expectConfigFailure([encoded(), encoded()], "config_duplicate");

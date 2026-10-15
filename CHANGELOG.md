@@ -32,6 +32,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **Error reporting through Sentry-compatible trackers.** `Reporter` drivers
+  send scrubbed errors to Rustrak, Sentry or GlitchTip, with bounded background
+  delivery and shutdown flushing. Laravel-shaped helpers and exclusions cover
+  handled errors; requests and background work share the reporting path. Logs,
+  traces and browser reporting are opt-in. The CLI offers local Rustrak, and
+  the [reporting chapter](manual/error-reporting.md) documents setup and privacy.
 - **Security headers with per-request CSP nonces.** `SecurityHeaders` provides
   strict, balanced and relaxed presets, validated environment configuration,
   report-only CSP and violation reporting, HTTPS-only HSTS, and route or group

@@ -39,6 +39,7 @@
     - [Validation](validation.md)
     - [Precognition](precognition.md)
     - [Error Handling](errors.md)
+    - [Error Reporting](error-reporting.md)
     - [Logging](logging.md)
     - [Context](context.md)
 - ## Digging Deeper
