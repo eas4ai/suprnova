@@ -326,3 +326,117 @@ async fn sec_003_sec_005_stitched_hits_fill_body_and_header_with_the_request_non
     assert_eq!(first_hit.header("x-frame-options"), Some("SAMEORIGIN"));
     assert_eq!(first_hit.header("x-content-type-options"), Some("nosniff"));
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn sec_003_enabling_nonce_policy_republishes_a_warmed_stitched_document() {
+    use crate::render_cache_stitch_support::{
+        STITCHED_PATH, attribute, boot, dispatch, enable_security_headers, handler_renders,
+    };
+    let mut harness = boot().await;
+    let warm = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-a")],
+    )
+    .await;
+    assert_eq!(warm.status, StatusCode::OK);
+    assert!(warm.header("content-security-policy").is_none());
+    let renders = handler_renders(STITCHED_PATH);
+    dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    assert_eq!(
+        handler_renders(STITCHED_PATH),
+        renders,
+        "precondition: stitched hit"
+    );
+    enable_security_headers(Arc::get_mut(&mut harness).expect("single harness owner"));
+    let first = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-b")],
+    )
+    .await;
+    assert_eq!(
+        handler_renders(STITCHED_PATH),
+        renders + 1,
+        "an unnonced shell must render afresh"
+    );
+    let second = dispatch(
+        &harness,
+        Method::GET,
+        STITCHED_PATH,
+        &[("x-test-login", "user-c")],
+    )
+    .await;
+    assert_eq!(
+        handler_renders(STITCHED_PATH),
+        renders + 1,
+        "the republished shell must replay"
+    );
+    for response in [&first, &second] {
+        assert_eq!(response.status, StatusCode::OK, "{}", response.text());
+        let nonce = response
+            .header("x-test-request-nonce")
+            .expect("request nonce");
+        assert!(
+            response
+                .header("content-security-policy")
+                .expect("CSP")
+                .contains(&format!("'nonce-{nonce}'"))
+        );
+        let html = response.text();
+        let mut executable = 0;
+        for tag in html.split('<').filter_map(|tag| tag.split('>').next()) {
+            if (tag.starts_with("script ") && !tag.contains("type=\"application/json\""))
+                || (tag.starts_with("link ")
+                    && ["stylesheet", "modulepreload", "preload"].contains(&attribute(tag, "rel")))
+            {
+                assert_eq!(attribute(tag, "nonce"), nonce, "{tag}");
+                executable += 1;
+            }
+        }
+        assert!(executable > 0);
+    }
+    assert_ne!(
+        first.header("x-test-request-nonce"),
+        second.header("x-test-request-nonce")
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn sec_003_nonce_free_stitched_pages_become_cacheable_after_policy_changes() {
+    use crate::render_cache_stitch_support::{
+        NONCE_FREE_PATH, boot, dispatch, enable_security_headers, handler_renders,
+    };
+    let mut harness = boot().await;
+    dispatch(&harness, Method::GET, NONCE_FREE_PATH, &[]).await;
+    assert!(
+        RenderCache::inspect_route_for_test(NONCE_FREE_PATH)
+            .await
+            .is_some()
+    );
+    let renders = handler_renders(NONCE_FREE_PATH);
+    enable_security_headers(Arc::get_mut(&mut harness).expect("single harness owner"));
+    dispatch(&harness, Method::GET, NONCE_FREE_PATH, &[]).await;
+    assert_eq!(handler_renders(NONCE_FREE_PATH), renders + 1);
+    assert!(
+        RenderCache::inspect_route_for_test(NONCE_FREE_PATH)
+            .await
+            .is_some()
+    );
+    dispatch(&harness, Method::GET, NONCE_FREE_PATH, &[]).await;
+    assert_eq!(
+        handler_renders(NONCE_FREE_PATH),
+        renders + 1,
+        "a page without nonce content can replay after republication"
+    );
+}

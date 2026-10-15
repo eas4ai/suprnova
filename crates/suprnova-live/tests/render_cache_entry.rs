@@ -63,6 +63,7 @@ fn entry_with(
     let body = Bytes::from_static(b"<!doctype html><html><body>hello</body></html>");
     CompleteEntry::new(
         EntryHeader {
+            published_with_nonce_policy: false,
             key: RenderKey::for_test(keys, "/hello"),
             class: RepresentationClass::PublicShared,
             variance,

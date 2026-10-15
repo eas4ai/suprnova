@@ -82,6 +82,7 @@ fn shared() -> SharedCachePolicy {
 fn complete_entry(keys: &SnapshotKeyRing, body: &'static [u8]) -> CompleteEntry {
     CompleteEntry::new(
         EntryHeader {
+            published_with_nonce_policy: false,
             key: RenderKey::for_test(keys, HOT_PATTERN),
             class: RepresentationClass::PublicShared,
             variance: VarianceDescriptor::new(),

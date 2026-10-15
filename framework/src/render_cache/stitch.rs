@@ -603,6 +603,11 @@ fn resolve_nested_segment<'a>(
         let Some((entry, actual_version)) = fetch_decoded_entry(ctx.runtime, key).await else {
             return nested_failure("fetch_failed", on_failure);
         };
+        // A nested shell has the same publication requirement as the outer
+        // entry. Its lack of nonce holes does not prove it was rendered safely.
+        if crate::CspNonce::current().is_some() && !entry.header().published_with_nonce_policy {
+            return nested_failure("fetch_failed", on_failure);
+        }
         if actual_version != named_version {
             return nested_failure(
                 nested_failure_cause_label(NestedFailureCause::VersionMismatch),
