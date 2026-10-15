@@ -90,6 +90,7 @@ pub mod mail;
 #[cfg(feature = "media")]
 pub mod media;
 pub mod middleware;
+pub mod security_headers;
 // The MongoDB backend (PAR-182 onward), behind `database-mongodb`.
 #[cfg(feature = "database-mongodb")]
 pub mod mongodb;
@@ -410,6 +411,9 @@ pub use inertia::{
     PageUrlResolver, PartialFilter, Prop, PropEntry, PropFuture, PropResolver,
     ProvidesScrollMetadata, ResolvedAssets, RootShare, ScrollMetadata, SsrConfig, SsrRequest,
     SsrResponse, VersionResolver, Visibility, ViteManifest,
+};
+pub use security_headers::{
+    ContentSecurityPolicy, CspNonce, SecurityHeaders, SecurityHeadersOverride,
 };
 // The error response the PAR-062 callback decides, on its own line so the
 // list above stays stable.

@@ -40,9 +40,10 @@
 //!    Precognition request or a partial reload of the page it rendered
 //!    (see [`InertiaConfig::store_previous_url`]).
 //!
-//! Register it first (it is registered first by
-//! [`Inertia::install`](crate::Inertia::install)) so it is the outermost
-//! middleware and sees every response, including the `409` that
+//! Register it before the other Inertia middleware (as
+//! [`Inertia::install`](crate::Inertia::install) does), inside
+//! [`SecurityHeaders`](crate::SecurityHeaders) when installed, so it sees
+//! every Inertia response, including the `409` that
 //! [`InertiaVersionMiddleware`](crate::InertiaVersionMiddleware) returns
 //! without ever calling the handler. It also scopes the facts of the
 //! request for [`Inertia::back`](crate::Inertia::back) and

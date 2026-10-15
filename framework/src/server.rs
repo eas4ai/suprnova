@@ -1363,7 +1363,7 @@ async fn handle_request_inner(
             // 0. RequestId is always outermost so the `request` span it
             //    enters - and every event emitted downstream within it -
             //    carries the per-request id.
-            chain.push(layer(into_boxed(RequestIdMiddleware::with_id(
+            chain.push_outermost(layer(into_boxed(RequestIdMiddleware::with_id(
                 request_id.clone(),
             ))));
 
@@ -1435,7 +1435,7 @@ async fn handle_request_inner(
                 );
 
                 // 0. RequestId is always outermost (same as the matched-route path).
-                chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
+                chain.push_outermost(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
 
                 // 1. Add global middleware
                 chain.extend(middleware_registry.global_middleware().iter().cloned());
@@ -1469,7 +1469,7 @@ async fn handle_request_inner(
 
                 let global_mw = middleware_registry.global_middleware();
                 let mut chain = MiddlewareChain::with_capacity(1 + global_mw.len());
-                chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
+                chain.push_outermost(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
                 chain.extend(global_mw.iter().cloned());
 
                 let terminal = unrouted_answer(&method, path, allowed);
@@ -1604,40 +1604,49 @@ async fn dispatch_chain(
     // The visit's facts for `Inertia::location` and `Inertia::back`, on
     // every dispatched request; the Inertia middleware refines them with
     // the application's hooks inside this scope.
+    let security_headers = chain.has_security_headers();
+    let secure = request.secure();
     let visit = Arc::new(crate::inertia::visit::Visit::capture(&request));
     let decision = crate::inertia::ServerErrorDecision::prepare(&request);
     // Boxed, as the request future is in `handle_request_with_peer`: this
     // future holds the chain's and the decision's, and each of the three
     // dispatch sites would otherwise carry a copy of it on the stack of the
     // task that polls the request, which overflows with debug on.
-    Box::pin(crate::inertia::visit::scope(visit, async move {
-        let response =
-            execute_chain_safely(chain, request, handler, method, path, request_id.clone()).await;
-        let Some(decision) = decision else {
-            return response;
-        };
-        // Boxed: deciding may render a page, a large future, which only
-        // the requests that reach this line pay for. Caught: the callback
-        // is application code, and a panic in it is a bug the boundary
-        // reports as the same 500 `execute_chain_safely` answers a
-        // handler's with, instead of unwinding the connection's task and
-        // closing the connection on the client.
-        let decided = match crate::logging::REQUEST_ID
-            .scope(
-                request_id.clone(),
-                crate::error::catch_panic(Box::pin(decision.decide(response))),
-            )
-            .await
-        {
-            Ok(decided) => decided,
-            Err(panic) => panic_into_response(panic, method.as_str(), path, request_id.as_str()),
-        };
-        if decided.header_value("X-Request-Id").is_some() {
-            decided
-        } else {
-            decided.header("X-Request-Id", request_id.as_str())
-        }
-    }))
+    Box::pin(crate::security_headers::scope_response(
+        security_headers,
+        secure,
+        crate::inertia::visit::scope(visit, async move {
+            let response =
+                execute_chain_safely(chain, request, handler, method, path, request_id.clone())
+                    .await;
+            let Some(decision) = decision else {
+                return response;
+            };
+            // Boxed: deciding may render a page, a large future, which only
+            // the requests that reach this line pay for. Caught: the callback
+            // is application code, and a panic in it is a bug the boundary
+            // reports as the same 500 `execute_chain_safely` answers a
+            // handler's with, instead of unwinding the connection's task and
+            // closing the connection on the client.
+            let decided = match crate::logging::REQUEST_ID
+                .scope(
+                    request_id.clone(),
+                    crate::error::catch_panic(Box::pin(decision.decide(response))),
+                )
+                .await
+            {
+                Ok(decided) => decided,
+                Err(panic) => {
+                    panic_into_response(panic, method.as_str(), path, request_id.as_str())
+                }
+            };
+            if decided.header_value("X-Request-Id").is_some() {
+                decided
+            } else {
+                decided.header("X-Request-Id", request_id.as_str())
+            }
+        }),
+    ))
     .await
 }
 
@@ -1934,7 +1943,7 @@ async fn handle_ws_upgrade(
                 + middleware_list.len()
                 + usize::from(live_metadata.is_some()),
         );
-        chain.push(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
+        chain.push_outermost(into_boxed(RequestIdMiddleware::with_id(request_id.clone())));
         chain.extend(middleware_registry.global_middleware().iter().cloned());
         chain.extend(middleware_list);
         if let Some(metadata) = live_metadata {
