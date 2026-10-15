@@ -158,11 +158,11 @@ pub(crate) fn enrich(payload: &mut Value, send_pii: bool) {
         if let Some(id) = id {
             payload["tags"]["request_id"] = json!(id);
         }
-        let user = state
-            .request
-            .as_ref()
-            .and_then(|_| crate::auth::request_state::current_user_id())
-            .or_else(|| state.user_id.clone());
+        let user = if state.request.is_some() {
+            route_user_id(state.user_id.as_ref())
+        } else {
+            state.user_id.clone()
+        };
         if let Some(user) = user {
             payload["user"]["id"] = json!(user);
         }
@@ -174,6 +174,22 @@ pub(crate) fn enrich(payload: &mut Value, send_pii: bool) {
             payload["contexts"]["trace"] =
                 json!({"type":"trace","trace_id":trace.id,"span_id":&trace.id[..16],"op":trace.op});
         }
+    }
+}
+
+/// The user the request's route authenticated. A route behind a guard other
+/// than the default one names that guard's user as `<guard>:<id>`, the
+/// framework's principal for it, and never falls back to the default guard,
+/// whose user may be someone else or no one.
+fn route_user_id(snapshot: Option<&String>) -> Option<String> {
+    use crate::auth::request_state;
+    match crate::auth::Auth::route_guard_other_than_default() {
+        Some(guard) => request_state::guard_user_id(&guard)
+            .or_else(|| {
+                request_state::request_guard_user(&guard).map(|user| user.get_auth_identifier())
+            })
+            .map(|id| crate::auth::Auth::guard_principal(&guard, &id)),
+        None => request_state::current_user_id().or_else(|| snapshot.cloned()),
     }
 }
 
