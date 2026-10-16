@@ -1,0 +1,17 @@
+.sn-dialog-host {
+  display: block;
+}
+
+.sn-dialog-host:focus {
+  outline: none;
+}
+
+.sn-dialog-title {
+  margin: 0 0 var(--sn-space-4);
+  font-size: var(--sn-font-size-xl);
+  line-height: var(--sn-font-leading-tight);
+}
+
+.sn-dialog-body > :last-child {
+  margin-block-end: 0;
+}
