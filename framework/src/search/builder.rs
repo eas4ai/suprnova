@@ -903,7 +903,8 @@ struct Prepared {
 
 // One extra representative distinguishes a full last page from a page with a successor.
 pub(super) fn lexical_depth(offset: usize, limit: usize, hits_cap: usize) -> usize {
-    offset.saturating_add(limit).saturating_add(1).min(hits_cap)
+    let _ = offset;
+    limit.saturating_add(1).min(hits_cap)
 }
 
 async fn prepare(
