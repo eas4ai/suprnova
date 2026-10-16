@@ -606,8 +606,8 @@ Reindex existing default Qdrant generations to adopt this vector layout.
 Document and query inference use identical options from the index's language
 settings: tokenizer, stemmer, stop words, and ASCII folding. The default uses
 `word`, ASCII folding, no stemmer, and an empty stopword set. Disabling stemming
-and stopword removal requires Qdrant's language-neutral options, available as of
-v1.19.0. `LanguageConfig::Server` uses these defaults too.
+and stopword removal uses Qdrant's language-neutral options, which need Qdrant
+1.19 or later. `LanguageConfig::Server` uses these defaults too.
 `SEARCH_BM25_AVERAGE_LENGTH` supplies `avg_len`, default 256. Qdrant's defaults
 for `k` (1.2) and `b` (0.75) stay in effect. Reindex after changing the average
 length. Text payload indexes enforce words, phrases, and exclusions separately
