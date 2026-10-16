@@ -538,3 +538,22 @@ async fn a_configured_context_wins_without_asking_the_service() {
     assert_eq!(embedder.profile().max_tokens, 64);
     assert!(server.seen.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn published_hosted_models_need_no_model_list() {
+    let server = server(vec![]).await;
+    for (model, dimensions, max_tokens) in [
+        ("text-embedding-3-small", 1536, 8192),
+        ("openai/text-embedding-3-large", 3072, 8192),
+        ("gemini-embedding-001", 3072, 2048),
+    ] {
+        let mut options = config(&server.url);
+        options.model = model.into();
+        options.dimensions = None;
+        options.max_tokens = None;
+        let embedder = HttpEmbedder::new(options).await.unwrap();
+        assert_eq!(embedder.profile().dimensions, dimensions, "{model}");
+        assert_eq!(embedder.profile().max_tokens, max_tokens, "{model}");
+    }
+    assert!(server.seen.lock().unwrap().is_empty());
+}

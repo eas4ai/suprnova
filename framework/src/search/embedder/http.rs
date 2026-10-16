@@ -241,7 +241,9 @@ impl HttpEmbedder {
             }
             None => (None, CONTEXT_RESERVE),
         };
-        let known = profile.or_else(|| profiles::profile(&config.model).ok());
+        let known = profile
+            .or_else(|| profiles::profile(&config.model).ok())
+            .or_else(|| profiles::hosted_profile(&config.model));
         let unknown = known.is_none();
         let profile = known.unwrap_or_else(|| {
             // The context is never guessed: it comes from the setting or the service below.
