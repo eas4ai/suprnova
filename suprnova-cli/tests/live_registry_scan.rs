@@ -163,6 +163,64 @@ fn reg_030_test_fakes_and_app_wide_hooks_are_refused() {
     );
 }
 
+/// The request's CSP nonce is not a component's: whoever holds it can write
+/// a script the page's policy runs, and a component's view holds no script.
+/// Nor is the application's error handling: a component that configured it
+/// could hide its own failures from the error tracker. The request's other
+/// accessors and reporting an error stay admitted.
+#[test]
+fn reg_030_the_csp_nonce_and_error_handling_settings_are_refused() {
+    let list = allowlist::embedded().expect("the embedded allowlist parses");
+    for path in [
+        "suprnova::Request::csp_nonce",
+        "suprnova::http::Request::csp_nonce",
+    ] {
+        assert!(
+            matches!(list.admit(path), Some(Admission::Refused { .. })),
+            "{path} must be refused; got {:?}",
+            list.admit(path)
+        );
+    }
+    // The application's error handling: a component reports errors, it does
+    // not configure how the application handles them.
+    for path in [
+        "suprnova::Exceptions::reset",
+        "suprnova::Exceptions::reportable",
+        "suprnova::Exceptions::dont_report",
+        "suprnova::Exceptions::dont_report_when",
+        "suprnova::Exceptions::dont_report_duplicates",
+        "suprnova::Exceptions::dont_retry",
+        "suprnova::Exceptions::dont_retry_when",
+    ] {
+        assert!(
+            matches!(list.admit(path), Some(Admission::Refused { .. })),
+            "{path} must be refused; got {:?}",
+            list.admit(path)
+        );
+    }
+    for path in [
+        "suprnova::Exceptions::report",
+        "suprnova::Exceptions::try_report",
+    ] {
+        assert!(
+            matches!(
+                list.admit(path),
+                Some(Admission::Item { .. }) | Some(Admission::Prefix { .. })
+            ),
+            "{path} must stay admitted; got {:?}",
+            list.admit(path)
+        );
+    }
+    assert!(
+        matches!(
+            list.admit("suprnova::Request::header"),
+            Some(Admission::Item { .. }) | Some(Admission::Prefix { .. })
+        ),
+        "a request's headers stay admitted; got {:?}",
+        list.admit("suprnova::Request::header")
+    );
+}
+
 /// The engine surfaces the framework holds for the host are not a
 /// component's to name: the host ports a bootstrap installs, the trusted
 /// contexts and fingerprints the engine verifies, the snapshot key material,

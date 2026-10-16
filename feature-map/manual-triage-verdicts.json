@@ -824,6 +824,22 @@
     "A worker started with `--tries` gives the job that bound, so after a long outage the job lands in `failed_jobs`; run `queue:retry` on it then.": {
       "class": "noise",
       "evidence": "manual/upgrade-4.0.md: the revocation retry job under a worker's --tries bound (framework/src/queue/worker.rs:1033 maps the worker's --tries onto the envelope, :1286 dead-letters at that bound); describes how the queue treats a job the worker bounded, not when a release ships."
+    },
+    "PUBLIC_URL": {
+      "class": "verified",
+      "evidence": "A Rustrak server setting, not a Suprnova one: the docker:compose Rustrak service sets it (suprnova-cli/src/templates/files/docker/rustrak.service.tpl:11) to the loopback address Rustrak puts in its DSNs."
+    },
+    "RUSTRAK_CREATE_SUPERUSER": {
+      "class": "verified",
+      "evidence": "The Compose variable the docker:compose Rustrak service reads for Rustrak's first admin (suprnova-cli/src/templates/files/docker/rustrak.service.tpl:10), and the hint docker:compose prints (suprnova-cli/src/commands/docker_compose.rs:167)."
+    },
+    "SESSION_SECRET_KEY": {
+      "class": "verified",
+      "evidence": "A Rustrak server setting: the docker:compose Rustrak service writes a generated value for it (suprnova-cli/src/templates/files/docker/rustrak.service.tpl:9); Suprnova itself never reads it."
+    },
+    "VITE_REPORTING_DSN": {
+      "class": "verified",
+      "evidence": "Read by each Inertia kit's entry through import.meta.env (suprnova-cli/src/templates/files/frontend/react/src/main.tsx.tpl:43, and the Vue and Svelte entries) and by SecurityHeaders through PUBLIC_DSN_SETTINGS (framework/src/security_headers/mod.rs:607); the name check misses a name held in a const array."
     }
   }
 }

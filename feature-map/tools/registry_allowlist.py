@@ -187,6 +187,21 @@ MODULES = {
 # from the file that holds its impl block, so such a method needs a rule
 # here; a rule on a type covers every member under it.
 ITEMS = {
+    # The request's CSP nonce lets the holder write a script the page's
+    # policy runs; a component's view holds no script, so nothing it does
+    # needs the nonce.
+    "suprnova::Request::csp_nonce": REFUSE,
+    # The application's error handling is the application's to configure: a
+    # component that could clear the callbacks, add one that stops delivery,
+    # or exclude errors could hide its own failures from the error tracker.
+    # Reporting an error stays a component's to do.
+    "suprnova::Exceptions::reset": REFUSE,
+    "suprnova::Exceptions::reportable": REFUSE,
+    "suprnova::Exceptions::dont_report": REFUSE,
+    "suprnova::Exceptions::dont_report_when": REFUSE,
+    "suprnova::Exceptions::dont_report_duplicates": REFUSE,
+    "suprnova::Exceptions::dont_retry": REFUSE,
+    "suprnova::Exceptions::dont_retry_when": REFUSE,
     "suprnova::App::bind": REFUSE,
     "suprnova::App::bind_factory": REFUSE,
     "suprnova::App::bind_if_absent": REFUSE,
