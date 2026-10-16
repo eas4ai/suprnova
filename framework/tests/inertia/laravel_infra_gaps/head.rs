@@ -505,6 +505,36 @@ async fn canonical_names_the_request_url_over_https() {
     );
 }
 
+/// Issue #155: a request-target that starts with `//` stays a path on the `APP_URL` origin,
+/// as `url::current` keeps it, rather than becoming a link to another host.
+#[tokio::test]
+async fn canonical_keeps_a_double_slash_path_on_the_app_origin() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "canonical_keeps_a_double_slash_path_on_the_app_origin",
+    )
+    .await
+    {
+        return;
+    }
+    suprnova::config::Config::register(
+        suprnova::config::AppConfig::builder()
+            .url("http://example.test")
+            .build(),
+    );
+    let _container = TestContainer::fake();
+    Head::defaults(|head| head.canonical());
+    let visit = client().get("//evil.example/x").inertia().send().await;
+    let tags = head_prop(&visit, "head").expect("a head prop");
+    assert!(
+        tags.contains(
+            &"<link data-inertia=\"canonical\" rel=\"canonical\" href=\"https://example.test//evil.example/x\">"
+                .to_string()
+        ),
+        "{tags:?}"
+    );
+}
+
 #[tokio::test]
 async fn canonical_names_the_request_url_on_a_server_rendered_route() {
     if crate::own_process_async::delegate(

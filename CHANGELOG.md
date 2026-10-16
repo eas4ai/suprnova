@@ -35,6 +35,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **`Head::canonical()` keeps a `//` request path on the app's origin (#155).**
+  A request for `//evil.example/x` gave a canonical link to another host. The
+  head now takes the request URL as `url::current` builds it,
+  `https://example.com//evil.example/x`, under the public root.
 - **Inertia kits paint styled under the Vite dev server (#153).** The kits
   list `src/app.css` as its own Vite entry, so the first server-rendered page
   loads it as a `<link>` with the request's nonce instead of waiting for the
