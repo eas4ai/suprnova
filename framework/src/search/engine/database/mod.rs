@@ -1908,6 +1908,7 @@ impl SearchEngine for DatabaseSearchEngine {
     ) -> Result<Arc<Vocabulary>, FrameworkError> {
         let (dialect, table, _) = self.context(index, generation).await?;
         let conn = DB::connection()?;
+        let mut derive_in_snapshot = false;
         if dialect == Dialect::Postgres {
             let step = vocabulary_step()?;
             let meta =
@@ -1915,11 +1916,22 @@ impl SearchEngine for DatabaseSearchEngine {
             let writes: i64 = get(&meta, "write_count")?;
             let refreshed: i64 = get(&meta, "refreshed_count")?;
             if writes > 0 && (refreshed == 0 || writes - refreshed >= step) {
-                self.refresh_vocabulary(index, generation).await?;
+                // A render reads through a snapshot fixed before this call and
+                // holds its connection. A refresh would commit on a second
+                // connection the snapshot cannot see, so count the words inside
+                // the snapshot, exactly as the refresh would store them.
+                if crate::search::render_cache::accounted_read() {
+                    derive_in_snapshot = true;
+                } else {
+                    self.refresh_vocabulary(index, generation).await?;
+                }
             }
         }
         let mut sql = Sql::new(dialect);
-        let text = if dialect == Dialect::Sqlite {
+        let text = if derive_in_snapshot {
+            let statement = sql.bind(format!("SELECT search_vector FROM {}", sql.ident(&table)));
+            format!("SELECT word,ndoc::bigint AS document_frequency FROM ts_stat({statement})")
+        } else if dialect == Dialect::Sqlite {
             let settings = self.read_settings(index, generation).await?;
             if settings.index_time.searchable_attributes.is_empty() {
                 return Ok(Arc::new(Vocabulary::default()));
