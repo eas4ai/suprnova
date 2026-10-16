@@ -72,10 +72,11 @@ async fn server(replies: Vec<Reply>) -> Server {
                             .headers()
                             .get("authorization")
                             .map(|v| v.to_str().unwrap().to_string());
+                        // A model-list GET carries no body.
                         let body = serde_json::from_slice(
                             &request.into_body().collect().await.unwrap().to_bytes(),
                         )
-                        .unwrap();
+                        .unwrap_or(Value::Null);
                         seen.lock().unwrap().push(Seen { path, auth, body });
                         let reply = replies
                             .lock()
@@ -106,6 +107,7 @@ fn config(url: &str) -> HttpEmbedderConfig {
         api_key: Some("test-secret".into()),
         dimensions: Some(2),
         batch: 2,
+        max_tokens: Some(8192),
         ..Default::default()
     }
 }
@@ -398,7 +400,9 @@ async fn prepared_input_is_cut_to_the_profile_context() {
         .clone();
     profile.max_tokens = 16;
     profile.query_prefix = "query: ".into();
-    let embedder = HttpEmbedder::with_profile(config(&server.url), Some(profile))
+    let mut options = config(&server.url);
+    options.max_tokens = None;
+    let embedder = HttpEmbedder::with_profile(options, Some(profile))
         .await
         .unwrap();
     embedder.embed_query(&"é".repeat(40)).await.unwrap();
@@ -428,6 +432,7 @@ async fn a_named_tokenizer_cuts_input_at_the_exact_token_count() {
     profile.max_tokens = 16;
     profile.query_prefix = "query: ".into();
     let mut options = config(&server.url);
+    options.max_tokens = None;
     // A word-level tokenizer with no special tokens: one token per whitespace word.
     options.tokenizer = Some(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -468,4 +473,68 @@ async fn an_unreadable_tokenizer_fails_at_boot_naming_its_setting() {
     .unwrap()
     .to_string();
     assert!(error.contains("SEARCH_EMBED_TOKENIZER"), "{error}");
+}
+
+#[tokio::test]
+async fn an_unknown_models_context_comes_from_the_service_model_list() {
+    let server = server(vec![Reply::status(
+        200,
+        &json!({"data": [{"id": "other", "context_length": 99}, {"id": "test-custom", "context_length": 16}]})
+            .to_string(),
+    )])
+    .await;
+    let mut options = config(&server.url);
+    options.max_tokens = None;
+    let embedder = HttpEmbedder::new(options).await.unwrap();
+    assert_eq!(embedder.profile().max_tokens, 16);
+    let seen = server.seen.lock().unwrap();
+    assert_eq!(seen[0].path, "/v1/embeddings/models");
+    assert_eq!(seen[0].auth.as_deref(), Some("Bearer test-secret"));
+}
+
+#[tokio::test]
+async fn a_server_model_list_supplies_its_own_context_field() {
+    let server = server(vec![
+        Reply::status(404, "not found"),
+        Reply::status(
+            200,
+            &json!({"data": [{"id": "test-custom", "max_model_len": 512}]}).to_string(),
+        ),
+    ])
+    .await;
+    let mut options = config(&server.url);
+    options.max_tokens = None;
+    let embedder = HttpEmbedder::new(options).await.unwrap();
+    assert_eq!(embedder.profile().max_tokens, 512);
+    let paths = server
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|seen| seen.path.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(paths, ["/v1/embeddings/models", "/v1/models"]);
+}
+
+#[tokio::test]
+async fn an_unknown_model_with_no_listed_context_fails_naming_the_setting() {
+    let server = server(vec![
+        Reply::status(404, "not found"),
+        Reply::status(200, &json!({"data": [{"id": "test-custom"}]}).to_string()),
+    ])
+    .await;
+    let mut options = config(&server.url);
+    options.max_tokens = None;
+    let error = HttpEmbedder::new(options).await.err().unwrap().to_string();
+    assert!(error.contains("SEARCH_EMBED_MAX_TOKENS"), "{error}");
+}
+
+#[tokio::test]
+async fn a_configured_context_wins_without_asking_the_service() {
+    let server = server(vec![]).await;
+    let mut options = config(&server.url);
+    options.max_tokens = Some(64);
+    let embedder = HttpEmbedder::new(options).await.unwrap();
+    assert_eq!(embedder.profile().max_tokens, 64);
+    assert!(server.seen.lock().unwrap().is_empty());
 }

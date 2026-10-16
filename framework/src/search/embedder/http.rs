@@ -42,6 +42,9 @@ pub struct HttpEmbedderConfig {
     /// The model's own `tokenizer.json` makes the context cut exact; without it the cut is in
     /// bytes, which never exceeds the context but keeps less text.
     pub tokenizer: Option<PathBuf>,
+    /// The model's context in tokens, for a server that caps input below the model's own or a
+    /// model whose service does not list it; it wins over the profile and the service's list.
+    pub max_tokens: Option<usize>,
 }
 impl Default for HttpEmbedderConfig {
     fn default() -> Self {
@@ -57,6 +60,7 @@ impl Default for HttpEmbedderConfig {
             query_prefix: None,
             document_template: None,
             tokenizer: None,
+            max_tokens: None,
         }
     }
 }
@@ -74,6 +78,7 @@ struct Variables {
     query_prefix: Option<String>,
     document_template: Option<String>,
     tokenizer: Option<String>,
+    max_tokens: Option<String>,
 }
 impl HttpEmbedderConfig {
     /// Registered configuration wins over environment settings, matching the framework's boot pattern.
@@ -110,6 +115,10 @@ impl HttpEmbedderConfig {
             query_prefix: raw.query_prefix,
             document_template: raw.document_template,
             tokenizer: raw.tokenizer.map(PathBuf::from),
+            max_tokens: raw
+                .max_tokens
+                .map(|v| parse(Some(v), 0, "SEARCH_EMBED_MAX_TOKENS"))
+                .transpose()?,
         })
     }
     fn validate(&self) -> Result<Url, FrameworkError> {
@@ -126,6 +135,7 @@ impl HttpEmbedderConfig {
                 self.max_response_bytes == 0,
             ),
             ("SEARCH_EMBED_DIMENSIONS", self.dimensions == Some(0)),
+            ("SEARCH_EMBED_MAX_TOKENS", self.max_tokens == Some(0)),
         ] {
             if zero {
                 return Err(FrameworkError::param(format!("{name} must be positive")));
@@ -234,10 +244,11 @@ impl HttpEmbedder {
         let known = profile.or_else(|| profiles::profile(&config.model).ok());
         let unknown = known.is_none();
         let profile = known.unwrap_or_else(|| {
+            // The context is never guessed: it comes from the setting or the service below.
             profiles::text_profile(
                 &config.model,
                 config.dimensions.unwrap_or(1),
-                8192,
+                0,
                 Pooling::Mean,
             )
         });
@@ -251,6 +262,11 @@ impl HttpEmbedder {
             tokenizer,
             special_tokens,
         };
+        match provider.config.max_tokens {
+            Some(max_tokens) => provider.profile.max_tokens = max_tokens,
+            None if unknown => provider.profile.max_tokens = provider.listed_context().await?,
+            None => {}
+        }
         if unknown {
             if let Some(prefix) = &provider.config.query_prefix {
                 provider.profile.query_prefix = prefix.clone();
@@ -318,6 +334,97 @@ impl HttpEmbedder {
         text.truncate(end);
         Ok(text)
     }
+    /// Gateways and inference servers list their models with a context length: OpenRouter
+    /// under `embeddings/models` (`context_length`), vLLM (`max_model_len`) and LM Studio
+    /// (`max_context_length`) under `models`. The request goes to the pinned host only.
+    async fn listed_context(&self) -> Result<usize, FrameworkError> {
+        let base = self
+            .endpoint
+            .path()
+            .strip_suffix("/embeddings")
+            .unwrap_or(self.endpoint.path())
+            .to_owned();
+        for list in ["embeddings/models", "models"] {
+            let mut url = self.endpoint.clone();
+            url.set_path(&format!("{base}/{list}"));
+            let mut request = self
+                .client
+                .get(url)
+                .timeout(Duration::from_secs(self.config.timeout_secs));
+            if let Some(value) = &self.authorization {
+                request = request.header(AUTHORIZATION, value);
+            }
+            let response = request.send().await.map_err(|error| {
+                FrameworkError::internal(format!(
+                    "SEARCH_EMBED_BASE_URL host {} model list request failed: {}",
+                    self.endpoint.host_str().unwrap_or("configured host"),
+                    error.without_url()
+                ))
+            })?;
+            let status = response.status().as_u16();
+            let body = self.read_body(response, status).await?;
+            if !(200..300).contains(&status) {
+                continue;
+            }
+            let listed = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|list| {
+                    list.get("data")?
+                        .as_array()?
+                        .iter()
+                        .find(|model| {
+                            model.get("id").and_then(serde_json::Value::as_str)
+                                == Some(self.config.model.as_str())
+                        })
+                        .and_then(|model| {
+                            ["context_length", "max_model_len", "max_context_length"]
+                                .into_iter()
+                                .find_map(|field| model.get(field)?.as_u64())
+                        })
+                })
+                .and_then(|tokens| usize::try_from(tokens).ok())
+                .filter(|tokens| *tokens > 0);
+            if let Some(tokens) = listed {
+                return Ok(tokens);
+            }
+        }
+        Err(FrameworkError::param(format!(
+            "SEARCH_EMBED_MAX_TOKENS is required for {}: the service's model list names no context length for it",
+            self.config.model
+        )))
+    }
+    /// The body is capped while streaming, before anything parses it.
+    async fn read_body(
+        &self,
+        mut response: reqwest::Response,
+        status: u16,
+    ) -> Result<Vec<u8>, FrameworkError> {
+        if response
+            .content_length()
+            .is_some_and(|len| len > self.config.max_response_bytes as u64)
+        {
+            return Err(FrameworkError::param(format!(
+                "SEARCH_EMBED_MAX_RESPONSE_BYTES exceeded by host {} status {status}",
+                self.endpoint.host_str().unwrap_or("configured host")
+            )));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|error| {
+            FrameworkError::internal(format!(
+                "SEARCH_EMBED_TIMEOUT_SECS or response from host {} status {status}: {}",
+                self.endpoint.host_str().unwrap_or("configured host"),
+                error.without_url()
+            ))
+        })? {
+            if chunk.len() > self.config.max_response_bytes.saturating_sub(body.len()) {
+                return Err(FrameworkError::param(format!(
+                    "SEARCH_EMBED_MAX_RESPONSE_BYTES exceeded at status {status}"
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    }
     fn diagnostic(&self, status: u16, body: &[u8]) -> FrameworkError {
         let text = String::from_utf8_lossy(body);
         let redacted = match self.config.api_key.as_deref().filter(|key| !key.is_empty()) {
@@ -346,7 +453,7 @@ impl HttpEmbedder {
             if let Some(value) = &self.authorization {
                 request = request.header(AUTHORIZATION, value);
             }
-            let mut response = request.send().await.map_err(|error| {
+            let response = request.send().await.map_err(|error| {
                 FrameworkError::internal(format!(
                     "SEARCH_EMBED_BASE_URL host {} request failed: {}",
                     self.endpoint.host_str().unwrap_or("configured host"),
@@ -359,30 +466,7 @@ impl HttpEmbedder {
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(retry_after);
-            if response
-                .content_length()
-                .is_some_and(|len| len > self.config.max_response_bytes as u64)
-            {
-                return Err(FrameworkError::param(format!(
-                    "SEARCH_EMBED_MAX_RESPONSE_BYTES exceeded by host {} status {status}",
-                    self.endpoint.host_str().unwrap_or("configured host")
-                )));
-            }
-            let mut body = Vec::new();
-            while let Some(chunk) = response.chunk().await.map_err(|error| {
-                FrameworkError::internal(format!(
-                    "SEARCH_EMBED_TIMEOUT_SECS or response from host {} status {status}: {}",
-                    self.endpoint.host_str().unwrap_or("configured host"),
-                    error.without_url()
-                ))
-            })? {
-                if chunk.len() > self.config.max_response_bytes.saturating_sub(body.len()) {
-                    return Err(FrameworkError::param(format!(
-                        "SEARCH_EMBED_MAX_RESPONSE_BYTES exceeded at status {status}"
-                    )));
-                }
-                body.extend_from_slice(&chunk);
-            }
+            let body = self.read_body(response, status).await?;
             if !(200..300).contains(&status) {
                 if (status == 429 || (500..600).contains(&status)) && attempt < self.config.retries
                 {
