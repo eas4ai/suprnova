@@ -130,6 +130,15 @@ pub trait SearchEngine: Send + Sync {
     fn name(&self) -> &str;
     /// Report supported behavior without silently ignoring requested features.
     fn capabilities(&self) -> EngineCapabilities;
+    /// Whether this driver advances RenderCache index dependencies itself.
+    ///
+    /// Keep the default in a custom driver: the registry then guards each write
+    /// and advances the index after it, so cached search pages go stale. The
+    /// framework's own drivers return true because they advance the index
+    /// inside their own data transactions, through crate-private hooks.
+    fn advances_render_cache(&self) -> bool {
+        false
+    }
     /// Resolve the generation readers currently share atomically.
     async fn current_generation(&self, index: &str)
     -> Result<Option<GenerationId>, FrameworkError>;

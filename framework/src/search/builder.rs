@@ -38,6 +38,12 @@ pub struct IndexSearchBuilder {
 }
 
 impl IndexSearchBuilder {
+    /// Require this search to run on every request by declining RenderCache storage.
+    pub fn without_render_cache(mut self) -> Self {
+        self.builder.render_cache = false;
+        self
+    }
+
     pub(crate) fn new(index: String) -> Self {
         Self {
             index,
@@ -95,6 +101,11 @@ impl IndexSearchBuilder {
 
     /// Projection excludes model-only fields while preserving scores, highlights and analytics.
     pub async fn get(self) -> Result<SearchResults<RawHit>, FrameworkError> {
+        super::render_cache::observe(
+            &self.index,
+            self.builder.viewer.is_some(),
+            !self.builder.render_cache,
+        )?;
         let entry = SearchRegistry::by_index(&self.index)?;
         (entry.search)(self.builder.plan, self.builder.grammar, self.builder.viewer).await
     }
@@ -123,6 +134,7 @@ where
         grammar,
         viewer,
         hydration: None,
+        render_cache: true,
         model: PhantomData,
     };
     let (result, documents) = builder.execute().await?;
@@ -178,10 +190,17 @@ pub struct SearchBuilder<M> {
     viewer: Option<Viewer>,
     grammar: Vec<String>,
     hydration: Option<HydrationCallback<M>>,
+    render_cache: bool,
     model: PhantomData<M>,
 }
 
 impl<M> SearchBuilder<M> {
+    /// Require this search to run on every request by declining RenderCache storage.
+    pub fn without_render_cache(mut self) -> Self {
+        self.render_cache = false;
+        self
+    }
+
     /// Start with bounded lexical retrieval and ordinary Eloquent hydration.
     pub fn new(query: impl Into<String>) -> Self {
         Self {
@@ -189,6 +208,7 @@ impl<M> SearchBuilder<M> {
             viewer: None,
             grammar: Vec::new(),
             hydration: None,
+            render_cache: true,
             model: PhantomData,
         }
     }
@@ -415,10 +435,17 @@ where
         prefix: &str,
     ) -> Result<FacetDistribution, FrameworkError> {
         let descriptor = M::descriptor();
+        super::render_cache::observe(descriptor.name, self.viewer.is_some(), !self.render_cache)?;
         let attribute = attribute.into();
         validate_facet(descriptor, &attribute, false)?;
         let viewer = match self.viewer {
             Some(viewer) => viewer,
+            None if crate::render_cache::collector::is_active()
+                && descriptor.scope.is_none()
+                && !SearchConfig::current()?.analytics =>
+            {
+                Viewer::Guest
+            }
             None => Viewer::current().await?,
         };
         let plan = bind_grammar(descriptor, self.plan, self.grammar)?;
@@ -441,8 +468,15 @@ where
     ) -> Result<(SearchResults<M>, HashMap<String, SearchDocument>), FrameworkError> {
         let started = Instant::now();
         let descriptor = M::descriptor();
+        super::render_cache::observe(descriptor.name, self.viewer.is_some(), !self.render_cache)?;
         let viewer = match self.viewer {
             Some(viewer) => viewer,
+            None if crate::render_cache::collector::is_active()
+                && descriptor.scope.is_none()
+                && !SearchConfig::current()?.analytics =>
+            {
+                Viewer::Guest
+            }
             None => Viewer::current().await?,
         };
         let plan = bind_grammar(descriptor, self.plan, self.grammar)?;
@@ -913,7 +947,7 @@ async fn prepare(
 ) -> Result<Prepared, FrameworkError> {
     validate_plan(descriptor, plan)?;
     let engine = SearchRegistry::engine_for(descriptor.name)?;
-    let generation = SearchRegistry::generation_for(descriptor.name).await?;
+    let generation = super::render_cache::generation_for_read(descriptor.name).await?;
     let settings = engine.read_settings(descriptor, &generation).await?;
     settings.validate()?;
     let config = SearchConfig::current()?;
@@ -1477,16 +1511,24 @@ fn pagination(plan: &SearchQuery, count: usize) -> SearchPagination {
 
 /// Heterogeneous indexes share the same scoped pipeline and a combined RRF page.
 pub struct FederatedBuilder {
+    render_cache: bool,
     indexes: Vec<String>,
     plan: SearchQuery,
     viewer: Option<Viewer>,
     grammar: Vec<String>,
 }
 impl FederatedBuilder {
+    /// Require this search to run on every request by declining RenderCache storage.
+    pub fn without_render_cache(mut self) -> Self {
+        self.render_cache = false;
+        self
+    }
+
     /// Preserve requested index order because it is the tie-break in a federation.
     pub fn new(indexes: Vec<String>) -> Self {
         Self {
             indexes,
+            render_cache: true,
             plan: SearchQuery::new(""),
             viewer: None,
             grammar: Vec::new(),
@@ -1560,8 +1602,19 @@ impl FederatedBuilder {
                 "federated search requires unique nonempty indexes",
             ));
         }
+        let cache_scope = crate::render_cache::collector::is_active();
+        let mut scoped = false;
+        if cache_scope {
+            for index in &self.indexes {
+                super::render_cache::observe(index, self.viewer.is_some(), !self.render_cache)?;
+                scoped |= (SearchRegistry::by_index(index)?.descriptor)()
+                    .scope
+                    .is_some();
+            }
+        }
         let viewer = match self.viewer {
             Some(viewer) => viewer,
+            None if cache_scope && !scoped && !SearchConfig::current()?.analytics => Viewer::Guest,
             None => Viewer::current().await?,
         };
         let mut lists = Vec::new();

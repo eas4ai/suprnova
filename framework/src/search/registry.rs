@@ -465,7 +465,10 @@ impl SearchRegistry {
     pub fn engine_for(index: &str) -> Result<Arc<dyn SearchEngine>, FrameworkError> {
         let entry = Self::by_index(index)?;
         let routed = |engine: Arc<dyn SearchEngine>| -> Arc<dyn SearchEngine> {
-            if (entry.connection)().is_some() && engine.name() == "database" {
+            if crate::render_cache::collector::is_active()
+                || !engine.advances_render_cache()
+                || ((entry.connection)().is_some() && engine.name() == "database")
+            {
                 Arc::new(super::engine::connection::ConnectionEngine::new(
                     entry.index,
                     engine,

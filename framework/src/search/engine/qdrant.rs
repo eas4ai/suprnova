@@ -1274,6 +1274,9 @@ fn facet_value(
 
 #[async_trait]
 impl SearchEngine for QdrantSearchEngine {
+    fn advances_render_cache(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         "qdrant"
     }
@@ -1303,50 +1306,56 @@ impl SearchEngine for QdrantSearchEngine {
         settings: &IndexSettings,
         generation: &GenerationId,
     ) -> Result<(), FrameworkError> {
-        let _lock = self.mutations.lock().await;
-        let collection = collection_name(index, generation)?;
-        let schema = schema(index, settings)?;
-        let mut vectors = qb::VectorsConfigBuilder::default();
-        vectors.add_named_vector_params(
-            "dense",
-            qb::VectorParamsBuilder::new(
-                settings.index_time.dimensions.unwrap_or(1) as u64,
-                qb::Distance::Cosine,
-            ),
-        );
-        let mut sparse = qb::SparseVectorsConfigBuilder::default();
-        sparse.add_named_vector_params(
-            "sparse",
-            qb::SparseVectorParamsBuilder::default().modifier(qb::Modifier::Idf),
-        );
-        let builder = qb::CreateCollectionBuilder::new(&collection)
-            .vectors_config(vectors)
-            .sparse_vectors_config(sparse);
-        // A retry completes a partially created collection, but never mutates
-        // the index-time identity of an already recorded generation.
-        if let Some(old) = storage::settings_optional(index.name, generation).await? {
-            if old != *settings {
-                return Err(error(
-                    &collection,
-                    "generation already has different settings",
-                ));
-            }
-            return self.check_schema(index, generation, &old).await;
-        }
-        if !self
-            .client
-            .collection_exists(&collection)
-            .await
-            .map_err(|e| error(&collection, e))?
-        {
-            self.client
-                .create_collection(builder)
-                .await
-                .map_err(|e| error(&collection, e))?;
-        }
-        self.apply_indexes(&collection, &schema).await?;
-        self.check_schema(index, generation, settings).await?;
-        storage::create(index.name, generation, settings).await
+        crate::search::render_cache::coordinated_write(
+            index.name,
+            Box::pin(async {
+                let _lock = self.mutations.lock().await;
+                let collection = collection_name(index, generation)?;
+                let schema = schema(index, settings)?;
+                let mut vectors = qb::VectorsConfigBuilder::default();
+                vectors.add_named_vector_params(
+                    "dense",
+                    qb::VectorParamsBuilder::new(
+                        settings.index_time.dimensions.unwrap_or(1) as u64,
+                        qb::Distance::Cosine,
+                    ),
+                );
+                let mut sparse = qb::SparseVectorsConfigBuilder::default();
+                sparse.add_named_vector_params(
+                    "sparse",
+                    qb::SparseVectorParamsBuilder::default().modifier(qb::Modifier::Idf),
+                );
+                let builder = qb::CreateCollectionBuilder::new(&collection)
+                    .vectors_config(vectors)
+                    .sparse_vectors_config(sparse);
+                // A retry completes a partially created collection, but never mutates
+                // the index-time identity of an already recorded generation.
+                if let Some(old) = storage::settings_optional(index.name, generation).await? {
+                    if old != *settings {
+                        return Err(error(
+                            &collection,
+                            "generation already has different settings",
+                        ));
+                    }
+                    return self.check_schema(index, generation, &old).await;
+                }
+                if !self
+                    .client
+                    .collection_exists(&collection)
+                    .await
+                    .map_err(|e| error(&collection, e))?
+                {
+                    self.client
+                        .create_collection(builder)
+                        .await
+                        .map_err(|e| error(&collection, e))?;
+                }
+                self.apply_indexes(&collection, &schema).await?;
+                self.check_schema(index, generation, settings).await?;
+                storage::create(index.name, generation, settings).await
+            }),
+        )
+        .await
     }
     async fn switch_generation(
         &self,
@@ -1354,33 +1363,45 @@ impl SearchEngine for QdrantSearchEngine {
         from: Option<GenerationId>,
         to: GenerationId,
     ) -> Result<(), FrameworkError> {
-        let _lock = self.mutations.lock().await;
-        self.read_settings(index, &to).await?;
-        storage::switch(index.name, from, &to).await
+        crate::search::render_cache::coordinated_write(
+            index.name,
+            Box::pin(async {
+                let _lock = self.mutations.lock().await;
+                self.read_settings(index, &to).await?;
+                storage::switch(index.name, from, &to).await
+            }),
+        )
+        .await
     }
     async fn drop_generation(
         &self,
         index: &IndexDescriptor,
         generation: &GenerationId,
     ) -> Result<(), FrameworkError> {
-        let _lock = self.mutations.lock().await;
-        let collection = collection_name(index, generation)?;
-        let txn = storage::locked(index.name, generation).await?;
-        if storage::current_locked(&txn, index.name).await?.as_ref() == Some(generation) {
-            return Err(error(&collection, "cannot drop the current generation"));
-        }
-        if self
-            .client
-            .collection_exists(&collection)
-            .await
-            .map_err(|e| error(&collection, e))?
-        {
-            self.client
-                .delete_collection(&collection)
-                .await
-                .map_err(|e| error(&collection, e))?;
-        }
-        storage::delete_metadata(txn, index.name, generation).await
+        crate::search::render_cache::coordinated_write(
+            index.name,
+            Box::pin(async {
+                let _lock = self.mutations.lock().await;
+                let collection = collection_name(index, generation)?;
+                let txn = storage::locked(index.name, generation).await?;
+                if storage::current_locked(&txn, index.name).await?.as_ref() == Some(generation) {
+                    return Err(error(&collection, "cannot drop the current generation"));
+                }
+                if self
+                    .client
+                    .collection_exists(&collection)
+                    .await
+                    .map_err(|e| error(&collection, e))?
+                {
+                    self.client
+                        .delete_collection(&collection)
+                        .await
+                        .map_err(|e| error(&collection, e))?;
+                }
+                storage::delete_metadata(txn, index.name, generation).await
+            }),
+        )
+        .await
     }
     async fn write_settings(
         &self,
@@ -1388,10 +1409,16 @@ impl SearchEngine for QdrantSearchEngine {
         generation: &GenerationId,
         settings: &IndexSettings,
     ) -> Result<(), FrameworkError> {
-        let _lock = self.mutations.lock().await;
-        schema(index, settings)?;
-        self.check_schema(index, generation, settings).await?;
-        storage::write_settings(index.name, generation, settings).await
+        crate::search::render_cache::coordinated_write(
+            index.name,
+            Box::pin(async {
+                let _lock = self.mutations.lock().await;
+                schema(index, settings)?;
+                self.check_schema(index, generation, settings).await?;
+                storage::write_settings(index.name, generation, settings).await
+            }),
+        )
+        .await
     }
     async fn read_settings(
         &self,
@@ -1452,143 +1479,151 @@ impl SearchEngine for QdrantSearchEngine {
         generation: &GenerationId,
         docs: &[IndexedDocument],
     ) -> Result<WriteOutcome, FrameworkError> {
-        let _lock = self.mutations.lock().await;
-        let collection = collection_name(index, generation)?;
-        let settings = self.read_settings(index, generation).await?;
-        // Direct engine writes (including baselines) use the same default encoder as indexing.
-        let mut prepared;
-        let docs = if settings
-            .index_time
-            .sparse_model
-            .as_deref()
-            .unwrap_or("bm25")
-            == "bm25"
-            && docs.iter().any(|doc| doc.sparse.is_none())
-        {
-            prepared = docs.to_vec();
-            crate::search::indexing::embed_sparse_documents(
-                index.name,
-                &settings,
-                &mut prepared,
-                "qdrant",
-            )
-            .await?;
-            prepared.as_slice()
-        } else {
-            docs
-        };
-        // Validate the complete batch before the first persistent change.
-        for doc in docs {
-            doc.document.validate(index)?;
-            if doc.document.key.chars().count() > 255 {
-                return Err(FrameworkError::param(format!(
-                    "search index {} key: exceeds 255 characters",
-                    index.name
-                )));
-            }
-            let data: Value = payload(index, &settings, doc)?.into();
-            if payload_words(Some(&data))
-                .iter()
-                .any(|word| word.chars().count() > 255)
-            {
-                return Err(FrameworkError::param(format!(
-                    "search index {}: vocabulary word exceeds 255 characters",
-                    index.name
-                )));
-            }
-            if let Some(dense) = &doc.dense {
-                validate_dense(index, &settings, dense)?;
-            }
-            if let Some(sparse) = &doc.sparse {
-                sparse.validate()?;
-            }
-            if doc.sparse.is_none() {
-                return Err(error(
-                    &collection,
-                    format!(
-                        "key {}: sparse model requires a document embedding",
-                        doc.document.key
-                    ),
-                ));
-            }
-        }
-        let txn = storage::locked(index.name, generation).await?;
-        let mut outcome = WriteOutcome::default();
-        for doc in docs {
-            let key = &doc.document.key;
-            if storage::tombstone_on(&txn, index.name, generation, key)
-                .await?
-                .is_some_and(|v| v >= doc.document.source_version)
-            {
-                outcome.skipped_tombstoned += 1;
-                continue;
-            }
-            let old = self
-                .get(&collection, key)
-                .await?
-                .map(|p| Value::from(Payload::from(p)));
-            if old
-                .as_ref()
-                .and_then(|v| v["__source_version"].as_i64())
-                .is_some_and(|v| v > doc.document.source_version)
-            {
-                outcome.skipped_older += 1;
-                continue;
-            }
-            if old.as_ref().and_then(|v| v["__content_hash"].as_str())
-                == Some(doc.content_hash.as_str())
-            {
-                // Freshness advances even when content is unchanged. This keeps
-                // an older removal from deleting a later unchanged save.
-                self.client
-                    .set_payload(
-                        qb::SetPayloadPointsBuilder::new(
-                            &collection,
-                            Payload::try_from(
-                                json!({"__source_version":doc.document.source_version}),
-                            )
-                            .map_err(|e| error(&collection, e))?,
-                        )
-                        .points_selector(vec![QdrantVectorDriver::resolve_point_id(key)])
-                        .wait(true),
+        crate::search::render_cache::coordinated_write(
+            index.name,
+            Box::pin(async {
+                let _lock = self.mutations.lock().await;
+                let collection = collection_name(index, generation)?;
+                let settings = self.read_settings(index, generation).await?;
+                // Direct engine writes (including baselines) use the same default encoder as indexing.
+                let mut prepared;
+                let docs = if settings
+                    .index_time
+                    .sparse_model
+                    .as_deref()
+                    .unwrap_or("bm25")
+                    == "bm25"
+                    && docs.iter().any(|doc| doc.sparse.is_none())
+                {
+                    prepared = docs.to_vec();
+                    crate::search::indexing::embed_sparse_documents(
+                        index.name,
+                        &settings,
+                        &mut prepared,
+                        "qdrant",
                     )
-                    .await
-                    .map_err(|e| error(&collection, e))?;
-                outcome.skipped_unchanged += 1;
-                continue;
-            }
-            let mut vectors = HashMap::new();
-            if let Some(dense) = &doc.dense {
-                vectors.insert("dense".into(), qb::Vector::new_dense(dense.clone()));
-            }
-            if let Some(sparse) = &doc.sparse {
-                vectors.insert(
-                    "sparse".into(),
-                    qb::Vector::new_sparse(sparse.indices.clone(), sparse.values.clone()),
-                );
-            }
-            let point = qb::PointStruct::new(
-                QdrantVectorDriver::resolve_point_id(key),
-                qb::NamedVectors { vectors },
-                payload(index, &settings, doc)?,
-            );
-            self.client
-                .upsert_points(qb::UpsertPointsBuilder::new(&collection, vec![point]).wait(true))
-                .await
-                .map_err(|e| error(&collection, e))?;
-            let data: Value = payload(index, &settings, doc)?.into();
-            storage::update_vocabulary(
-                &txn,
-                index.name,
-                generation,
-                &payload_words(old.as_ref()),
-                &payload_words(Some(&data)),
-            )
-            .await?;
-            outcome.written += 1;
-        }
-        storage::commit(txn, index.name).await?;
-        Ok(outcome)
+                    .await?;
+                    prepared.as_slice()
+                } else {
+                    docs
+                };
+                // Validate the complete batch before the first persistent change.
+                for doc in docs {
+                    doc.document.validate(index)?;
+                    if doc.document.key.chars().count() > 255 {
+                        return Err(FrameworkError::param(format!(
+                            "search index {} key: exceeds 255 characters",
+                            index.name
+                        )));
+                    }
+                    let data: Value = payload(index, &settings, doc)?.into();
+                    if payload_words(Some(&data))
+                        .iter()
+                        .any(|word| word.chars().count() > 255)
+                    {
+                        return Err(FrameworkError::param(format!(
+                            "search index {}: vocabulary word exceeds 255 characters",
+                            index.name
+                        )));
+                    }
+                    if let Some(dense) = &doc.dense {
+                        validate_dense(index, &settings, dense)?;
+                    }
+                    if let Some(sparse) = &doc.sparse {
+                        sparse.validate()?;
+                    }
+                    if doc.sparse.is_none() {
+                        return Err(error(
+                            &collection,
+                            format!(
+                                "key {}: sparse model requires a document embedding",
+                                doc.document.key
+                            ),
+                        ));
+                    }
+                }
+                let txn = storage::locked(index.name, generation).await?;
+                let mut outcome = WriteOutcome::default();
+                for doc in docs {
+                    let key = &doc.document.key;
+                    if storage::tombstone_on(&txn, index.name, generation, key)
+                        .await?
+                        .is_some_and(|v| v >= doc.document.source_version)
+                    {
+                        outcome.skipped_tombstoned += 1;
+                        continue;
+                    }
+                    let old = self
+                        .get(&collection, key)
+                        .await?
+                        .map(|p| Value::from(Payload::from(p)));
+                    if old
+                        .as_ref()
+                        .and_then(|v| v["__source_version"].as_i64())
+                        .is_some_and(|v| v > doc.document.source_version)
+                    {
+                        outcome.skipped_older += 1;
+                        continue;
+                    }
+                    if old.as_ref().and_then(|v| v["__content_hash"].as_str())
+                        == Some(doc.content_hash.as_str())
+                    {
+                        // Freshness advances even when content is unchanged. This keeps
+                        // an older removal from deleting a later unchanged save.
+                        self.client
+                            .set_payload(
+                                qb::SetPayloadPointsBuilder::new(
+                                    &collection,
+                                    Payload::try_from(
+                                        json!({"__source_version":doc.document.source_version}),
+                                    )
+                                    .map_err(|e| error(&collection, e))?,
+                                )
+                                .points_selector(vec![QdrantVectorDriver::resolve_point_id(key)])
+                                .wait(true),
+                            )
+                            .await
+                            .map_err(|e| error(&collection, e))?;
+                        outcome.skipped_unchanged += 1;
+                        continue;
+                    }
+                    let mut vectors = HashMap::new();
+                    if let Some(dense) = &doc.dense {
+                        vectors.insert("dense".into(), qb::Vector::new_dense(dense.clone()));
+                    }
+                    if let Some(sparse) = &doc.sparse {
+                        vectors.insert(
+                            "sparse".into(),
+                            qb::Vector::new_sparse(sparse.indices.clone(), sparse.values.clone()),
+                        );
+                    }
+                    let point = qb::PointStruct::new(
+                        QdrantVectorDriver::resolve_point_id(key),
+                        qb::NamedVectors { vectors },
+                        payload(index, &settings, doc)?,
+                    );
+                    self.client
+                        .upsert_points(
+                            qb::UpsertPointsBuilder::new(&collection, vec![point]).wait(true),
+                        )
+                        .await
+                        .map_err(|e| error(&collection, e))?;
+                    let data: Value = payload(index, &settings, doc)?.into();
+                    storage::update_vocabulary(
+                        &txn,
+                        index.name,
+                        generation,
+                        &payload_words(old.as_ref()),
+                        &payload_words(Some(&data)),
+                    )
+                    .await?;
+                    outcome.written += 1;
+                }
+                storage::commit_write(txn, index.name).await?;
+                Ok(outcome)
+            }),
+        )
+        .await
     }
     async fn remove(
         &self,
@@ -1596,76 +1631,83 @@ impl SearchEngine for QdrantSearchEngine {
         generation: &GenerationId,
         keys: &[(String, i64)],
     ) -> Result<WriteOutcome, FrameworkError> {
-        let _lock = self.mutations.lock().await;
-        let collection = collection_name(index, generation)?;
-        storage::settings(index.name, generation).await?;
-        if keys
-            .iter()
-            .any(|(key, _)| key.is_empty() || key.chars().count() > 255)
-        {
-            return Err(FrameworkError::param(format!(
-                "search index {}: removal key requires 1 to 255 characters",
-                index.name
-            )));
-        }
-        let mut outcome = WriteOutcome::default();
-        for (key, version) in keys {
-            let txn = storage::locked(index.name, generation).await?;
-            let old = self
-                .get(&collection, key)
-                .await?
-                .map(|p| Value::from(Payload::from(p)));
-            if old
-                .as_ref()
-                .and_then(|p| p["__source_version"].as_i64())
-                .is_some_and(|v| v > *version)
-                || storage::tombstone_on(&txn, index.name, generation, key)
-                    .await?
-                    .is_some_and(|v| v > *version)
-            {
-                storage::commit(txn, index.name).await?;
-                outcome.skipped_older += 1;
-                continue;
-            }
-            // Commit the tombstone before delete so a crash cannot lose it.
-            storage::record_tombstone_on(&txn, index.name, generation, key, *version).await?;
-            storage::commit(txn, index.name).await?;
-            // Reacquire the shared lock and reread: a newer save may have
-            // legitimately replaced this tombstone while it was released.
-            let txn = storage::locked(index.name, generation).await?;
-            let old = self
-                .get(&collection, key)
-                .await?
-                .map(|p| Value::from(Payload::from(p)));
-            if old
-                .as_ref()
-                .and_then(|p| p["__source_version"].as_i64())
-                .is_some_and(|v| v > *version)
-            {
-                storage::commit(txn, index.name).await?;
-                outcome.skipped_older += 1;
-                continue;
-            }
-            self.client
-                .delete_points(
-                    qb::DeletePointsBuilder::new(&collection)
-                        .points(vec![QdrantVectorDriver::resolve_point_id(key)])
-                        .wait(true),
-                )
-                .await
-                .map_err(|e| error(&collection, e))?;
-            storage::update_vocabulary(
-                &txn,
-                index.name,
-                generation,
-                &payload_words(old.as_ref()),
-                &BTreeSet::new(),
-            )
-            .await?;
-            storage::commit(txn, index.name).await?;
-            outcome.written += 1;
-        }
-        Ok(outcome)
+        crate::search::render_cache::coordinated_write(
+            index.name,
+            Box::pin(async {
+                let _lock = self.mutations.lock().await;
+                let collection = collection_name(index, generation)?;
+                storage::settings(index.name, generation).await?;
+                if keys
+                    .iter()
+                    .any(|(key, _)| key.is_empty() || key.chars().count() > 255)
+                {
+                    return Err(FrameworkError::param(format!(
+                        "search index {}: removal key requires 1 to 255 characters",
+                        index.name
+                    )));
+                }
+                let mut outcome = WriteOutcome::default();
+                for (key, version) in keys {
+                    let txn = storage::locked(index.name, generation).await?;
+                    let old = self
+                        .get(&collection, key)
+                        .await?
+                        .map(|p| Value::from(Payload::from(p)));
+                    if old
+                        .as_ref()
+                        .and_then(|p| p["__source_version"].as_i64())
+                        .is_some_and(|v| v > *version)
+                        || storage::tombstone_on(&txn, index.name, generation, key)
+                            .await?
+                            .is_some_and(|v| v > *version)
+                    {
+                        storage::commit_write(txn, index.name).await?;
+                        outcome.skipped_older += 1;
+                        continue;
+                    }
+                    // Commit the tombstone before delete so a crash cannot lose it.
+                    storage::record_tombstone_on(&txn, index.name, generation, key, *version)
+                        .await?;
+                    storage::commit_write(txn, index.name).await?;
+                    // Reacquire the shared lock and reread: a newer save may have
+                    // legitimately replaced this tombstone while it was released.
+                    let txn = storage::locked(index.name, generation).await?;
+                    let old = self
+                        .get(&collection, key)
+                        .await?
+                        .map(|p| Value::from(Payload::from(p)));
+                    if old
+                        .as_ref()
+                        .and_then(|p| p["__source_version"].as_i64())
+                        .is_some_and(|v| v > *version)
+                    {
+                        storage::commit_write(txn, index.name).await?;
+                        outcome.skipped_older += 1;
+                        continue;
+                    }
+                    self.client
+                        .delete_points(
+                            qb::DeletePointsBuilder::new(&collection)
+                                .points(vec![QdrantVectorDriver::resolve_point_id(key)])
+                                .wait(true),
+                        )
+                        .await
+                        .map_err(|e| error(&collection, e))?;
+                    storage::update_vocabulary(
+                        &txn,
+                        index.name,
+                        generation,
+                        &payload_words(old.as_ref()),
+                        &BTreeSet::new(),
+                    )
+                    .await?;
+                    storage::commit_write(txn, index.name).await?;
+                    outcome.written += 1;
+                }
+                Ok(outcome)
+            }),
+        )
+        .await
     }
     async fn query(
         &self,
@@ -1965,7 +2007,13 @@ impl SearchEngine for QdrantSearchEngine {
         let collection = collection_name(index, generation)?;
         storage::settings(index.name, generation).await?;
         let _lock = self.mutations.lock().await;
-        let txn = storage::locked(index.name, generation).await?;
+        // The render already owns its SQL snapshot connection. Rebuilding
+        // derived vocabulary must not acquire a second transaction inside it.
+        let txn = if crate::search::render_cache::accounted_read() {
+            None
+        } else {
+            Some(storage::locked(index.name, generation).await?)
+        };
         let mut vocabulary = Vocabulary::default();
         let mut offset = None;
         loop {
@@ -1994,9 +2042,14 @@ impl SearchEngine for QdrantSearchEngine {
                 break;
             }
         }
-        storage::replace_vocabulary(&txn, index.name, generation, &vocabulary).await?;
-        let vocabulary = storage::vocabulary_on(&txn, index.name, generation).await?;
-        storage::commit(txn, index.name).await?;
+        let vocabulary = if let Some(txn) = txn {
+            storage::replace_vocabulary(&txn, index.name, generation, &vocabulary).await?;
+            let refreshed = storage::vocabulary_on(&txn, index.name, generation).await?;
+            storage::commit(txn, index.name).await?;
+            refreshed
+        } else {
+            vocabulary
+        };
         Ok(Arc::new(vocabulary))
     }
     async fn count(

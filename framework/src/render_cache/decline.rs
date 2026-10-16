@@ -52,6 +52,12 @@ pub(crate) enum LookupDeclineReason {
     SecretContextRead,
     /// Request context outside the declared variance affected rendering.
     UndeclaredContext,
+    /// A search used viewer-specific filtering that must run on every request.
+    ViewerScopedSearch,
+    /// A search records an impression on every request.
+    AnalyticsSearch,
+    /// A search explicitly opted out of representation caching.
+    SearchOptOut,
     // Live document facts.
     /// An identity-bound island was mounted on a route that did not
     /// declare stitching.
@@ -147,6 +153,9 @@ impl LookupDeclineReason {
             Self::SessionValueRead => "session_value_read",
             Self::SecretContextRead => "secret_context_read",
             Self::UndeclaredContext => "undeclared_context",
+            Self::ViewerScopedSearch => "viewer_scoped_search",
+            Self::AnalyticsSearch => "analytics_search",
+            Self::SearchOptOut => "search_opt_out",
             Self::IdentityBoundWithoutStitching => "identity_bound_without_stitching",
             Self::InvalidStitchCapture => "invalid_stitch_capture",
             Self::NoStoreIntent => "no_store_intent",
@@ -197,6 +206,9 @@ impl LookupDeclineReason {
         Self::SessionValueRead,
         Self::SecretContextRead,
         Self::UndeclaredContext,
+        Self::ViewerScopedSearch,
+        Self::AnalyticsSearch,
+        Self::SearchOptOut,
         Self::IdentityBoundWithoutStitching,
         Self::InvalidStitchCapture,
         Self::NoStoreIntent,

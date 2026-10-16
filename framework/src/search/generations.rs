@@ -422,6 +422,7 @@ async fn publish(
             .switch_generation((SearchRegistry::by_index(index)?.descriptor)(), from, to)
             .await
     } else {
+        super::render_cache::coordinated_write(index, Box::pin(async {
         let tx = fence(index).await?;
         let rows = query(
             &tx,
@@ -465,7 +466,9 @@ async fn publish(
             .await?;
         execute(&tx,index,"UPDATE search_generations SET state=CASE WHEN generation=? THEN 'current' ELSE 'retired' END WHERE index_name=? AND (state='current' OR generation=?)",vec![to.as_str().to_owned().into(),index.to_owned().into(),to.as_str().to_owned().into()]).await?;
         execute(&tx,index,"UPDATE search_generations SET building_generation=NULL,building_digest=NULL WHERE index_name=? AND generation='__control'",vec![index.to_owned().into()]).await?;
+        super::render_cache::advance_transaction(&tx, index).await?;
         tx.commit().await.map_err(|e| error(index, e))
+        })).await
     }
 }
 /// Initialize settings explicitly so a normal model write never performs hidden DDL.
@@ -800,6 +803,7 @@ pub async fn delete_index(index: &str) -> Result<(), FrameworkError> {
     super::registry::in_index_connection(index, delete_index_inner(index)).await
 }
 async fn delete_index_inner(index: &str) -> Result<(), FrameworkError> {
+    super::render_cache::coordinated_write(index, Box::pin(async {
     let tx = fence(index).await?;
     let rows = query(
         &tx,
@@ -843,11 +847,15 @@ async fn delete_index_inner(index: &str) -> Result<(), FrameworkError> {
         engine.retire_index(index).await?;
     }
     execute(&tx,index,"UPDATE search_generations SET state='retired' WHERE index_name=? AND generation!='__control'",vec![index.to_owned().into()]).await?;
+    super::render_cache::advance_transaction(&tx, index).await?;
     tx.commit().await.map_err(|e| error(index, e))?;
     prune_retired(index).await?;
     console::line(format!("search:delete-index {index}: deleted"));
     Ok(())
+
+    })).await
 }
+
 /// Retention expires persistent removal fences independently of queue storage.
 pub async fn prune_tombstones() -> Result<(), FrameworkError> {
     let count = super::DatabaseSearchEngine::new()

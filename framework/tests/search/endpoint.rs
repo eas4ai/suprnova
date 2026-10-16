@@ -4,8 +4,7 @@ use http_body_util::BodyExt;
 use std::sync::Arc;
 use suprnova::{MiddlewareRegistry, Router, Search, SearchConfig, SearchDriver, SearchRegistry};
 
-#[path = "../support/common.rs"]
-mod common;
+use super::common;
 
 async fn request(path: &str) -> (u16, serde_json::Value) {
     request_as(path, None).await

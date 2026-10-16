@@ -36,11 +36,15 @@ pub(super) async fn settings_optional(
     index: &str,
     generation: &GenerationId,
 ) -> Result<Option<IndexSettings>, FrameworkError> {
-    let db = DB::get()?;
+    let exec = crate::database::transaction::ExecutorChoice::resolve_read(
+        None,
+        Some(&DB::default_connection()),
+        None,
+    )
+    .await?;
     let query = generation_row(index, generation);
-    let Some(row) = db
-        .inner()
-        .query_one_raw(db.inner().get_database_backend().build(&query))
+    let Some(row) = exec
+        .query_one(exec.backend().build(&query))
         .await
         .map_err(|e| error(index, e))?
     else {
@@ -72,6 +76,7 @@ pub(super) async fn create(
     settings: &IndexSettings,
 ) -> Result<(), FrameworkError> {
     let db = DB::get()?;
+    crate::render_cache::write_side_open(false).await?;
     let txn = db.inner().begin().await.map_err(|e| error(index, e))?;
     let backend = txn.get_database_backend();
     let control = Query::insert()
@@ -133,6 +138,7 @@ pub(super) async fn create(
     txn.execute_raw(backend.build(&query))
         .await
         .map_err(|e| error(index, e))?;
+    crate::search::render_cache::advance_transaction(&txn, index).await?;
     txn.commit().await.map_err(|e| error(index, e))
 }
 pub(super) async fn write_settings(
@@ -148,6 +154,8 @@ pub(super) async fn write_settings(
         )));
     }
     let db = DB::get()?;
+    crate::render_cache::write_side_open(false).await?;
+    let txn = db.inner().begin().await.map_err(|e| error(index, e))?;
     let query = Query::update()
         .table(a("search_generations"))
         .value(
@@ -157,11 +165,11 @@ pub(super) async fn write_settings(
         .and_where(Expr::col(a("index_name")).eq(index))
         .and_where(Expr::col(a("generation")).eq(generation.as_str()))
         .to_owned();
-    db.inner()
-        .execute_raw(db.inner().get_database_backend().build(&query))
+    txn.execute_raw(txn.get_database_backend().build(&query))
         .await
         .map_err(|e| error(index, e))?;
-    Ok(())
+    crate::search::render_cache::advance_transaction(&txn, index).await?;
+    txn.commit().await.map_err(|e| error(index, e))
 }
 fn state_query(index: &str) -> sea_orm::sea_query::SelectStatement {
     Query::select()
@@ -186,10 +194,14 @@ fn decode_current(
         .transpose()
 }
 pub(super) async fn current(index: &str) -> Result<Option<GenerationId>, FrameworkError> {
-    let db = DB::get()?;
-    let row = db
-        .inner()
-        .query_all_raw(db.inner().get_database_backend().build(&state_query(index)))
+    let exec = crate::database::transaction::ExecutorChoice::resolve_read(
+        None,
+        Some(&DB::default_connection()),
+        None,
+    )
+    .await?;
+    let row = exec
+        .query_all(exec.backend().build(&state_query(index)))
         .await
         .map_err(|e| error(index, e))?;
     decode_current(index, row)
@@ -200,6 +212,7 @@ pub(super) async fn locked(
     generation: &GenerationId,
 ) -> Result<sea_orm::DatabaseTransaction, FrameworkError> {
     let db = DB::get()?;
+    crate::render_cache::write_side_open(false).await?;
     let txn = db.inner().begin().await.map_err(|e| error(index, e))?;
     for target in ["__control", generation.as_str()] {
         let query = Query::update()
@@ -286,6 +299,7 @@ pub(super) async fn switch(
     txn.execute_raw(backend.build(&query))
         .await
         .map_err(|e| error(index, e))?;
+    crate::search::render_cache::advance_transaction(&txn, index).await?;
     txn.commit().await.map_err(|e| error(index, e))
 }
 pub(super) async fn delete_metadata(
@@ -307,6 +321,7 @@ pub(super) async fn delete_metadata(
             .await
             .map_err(|e| error(index, e))?;
     }
+    crate::search::render_cache::advance_transaction(&txn, index).await?;
     txn.commit().await.map_err(|e| error(index, e))
 }
 pub(super) async fn current_locked(
@@ -379,6 +394,14 @@ pub(super) async fn commit(
     index: &str,
 ) -> Result<(), FrameworkError> {
     txn.commit().await.map_err(|e| error(index, e))
+}
+
+pub(super) async fn commit_write(
+    txn: sea_orm::DatabaseTransaction,
+    index: &str,
+) -> Result<(), FrameworkError> {
+    crate::search::render_cache::advance_transaction(&txn, index).await?;
+    commit(txn, index).await
 }
 
 /// Maintain the same per-generation document frequencies as the database engine.

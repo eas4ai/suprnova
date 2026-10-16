@@ -225,6 +225,12 @@ pub struct CollectedContext {
     /// so the render's snapshot did not cover it (CACHE-008). Set by the
     /// executor routing in `database::transaction`.
     pub foreign_connection_read: bool,
+    /// A search used a declared or explicit viewer, so its results cannot be replayed.
+    pub viewer_scoped_search: bool,
+    /// Search analytics requires an impression on every request.
+    pub analytics_search: bool,
+    /// A search explicitly required fresh execution for this representation.
+    pub search_opt_out: bool,
     /// Observation bound exceeded, or a dependency could not be encoded
     /// into an identity at all; the report is incomplete either way and
     /// the response it describes must not be stored.
@@ -338,6 +344,9 @@ impl CollectorReport {
         content.tenant_material.extend(gate.context.tenant_material);
         content.locale_material.extend(gate.context.locale_material);
         content.session_read |= gate.context.session_read;
+        content.viewer_scoped_search |= gate.context.viewer_scoped_search;
+        content.analytics_search |= gate.context.analytics_search;
+        content.search_opt_out |= gate.context.search_opt_out;
         content.principal_reads += gate.context.principal_reads;
         content.tenant_reads += gate.context.tenant_reads;
         content.locale_reads += gate.context.locale_reads;
@@ -384,6 +393,9 @@ struct State {
     /// observation and overflow a report whose folded set is well inside
     /// the window.
     distinct: usize,
+    // Initialized only by a search. Joined driver futures await the same
+    // cell before external retrieval, so the SQL snapshot is already fixed.
+    search_snapshot: Option<Arc<tokio::sync::OnceCell<()>>>,
 }
 
 /// A scope's collector.
@@ -499,6 +511,41 @@ pub async fn slot_scope<F: std::future::Future>(future: F) -> F::Output {
     IN_SLOT.scope((), future).await
 }
 
+/// Fix the render's SQL read view before any external search data is read.
+///
+/// SQLite establishes its snapshot at the first table read, not BEGIN. A
+/// collection read can precede hydration or have no hydration at all. Without
+/// this read, a concurrent write could commit between retrieval and window
+/// close, letting an old result publish with its new generation. The cell is
+/// shared by joined futures and initialized once per render, never outside a
+/// collector and its database transaction.
+pub(crate) async fn anchor_search_snapshot() -> Result<(), crate::FrameworkError> {
+    if crate::Transaction::current().is_none() {
+        return Ok(());
+    }
+    let Some(cell) = with_state(|state| {
+        Arc::clone(
+            state
+                .search_snapshot
+                .get_or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+        )
+    }) else {
+        return Ok(());
+    };
+    cell.get_or_try_init(|| async {
+        use suprnova_live::render_cache::generation::GenerationLedger;
+        super::ledger::SqlGenerationLedger::new()
+            .epoch()
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                crate::FrameworkError::internal(format!("search render snapshot: {error}"))
+            })
+    })
+    .await?;
+    Ok(())
+}
+
 /// Whether a collector is active on this task.
 ///
 /// Read-site hooks check this before doing any work to build an identity
@@ -581,6 +628,15 @@ pub fn observe(identity: DependencyIdentity) {
             state.seen.insert(identity.clone());
             state.report.observed.push(identity);
         }
+    });
+}
+
+// Search declines follow the same gate/content/slot attribution as other reads.
+pub(crate) fn observe_search_read(viewer_scoped: bool, analytics: bool, opt_out: bool) {
+    with_context(|context| {
+        context.viewer_scoped_search |= viewer_scoped;
+        context.analytics_search |= analytics;
+        context.search_opt_out |= opt_out;
     });
 }
 

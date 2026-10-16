@@ -40,3 +40,10 @@ mod qdrant;
 mod endpoint;
 
 mod analytics;
+
+#[cfg(feature = "testing")]
+mod render_cache;
+
+#[cfg(feature = "testing")]
+#[path = "../support/common.rs"]
+mod common;

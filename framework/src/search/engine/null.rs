@@ -14,6 +14,9 @@ impl NullEngine {
 }
 #[async_trait]
 impl SearchEngine for NullEngine {
+    fn advances_render_cache(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         "null"
     }

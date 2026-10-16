@@ -1,6 +1,6 @@
 //! Shared fixtures keep each native database corpus isolated.
 
-use sea_orm_migration::{MigrationTrait, MigratorTrait};
+use sea_orm_migration::{MigrationTrait, MigratorTrait, SchemaManager};
 use std::{collections::BTreeMap, sync::Arc};
 use suprnova::{
     DB, DbConnection, FrameworkError,
@@ -146,4 +146,59 @@ pub(super) async fn live_database(variable: &str) -> Result<TestContainerGuard, 
         .await
         .map_err(|error| FrameworkError::database(format!("search test migrations: {error}")))?;
     Ok(guard)
+}
+
+/// Native driver writes advance the index's RenderCache identity in their own transaction.
+pub(super) async fn writes_advance_the_render_cache_index(
+    name: &'static str,
+) -> Result<(), FrameworkError> {
+    suprnova::render_cache::migration::Migration
+        .up(&SchemaManager::new(DB::connection()?.inner()))
+        .await
+        .map_err(|error| FrameworkError::database(format!("render cache migration: {error}")))?;
+    // Probe again now that the ledger exists in this database.
+    suprnova::render_cache::RenderCache::uninstall_for_test();
+    let index = descriptor(name);
+    let generation = create(&index).await?;
+    let driver = engine();
+    let created = render_generation(name).await?;
+    assert!(created > 0, "creating a generation advances the index");
+    driver
+        .index(
+            &index,
+            &generation,
+            &[document(&index, "a", "orchard", "garden")],
+        )
+        .await?;
+    let indexed = render_generation(name).await?;
+    assert!(indexed > created, "indexing advances the index");
+    driver
+        .remove(&index, &generation, &[("a".into(), 2)])
+        .await?;
+    let removed = render_generation(name).await?;
+    assert!(removed > indexed, "removal advances the index");
+    let mut settings = index.index_settings();
+    settings.query.hits_cap = 50;
+    driver
+        .write_settings(&index, &generation, &settings)
+        .await?;
+    assert!(
+        render_generation(name).await? > removed,
+        "a settings write advances the index"
+    );
+    driver.drop_generation(&index, &generation).await
+}
+
+async fn render_generation(name: &str) -> Result<i64, FrameworkError> {
+    // A digest is lowercase hex, never caller input, so it is safe to inline.
+    let identity = hex::encode(
+        suprnova::render_cache::DependencyIdentity::table(&format!("search:{name}")).digest(),
+    );
+    DB::scalar(
+        &format!(
+            "SELECT COALESCE(MAX(generation), 0) AS generation FROM suprnova_render_generations WHERE identity = '{identity}'"
+        ),
+        vec![],
+    )
+    .await
 }

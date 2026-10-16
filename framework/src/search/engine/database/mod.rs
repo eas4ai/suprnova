@@ -254,11 +254,21 @@ async fn execute<C: ConnectionTrait>(
         .map_err(db_error)?
         .rows_affected())
 }
+use crate::search::render_cache::advance_transaction;
 async fn rows<C: ConnectionTrait>(
     conn: &C,
     text: String,
     sql: Sql,
 ) -> Result<Vec<QueryResult>, FrameworkError> {
+    if crate::search::render_cache::accounted_read() {
+        let exec = crate::database::transaction::ExecutorChoice::resolve_read(
+            None,
+            Some(&DB::default_connection()),
+            None,
+        )
+        .await?;
+        return exec.query_all(sql.statement(text)).await.map_err(db_error);
+    }
     crate::render_cache::collector::observe_unobservable_read();
     conn.query_all_raw(sql.statement(text))
         .await
@@ -328,7 +338,18 @@ impl DatabaseSearchEngine {
             DbBackend::MySql => Ok(*self
                 .mysql_dialect
                 .get_or_try_init(|| async {
-                    let version: String = DB::scalar("SELECT VERSION()", vec![]).await?;
+                    let result = rows(
+                        DB::connection()?.inner(),
+                        "SELECT VERSION() AS version".into(),
+                        Sql::new(Dialect::Mysql),
+                    )
+                    .await?;
+                    let version: String = get(
+                        result
+                            .first()
+                            .ok_or_else(|| db_error("server version returned no row"))?,
+                        "version",
+                    )?;
                     Ok::<_, FrameworkError>(if version.to_lowercase().contains("mariadb") {
                         Dialect::MariaDb
                     } else {
@@ -392,14 +413,164 @@ impl DatabaseSearchEngine {
         let cutoff = now().checked_sub(seconds).ok_or_else(|| {
             FrameworkError::param("SEARCH_TOMBSTONE_HOURS exceeds timestamp range")
         })?;
-        let mut sql = Sql::new(self.dialect().await?);
-        let cutoff = sql.bind(cutoff);
-        execute(
-            DB::connection()?.inner(),
-            format!("DELETE FROM search_tombstones WHERE removed_at <= {cutoff}"),
+        let dialect = self.dialect().await?;
+        let conn = DB::connection()?;
+        crate::render_cache::write_side_open(false).await?;
+        let tx = conn.inner().begin().await.map_err(db_error)?;
+        let mut sql = Sql::new(dialect);
+        let bound = sql.bind(cutoff);
+        let indexes = rows(
+            &tx,
+            format!(
+                "SELECT DISTINCT index_name FROM search_tombstones WHERE removed_at <= {bound}"
+            ),
             sql,
         )
-        .await
+        .await?;
+        let indexes = indexes
+            .iter()
+            .map(|row| get::<String>(row, "index_name"))
+            .collect::<Result<Vec<_>, _>>()?;
+        crate::search::render_cache::named_write_many(&indexes, Box::pin(async {
+            let mut removed = 0;
+            for index in &indexes {
+                let mut sql = Sql::new(dialect);
+                let name = sql.bind(index.clone());
+                let bound = sql.bind(cutoff);
+                removed += execute(&tx, format!("DELETE FROM search_tombstones WHERE index_name={name} AND removed_at <= {bound}"), sql).await?;
+                advance_transaction(&tx, index).await?;
+            }
+            tx.commit().await.map_err(db_error)?;
+            Ok(removed)
+        })).await
+    }
+
+    async fn query_on<C: ConnectionTrait>(
+        &self,
+        index: &IndexDescriptor,
+        q: &EngineQuery,
+        conn: &C,
+        context: (Dialect, String, IndexSettings),
+    ) -> Result<EngineResult, FrameworkError> {
+        let (dialect, table, settings) = context;
+        super::collection::validate_query(index, q)?;
+        let total = Self::count_on(conn, index, dialect, &table, &settings, q).await?;
+        let native_settings = native_settings(index, &settings);
+        let expanded = native_query(index, &q.expanded);
+        let crop = q
+            .crop
+            .iter()
+            .map(|(name, length)| (native_attribute(index, name), *length))
+            .collect();
+        let mut sql = Sql::new(dialect);
+        let ranked = if dialect == Dialect::Sqlite {
+            sqlite::ranked_matches(&table, &native_settings, &expanded, &mut sql)?
+        } else {
+            None
+        };
+        let score = match dialect {
+            Dialect::Sqlite if ranked.is_some() => "search_ranked.score".into(),
+            Dialect::Sqlite => "0.0".into(),
+            Dialect::Postgres => postgres::score(&table, &native_settings, &expanded, &mut sql)?,
+            _ => mysql::score(&table, &native_settings, &expanded, &mut sql)?,
+        };
+        let score = if dialect == Dialect::Postgres {
+            format!("CAST(({score}) AS DOUBLE PRECISION)")
+        } else {
+            score
+        };
+        let native = if q.highlights || !q.crop.is_empty() {
+            match dialect {
+                Dialect::Sqlite => {
+                    sqlite::highlights(&table, &native_settings, &expanded, &crop, &mut sql)?
+                }
+                Dialect::Postgres => {
+                    postgres::highlights(&table, &native_settings, &expanded, &mut sql)?
+                }
+                _ => vec![],
+            }
+        } else {
+            vec![]
+        };
+        let native = native
+            .into_iter()
+            .map(|(name, expression)| (original_attribute(index, &name), expression))
+            .collect::<Vec<_>>();
+        let formatted = native
+            .iter()
+            .enumerate()
+            .map(|(n, (_, expression))| format!(", {expression} AS h{n}"))
+            .collect::<String>();
+        let predicate = Self::predicate(index, dialect, &table, &settings, q, &mut sql)?;
+        let mut order = filter::order(index, &q.sort, &mut sql)?;
+        let collation = if dialect == Dialect::Postgres {
+            " COLLATE \"C\""
+        } else {
+            ""
+        };
+        order.extend([
+            "score DESC".into(),
+            format!("s.{}{collation} ASC", sql.ident("key")),
+        ]);
+        let limit = sql.bind(i64::try_from(q.depth).map_err(db_error)?);
+        let (with, join) = match ranked {
+            Some(ranked) => (
+                format!("WITH search_ranked AS MATERIALIZED ({ranked}) "),
+                " JOIN search_ranked ON search_ranked.rowid=s.rowid",
+            ),
+            None => (String::new(), ""),
+        };
+        let text = format!(
+            "{with}SELECT s.document_json,s.source_version,{score} AS score{formatted} FROM {} AS s{join} WHERE {predicate} ORDER BY {} LIMIT {limit}",
+            sql.ident(&table),
+            order.join(",")
+        );
+        let result = rows(conn, text, sql).await?;
+        let mut candidates = Vec::new();
+        for row in result {
+            let document = decode(&row)?;
+            let mut highlights = BTreeMap::new();
+            if q.highlights || !q.crop.is_empty() {
+                if dialect.mysql() {
+                    for attr in &settings.index_time.searchable_attributes {
+                        if let Some(text) = document
+                            .attributes
+                            .get(&attr.name)
+                            .and_then(searchable_text)
+                        {
+                            highlights.insert(
+                                attr.name.clone(),
+                                crate::search::highlight(
+                                    &text,
+                                    &attribute_query(&q.expanded, &attr.name),
+                                    &settings.query,
+                                    q.crop.get(&attr.name).copied(),
+                                )?,
+                            );
+                        }
+                    }
+                } else {
+                    for (n, (name, _)) in native.iter().enumerate() {
+                        if let Some(fragment) = get::<Option<String>>(&row, &format!("h{n}"))? {
+                            highlights.insert(
+                                name.clone(),
+                                crate::search::highlight::format_native(
+                                    &fragment,
+                                    &settings.query,
+                                    q.crop.get(name).copied(),
+                                )?,
+                            );
+                        }
+                    }
+                }
+            }
+            candidates.push(EngineCandidate {
+                document,
+                score: get(&row, "score")?,
+                highlights: (q.highlights || !q.crop.is_empty()).then_some(highlights),
+            });
+        }
+        Ok(EngineResult { candidates, total })
     }
     async fn context(
         &self,
@@ -602,16 +773,24 @@ impl DatabaseSearchEngine {
         index: &IndexDescriptor,
         generation: &GenerationId,
     ) -> Result<(), FrameworkError> {
-        let (dialect, table, _) = self.context(index, generation).await?;
-        if dialect != Dialect::Postgres {
-            return Ok(());
-        }
-        let conn = DB::connection()?;
-        let tx = conn.inner().begin().await.map_err(db_error)?;
-        Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
-        ensure_ready(&tx, dialect, index.name, generation).await?;
-        Self::refresh_pg(&tx, index, generation, &table).await?;
-        tx.commit().await.map_err(db_error)
+        crate::search::render_cache::named_write(
+            index.name,
+            Box::pin(async {
+                let (dialect, table, _) = self.context(index, generation).await?;
+                if dialect != Dialect::Postgres {
+                    return Ok(());
+                }
+                let conn = DB::connection()?;
+                crate::render_cache::write_side_open(false).await?;
+                let tx = conn.inner().begin().await.map_err(db_error)?;
+                Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
+                ensure_ready(&tx, dialect, index.name, generation).await?;
+                Self::refresh_pg(&tx, index, generation, &table).await?;
+                advance_transaction(&tx, index.name).await?;
+                tx.commit().await.map_err(db_error)
+            }),
+        )
+        .await
     }
     /// Retrieve FTS5 token-window snippets while escaping source text before adding tags.
     pub async fn snippets(
@@ -866,6 +1045,9 @@ async fn renew_creation<C: ConnectionTrait>(
 
 #[async_trait]
 impl SearchEngine for DatabaseSearchEngine {
+    fn advances_render_cache(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         "database"
     }
@@ -924,6 +1106,7 @@ impl SearchEngine for DatabaseSearchEngine {
         settings: &IndexSettings,
         generation: &GenerationId,
     ) -> Result<(), FrameworkError> {
+        crate::search::render_cache::named_write(index.name, Box::pin(async {
         let table = table(index, generation)?;
         super::collection::validate_settings(index, settings)?;
         let dialect = self.dialect().await?;
@@ -949,6 +1132,7 @@ impl SearchEngine for DatabaseSearchEngine {
         execute(conn.inner(),format!("INSERT INTO search_generations(index_name,generation,state,settings_json,digest) VALUES ({i},{g},{state},{empty},{digest}) {conflict}"),sql).await?;
         let owner = uuid::Uuid::new_v4().to_string();
         let now = crate::clock::now().timestamp();
+        crate::render_cache::write_side_open(false).await?;
         let tx = conn.inner().begin().await.map_err(db_error)?;
         Self::lock(&tx, dialect, index.name, "__control").await?;
         let mut sql = Sql::new(dialect);
@@ -1000,6 +1184,7 @@ impl SearchEngine for DatabaseSearchEngine {
             execute(&tx,format!("INSERT INTO search_generations(index_name,generation,state,settings_json,digest,model,dimensions,creation_owner,creation_expires_at) VALUES ({i},{g},{state},{settings_json},{digest},{model},{dimensions},{token},{expiry})"),sql).await?;
             false
         };
+        advance_transaction(&tx, index.name).await?;
         tx.commit().await.map_err(db_error)?;
         let mut created_tables = Vec::new();
         let build=async {
@@ -1027,12 +1212,14 @@ impl SearchEngine for DatabaseSearchEngine {
                 result = ddl => result?,
                 result = heartbeat() => result?,
             }
-            let tx = conn.inner().begin().await.map_err(db_error)?;
+            crate::render_cache::write_side_open(false).await?;
+        let tx = conn.inner().begin().await.map_err(db_error)?;
             Self::lock(&tx,dialect,index.name,"__control").await?;
             renew_creation(&tx,dialect,index.name,generation.as_str(),&owner).await?;
             let mut sql=Sql::new(dialect);let state=sql.bind("building".to_owned());let i=sql.bind(index.name.to_owned());let g=sql.bind(generation.as_str().to_owned());let token=sql.bind(owner.clone());
             if execute(&tx,format!("UPDATE search_generations SET state={state},creation_owner=NULL,creation_expires_at=NULL WHERE index_name={i} AND generation={g} AND state='creating' AND creation_owner={token}"),sql).await? != 1 {return Err(db_error(format!("search index {}: generation creation lease was replaced",index.name)));}
-            tx.commit().await.map_err(db_error)?;
+            advance_transaction(&tx, index.name).await?;
+        tx.commit().await.map_err(db_error)?;
             Ok::<_,FrameworkError>(())
         }.await;
         if let Err(error) = build {
@@ -1078,6 +1265,7 @@ impl SearchEngine for DatabaseSearchEngine {
             )));
         }
         Ok(())
+        })).await
     }
     async fn switch_generation(
         &self,
@@ -1085,9 +1273,11 @@ impl SearchEngine for DatabaseSearchEngine {
         from: Option<GenerationId>,
         to: GenerationId,
     ) -> Result<(), FrameworkError> {
+        crate::search::render_cache::named_write(index.name, Box::pin(async {
         let table = table(index, &to)?;
         let dialect = self.dialect().await?;
         let conn = DB::connection()?;
+        crate::render_cache::write_side_open(false).await?;
         let tx = conn.inner().begin().await.map_err(db_error)?;
         Self::lock(&tx, dialect, index.name, "__control").await?;
         let mut sql = Sql::new(dialect);
@@ -1175,16 +1365,20 @@ impl SearchEngine for DatabaseSearchEngine {
         let mut sql = Sql::new(dialect);
         let i = sql.bind(index.name.to_owned());
         execute(&tx,format!("UPDATE search_generations SET building_generation=NULL,building_digest=NULL WHERE index_name={i} AND generation='__control'"),sql).await?;
+        advance_transaction(&tx, index.name).await?;
         tx.commit().await.map_err(db_error)
+        })).await
     }
     async fn drop_generation(
         &self,
         index: &IndexDescriptor,
         generation: &GenerationId,
     ) -> Result<(), FrameworkError> {
+        crate::search::render_cache::named_write(index.name, Box::pin(async {
         let table = table(index, generation)?;
         let dialect = self.dialect().await?;
         let conn = DB::connection()?;
+        crate::render_cache::write_side_open(false).await?;
         let tx = conn.inner().begin().await.map_err(db_error)?;
         Self::lock(&tx, dialect, index.name, "__control").await?;
         Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
@@ -1221,6 +1415,7 @@ impl SearchEngine for DatabaseSearchEngine {
         let i = sql.bind(index.name.to_owned());
         let g = sql.bind(generation.as_str().to_owned());
         execute(&tx,format!("UPDATE search_generations SET state={dropping} WHERE index_name={i} AND generation={g}"),sql).await?;
+        advance_transaction(&tx, index.name).await?;
         tx.commit().await.map_err(db_error)?;
         // MySQL DDL commits implicitly. Mark the generation unavailable before issuing it.
         self.drain_vectors(index, generation, &table, dialect)
@@ -1266,6 +1461,7 @@ impl SearchEngine for DatabaseSearchEngine {
             .await?;
         }
         Ok(())
+        })).await
     }
     async fn write_settings(
         &self,
@@ -1273,6 +1469,7 @@ impl SearchEngine for DatabaseSearchEngine {
         generation: &GenerationId,
         settings: &IndexSettings,
     ) -> Result<(), FrameworkError> {
+        crate::search::render_cache::named_write(index.name, Box::pin(async {
         super::collection::validate_settings(index, settings)?;
         let (dialect, _, old) = self.context(index, generation).await?;
         if old.index_time.digest() != settings.index_time.digest() {
@@ -1281,12 +1478,17 @@ impl SearchEngine for DatabaseSearchEngine {
                 index.name
             )));
         }
+        let conn = DB::connection()?;
+        crate::render_cache::write_side_open(false).await?;
+        let tx = conn.inner().begin().await.map_err(db_error)?;
         let mut sql = Sql::new(dialect);
         let value = sql.bind(serde_json::to_string(settings).map_err(db_error)?);
         let i = sql.bind(index.name.to_owned());
         let g = sql.bind(generation.as_str().to_owned());
-        execute(DB::connection()?.inner(),format!("UPDATE search_generations SET settings_json={value} WHERE index_name={i} AND generation={g}"),sql).await?;
-        Ok(())
+        execute(&tx,format!("UPDATE search_generations SET settings_json={value} WHERE index_name={i} AND generation={g}"),sql).await?;
+        advance_transaction(&tx, index.name).await?;
+        tx.commit().await.map_err(db_error)
+        })).await
     }
     async fn record_flush(
         &self,
@@ -1294,9 +1496,11 @@ impl SearchEngine for DatabaseSearchEngine {
         generation: &GenerationId,
         cutoff: i64,
     ) -> Result<(), FrameworkError> {
+        crate::search::render_cache::named_write(index.name, Box::pin(async {
         table(index, generation)?;
         let dialect = self.dialect().await?;
         let conn = DB::connection()?;
+        crate::render_cache::write_side_open(false).await?;
         let tx = conn.inner().begin().await.map_err(db_error)?;
         Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
         ensure_ready(&tx, dialect, index.name, generation).await?;
@@ -1310,7 +1514,9 @@ impl SearchEngine for DatabaseSearchEngine {
             let g = sql.bind(generation.as_str().to_owned());
             execute(&tx, format!("UPDATE search_generations SET flush_version={version},flush_removed_at={removed} WHERE index_name={i} AND generation={g}"), sql).await?;
         }
+        advance_transaction(&tx, index.name).await?;
         tx.commit().await.map_err(db_error)
+        })).await
     }
     async fn keys_before_version(
         &self,
@@ -1364,58 +1570,69 @@ impl SearchEngine for DatabaseSearchEngine {
         generation: &GenerationId,
         docs: &[IndexedDocument],
     ) -> Result<WriteOutcome, FrameworkError> {
-        let (dialect, table, settings) = self.context(index, generation).await?;
-        for doc in docs {
-            validate_document(index, &settings, doc)?;
-        }
-        let conn = DB::connection()?;
-        let tx = conn.inner().begin().await.map_err(db_error)?;
-        Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
-        let mut outcome = WriteOutcome::default();
-        ensure_ready(&tx, dialect, index.name, generation).await?;
-        let metadata = Self::metadata(&tx, dialect, index.name, generation.as_str()).await?;
-        let retention = crate::search::SearchConfig::current()?
-            .tombstone_hours
-            .checked_mul(3600)
-            .and_then(|seconds| i64::try_from(seconds).ok())
-            .ok_or_else(|| {
-                FrameworkError::param("SEARCH_TOMBSTONE_HOURS exceeds timestamp range")
-            })?;
-        let expires_before = now().checked_sub(retention).ok_or_else(|| {
-            FrameworkError::param("SEARCH_TOMBSTONE_HOURS exceeds timestamp range")
-        })?;
-        let flush = get::<Option<i64>>(&metadata, "flush_version")?
-            .zip(get::<Option<i64>>(&metadata, "flush_removed_at")?)
-            .filter(|(_, removed)| *removed > expires_before)
-            .map(|(version, _)| version);
-        let scope = WriteContext {
-            index,
-            generation,
-            dialect,
-            table: &table,
-            settings: &settings,
-        };
-        for doc in docs {
-            if flush.is_some_and(|cutoff| doc.document.source_version <= cutoff) {
-                outcome.skipped_tombstoned += 1;
-                continue;
-            }
-            write_document(&tx, &scope, doc, &mut outcome).await?;
-        }
-        if dialect == Dialect::Postgres {
-            let metadata = Self::metadata(&tx, dialect, index.name, generation.as_str()).await?;
-            if get::<i64>(&metadata, "write_count")? - get::<i64>(&metadata, "refreshed_count")?
-                >= vocabulary_step()?
-            {
-                Self::refresh_pg(&tx, index, generation, &table).await?;
-            }
-        }
-        tx.commit().await.map_err(db_error)?;
-        self.flush_vectors(index, generation, &table, dialect)
-            .await?;
-        self.drain_vectors(index, generation, &table, dialect)
-            .await?;
-        Ok(outcome)
+        crate::search::render_cache::named_write(
+            index.name,
+            Box::pin(async {
+                let (dialect, table, settings) = self.context(index, generation).await?;
+                for doc in docs {
+                    validate_document(index, &settings, doc)?;
+                }
+                let conn = DB::connection()?;
+                crate::render_cache::write_side_open(false).await?;
+                let tx = conn.inner().begin().await.map_err(db_error)?;
+                Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
+                let mut outcome = WriteOutcome::default();
+                ensure_ready(&tx, dialect, index.name, generation).await?;
+                let metadata =
+                    Self::metadata(&tx, dialect, index.name, generation.as_str()).await?;
+                let retention = crate::search::SearchConfig::current()?
+                    .tombstone_hours
+                    .checked_mul(3600)
+                    .and_then(|seconds| i64::try_from(seconds).ok())
+                    .ok_or_else(|| {
+                        FrameworkError::param("SEARCH_TOMBSTONE_HOURS exceeds timestamp range")
+                    })?;
+                let expires_before = now().checked_sub(retention).ok_or_else(|| {
+                    FrameworkError::param("SEARCH_TOMBSTONE_HOURS exceeds timestamp range")
+                })?;
+                let flush = get::<Option<i64>>(&metadata, "flush_version")?
+                    .zip(get::<Option<i64>>(&metadata, "flush_removed_at")?)
+                    .filter(|(_, removed)| *removed > expires_before)
+                    .map(|(version, _)| version);
+                let scope = WriteContext {
+                    index,
+                    generation,
+                    dialect,
+                    table: &table,
+                    settings: &settings,
+                };
+                for doc in docs {
+                    if flush.is_some_and(|cutoff| doc.document.source_version <= cutoff) {
+                        outcome.skipped_tombstoned += 1;
+                        continue;
+                    }
+                    write_document(&tx, &scope, doc, &mut outcome).await?;
+                }
+                if dialect == Dialect::Postgres {
+                    let metadata =
+                        Self::metadata(&tx, dialect, index.name, generation.as_str()).await?;
+                    if get::<i64>(&metadata, "write_count")?
+                        - get::<i64>(&metadata, "refreshed_count")?
+                        >= vocabulary_step()?
+                    {
+                        Self::refresh_pg(&tx, index, generation, &table).await?;
+                    }
+                }
+                advance_transaction(&tx, index.name).await?;
+                tx.commit().await.map_err(db_error)?;
+                self.flush_vectors(index, generation, &table, dialect)
+                    .await?;
+                self.drain_vectors(index, generation, &table, dialect)
+                    .await?;
+                Ok(outcome)
+            }),
+        )
+        .await
     }
     async fn remove(
         &self,
@@ -1423,8 +1640,10 @@ impl SearchEngine for DatabaseSearchEngine {
         generation: &GenerationId,
         keys: &[(String, i64)],
     ) -> Result<WriteOutcome, FrameworkError> {
+        crate::search::render_cache::named_write(index.name, Box::pin(async {
         let (dialect, table, settings) = self.context(index, generation).await?;
         let conn = DB::connection()?;
+        crate::render_cache::write_side_open(false).await?;
         let tx = conn.inner().begin().await.map_err(db_error)?;
         Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
         ensure_ready(&tx, dialect, index.name, generation).await?;
@@ -1485,10 +1704,12 @@ impl SearchEngine for DatabaseSearchEngine {
         if dialect == Dialect::Postgres {
             Self::refresh_pg(&tx, index, generation, &table).await?;
         }
+        advance_transaction(&tx, index.name).await?;
         tx.commit().await.map_err(db_error)?;
         self.drain_vectors(index, generation, &table, dialect)
             .await?;
         Ok(outcome)
+        })).await
     }
     async fn query(
         &self,
@@ -1496,128 +1717,18 @@ impl SearchEngine for DatabaseSearchEngine {
         generation: &GenerationId,
         q: &EngineQuery,
     ) -> Result<EngineResult, FrameworkError> {
-        let (dialect, table, settings) = self.context(index, generation).await?;
-        super::collection::validate_query(index, q)?;
+        // Resolve settings before acquiring a standalone read transaction.
+        // A one-connection pool cannot lend another connection to context().
+        let context = self.context(index, generation).await?;
         let conn = DB::connection()?;
-        let tx = conn.inner().begin().await.map_err(db_error)?;
-        let total = Self::count_on(&tx, index, dialect, &table, &settings, q).await?;
-        let native_settings = native_settings(index, &settings);
-        let expanded = native_query(index, &q.expanded);
-        let crop = q
-            .crop
-            .iter()
-            .map(|(name, length)| (native_attribute(index, name), *length))
-            .collect();
-        let mut sql = Sql::new(dialect);
-        let ranked = if dialect == Dialect::Sqlite {
-            sqlite::ranked_matches(&table, &native_settings, &expanded, &mut sql)?
-        } else {
-            None
-        };
-        let score = match dialect {
-            Dialect::Sqlite if ranked.is_some() => "search_ranked.score".into(),
-            Dialect::Sqlite => "0.0".into(),
-            Dialect::Postgres => postgres::score(&table, &native_settings, &expanded, &mut sql)?,
-            _ => mysql::score(&table, &native_settings, &expanded, &mut sql)?,
-        };
-        let score = if dialect == Dialect::Postgres {
-            format!("CAST(({score}) AS DOUBLE PRECISION)")
-        } else {
-            score
-        };
-        let native = if q.highlights || !q.crop.is_empty() {
-            match dialect {
-                Dialect::Sqlite => {
-                    sqlite::highlights(&table, &native_settings, &expanded, &crop, &mut sql)?
-                }
-                Dialect::Postgres => {
-                    postgres::highlights(&table, &native_settings, &expanded, &mut sql)?
-                }
-                _ => vec![],
-            }
-        } else {
-            vec![]
-        };
-        let native = native
-            .into_iter()
-            .map(|(name, expression)| (original_attribute(index, &name), expression))
-            .collect::<Vec<_>>();
-        let formatted = native
-            .iter()
-            .enumerate()
-            .map(|(n, (_, expression))| format!(", {expression} AS h{n}"))
-            .collect::<String>();
-        let predicate = Self::predicate(index, dialect, &table, &settings, q, &mut sql)?;
-        let mut order = filter::order(index, &q.sort, &mut sql)?;
-        let collation = if dialect == Dialect::Postgres {
-            " COLLATE \"C\""
-        } else {
-            ""
-        };
-        order.extend([
-            "score DESC".into(),
-            format!("s.{}{collation} ASC", sql.ident("key")),
-        ]);
-        let limit = sql.bind(i64::try_from(q.depth).map_err(db_error)?);
-        let (with, join) = match ranked {
-            Some(ranked) => (
-                format!("WITH search_ranked AS MATERIALIZED ({ranked}) "),
-                " JOIN search_ranked ON search_ranked.rowid=s.rowid",
-            ),
-            None => (String::new(), ""),
-        };
-        let text = format!(
-            "{with}SELECT s.document_json,s.source_version,{score} AS score{formatted} FROM {} AS s{join} WHERE {predicate} ORDER BY {} LIMIT {limit}",
-            sql.ident(&table),
-            order.join(",")
-        );
-        let result = rows(&tx, text, sql).await?;
-        let mut candidates = Vec::new();
-        for row in result {
-            let document = decode(&row)?;
-            let mut highlights = BTreeMap::new();
-            if q.highlights || !q.crop.is_empty() {
-                if dialect.mysql() {
-                    for attr in &settings.index_time.searchable_attributes {
-                        if let Some(text) = document
-                            .attributes
-                            .get(&attr.name)
-                            .and_then(searchable_text)
-                        {
-                            highlights.insert(
-                                attr.name.clone(),
-                                crate::search::highlight(
-                                    &text,
-                                    &attribute_query(&q.expanded, &attr.name),
-                                    &settings.query,
-                                    q.crop.get(&attr.name).copied(),
-                                )?,
-                            );
-                        }
-                    }
-                } else {
-                    for (n, (name, _)) in native.iter().enumerate() {
-                        if let Some(fragment) = get::<Option<String>>(&row, &format!("h{n}"))? {
-                            highlights.insert(
-                                name.clone(),
-                                crate::search::highlight::format_native(
-                                    &fragment,
-                                    &settings.query,
-                                    q.crop.get(name).copied(),
-                                )?,
-                            );
-                        }
-                    }
-                }
-            }
-            candidates.push(EngineCandidate {
-                document,
-                score: get(&row, "score")?,
-                highlights: (q.highlights || !q.crop.is_empty()).then_some(highlights),
-            });
+        if crate::search::render_cache::accounted_read() {
+            // rows routes every statement through the render's existing read view.
+            return self.query_on(index, q, conn.inner(), context).await;
         }
+        let tx = conn.inner().begin().await.map_err(db_error)?;
+        let result = self.query_on(index, q, &tx, context).await?;
         tx.commit().await.map_err(db_error)?;
-        Ok(EngineResult { candidates, total })
+        Ok(result)
     }
     async fn semantic(
         &self,
@@ -2447,6 +2558,7 @@ impl DatabaseSearchEngine {
         dialect: Dialect,
     ) -> Result<(), FrameworkError> {
         let conn = DB::connection()?;
+        crate::render_cache::write_side_open(false).await?;
         let tx = conn.inner().begin().await.map_err(db_error)?;
         Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
         let metadata = Self::metadata(&tx, dialect, index.name, generation.as_str()).await?;
@@ -2480,6 +2592,7 @@ impl DatabaseSearchEngine {
         let i = sql.bind(index.name.to_owned());
         let g = sql.bind(generation.as_str().to_owned());
         execute(&tx,format!("UPDATE search_generations SET pending_vectors_json={empty} WHERE index_name={i} AND generation={g}"),sql).await?;
+        advance_transaction(&tx, index.name).await?;
         tx.commit().await.map_err(db_error)
     }
 }
@@ -2530,6 +2643,7 @@ impl DatabaseSearchEngine {
     ) -> Result<(), FrameworkError> {
         loop {
             let conn = DB::connection()?;
+            crate::render_cache::write_side_open(false).await?;
             let tx = conn.inner().begin().await.map_err(db_error)?;
             Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
             ensure_ready(&tx, dialect, index.name, generation).await?;
@@ -2564,6 +2678,7 @@ impl DatabaseSearchEngine {
                 sql.ident(table)
             );
             execute(&tx, text, sql).await?;
+            advance_transaction(&tx, index.name).await?;
             tx.commit().await.map_err(db_error)?;
         }
     }
