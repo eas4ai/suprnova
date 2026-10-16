@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: decision-01m4zjm8qzc5n3qjx3c9ayha7f
+Current: decision-01m4zmzch6hckq8nd8ehy25bj8
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -1332,3 +1332,9 @@ Delivers backlog item tests-share-process-global-state: Shawn 2026-10-14 04:16 '
 Requirements: SEARCH-004
 
 Delivers backlog item decision-01m4zjm8qzc5n3qjx3c9ayha7f: A search fetches the page it shows and loads later pages on request. Developer, 2026-10-15 06:44: "The search should be paged according to paging on the results page and lazy loaded on subsequent page loads". A lexical search asks the engine for offset + limit + 1 candidates bounded by the hits cap (the extra one decides has_more), refills only when distinct, group_by or hydration drops leave the page short, and each later page is fetched when it is requested; the baseline measures the first page of 10 hits, the page the rivals return.
+
+## decision-01m4zmzch6hckq8nd8ehy25bj8
+
+Requirements: SEARCH-004
+
+Delivers backlog item decision-01m4zmzch6hckq8nd8ehy25bj8 (4482b84f14c2); its body is in the promotion decision.
