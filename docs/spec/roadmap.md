@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: tests-share-process-global-state
+Current: decision-01m4zjm8qzc5n3qjx3c9ayha7f
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -1326,3 +1326,9 @@ Requirements: REPORT-001, REPORT-002, REPORT-003, REPORT-004, REPORT-005, REPORT
 Requirements: PAR-096
 
 Delivers backlog item tests-share-process-global-state: Shawn 2026-10-14 04:16 'ok' to a backlog item (side-agent note on the fixes round): two framework tests fail only when their binary runs under plain cargo test with several threads, from process-wide state, and pass alone and under nextest, which the gate and every mechanism use. framework/tests/auth/laravel_delta.rs: configured_store_without_selective_revocation_returns_an_error and its siblings bind the session store with App::bind, the process-global container, instead of TestContainer::bind inside their TestContainer::scope, so a parallel test's DatabaseSessionDriver can win the lookup and Auth::logout_other_devices succeeds where the test expects the UnsupportedStore refusal (PAR-096). framework/tests/eloquent/model_changes.rs: dirty_save_syncs_memory_so_a_second_save_preserves_other_writers counts saved events through the global observer registry that ChangeUser::observe(AuditObserver) fills from several parallel tests, so the count comes out high (10 for 7). Fix: bind the store through the test container and count the test's own observer's events (or run each alone with own_process), so a plain cargo test of the auth and eloquent binaries is trustworthy. No production code is involved; low priority.
+
+## decision-01m4zjm8qzc5n3qjx3c9ayha7f
+
+Requirements: SEARCH-004
+
+Delivers backlog item decision-01m4zjm8qzc5n3qjx3c9ayha7f: A search fetches the page it shows and loads later pages on request. Developer, 2026-10-15 06:44: "The search should be paged according to paging on the results page and lazy loaded on subsequent page loads". A lexical search asks the engine for offset + limit + 1 candidates bounded by the hits cap (the extra one decides has_more), refills only when distinct, group_by or hydration drops leave the page short, and each later page is fetched when it is requested; the baseline measures the first page of 10 hits, the page the rivals return.
