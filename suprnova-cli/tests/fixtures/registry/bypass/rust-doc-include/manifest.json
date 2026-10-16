@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-doc-include",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}
