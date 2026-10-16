@@ -35,6 +35,14 @@ struct OtherArticle {
 }
 
 tokio::task_local! { static SETTINGS: suprnova::IndexSettings; }
+
+// An application can resolve an engine handle once, outside any render, and
+// keep it with the generation it read; the retained route uses that handle.
+type RetainedHandle = (
+    Arc<dyn suprnova::search::SearchEngine>,
+    suprnova::GenerationId,
+);
+static RETAINED: std::sync::Mutex<Option<RetainedHandle>> = std::sync::Mutex::new(None);
 fn cache_settings() -> suprnova::IndexSettings {
     SETTINGS.try_with(Clone::clone).unwrap_or_default()
 }
@@ -50,12 +58,16 @@ async fn boot() -> Harness {
     boot_with_connections(5).await
 }
 
-async fn boot_with_connections(connections: u32) -> Harness {
+fn reset_process() -> TestContainerGuard {
     static CRYPT: Once = Once::new();
     CRYPT.call_once(|| suprnova::Crypt::init(suprnova::EncryptionKey::generate()));
     suprnova::middleware::clear_global_middleware_for_test();
     RenderCache::uninstall_for_test();
-    let guard = TestContainer::fake();
+    TestContainer::fake()
+}
+
+async fn boot_with_connections(connections: u32) -> Harness {
+    let guard = reset_process();
     let directory = tempfile::tempdir().unwrap();
     let config = suprnova::database::DatabaseConfig::builder()
         .url(format!(
@@ -93,6 +105,45 @@ async fn boot_with_connections(connections: u32) -> Harness {
             .unwrap();
     }
     TestContainer::singleton(connection);
+    install(guard, directory).await
+}
+
+/// Postgres renders read through a REPEATABLE READ snapshot taken before retrieval.
+async fn boot_postgres() -> Harness {
+    let guard = reset_process();
+    let directory = tempfile::tempdir().unwrap();
+    let config = suprnova::database::DatabaseConfig::builder()
+        .url(std::env::var("PG_TEST_URL").expect("set PG_TEST_URL to a disposable database"))
+        .max_connections(5)
+        .min_connections(1)
+        .logging(false)
+        .build();
+    let connection = DbConnection::connect(&config).await.unwrap();
+    super::database_support::Migrator::up(connection.inner(), None)
+        .await
+        .unwrap();
+    suprnova::render_cache::migration::Migration
+        .up(&SchemaManager::new(connection.inner()))
+        .await
+        .unwrap();
+    for table in ["cached_search_a", "cached_search_b"] {
+        let inner = connection.inner();
+        inner
+            .execute_unprepared(&format!("DROP TABLE IF EXISTS {table}"))
+            .await
+            .unwrap();
+        inner
+            .execute_unprepared(&format!(
+                "CREATE TABLE {table}(id BIGSERIAL PRIMARY KEY, title TEXT NOT NULL)"
+            ))
+            .await
+            .unwrap();
+    }
+    TestContainer::singleton(connection);
+    install(guard, directory).await
+}
+
+async fn install(guard: TestContainerGuard, directory: tempfile::TempDir) -> Harness {
     let router: Router = Router::new().get("/results/{kind}", results).into();
     let policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
         .freshness(FreshnessPolicy::new(60_000, 0, 0).unwrap())
@@ -157,6 +208,43 @@ async fn results(request: Request) -> Response {
                 Some(suprnova::AttributeValue::Text(title)) => Some(title.clone()),
                 _ => None,
             })
+            .collect::<Vec<_>>();
+        return Ok(HttpResponse::text(titles.join(",")));
+    }
+    if kind == "retained" {
+        let (engine, generation) = RETAINED
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("retain a handle before requesting this route");
+        let query = suprnova::EngineQuery {
+            expanded: Default::default(),
+            filter: None,
+            sort: vec![],
+            depth: 10,
+            highlights: false,
+            crop: Default::default(),
+        };
+        let mut titles = engine
+            .query(Article::descriptor(), &generation, &query)
+            .await?
+            .candidates
+            .into_iter()
+            .filter_map(|hit| match hit.document.attributes.get("title") {
+                Some(suprnova::AttributeValue::Text(title)) => Some(title.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        titles.sort();
+        return Ok(HttpResponse::text(titles.join(",")));
+    }
+    if kind == "typo" {
+        let titles = Article::search("peazh")
+            .get()
+            .await?
+            .hits
+            .into_iter()
+            .map(|hit| hit.model.title)
             .collect::<Vec<_>>();
         return Ok(HttpResponse::text(titles.join(",")));
     }
@@ -340,6 +428,7 @@ enum Case {
     Maintenance,
     ExternalReadRace,
     NamedAdvance,
+    RetainedHandle,
 }
 
 async fn scenario(driver: SearchDriver, case: Case) {
@@ -359,6 +448,18 @@ async fn scenario(driver: SearchDriver, case: Case) {
             assert_eq!(get(&harness, "/results/a").await.0, "rust first");
             assert!(hit(&get(&harness, "/results/a").await.1), "prime a stored search page");
             match case {
+                Case::RetainedHandle => {
+                    *RETAINED.lock().unwrap() = Some((engine.clone(), generation.clone()));
+                    assert_eq!(get(&harness, "/results/retained").await.0, "rust first");
+                    assert!(
+                        hit(&get(&harness, "/results/retained").await.1),
+                        "a page read through a retained handle must be stored"
+                    );
+                    index(&second).await;
+                    let (body, lookups) = get(&harness, "/results/retained").await;
+                    assert!(!hit(&lookups), "an index write must invalidate a retained-handle page");
+                    assert_eq!(body, "rust first,rust second");
+                }
                 Case::Remove => {
                     suprnova::unsearchable::<Article>(&[first.id.to_string()]).await.unwrap();
                     let (body, lookups) = get(&harness, "/results/a").await;
@@ -572,6 +673,38 @@ cases! {
     maintenance_sqlite, Database, Maintenance;
     external_read_before_first_sql_keeps_the_earlier_generation, Collection, ExternalReadRace;
     named_external_write_advances_primary_authority, Collection, NamedAdvance;
+    retained_handle_collection, Collection, RetainedHandle;
+    retained_handle_sqlite, Database, RetainedHandle;
+}
+
+/// The first render after incremental writes expands typos from the words those writes added.
+#[tokio::test]
+#[serial_test::serial]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_first_cached_search_expands_typos_from_new_writes() {
+    SearchConfig::scope(
+        SearchConfig {
+            driver: SearchDriver::Database,
+            queue: false,
+            ..Default::default()
+        },
+        SearchRegistry::isolated(async {
+            let harness = boot_postgres().await;
+            suprnova::search::generations::create_index("cached_a")
+                .await
+                .unwrap();
+            let peach = article("peach").await;
+            index(&peach).await;
+            let (body, _) = get(&harness, "/results/typo").await;
+            assert_eq!(
+                body, "peach",
+                "a one-edit query must reach the indexed word"
+            );
+            assert!(hit(&get(&harness, "/results/typo").await.1));
+        }),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

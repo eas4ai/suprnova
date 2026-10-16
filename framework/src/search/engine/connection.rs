@@ -1,14 +1,34 @@
-//! Declared model databases also route engine reads when no write callback is active.
+//! Registry handles observe RenderCache reads when they are called, and declared
+//! model databases also route engine reads when no write callback is active.
 use super::*;
 
 /// A driver handle retains the index declaration without capturing a request's live pool.
+///
+/// The registry wraps every engine in one, so a handle resolved outside a
+/// render still records its index when a cached render calls it later.
 pub(crate) struct ConnectionEngine {
     index: &'static str,
     inner: Arc<dyn SearchEngine>,
+    routed: bool,
 }
 impl ConnectionEngine {
-    pub(crate) fn new(index: &'static str, inner: Arc<dyn SearchEngine>) -> Self {
-        Self { index, inner }
+    pub(crate) fn new(index: &'static str, inner: Arc<dyn SearchEngine>, routed: bool) -> Self {
+        Self {
+            index,
+            inner,
+            routed,
+        }
+    }
+    // Only a database engine on a declared model connection changes connection.
+    async fn routed<T>(
+        &self,
+        future: impl std::future::Future<Output = Result<T, FrameworkError>>,
+    ) -> Result<T, FrameworkError> {
+        if self.routed {
+            crate::search::registry::in_index_connection(self.index, future).await
+        } else {
+            future.await
+        }
     }
     async fn write<T>(
         &self,
@@ -37,11 +57,7 @@ impl SearchEngine for ConnectionEngine {
         index: &str,
     ) -> Result<Option<GenerationId>, FrameworkError> {
         crate::search::render_cache::read(self.index, async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.current_generation(index),
-            )
-            .await
+            self.routed(self.inner.current_generation(index)).await
         })
         .await?
     }
@@ -50,11 +66,7 @@ impl SearchEngine for ConnectionEngine {
         index: &str,
     ) -> Result<Vec<(GenerationId, String)>, FrameworkError> {
         crate::search::render_cache::read(self.index, async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.generation_states(index),
-            )
-            .await
+            self.routed(self.inner.generation_states(index)).await
         })
         .await?
     }
@@ -65,11 +77,8 @@ impl SearchEngine for ConnectionEngine {
         cutoff: i64,
     ) -> Result<(), FrameworkError> {
         self.write(async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.record_flush(index, generation, cutoff),
-            )
-            .await
+            self.routed(self.inner.record_flush(index, generation, cutoff))
+                .await
         })
         .await
     }
@@ -81,8 +90,7 @@ impl SearchEngine for ConnectionEngine {
         limit: usize,
     ) -> Result<Vec<(String, i64)>, FrameworkError> {
         crate::search::render_cache::read(self.index, async {
-            crate::search::registry::in_index_connection(
-                self.index,
+            self.routed(
                 self.inner
                     .keys_before_version(index, generation, cutoff, limit),
             )
@@ -91,11 +99,8 @@ impl SearchEngine for ConnectionEngine {
         .await?
     }
     async fn retire_index(&self, index: &str) -> Result<(), FrameworkError> {
-        self.write(async {
-            crate::search::registry::in_index_connection(self.index, self.inner.retire_index(index))
-                .await
-        })
-        .await
+        self.write(async { self.routed(self.inner.retire_index(index)).await })
+            .await
     }
     async fn create_generation(
         &self,
@@ -104,11 +109,8 @@ impl SearchEngine for ConnectionEngine {
         generation: &GenerationId,
     ) -> Result<(), FrameworkError> {
         self.write(async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.create_generation(index, settings, generation),
-            )
-            .await
+            self.routed(self.inner.create_generation(index, settings, generation))
+                .await
         })
         .await
     }
@@ -119,11 +121,8 @@ impl SearchEngine for ConnectionEngine {
         to: GenerationId,
     ) -> Result<(), FrameworkError> {
         self.write(async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.switch_generation(index, from, to),
-            )
-            .await
+            self.routed(self.inner.switch_generation(index, from, to))
+                .await
         })
         .await
     }
@@ -133,11 +132,8 @@ impl SearchEngine for ConnectionEngine {
         generation: &GenerationId,
     ) -> Result<(), FrameworkError> {
         self.write(async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.drop_generation(index, generation),
-            )
-            .await
+            self.routed(self.inner.drop_generation(index, generation))
+                .await
         })
         .await
     }
@@ -148,11 +144,8 @@ impl SearchEngine for ConnectionEngine {
         settings: &IndexSettings,
     ) -> Result<(), FrameworkError> {
         self.write(async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.write_settings(index, generation, settings),
-            )
-            .await
+            self.routed(self.inner.write_settings(index, generation, settings))
+                .await
         })
         .await
     }
@@ -162,11 +155,8 @@ impl SearchEngine for ConnectionEngine {
         generation: &GenerationId,
     ) -> Result<IndexSettings, FrameworkError> {
         crate::search::render_cache::read(self.index, async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.read_settings(index, generation),
-            )
-            .await
+            self.routed(self.inner.read_settings(index, generation))
+                .await
         })
         .await?
     }
@@ -177,11 +167,8 @@ impl SearchEngine for ConnectionEngine {
         _documents: &[IndexedDocument],
     ) -> Result<BTreeMap<String, String>, FrameworkError> {
         crate::search::render_cache::read(self.index, async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.stored_hashes(_index, _generation, _documents),
-            )
-            .await
+            self.routed(self.inner.stored_hashes(_index, _generation, _documents))
+                .await
         })
         .await?
     }
@@ -191,14 +178,8 @@ impl SearchEngine for ConnectionEngine {
         generation: &GenerationId,
         docs: &[IndexedDocument],
     ) -> Result<WriteOutcome, FrameworkError> {
-        self.write(async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.index(index, generation, docs),
-            )
+        self.write(async { self.routed(self.inner.index(index, generation, docs)).await })
             .await
-        })
-        .await
     }
     async fn remove(
         &self,
@@ -207,11 +188,8 @@ impl SearchEngine for ConnectionEngine {
         keys: &[(String, i64)],
     ) -> Result<WriteOutcome, FrameworkError> {
         self.write(async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.remove(index, generation, keys),
-            )
-            .await
+            self.routed(self.inner.remove(index, generation, keys))
+                .await
         })
         .await
     }
@@ -222,11 +200,7 @@ impl SearchEngine for ConnectionEngine {
         q: &EngineQuery,
     ) -> Result<EngineResult, FrameworkError> {
         crate::search::render_cache::read(self.index, async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.query(index, generation, q),
-            )
-            .await
+            self.routed(self.inner.query(index, generation, q)).await
         })
         .await?
     }
@@ -239,8 +213,7 @@ impl SearchEngine for ConnectionEngine {
         depth: usize,
     ) -> Result<EngineResult, FrameworkError> {
         crate::search::render_cache::read(self.index, async {
-            crate::search::registry::in_index_connection(
-                self.index,
+            self.routed(
                 self.inner
                     .semantic(index, generation, vector, filter, depth),
             )
@@ -257,11 +230,8 @@ impl SearchEngine for ConnectionEngine {
         ratio: f32,
     ) -> Result<Option<EngineResult>, FrameworkError> {
         crate::search::render_cache::read(self.index, async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.hybrid(index, generation, query, vector, ratio),
-            )
-            .await
+            self.routed(self.inner.hybrid(index, generation, query, vector, ratio))
+                .await
         })
         .await?
     }
@@ -275,11 +245,8 @@ impl SearchEngine for ConnectionEngine {
         order: FacetOrder,
     ) -> Result<FacetDistribution, FrameworkError> {
         crate::search::render_cache::read(self.index, async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.facets(index, generation, q, attrs, cap, order),
-            )
-            .await
+            self.routed(self.inner.facets(index, generation, q, attrs, cap, order))
+                .await
         })
         .await?
     }
@@ -291,11 +258,8 @@ impl SearchEngine for ConnectionEngine {
         attrs: &[String],
     ) -> Result<FacetStats, FrameworkError> {
         crate::search::render_cache::read(self.index, async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.facet_stats(index, generation, q, attrs),
-            )
-            .await
+            self.routed(self.inner.facet_stats(index, generation, q, attrs))
+                .await
         })
         .await?
     }
@@ -309,8 +273,7 @@ impl SearchEngine for ConnectionEngine {
         cap: usize,
     ) -> Result<FacetDistribution, FrameworkError> {
         crate::search::render_cache::read(self.index, async {
-            crate::search::registry::in_index_connection(
-                self.index,
+            self.routed(
                 self.inner
                     .facet_search(index, generation, q, attr, prefix, cap),
             )
@@ -324,11 +287,7 @@ impl SearchEngine for ConnectionEngine {
         generation: &GenerationId,
     ) -> Result<Arc<Vocabulary>, FrameworkError> {
         crate::search::render_cache::read(self.index, async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.vocabulary(index, generation),
-            )
-            .await
+            self.routed(self.inner.vocabulary(index, generation)).await
         })
         .await?
     }
@@ -339,11 +298,7 @@ impl SearchEngine for ConnectionEngine {
         q: &EngineQuery,
     ) -> Result<Total, FrameworkError> {
         crate::search::render_cache::read(self.index, async {
-            crate::search::registry::in_index_connection(
-                self.index,
-                self.inner.count(index, generation, q),
-            )
-            .await
+            self.routed(self.inner.count(index, generation, q)).await
         })
         .await?
     }

@@ -464,18 +464,15 @@ impl SearchRegistry {
     /// Built-in database and test engines resolve lazily; applications register other drivers.
     pub fn engine_for(index: &str) -> Result<Arc<dyn SearchEngine>, FrameworkError> {
         let entry = Self::by_index(index)?;
+        // Wrap every handle: a caller may keep one resolved outside a render
+        // and use it inside one, so reads must be observed when they run.
         let routed = |engine: Arc<dyn SearchEngine>| -> Arc<dyn SearchEngine> {
-            if crate::render_cache::collector::is_active()
-                || !engine.advances_render_cache()
-                || ((entry.connection)().is_some() && engine.name() == "database")
-            {
-                Arc::new(super::engine::connection::ConnectionEngine::new(
-                    entry.index,
-                    engine,
-                ))
-            } else {
-                engine
-            }
+            let named = (entry.connection)().is_some() && engine.name() == "database";
+            Arc::new(super::engine::connection::ConnectionEngine::new(
+                entry.index,
+                engine,
+                named,
+            ))
         };
         let config = SearchConfig::current()?;
         let state = services();
