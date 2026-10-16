@@ -201,3 +201,11 @@ fn route_installation_rejects_unregistered_indexes() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn an_oversized_query_is_a_validation_error_naming_q() {
+    let q = vec!["word"; 1025].join("%20");
+    let (status, body) = request(&format!("/search?index=test_search_notes&q={q}")).await;
+    assert_eq!(status, 422, "{body}");
+    assert!(body["errors"]["q"].to_string().contains("1024"), "{body}");
+}

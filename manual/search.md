@@ -850,8 +850,9 @@ The example abbreviates the document attributes. The actual response contains
 only declared attributes, using `AttributeValue`'s `type`/`value` encoding,
 and no additional hydrated model fields. `impression` is present only when
 recorded. An unlisted or missing index returns a non-disclosing 404. Invalid
-filters, facets, sorting, page sizes, or page numbers return 422 errors naming
-the failing parameter; undeclared attributes are refused.
+filters, facets, sorting, page sizes, or page numbers, and a `q` over 65536
+bytes or 1024 words, return 422 errors naming the failing parameter;
+undeclared attributes are refused.
 
 `POST /search/click` accepts JSON
 `{"impression":"...","key":"1","position":0}` and returns

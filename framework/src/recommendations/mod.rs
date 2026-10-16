@@ -49,17 +49,15 @@ impl Recommend {
             .ok_or_else(|| {
                 FrameworkError::param("recommendation event requires an access scope")
             })?;
-        let descriptor = (crate::SearchRegistry::by_index(&target.index)?.descriptor)();
-        let expected = crate::search::apply_scope(descriptor, &Viewer::Guest, None)?
-            .unwrap_or(crate::Filter::And(Vec::new()));
-        let supplied: crate::Filter = serde_json::from_value(scope.clone()).map_err(|e| {
-            FrameworkError::param(format!(
-                "recommendation access scope must be a search filter: {e}"
-            ))
+        // The scope is read again from the target so a caller cannot store a boundary the
+        // target never had; a target changed since the event was built must be rebuilt.
+        let entry = crate::SearchRegistry::by_index(&target.index)?;
+        let document = (entry.load_document)(&target.key).await?.ok_or_else(|| {
+            FrameworkError::param("recommendation event target does not exist or is not searchable")
         })?;
-        if supplied != expected {
+        if *scope != event::access_scope((entry.descriptor)(), &document)? {
             return Err(FrameworkError::param(
-                "recommendation access scope must equal the index descriptor's guest filter",
+                "recommendation access scope must equal the target's scope at record time; build the event again",
             ));
         }
         let scoring = event

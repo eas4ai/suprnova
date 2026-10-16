@@ -19,7 +19,7 @@ use crate::{
         FacetStats, FacetValue, Filter, IndexDescriptor, IndexSettings, SearchDocument, Total,
         Vocabulary, tokenize,
     },
-    vector::{Vector, VectorItem, VectorStore},
+    vector::{Vector, VectorItem, VectorMatch, VectorStore},
 };
 use async_trait::async_trait;
 use sea_orm::{
@@ -1043,6 +1043,75 @@ async fn renew_creation<C: ConnectionTrait>(
     Ok(())
 }
 
+/// Vector ids bound per semantic statement; two binds each stay far below SQLite's limit.
+const SEMANTIC_BATCH: usize = 500;
+
+impl DatabaseSearchEngine {
+    /// Keep the store's matches that belong to this generation and pass the filter.
+    async fn semantic_candidates(
+        &self,
+        dialect: Dialect,
+        table: &str,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        filter: Option<&Filter>,
+        matches: &[VectorMatch],
+    ) -> Result<Vec<EngineCandidate>, FrameworkError> {
+        let mut sql = Sql::new(dialect);
+        let mut selected = Vec::new();
+        for m in matches {
+            if m.metadata.get("index").and_then(serde_json::Value::as_str) == Some(index.name)
+                && m.metadata
+                    .get("generation")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(generation.as_str())
+                && let Some(key) = m.metadata.get("key").and_then(serde_json::Value::as_str)
+            {
+                selected.push((m.id.clone(), m.score, key.to_owned()));
+            }
+        }
+        if selected.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = selected
+            .iter()
+            .map(|(id, _, _)| sql.bind(id.clone()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let keys = selected
+            .iter()
+            .map(|(_, _, key)| sql.bind(key.clone()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let predicate = if let Some(f) = filter {
+            filter::predicate(index, table, f, &mut sql)?
+        } else {
+            "1=1".into()
+        };
+        let text = format!(
+            "SELECT s.document_json,s.source_version,s.vector_id FROM {} AS s WHERE s.vector_id IN ({ids}) AND s.{} IN ({keys}) AND ({predicate})",
+            sql.ident(table),
+            sql.ident("key")
+        );
+        let documents = rows(DB::connection()?.inner(), text, sql)
+            .await?
+            .iter()
+            .map(|r| Ok((get::<String>(r, "vector_id")?, decode(r)?)))
+            .collect::<Result<BTreeMap<_, _>, FrameworkError>>()?;
+        let candidates = selected
+            .into_iter()
+            .filter_map(|(id, score, _)| {
+                documents.get(&id).map(|doc| EngineCandidate {
+                    document: doc.clone(),
+                    score: f64::from(score),
+                    highlights: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(candidates)
+    }
+}
+
 #[async_trait]
 impl SearchEngine for DatabaseSearchEngine {
     fn advances_render_cache(&self) -> bool {
@@ -1755,63 +1824,28 @@ impl SearchEngine for DatabaseSearchEngine {
                 total: Total::Estimated(0),
             });
         }
-        let matches = vector_store(index.name)?
-            .similar(vector.to_vec(), limit)
-            .await?;
-        let mut sql = Sql::new(dialect);
-        let mut selected = Vec::new();
-        for m in &matches {
-            if m.metadata.get("index").and_then(serde_json::Value::as_str) == Some(index.name)
-                && m.metadata
-                    .get("generation")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(generation.as_str())
-                && let Some(key) = m.metadata.get("key").and_then(serde_json::Value::as_str)
-            {
-                selected.push((m.id.clone(), m.score, key.to_owned()));
+        // The vector store ranks every index and generation it holds and knows no filter, so a
+        // fixed neighbour count can be filled by documents the filter or generation excludes.
+        // Widen until the filtered top `depth` is complete or the store has nothing more.
+        let store = vector_store(index.name)?;
+        let available = store.count().await?;
+        let mut limit = limit;
+        let mut candidates = loop {
+            let matches = store.similar(vector.to_vec(), limit).await?;
+            let exhausted = matches.len() < limit || limit >= available;
+            // Batches keep each statement's bound ids under every dialect's parameter limit.
+            let mut candidates = Vec::new();
+            for batch in matches.chunks(SEMANTIC_BATCH) {
+                candidates.extend(
+                    self.semantic_candidates(dialect, &table, index, generation, filter, batch)
+                        .await?,
+                );
             }
-        }
-        if selected.is_empty() {
-            return Ok(EngineResult {
-                candidates: vec![],
-                total: Total::Estimated(0),
-            });
-        }
-        let ids = selected
-            .iter()
-            .map(|(id, _, _)| sql.bind(id.clone()))
-            .collect::<Vec<_>>()
-            .join(",");
-        let keys = selected
-            .iter()
-            .map(|(_, _, key)| sql.bind(key.clone()))
-            .collect::<Vec<_>>()
-            .join(",");
-        let predicate = if let Some(f) = filter {
-            filter::predicate(index, &table, f, &mut sql)?
-        } else {
-            "1=1".into()
+            if candidates.len() >= depth || exhausted {
+                break candidates;
+            }
+            limit = limit.saturating_mul(2).min(available);
         };
-        let text = format!(
-            "SELECT s.document_json,s.source_version,s.vector_id FROM {} AS s WHERE s.vector_id IN ({ids}) AND s.{} IN ({keys}) AND ({predicate})",
-            sql.ident(&table),
-            sql.ident("key")
-        );
-        let documents = rows(DB::connection()?.inner(), text, sql)
-            .await?
-            .iter()
-            .map(|r| Ok((get::<String>(r, "vector_id")?, decode(r)?)))
-            .collect::<Result<BTreeMap<_, _>, FrameworkError>>()?;
-        let mut candidates = selected
-            .into_iter()
-            .filter_map(|(id, score, _)| {
-                documents.get(&id).map(|doc| EngineCandidate {
-                    document: doc.clone(),
-                    score: f64::from(score),
-                    highlights: None,
-                })
-            })
-            .collect::<Vec<_>>();
         candidates.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)

@@ -265,8 +265,7 @@ impl RecommendationEvent {
         let document = (entry.load_document)(&target.key).await?.ok_or_else(|| {
             FrameworkError::param("recommendation event target does not exist or is not searchable")
         })?;
-        let filter = crate::search::apply_scope((entry.descriptor)(), &Viewer::Guest, None)?
-            .unwrap_or(crate::Filter::And(Vec::new()));
+        let access_scope = access_scope((entry.descriptor)(), &document)?;
         Ok(Self {
             event_type,
             weight: 0,
@@ -277,13 +276,34 @@ impl RecommendationEvent {
             target: Some(target),
             surface: surface.into(),
             occurred_at: crate::clock::now(),
-            access_scope: Some(serde_json::to_value(filter).map_err(|e| {
-                FrameworkError::internal(format!("serialize recommendation scope: {e}"))
-            })?),
+            access_scope: Some(access_scope),
             source_version: Some(document.source_version),
             dedupe_key: dedupe_key.into(),
         })
     }
+}
+/// The scope is a policy over filterable attributes, so a target's access boundary at
+/// record time is that policy's guest filter plus the target's own filterable values: later
+/// derivation can evaluate any viewer against them after the row changes or disappears.
+pub(crate) fn access_scope(
+    descriptor: &crate::search::IndexDescriptor,
+    document: &crate::search::SearchDocument,
+) -> Result<serde_json::Value, FrameworkError> {
+    let policy = crate::search::apply_scope(descriptor, &Viewer::Guest, None)?
+        .unwrap_or(crate::Filter::And(Vec::new()));
+    let values = descriptor
+        .attributes
+        .iter()
+        .filter(|attribute| descriptor.scope.is_some() && attribute.filterable)
+        .filter_map(|attribute| {
+            document
+                .attributes
+                .get(&attribute.name)
+                .map(|value| (attribute.name.as_str(), value))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    serde_json::to_value(serde_json::json!({ "policy": policy, "values": values }))
+        .map_err(|e| FrameworkError::internal(format!("serialize recommendation scope: {e}")))
 }
 pub(crate) fn validate_text(value: &str, max: usize, name: &str) -> Result<(), FrameworkError> {
     if value.trim().is_empty() || value.len() > max || value.chars().any(char::is_control) {

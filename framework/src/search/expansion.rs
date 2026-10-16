@@ -155,6 +155,20 @@ pub fn expand(
     })
 }
 
+/// One bound for every caller, so the HTTP endpoint can name `q` before the builder runs.
+pub(crate) fn query_bounds_error(query: &QueryText) -> Option<&'static str> {
+    let input = query
+        .words
+        .iter()
+        .chain(query.phrases.iter().flatten())
+        .chain(&query.negatives);
+    let (bytes, count) = input.fold((0usize, 0usize), |(bytes, count), token| {
+        (bytes.saturating_add(token.len()), count.saturating_add(1))
+    });
+    (query.original.len() > MAX_QUERY_BYTES || bytes > MAX_QUERY_BYTES || count > MAX_QUERY_TOKENS)
+        .then_some("search query exceeds 65536 bytes or 1024 tokens")
+}
+
 // Native engines send source text to their tokenizer and use normalized words only
 // to look up expansions. Framework engines keep their existing normalized source.
 pub(crate) struct ExpansionToken {
@@ -175,19 +189,8 @@ pub(crate) fn expand_with(
             "SEARCH_EXPANSION_TERMS must be positive",
         ));
     }
-    let input = query
-        .words
-        .iter()
-        .chain(query.phrases.iter().flatten())
-        .chain(&query.negatives);
-    let (bytes, count) = input.fold((0usize, 0usize), |(bytes, count), token| {
-        (bytes.saturating_add(token.len()), count.saturating_add(1))
-    });
-    if query.original.len() > MAX_QUERY_BYTES || bytes > MAX_QUERY_BYTES || count > MAX_QUERY_TOKENS
-    {
-        return Err(FrameworkError::param(
-            "search query exceeds 65536 bytes or 1024 tokens",
-        ));
+    if let Some(message) = query_bounds_error(query) {
+        return Err(FrameworkError::param(message));
     }
     let tokenize = |text: &str| {
         tokens(text)
