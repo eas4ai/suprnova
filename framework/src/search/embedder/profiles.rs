@@ -154,6 +154,27 @@ pub fn profile(name: &str) -> Result<ModelProfile, FrameworkError> {
     Ok(profile)
 }
 
+/// Hosted models have no files to load, so only the HTTP provider reads these. The input
+/// limits and dimensions are the providers' published ones, and a reduced dimension is
+/// renormalized here because Gemini's earlier model returns it unnormalized.
+/// Sources: <https://developers.openai.com/api/docs/guides/embeddings>,
+/// <https://ai.google.dev/gemini-api/docs/embeddings>.
+pub(crate) fn hosted_profile(name: &str) -> Option<ModelProfile> {
+    let normalized = name.to_ascii_lowercase();
+    let short = normalized.rsplit('/').next().unwrap_or(&normalized);
+    let (dimensions, max_tokens, truncation_dims) = match short {
+        "text-embedding-3-small" => (1536, 8192, vec![1024, 768, 512, 256]),
+        "text-embedding-3-large" => (3072, 8192, vec![2048, 1536, 1024, 768, 512, 256]),
+        "text-embedding-ada-002" => (1536, 8192, vec![]),
+        "gemini-embedding-001" => (3072, 2048, vec![1536, 768]),
+        "gemini-embedding-2" => (3072, 8192, vec![1536, 768]),
+        _ => return None,
+    };
+    let mut profile = text_profile(name, dimensions, max_tokens, Pooling::Mean);
+    profile.truncation_dims = truncation_dims;
+    Some(profile)
+}
+
 /// Shared text defaults keep the fake and shipped profiles on the same validation boundary.
 pub(crate) fn text_profile(
     id: &str,

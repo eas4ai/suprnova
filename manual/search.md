@@ -499,13 +499,18 @@ are followed. `SEARCH_EMBED_API_KEY` is a bearer key sent only to the pinned
 destination. Defaults are 64 inputs per batch, a 30-second timeout including
 the response body, 16 MiB per response, and three additional attempts for 429
 or 5xx only. Retries are capped at 16; `Retry-After` is bounded. HTTP uses no
-provider-specific fields. A model outside the shipped profiles takes its
-context from the service's model list at boot: OpenRouter's
-`embeddings/models` (`context_length`), or `models` with vLLM's
-`max_model_len` or LM Studio's `max_context_length`. Set
-`SEARCH_EMBED_MAX_TOKENS` when the service lists none, as OpenAI's does not,
-or when the server caps input below the model's context; it wins over the
-profile and the list, and boot fails naming it when no context is known.
+provider-specific fields. Hosted models with published limits are built in:
+OpenAI's `text-embedding-3-small`, `text-embedding-3-large` and
+`text-embedding-ada-002` (8192 tokens), and Google's `gemini-embedding-001`
+(2048 tokens) and `gemini-embedding-2` (8192 tokens), with or without an
+`owner/` prefix such as OpenRouter's `openai/text-embedding-3-small`. Any
+other model outside the shipped profiles takes its context from the
+service's model list at boot: OpenRouter's `embeddings/models`
+(`context_length`), or `models` with vLLM's `max_model_len`, LM Studio's or
+Mistral's `max_context_length`. Set `SEARCH_EMBED_MAX_TOKENS` when the
+service lists none, or when the server caps input below the model's context;
+it wins over the profile and the list, and boot fails naming it when no
+context is known.
 Every prepared input is cut to the model's context before it is sent. Set `SEARCH_EMBED_TOKENIZER` to the model's own
 `tokenizer.json`, published beside the weights in its Hugging Face repository,
 and the cut falls after the last token that fits. Without it the protocol
