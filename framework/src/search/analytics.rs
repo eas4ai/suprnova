@@ -152,6 +152,7 @@ pub async fn suggest(
     prefix: &str,
     limit: usize,
 ) -> Result<Vec<String>, FrameworkError> {
+    super::render_cache::observe(index, false, false)?;
     SearchRegistry::by_index(index)?;
     if limit > 1000 {
         return Err(FrameworkError::param("suggest limit must be at most 1000"));

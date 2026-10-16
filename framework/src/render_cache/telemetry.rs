@@ -107,6 +107,7 @@ pub const OUTCOME: &str = "outcome";
 ///   `handler_not_begun`, `foreign_connection_read`, `snapshot_unavailable`.
 /// - Classification narrowed to `Uncacheable`: `session_value_read`,
 ///   `secret_context_read`, `undeclared_context`.
+/// - Search: `viewer_scoped_search`, `analytics_search`, `search_opt_out`.
 /// - Live document facts: `identity_bound_without_stitching`,
 ///   `invalid_stitch_capture`, `no_store_intent`,
 ///   `unresolvable_seed_deadline`.

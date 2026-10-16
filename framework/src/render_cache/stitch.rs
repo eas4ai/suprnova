@@ -105,6 +105,13 @@ pub(crate) async fn serve_prepared(mut request: Request, next: Next) -> Response
         return next(request).await;
     };
     let hit = *hit;
+    let header = match &hit.entry {
+        FoundEntry::Hot(hot) => hot.entry().header(),
+        FoundEntry::Decoded(decoded) => decoded.entry.header(),
+    };
+    if !crate::search::render_cache::replay_allowed(&header.observed) {
+        return next(request).await;
+    }
     let published_at_ms = hit.entry.published_at_ms();
     match hit.entry {
         // A hot entry is a Complete one whose header values were formed at
@@ -541,7 +548,11 @@ async fn fetch_decoded_entry(
         Err(_) => return None,
     };
     let decoded = decode(&stored.bytes, &runtime.keys, &runtime.limits).ok()?;
-    if decoded.header().key != *key {
+    // Named segments bypass the top-level route lookup, so they must apply
+    // the same search eligibility check before replaying their stored bytes.
+    if decoded.header().key != *key
+        || !crate::search::render_cache::replay_allowed(&decoded.header().observed)
+    {
         return None;
     }
     Some((decoded, stored.fence.token))

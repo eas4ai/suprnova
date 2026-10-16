@@ -463,8 +463,61 @@ pub(crate) async fn advance_in_raw_transaction(
 /// are exactly that shape. Routing them back through `DB::statement`
 /// would recurse: this advance would trigger another broad-authority
 /// advance, which would trigger another, without ever returning.
+// Driver-owned transactions borrow their executor instead of installing CURRENT_TX.
+// The same SQL and announcement path serves both transaction forms.
+enum AdvanceExecutor<'a> {
+    Framework(&'a ExecutorChoice),
+    Raw(&'a sea_orm::DatabaseTransaction),
+}
+impl AdvanceExecutor<'_> {
+    fn backend(&self) -> DbBackend {
+        match self {
+            Self::Framework(exec) => exec.backend(),
+            Self::Raw(tx) => sea_orm::ConnectionTrait::get_database_backend(*tx),
+        }
+    }
+    async fn query_one(
+        &self,
+        stmt: sea_orm::Statement,
+    ) -> Result<Option<sea_orm::QueryResult>, sea_orm::DbErr> {
+        match self {
+            Self::Framework(exec) => exec.query_one(stmt).await,
+            Self::Raw(tx) => sea_orm::ConnectionTrait::query_one_raw(*tx, stmt).await,
+        }
+    }
+    async fn run(&self, stmt: sea_orm::Statement) -> Result<(), sea_orm::DbErr> {
+        match self {
+            Self::Framework(exec) => {
+                exec.run(stmt).await?;
+            }
+            Self::Raw(tx) => {
+                sea_orm::ConnectionTrait::execute_raw(*tx, stmt).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Keep driver-owned database writes and their index advances in one transaction.
+pub(crate) async fn advance_in_borrowed_transaction(
+    tx: &sea_orm::DatabaseTransaction,
+    identities: &[DependencyIdentity],
+) -> Result<(), FrameworkError> {
+    if !super::write_side_open(true).await? {
+        return Ok(());
+    }
+    advance_with(AdvanceExecutor::Raw(tx), identities).await
+}
+
 async fn advance_through(
     exec: &ExecutorChoice,
+    identities: &[DependencyIdentity],
+) -> Result<(), FrameworkError> {
+    advance_with(AdvanceExecutor::Framework(exec), identities).await
+}
+
+async fn advance_with(
+    exec: AdvanceExecutor<'_>,
     identities: &[DependencyIdentity],
 ) -> Result<(), FrameworkError> {
     if identities.is_empty() {
@@ -551,20 +604,20 @@ async fn advance_through(
 /// that observes one of them revalidate earlier than their lease alone
 /// would have made them.
 ///
-/// # Why here, of the six ways a generation advances
+/// # Why at the shared advancement body
 ///
 /// This is the single funnel: `advance_in_current_transaction`,
 /// `advance_in_dedicated_transaction`, `advance_in_raw_transaction`,
 /// `advance_via_tx`, `advance_via_handle`, and `GenerationLedger::advance`
-/// all reach [`advance_through`], and nothing advances a generation without
-/// reaching it. Publishing at any one of the six would announce that one's
+/// all reach [`advance_with`], as does a borrowed driver transaction, and
+/// nothing advances a generation without reaching it. Publishing at only one entry point would announce that caller's
 /// writes and silently miss the others - and a seventh entry point added
 /// later would miss it by default, which is exactly the kind of gap nobody
 /// notices, because a missing hint changes no answer, only a latency.
 ///
 /// # Why publishing before the caller's commit is correct
 ///
-/// Only one of those six paths owns its own commit. The rest run inside
+/// Only the dedicated advance path owns its commit. The rest run inside
 /// the caller's transaction, so a hint announced here can precede a
 /// rollback that means the generation never moved at all. That is not a
 /// correctness problem, and spec 18 says so in as many words: a deployment
@@ -574,7 +627,7 @@ async fn advance_through(
 /// do anyway. The cost of a hint for a rolled-back write is one ledger read
 /// on a peer, which returns the unchanged truth. The alternative - waiting
 /// for a commit this function does not own - would mean either not
-/// announcing five paths out of six or reaching into the caller's
+/// announcing the caller-owned paths or reaching into the caller's
 /// transaction lifecycle, and the first is worse and the second is not this
 /// function's to do.
 ///

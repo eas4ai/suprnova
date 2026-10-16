@@ -1604,7 +1604,9 @@ async fn lookup(
         return Ok(None);
     }
     if let Some(hot) = runtime.l0.hot_get(key) {
-        if hot.entry().header().key == *key {
+        if hot.entry().header().key == *key
+            && crate::search::render_cache::replay_allowed(&hot.entry().header().observed)
+        {
             return Ok(Some(FoundEntry::Hot(hot)));
         }
         // Misplaced, exactly as below: evicted and never served. This drops
@@ -1616,7 +1618,10 @@ async fn lookup(
     let l0_stored = runtime.l0.get(key).await?;
     if let Some(stored) = l0_stored {
         match decode(&stored.bytes, &runtime.keys, &runtime.limits) {
-            Ok(entry) if entry.header().key == *key => {
+            Ok(entry)
+                if entry.header().key == *key
+                    && crate::search::render_cache::replay_allowed(&entry.header().observed) =>
+            {
                 return Ok(Some(FoundEntry::Decoded(Box::new(DecodedHit {
                     entry,
                     stored,
@@ -1634,7 +1639,12 @@ async fn lookup(
         let l1_stored = l1.get(key).await?;
         if let Some(stored) = l1_stored {
             match decode(&stored.bytes, &runtime.keys, &runtime.limits) {
-                Ok(entry) if entry.header().key == *key => {
+                Ok(entry)
+                    if entry.header().key == *key
+                        && crate::search::render_cache::replay_allowed(
+                            &entry.header().observed,
+                        ) =>
+                {
                     promote_to_l0(runtime, policy, key, &entry, &stored).await;
                     return Ok(Some(FoundEntry::Decoded(Box::new(DecodedHit {
                         entry,
@@ -2561,6 +2571,21 @@ async fn lead_render(
         let _ = runtime.coordinator.release(lease).await;
         return response;
     };
+    let search_decline = if report.context.viewer_scoped_search {
+        Some(LookupDeclineReason::ViewerScopedSearch)
+    } else if report.context.analytics_search {
+        Some(LookupDeclineReason::AnalyticsSearch)
+    } else if report.context.search_opt_out {
+        Some(LookupDeclineReason::SearchOptOut)
+    } else {
+        None
+    };
+    if let Some(reason) = search_decline {
+        LookupOutcome::Declined(reason).record();
+        let _ = runtime.coordinator.release(lease).await;
+        return Ok(response);
+    }
+
     let observed = match observed {
         Ok(observed) => observed,
         Err(failure) => {

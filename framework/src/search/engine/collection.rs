@@ -865,6 +865,9 @@ fn apply_write(
 }
 #[async_trait]
 impl SearchEngine for CollectionEngine {
+    fn advances_render_cache(&self) -> bool {
+        true
+    }
     fn name(&self) -> &str {
         "collection"
     }
@@ -914,15 +917,21 @@ impl SearchEngine for CollectionEngine {
         id: &GenerationId,
         cutoff: i64,
     ) -> Result<(), FrameworkError> {
-        let mut state = self.write()?;
-        let generation = generation_mut(&mut state, index, id)?;
-        if generation
-            .flush
-            .is_none_or(|(previous, _)| cutoff >= previous)
-        {
-            generation.flush = Some((cutoff, Instant::now()));
-        }
-        Ok(())
+        crate::search::render_cache::external_write(
+            index.name,
+            Box::pin(async {
+                let mut state = self.write()?;
+                let generation = generation_mut(&mut state, index, id)?;
+                if generation
+                    .flush
+                    .is_none_or(|(previous, _)| cutoff >= previous)
+                {
+                    generation.flush = Some((cutoff, Instant::now()));
+                }
+                Ok(())
+            }),
+        )
+        .await
     }
     async fn keys_before_version(
         &self,
@@ -969,13 +978,19 @@ impl SearchEngine for CollectionEngine {
             .and_then(|i| i.current.clone()))
     }
     async fn retire_index(&self, index: &str) -> Result<(), FrameworkError> {
-        if let Some(index) = self.write()?.indexes.get_mut(index) {
-            index.current = None;
-            for generation in index.generations.values_mut() {
-                generation.state = "retired";
-            }
-        }
-        Ok(())
+        crate::search::render_cache::external_write(
+            index,
+            Box::pin(async {
+                if let Some(index) = self.write()?.indexes.get_mut(index) {
+                    index.current = None;
+                    for generation in index.generations.values_mut() {
+                        generation.state = "retired";
+                    }
+                }
+                Ok(())
+            }),
+        )
+        .await
     }
     async fn generation_states(
         &self,
@@ -1000,35 +1015,41 @@ impl SearchEngine for CollectionEngine {
         settings: &IndexSettings,
         id: &GenerationId,
     ) -> Result<(), FrameworkError> {
-        index.validate()?;
-        GenerationId::new(id.0.clone())?;
-        validate_settings(index, settings)?;
-        let mut state = self.write()?;
-        let i = state.indexes.entry(index.name.into()).or_default();
-        if i.generations.contains_key(id) {
-            return Err(FrameworkError::param(format!(
-                "search index {} generation {}: already exists",
-                index.name, id.0
-            )));
-        }
-        i.generations.insert(
-            id.clone(),
-            Generation {
-                state: "building",
-                settings: settings.clone(),
-                documents: BTreeMap::new(),
-                postings: BTreeMap::new(),
-                lengths: BTreeMap::new(),
-                document_words: BTreeMap::new(),
-                total_length: 0,
-                vocabulary: OnceLock::new(),
-                #[cfg(test)]
-                tokenized: OnceLock::new(),
-                tombstones: BTreeMap::new(),
-                flush: None,
-            },
-        );
-        Ok(())
+        crate::search::render_cache::external_write(
+            index.name,
+            Box::pin(async {
+                index.validate()?;
+                GenerationId::new(id.0.clone())?;
+                validate_settings(index, settings)?;
+                let mut state = self.write()?;
+                let i = state.indexes.entry(index.name.into()).or_default();
+                if i.generations.contains_key(id) {
+                    return Err(FrameworkError::param(format!(
+                        "search index {} generation {}: already exists",
+                        index.name, id.0
+                    )));
+                }
+                i.generations.insert(
+                    id.clone(),
+                    Generation {
+                        state: "building",
+                        settings: settings.clone(),
+                        documents: BTreeMap::new(),
+                        postings: BTreeMap::new(),
+                        lengths: BTreeMap::new(),
+                        document_words: BTreeMap::new(),
+                        total_length: 0,
+                        vocabulary: OnceLock::new(),
+                        #[cfg(test)]
+                        tokenized: OnceLock::new(),
+                        tombstones: BTreeMap::new(),
+                        flush: None,
+                    },
+                );
+                Ok(())
+            }),
+        )
+        .await
     }
     async fn switch_generation(
         &self,
@@ -1036,47 +1057,59 @@ impl SearchEngine for CollectionEngine {
         from: Option<GenerationId>,
         to: GenerationId,
     ) -> Result<(), FrameworkError> {
-        index.validate()?;
-        let mut state = self.write()?;
-        generation(&state, index, &to)?;
-        let i = state.indexes.get_mut(index.name).ok_or_else(|| {
-            FrameworkError::param(format!("search index {}: does not exist", index.name))
-        })?;
-        if i.current != from {
-            return Err(FrameworkError::param(format!(
-                "search index {}: current generation changed",
-                index.name
-            )));
-        }
-        if let Some(old) = &i.current
-            && let Some(generation) = i.generations.get_mut(old)
-        {
-            generation.state = "retired";
-        }
-        if let Some(generation) = i.generations.get_mut(&to) {
-            generation.state = "current";
-        }
-        i.current = Some(to);
-        Ok(())
+        crate::search::render_cache::external_write(
+            index.name,
+            Box::pin(async {
+                index.validate()?;
+                let mut state = self.write()?;
+                generation(&state, index, &to)?;
+                let i = state.indexes.get_mut(index.name).ok_or_else(|| {
+                    FrameworkError::param(format!("search index {}: does not exist", index.name))
+                })?;
+                if i.current != from {
+                    return Err(FrameworkError::param(format!(
+                        "search index {}: current generation changed",
+                        index.name
+                    )));
+                }
+                if let Some(old) = &i.current
+                    && let Some(generation) = i.generations.get_mut(old)
+                {
+                    generation.state = "retired";
+                }
+                if let Some(generation) = i.generations.get_mut(&to) {
+                    generation.state = "current";
+                }
+                i.current = Some(to);
+                Ok(())
+            }),
+        )
+        .await
     }
     async fn drop_generation(
         &self,
         index: &IndexDescriptor,
         id: &GenerationId,
     ) -> Result<(), FrameworkError> {
-        let mut state = self.write()?;
-        generation(&state, index, id)?;
-        let i = state.indexes.get_mut(index.name).ok_or_else(|| {
-            FrameworkError::param(format!("search index {}: does not exist", index.name))
-        })?;
-        if i.current.as_ref() == Some(id) {
-            return Err(FrameworkError::param(format!(
-                "search index {}: cannot drop active generation {}",
-                index.name, id.0
-            )));
-        }
-        i.generations.remove(id);
-        Ok(())
+        crate::search::render_cache::external_write(
+            index.name,
+            Box::pin(async {
+                let mut state = self.write()?;
+                generation(&state, index, id)?;
+                let i = state.indexes.get_mut(index.name).ok_or_else(|| {
+                    FrameworkError::param(format!("search index {}: does not exist", index.name))
+                })?;
+                if i.current.as_ref() == Some(id) {
+                    return Err(FrameworkError::param(format!(
+                        "search index {}: cannot drop active generation {}",
+                        index.name, id.0
+                    )));
+                }
+                i.generations.remove(id);
+                Ok(())
+            }),
+        )
+        .await
     }
     async fn write_settings(
         &self,
@@ -1084,20 +1117,27 @@ impl SearchEngine for CollectionEngine {
         id: &GenerationId,
         settings: &IndexSettings,
     ) -> Result<(), FrameworkError> {
-        validate_settings(index, settings)?;
-        let mut state = self.write()?;
-        let g = generation_mut(&mut state, index, id)?;
-        if g.settings.index_time.digest() != settings.index_time.digest() && !g.documents.is_empty()
-        {
-            return Err(FrameworkError::param(format!(
-                "search index {}: index-time settings require a new generation",
-                index.name
-            )));
-        }
-        #[cfg(test)]
-        g.tokenized.take();
-        g.settings = settings.clone();
-        Ok(())
+        crate::search::render_cache::external_write(
+            index.name,
+            Box::pin(async {
+                validate_settings(index, settings)?;
+                let mut state = self.write()?;
+                let g = generation_mut(&mut state, index, id)?;
+                if g.settings.index_time.digest() != settings.index_time.digest()
+                    && !g.documents.is_empty()
+                {
+                    return Err(FrameworkError::param(format!(
+                        "search index {}: index-time settings require a new generation",
+                        index.name
+                    )));
+                }
+                #[cfg(test)]
+                g.tokenized.take();
+                g.settings = settings.clone();
+                Ok(())
+            }),
+        )
+        .await
     }
     async fn read_settings(
         &self,
@@ -1113,25 +1153,31 @@ impl SearchEngine for CollectionEngine {
         id: &GenerationId,
         docs: &[IndexedDocument],
     ) -> Result<WriteOutcome, FrameworkError> {
-        let mut state = self.write()?;
-        let generation = generation_mut(&mut state, index, id)?;
-        validate_documents(index, docs, generation.settings.index_time.dimensions)?;
-        let now = Instant::now();
-        generation
-            .tombstones
-            .retain(|_, (_, created)| now.duration_since(*created) < self.tombstone_retention);
-        let mut outcome = WriteOutcome::default();
-        for document in docs {
-            if generation.flush.is_some_and(|(cutoff, removed_at)| {
-                now.duration_since(removed_at) < self.tombstone_retention
-                    && document.document.source_version <= cutoff
-            }) {
-                outcome.skipped_tombstoned += 1;
-                continue;
-            }
-            apply_write(generation, document, &mut outcome);
-        }
-        Ok(outcome)
+        crate::search::render_cache::external_write(
+            index.name,
+            Box::pin(async {
+                let mut state = self.write()?;
+                let generation = generation_mut(&mut state, index, id)?;
+                validate_documents(index, docs, generation.settings.index_time.dimensions)?;
+                let now = Instant::now();
+                generation.tombstones.retain(|_, (_, created)| {
+                    now.duration_since(*created) < self.tombstone_retention
+                });
+                let mut outcome = WriteOutcome::default();
+                for document in docs {
+                    if generation.flush.is_some_and(|(cutoff, removed_at)| {
+                        now.duration_since(removed_at) < self.tombstone_retention
+                            && document.document.source_version <= cutoff
+                    }) {
+                        outcome.skipped_tombstoned += 1;
+                        continue;
+                    }
+                    apply_write(generation, document, &mut outcome);
+                }
+                Ok(outcome)
+            }),
+        )
+        .await
     }
     async fn remove(
         &self,
@@ -1139,30 +1185,37 @@ impl SearchEngine for CollectionEngine {
         id: &GenerationId,
         keys: &[(String, i64)],
     ) -> Result<WriteOutcome, FrameworkError> {
-        let mut state = self.write()?;
-        let g = generation_mut(&mut state, index, id)?;
-        let now = Instant::now();
-        g.tombstones
-            .retain(|_, (_, created)| now.duration_since(*created) < self.tombstone_retention);
-        let mut result = WriteOutcome::default();
-        for (key, version) in keys {
-            if g.documents
-                .get(key)
-                .is_some_and(|d| d.document.source_version > *version)
-                || g.tombstones.get(key).is_some_and(|(v, _)| *v > *version)
-            {
-                result.skipped_older += 1;
-                continue;
-            }
-            remove_postings(g, key);
-            g.documents.remove(key);
-            g.vocabulary.take();
-            #[cfg(test)]
-            g.tokenized.take();
-            g.tombstones.insert(key.clone(), (*version, now));
-            result.written += 1;
-        }
-        Ok(result)
+        crate::search::render_cache::external_write(
+            index.name,
+            Box::pin(async {
+                let mut state = self.write()?;
+                let g = generation_mut(&mut state, index, id)?;
+                let now = Instant::now();
+                g.tombstones.retain(|_, (_, created)| {
+                    now.duration_since(*created) < self.tombstone_retention
+                });
+                let mut result = WriteOutcome::default();
+                for (key, version) in keys {
+                    if g.documents
+                        .get(key)
+                        .is_some_and(|d| d.document.source_version > *version)
+                        || g.tombstones.get(key).is_some_and(|(v, _)| *v > *version)
+                    {
+                        result.skipped_older += 1;
+                        continue;
+                    }
+                    remove_postings(g, key);
+                    g.documents.remove(key);
+                    g.vocabulary.take();
+                    #[cfg(test)]
+                    g.tokenized.take();
+                    g.tombstones.insert(key.clone(), (*version, now));
+                    result.written += 1;
+                }
+                Ok(result)
+            }),
+        )
+        .await
     }
     async fn query(
         &self,

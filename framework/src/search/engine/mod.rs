@@ -130,6 +130,15 @@ pub trait SearchEngine: Send + Sync {
     fn name(&self) -> &str;
     /// Report supported behavior without silently ignoring requested features.
     fn capabilities(&self) -> EngineCapabilities;
+    /// Let the registry preserve a driver's own atomic dependency advances.
+    ///
+    /// The default makes the registry guard writes and advance the index after
+    /// external storage changes. A driver returning true owns that work: every
+    /// mutation must advance `Table("search:<index>")` in its data transaction,
+    /// and protect external writes until their advancement is durable.
+    fn advances_render_cache(&self) -> bool {
+        false
+    }
     /// Resolve the generation readers currently share atomically.
     async fn current_generation(&self, index: &str)
     -> Result<Option<GenerationId>, FrameworkError>;

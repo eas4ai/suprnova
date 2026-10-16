@@ -24,6 +24,7 @@ pub mod migrations;
 mod outbox;
 pub mod query;
 pub mod registry;
+pub(crate) mod render_cache;
 pub mod results;
 pub mod routes;
 pub mod scope;

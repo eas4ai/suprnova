@@ -57,10 +57,9 @@ use crate::{DB, FrameworkError};
 /// `eloquent_eager_named_connection.rs`) - and a model write on one of
 /// those named connections must keep working exactly as it always has.
 ///
-/// `pub(crate)` for exactly one caller outside this module:
-/// [`super::RenderCache::bump_permission_version`], which advances the
-/// reserved permission-version identity through this same path so a bump is
-/// persisted and logged the way every ORM write's advance is.
+/// Shared with [`super::RenderCache::bump_permission_version`] and logical
+/// search-index writes so those non-model dependencies use the same durable
+/// advancement and failure protection as ORM writes.
 pub(crate) async fn advance(identities: Vec<DependencyIdentity>) -> Result<(), FrameworkError> {
     let already_in_transaction = in_transaction();
     if !super::write_side_open(already_in_transaction).await? {

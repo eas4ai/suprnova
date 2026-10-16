@@ -1275,10 +1275,17 @@ async fn first_searchable_write_advances_migrated_render_cache_before_any_prior_
             suprnova::search::generations::create_index(EligibilityNote::descriptor().name)
                 .await
                 .unwrap();
+            // Index creation now advances its own identity. Reset the probe so
+            // the first model write still has to discover the migrated ledger.
+            suprnova::render_cache::RenderCache::uninstall_for_test();
+            let index_identity = hex::encode(
+                suprnova::render_cache::DependencyIdentity::table("search:search_eligibility")
+                    .digest(),
+            );
             assert_eq!(
                 DB::scalar::<i64>(
-                    "SELECT COUNT(*) FROM suprnova_render_generations",
-                    Vec::<sea_orm::Value>::new()
+                    "SELECT COUNT(*) FROM suprnova_render_generations WHERE identity <> ?",
+                    vec![index_identity.clone().into()]
                 )
                 .await
                 .unwrap(),
@@ -1291,8 +1298,8 @@ async fn first_searchable_write_advances_migrated_render_cache_before_any_prior_
             .unwrap();
             assert!(
                 DB::scalar::<i64>(
-                    "SELECT COUNT(*) FROM suprnova_render_generations",
-                    Vec::<sea_orm::Value>::new()
+                    "SELECT COUNT(*) FROM suprnova_render_generations WHERE identity <> ?",
+                    vec![index_identity.clone().into()]
                 )
                 .await
                 .unwrap()
