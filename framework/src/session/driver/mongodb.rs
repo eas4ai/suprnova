@@ -367,6 +367,7 @@ impl SessionStore for MongoSessionDriver {
             dirty: false,
             loaded_from_store: true,
             pending_sign_in_rebinds: Vec::new(),
+            token_issued: false,
         }))
     }
 

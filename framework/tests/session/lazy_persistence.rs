@@ -823,3 +823,35 @@ async fn a_public_response_that_changed_the_session_delivers_it_privately() {
     );
     assert_eq!(store.writes.load(Ordering::SeqCst), 1);
 }
+
+fn shared_cacheable_page_with_a_form() -> suprnova::Response {
+    Ok(suprnova::HttpResponse::html(format!(
+        "<form method=post>{}</form>",
+        suprnova::csrf::csrf_field()
+    ))
+    .header("Cache-Control", "public, max-age=3600"))
+}
+
+/// A page that embeds the CSRF token belongs to its reader: shared, it would leak the token
+/// and hand new visitors a token for a session that was never stored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_public_page_that_embeds_the_csrf_token_is_sent_private_with_its_session() {
+    ensure_crypt();
+    let config = insecure_config();
+    let session_cookie = config.cookie_name.clone();
+    let store = Arc::new(CountingStore::default());
+    let sessions = SessionMiddleware::with_store(config, store.clone());
+    let response = through_session_csrf_and(
+        &sessions,
+        suprnova::Request::for_test_with_headers("GET", "/contact", Vec::<(&str, &str)>::new()),
+        shared_cacheable_page_with_a_form,
+    )
+    .await;
+    assert_eq!(
+        response.headers().get("cache-control").unwrap(),
+        "private, no-store"
+    );
+    assert!(set_cookie_value(&response, &session_cookie).is_some());
+    assert!(set_cookie_value(&response, "XSRF-TOKEN").is_some());
+    assert_eq!(store.writes.load(Ordering::SeqCst), 1);
+}

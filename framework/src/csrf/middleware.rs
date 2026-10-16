@@ -565,7 +565,7 @@ impl CsrfMiddleware {
         // and always gets its token.
         let bootstrap = (200..400).contains(&status);
         let Some(token) = crate::session::session_mut(|session| {
-            if shared_cacheable && !session.is_dirty() {
+            if shared_cacheable && !session.is_dirty() && !session.token_issued {
                 return None;
             }
             if !session.loaded_from_store && !session.is_dirty() {

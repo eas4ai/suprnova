@@ -51,7 +51,11 @@ cookies off: the reader already holds them, and a session the request created
 without writing to it is not stored. When a cookie must reach the reader, such
 as a new or rotated session from a sign-in, a rotated remember-me cookie or one
 your handler set, the cookies stay and the response goes out
-`Cache-Control: private, no-store` instead, with a warning in the log.
+`Cache-Control: private, no-store` instead, with a warning in the log. The same
+happens to a page that embeds the CSRF token through `csrf_field()`,
+`csrf_meta_tag()`, the Inertia root template or a Live mount: the token belongs
+to its reader, so the page is sent private and its session is stored, and a
+form on it submits on the first try.
 
 ### Why Suprnova diverges
 

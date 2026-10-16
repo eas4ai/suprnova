@@ -2510,6 +2510,30 @@ impl SessionMiddleware {
         // request) leave the session clean - that preserves the
         // "unmodified session never gets a fail-closed write" invariant
         // exercised by the session-persistence regression tests.
+        // A page that embeds the session's CSRF token (a form, a meta tag) belongs to this
+        // reader. Shared, it would hand the token to every later visitor, and a new session's
+        // token to visitors whose session was never stored, so it goes out private and its
+        // session is stored.
+        let token_in_shared_page = session.as_ref().is_some_and(|s| s.token_issued)
+            && match &response {
+                Ok(r) | Err(r) => r.shared_cacheable(),
+            };
+        let response = if token_in_shared_page {
+            tracing::warn!(
+                "a response marked for shared caching embeds the CSRF token, so it was sent private, no-store"
+            );
+            if let Some(s) = session.as_mut()
+                && !s.loaded_from_store
+            {
+                s.dirty = true;
+            }
+            match response {
+                Ok(r) => Ok(r.replace_header("Cache-Control", "private, no-store")),
+                Err(r) => Err(r.replace_header("Cache-Control", "private, no-store")),
+            }
+        } else {
+            response
+        };
         let response_status = match &response {
             Ok(r) | Err(r) => r.status_code(),
         };
@@ -2954,7 +2978,10 @@ pub fn invalidate_session() {
 
 /// Helper to get the CSRF token from current session
 pub fn get_csrf_token() -> Option<String> {
-    session().map(|s| s.csrf_token)
+    session_mut(|s| {
+        s.token_issued = true;
+        s.csrf_token.clone()
+    })
 }
 
 /// Mint a new CSRF token for the current session without otherwise
