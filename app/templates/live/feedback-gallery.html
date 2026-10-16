@@ -1,0 +1,34 @@
+{% import "suprnova-ui/alert/alert.html" as alert %}
+{% import "suprnova-ui/skeleton/skeleton.html" as skeleton %}
+{% import "suprnova-ui/spinner/spinner.html" as spinner %}
+{% import "suprnova-ui/progress/progress.html" as progress %}
+{% import "suprnova-ui/empty-state/empty-state.html" as empty %}
+{% import "suprnova-ui/toast/toast.html" as toast %}
+{% import "suprnova-ui/button/button.html" as button %}
+<div class="sn-feedback-gallery">
+{% call alert::alert("welcome", variant="info", title="Feedback gallery") %}<p>Saved <span data-saved="{{ saved }}">{{ saved }}</span> times.</p>{% endcall %}
+{% call alert::alert("saved-alert", variant="success") %}<p>Your changes are saved.</p>{% endcall %}
+{% call alert::alert("quota", variant="warning") %}<p>Storage is nearly full.</p>{% endcall %}
+{% if failure %}{% call alert::alert("failure", variant="error", title="Save failed") %}<p>The last save did not reach the server. Try again.</p>{% endcall %}{% endif %}
+<p class="sn-feedback-toolbar">
+{% call button::button("Save", action="save") %}{% endcall %}
+{% call spinner::spinner(action="save", label="Saving") %}{% endcall %}
+{% call button::button("Fail", action="fail", variant="danger") %}{% endcall %}
+{% call button::button("Advance", action="advance", variant="secondary") %}{% endcall %}
+{% call button::button("Refresh", action="refresh", variant="secondary") %}{% endcall %}
+</p>
+{% call skeleton::skeleton(action="refresh", lines=2, label="Refreshing the list") %}{% endcall %}
+{% call progress::progress("upload", "Upload", value=progress, max=100, determinate=true) %}{% endcall %}
+{% call progress::progress("indexing", "Indexing", determinate=false) %}{% endcall %}
+{% if reason == "empty" %}
+{% call empty::empty_state("inbox", reason, "Nothing here yet", text="Items you create appear here.") %}{% if can_create %}{% call button::button("Create the first item", action="save") %}{% endcall %}{% endif %}{% endcall %}
+{% elif reason == "no-results" %}
+{% call empty::empty_state("inbox", reason, "No results", text="Nothing matches the current filters.") %}{% call button::button("Clear filters", action="refresh", variant="secondary") %}{% endcall %}{% endcall %}
+{% elif reason == "no-permission" %}
+{% call empty::empty_state("inbox", reason, "Nothing to show", text="You do not have access to this list.") %}{% endcall %}
+{% else %}
+{% call empty::empty_state("inbox", reason, "Disconnected", text="The list could not be loaded.") %}{% call button::button("Retry", action="refresh", variant="secondary") %}{% endcall %}{% endcall %}
+{% endif %}
+{% call toast::toast_region("toasts") %}{% for entry in toasts %}{% call toast::toast(entry.key, entry.text, variant=entry.variant) %}{% endcall %}{% endfor %}{% endcall %}
+<p>{% call button::button("Reset", action="reset", variant="secondary") %}{% endcall %}</p>
+</div>
