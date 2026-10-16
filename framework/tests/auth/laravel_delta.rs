@@ -52,7 +52,7 @@ fn configure(db: DbConnection) -> Arc<DatabaseSessionDriver> {
         DatabaseSessionDriver::with_table(Duration::from_secs(3600), "d4_sessions")
             .expect("custom session table"),
     );
-    App::bind::<dyn SessionStore>(store.clone());
+    TestContainer::bind::<dyn SessionStore>(store.clone());
     store
 }
 
@@ -410,7 +410,7 @@ async fn configured_store_without_selective_revocation_returns_an_error() {
             .write(&signed_in("other-session", "7"))
             .await
             .expect("other");
-        App::bind::<dyn SessionStore>(Arc::new(UnsupportedStore));
+        TestContainer::bind::<dyn SessionStore>(Arc::new(UnsupportedStore));
         let before = rows(&db).await;
         request(current, async {
             let error = Auth::logout_other_devices("secret")

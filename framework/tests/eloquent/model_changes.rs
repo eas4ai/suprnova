@@ -178,6 +178,16 @@ fn seen_for(event: &str, email: &str) -> Vec<Seen> {
 #[derive(Clone)]
 struct AuditObserver;
 
+/// The observer registry is process-wide, and every test of this binary
+/// shares one process under `cargo test`. Registering once keeps each event
+/// count exact: a second registration would record every event twice.
+async fn observe_audit() {
+    static REGISTERED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    REGISTERED
+        .get_or_init(|| ChangeUser::observe(AuditObserver))
+        .await;
+}
+
 #[async_trait]
 impl Observer<ChangeUser> for AuditObserver {
     async fn saving(&self, attrs: &mut Attrs, _is_creating: bool) -> EventResult {
@@ -316,7 +326,7 @@ async fn plain(name: &str, email: &str) -> PlainUser {
 #[tokio::test]
 async fn observers_see_what_save_changed_and_the_loaded_value() {
     let _db = sqlite().await;
-    ChangeUser::observe(AuditObserver).await;
+    observe_audit().await;
     let created = ChangeUser::create(attrs! {
         name: "Ada",
         email: "observer-save@example.com",
@@ -335,7 +345,7 @@ async fn observers_see_what_save_changed_and_the_loaded_value() {
 #[tokio::test]
 async fn observers_see_what_update_changed() {
     let _db = sqlite().await;
-    ChangeUser::observe(AuditObserver).await;
+    observe_audit().await;
     let created = ChangeUser::create(attrs! {
         name: "Grace",
         email: "observer-update@example.com",
@@ -353,7 +363,7 @@ async fn observers_see_what_update_changed() {
 #[tokio::test]
 async fn an_insert_has_no_original_while_its_observers_run() {
     let _db = sqlite().await;
-    ChangeUser::observe(AuditObserver).await;
+    observe_audit().await;
     let email = "observer-insert@example.com";
     let created = ChangeUser::create(attrs! { name: "Ada", email: email, is_admin: true })
         .await
@@ -790,7 +800,7 @@ async fn mysql_save_reports_its_changes() {
 #[tokio::test]
 async fn a_clean_save_fires_only_saving_and_saved_without_reading_or_writing() {
     let db = sqlite().await;
-    ChangeUser::observe(AuditObserver).await;
+    observe_audit().await;
     let email = "clean@example.com";
     let user = ChangeUser::create(attrs! { name: "Ada", email: email, is_admin: false })
         .await
@@ -890,7 +900,7 @@ async fn clean_timestamped_and_encrypted_models_run_no_update_after_time_advance
 #[tokio::test]
 async fn dirty_save_syncs_memory_so_a_second_save_preserves_other_writers() {
     let db = sqlite().await;
-    ChangeUser::observe(AuditObserver).await;
+    observe_audit().await;
     let email = "second-clean@example.com";
     let created = ChangeUser::create(attrs! { name: "Ada", email: email, is_admin: false })
         .await
