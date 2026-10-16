@@ -1,0 +1,2 @@
+{% macro link(href = suprnova::url::root()) %}<a href="{{ href }}">x</a>{% endmacro %}
+{% call link() %}{% endcall %} {# refused: view-url #}

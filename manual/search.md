@@ -562,36 +562,26 @@ Set `QDRANT_URL` to the gRPC URL, normally port 6334, and optionally
 Install the SQL search migrations too: generations, pending work, tombstones,
 and vocabulary use your application's database.
 
-Qdrant 1.19 or later is required. Each `search_<index>_<generation>` collection
-has a named cosine `dense` vector, a language-configured text payload index,
-typed payload indexes, keys, and source versions. A lexical index needs no dense
-model; its unused dense schema has size 1.
+Each `search_<index>_<generation>` collection has a named cosine `dense`
+vector, a named `sparse` vector with Qdrant's IDF modifier, a language-configured
+text payload index, typed payload indexes, keys, and source versions. A lexical
+index needs no dense model; its unused dense schema has size 1.
 
-Default lexical ranking uses Qdrant's own `qdrant/bm25` model. Qdrant encodes
-each weighted searchable attribute's text on the server into a named
-`bm25_<attribute>` sparse vector with the IDF modifier. A Qdrant formula sums
-the attribute scores multiplied by their declared weights. This works on
-self-hosted Qdrant without `search-fastembed` or a model download. Setting
-`index_time.sparse_model = Some("bm25".into())` selects the same default path.
-Reindex existing default Qdrant generations to adopt this vector layout.
-
-Document and query inference use identical options from the index's language
-settings: tokenizer, stemmer, stop words, and ASCII folding. The default uses
-`word`, ASCII folding, no stemmer, and an empty stopword set. Disabling stemming
-and stopword removal requires Qdrant's language-neutral options, available as of
-v1.19.0. `LanguageConfig::Server` uses these defaults too.
-`SEARCH_BM25_AVERAGE_LENGTH` supplies `avg_len`, default 256. Qdrant's defaults
-for `k` (1.2) and `b` (0.75) stay in effect. Reindex after changing the average
-length. Text payload indexes enforce words, phrases, and exclusions separately
-from ranking. Normalized keyword words support prefix filters and the typo
-vocabulary; they never score a hit.
+Lexical ranking defaults to the built-in `bm25` sparse provider, available
+without `search-fastembed` or a download. You can also select it explicitly
+with `index_time.sparse_model = Some("bm25".into())`. The framework tokenizer
+folds words and hashes token ids with 32-bit FNV-1a; collisions share a sparse
+dimension. Document weights use BM25 saturation with k1 = 1.2, b = 0.75, and
+`SEARCH_BM25_AVERAGE_LENGTH` (256 tokens by default). Query weights are 1;
+Qdrant supplies collection IDF and sparse scoring. Reindex after changing the
+average length. This sparse representation is distinct from the native text
+payload index that enforces lexical predicates.
 
 For a learned sparse model, configure `SEARCH_EMBED_SPARSE_MODEL` on the local
 provider and set the generation's `sparse_model` to that registered provider's
 name, such as `fastembed`. Providers must use one vector space for documents
 and expanded queries, returning finite weights with sorted unique token ids.
 Learned sparse document fields combine their declared attribute weights.
-These providers use one named `sparse` vector with the IDF modifier.
 Qdrant performs native weighted RRF for hybrid queries.
 
 Qdrant's default text tokenizer is `word`; supported alternatives are
@@ -601,7 +591,8 @@ The text index lowercases tokens, enables phrase matching, and indexes tokens
 from one character. The default has ASCII folding and no stemmer or stop list.
 Text predicates support any-word matching, prefixes, required per-field
 phrases, and exclusions; payload filters and exact facets still apply.
-The default BM25 leg uses the same language options as the text predicates.
+Built-in BM25 uses the framework tokenizer and configured stop words; Qdrant's
+text tokenizer controls the separate text predicates.
 
 ### Collection and null
 

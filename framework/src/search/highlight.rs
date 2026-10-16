@@ -119,18 +119,13 @@ fn matched_spans(text: &str, query: &ExpandedQuery) -> Vec<(usize, usize)> {
         .iter()
         .flat_map(|term| &term.alternatives)
         .map(|alternative| tokenize(alternative))
-        .chain(
-            query
-                .phrases
-                .iter()
-                .map(|phrase| phrase.iter().flat_map(|word| tokenize(word)).collect()),
-        )
+        .chain(query.phrases.clone())
         .collect();
     let prefixes: Vec<_> = query
         .terms
         .iter()
         .filter(|term| term.prefix)
-        .flat_map(|term| tokenize(&term.original))
+        .map(|term| &term.original)
         .collect();
     let mut matches = Vec::new();
     for (i, (start, end, word)) in words.iter().enumerate() {

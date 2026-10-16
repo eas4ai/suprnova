@@ -140,17 +140,6 @@ pub fn expand(
     vocabulary: &Vocabulary,
     cap: usize,
 ) -> Result<ExpandedQuery, FrameworkError> {
-    expand_with(query, settings, vocabulary, cap, &tokenize)
-}
-
-// Native engines must keep query scripts consistent with their text indexes.
-pub(crate) fn expand_with(
-    query: &QueryText,
-    settings: &QuerySettings,
-    vocabulary: &Vocabulary,
-    cap: usize,
-    tokenize: &dyn Fn(&str) -> Vec<String>,
-) -> Result<ExpandedQuery, FrameworkError> {
     if cap == 0 {
         return Err(FrameworkError::param(
             "SEARCH_EXPANSION_TERMS must be positive",
@@ -173,7 +162,7 @@ pub(crate) fn expand_with(
     let stop: BTreeSet<_> = settings
         .stop_words
         .iter()
-        .map(|word| tokenize(word).join(" "))
+        .map(|word| normalize_word(word))
         .collect();
     let (words, source_lengths): (Vec<_>, Vec<_>) = query
         .words
@@ -205,7 +194,7 @@ pub(crate) fn expand_with(
         let width = synonym_width(&words[at..], &synonyms);
         let original = words[at..at + width].join(" ");
         let mut alternatives = synonym_targets(&original, &synonyms, vocabulary);
-        let budget = correction_budget(&original, settings, width, source_lengths[at], tokenize);
+        let budget = correction_budget(&original, settings, width, source_lengths[at]);
         let corrections = if budget > 0
             && at < MAX_CORRECTION_TOKENS
             && source_lengths[at] <= MAX_CORRECTION_SCALARS
@@ -236,9 +225,7 @@ pub(crate) fn expand_with(
         });
         at += width;
     }
-    let phrases = expand_phrases(
-        query, &stop, &synonyms, vocabulary, cap, &mut terms, tokenize,
-    );
+    let phrases = expand_phrases(query, &stop, &synonyms, vocabulary, cap, &mut terms);
     Ok(ExpandedQuery {
         terms,
         phrases,
@@ -298,13 +285,12 @@ fn correction_budget(
     settings: &QuerySettings,
     width: usize,
     source_length: usize,
-    tokenize: &dyn Fn(&str) -> Vec<String>,
 ) -> usize {
     let tolerance = &settings.typo_tolerance;
     let disabled = tolerance
         .disable_on_words
         .iter()
-        .any(|word| tokenize(word).join(" ") == original);
+        .any(|word| normalize_word(word) == original);
     let numeric = original.parse::<f64>().is_ok() || original.chars().all(char::is_numeric);
     if !tolerance.enabled || width > 1 || disabled || numeric {
         return 0;
@@ -338,7 +324,6 @@ fn expand_phrases(
     vocabulary: &Vocabulary,
     cap: usize,
     terms: &mut Vec<ExpandedTerm>,
-    tokenize: &dyn Fn(&str) -> Vec<String>,
 ) -> Vec<Vec<String>> {
     let mut phrases = Vec::new();
     for source in &query.phrases {
