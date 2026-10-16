@@ -890,3 +890,38 @@ async fn sqlite_unchanged_content_can_repair_a_missing_dense_vector() -> Result<
     assert!(result.candidates[0].score > 0.99);
     Ok(())
 }
+
+#[tokio::test]
+async fn sqlite_semantic_filters_before_taking_the_cosine_top() -> Result<(), FrameworkError> {
+    let _db = TestDatabase::fresh::<Migrator>().await?;
+    let index = descriptor("database_sqlite_filtered_vectors");
+    vectors(index.name);
+    let generation = GenerationId::new("filtered")?;
+    let mut settings = index.index_settings();
+    settings.index_time.dimensions = Some(3);
+    let driver = engine();
+    driver
+        .create_generation(&index, &settings, &generation)
+        .await?;
+    // Four neighbours closer to the query than the one document the filter admits.
+    let mut documents = Vec::new();
+    for (key, y) in [("near0", 0.0), ("near1", 0.1), ("near2", 0.2), ("near3", 0.3)] {
+        let mut doc = document(&index, key, "excluded", "orchard");
+        doc.dense = Some(vec![1.0, y, 0.0]);
+        documents.push(doc);
+    }
+    let mut eligible = document(&index, "far", "eligible", "orchard");
+    eligible.dense = Some(vec![1.0, 1.0, 0.0]);
+    documents.push(eligible);
+    for doc in &mut documents {
+        doc.content_hash = doc.document.content_hash(&settings.index_time.digest());
+    }
+    driver.index(&index, &generation, &documents).await?;
+    let admitted = Filter::Eq("title".into(), AttributeValue::Text("eligible".into()));
+    let result = driver
+        .semantic(&index, &generation, &[1.0, 0.0, 0.0], Some(&admitted), 1)
+        .await?;
+    assert_eq!(result.candidates.len(), 1);
+    assert_eq!(result.candidates[0].document.key, "far");
+    Ok(())
+}

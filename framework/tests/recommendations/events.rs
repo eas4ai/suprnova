@@ -172,3 +172,23 @@ async fn retention_and_popularity_windows_cannot_overflow_the_calendar() {
     assert!(config.validate().is_err());
     assert!(Recommend::prune(u32::MAX).await.is_err());
 }
+
+#[tokio::test]
+async fn access_scope_records_each_targets_own_scope_values() {
+    use super::support::{event, note, setup};
+    use suprnova::Recommend;
+    setup(async {
+        let open = note("Open", "fruit", true, "", 1).await;
+        let closed = note("Closed", "fruit", false, "alice", 2).await;
+        let open_event = event("reader", &open, EventType::View, "open").await;
+        let closed_event = event("reader", &closed, EventType::View, "closed").await;
+        assert_ne!(open_event.access_scope, closed_event.access_scope);
+        let values = &closed_event.access_scope.as_ref().unwrap()["values"];
+        assert!(values.get("public").is_some() && values.get("owner").is_some(), "{values}");
+        let mut forged = event("forger", &closed, EventType::View, "forged").await;
+        forged.access_scope = open_event.access_scope.clone();
+        assert!(Recommend::record(forged).await.is_err());
+        Recommend::record(closed_event).await.unwrap();
+    })
+    .await;
+}

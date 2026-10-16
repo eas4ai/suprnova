@@ -384,3 +384,32 @@ async fn text_provider_refuses_a_profile_claiming_media_capabilities() {
     assert!(error.contains("SEARCH_EMBED_MODEL"));
     assert!(error.contains("image"));
 }
+
+#[tokio::test]
+async fn prepared_input_is_cut_to_the_profile_context() {
+    let server = server(vec![
+        Reply::vectors(vec![vec![1., 0.]]),
+        Reply::vectors(vec![vec![1., 0.]]),
+    ])
+    .await;
+    let mut profile = suprnova::search::FakeEmbedder::new(2)
+        .unwrap()
+        .profile()
+        .clone();
+    profile.max_tokens = 16;
+    profile.query_prefix = "query: ".into();
+    let embedder = HttpEmbedder::with_profile(config(&server.url), Some(profile))
+        .await
+        .unwrap();
+    embedder.embed_query(&"é".repeat(40)).await.unwrap();
+    embedder
+        .embed_documents(&[doc(&"rust ".repeat(40))])
+        .await
+        .unwrap();
+    let seen = server.seen.lock().unwrap();
+    // Sixteen tokens less the four reserved for special tokens: twelve bytes, cut on a
+    // character boundary.
+    assert_eq!(seen[0].body["input"], json!(["query: éé"]));
+    let document = seen[1].body["input"][0].as_str().unwrap();
+    assert!(!document.is_empty() && document.len() <= 12, "{document}");
+}
