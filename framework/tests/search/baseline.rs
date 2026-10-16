@@ -1040,6 +1040,7 @@ async fn baseline_assertions_enforce_floors_budgets_and_identity() -> Result<(),
         base_url: provider.uri(),
         model: "baseline-timing-test".into(),
         dimensions: Some(2),
+        max_tokens: Some(512),
         ..Default::default()
     })
     .await?;

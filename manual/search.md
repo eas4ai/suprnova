@@ -499,8 +499,14 @@ are followed. `SEARCH_EMBED_API_KEY` is a bearer key sent only to the pinned
 destination. Defaults are 64 inputs per batch, a 30-second timeout including
 the response body, 16 MiB per response, and three additional attempts for 429
 or 5xx only. Retries are capped at 16; `Retry-After` is bounded. HTTP uses no
-provider-specific fields. Every prepared input is cut to the model's context
-before it is sent. Set `SEARCH_EMBED_TOKENIZER` to the model's own
+provider-specific fields. A model outside the shipped profiles takes its
+context from the service's model list at boot: OpenRouter's
+`embeddings/models` (`context_length`), or `models` with vLLM's
+`max_model_len` or LM Studio's `max_context_length`. Set
+`SEARCH_EMBED_MAX_TOKENS` when the service lists none, as OpenAI's does not,
+or when the server caps input below the model's context; it wins over the
+profile and the list, and boot fails naming it when no context is known.
+Every prepared input is cut to the model's context before it is sent. Set `SEARCH_EMBED_TOKENIZER` to the model's own
 `tokenizer.json`, published beside the weights in its Hugging Face repository,
 and the cut falls after the last token that fits. Without it the protocol
 gives no way to count tokens, so the cut is in UTF-8 bytes, four short of the

@@ -482,6 +482,7 @@ downloads ONNX Runtime at compile time. The default build downloads nothing.
 | `SEARCH_EMBED_RETRIES` | `3` | `u32` | Additional HTTP attempts for 429 or 5xx only; at most 16. |
 | `SEARCH_EMBED_QUERY_PREFIX` | shipped profile; unknown HTTP model: empty | `Option<String>` | Query preparation for unknown HTTP models. Known models keep their profile's prefix. |
 | `SEARCH_EMBED_DOCUMENT_TEMPLATE` | shipped profile; unknown HTTP model: `{text}` | `Option<String>` | Document preparation for unknown HTTP models; placeholders are `{title}` and `{text}`. Known models keep their profile. |
+| `SEARCH_EMBED_MAX_TOKENS` | shipped profile; unknown HTTP model: the service's model list | `Option<usize>` | HTTP only: the model's context in tokens. Wins over the profile and the service's list; required when the list names none. |
 | `SEARCH_EMBED_TOKENIZER` | unset | `Option<PathBuf>` | HTTP only: path to the model's `tokenizer.json`. The provider cuts each prepared input after the last token that fits the model's context; unset, it cuts to the context length minus four in UTF-8 bytes. |
 | `SEARCH_EMBED_PRECISION` | `fp32` | `String` | Local graph variant: `fp32`, `int8`, or `q4`. fp16 is refused. |
 | `SEARCH_EMBED_SPARSE_MODEL` | unset | `Option<String>` | Optional fastembed sparse head, including BGE-M3. Select its registered provider in the generation's `sparse_model`; Qdrant otherwise uses built-in `bm25`. |
