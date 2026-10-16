@@ -173,7 +173,20 @@ fn baseline_fixture_rejects_broken_references_and_rows() -> Result<(), Framework
 
 #[test]
 fn baseline_uncalibrated_gate_is_closed() -> Result<(), FrameworkError> {
-    let floors = BaselineFloors::load(fixtures().join("baseline.json"))?;
+    // The committed floors as they read before a calibration: rival scores
+    // kept, the chosen settings and their grids not yet recorded.
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixtures().join("baseline.json")).unwrap()).unwrap();
+    value["calibrated"] = serde_json::Value::Bool(false);
+    for name in ["meilisearch", "typesense"] {
+        let rival = value["rivals"][name].as_object_mut().unwrap();
+        rival.remove("settings");
+        rival.remove("grid");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("baseline.json");
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let floors = BaselineFloors::load(&path)?;
     assert!(!floors.calibrated);
     assert!(floors.rivals.meilisearch.settings.is_none());
     assert!(floors.rivals.meilisearch.grid.is_empty());
