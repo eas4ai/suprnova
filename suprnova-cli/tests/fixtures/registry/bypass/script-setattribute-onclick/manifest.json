@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-setattribute-onclick",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
