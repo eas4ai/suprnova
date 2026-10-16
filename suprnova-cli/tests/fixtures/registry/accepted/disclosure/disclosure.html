@@ -1,0 +1,16 @@
+{# A disclosure: everything a view may do, from state links to helper URLs. #}
+{% macro disclosure(id, label, href, open=false) %}
+<acme-disclosure class="acme-disclosure"{% if open %} data-open{% endif %}>
+<style>.acme-disclosure-icon { background-image: image-set("/icons/chevron.png" 1x, "/icons/chevron@2x.png" 2x); }</style>
+<button type="button" class="acme-disclosure-toggle" aria-controls="{{ id }}" aria-expanded="{% if open %}true{% else %}false{% endif %}">
+<span class="acme-disclosure-icon" style="mask-image: url(/icons/chevron.svg)"></span>{{ label }}
+</button>
+<div id="{{ id }}" class="acme-disclosure-panel"{% if !open %} hidden{% endif %}>
+<a href="{{ href }}">More</a>
+<a href="{{ suprnova::url::to("/help") }}">Help</a>
+<a href="/docs/disclosure#usage">Usage</a>
+<img src="/icons/info.png" srcset="/icons/info.png 1x, /icons/info@2x.png 2x" alt="">
+{{ caller() }}
+</div>
+</acme-disclosure>
+{% endmacro %}
