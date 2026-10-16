@@ -54,6 +54,16 @@ fn run(dir: &Path, program: &str, args: &[&str]) {
 }
 
 /// Render the home page through the built worker with no localization props.
+/// Issue #153: the stylesheet is its own entry, so the server writes it as a `<link>` on the
+/// first paint instead of leaving it to the entry's JavaScript.
+fn assert_stylesheet_entry(manifest: &Path) {
+    let text = std::fs::read_to_string(manifest).expect("read the client manifest");
+    assert!(
+        text.contains("\"src/app.css\":"),
+        "the client manifest must list src/app.css as its own entry:\n{text}"
+    );
+}
+
 fn assert_home_heading(frontend: &Path) {
     let script = r#"
 import assert from 'node:assert/strict'
@@ -123,6 +133,7 @@ fn kit_svelte_type_checks_and_builds() {
             .is_file(),
         "`npm run build` must write the manifest the server reads"
     );
+    assert_stylesheet_entry(&frontend.join("../public/assets/.vite/manifest.json"));
 
     run(&frontend, "npm", &["run", "build:ssr"]);
     assert!(
@@ -165,6 +176,10 @@ mod react {
                 .join("kit-react/public/assets/.vite/manifest.json")
                 .is_file(),
             "`npm run build` writes the client bundle and its manifest to public/assets"
+        );
+        super::assert_stylesheet_entry(
+            &tmp.path()
+                .join("kit-react/public/assets/.vite/manifest.json"),
         );
         run(&frontend, "npm", &["run", "build:ssr"]);
         assert!(
@@ -217,5 +232,6 @@ mod vue {
             "`npm run build` must write the client manifest at {}",
             manifest.display()
         );
+        super::assert_stylesheet_entry(&manifest);
     }
 }
