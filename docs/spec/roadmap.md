@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: decision-01m4zmzch6hckq8nd8ehy25bj8
+Current: qdrant-native-bm25
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -1338,3 +1338,9 @@ Delivers backlog item decision-01m4zjm8qzc5n3qjx3c9ayha7f: A search fetches the 
 Requirements: SEARCH-004
 
 Delivers backlog item decision-01m4zmzch6hckq8nd8ehy25bj8 (4482b84f14c2); its body is in the promotion decision.
+
+## qdrant-native-bm25
+
+Requirements: SEARCH-003
+
+Delivers backlog item qdrant-native-bm25: Decision 01M527GRBJM0J80F7Q099WMTCM (developer, 2026-10-16 07:26: "yes"): Qdrant's lexical leg moves from the framework's BM25 encoder to Qdrant's own qdrant/bm25 model, one named sparse vector per weighted searchable attribute with the IDF modifier, options from the index language (default word tokenizer, ASCII folding, no stemmer, no stop words), the scores summed by attribute weight in a formula query; a configured sparse model keeps one named sparse vector; the word payload stays for prefix filters and the typo vocabulary; the framework encoder and its hashed __sparse_indices payload go for the default path; the Qdrant baseline is rerun against the SEARCH-013 floor.
