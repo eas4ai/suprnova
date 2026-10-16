@@ -1,0 +1,5 @@
+error: field helper cannot be placed on a Live impl method
+  --> tests/ui/live/fail/upload_misplaced_helper.rs:16:5
+   |
+16 |     #[upload(policy = policy)]
+   |     ^
