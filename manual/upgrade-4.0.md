@@ -1549,8 +1549,44 @@ fn migrations() -> Vec<Box<dyn MigrationTrait>> {
 ```
 
 Use `SessionUserKey::Uuid` or `SessionUserKey::Ulid` when your user model's
-key is a UUID or a ULID. Then run the migrations. For an earlier scaffold's
-`users`, use the migration in [Running on a Laravel Database](laravel-database.md).
+key is a UUID or a ULID.
+
+The create migrations your `Migrator` already lists make the new layouts
+only on an empty database. On your existing database they have already
+run, so each one has an upgrade migration that moves the earlier table.
+Add each upgrade migration your `Migrator` is missing, right after
+the migration it follows:
+
+| Your `Migrator` lists | Add right after it |
+| --- | --- |
+| `rbac::migrations::CreateRbacTables` | `RbacToSpatieLayout` |
+| `notifications::migrations::CreateNotificationsTable` | `NotificationTimestampsToDatetime`, then `NotificationsToLaravelLayout` |
+| `features::migrations::CreateFeaturesTable` | `FeatureTimestampsToDatetime`, then `FeaturesToPennantLayout` |
+
+If you use the database queue, also add `CreateJobsTable`,
+`CreateJobBatchesTable` and `CreateFailedJobsTable` from
+`queue::migrations`. [Registering the migrations](laravel-database.md#registering-the-migrations)
+shows the whole list in order.
+
+Without an upgrade migration, the earlier table stays and the framework
+reads tables that don't exist. With `CreateRbacTables` alone, every page
+that reads a user's roles fails with "no such table: model_has_roles".
+Tests that start from an empty database still pass, so check the list
+against a copy of your production database.
+
+```rust
+fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+    vec![
+        // ... your migrations ...
+        Box::new(suprnova::rbac::migrations::CreateRbacTables),
+        Box::new(suprnova::rbac::migrations::RbacToSpatieLayout),
+        // ... the rest of your migrations ...
+    ]
+}
+```
+
+Then run the migrations. For an earlier scaffold's `users`, use the
+migration in [Running on a Laravel Database](laravel-database.md).
 
 ```bash
 suprnova migrate
