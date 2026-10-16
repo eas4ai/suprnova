@@ -42,6 +42,28 @@ the next request would load an empty session and the mutation
 requests that fail only on a due `last_activity` touch log `warn!`, keep the
 existing cookie, and pass through.
 
+A response marked for shared caching, with `Cache-Control: public` or an
+`s-maxage`, is never sent with a cookie. A CDN or a caching proxy may store
+such a response with its `Set-Cookie` lines and replay them to every later
+visitor, which would hand one reader's session to everyone. While the request
+leaves the session unchanged, the session and CSRF middleware leave their
+cookies off: the reader already holds them, and a session the request created
+without writing to it is not stored. When a cookie must reach the reader, such
+as a new or rotated session from a sign-in, a rotated remember-me cookie or one
+your handler set, the cookies stay and the response goes out
+`Cache-Control: private, no-store` instead, with a warning in the log. The same
+happens to a page that embeds the CSRF token through `csrf_field()`,
+`csrf_meta_tag()`, the Inertia root template or a Live mount: the token belongs
+to its reader, so the page is sent private and its session is stored, and a
+form on it submits on the first try.
+
+### Why Suprnova diverges
+
+Laravel's `StartSession` and `VerifyCsrfToken` attach their cookies to every
+response, whatever its `Cache-Control` says. Suprnova keeps them off responses
+a shared cache may store, so marking a favicon or a sitemap `public` cannot
+leak a session.
+
 ## Reading the session
 
 ```rust

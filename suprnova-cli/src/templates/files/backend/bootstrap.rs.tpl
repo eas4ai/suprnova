@@ -196,6 +196,11 @@ pub fn try_register_http_stack() -> Result<(), FrameworkError> {
     Inertia::install(
         &InertiaConfig::new()
             .frontend(Frontend::{frontend_variant})
+            // The stylesheet is its own Vite entry, so the first paint of a
+            // server-rendered page has it: a `<link>` with the request's nonce,
+            // from the dev server or the build manifest, rather than CSS that
+            // only arrives once the entry's JavaScript runs.
+            .entry_points(["src/app.css"])
             .default_title("{project_title}")
             .root_template(InertiaRootTemplate::of::<AppDocument>())
             // Record in local development for the Inertia DevTools browser extension.

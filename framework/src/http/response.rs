@@ -615,6 +615,17 @@ impl HttpResponse {
         self.headers.iter().map(|(n, v)| (n.as_str(), v.as_str()))
     }
 
+    /// A shared cache (a CDN, a caching proxy) may store a response marked `public` or given
+    /// an `s-maxage` and replay it, `Set-Cookie` included, to every later visitor.
+    pub(crate) fn shared_cacheable(&self) -> bool {
+        self.header_values("Cache-Control")
+            .flat_map(|value| value.split(','))
+            .any(|directive| {
+                let name = directive.split('=').next().unwrap_or_default().trim();
+                name.eq_ignore_ascii_case("public") || name.eq_ignore_ascii_case("s-maxage")
+            })
+    }
+
     /// Replace any prior occurrences of `name` with a single value.
     /// Mirrors Laravel's `Response::header($key, $value, replace=true)`.
     pub fn replace_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {

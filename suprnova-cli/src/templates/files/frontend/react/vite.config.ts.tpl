@@ -53,7 +53,7 @@ export default defineConfig(({ isSsrBuild }) => ({
         outDir: '../public/assets',
         manifest: true,
         rollupOptions: {
-          input: 'src/main.tsx',
+          input: ['src/main.tsx', 'src/app.css'],
         },
       },
 }))

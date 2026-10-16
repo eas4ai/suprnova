@@ -98,6 +98,10 @@ pub struct SessionData {
     /// transaction committed before it stores the session, and drops the
     /// rest (HRD-007). Never stored.
     pub(crate) pending_sign_in_rebinds: Vec<PendingSignInRebind>,
+    /// The CSRF token was handed out this request: a form field, a meta tag, a Live mount.
+    /// A response that embeds it belongs to this reader, so it is never sent for shared
+    /// caching (#154). Never stored.
+    pub(crate) token_issued: bool,
 }
 
 /// A sign-in rebind waiting for its transaction's commit: the guard, the
@@ -129,6 +133,7 @@ impl SessionData {
             dirty: false,
             loaded_from_store: false,
             pending_sign_in_rebinds: Vec::new(),
+            token_issued: false,
         }
     }
 

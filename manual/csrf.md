@@ -69,7 +69,10 @@ flowchart TD
 
 GET, HEAD, and OPTIONS are never token-checked, but they still hit the
 bottom of the middleware so the `XSRF-TOKEN` cookie attaches to the
-response. That's how SPA clients first acquire the cookie.
+response. That's how SPA clients first acquire the cookie. A response marked
+for shared caching (`Cache-Control: public` or an `s-maxage`) gets no
+`XSRF-TOKEN` while the session is unchanged, because a CDN could replay it to
+other visitors; see [sessions](session.md#how-a-request-sees-the-session).
 
 Every other method is checked, as Laravel's `isReading` decides:
 `POST`, `PUT`, `PATCH` and `DELETE`, and also `QUERY` and extension

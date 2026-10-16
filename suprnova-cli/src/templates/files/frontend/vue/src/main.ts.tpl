@@ -1,4 +1,3 @@
-import './app.css'
 import { createInertiaApp } from '@inertiajs/vue3'
 import { createApp, createSSRApp, h } from 'vue'
 import AppLayout from './layouts/AppLayout.vue'

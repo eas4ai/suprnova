@@ -35,6 +35,23 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Inertia kits paint styled under the Vite dev server (#153).** The kits
+  list `src/app.css` as its own Vite entry, so the first server-rendered page
+  loads it as a `<link>` with the request's nonce instead of waiting for the
+  entry's JavaScript. `main.ts` and `main.tsx` no longer import it. In an
+  existing application, add `.entry_points(["src/app.css"])` to its
+  `InertiaConfig`, add `'src/app.css'` to the Vite build `input`, and remove
+  the import.
+- **The CLI installs on macOS without warnings (#152).** The browser
+  certificate store helpers that only the Linux install path uses are now
+  compiled on Linux only.
+- **Public responses no longer carry the session or `XSRF-TOKEN` cookie
+  (#154).** A response marked `Cache-Control: public` or given an `s-maxage`
+  could be stored by a CDN or caching proxy with its `Set-Cookie` lines and
+  replayed to other visitors. The session and CSRF middleware now leave off
+  the cookies the reader already holds; a public response that must deliver a
+  cookie, such as a new session or a rotated remember-me cookie, goes out
+  `private, no-store` instead.
 - **The reset email greets the user by name under Magnetar.**
   `PasswordReset::send_link` now looks the account up and greets its name, as
   the verification and password-changed emails do. A failed lookup sends the

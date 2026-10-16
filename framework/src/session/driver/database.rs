@@ -499,6 +499,7 @@ impl SessionStore for DatabaseSessionDriver {
             // see `SessionData::loaded_from_store` (SEC-02(c)).
             loaded_from_store: true,
             pending_sign_in_rebinds: Vec::new(),
+            token_issued: false,
         }))
     }
 

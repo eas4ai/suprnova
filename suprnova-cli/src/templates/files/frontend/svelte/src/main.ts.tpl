@@ -1,4 +1,3 @@
-import './app.css'
 import { createInertiaApp } from '@inertiajs/svelte'
 import { hydrate, mount } from 'svelte'
 import AppLayout from './layouts/AppLayout.svelte'

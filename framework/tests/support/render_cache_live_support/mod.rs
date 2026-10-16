@@ -181,6 +181,11 @@ pub fn last_failed_mount_report() -> Option<CollectorReport> {
 /// this exercises `middleware.rs`'s classification path directly.
 pub const UNREASONED_PATH: &str = "/unreasoned-private-cached";
 
+/// The tests' sign-in step. It writes the session, as an application's login handler does,
+/// so the browser receives a session cookie: a page marked for shared caching hands none
+/// out while the session is unchanged (#154). No render cache policy is attached to it.
+pub const SIGN_IN_PATH: &str = "/test-sign-in";
+
 /// Fix round 2 (finding 8), policy updated in round 3 (R90): a route
 /// declared `PublicShared` with `Principal` variance, whose handler reads
 /// an identity (attaching `ClassificationReason::PrincipalObserved`) and
@@ -470,6 +475,7 @@ pub async fn boot_with_render_cache_and_live() -> Arc<Harness> {
         .try_live_mount(&failed_mount)
         .expect("register failed-mount identity-bound mount");
     let router: Router = router.get(UNREASONED_PATH, unreasoned_handler).into();
+    let router: Router = router.get(SIGN_IN_PATH, sign_in_handler).into();
     // Gated with their handlers, for the reason `strip_handler` records.
     // The policies below stay attached unconditionally: a policy attached
     // to a pattern no route serves is inert.
@@ -688,6 +694,11 @@ async fn unreasoned_handler(_request: Request) -> Response {
 /// feature off. The gate is at item level because this support module is
 /// shared with test modules that need none of it.
 #[cfg(feature = "testing")]
+async fn sign_in_handler(_request: Request) -> Response {
+    suprnova::session::session_mut(|session| session.put("signed_in", true));
+    Ok(suprnova::HttpResponse::text("signed in"))
+}
+
 async fn strip_handler(_request: Request) -> Response {
     let identity = Auth::id().unwrap_or_else(|| "anonymous".to_owned());
     suprnova::render_cache::collector::strip_classification_reasons_for_test();
