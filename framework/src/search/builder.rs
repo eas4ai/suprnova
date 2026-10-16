@@ -965,12 +965,22 @@ async fn prepare(
         });
     }
     let vocabulary = engine.vocabulary(descriptor, &generation).await?;
-    let expanded = expand(
-        &plan.text,
-        &settings.query,
-        &vocabulary,
-        config.expansion_terms,
-    )?;
+    let expanded = if engine.name() == "qdrant" && super::engine::qdrant::native_bm25(&settings) {
+        super::expansion::expand_with(
+            &plan.text,
+            &settings.query,
+            &vocabulary,
+            config.expansion_terms,
+            &|text| super::engine::qdrant::query_words(text, &settings),
+        )?
+    } else {
+        expand(
+            &plan.text,
+            &settings.query,
+            &vocabulary,
+            config.expansion_terms,
+        )?
+    };
     let needed = lexical_depth(plan.offset, plan.limit, hits_cap)
         .max(plan.rerank.as_ref().map_or(0, |rerank| rerank.depth))
         .min(hits_cap);

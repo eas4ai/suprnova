@@ -76,7 +76,7 @@ pub struct SearchConfig {
     pub hits_cap: usize,
     /// SEARCH_FUSION_DEPTH bounds each hybrid retrieval leg.
     pub fusion_depth: usize,
-    /// SEARCH_BM25_AVERAGE_LENGTH is the fixed BM25 document length in tokens (default 256).
+    /// SEARCH_BM25_AVERAGE_LENGTH supplies Qdrant BM25 avg_len in tokens (default 256).
     pub bm25_average_length: usize,
     /// SEARCH_TOMBSTONE_HOURS retains removals against delayed retries.
     pub tombstone_hours: u64,
