@@ -636,7 +636,8 @@ A custom reset-capable provider keeps the provider default, which sends the
 framework's mail to the address `flow_user_by_id(id)` returns and greets its
 name, or overrides `send_password_reset_notification`. The default returns an
 error when `flow_user_by_id` finds no user. The Magnetar path holds an address,
-not a model, and always sends the framework's mail.
+not a model. It always sends the framework's mail, greeting the name Magnetar
+holds for the account, and never calls `send_password_reset_notification`.
 
 ### Bounded anti-enumeration behavior
 

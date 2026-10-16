@@ -12,11 +12,21 @@ use suprnova::magnetar_integration::engine::{
 };
 use suprnova::magnetar_integration::{LockoutStatus, User};
 
+/// What `user_by_id` answers for the reset mail's greeting.
+#[derive(Default)]
+enum UserLookup {
+    #[default]
+    Missing,
+    Named(&'static str),
+    Fails,
+}
+
 #[derive(Default)]
 struct ResetEngine {
     issued_for: Mutex<Vec<String>>,
     checked: Mutex<Vec<String>>,
     completed: Mutex<Vec<(String, String)>>,
+    lookup: Mutex<UserLookup>,
 }
 
 impl ResetEngine {
@@ -119,8 +129,23 @@ impl MagnetarPasswordAuthEngine for ResetEngine {
         Ok(0)
     }
 
-    async fn user_by_id(&self, _user_id: &str) -> magnetar::Result<Option<User>> {
-        Ok(None)
+    async fn user_by_id(&self, user_id: &str) -> magnetar::Result<Option<User>> {
+        match *self.lookup.lock().unwrap() {
+            UserLookup::Missing => Ok(None),
+            UserLookup::Named(name) => Ok(Some(
+                User::builder()
+                    .id(suprnova::UserId::new(&format!("usr_{user_id}")))
+                    .email(format!("{user_id}@example.test"))
+                    .name(Some(name.to_owned()))
+                    .build()
+                    .map_err(|error| magnetar::Error::Internal {
+                        message: error.to_string(),
+                    })?,
+            )),
+            UserLookup::Fails => Err(magnetar::Error::Internal {
+                message: "scripted user lookup failure".to_owned(),
+            }),
+        }
     }
 
     async fn revoke_session(&self, _session_id: &str) -> magnetar::Result<bool> {
@@ -217,4 +242,47 @@ async fn password_reset_facade_delegates_issue_check_and_completion_to_magnetar(
             "replacement password".to_owned(),
         )]
     );
+}
+
+#[tokio::test]
+async fn magnetar_reset_mail_greets_the_user_by_name() {
+    // Its own process: it installs a process-wide Magnetar password engine.
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "magnetar_reset_mail_greets_the_user_by_name",
+    )
+    .await
+    {
+        return;
+    }
+    let _env = crate::env_lock::lock_env_async().await;
+    unsafe {
+        std::env::set_var("MAIL_FROM", "test-mailer@example.test");
+    }
+    suprnova::rate_limit::bootstrap_default().await;
+    let engine = Arc::new(ResetEngine::default());
+    suprnova::magnetar_integration::install_magnetar_password_engine_for_test(engine.clone())
+        .unwrap();
+    let mail = Mail::fake();
+
+    for (lookup, address, greeting) in [
+        (
+            UserLookup::Named("Ada Lovelace"),
+            "ada@example.test",
+            "Hi Ada Lovelace,",
+        ),
+        (UserLookup::Missing, "nobody@example.test", "Hi there,"),
+        (UserLookup::Fails, "failing@example.test", "Hi there,"),
+    ] {
+        *engine.lookup.lock().unwrap() = lookup;
+        PasswordReset::send_link(address, "https://app.test/reset")
+            .await
+            .unwrap();
+        let sent = mail.sent_to(address);
+        assert_eq!(sent.len(), 1, "one reset mail to {address}");
+        for body in [&sent[0].text, &sent[0].html] {
+            let body = body.as_deref().unwrap_or_default();
+            assert!(body.contains(greeting), "{address}: {body}");
+        }
+    }
 }

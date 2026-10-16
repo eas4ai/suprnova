@@ -204,9 +204,30 @@ impl PasswordReset {
         let url =
             crate::auth_flows::append_token_query(base_url, issued.token.plaintext.expose_secret());
         let to_address = issued.email;
+        // Greet the reader by name, as the verification and password-changed
+        // mails do. Magnetar never calls an app's own reset notification, so
+        // this is the only place the name can come from. A failed lookup only
+        // costs the name, never the reset.
+        let user_name = match engine.user_by_id(&issued.user_id).await {
+            Ok(Some(user)) => user.name,
+            Ok(None) => {
+                tracing::warn!(
+                    "password reset mail greets user {} without a name: no such user",
+                    issued.user_id
+                );
+                None
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "password reset mail greets user {} without a name: {error}",
+                    issued.user_id
+                );
+                None
+            }
+        };
         let mail = PasswordResetMail {
             to_address: to_address.clone(),
-            user_name: None,
+            user_name,
             reset_link: url,
             app_name: crate::auth_flows::app_name(),
             from_address,
