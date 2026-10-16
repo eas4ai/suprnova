@@ -41,12 +41,12 @@ entry of the release is either a section here or listed under
    the lock file and the CLI:
 
    ```toml
-   suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.0.4" }
+   suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.1.0" }
    ```
 
    ```bash
    cargo update -p suprnova
-   cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v4.0.4 suprnova-cli
+   cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v4.1.0 suprnova-cli
    ```
 
 2. Build. Run `cargo check --all-targets`. The compiler names each type or
@@ -2545,7 +2545,7 @@ built from, and `rev = "<commit hash>"` otherwise.
 tag when you move to a release:
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.0.4" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.1.0" }
 ```
 
 ### Web Push refuses endpoints that resolve to private or local addresses.

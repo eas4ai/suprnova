@@ -538,6 +538,13 @@ that has no effects. The scan refuses:
   `Cache::set_connection`, the `install` of a service, the test container
   and the test clock. Each changes what every other caller in the process
   sees, which is the application's to decide, not a component's.
+- The application's error handling: `Exceptions::reportable`,
+  `dont_report`, `dont_report_when`, `dont_report_duplicates`, `dont_retry`
+  and `dont_retry_when`. A component that could change them could hide its
+  own failures from the error tracker. A component still reports an error
+  with `Exceptions::report` or `try_report`.
+- The request's CSP nonce (`Request::csp_nonce`). Whoever holds it can write
+  a script the page's policy runs, and a component's view holds no script.
 - The engine surfaces the framework holds for the host: the host ports a
   bootstrap installs (`HostCapabilities` and the action, subscription and
   upload authorization, continuity, credential and registry ports), the
