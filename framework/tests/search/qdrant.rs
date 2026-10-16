@@ -2239,3 +2239,290 @@ async fn native_bm25_builder_cyrillic_qdrant() {
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }
+
+#[tokio::test]
+#[ignore = "requires Qdrant at QDRANT_TEST_URL"]
+async fn native_bm25_threshold_bound_qdrant() {
+    fixture(|engine, index, generation| {
+        Box::pin(async move {
+            let mut index = IndexDescriptor {
+                name: index.name,
+                ..descriptor()
+            };
+            index
+                .attributes
+                .iter_mut()
+                .find(|a| a.name == "category")
+                .unwrap()
+                .searchable = Some(SearchableDecl {
+                weight: 2.0,
+                order: 1,
+            });
+            let mut settings = index.index_settings();
+            settings.index_time.dimensions = Some(3);
+            engine
+                .create_generation(&index, &settings, generation)
+                .await
+                .unwrap();
+            let mut docs = Vec::new();
+            for n in 0..400 {
+                let key = format!("doc_{n:03}");
+                let text = if n < 4 {
+                    format!("common {}", "common ".repeat(32 - n * 6))
+                } else {
+                    format!("common {}", "filler ".repeat(128))
+                };
+                let mut doc = document(&index, &key, &text, 1);
+                doc.document
+                    .attributes
+                    .insert("category".into(), AttributeValue::Text(text));
+                doc.dense = Some(vec![1.0, 0.0, 0.0]);
+                docs.push(doc);
+            }
+            engine.index(&index, generation, &docs).await.unwrap();
+            let mut q = query(engine, &index, generation, "common").await;
+            q.depth = 3;
+            suprnova::search::testing::take_qdrant_attribute_limit(engine).unwrap();
+            let actual = engine.query(&index, generation, &q).await.unwrap();
+            assert_eq!(actual.total.value(), 400);
+            assert_eq!(
+                actual
+                    .candidates
+                    .iter()
+                    .map(|c| c.document.key.as_str())
+                    .collect::<Vec<_>>(),
+                ["doc_000", "doc_001", "doc_002"]
+            );
+            let limit = suprnova::search::testing::take_qdrant_attribute_limit(engine).unwrap();
+            eprintln!("lexical largest attribute limit: {limit}");
+            let lexical_limit = limit;
+            // At ratio zero hybrid uses the same exact lexical order.
+            let lexical = engine
+                .hybrid(&index, generation, &q, &[1.0, 0.0, 0.0], 0.0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                lexical
+                    .candidates
+                    .iter()
+                    .map(|c| (&c.document.key, c.score))
+                    .collect::<Vec<_>>(),
+                actual
+                    .candidates
+                    .iter()
+                    .map(|c| (&c.document.key, c.score))
+                    .collect::<Vec<_>>()
+            );
+            let hybrid = engine
+                .hybrid(&index, generation, &q, &[1.0, 0.0, 0.0], 0.01)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                hybrid.candidates[..3]
+                    .iter()
+                    .map(|c| c.document.key.as_str())
+                    .collect::<Vec<_>>(),
+                ["doc_000", "doc_001", "doc_002"]
+            );
+            let limit = suprnova::search::testing::take_qdrant_attribute_limit(engine).unwrap();
+            eprintln!("hybrid largest attribute limit: {limit}");
+            assert!(
+                limit < 100,
+                "hybrid attribute limit {limit} should stay well below 400"
+            );
+            assert!(
+                lexical_limit < 100,
+                "attribute limit {lexical_limit} should stay well below 400"
+            );
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant at QDRANT_TEST_URL"]
+async fn missing_searchable_attribute_writes_nothing_qdrant() {
+    fixture(|engine, index, generation| {
+        Box::pin(async move {
+            engine
+                .create_generation(index, &index.index_settings(), generation)
+                .await
+                .unwrap();
+            let valid = document(index, "valid", "apple", 1);
+            let mut missing = document(index, "missing", "apple", 1);
+            missing.document.attributes.remove("text");
+            let docs = [valid, missing];
+            let error = engine.index(index, generation, &docs).await.unwrap_err();
+            assert!(
+                error.to_string().contains("text") && error.to_string().contains("missing"),
+                "{error}"
+            );
+            let count = engine
+                .client()
+                .unwrap()
+                .count(
+                    qdrant_client::qdrant::CountPointsBuilder::new(format!(
+                        "search_{}_g1",
+                        index.name
+                    ))
+                    .exact(true),
+                )
+                .await
+                .unwrap()
+                .result
+                .unwrap()
+                .count;
+            assert_eq!(
+                count, 0,
+                "the valid document preceding the invalid one must not be written"
+            );
+            assert!(
+                engine
+                    .stored_hashes(index, generation, &docs)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                engine
+                    .vocabulary(index, generation)
+                    .await
+                    .unwrap()
+                    .words
+                    .is_empty()
+            );
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant at QDRANT_TEST_URL"]
+async fn native_bm25_threshold_fractional_ties_qdrant() {
+    fixture(|engine, index, _| {
+        Box::pin(async move {
+            for (n, weights) in [
+                [0.1, 0.2, 0.3],
+                [0.3, 0.7, 1.1],
+                [1.1, 1.3, 1.7],
+                [0.9, 0.1, 0.9],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut index = IndexDescriptor {
+                    name: index.name,
+                    ..descriptor()
+                };
+                for (order, (name, weight)) in ["text", "category", "tags"]
+                    .into_iter()
+                    .zip(weights)
+                    .enumerate()
+                {
+                    index
+                        .attributes
+                        .iter_mut()
+                        .find(|a| a.name == name)
+                        .unwrap()
+                        .searchable = Some(SearchableDecl { weight, order });
+                }
+                let generation = GenerationId::new(format!("ties{n}")).unwrap();
+                engine
+                    .create_generation(&index, &index.index_settings(), &generation)
+                    .await
+                    .unwrap();
+                let docs = (0..30)
+                    .map(|n| {
+                        let mut doc = document(&index, &format!("doc_{n:03}"), "common", 1);
+                        doc.document
+                            .attributes
+                            .insert("category".into(), AttributeValue::Text("common".into()));
+                        doc.document.attributes.insert(
+                            "tags".into(),
+                            AttributeValue::List(vec![AttributeValue::Text("common".into())]),
+                        );
+                        doc
+                    })
+                    .collect::<Vec<_>>();
+                engine.index(&index, &generation, &docs).await.unwrap();
+                let mut q = query(engine, &index, &generation, "common").await;
+                q.depth = 3;
+                let result = engine.query(&index, &generation, &q).await.unwrap();
+                assert_eq!(
+                    result
+                        .candidates
+                        .iter()
+                        .map(|c| c.document.key.as_str())
+                        .collect::<Vec<_>>(),
+                    ["doc_000", "doc_001", "doc_002"],
+                    "weights {weights:?}"
+                );
+                assert!(
+                    result
+                        .candidates
+                        .iter()
+                        .all(|c| c.score == result.candidates[0].score)
+                );
+            }
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant at QDRANT_TEST_URL"]
+async fn native_bm25_threshold_rounded_zero_boundary_qdrant() {
+    fixture(|engine, index, generation| {
+        Box::pin(async move {
+            let mut index = IndexDescriptor {
+                name: index.name,
+                ..descriptor()
+            };
+            for (order, name) in ["text", "category"].into_iter().enumerate() {
+                index
+                    .attributes
+                    .iter_mut()
+                    .find(|a| a.name == name)
+                    .unwrap()
+                    .searchable = Some(SearchableDecl {
+                    weight: f32::from_bits(1),
+                    order,
+                });
+            }
+            engine
+                .create_generation(&index, &index.index_settings(), generation)
+                .await
+                .unwrap();
+            let mut docs = (0..30)
+                .map(|n| {
+                    let mut doc = document(&index, &format!("doc_{n:03}"), "common", 1);
+                    doc.document
+                        .attributes
+                        .insert("category".into(), AttributeValue::Text("common".into()));
+                    doc
+                })
+                .collect::<Vec<_>>();
+            let mut zero = document(&index, "a_zero", "commonplace", 1);
+            zero.document
+                .attributes
+                .insert("category".into(), AttributeValue::Text("filler".into()));
+            docs.push(zero);
+            engine.index(&index, generation, &docs).await.unwrap();
+            let mut q = query(engine, &index, generation, "common").await;
+            q.depth = 3;
+            let result = engine.query(&index, generation, &q).await.unwrap();
+            assert!(result.candidates.iter().all(|c| c.score == 0.0));
+            assert_eq!(
+                result
+                    .candidates
+                    .iter()
+                    .map(|c| c.document.key.as_str())
+                    .collect::<Vec<_>>(),
+                ["a_zero", "doc_000", "doc_001"]
+            );
+        })
+    })
+    .await;
+}

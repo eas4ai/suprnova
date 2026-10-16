@@ -26,11 +26,12 @@
 //! and large-integer ranges use exact keyword dictionaries because native numeric
 //! range bounds are f64. Named model column weights are combined before indexing;
 //! Qdrant BM25 encodes each attribute's text with the text index's language options.
-//! Boundary score
-//! ties require extra native pages and, for sparse composites, temporarily wider
-//! prefetches; returned candidates still obey the requested depth.
+//! Boundary score ties require deeper attribute windows or extra native pages.
+//! Threshold retrieval completes attribute sums over candidate ids; returned
+//! candidates still obey the requested depth.
 mod predicates;
 mod storage;
+mod threshold;
 use super::*;
 use crate::{
     search::{AttributeType, AttributeValue, LanguageConfig, SearchDocument, Sort, tokenize},
@@ -48,6 +49,8 @@ use std::{
 pub struct QdrantSearchEngine {
     client: Arc<Qdrant>,
     mutations: tokio::sync::Mutex<()>,
+    #[cfg(any(test, feature = "testing"))]
+    max_attribute_limit: std::sync::atomic::AtomicU64,
 }
 impl QdrantSearchEngine {
     /// Use the vector driver's variables and bound every gRPC call with a timeout.
@@ -96,8 +99,35 @@ impl QdrantSearchEngine {
         Self {
             client: Arc::new(client),
             mutations: tokio::sync::Mutex::new(()),
+            #[cfg(any(test, feature = "testing"))]
+            max_attribute_limit: std::sync::atomic::AtomicU64::new(0),
         }
     }
+    /// Measures retrieval work without relying on timings in live Qdrant tests.
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn take_attribute_limit_for_test(&self) -> u64 {
+        self.max_attribute_limit
+            .swap(0, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    async fn ranked_query(
+        &self,
+        request: qb::QueryPoints,
+    ) -> Result<qb::QueryResponse, QdrantError> {
+        #[cfg(any(test, feature = "testing"))]
+        self.max_attribute_limit.fetch_max(
+            attribute_limit(&request.prefetch).max(
+                request
+                    .using
+                    .as_deref()
+                    .filter(|name| name.starts_with("bm25_"))
+                    .map_or(0, |_| request.limit.unwrap_or(0)),
+            ),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.client.query(request).await
+    }
+
     /// The native client permits schema inspection and engine-specific administration.
     pub fn client(&self) -> Result<&Qdrant, FrameworkError> {
         Ok(&self.client)
@@ -434,8 +464,7 @@ impl QdrantSearchEngine {
         request.offset = None;
         grow_prefetch(&mut request.prefetch, lookahead, false);
         let response = self
-            .client
-            .query(request.clone())
+            .ranked_query(request.clone())
             .await
             .map_err(|e| error(collection, e))?;
         let mut candidates = decode_scored(index, response.result)?;
@@ -468,8 +497,7 @@ impl QdrantSearchEngine {
         candidates.clear();
         loop {
             let response = self
-                .client
-                .query(request.clone())
+                .ranked_query(request.clone())
                 .await
                 .map_err(|e| error(collection, e))?;
             let len = response.result.len();
@@ -600,45 +628,23 @@ impl QdrantSearchEngine {
         }
         Ok(prefetch.build())
     }
-    async fn complete_attribute_scores(
-        &self,
-        collection: &str,
-        prefetch: &mut qb::PrefetchQuery,
-    ) -> Result<(), FrameworkError> {
-        if prefetch
-            .prefetch
-            .iter()
-            .filter(|p| {
-                p.using
-                    .as_deref()
-                    .is_some_and(|name| name.starts_with("bm25_"))
-            })
-            .count()
-            > 1
-        {
-            // A summed winner need not lead any individual attribute. Every
-            // candidate also needs contributions from attributes where it ranks
-            // below the prefetch limit. Score the matching universe in Qdrant.
-            let count = self
-                .exact_count(collection, prefetch.filter.clone().unwrap_or_default())
-                .await?
-                .value();
-            grow_prefetch(&mut prefetch.prefetch, count.max(1), true);
-        }
-        Ok(())
-    }
     async fn run_prefetch(
         &self,
         index: &IndexDescriptor,
         collection: &str,
+        settings: &IndexSettings,
         mut prefetch: qb::PrefetchQuery,
     ) -> Result<Vec<EngineCandidate>, FrameworkError> {
         let depth = prefetch.limit.unwrap_or(0);
         if depth == 0 {
             return Ok(vec![]);
         }
-        self.complete_attribute_scores(collection, &mut prefetch)
-            .await?;
+        if let Some(candidates) = self
+            .complete_attribute_scores(index, collection, settings, &mut prefetch)
+            .await?
+        {
+            return Ok(candidates);
+        }
         let mut builder = qb::QueryPointsBuilder::new(collection)
             .prefetch(prefetch.prefetch)
             .limit(depth)
@@ -702,8 +708,7 @@ impl QdrantSearchEngine {
                 builder = builder.using(using.clone());
             }
             let response = self
-                .client
-                .query(builder)
+                .ranked_query(builder.build())
                 .await
                 .map_err(|e| error(collection, e))?;
             let len = response.result.len();
@@ -740,7 +745,9 @@ impl QdrantSearchEngine {
             let prefetch = self
                 .lexical_prefetch(index, settings, q, vector, filter)
                 .await?;
-            return self.run_prefetch(index, collection, prefetch).await;
+            return self
+                .run_prefetch(index, collection, settings, prefetch)
+                .await;
         }
         if q.sort.is_empty()
             && let Some(vector) = vector
@@ -1905,7 +1912,7 @@ impl SearchEngine for QdrantSearchEngine {
         let mut lexical_prefetch = self
             .lexical_prefetch(index, &settings, q, Some(vector), lexical.clone())
             .await?;
-        self.complete_attribute_scores(&collection, &mut lexical_prefetch)
+        self.complete_attribute_scores(index, &collection, &settings, &mut lexical_prefetch)
             .await?;
         let prefetch = vec![
             lexical_prefetch,
@@ -1923,14 +1930,14 @@ impl SearchEngine for QdrantSearchEngine {
             })),
         };
         let response = self
-            .client
-            .query(
+            .ranked_query(
                 qb::QueryPointsBuilder::new(&collection)
                     .prefetch(prefetch.clone())
                     .query(query)
                     .filter(scope.clone())
                     .limit(q.depth.saturating_mul(2) as u64)
-                    .with_payload(hit_payload(index)),
+                    .with_payload(hit_payload(index))
+                    .build(),
             )
             .await;
         let candidates = match response {
@@ -1938,16 +1945,16 @@ impl SearchEngine for QdrantSearchEngine {
             Err(e) if unsupported_weights(&e) => {
                 // Only unsupported fusion syntax triggers fallback. Transport,
                 // authentication and collection errors remain visible.
-                self.client
-                    .query(
-                        qb::QueryPointsBuilder::new(&collection)
-                            .prefetch(prefetch)
-                            .query(qb::Fusion::Rrf)
-                            .filter(scope.clone())
-                            .limit(q.depth as u64),
-                    )
-                    .await
-                    .map_err(|e| error(&collection, e))?;
+                self.ranked_query(
+                    qb::QueryPointsBuilder::new(&collection)
+                        .prefetch(prefetch)
+                        .query(qb::Fusion::Rrf)
+                        .filter(scope.clone())
+                        .limit(q.depth as u64)
+                        .build(),
+                )
+                .await
+                .map_err(|e| error(&collection, e))?;
                 let left = self
                     .lexical_candidates(index, &collection, &settings, q, Some(vector), lexical)
                     .await?;
@@ -2327,4 +2334,20 @@ fn payload_words(payload: Option<&Value>) -> BTreeSet<String> {
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect()
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn attribute_limit(prefetches: &[qb::PrefetchQuery]) -> u64 {
+    prefetches
+        .iter()
+        .map(|p| {
+            let own = p
+                .using
+                .as_deref()
+                .filter(|name| name.starts_with("bm25_"))
+                .map_or(0, |_| p.limit.unwrap_or(0));
+            own.max(attribute_limit(&p.prefetch))
+        })
+        .max()
+        .unwrap_or(0)
 }

@@ -828,3 +828,11 @@ pub mod conformance {
         }
     }
 }
+
+/// Exposes the engine's crate-private work counter to integration tests.
+#[doc(hidden)]
+pub fn take_qdrant_attribute_limit(
+    engine: &crate::search::engine::qdrant::QdrantSearchEngine,
+) -> Result<u64, crate::FrameworkError> {
+    Ok(engine.take_attribute_limit_for_test())
+}
