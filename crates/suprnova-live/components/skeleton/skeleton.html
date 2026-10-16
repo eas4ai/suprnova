@@ -1,0 +1,14 @@
+{#
+  suprnova.skeleton - layout-preserving placeholder for work in flight
+  (FDB-002). Bound through live:loading.show to a registered action, it is
+  authored hidden and the runtime reveals it after its own 150 ms delay
+  and keeps it for 200 ms, so a fast action never flashes it; as a lazy
+  island's placeholder (lazy=true) it is the island's initial markup. The
+  bars are decorative; the label is what assistive technology reads.
+#}
+{% macro skeleton(action="", lazy=false, lines=3, label="Loading") %}
+<div class="sn-skeleton" role="status" {% if lazy %}data-sn-placeholder="lazy"{% else %}live:loading.show="{{ action }}" hidden{% endif %}>
+<span class="sn-skeleton-label">{{ label }}</span>
+<span class="sn-skeleton-lines" aria-hidden="true" data-sn-lines="{{ lines }}"><span class="sn-skeleton-line"></span><span class="sn-skeleton-line"></span><span class="sn-skeleton-line"></span></span>
+</div>
+{% endmacro %}
