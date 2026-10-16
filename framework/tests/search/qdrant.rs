@@ -1,7 +1,7 @@
 //! The standing Qdrant service exercises the persistent search contract.
 use std::sync::Arc;
 use suprnova::{
-    FrameworkError,
+    FrameworkError, Model, Searchable,
     search::{engine::qdrant::QdrantSearchEngine, testing::conformance},
 };
 
@@ -228,6 +228,292 @@ async fn query(
     }
 }
 type TestFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+
+async fn native_builder_fixture(
+    tokenizer: Option<&str>,
+    weights: [f32; 2],
+    texts: &[(&str, &str)],
+    test: impl FnOnce(
+        Vec<super::derive::SearchNote>,
+        Arc<suprnova::search::Vocabulary>,
+    ) -> TestFuture<'static>,
+) {
+    use super::derive::SearchNote;
+    use futures::FutureExt;
+    use suprnova::{SearchConfig, SearchDriver, Searchable};
+    let db = super::derive::database().await;
+    for migration in suprnova::search::migrations() {
+        migration
+            .up(&sea_orm_migration::SchemaManager::new(db.conn()))
+            .await
+            .unwrap();
+    }
+    let engine = Arc::new(engine());
+    let descriptor = SearchNote::descriptor();
+    let generation =
+        GenerationId::new(format!("tokens_{}", uuid::Uuid::new_v4().simple())).unwrap();
+    let outcome = std::panic::AssertUnwindSafe(SearchConfig::scope(
+        SearchConfig {
+            driver: SearchDriver::Collection,
+            queue: false,
+            ..Default::default()
+        },
+        SearchRegistry::isolated(async {
+            SearchRegistry::register_engine("qdrant", engine.clone()).unwrap();
+            SearchRegistry::set_index_driver(descriptor.name, "qdrant").unwrap();
+            SearchRegistry::register_embedder("token-dense", Arc::new(FakeEmbedder::new(3).unwrap())).unwrap();
+            let mut settings = descriptor.index_settings();
+            settings.index_time.embedder = Some("token-dense".into());
+            settings.index_time.dimensions = Some(3);
+            if let Some(tokenizer) = tokenizer {
+                settings.index_time.language = LanguageConfig::Qdrant {
+                    tokenizer: tokenizer.into(),
+                    stemmer: None,
+                    stop_words: vec![],
+                    folding: true,
+                };
+            }
+            settings.index_time.searchable_attributes.retain(|attr| {
+                attr.name == "title" || attr.name == "body"
+            });
+            for (attr, weight) in settings.index_time.searchable_attributes.iter_mut().zip(weights) {
+                attr.weight = weight;
+            }
+            engine.create_generation(descriptor, &settings, &generation).await.unwrap();
+            engine.switch_generation(descriptor, None, generation.clone()).await.unwrap();
+            let mut models = Vec::new();
+            let mut docs = Vec::new();
+            for (title, body) in texts {
+                let model = suprnova::search::indexing::without_syncing_to_search(|| async {
+                    SearchNote::create(suprnova::attrs! {
+                        title: *title, body: *body, category: "notes", rank: 7,
+                        enabled: true, owner_id: 0, tags: Vec::<String>::new(), lat: 40.0, lng: -73.0,
+                    }).await
+                }).await.unwrap();
+                let document = model.to_search_document().unwrap();
+                docs.push(IndexedDocument {
+                    content_hash: document.content_hash("tokens"),
+                    document,
+                    dense: Some(vec![1.0, 0.0, 0.0]),
+                    sparse: None,
+                });
+                models.push(model);
+            }
+            engine.index(descriptor, &generation, &docs).await.unwrap();
+            let vocabulary = engine.vocabulary(descriptor, &generation).await.unwrap();
+            test(models, vocabulary).await;
+        }),
+    )).catch_unwind().await;
+    engine
+        .client()
+        .unwrap()
+        .delete_collection(format!(
+            "search_{}_{}",
+            descriptor.name,
+            generation.as_str()
+        ))
+        .await
+        .unwrap();
+    match outcome {
+        Ok(result) => result.unwrap(),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant at QDRANT_TEST_URL"]
+async fn native_bm25_builder_word_boundaries_qdrant() {
+    use super::derive::SearchNote;
+    for (tokenizer, weights, first) in [
+        (None, [5.0, 1.0], 0),
+        (None, [1.0, 5.0], 1),
+        (Some("prefix"), [5.0, 1.0], 0),
+        (Some("prefix"), [1.0, 5.0], 1),
+    ] {
+        native_builder_fixture(
+            tokenizer,
+            weights,
+            &[
+                ("北京 filler", "other filler"),
+                ("other filler", "北京 filler"),
+            ],
+            |models, vocabulary| {
+                Box::pin(async move {
+                    assert_eq!(vocabulary.words.get("北京"), Some(&2));
+                    assert!(!vocabulary.words.contains_key("北"));
+                    assert!(!vocabulary.words.contains_key("京"));
+                    let hits = SearchNote::search("北京").get().await.unwrap();
+                    assert_eq!(hits.hits.len(), 2);
+                    assert!(
+                        hits.hits.iter().all(|hit| hit.engine_score > 0.0),
+                        "北京 must have positive lexical scores"
+                    );
+                    assert_eq!(hits.hits[0].model.id, models[first].id);
+                    assert!(hits.hits[0].engine_score > hits.hits[1].engine_score);
+                    let prefix = SearchNote::search("北").get().await.unwrap();
+                    assert_eq!(prefix.hits.len(), 2);
+                })
+            },
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant at QDRANT_TEST_URL"]
+async fn native_bm25_builder_quoted_boundaries_qdrant() {
+    use super::derive::SearchNote;
+    native_builder_fixture(
+        None,
+        [5.0, 1.0],
+        &[
+            ("北京 filler", "other filler"),
+            ("other filler", "北京 filler"),
+        ],
+        |_, _| {
+            Box::pin(async {
+                let hits = SearchNote::search("\"北京\"").get().await.unwrap();
+                assert_eq!(hits.hits.len(), 2, "the phrase 北京 must stay intact");
+                assert!(hits.hits.iter().all(|hit| hit.engine_score > 0.0));
+                assert!(
+                    SearchNote::search("filler -北京")
+                        .get()
+                        .await
+                        .unwrap()
+                        .hits
+                        .is_empty()
+                );
+                assert_eq!(
+                    SearchNote::search("filler -北")
+                        .get()
+                        .await
+                        .unwrap()
+                        .hits
+                        .len(),
+                    2
+                );
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant at QDRANT_TEST_URL"]
+async fn native_bm25_builder_whitespace_boundaries_qdrant() {
+    use super::derive::SearchNote;
+    native_builder_fixture(
+        Some("whitespace"),
+        [5.0, 1.0],
+        &[("rust-lang", "filler")],
+        |_, vocabulary| {
+            Box::pin(async move {
+                assert_eq!(vocabulary.words.get("rust-lang"), Some(&1));
+                assert!(!vocabulary.words.contains_key("rust"));
+                assert!(!vocabulary.words.contains_key("lang"));
+                let hits = SearchNote::search("rust-lang").get().await.unwrap();
+                assert_eq!(hits.hits.len(), 1);
+                assert!(
+                    hits.hits[0].engine_score > 0.0,
+                    "rust-lang is one whitespace token"
+                );
+                let prefix = SearchNote::search("rust").get().await.unwrap();
+                assert!(
+                    prefix.hits.iter().all(|hit| hit.engine_score == 0.0),
+                    "rust alone must not score rust-lang"
+                );
+                assert_eq!(prefix.hits.len(), 1, "the keyword prefix must still match");
+                for text in ["RUST-LANG", "rust-lagn", "\"rust-lang\""] {
+                    let hits = SearchNote::search(text).get().await.unwrap();
+                    assert_eq!(hits.hits.len(), 1, "{text}");
+                    assert!(hits.hits[0].engine_score > 0.0, "{text}");
+                }
+                assert!(
+                    SearchNote::search("filler -rust-lang")
+                        .get()
+                        .await
+                        .unwrap()
+                        .hits
+                        .is_empty()
+                );
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant at QDRANT_TEST_URL"]
+async fn native_bm25_builder_multilingual_boundaries_qdrant() {
+    use super::derive::SearchNote;
+    native_builder_fixture(
+        Some("multilingual"),
+        [5.0, 1.0],
+        &[
+            ("北京 filler", "other filler"),
+            ("other filler", "北京 filler"),
+        ],
+        |_, _| {
+            Box::pin(async {
+                let hits = SearchNote::search("北京").get().await.unwrap();
+                assert_eq!(hits.hits.len(), 2);
+                assert!(
+                    hits.hits.iter().all(|hit| hit.engine_score > 0.0),
+                    "Qdrant must segment the original multilingual query"
+                );
+                let quoted = SearchNote::search("\"北京\"").get().await.unwrap();
+                assert_eq!(quoted.hits.len(), 2);
+                assert!(quoted.hits.iter().all(|hit| hit.engine_score > 0.0));
+                assert!(
+                    SearchNote::search("filler -北京")
+                        .get()
+                        .await
+                        .unwrap()
+                        .hits
+                        .is_empty()
+                );
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant at QDRANT_TEST_URL"]
+async fn native_bm25_builder_hybrid_exclusion_boundaries_qdrant() {
+    use super::derive::SearchNote;
+    native_builder_fixture(
+        Some("whitespace"),
+        [5.0, 1.0],
+        &[("rust-lang", "filler"), ("rust", "filler")],
+        |models, _| {
+            Box::pin(async move {
+                for ratio in [0.5, 1.0] {
+                    let hits = SearchNote::search("filler -rust")
+                        .hybrid(ratio)
+                        .get()
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        hits.hits.len(),
+                        1,
+                        "-rust must not exclude the whitespace token rust-lang at ratio {ratio}"
+                    );
+                    assert_eq!(hits.hits[0].model.id, models[0].id);
+                    let excluded = SearchNote::search("filler -RUST-LANG")
+                        .hybrid(ratio)
+                        .get()
+                        .await
+                        .unwrap();
+                    assert_eq!(excluded.hits.len(), 1);
+                    assert_eq!(excluded.hits[0].model.id, models[1].id);
+                }
+            })
+        },
+    )
+    .await;
+}
+
 async fn fixture(
     test: impl for<'a> FnOnce(
         &'a QdrantSearchEngine,

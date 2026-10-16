@@ -586,6 +586,15 @@ length. Text payload indexes enforce words, phrases, and exclusions separately
 from ranking. Normalized keyword words support prefix filters and the typo
 vocabulary; they never score a hit.
 
+Native queries keep the source spelling for ranking, phrases, and exclusions.
+Qdrant tokenizes that text itself; normalized typo and synonym alternatives
+are added separately. Keyword words and typo expansion split `word` and `prefix`
+text on non-alphanumeric characters and `whitespace` text on whitespace, then
+lowercase and fold accents as configured. For `multilingual`, keyword words and
+expansion use whitespace as an approximation because Qdrant segments text with
+language dictionaries. Ranking and text predicates still use Qdrant's own
+multilingual segmentation. Reindex existing generations to update keyword words.
+
 For a learned sparse model, configure `SEARCH_EMBED_SPARSE_MODEL` on the local
 provider and set the generation's `sparse_model` to that registered provider's
 name, such as `fastembed`. Providers must use one vector space for documents

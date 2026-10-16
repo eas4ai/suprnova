@@ -1125,39 +1125,81 @@ fn text(value: &AttributeValue) -> String {
         _ => String::new(),
     }
 }
-// Prefixes and typo words must keep the script used by Qdrant's native text index.
-pub(in crate::search) fn query_words(text: &str, settings: &IndexSettings) -> Vec<String> {
-    use unicode_segmentation::UnicodeSegmentation;
+// Word and prefix queries split on non-alphanumeric characters in Qdrant 1.19.
+// Multilingual segmentation needs Qdrant's language dictionaries. Whitespace is
+// only an approximation for its keyword payload and expansion vocabulary; source
+// query text still reaches Qdrant intact for native ranking and text predicates.
+fn word_slices<'a>(text: &'a str, settings: &IndexSettings) -> Vec<&'a str> {
+    match &settings.index_time.language {
+        LanguageConfig::Qdrant { tokenizer, .. }
+            if matches!(tokenizer.as_str(), "whitespace" | "multilingual") =>
+        {
+            text.split_whitespace().collect()
+        }
+        _ => text
+            .split(|ch: char| !ch.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect(),
+    }
+}
+
+fn normalize_query_word(word: &str, folding: bool) -> String {
+    word.to_lowercase()
+        .chars()
+        .map(|ch| {
+            let latin = matches!(
+                ch,
+                '\u{00c0}'..='\u{024f}' | '\u{0300}'..='\u{036f}' | '\u{1e00}'..='\u{1eff}'
+            );
+            if folding && latin {
+                deunicode::deunicode(&ch.to_string()).to_lowercase()
+            } else {
+                ch.to_string()
+            }
+        })
+        .collect()
+}
+
+pub(in crate::search) fn query_tokens(
+    text: &str,
+    settings: &IndexSettings,
+) -> Vec<crate::search::expansion::ExpansionToken> {
     let folding = !matches!(
         &settings.index_time.language,
         LanguageConfig::Qdrant { folding: false, .. }
     );
-    text.unicode_words()
-        .map(|word| {
-            word.to_lowercase()
-                .chars()
-                .map(|ch| {
-                    let latin = matches!(
-                        ch,
-                        '\u{00c0}'..='\u{024f}' | '\u{0300}'..='\u{036f}' | '\u{1e00}'..='\u{1eff}'
-                    );
-                    if folding && latin {
-                        deunicode::deunicode(&ch.to_string()).to_lowercase()
-                    } else {
-                        ch.to_string()
-                    }
-                })
-                .collect::<String>()
+    word_slices(text, settings)
+        .into_iter()
+        .map(|word| crate::search::expansion::ExpansionToken {
+            source: word.into(),
+            normalized: normalize_query_word(word, folding),
+            source_length: word.chars().count(),
         })
         .collect()
 }
+
+pub(in crate::search) fn query_words(text: &str, settings: &IndexSettings) -> Vec<String> {
+    let folding = !matches!(
+        &settings.index_time.language,
+        LanguageConfig::Qdrant { folding: false, .. }
+    );
+    word_slices(text, settings)
+        .into_iter()
+        .map(|word| normalize_query_word(word, folding))
+        .collect()
+}
+
 fn word_list(text: &str, settings: &IndexSettings) -> BTreeSet<String> {
-    let words = if native_bm25(settings)
-        || matches!(
-            &settings.index_time.language,
-            LanguageConfig::Qdrant { folding: false, .. }
-        ) {
+    use unicode_segmentation::UnicodeSegmentation;
+    let words = if native_bm25(settings) {
         query_words(text, settings)
+    } else if matches!(
+        &settings.index_time.language,
+        LanguageConfig::Qdrant { folding: false, .. }
+    ) {
+        text.unicode_words()
+            .map(|word| normalize_query_word(word, false))
+            .collect()
     } else {
         tokenize(text)
     };
@@ -2350,4 +2392,77 @@ fn attribute_limit(prefetches: &[qb::PrefetchQuery]) -> u64 {
         })
         .max()
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+    use crate::search::{QueryText, Synonym, Vocabulary, expansion::expand_with};
+
+    #[test]
+    fn keyword_words_follow_the_configured_token_boundaries() {
+        for (tokenizer, expected) in [
+            ("word", vec!["cafe", "北京", "rust", "lang", "o", "reilly"]),
+            (
+                "prefix",
+                vec!["cafe", "北京", "rust", "lang", "o", "reilly"],
+            ),
+            ("whitespace", vec!["cafe", "北京", "rust-lang", "o'reilly"]),
+            (
+                "multilingual",
+                vec!["cafe", "北京", "rust-lang", "o'reilly"],
+            ),
+        ] {
+            let mut settings = IndexSettings::default();
+            settings.index_time.language = LanguageConfig::Qdrant {
+                tokenizer: tokenizer.into(),
+                stemmer: None,
+                stop_words: vec![],
+                folding: true,
+            };
+            assert_eq!(
+                query_words("Café 北京 rust-lang O'Reilly", &settings),
+                expected,
+                "{tokenizer}"
+            );
+            assert_eq!(
+                word_list("Café 北京 rust-lang O'Reilly", &settings),
+                expected.into_iter().map(str::to_owned).collect(),
+                "{tokenizer}"
+            );
+            if let LanguageConfig::Qdrant { folding, .. } = &mut settings.index_time.language {
+                *folding = false;
+            }
+            assert_eq!(query_words("Café", &settings), ["café"]);
+        }
+    }
+
+    #[test]
+    fn native_expansion_keeps_source_text_alongside_vocabulary_alternatives() {
+        let mut settings = IndexSettings::default();
+        settings.index_time.language = LanguageConfig::Qdrant {
+            tokenizer: "whitespace".into(),
+            stemmer: None,
+            stop_words: vec![],
+            folding: true,
+        };
+        settings.query.synonyms.push(Synonym {
+            terms: vec!["cafe".into(), "coffee".into()],
+            one_way: false,
+        });
+        let vocabulary = Vocabulary {
+            words: [("rust-lang".into(), 1)].into_iter().collect(),
+        };
+        let query = QueryText::parse("Café rust-lagn \"北京 rust-lang\" -RUST-LANG");
+        let expanded = expand_with(&query, &settings.query, &vocabulary, 64, &|text| {
+            query_tokens(text, &settings)
+        })
+        .unwrap();
+        assert_eq!(expanded.terms[0].original, "Café");
+        assert_eq!(expanded.terms[0].alternatives, ["Café", "coffee"]);
+        assert_eq!(expanded.terms[1].alternatives, ["rust-lagn", "rust-lang"]);
+        assert_eq!(expanded.terms[1].typo_alternatives, ["rust-lang"]);
+        assert_eq!(expanded.phrases, vec![vec!["北京", "rust-lang"]]);
+        assert_eq!(expanded.negatives, ["RUST-LANG"]);
+    }
 }

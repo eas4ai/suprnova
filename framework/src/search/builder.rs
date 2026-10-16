@@ -971,7 +971,7 @@ async fn prepare(
             &settings.query,
             &vocabulary,
             config.expansion_terms,
-            &|text| super::engine::qdrant::query_words(text, &settings),
+            &|text| super::engine::qdrant::query_tokens(text, &settings),
         )?
     } else {
         expand(
@@ -1185,9 +1185,13 @@ async fn retrieve(
             .await?
         {
             validate_candidates(descriptor, &native.candidates)?;
-            native.candidates.retain(|candidate| {
-                !matches_negative(&candidate.document, &settings, &query.expanded.negatives)
-            });
+            // Qdrant already applies exclusions with its configured tokenizer to
+            // both legs. A framework word check would change those boundaries.
+            if engine.name() != "qdrant" || !super::engine::qdrant::native_bm25(&settings) {
+                native.candidates.retain(|candidate| {
+                    !matches_negative(&candidate.document, &settings, &query.expanded.negatives)
+                });
+            }
             total = native.total;
             candidates = native
                 .candidates
