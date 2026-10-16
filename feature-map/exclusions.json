@@ -81,6 +81,9 @@
   ],
   "VERIFY_IDENTITY": [
    "framework/src/database/schema_dump.rs:1045"
+  ],
+  "VITE_REPORTING_DSN": [
+   "framework/src/security_headers/mod.rs:607"
   ]
  },
  "rust_items_not_extracted": [
@@ -89,5 +92,5 @@
   "demo application code (app/), test-support crates and fixtures"
  ],
  "sibling_reexports_folded_into_aliases": 678,
- "source_rev": "56e9a36e1"
+ "source_rev": "33e6d7e03"
 }
