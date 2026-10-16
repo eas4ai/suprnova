@@ -1714,7 +1714,7 @@ mod react {
             "outDir: 'bootstrap/ssr'",
             "entryFileNames: 'ssr.js'",
             "outDir: '../public/assets'",
-            "input: 'src/main.tsx'",
+            "input: ['src/main.tsx', 'src/app.css']",
             "port: Number(process.env.VITE_PORT) || 5765",
         ] {
             assert!(
@@ -2187,7 +2187,7 @@ mod vue {
             "outDir: 'bootstrap/ssr'",
             "entryFileNames: 'ssr.js'",
             "outDir: '../public/assets'",
-            "input: 'src/main.ts'",
+            "input: ['src/main.ts', 'src/app.css']",
         ] {
             assert!(
                 config.contains(needle),

@@ -1,4 +1,3 @@
-import './app.css'
 import { createInertiaApp } from '@inertiajs/react'
 import type { ErrorInfo } from 'react'
 import { createRoot, hydrateRoot } from 'react-dom/client'

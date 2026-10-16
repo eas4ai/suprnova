@@ -35,6 +35,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Inertia kits paint styled under the Vite dev server (#153).** The kits
+  list `src/app.css` as its own Vite entry, so the first server-rendered page
+  loads it as a `<link>` with the request's nonce instead of waiting for the
+  entry's JavaScript. `main.ts` and `main.tsx` no longer import it. In an
+  existing application, add `.entry_points(["src/app.css"])` to its
+  `InertiaConfig`, add `'src/app.css'` to the Vite build `input`, and remove
+  the import.
 - **The CLI installs on macOS without warnings (#152).** The browser
   certificate store helpers that only the Linux install path uses are now
   compiled on Linux only.
