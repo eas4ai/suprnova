@@ -55,6 +55,7 @@ async fn typo_expansion_respects_attributes_that_disable_corrections()
         search_touches: vec![],
         settings,
         scope: None,
+        scope_fields: vec![],
     };
     let engine = CollectionEngine::new();
     let generation = GenerationId::default();
@@ -137,6 +138,7 @@ async fn generation_and_descriptor_validation_cannot_be_bypassed()
         search_touches: vec![],
         settings: IndexSettings::default,
         scope: None,
+        scope_fields: vec![],
     };
     let engine = CollectionEngine::new();
     let invalid = GenerationId("../../invalid".into());
@@ -188,6 +190,7 @@ fn typo_prefix_descriptor() -> suprnova::search::IndexDescriptor {
         search_touches: vec![],
         settings: IndexSettings::default,
         scope: None,
+        scope_fields: vec![],
     }
 }
 
@@ -275,6 +278,7 @@ async fn expired_tombstones_do_not_reject_a_new_removal() -> Result<(), suprnova
         search_touches: vec![],
         settings: IndexSettings::default,
         scope: None,
+        scope_fields: vec![],
     };
     let engine = CollectionEngine::with_tombstone_hours(0)?;
     let generation = GenerationId::default();

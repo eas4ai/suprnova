@@ -1064,6 +1064,7 @@ pub(super) fn descriptor() -> IndexDescriptor {
         search_touches: vec![],
         settings: IndexSettings::default,
         scope: None,
+        scope_fields: vec![],
     }
 }
 

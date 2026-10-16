@@ -64,6 +64,7 @@ pub fn apply_scope(
     let scope = descriptor.scope.map(|scope| scope(viewer));
     if let Some(scope) = &scope {
         scope.validate(descriptor)?;
+        reads_only_scope_fields(descriptor, scope)?;
     }
     Ok(match (filter, scope) {
         (Some(filter), Some(scope)) => Some(Filter::And(vec![filter, scope])),
@@ -80,6 +81,48 @@ pub fn evaluate_scope(
 ) -> bool {
     descriptor.scope.is_none_or(|scope| {
         let filter = scope(viewer);
-        filter.validate(descriptor).is_ok() && filter.matches(document)
+        filter.validate(descriptor).is_ok()
+            && reads_only_scope_fields(descriptor, &filter).is_ok()
+            && filter.matches(document)
     })
+}
+
+/// A recommendation event records the target's scope-field values as its access boundary,
+/// so a scope that reads another field would leave part of that boundary unrecorded.
+fn reads_only_scope_fields(
+    descriptor: &IndexDescriptor,
+    scope: &Filter,
+) -> Result<(), FrameworkError> {
+    let mut pending = vec![scope];
+    while let Some(filter) = pending.pop() {
+        let field = match filter {
+            Filter::And(children) | Filter::Or(children) => {
+                pending.extend(children);
+                continue;
+            }
+            Filter::Not(child) => {
+                pending.push(child);
+                continue;
+            }
+            Filter::Eq(field, _)
+            | Filter::Ne(field, _)
+            | Filter::In(field, _)
+            | Filter::NotIn(field, _)
+            | Filter::Gt(field, _)
+            | Filter::Gte(field, _)
+            | Filter::Lt(field, _)
+            | Filter::Lte(field, _)
+            | Filter::Between(field, _, _)
+            | Filter::IsNull(field)
+            | Filter::IsNotNull(field)
+            | Filter::GeoRadius(field, _, _) => field,
+        };
+        if !descriptor.scope_fields.contains(&field.as_str()) {
+            return Err(FrameworkError::param(format!(
+                "index '{}' scope reads '{field}', which its scope_fields do not name",
+                descriptor.name
+            )));
+        }
+    }
+    Ok(())
 }

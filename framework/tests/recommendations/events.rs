@@ -183,11 +183,10 @@ async fn access_scope_records_each_targets_own_scope_values() {
         let open_event = event("reader", &open, EventType::View, "open").await;
         let closed_event = event("reader", &closed, EventType::View, "closed").await;
         assert_ne!(open_event.access_scope, closed_event.access_scope);
+        // Only the scope fields are copied; category is filterable but the scope never reads it.
         let values = &closed_event.access_scope.as_ref().unwrap()["values"];
-        assert!(
-            values.get("public").is_some() && values.get("owner").is_some(),
-            "{values}"
-        );
+        let fields = values.as_object().unwrap().keys().collect::<Vec<_>>();
+        assert_eq!(fields, ["owner", "public"], "{values}");
         let mut forged = event("forger", &closed, EventType::View, "forged").await;
         forged.access_scope = open_event.access_scope.clone();
         assert!(Recommend::record(forged).await.is_err());

@@ -13,6 +13,7 @@ struct Options {
     should_index: Option<Path>,
     with: Option<Path>,
     scope: Option<Path>,
+    scope_fields: Vec<LitStr>,
     settings: Option<Path>,
     geo: Vec<Geo>,
 }
@@ -79,6 +80,12 @@ fn options(input: &DeriveInput) -> syn::Result<Options> {
                 options.scope = Some(method(&meta)?);
             } else if meta.path.is_ident("settings") {
                 options.settings = Some(method(&meta)?);
+            } else if meta.path.is_ident("scope_fields") {
+                let content;
+                syn::parenthesized!(content in meta.input);
+                let values =
+                    content.parse_terminated(|input| input.parse::<LitStr>(), syn::Token![,])?;
+                options.scope_fields.extend(values);
             } else if meta.path.is_ident("touches") {
                 let content;
                 syn::parenthesized!(content in meta.input);
@@ -111,6 +118,12 @@ fn options(input: &DeriveInput) -> syn::Result<Options> {
             }
             Ok(())
         })?;
+    }
+    if options.scope.is_some() == options.scope_fields.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &input.ident,
+            "searchable scope and scope_fields(...) are declared together: scope_fields names every field the scope reads",
+        ));
     }
     if options
         .index
@@ -286,6 +299,7 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let mut title: Option<String> = None;
     let mut order = 0usize;
     let mut names = std::collections::BTreeSet::new();
+    let mut filterable_names = std::collections::BTreeSet::new();
     for field in &fields.named {
         let Some(ident) = &field.ident else { continue };
         if ident == "__eager" || ident == "__pivot" {
@@ -324,6 +338,9 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             quote!(None)
         };
         let filterable = roles.filterable;
+        if filterable {
+            filterable_names.insert(name.clone());
+        }
         let sortable = roles.sortable;
         let facet = roles.facet;
         declarations.push(quote!(::suprnova::search::AttributeDecl {
@@ -443,6 +460,21 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         || quote!(::suprnova::search::IndexSettings::default),
         |settings| quote!(#settings),
     );
+    for geo in &opts.geo {
+        filterable_names.insert(geo.name.value());
+    }
+    for field in &opts.scope_fields {
+        if !filterable_names.contains(&field.value()) {
+            return Err(syn::Error::new_spanned(
+                field,
+                format!(
+                    "scope field `{}` must be a filterable searchable field",
+                    field.value()
+                ),
+            ));
+        }
+    }
+    let scope_fields = &opts.scope_fields;
     let touches = &opts.touches;
     let predicate = opts.should_index.as_ref().map(|method| quote! {
         fn should_be_searchable(&self) -> Result<bool, ::suprnova::FrameworkError> { self.#method() }
@@ -463,7 +495,7 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                     key_column: <Self as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY,
                     attributes: vec![#(#declarations),*], embed_source: #embed_source,
                     soft_delete: #soft_delete, search_touches: vec![#(#touches),*],
-                    settings: #settings, scope: #scope,
+                    settings: #settings, scope: #scope, scope_fields: vec![#(#scope_fields),*],
                 })
             }
 
@@ -537,8 +569,9 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 },
                 load_documents: |keys| ::std::boxed::Box::pin(#model::__suprnova_load_search_documents(keys)),
                 evaluate_scope: |viewer, document| {
-                    <#model as ::suprnova::search::Searchable>::descriptor().scope
-                        .map(|scope| scope(viewer).matches(document)).unwrap_or(true)
+                    ::suprnova::search::evaluate_scope(
+                        <#model as ::suprnova::search::Searchable>::descriptor(), viewer, document,
+                    )
                 },
                 document: |model| {
                     let model = model.downcast_ref::<#model>().ok_or_else(|| ::suprnova::FrameworkError::param("search model type"))?;
@@ -560,7 +593,7 @@ mod tests {
     #[test]
     fn declaration_emits_typed_roles_inventory_and_hooks() {
         let input = syn::parse_quote! {
-            #[searchable(index = "posts", soft_delete, touches("author"), should_index = "published", with = "eager", scope = "visible", geo(name = "location", lat = "lat", lng = "lng"))]
+            #[searchable(index = "posts", soft_delete, touches("author"), should_index = "published", with = "eager", scope = "visible", scope_fields("category"), geo(name = "location", lat = "lat", lng = "lng"))]
             struct Post {
                 id: i64,
                 #[searchable(text(weight = 2.5), embed, title)] title: String,
@@ -587,6 +620,45 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn scope_and_scope_fields_come_together_over_filterable_fields() {
+        for (input, message) in [
+            (
+                syn::parse_quote!(
+                    #[searchable(scope = "visible")]
+                    struct Post {
+                        #[searchable(filterable)]
+                        owner: String,
+                    }
+                ),
+                "scope_fields",
+            ),
+            (
+                syn::parse_quote!(
+                    #[searchable(scope_fields("owner"))]
+                    struct Post {
+                        #[searchable(filterable)]
+                        owner: String,
+                    }
+                ),
+                "scope_fields",
+            ),
+            (
+                syn::parse_quote!(
+                    #[searchable(scope = "visible", scope_fields("title"))]
+                    struct Post {
+                        #[searchable(text)]
+                        title: String,
+                    }
+                ),
+                "title",
+            ),
+        ] {
+            let error = expand(input).unwrap_err().to_string();
+            assert!(error.contains(message), "{error}");
+        }
     }
 
     #[test]

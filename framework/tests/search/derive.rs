@@ -31,6 +31,7 @@ fn note_scope(viewer: &Viewer) -> Filter {
     should_index = "is_enabled",
     with = "load_for_search",
     scope = "note_scope",
+    scope_fields("owner_id"),
     geo(name = "location", lat = "lat", lng = "lng")
 )]
 pub(crate) struct SearchNote {

@@ -603,7 +603,11 @@ fn archive_scope(viewer: &Viewer) -> suprnova::Filter {
 }
 #[suprnova::model(table = "search_notes", timestamps = false, soft_deletes)]
 #[derive(Searchable)]
-#[searchable(index = "test_search_archives", scope = "archive_scope")]
+#[searchable(
+    index = "test_search_archives",
+    scope = "archive_scope",
+    scope_fields("owner_id")
+)]
 struct SearchArchive {
     pub id: i64,
     #[searchable(text)]

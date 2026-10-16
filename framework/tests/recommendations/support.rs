@@ -20,7 +20,11 @@ fn scope(viewer: &Viewer) -> Filter {
 #[suprnova::model(table = "recommendation_notes", timestamps = false,
     fillable = ["title", "category", "public", "owner", "published_at"])]
 #[derive(Searchable)]
-#[searchable(index = "recommendation_notes", scope = "scope")]
+#[searchable(
+    index = "recommendation_notes",
+    scope = "scope",
+    scope_fields("public", "owner")
+)]
 pub struct Note {
     pub id: i64,
     #[searchable(text, embed, title)]

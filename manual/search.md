@@ -26,6 +26,7 @@ use suprnova::{AttributeValue, Filter, FrameworkError, IndexSettings, Searchable
     should_index = "is_published",
     with = "prepare_search",
     scope = "article_scope",
+    scope_fields("owner_id"),
     settings = "article_settings",
     geo(name = "location", lat = "lat", lng = "lng")
 )]
@@ -100,12 +101,14 @@ integers as `i64` and rejects unsigned overflow. Text roles accept strings and
 text lists. Optional values remain null; non-finite floats are errors.
 
 The struct options are `index`, `soft_delete`, `should_index`, `with`, `scope`,
-`settings`, `touches("relation", ...)`, and `geo(name = "location", lat = "lat",
-lng = "lng")`. `should_index` names a model method returning
+`scope_fields("field", ...)`, `settings`, `touches("relation", ...)`, and
+`geo(name = "location", lat = "lat", lng = "lng")`. `should_index` names a model method returning
 `Result<bool, FrameworkError>`; false removes an existing document. `with` names
 an async model method taking and returning `Vec<Self>` through `Result`, so you
 can load relations once per chunk before `make_searchable_using` projects rows.
-`scope` names `fn(&Viewer) -> Filter`. `settings` names `fn() -> IndexSettings`.
+`scope` names `fn(&Viewer) -> Filter`, and `scope_fields` names every
+filterable field it reads; the two come together. `settings` names
+`fn() -> IndexSettings`.
 
 The geo option synthesizes a filterable, sortable geo attribute from numeric
 latitude and longitude fields. Coordinates use degrees, latitude -90 to 90 and
@@ -505,12 +508,16 @@ OpenAI's `text-embedding-3-small`, `text-embedding-3-large` and
 (2048 tokens) and `gemini-embedding-2` (8192 tokens), with or without an
 `owner/` prefix such as OpenRouter's `openai/text-embedding-3-small`. Any
 other model outside the shipped profiles takes its context from the
-service's model list at boot: OpenRouter's `embeddings/models`
-(`context_length`), or `models` with vLLM's `max_model_len`, LM Studio's or
-Mistral's `max_context_length`. Set `SEARCH_EMBED_MAX_TOKENS` when the
-service lists none, or when the server caps input below the model's context;
-it wins over the profile and the list, and boot fails naming it when no
-context is known.
+service's model list: OpenRouter's `embeddings/models` (`context_length`),
+or `models` with vLLM's `max_model_len`, LM Studio's or Mistral's
+`max_context_length`. The list is read on the first embedding, not at boot,
+so the application starts while the service is down. When the list names no
+context for the model, the provider uses 8192 tokens, the limit OpenAI,
+Mistral and Google's newer models publish; when the list cannot be read, it
+uses 8192 for that embedding, logs a warning, and reads the list again next
+time. `SEARCH_EMBED_MAX_TOKENS` wins over the profile, the list and the
+default, for a model with a smaller context or a server that caps input
+below it.
 Every prepared input is cut to the model's context before it is sent. Set `SEARCH_EMBED_TOKENIZER` to the model's own
 `tokenizer.json`, published beside the weights in its Hugging Face repository,
 and the cut falls after the last token that fits. Without it the protocol
@@ -711,7 +718,11 @@ authoritative reloads support retries after interrupted acknowledgements.
 
 ## Scopes and the viewer
 
-An index scope returns a `Filter` over declared filterable fields. Every read
+An index scope returns a `Filter` over the filterable fields its
+`scope_fields` name; a scope that reads any other field fails the read with an
+error naming the field. A recommendation event records the target's values
+for exactly those fields as its access boundary, so name only what the scope
+reads, for every viewer, signed in or not. Every read
 path applies it inside engine candidates: hits, keys, raw projections, facets,
 stats, totals, groups, federation, the JSON endpoint, and recommendation reads.
 The request supplies `Viewer::current()` through Auth. Background code can use

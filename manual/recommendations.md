@@ -262,7 +262,7 @@ Extend your application's migration list with
 
 | Table | Stored contract |
 |---|---|
-| `recommendation_events` | Immutable id, actor kind/id, target index/key, type, weight, surface, UTC microsecond time, access scope (the index scope's guest filter and the target's filterable values when the event was recorded), source version, dedupe key, class, and score. |
+| `recommendation_events` | Immutable id, actor kind/id, target index/key, type, weight, surface, UTC microsecond time, access scope (the index scope's guest filter and the target's values for the index's `scope_fields` when the event was recorded), source version, dedupe key, class, and score. |
 | `recommendation_explanations` | Run id, event-id/digest provenance pairs, attribute values, peer count, shared-target count and references, and fallback tier. |
 | `starter_recommendations` | Run id, actor, surface, target index/key, score, rank, and explanation id. |
 | `recommendation_runs` | Publication state and batch statistics, watermarks, catalog digest, history snapshots, and error. |

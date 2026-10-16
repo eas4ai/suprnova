@@ -156,6 +156,7 @@ fn descriptor() -> IndexDescriptor {
         search_touches: vec![],
         settings,
         scope: None,
+        scope_fields: vec![],
     }
 }
 fn document(index: &IndexDescriptor, key: &str, text: &str, n: i64) -> IndexedDocument {
@@ -1647,6 +1648,7 @@ async fn sparse_prefix_and_synonym_field_boundaries_qdrant() {
                     search_touches: vec![],
                     settings,
                     scope: None,
+                    scope_fields: vec![],
                 };
                 index
                     .attributes
