@@ -826,19 +826,26 @@ CC BY 4.0; abstracts are ODC-By 1.0. Attribution, licenses, corpus, queries,
 and judgments live in `framework/tests/search/fixtures/`.
 
 Calibration indexes the same corpus into Meilisearch and Typesense, waits for
-imports, warms every query, records nDCG@10 and p50/p95/p99 latency, and writes
-`baseline.json`. The committed calibration is:
+imports, and measures each rival over a small grid of its own search settings:
+Meilisearch's `matchingStrategy` (`last`, `frequency` and `all`), and
+Typesense's `drop_tokens_threshold` (1 and 10) with `text_match_type`
+(`max_score` and `sum_score`). Every grid entry warms every query, then records
+nDCG@10 and p50/p95/p99 latency. The entry with the highest nDCG@10 becomes the
+rival's score; a tie goes to the lower p95. `baseline.json` keeps the chosen
+settings and the whole grid. The committed calibration is:
 
-| Rival | Version | Lexical nDCG@10 | p95 |
-|---|---|---:|---:|
-| Meilisearch | 1.55.0 | 0.3775 | 2.767554 ms |
-| Typesense | 30.2 | 0.3348 | 50.456052 ms |
+| Rival | Version | Chosen settings | Lexical nDCG@10 | p95 |
+|---|---|---|---:|---:|
+| Meilisearch | 1.55.0 | `matchingStrategy` `frequency` | 0.4665 | 2.232596 ms |
+| Typesense | 30.2 | `drop_tokens_threshold` 10, `text_match_type` `max_score` | 0.4274 | 52.005666 ms |
 
 Lexical mode must reach the stronger rival minus the committed absolute
-tolerance, 0.05: the floor is about 0.327459. Hybrid mode at the benchmark's
-ratio 0.5 must exceed 0.377459. Every engine's committed p95 budget is
-100.912104 ms, about 100.9 ms. It is two times the slower rival's p95 from
-the same calibration run. `search:baseline calibrate` writes the budget and
+tolerance, 0.05: the floor is about 0.416543. Hybrid mode at the benchmark's
+ratio 0.5 must exceed 0.466543. Every engine's committed p95 budget is
+104.011332 ms, about 104.0 ms. It is two times the slower rival's p95, with its
+chosen settings, from the same calibration run. If a rival refuses a request,
+calibration stops with the error and leaves `baseline.json` as it was.
+`search:baseline calibrate` writes the budget and
 the loader re-derives it; a hand-edited budget that disagrees is refused.
 
 Supply `SEARCH_BASELINE_MEILISEARCH_URL`, `SEARCH_BASELINE_MEILISEARCH_KEY`,
@@ -856,7 +863,9 @@ unless you explicitly set `SEARCH_BASELINE_ALLOW_UNCALIBRATED=1`; that override
 does not turn provisional numbers into rival measurements.
 
 Framework measurements warm an isolated generation with a fixed vocabulary.
-The engine sample includes parsing, expansion, retrieval, and fusion. Query
+Each sample asks for the first page of 10 hits at the depth the builder
+requests for that page. The engine sample includes parsing, expansion,
+retrieval, and fusion. Query
 inference has separate percentiles. Corpus embedding, indexing, vocabulary
 preparation, and hydration are outside that sample; vocabulary preparation is
 reported separately. Records under `target/search-baseline/<engine>.json`
