@@ -1,0 +1,49 @@
+{% import "suprnova-ui/tooltip/tooltip.html" as tooltip %}
+{% import "suprnova-ui/collapsible/collapsible.html" as collapsible %}
+{% import "suprnova-ui/accordion/accordion.html" as accordion %}
+{% import "suprnova-ui/popover/popover.html" as popover %}
+{% import "suprnova-ui/dropdown-menu/dropdown-menu.html" as menu %}
+{% import "suprnova-ui/dialog/dialog.html" as dialog %}
+{% import "suprnova-ui/sheet/sheet.html" as sheet %}
+{% import "suprnova-ui/drawer/drawer.html" as drawer %}
+{% import "suprnova-ui/button/button.html" as button %}
+<div class="sn-overlay-gallery">
+<p class="sn-overlay-toolbar">
+{% call tooltip::tooltip("save-tip", "Saves the notes to the server") %}<button class="sn-button" type="button" data-sn-variant="secondary" aria-describedby="save-tip">Save</button>{% endcall %}
+{% call popover::popover_trigger("hint", "Hint") %}{% endcall %}
+{% call menu::menu_trigger("actions", "Actions") %}{% endcall %}
+{% call dialog::dialog_trigger("confirm", "Delete everything", variant="danger") %}{% endcall %}
+{% call sheet::sheet_trigger("details-sheet", "Details", variant="secondary") %}{% endcall %}
+{% call drawer::drawer_trigger("nav-drawer", "Navigate", variant="secondary") %}{% endcall %}
+</p>
+{% call popover::popover("hint", "hint", "Hint") %}<p>Notes are kept until you delete everything.</p>{% endcall %}
+{% call menu::menu("actions", "actions", "Actions") %}
+{% call menu::menu_link("/live", "Dashboard") %}{% endcall %}
+{% call menu::menu_action("actions", "add_note", "Add a note") %}{% endcall %}
+{% endcall %}
+{% call collapsible::collapsible("notes", "Notes") %}
+<ul class="sn-note-list" data-notes="{{ notes.len() }}">
+{% for note in notes %}<li>{{ note }}</li>
+{% endfor %}</ul>
+{% endcall %}
+{% call accordion::accordion("faq") %}
+{% call accordion::accordion_item("faq", "faq-open", "Is open state sent to the server?", open=true) %}<p>No. Opening and closing stays in the browser.</p>{% endcall %}
+{% call accordion::accordion_item("faq", "faq-morph", "Does an open item survive a refresh?") %}<p>Yes, when its key is stable.</p>{% endcall %}
+{% endcall %}
+{% call dialog::dialog("confirm", "confirm", "Delete everything?") %}
+<p>This removes every note.</p>
+<p class="sn-overlay-actions">
+{% call button::button("Delete", action="confirm_delete", variant="danger") %}{% endcall %}
+{% call dialog::dialog_close("confirm", "Cancel") %}{% endcall %}
+</p>
+{% endcall %}
+{% call sheet::sheet("details-sheet", "details-sheet", "Details") %}
+<p>Deleted: <span data-deleted="{{ deleted }}">{{ deleted }}</span></p>
+{% call sheet::sheet_close("details-sheet") %}{% endcall %}
+{% endcall %}
+{% call drawer::drawer("nav-drawer", "nav-drawer", "Navigate") %}
+<nav aria-label="Sections"><a href="/live">Dashboard</a></nav>
+{% call drawer::drawer_close("nav-drawer") %}{% endcall %}
+{% endcall %}
+<p>{% call button::button("Reset", action="reset", variant="secondary") %}{% endcall %}</p>
+</div>
