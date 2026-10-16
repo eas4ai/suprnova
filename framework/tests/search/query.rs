@@ -31,6 +31,7 @@ fn descriptor() -> IndexDescriptor {
         search_touches: vec![],
         settings: IndexSettings::default,
         scope: None,
+        scope_fields: vec![],
     }
 }
 #[test]
@@ -173,4 +174,42 @@ fn grammar_and_typed_filters_share_the_64_level_bound() {
     let grammar = format!("{}title = 'rust'", "NOT ".repeat(64));
     Filter::parse(&grammar, &descriptor()).unwrap();
     assert!(Filter::parse(&format!("NOT {grammar}"), &descriptor()).is_err());
+}
+
+fn reads_title(_: &suprnova::Viewer) -> Filter {
+    Filter::Eq("title".into(), AttributeValue::Text("open".into()))
+}
+
+#[test]
+fn a_scope_must_name_and_read_only_its_scope_fields() {
+    let mut index = descriptor();
+    index.scope = Some(reads_title);
+    let error = index.validate().unwrap_err().to_string();
+    assert!(error.contains("scope_fields"), "{error}");
+    index.scope_fields = vec!["price"];
+    index.validate().unwrap();
+    let error = suprnova::search::apply_scope(&index, &suprnova::Viewer::Guest, None)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("'title'"), "{error}");
+    let document = SearchDocument {
+        index: "query_tests".into(),
+        key: "1".into(),
+        source_version: 1,
+        attributes: BTreeMap::from([("title".into(), AttributeValue::Text("open".into()))]),
+        embed_text: None,
+        title: None,
+    };
+    assert!(!suprnova::search::evaluate_scope(
+        &index,
+        &suprnova::Viewer::Guest,
+        &document
+    ));
+    index.scope_fields = vec!["title"];
+    assert!(suprnova::search::apply_scope(&index, &suprnova::Viewer::Guest, None).is_ok());
+    assert!(suprnova::search::evaluate_scope(
+        &index,
+        &suprnova::Viewer::Guest,
+        &document
+    ));
 }

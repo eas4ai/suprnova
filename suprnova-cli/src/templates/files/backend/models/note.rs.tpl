@@ -28,7 +28,7 @@ use suprnova::{Builder, FrameworkError, Model, Searchable, model};
 )]
 /// The owner scope makes the same private note projection safe for every search path.
 #[derive(Searchable)]
-#[searchable(index = "notes", scope = "own_notes")]
+#[searchable(index = "notes", scope = "own_notes", scope_fields("user_id"))]
 pub struct Note {
     // `BIGINT UNSIGNED` on MySQL, as Laravel's `id()` creates it.
     pub id: u64,

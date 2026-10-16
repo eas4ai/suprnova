@@ -26,6 +26,7 @@ use suprnova::{AttributeValue, Filter, FrameworkError, IndexSettings, Searchable
     should_index = "is_published",
     with = "prepare_search",
     scope = "article_scope",
+    scope_fields("owner_id"),
     settings = "article_settings",
     geo(name = "location", lat = "lat", lng = "lng")
 )]
@@ -100,12 +101,14 @@ integers as `i64` and rejects unsigned overflow. Text roles accept strings and
 text lists. Optional values remain null; non-finite floats are errors.
 
 The struct options are `index`, `soft_delete`, `should_index`, `with`, `scope`,
-`settings`, `touches("relation", ...)`, and `geo(name = "location", lat = "lat",
-lng = "lng")`. `should_index` names a model method returning
+`scope_fields("field", ...)`, `settings`, `touches("relation", ...)`, and
+`geo(name = "location", lat = "lat", lng = "lng")`. `should_index` names a model method returning
 `Result<bool, FrameworkError>`; false removes an existing document. `with` names
 an async model method taking and returning `Vec<Self>` through `Result`, so you
 can load relations once per chunk before `make_searchable_using` projects rows.
-`scope` names `fn(&Viewer) -> Filter`. `settings` names `fn() -> IndexSettings`.
+`scope` names `fn(&Viewer) -> Filter`, and `scope_fields` names every
+filterable field it reads; the two come together. `settings` names
+`fn() -> IndexSettings`.
 
 The geo option synthesizes a filterable, sortable geo attribute from numeric
 latitude and longitude fields. Coordinates use degrees, latitude -90 to 90 and
@@ -711,7 +714,11 @@ authoritative reloads support retries after interrupted acknowledgements.
 
 ## Scopes and the viewer
 
-An index scope returns a `Filter` over declared filterable fields. Every read
+An index scope returns a `Filter` over the filterable fields its
+`scope_fields` name; a scope that reads any other field fails the read with an
+error naming the field. A recommendation event records the target's values
+for exactly those fields as its access boundary, so name only what the scope
+reads, for every viewer, signed in or not. Every read
 path applies it inside engine candidates: hits, keys, raw projections, facets,
 stats, totals, groups, federation, the JSON endpoint, and recommendation reads.
 The request supplies `Viewer::current()` through Auth. Background code can use

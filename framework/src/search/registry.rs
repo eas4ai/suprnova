@@ -65,6 +65,9 @@ pub struct IndexDescriptor {
     pub settings: fn() -> IndexSettings,
     /// A scope is always evaluated with a named viewer, including guests.
     pub scope: Option<fn(&Viewer) -> Filter>,
+    /// The fields the scope reads. A recommendation event records the target's values for
+    /// them as its access boundary, so a scope that reads any other field is refused.
+    pub scope_fields: Vec<&'static str>,
 }
 
 impl IndexDescriptor {
@@ -168,6 +171,20 @@ impl IndexDescriptor {
                 return Err(FrameworkError::param(format!(
                     "searchable attribute '{}' must be text",
                     attribute.name
+                )));
+            }
+        }
+        if self.scope.is_some() == self.scope_fields.is_empty() {
+            return Err(FrameworkError::param(format!(
+                "index '{}' must declare scope and scope_fields together",
+                self.name
+            )));
+        }
+        for field in &self.scope_fields {
+            if !self.attribute(field)?.filterable {
+                return Err(FrameworkError::param(format!(
+                    "scope field '{field}' of index '{}' must be filterable",
+                    self.name
                 )));
             }
         }

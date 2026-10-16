@@ -282,9 +282,9 @@ impl RecommendationEvent {
         })
     }
 }
-/// The scope is a policy over filterable attributes, so a target's access boundary at
-/// record time is that policy's guest filter plus the target's own filterable values: later
-/// derivation can evaluate any viewer against them after the row changes or disappears.
+/// The scope is a policy over the index's scope fields, so a target's access boundary at
+/// record time is that policy's guest filter plus the target's own values for those fields:
+/// later derivation can evaluate any viewer against them after the row changes or goes.
 pub(crate) fn access_scope(
     descriptor: &crate::search::IndexDescriptor,
     document: &crate::search::SearchDocument,
@@ -292,15 +292,9 @@ pub(crate) fn access_scope(
     let policy = crate::search::apply_scope(descriptor, &Viewer::Guest, None)?
         .unwrap_or(crate::Filter::And(Vec::new()));
     let values = descriptor
-        .attributes
+        .scope_fields
         .iter()
-        .filter(|attribute| descriptor.scope.is_some() && attribute.filterable)
-        .filter_map(|attribute| {
-            document
-                .attributes
-                .get(&attribute.name)
-                .map(|value| (attribute.name.as_str(), value))
-        })
+        .filter_map(|field| document.attributes.get(*field).map(|value| (*field, value)))
         .collect::<std::collections::BTreeMap<_, _>>();
     serde_json::to_value(serde_json::json!({ "policy": policy, "values": values }))
         .map_err(|e| FrameworkError::internal(format!("serialize recommendation scope: {e}")))

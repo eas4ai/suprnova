@@ -576,7 +576,7 @@ mod backend {
                 "Note::search(&search)",
                 r#".highlight(["title", "body"])"#,
                 "pub highlight: Option<NoteHighlight>",
-                r#"#[searchable(index = "notes", scope = "own_notes")]"#,
+                r#"#[searchable(index = "notes", scope = "own_notes", scope_fields("user_id"))]"#,
             ] {
                 assert!(
                     contains(
@@ -596,7 +596,7 @@ mod backend {
             let model = app.read("src/models/note.rs");
             assert!(contains(
                 &model,
-                r#"#[searchable(index = "notes", scope = "own_notes")]"#
+                r#"#[searchable(index = "notes", scope = "own_notes", scope_fields("user_id"))]"#
             ));
             for attribute in [
                 "#[searchable(text)]",

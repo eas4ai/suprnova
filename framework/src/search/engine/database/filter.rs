@@ -404,6 +404,7 @@ mod tests {
             search_touches: Vec::new(),
             settings: IndexSettings::default,
             scope: None,
+            scope_fields: vec![],
         }
     }
 

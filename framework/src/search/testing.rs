@@ -125,6 +125,7 @@ pub mod conformance {
             search_touches: vec![],
             settings,
             scope: None,
+            scope_fields: vec![],
         }
     }
     fn document(
