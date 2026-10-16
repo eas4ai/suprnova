@@ -1,0 +1,107 @@
+APP_NAME="Suprnova Application"
+APP_ENV=local
+APP_DEBUG=true
+APP_URL=http://localhost:8765
+
+# 32-byte AES-256 key (URL-safe base64, no padding). Generate one with
+# `suprnova key:generate` and copy it into your `.env`. Required in
+# production - Suprnova fails closed on boot when APP_ENV is not
+# local/dev/test and APP_KEY is unset.
+APP_KEY=
+
+# Backend + Vite ports. Distinctive defaults to dodge the universally
+# squatted 8080/5173; `suprnova serve` scans upward if they're busy.
+SERVER_HOST=127.0.0.1
+SERVER_PORT=8765
+
+VITE_PORT=5765
+
+# SUPRNOVA_FRONTEND=svelte   # svelte | react | vue - which frontend the HTML shell renders; the scaffolded .env sets it for you
+
+# Response security. Balanced includes a fresh CSP nonce for HTML scripts.
+SECURITY_HEADERS=balanced
+SECURITY_HEADERS_CSP_REPORT_ONLY=false
+# SECURITY_HEADERS_CSP_REPORT_TO=https://reports.example.com/csp
+SECURITY_HEADERS_HSTS_PRELOAD=false
+
+# Database (SQLite by default, change to postgres://user:pass@localhost:5432/dbname for PostgreSQL)
+DATABASE_URL=sqlite://./database.db
+DB_MAX_CONNECTIONS=10
+DB_MIN_CONNECTIONS=1
+DB_CONNECT_TIMEOUT=30
+DB_LOGGING=false
+
+# Pool liveness. Unset means sqlx's defaults: connections are closed
+# after 600 idle seconds, recycled after 1800 seconds, and pinged before
+# every checkout. Raise the ping threshold instead of pinging on every
+# acquire when checkout latency matters. Set an idle or lifetime value to
+# 0 to disable that form of reaping.
+# DB_IDLE_TIMEOUT=600
+# DB_MAX_LIFETIME=1800
+# DB_ACQUIRE_TIMEOUT=30
+# DB_TEST_BEFORE_ACQUIRE=true
+# DB_PING_AFTER_IDLE=30
+
+# Session
+SESSION_LIFETIME=120
+SESSION_COOKIE=suprnova_session
+SESSION_SECURE=false
+# Cookie path. Unset, the session and CSRF cookies take the public root
+# of each request: `/`, or `/billing` behind a proxy that serves the app
+# there. Set it only to pin one path.
+# SESSION_PATH=/
+SESSION_SAME_SITE=Lax
+# Cookie-name prefix for the session and remember-me cookies.
+# "__Host-" is the production hardening: the browser refuses the cookie
+# unless it is Secure, Path=/, and Domain-less, so a compromised sibling
+# subdomain cannot shadow it. It requires HTTPS (SESSION_SECURE=true)
+# and is incompatible with SESSION_DOMAIN. Leave empty for local HTTP
+# development - with SESSION_SECURE=false a prefixed cookie would be
+# silently dropped by the browser.
+SESSION_COOKIE_PREFIX=
+
+# Mail
+#
+# These are the names the framework's transport actually reads. Leave the
+# credentials unset for a local catcher (maildev / mailpit / mailhog on
+# 1025); set BOTH MAIL_SMTP_USER and MAIL_SMTP_PASS for authenticated
+# STARTTLS. MAIL_SMTP_ENCRYPTION is derived from them when left blank -
+# set it to `tls` for a relay expecting implicit TLS on 465. Production
+# refuses to boot on an unencrypted connection.
+MAIL_DRIVER=smtp
+MAIL_SMTP_HOST=localhost
+MAIL_SMTP_PORT=1025
+MAIL_SMTP_USER=
+MAIL_SMTP_PASS=
+MAIL_SMTP_ENCRYPTION=
+
+# Required. The auth flows (password reset, email verification) refuse to
+# send without a real from-address.
+MAIL_FROM=hello@example.com
+MAIL_FROM_NAME="Suprnova App"
+
+# RenderCache (Tier 0). `RENDER_CACHE_ENABLED` is the master switch and
+# defaults to true when unset; anything other than `false` or `0` enables
+# it. Setting it to `false` makes `live::routes_with_render_cache` a no-op:
+# the router is returned untouched and nothing is probed or installed.
+# `RENDER_CACHE_L1_DIR` names a directory this process owns for the
+# file-backed second tier; leave it empty for the in-process tier alone.
+RENDER_CACHE_ENABLED=true
+RENDER_CACHE_L1_DIR=
+
+# The database driver is the default and needs no external search service.
+SEARCH_DRIVER=database
+
+# Error reporting. Copy a project's DSN from Rustrak, Sentry or GlitchTip.
+# No DSN sends nothing; logs, transactions and browser reports are opt-in.
+# REPORTING_DRIVER=sentry
+# REPORTING_DSN=
+# REPORTING_RELEASE=
+# REPORTING_SEND_PII=false
+# REPORTING_LOGS=off
+# REPORTING_TRACES_SAMPLE_RATE=0
+# Live reports browser errors to this public DSN.
+# REPORTING_PUBLIC_DSN=
+# Inertia kits read this public DSN at build time; the security policy
+# reads it from this file too and allows the tracker connection.
+# VITE_REPORTING_DSN=
