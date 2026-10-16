@@ -1,0 +1,40 @@
+@layer suprnova-ui {
+  .sn-search-box {
+    position: relative;
+    display: grid;
+    gap: var(--sn-space-2);
+  }
+  .sn-search-box-listbox {
+    margin: 0;
+    padding: var(--sn-space-1);
+    max-block-size: var(--sn-space-measure);
+    overflow: auto;
+    list-style: none;
+    border: var(--sn-state-border-width) solid var(--sn-color-border);
+    border-radius: var(--sn-radius-md);
+    background: var(--sn-color-surface-raised);
+    box-shadow: var(--sn-shadow-md);
+  }
+  .sn-search-box-listbox[hidden] {
+    display: none;
+  }
+  .sn-search-box-option {
+    display: grid;
+    gap: var(--sn-space-1);
+    padding: var(--sn-space-2) var(--sn-space-3);
+    cursor: pointer;
+    border-radius: var(--sn-radius-sm);
+  }
+  .sn-search-box-option[aria-selected="true"],
+  .sn-search-box-option:hover {
+    background: var(--sn-color-surface-sunken);
+    outline: var(--sn-state-outline-width) solid var(--sn-color-focus-ring);
+  }
+  .sn-search-box-field {
+    display: block;
+  }
+  .sn-search-box-facets {
+    display: grid;
+    gap: var(--sn-space-2);
+  }
+}
