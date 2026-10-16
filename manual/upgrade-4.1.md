@@ -19,12 +19,12 @@ the new middleware. New full-stack scaffolds register it automatically.
 1. Point application dependencies and the CLI at `v4.1.0`:
 
    ```toml
-   suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.1.0" }
+   suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.2.0" }
    ```
 
    ```bash
    cargo update -p suprnova
-   cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v4.1.0 suprnova-cli
+   cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v4.2.0 suprnova-cli
    cargo check --all-targets
    ```
 
@@ -47,7 +47,7 @@ and lists the ones it keeps. Add `reporting-sentry` to that list in
 `Cargo.toml`, or the `sentry` driver is not compiled in:
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.1.0", default-features = false, features = [
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.2.0", default-features = false, features = [
     # ...the features already listed...
     "reporting-sentry",
 ] }
