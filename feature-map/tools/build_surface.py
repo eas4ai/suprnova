@@ -100,6 +100,7 @@ PATH_RULES = {
     "framework/src/queue/": "queues",
     "framework/src/rate_limit/": "rate-limiting",
     "framework/src/redis_facade/": "redis",
+    "framework/src/reporting/": "error-reporting",
     "framework/src/strings/": "strings",
     "framework/src/render_cache/providers/": "render-cache-deployment",
     "framework/src/render_cache/ledger": "render-cache-deployment",
@@ -120,6 +121,7 @@ PATH_RULES = {
     "framework/src/schedule/": "scheduling",
     "framework/src/search/": "search",
     "framework/src/recommendations/": "recommendations",
+    "framework/src/security_headers/": "security-headers",
     "framework/src/seed/": "seeding",
     "framework/src/server.rs": "lifecycle",
     "framework/src/session/": "session",
@@ -169,6 +171,7 @@ MACROS = {
     "InputNames": "data", "authorize": "authorization",
     "RouteBinding": "routing", "resource": "routing", "api_resource": "routing",
     "concurrent_task": "concurrency", "document": "mongodb", "inertia_root": "frontend-inertia-responses",
+    "Searchable": "search",
 }
 # External crates re-exported by `suprnova`.
 EXTERNAL = {
@@ -202,6 +205,7 @@ CLI_RULES = [  # (binary, command prefix, chapter)
     ("suprnova", "db:seed", "seeding"), ("suprnova", "model:prune", "eloquent"),
     ("suprnova", "queue:", "queues"),
     ("console", "render-cache:", "render-cache-operations"), ("console", "__suprnova:live-tool", "live"),
+    ("console", "search:", "search"), ("console", "recommendations:", "recommendations"),
 ]
 ENDPOINT_RULES = [("/_suprnova/health", "deployment"), ("/_suprnova/lang", "localization"),
                   ("/__live", "live"), ("/suprnova-ui", "live"), ("/webhooks/payments", "payments"),

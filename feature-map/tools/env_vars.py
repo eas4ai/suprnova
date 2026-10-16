@@ -3,9 +3,11 @@
 Candidates are every SCREAMING_SNAKE string literal in non-test source.
 A candidate is confirmed when it reaches an env-reading call: it sits on
 the same logical statement as a callee whose name mentions env/var, or it is
-the value of a constant that does. Code the CLI scaffolds counts too, and so
-do `${VAR}` interpolations in the docker templates it writes. Every rejected
-candidate is reported, so nothing is dropped silently.
+the value of a constant that does. A typed `Config::resolve_prefixed::<T>`
+read names one variable per field of `T`: the prefix plus the field name in
+upper case. Code the CLI scaffolds counts too, and so do `${VAR}`
+interpolations in the docker templates it writes. Every rejected candidate is
+reported, so nothing is dropped silently.
 """
 import json
 import re
@@ -62,6 +64,10 @@ def envish_callees(stmt: str, readers=frozenset()) -> bool:
     return False
 
 
+# `let read = crate::config::try_env_required::<String>;` makes `read` a reader.
+ALIAS = re.compile(
+    r'\blet\s+([a-z_][a-z0-9_]*)\s*=\s*(?:[A-Za-z_][A-Za-z0-9_]*::)*([A-Za-z_][A-Za-z0-9_]*)\s*(?:::<[^;]*>)?\s*;'
+)
 FN_DEF = re.compile(r'\bfn\s+([a-z_][a-z0-9_]*)\s*(?:<[^>{]*>)?\s*\(')
 CLOSURE = re.compile(r'\blet\s+([a-z_][a-z0-9_]*)\s*=\s*(?:move\s+)?\|')
 FN_PARAM = re.compile(r'\b([a-z_][a-z0-9_]*)\s*:\s*(?:&(?:\'\w+\s+)?(?:dyn|impl)|impl|&?\s*[A-Z])\s*Fn(?:Mut|Once)?\s*\(\s*&(?:\'\w+\s+)?str')
@@ -71,6 +77,7 @@ GENERIC_FN = re.compile(r'\b([A-Z])\s*:\s*Fn(?:Mut|Once)?\s*\(\s*&(?:\'\w+\s+)?s
 def file_readers(text: str) -> set:
     """Names in this file that lead to an env read (fixed point)."""
     readers = set(m.group(1) for m in FN_PARAM.finditer(text))
+    readers.update(m.group(1) for m in ALIAS.finditer(text) if base_reader(m.group(2)))
     for g in GENERIC_FN.finditer(text):
         for pm in re.finditer(r'\b([a-z_][a-z0-9_]*)\s*:\s*&?' + g.group(1) + r'\b', text):
             readers.add(pm.group(1))
@@ -141,6 +148,37 @@ for crate, f, text in files:
         if key in const_hits and LIT.fullmatch(f'"{value}"'):
             ln = text[: m.start()].count("\n") + 1
             found.setdefault(value, set()).add((crate, str(rel), ln))
+
+# `Config::resolve_prefixed::<T>("PREFIX_")` deserializes T's fields from PREFIX_ + FIELD
+# (envy, framework/src/config/typed.rs). The struct is read from the same file.
+PREFIXED = re.compile(r'resolve_prefixed::<\s*([A-Z][A-Za-z0-9_]*)\s*>\s*\(\s*"([A-Z][A-Z0-9_]*)"')
+FIELD = re.compile(r'^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z_][a-z0-9_]*)\s*:')
+RENAME = re.compile(r'#\[serde\([^)]*\brename\s*=\s*"([^"]+)"')
+for crate, f, text in files:
+    rel = f.relative_to(ROOT)
+    for m in PREFIXED.finditer(text):
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        if text[line_start:m.start()].lstrip().startswith("//"):
+            continue  # a doc example, not a read
+        struct = re.search(r'\bstruct\s+' + re.escape(m.group(1)) + r'\s*\{', text)
+        if not struct:
+            sys.exit(f"env_vars: {rel}: resolve_prefixed::<{m.group(1)}> names a struct not defined in this file")
+        body = text[struct.end():_match_brace(text, struct.end() - 1)]
+        header = text[max(0, struct.start() - 200):struct.start()]
+        if "flatten" in body or "rename_all" in header.rsplit("}", 1)[-1]:
+            sys.exit(f"env_vars: {rel}: {m.group(1)} uses serde flatten or rename_all, which this extractor does not model")
+        ln = text[: m.start()].count("\n") + 1
+        rename = None
+        for line in body.splitlines():
+            renamed = RENAME.search(line)
+            if renamed:
+                rename = renamed.group(1)
+                continue
+            field = FIELD.match(line)
+            if field:
+                name = m.group(2) + (rename or field.group(1)).upper()
+                found.setdefault(name, set()).add((crate, str(rel), ln))
+                rename = None
 
 # Generated compose files read `${VAR}` / `${VAR:-default}` from the shell or .env.
 COMPOSE_VAR = re.compile(r'\$\{([A-Z][A-Z0-9_]*)(?::?-[^}]*)?\}')
