@@ -384,3 +384,88 @@ async fn text_provider_refuses_a_profile_claiming_media_capabilities() {
     assert!(error.contains("SEARCH_EMBED_MODEL"));
     assert!(error.contains("image"));
 }
+
+#[tokio::test]
+async fn prepared_input_is_cut_to_the_profile_context() {
+    let server = server(vec![
+        Reply::vectors(vec![vec![1., 0.]]),
+        Reply::vectors(vec![vec![1., 0.]]),
+    ])
+    .await;
+    let mut profile = suprnova::search::FakeEmbedder::new(2)
+        .unwrap()
+        .profile()
+        .clone();
+    profile.max_tokens = 16;
+    profile.query_prefix = "query: ".into();
+    let embedder = HttpEmbedder::with_profile(config(&server.url), Some(profile))
+        .await
+        .unwrap();
+    embedder.embed_query(&"é".repeat(40)).await.unwrap();
+    embedder
+        .embed_documents(&[doc(&"rust ".repeat(40))])
+        .await
+        .unwrap();
+    let seen = server.seen.lock().unwrap();
+    // Sixteen tokens less the four reserved for special tokens: twelve bytes, cut on a
+    // character boundary.
+    assert_eq!(seen[0].body["input"], json!(["query: éé"]));
+    let document = seen[1].body["input"][0].as_str().unwrap();
+    assert!(!document.is_empty() && document.len() <= 12, "{document}");
+}
+
+#[tokio::test]
+async fn a_named_tokenizer_cuts_input_at_the_exact_token_count() {
+    let server = server(vec![
+        Reply::vectors(vec![vec![1., 0.]]),
+        Reply::vectors(vec![vec![1., 0.]]),
+    ])
+    .await;
+    let mut profile = suprnova::search::FakeEmbedder::new(2)
+        .unwrap()
+        .profile()
+        .clone();
+    profile.max_tokens = 16;
+    profile.query_prefix = "query: ".into();
+    let mut options = config(&server.url);
+    // A word-level tokenizer with no special tokens: one token per whitespace word.
+    options.tokenizer = Some(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/search/fixtures/tokenizer.json"),
+    );
+    let embedder = HttpEmbedder::with_profile(options, Some(profile))
+        .await
+        .unwrap();
+    embedder.embed_query(&"low ".repeat(40)).await.unwrap();
+    embedder
+        .embed_documents(&[doc(&"high ".repeat(40))])
+        .await
+        .unwrap();
+    let seen = server.seen.lock().unwrap();
+    let query = seen[0].body["input"][0].as_str().unwrap();
+    assert!(query.starts_with("query: low"), "{query}");
+    assert_eq!(query.split_whitespace().count(), 16, "{query}");
+    let document = seen[1].body["input"][0].as_str().unwrap();
+    assert_eq!(document.split_whitespace().count(), 16, "{document}");
+    assert!(!document.ends_with(' '), "{document}");
+}
+
+#[tokio::test]
+async fn an_unreadable_tokenizer_fails_at_boot_naming_its_setting() {
+    let mut options = config("http://localhost:1234/v1");
+    options.tokenizer = Some("/nonexistent/tokenizer.json".into());
+    let error = HttpEmbedder::with_profile(
+        options,
+        Some(
+            suprnova::search::FakeEmbedder::new(2)
+                .unwrap()
+                .profile()
+                .clone(),
+        ),
+    )
+    .await
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(error.contains("SEARCH_EMBED_TOKENIZER"), "{error}");
+}

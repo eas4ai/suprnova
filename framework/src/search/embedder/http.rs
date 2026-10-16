@@ -8,7 +8,12 @@ use reqwest::{
     header::{AUTHORIZATION, HeaderValue},
 };
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, SystemTime};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
+use tokenizers::Tokenizer;
 
 /// Resolve deployment settings once, before any request or tenant can supply a destination.
 /// This type deliberately has no Debug implementation because it contains a credential.
@@ -34,6 +39,9 @@ pub struct HttpEmbedderConfig {
     pub query_prefix: Option<String>,
     /// Unknown models may declare their document preparation without application glue.
     pub document_template: Option<String>,
+    /// The model's own `tokenizer.json` makes the context cut exact; without it the cut is in
+    /// bytes, which never exceeds the context but keeps less text.
+    pub tokenizer: Option<PathBuf>,
 }
 impl Default for HttpEmbedderConfig {
     fn default() -> Self {
@@ -48,6 +56,7 @@ impl Default for HttpEmbedderConfig {
             retries: 3,
             query_prefix: None,
             document_template: None,
+            tokenizer: None,
         }
     }
 }
@@ -64,6 +73,7 @@ struct Variables {
     retries: Option<String>,
     query_prefix: Option<String>,
     document_template: Option<String>,
+    tokenizer: Option<String>,
 }
 impl HttpEmbedderConfig {
     /// Registered configuration wins over environment settings, matching the framework's boot pattern.
@@ -99,6 +109,7 @@ impl HttpEmbedderConfig {
             retries: parse(raw.retries, default.retries, "SEARCH_EMBED_RETRIES")?,
             query_prefix: raw.query_prefix,
             document_template: raw.document_template,
+            tokenizer: raw.tokenizer.map(PathBuf::from),
         })
     }
     fn validate(&self) -> Result<Url, FrameworkError> {
@@ -163,6 +174,8 @@ pub struct HttpEmbedder {
     config: HttpEmbedderConfig,
     profile: ModelProfile,
     native_profile: ModelProfile,
+    tokenizer: Option<Arc<Tokenizer>>,
+    special_tokens: usize,
 }
 #[derive(Serialize)]
 struct WireRequest<'a> {
@@ -191,7 +204,8 @@ impl HttpEmbedder {
         Self::with_profile(config, None).await
     }
     /// Explicit profiles permit deployments to declare context and Matryoshka capabilities.
-    /// The generic HTTP protocol has no tokenizer metadata; remote tokenization remains service-owned.
+    /// The generic HTTP protocol has no tokenizer metadata, so the deployment names the model's
+    /// `tokenizer.json` for an exact context cut.
     pub async fn with_profile(
         config: HttpEmbedderConfig,
         profile: Option<ModelProfile>,
@@ -210,6 +224,13 @@ impl HttpEmbedder {
             value.set_sensitive(true);
         }
         let client = crate::http_client::client_for(true, Some(Duration::from_secs(10)))?;
+        let (tokenizer, special_tokens) = match &config.tokenizer {
+            Some(path) => {
+                let (tokenizer, special_tokens) = load_tokenizer(path)?;
+                (Some(Arc::new(tokenizer)), special_tokens)
+            }
+            None => (None, CONTEXT_RESERVE),
+        };
         let known = profile.or_else(|| profiles::profile(&config.model).ok());
         let unknown = known.is_none();
         let profile = known.unwrap_or_else(|| {
@@ -227,6 +248,8 @@ impl HttpEmbedder {
             native_profile: profile.clone(),
             profile,
             config,
+            tokenizer,
+            special_tokens,
         };
         if unknown {
             if let Some(prefix) = &provider.config.query_prefix {
@@ -258,7 +281,42 @@ impl HttpEmbedder {
         provider.profile = provider
             .native_profile
             .with_dimensions(provider.config.dimensions)?;
+        if provider.profile.max_tokens <= provider.special_tokens {
+            return Err(FrameworkError::param(format!(
+                "embedding model {} max_tokens must exceed the {} tokens reserved for special tokens",
+                provider.profile.id, provider.special_tokens
+            )));
+        }
         Ok(provider)
+    }
+    /// The service rejects or silently drops input past the model's context, so every prepared
+    /// input is cut here. With the model's tokenizer the cut falls after the last token that
+    /// fits; without it the cut is in UTF-8 bytes, because every token a WordPiece,
+    /// SentencePiece or byte-level BPE tokenizer emits covers at least one input byte.
+    fn within_context(&self, text: String) -> Result<String, FrameworkError> {
+        let budget = self.profile.max_tokens - self.special_tokens;
+        let end = match &self.tokenizer {
+            Some(tokenizer) => {
+                let encoding = tokenizer.encode(text.as_str(), false).map_err(|e| {
+                    FrameworkError::param(format!(
+                        "SEARCH_EMBED_TOKENIZER could not encode input: {e}"
+                    ))
+                })?;
+                if encoding.len() <= budget {
+                    return Ok(text);
+                }
+                encoding.get_offsets()[budget - 1].1
+            }
+            None if text.len() <= budget => return Ok(text),
+            None => budget,
+        };
+        let mut end = end.min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut text = text;
+        text.truncate(end);
+        Ok(text)
     }
     fn diagnostic(&self, status: u16, body: &[u8]) -> FrameworkError {
         let text = String::from_utf8_lossy(body);
@@ -383,6 +441,23 @@ impl HttpEmbedder {
         Ok(out)
     }
 }
+/// Room for the special tokens a model adds around its input when no tokenizer says how many.
+const CONTEXT_RESERVE: usize = 4;
+
+/// Truncation and padding in the file would hide the input's real length, so both are cleared.
+fn load_tokenizer(path: &std::path::Path) -> Result<(Tokenizer, usize), FrameworkError> {
+    let failed = |e: &dyn std::fmt::Display| {
+        FrameworkError::param(format!(
+            "SEARCH_EMBED_TOKENIZER could not load {}: {e}",
+            path.display()
+        ))
+    };
+    let mut tokenizer = Tokenizer::from_file(path).map_err(|e| failed(&e))?;
+    tokenizer.with_truncation(None).map_err(|e| failed(&e))?;
+    tokenizer.with_padding(None);
+    let special_tokens = tokenizer.encode("", true).map_err(|e| failed(&e))?.len();
+    Ok((tokenizer, special_tokens))
+}
 fn retry_after(value: &str) -> Option<Duration> {
     value
         .trim()
@@ -407,12 +482,12 @@ impl Embedder for HttpEmbedder {
     ) -> Result<Vec<Embedding>, FrameworkError> {
         let texts = inputs
             .iter()
-            .map(|input| self.profile.document_input(input))
+            .map(|input| self.within_context(self.profile.document_input(input)?))
             .collect::<Result<Vec<_>, _>>()?;
         self.embed(&texts).await
     }
     async fn embed_query(&self, text: &str) -> Result<Embedding, FrameworkError> {
-        self.embed(&[self.profile.query_input(text)?])
+        self.embed(&[self.within_context(self.profile.query_input(text)?)?])
             .await?
             .into_iter()
             .next()

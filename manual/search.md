@@ -499,8 +499,13 @@ are followed. `SEARCH_EMBED_API_KEY` is a bearer key sent only to the pinned
 destination. Defaults are 64 inputs per batch, a 30-second timeout including
 the response body, 16 MiB per response, and three additional attempts for 429
 or 5xx only. Retries are capped at 16; `Retry-After` is bounded. HTTP uses no
-provider-specific fields. Remote tokenization and exact token truncation are
-owned by the service because this protocol supplies no tokenizer metadata.
+provider-specific fields. Every prepared input is cut to the model's context
+before it is sent. Set `SEARCH_EMBED_TOKENIZER` to the model's own
+`tokenizer.json`, published beside the weights in its Hugging Face repository,
+and the cut falls after the last token that fits. Without it the protocol
+gives no way to count tokens, so the cut is in UTF-8 bytes, four short of the
+context: it never exceeds the context, and it keeps about a quarter of what
+the model can read in English text. Suprnova never downloads the file.
 
 ## Reranking
 
@@ -551,9 +556,14 @@ native limits, so short words or stop words can match differently by dialect.
 For a database index's semantic leg, register a [Vector driver](vector.md)
 under the index name, or set `SEARCH_VECTOR_STORE` to a registered store name.
 You can use any Vector driver. Points carry generation and content identities;
-durable pending delivery repairs interrupted writes. Retrieval over-fetches
-four times the fusion depth and applies SQL filters to the candidate keys.
-Keep the store persistent when your search index must survive process exits.
+durable pending delivery repairs interrupted writes. Retrieval asks the store
+for four times the fusion depth, applies the SQL filter and scope to those
+keys, and doubles the request until the filtered depth is complete or the
+store is exhausted. A Vector driver cannot filter, so a narrow filter, such as
+one user's private documents among many users' documents, can read most of
+the store on every semantic query. Qdrant applies the filter inside its own
+index, so prefer it for large, narrowly scoped data. Keep the store persistent
+when your search index must survive process exits.
 
 ### Qdrant
 

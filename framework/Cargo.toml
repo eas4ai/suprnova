@@ -188,6 +188,10 @@ url = "2"
 tempfile = "3"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "query", "multipart"] }
 getrandom = "0.4.2"
+# The HTTP embedder cuts input at the model's own token count when the deployment names the
+# model's tokenizer.json (SEARCH_EMBED_TOKENIZER). Oniguruma builds from bundled source, the
+# same backend fastembed selects, so no build step downloads anything.
+tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
 fastembed = { version = "7", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"], optional = true }
 hf-hub = { version = "0.5", default-features = false, features = ["ureq", "rustls-tls"], optional = true }
 tokio-util = { version = "0.7.18", features = ["time"] }

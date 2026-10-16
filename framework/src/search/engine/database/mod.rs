@@ -1830,22 +1830,28 @@ impl SearchEngine for DatabaseSearchEngine {
         let store = vector_store(index.name)?;
         let available = store.count().await?;
         let mut limit = limit;
-        let mut candidates = loop {
+        let mut checked = BTreeSet::new();
+        let mut candidates = Vec::new();
+        loop {
             let matches = store.similar(vector.to_vec(), limit).await?;
             let exhausted = matches.len() < limit || limit >= available;
-            // Batches keep each statement's bound ids under every dialect's parameter limit.
-            let mut candidates = Vec::new();
-            for batch in matches.chunks(SEMANTIC_BATCH) {
+            // Each id is checked once across rounds, and batches keep each statement's bound
+            // ids under every dialect's parameter limit.
+            let unchecked = matches
+                .into_iter()
+                .filter(|m| checked.insert(m.id.clone()))
+                .collect::<Vec<_>>();
+            for batch in unchecked.chunks(SEMANTIC_BATCH) {
                 candidates.extend(
                     self.semantic_candidates(dialect, &table, index, generation, filter, batch)
                         .await?,
                 );
             }
             if candidates.len() >= depth || exhausted {
-                break candidates;
+                break;
             }
             limit = limit.saturating_mul(2).min(available);
-        };
+        }
         candidates.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
