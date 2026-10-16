@@ -94,9 +94,9 @@ pub struct ExpandedQuery {
 /// Keeping the original separately lets renderers apply prefix matching precisely.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExpandedTerm {
-    /// The user's normalized word, or normalized multi-word synonym source.
+    /// The source word or multi-word synonym source, normalized for framework engines.
     pub original: String,
-    /// Normalized exact alternatives; strings containing spaces are phrase alternatives.
+    /// Exact alternatives, including the source; spaces denote phrase alternatives.
     pub alternatives: Vec<String>,
     /// Prefix matching applies to the original, never to corrected alternatives.
     pub prefix: bool,
@@ -140,28 +140,47 @@ pub fn expand(
     vocabulary: &Vocabulary,
     cap: usize,
 ) -> Result<ExpandedQuery, FrameworkError> {
-    expand_with(query, settings, vocabulary, cap, &tokenize)
+    expand_with(query, settings, vocabulary, cap, &|text| {
+        text.unicode_words()
+            .flat_map(|source| {
+                tokenize(source)
+                    .into_iter()
+                    .map(move |normalized| ExpansionToken {
+                        source: normalized.clone(),
+                        normalized,
+                        source_length: source.chars().count(),
+                    })
+            })
+            .collect()
+    })
 }
 
-// Native engines must keep query scripts consistent with their text indexes.
+// Native engines send source text to their tokenizer and use normalized words only
+// to look up expansions. Framework engines keep their existing normalized source.
+pub(crate) struct ExpansionToken {
+    pub source: String,
+    pub normalized: String,
+    pub source_length: usize,
+}
+
 pub(crate) fn expand_with(
     query: &QueryText,
     settings: &QuerySettings,
     vocabulary: &Vocabulary,
     cap: usize,
-    tokenize: &dyn Fn(&str) -> Vec<String>,
+    tokens: &dyn Fn(&str) -> Vec<ExpansionToken>,
 ) -> Result<ExpandedQuery, FrameworkError> {
     if cap == 0 {
         return Err(FrameworkError::param(
             "SEARCH_EXPANSION_TERMS must be positive",
         ));
     }
-    let tokens = query
+    let input = query
         .words
         .iter()
         .chain(query.phrases.iter().flatten())
         .chain(&query.negatives);
-    let (bytes, count) = tokens.fold((0usize, 0usize), |(bytes, count), token| {
+    let (bytes, count) = input.fold((0usize, 0usize), |(bytes, count), token| {
         (bytes.saturating_add(token.len()), count.saturating_add(1))
     });
     if query.original.len() > MAX_QUERY_BYTES || bytes > MAX_QUERY_BYTES || count > MAX_QUERY_TOKENS
@@ -170,21 +189,27 @@ pub(crate) fn expand_with(
             "search query exceeds 65536 bytes or 1024 tokens",
         ));
     }
+    let tokenize = |text: &str| {
+        tokens(text)
+            .into_iter()
+            .map(|token| token.normalized)
+            .collect::<Vec<_>>()
+    };
     let stop: BTreeSet<_> = settings
         .stop_words
         .iter()
         .map(|word| tokenize(word).join(" "))
         .collect();
-    let (words, source_lengths): (Vec<_>, Vec<_>) = query
+    let sources: Vec<_> = query
         .words
         .iter()
-        .flat_map(|word| word.unicode_words())
-        .flat_map(|source| {
-            let length = source.chars().count();
-            tokenize(source).into_iter().map(move |word| (word, length))
-        })
-        .filter(|(word, _)| !stop.contains(word))
-        .unzip();
+        .flat_map(|word| tokens(word))
+        .filter(|token| !stop.contains(&token.normalized))
+        .collect();
+    let words: Vec<_> = sources
+        .iter()
+        .map(|token| token.normalized.clone())
+        .collect();
     let synonyms: Vec<_> = settings
         .synonyms
         .iter()
@@ -205,10 +230,11 @@ pub(crate) fn expand_with(
         let width = synonym_width(&words[at..], &synonyms);
         let original = words[at..at + width].join(" ");
         let mut alternatives = synonym_targets(&original, &synonyms, vocabulary);
-        let budget = correction_budget(&original, settings, width, source_lengths[at], tokenize);
+        let source_length = sources[at].source_length;
+        let budget = correction_budget(&original, settings, width, source_length, &tokenize);
         let corrections = if budget > 0
             && at < MAX_CORRECTION_TOKENS
-            && source_lengths[at] <= MAX_CORRECTION_SCALARS
+            && source_length <= MAX_CORRECTION_SCALARS
             && original.chars().take(MAX_CORRECTION_SCALARS + 1).count() <= MAX_CORRECTION_SCALARS
         {
             vocabulary.within(&original, budget)
@@ -221,31 +247,36 @@ pub(crate) fn expand_with(
             .map(|(word, _)| word.clone())
             .collect();
         alternatives.extend(corrections);
-        let alternatives = rank_alternatives(&original, alternatives, cap);
+        let mut alternatives = rank_alternatives(&original, alternatives, cap);
         let typo_alternatives = alternatives
             .iter()
             .filter(|word| correction_only.contains(*word))
             .cloned()
             .collect();
+        let source = sources[at..at + width]
+            .iter()
+            .map(|token| token.source.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        alternatives[0] = source.clone();
         terms.push(ExpandedTerm {
             alternatives,
             typo_alternatives,
-            original,
+            original: source,
             prefix: width == 1 && at + width == words.len(),
             required: false,
         });
         at += width;
     }
-    let phrases = expand_phrases(
-        query, &stop, &synonyms, vocabulary, cap, &mut terms, tokenize,
-    );
+    let phrases = expand_phrases(query, &stop, &synonyms, vocabulary, cap, &mut terms, tokens);
     Ok(ExpandedQuery {
         terms,
         phrases,
         negatives: query
             .negatives
             .iter()
-            .flat_map(|word| tokenize(word))
+            .flat_map(|word| tokens(word))
+            .map(|token| token.source)
             .collect(),
         typo_disabled_attributes: settings.typo_tolerance.disable_on_attributes.clone(),
     })
@@ -338,23 +369,34 @@ fn expand_phrases(
     vocabulary: &Vocabulary,
     cap: usize,
     terms: &mut Vec<ExpandedTerm>,
-    tokenize: &dyn Fn(&str) -> Vec<String>,
+    tokens: &dyn Fn(&str) -> Vec<ExpansionToken>,
 ) -> Vec<Vec<String>> {
     let mut phrases = Vec::new();
     for source in &query.phrases {
-        let phrase: Vec<_> = source
+        let phrase_tokens: Vec<_> = source
             .iter()
-            .flat_map(|word| tokenize(word))
-            .filter(|word| !stop.contains(word))
+            .flat_map(|word| tokens(word))
+            .filter(|token| !stop.contains(&token.normalized))
             .collect();
-        if phrase.is_empty() {
+        if phrase_tokens.is_empty() {
             continue;
         }
-        let original = phrase.join(" ");
+        let original = phrase_tokens
+            .iter()
+            .map(|token| token.normalized.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let phrase: Vec<_> = phrase_tokens
+            .into_iter()
+            .map(|token| token.source)
+            .collect();
         let alternatives = synonym_targets(&original, synonyms, vocabulary);
         if alternatives.keys().any(|term| term != &original) {
+            let mut alternatives = rank_alternatives(&original, alternatives, cap);
+            let original = phrase.join(" ");
+            alternatives[0] = original.clone();
             terms.push(ExpandedTerm {
-                alternatives: rank_alternatives(&original, alternatives, cap),
+                alternatives,
                 original,
                 prefix: false,
                 required: true,

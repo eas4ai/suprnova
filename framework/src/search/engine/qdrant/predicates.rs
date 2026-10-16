@@ -164,6 +164,7 @@ pub(super) fn predicate(filter: &Filter) -> Result<Condition, FrameworkError> {
     })
 }
 fn term_clause(
+    settings: &IndexSettings,
     field: &str,
     words: &str,
     term: &crate::search::ExpandedTerm,
@@ -190,7 +191,12 @@ fn term_clause(
         clauses.push(Condition::matches_text_any(field, singles.join(" ")));
     }
     if term.prefix {
-        clauses.push(Condition::matches_prefix(words, term.original.clone()));
+        let prefix = if super::native_bm25(settings) {
+            super::query_words(&term.original, settings).join(" ")
+        } else {
+            term.original.clone()
+        };
+        clauses.push(Condition::matches_prefix(words, prefix));
     }
     QFilter::should(clauses).into()
 }
@@ -212,7 +218,7 @@ fn word_clause(
             .chain(std::iter::once(&term.original))
             .any(|a| a.contains(' '))
     {
-        term_clause("__text", "__words", term, false)
+        term_clause(settings, "__text", "__words", term, false)
     } else {
         QFilter::should(
             settings
@@ -221,6 +227,7 @@ fn word_clause(
                 .iter()
                 .map(|attr| {
                     term_clause(
+                        settings,
                         &format!("__search_{}", attr.name),
                         &format!("__words_{}", attr.name),
                         term,
