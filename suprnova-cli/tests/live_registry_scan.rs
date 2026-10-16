@@ -221,6 +221,54 @@ fn reg_030_the_csp_nonce_and_error_handling_settings_are_refused() {
     );
 }
 
+/// Search's engines, embedders and rerankers are the application's to
+/// register at boot: a component that registered one could answer every
+/// search in the application, or read every query. Its baseline and
+/// conformance tools are development tools no component ships. A component
+/// still searches, and an item that reaches another host, the disk, the
+/// queue or the signed-in user carries that capability, not the database.
+#[test]
+fn reg_030_search_registration_and_tooling_are_refused() {
+    let list = allowlist::embedded().expect("the embedded allowlist parses");
+    for path in [
+        "suprnova::SearchRegistry::register_engine",
+        "suprnova::SearchRegistry::register_embedder",
+        "suprnova::SearchRegistry::register_reranker",
+        "suprnova::SearchRegistry::set_index_driver",
+        "suprnova::SearchRegistry::bootstrap",
+        "suprnova::SearchRegistry::isolated",
+        "suprnova::Search::boot",
+        "suprnova::search::boot",
+        "suprnova::search::boot::boot",
+        "suprnova::FastembedReranker::new",
+        "suprnova::FastembedReranker::register_supported",
+        "suprnova::FastembedEmbedder::new",
+        "suprnova::search::baseline::Baseline::run",
+        "suprnova::conformance::run",
+    ] {
+        assert!(
+            matches!(list.admit(path), Some(Admission::Refused { .. })),
+            "{path} must be refused; got {:?}",
+            list.admit(path)
+        );
+    }
+    for (path, capability) in [
+        ("suprnova::Search::for_index", Capability::Database),
+        ("suprnova::SearchRegistry::by_index", Capability::Database),
+        (
+            "suprnova::QdrantSearchEngine::from_url",
+            Capability::Network,
+        ),
+        ("suprnova::HttpEmbedder::new", Capability::Network),
+        ("suprnova::ModelManifest::record", Capability::Files),
+        ("suprnova::SearchIndexJob::enqueue", Capability::Queue),
+        ("suprnova::Viewer::current", Capability::Session),
+        ("suprnova::Actor::current", Capability::Session),
+    ] {
+        assert_eq!(capability_of(list, path), Some(capability), "{path}");
+    }
+}
+
 /// The engine surfaces the framework holds for the host are not a
 /// component's to name: the host ports a bootstrap installs, the trusted
 /// contexts and fingerprints the engine verifies, the snapshot key material,

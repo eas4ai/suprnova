@@ -166,6 +166,9 @@ MODULES = {
     "suprnova::validation::rule::async_rules": "database",
     "suprnova::vector::pinecone": "network",
     "suprnova::vector::qdrant": "network",
+    "suprnova::search::engine::qdrant": "network",
+    "suprnova::search::embedder::http": "network",
+    "suprnova::search::embedder::model_cache": "files",
     "suprnova::workflow::entities": "database",
     "suprnova::workflow::migrations": "database",
     "suprnova::workflow::store": "database",
@@ -176,6 +179,7 @@ MODULES = {
     "suprnova::render_cache::testing": REFUSE,
     "suprnova::crypto::testing": REFUSE,
     "suprnova::database::testing": REFUSE,
+    "suprnova::search::testing": REFUSE,
 }
 
 # Item rules, by full path, for items whose own effect differs from their
@@ -490,6 +494,29 @@ ITEMS = {
     "suprnova::VectorRegistry::install": REFUSE,
     "suprnova::testing::TestClock": REFUSE,
     "suprnova::testing::TestContainer": REFUSE,
+    # Search's engines, embedders and rerankers are the application's to
+    # register at boot: a component that registered one could answer every
+    # search in the application, or read every query.
+    "suprnova::SearchRegistry::bootstrap": REFUSE,
+    "suprnova::SearchRegistry::register_engine": REFUSE,
+    "suprnova::SearchRegistry::register_embedder": REFUSE,
+    "suprnova::SearchRegistry::register_reranker": REFUSE,
+    "suprnova::SearchRegistry::set_index_driver": REFUSE,
+    "suprnova::SearchRegistry::isolated": REFUSE,
+    "suprnova::Search::boot": REFUSE,
+    "suprnova::search::boot": REFUSE,
+    # Search's baseline loads fixtures, writes floor files and runs rival
+    # engines: the application's development tool, its settings included.
+    "suprnova::search::baseline": REFUSE,
+    # A Fastembed model downloads into a directory the caller names and runs
+    # in this process: the application configures it at boot.
+    "suprnova::FastembedEmbedder": REFUSE,
+    "suprnova::FastembedReranker": REFUSE,
+    # An index job goes to the application's queue.
+    "suprnova::SearchIndexJob": "queue",
+    # The search viewer and the recommendation actor are the signed-in user.
+    "suprnova::Viewer::current": "session",
+    "suprnova::Actor::current": "session",
 }
 
 # Item names whose effect is the same wherever they sit: a constructor that

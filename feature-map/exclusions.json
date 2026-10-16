@@ -54,12 +54,112 @@
   "ENCRYPTION_MASTER_KEY_BASE64": [
    "framework/src/broadcasting/pusher/config.rs:246"
   ],
+  "MYSQL_TEST_URL": [
+   "framework/src/search/commands.rs:268"
+  ],
   "PAYLOAD_CONTRACT": [
    "suprnova-cli/src/registry/scan/contract.rs:183"
+  ],
+  "PG_TEST_URL": [
+   "framework/src/search/commands.rs:267"
+  ],
+  "RECOMMEND_ENABLED": [
+   "framework/src/recommendations/config.rs:80"
+  ],
+  "RECOMMEND_HISTORY": [
+   "framework/src/recommendations/config.rs:81",
+   "framework/src/recommendations/config.rs:108"
+  ],
+  "RECOMMEND_LOCK_TTL_SECS": [
+   "framework/src/recommendations/config.rs:91",
+   "framework/src/recommendations/config.rs:114"
+  ],
+  "RECOMMEND_PEERS": [
+   "framework/src/recommendations/config.rs:82",
+   "framework/src/recommendations/config.rs:109"
+  ],
+  "RECOMMEND_POPULARITY_WINDOW": [
+   "framework/src/recommendations/config.rs:86",
+   "framework/src/recommendations/config.rs:111"
   ],
   "SCREAMING_SNAKE_CASE": [
    "suprnova-cli/src/commands/generate_types.rs:358",
    "suprnova-macros/src/serde_attrs.rs:33"
+  ],
+  "SEARCH_ANALYTICS": [
+   "framework/src/search/config.rs:259"
+  ],
+  "SEARCH_ANALYTICS_RETENTION_DAYS": [
+   "framework/src/search/config.rs:184",
+   "framework/src/search/config.rs:263"
+  ],
+  "SEARCH_ANALYTICS_VIEWER": [
+   "framework/src/search/config.rs:268"
+  ],
+  "SEARCH_BASELINE_MEILISEARCH_KEY": [
+   "framework/src/search/baseline/calibration.rs:220"
+  ],
+  "SEARCH_BASELINE_MEILISEARCH_URL": [
+   "framework/src/search/baseline/calibration.rs:201",
+   "framework/src/search/baseline/calibration.rs:219"
+  ],
+  "SEARCH_BASELINE_TYPESENSE_KEY": [
+   "framework/src/search/baseline/calibration.rs:222"
+  ],
+  "SEARCH_BASELINE_TYPESENSE_URL": [
+   "framework/src/search/baseline/calibration.rs:208",
+   "framework/src/search/baseline/calibration.rs:221"
+  ],
+  "SEARCH_BM25_AVERAGE_LENGTH": [
+   "framework/src/search/config.rs:174",
+   "framework/src/search/config.rs:252",
+   "framework/src/search/embedder/bm25.rs:22"
+  ],
+  "SEARCH_CHUNK": [
+   "framework/src/search/config.rs:170",
+   "framework/src/search/config.rs:237"
+  ],
+  "SEARCH_DRIVER": [
+   "framework/src/search/config.rs:223"
+  ],
+  "SEARCH_EMBEDDER": [
+   "framework/src/search/config.rs:229"
+  ],
+  "SEARCH_EMBED_MAX_RESPONSE_BYTES": [
+   "framework/src/search/embedder/http.rs:97",
+   "framework/src/search/embedder/http.rs:114"
+  ],
+  "SEARCH_EMBED_RETRIES": [
+   "framework/src/search/embedder/http.rs:99"
+  ],
+  "SEARCH_EMBED_TIMEOUT_SECS": [
+   "framework/src/search/embedder/http.rs:92",
+   "framework/src/search/embedder/http.rs:112"
+  ],
+  "SEARCH_EXPANSION_TERMS": [
+   "framework/src/search/config.rs:171",
+   "framework/src/search/config.rs:241"
+  ],
+  "SEARCH_FUSION_DEPTH": [
+   "framework/src/search/config.rs:173",
+   "framework/src/search/config.rs:247"
+  ],
+  "SEARCH_HITS_CAP": [
+   "framework/src/search/config.rs:172",
+   "framework/src/search/config.rs:243"
+  ],
+  "SEARCH_QUEUE": [
+   "framework/src/search/config.rs:234"
+  ],
+  "SEARCH_QUEUE_CONNECTION": [
+   "framework/src/search/config.rs:194"
+  ],
+  "SEARCH_QUEUE_NAME": [
+   "framework/src/search/config.rs:201"
+  ],
+  "SEARCH_TOMBSTONE_HOURS": [
+   "framework/src/search/config.rs:181",
+   "framework/src/search/config.rs:257"
   ],
   "SUPRNOVA_CLI_BUILD_COMMIT": [
    "suprnova-cli/src/templates/mod.rs:54"
@@ -81,6 +181,9 @@
   ],
   "VERIFY_IDENTITY": [
    "framework/src/database/schema_dump.rs:1045"
+  ],
+  "VITE_REPORTING_DSN": [
+   "framework/src/security_headers/mod.rs:607"
   ]
  },
  "rust_items_not_extracted": [
@@ -88,6 +191,6 @@
   "methods of external trait impls (Debug, Clone, Serialize, ...); the traits themselves are listed in each type's implements_external",
   "demo application code (app/), test-support crates and fixtures"
  ],
- "sibling_reexports_folded_into_aliases": 678,
- "source_rev": "a1c37a792"
+ "sibling_reexports_folded_into_aliases": 679,
+ "source_rev": "f3e691e9e"
 }
