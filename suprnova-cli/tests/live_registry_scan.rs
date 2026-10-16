@@ -171,7 +171,10 @@ fn reg_030_test_fakes_and_app_wide_hooks_are_refused() {
 #[test]
 fn reg_030_the_csp_nonce_and_error_handling_settings_are_refused() {
     let list = allowlist::embedded().expect("the embedded allowlist parses");
-    for path in ["suprnova::Request::csp_nonce", "suprnova::http::Request::csp_nonce"] {
+    for path in [
+        "suprnova::Request::csp_nonce",
+        "suprnova::http::Request::csp_nonce",
+    ] {
         assert!(
             matches!(list.admit(path), Some(Admission::Refused { .. })),
             "{path} must be refused; got {:?}",
