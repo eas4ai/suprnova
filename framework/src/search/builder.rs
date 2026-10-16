@@ -940,8 +940,11 @@ async fn prepare(
     let needed = lexical_depth(plan.offset, plan.limit, hits_cap)
         .max(plan.rerank.as_ref().map_or(0, |rerank| rerank.depth))
         .min(hits_cap);
+    // Both fusion legs keep the fusion depth on every page: a deeper leg
+    // adds contributions that reorder the fused list, and every page must be
+    // a slice of that one list.
     let depth = if ratio > 0.0 {
-        settings.query.fusion_depth.max(needed)
+        settings.query.fusion_depth
     } else {
         needed
     };

@@ -731,6 +731,37 @@ struct DecoratedEngine {
     inject_attribute: bool,
     unsafe_highlights: bool,
     index_calls: Arc<std::sync::atomic::AtomicUsize>,
+    // Fixed lexical and semantic orders by title, for fusion tests that need
+    // each leg's ranking under control.
+    leg_orders: Option<(Vec<String>, Vec<String>)>,
+}
+
+/// One leg in a scripted order, cut to the depth the builder asked for.
+fn in_leg_order(
+    mut result: suprnova::EngineResult,
+    order: &[String],
+    depth: usize,
+) -> suprnova::EngineResult {
+    let position = |candidate: &suprnova::EngineCandidate| {
+        let title = candidate
+            .document
+            .attributes
+            .get("title")
+            .and_then(AttributeValue::as_text);
+        order
+            .iter()
+            .position(|each| Some(each.as_str()) == title)
+            .unwrap_or(order.len())
+    };
+    result
+        .candidates
+        .sort_by_key(|candidate| position(candidate));
+    result.candidates.truncate(depth);
+    let count = result.candidates.len();
+    for (rank, candidate) in result.candidates.iter_mut().enumerate() {
+        candidate.score = (count - rank) as f64;
+    }
+    result
 }
 #[async_trait::async_trait]
 impl suprnova::SearchEngine for DecoratedEngine {
@@ -821,7 +852,18 @@ impl suprnova::SearchEngine for DecoratedEngine {
         q: &suprnova::EngineQuery,
     ) -> Result<suprnova::EngineResult, suprnova::FrameworkError> {
         self.query_depths.lock().unwrap().push(q.depth);
-        let mut result = self.inner.query(index, generation, q).await?;
+        let mut result = match &self.leg_orders {
+            Some((lexical, _)) => {
+                let mut every = q.clone();
+                every.depth = 1000;
+                in_leg_order(
+                    self.inner.query(index, generation, &every).await?,
+                    lexical,
+                    q.depth,
+                )
+            }
+            None => self.inner.query(index, generation, q).await?,
+        };
         for candidate in &mut result.candidates {
             if self.inject_attribute {
                 candidate.document.attributes.insert(
@@ -847,9 +889,20 @@ impl suprnova::SearchEngine for DecoratedEngine {
         depth: usize,
     ) -> Result<suprnova::EngineResult, suprnova::FrameworkError> {
         self.semantic_depths.lock().unwrap().push(depth);
-        self.inner
-            .semantic(index, generation, vector, filter, depth)
-            .await
+        match &self.leg_orders {
+            Some((_, semantic)) => Ok(in_leg_order(
+                self.inner
+                    .semantic(index, generation, vector, filter, 1000)
+                    .await?,
+                semantic,
+                depth,
+            )),
+            None => {
+                self.inner
+                    .semantic(index, generation, vector, filter, depth)
+                    .await
+            }
+        }
     }
     async fn facets(
         &self,
@@ -918,6 +971,7 @@ async fn raw_and_federated_projections_reject_undeclared_fields_returned_by_a_dr
                     inject_attribute: true,
                     unsafe_highlights: false,
                     index_calls: Arc::default(),
+                    leg_orders: None,
                 }),
             )
             .unwrap();
@@ -961,6 +1015,7 @@ async fn unsafe_native_highlights_fall_back_to_escaped_framework_formatting() {
                     inject_attribute: false,
                     unsafe_highlights: true,
                     index_calls: Arc::default(),
+                    leg_orders: None,
                 }),
             )
             .unwrap();
@@ -1269,6 +1324,7 @@ async fn unchanged_writes_skip_embedding_and_indexing_but_preserve_the_version_w
                     inject_attribute: false,
                     unsafe_highlights: false,
                     index_calls: calls.clone(),
+                    leg_orders: None,
                 }),
             )
             .unwrap();
@@ -1755,6 +1811,7 @@ async fn page_depth_contract(sqlite: bool) {
                     inject_attribute: false,
                     unsafe_highlights: false,
                     index_calls: Arc::default(),
+                    leg_orders: None,
                 }),
             )
             .unwrap();
@@ -1811,8 +1868,99 @@ async fn sqlite_pages_request_lookahead_and_refill_representatives() {
     page_depth_contract(true).await;
 }
 
+// SEARCH-004: deepening a fusion leg for a later page would add a second
+// contribution to documents the other leg ranked earlier and reorder the
+// fused list, so a page could repeat hits from the page before it.
 #[tokio::test]
-async fn hybrid_deep_pages_raise_both_fusion_legs_to_the_lookahead() {
+async fn hybrid_pages_are_slices_of_one_fused_list() {
+    let _db = database().await;
+    SearchConfig::scope(
+        config(),
+        SearchRegistry::isolated(async {
+            let lexical_depths = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let semantic_depths = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let title = |letter: &str| format!("Rust {letter}");
+            let lexical = ["A", "B", "C", "D", "E", "F", "G", "V", "W", "X", "Y", "Z"];
+            let semantic = ["Z", "Y", "X", "W", "V", "D", "E", "A", "B", "C", "F", "G"];
+            SearchRegistry::register_engine(
+                "collection",
+                Arc::new(DecoratedEngine {
+                    inner: Arc::new(CollectionEngine::new()),
+                    query_depths: lexical_depths.clone(),
+                    semantic_depths: semantic_depths.clone(),
+                    inject_attribute: false,
+                    unsafe_highlights: false,
+                    index_calls: Arc::default(),
+                    leg_orders: Some((
+                        lexical.iter().map(|letter| title(letter)).collect(),
+                        semantic.iter().map(|letter| title(letter)).collect(),
+                    )),
+                }),
+            )
+            .unwrap();
+            SearchRegistry::register_embedder("fake", Arc::new(FakeEmbedder::new(8).unwrap()))
+                .unwrap();
+            let descriptor = SearchNote::descriptor();
+            let engine = SearchRegistry::engine_for(descriptor.name).unwrap();
+            let mut settings = descriptor.index_settings();
+            settings.index_time.embedder = Some("fake".into());
+            settings.index_time.dimensions = Some(8);
+            settings.query.fusion_depth = 5;
+            settings.query.hits_cap = 20;
+            let generation = suprnova::GenerationId::new("hybrid_page_slices").unwrap();
+            engine
+                .create_generation(descriptor, &settings, &generation)
+                .await
+                .unwrap();
+            engine
+                .switch_generation(descriptor, None, generation)
+                .await
+                .unwrap();
+            for letter in lexical {
+                index(&note(&title(letter), true, 0).await).await;
+            }
+            let titles = |result: &suprnova::SearchResults<SearchNote>| {
+                result
+                    .hits
+                    .iter()
+                    .map(|hit| hit.model.title.clone())
+                    .collect::<Vec<_>>()
+            };
+            let complete = SearchNote::search("Rust")
+                .hybrid(0.5)
+                .limit(20)
+                .get()
+                .await
+                .unwrap();
+            let complete = titles(&complete);
+            assert!(complete.len() >= 6, "the fused list is {complete:?}");
+            let mut seen = Vec::new();
+            for offset in (0..complete.len()).step_by(2) {
+                lexical_depths.lock().unwrap().clear();
+                semantic_depths.lock().unwrap().clear();
+                let page = SearchNote::search("Rust")
+                    .hybrid(0.5)
+                    .offset(offset)
+                    .limit(2)
+                    .get()
+                    .await
+                    .unwrap();
+                let page = titles(&page);
+                let end = (offset + 2).min(complete.len());
+                assert_eq!(page, complete[offset..end], "page at offset {offset}");
+                assert_eq!(lexical_depths.lock().unwrap().as_slice(), [5]);
+                assert_eq!(semantic_depths.lock().unwrap().as_slice(), [5]);
+                seen.extend(page);
+            }
+            assert_eq!(seen, complete);
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn hybrid_deep_pages_keep_both_fusion_legs_at_the_fusion_depth() {
     let _db = database().await;
     SearchConfig::scope(
         config(),
@@ -1828,6 +1976,7 @@ async fn hybrid_deep_pages_raise_both_fusion_legs_to_the_lookahead() {
                     inject_attribute: false,
                     unsafe_highlights: false,
                     index_calls: Arc::default(),
+                    leg_orders: None,
                 }),
             )
             .unwrap();
@@ -1852,7 +2001,18 @@ async fn hybrid_deep_pages_raise_both_fusion_legs_to_the_lookahead() {
             for _ in 0..24 {
                 index(&note("Rust identical", true, 0).await).await;
             }
-            for (offset, limit, depth) in [(0, 2, 5), (7, 3, 11), (18, 5, 20)] {
+            // Each leg returns at most the fusion depth, so the fused list
+            // holds at most twice that, whatever page is asked for.
+            let complete = SearchNote::search("Rust")
+                .hybrid(0.5)
+                .limit(20)
+                .get()
+                .await
+                .unwrap()
+                .hits
+                .len();
+            assert!((5..=10).contains(&complete), "{complete} fused hits");
+            for (offset, limit) in [(0, 2), (7, 3), (18, 5)] {
                 lexical.lock().unwrap().clear();
                 semantic.lock().unwrap().clear();
                 let result = SearchNote::search("Rust")
@@ -1862,10 +2022,13 @@ async fn hybrid_deep_pages_raise_both_fusion_legs_to_the_lookahead() {
                     .get()
                     .await
                     .unwrap();
-                assert_eq!(lexical.lock().unwrap().as_slice(), [depth]);
-                assert_eq!(semantic.lock().unwrap().as_slice(), [depth]);
-                assert_eq!(result.hits.len(), if offset == 18 { 2 } else { limit });
-                assert_eq!(result.pagination.has_more, offset != 18);
+                assert_eq!(lexical.lock().unwrap().as_slice(), [5]);
+                assert_eq!(semantic.lock().unwrap().as_slice(), [5]);
+                assert_eq!(
+                    result.hits.len(),
+                    complete.saturating_sub(offset).min(limit)
+                );
+                assert_eq!(result.pagination.has_more, offset + limit < complete);
             }
             lexical.lock().unwrap().clear();
             semantic.lock().unwrap().clear();
