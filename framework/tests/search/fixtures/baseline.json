@@ -1,0 +1,138 @@
+{
+  "calibrated": true,
+  "fixture_sha256": "dfcd40669cd0f82678814fcc9af2751f086ec0ce9d63d3b8054770991b0cc5f7",
+  "fixture_license": "SciFact claims and judgments: CC BY 4.0; S2ORC abstracts: ODC-By 1.0; see LICENSE",
+  "tolerance": 0.05,
+  "rivals": {
+    "meilisearch": {
+      "version": "1.55.0",
+      "lexical": {
+        "ndcg_at_10": 0.46654319787180965,
+        "latency": {
+          "p50_ms": 1.234169,
+          "p95_ms": 2.232596,
+          "p99_ms": 3.8516340000000002
+        },
+        "queries": 300
+      },
+      "settings": {
+        "matchingStrategy": "frequency",
+        "limit": 10,
+        "attributesToRetrieve": [
+          "id"
+        ]
+      },
+      "grid": [
+        {
+          "settings": {
+            "matchingStrategy": "last",
+            "limit": 10,
+            "attributesToRetrieve": [
+              "id"
+            ]
+          },
+          "ndcg_at_10": 0.37745906023030584,
+          "p95_ms": 2.5131609999999998
+        },
+        {
+          "settings": {
+            "matchingStrategy": "frequency",
+            "limit": 10,
+            "attributesToRetrieve": [
+              "id"
+            ]
+          },
+          "ndcg_at_10": 0.46654319787180965,
+          "p95_ms": 2.232596
+        },
+        {
+          "settings": {
+            "matchingStrategy": "all",
+            "limit": 10,
+            "attributesToRetrieve": [
+              "id"
+            ]
+          },
+          "ndcg_at_10": 0.052864831938353965,
+          "p95_ms": 1.1311360000000001
+        }
+      ]
+    },
+    "typesense": {
+      "version": "30.2",
+      "lexical": {
+        "ndcg_at_10": 0.42744851235872916,
+        "latency": {
+          "p50_ms": 16.335175,
+          "p95_ms": 52.005666,
+          "p99_ms": 82.055243
+        },
+        "queries": 300
+      },
+      "settings": {
+        "drop_tokens_threshold": 10,
+        "text_match_type": "max_score",
+        "query_by": "title,text",
+        "per_page": 10,
+        "include_fields": "id"
+      },
+      "grid": [
+        {
+          "settings": {
+            "drop_tokens_threshold": 1,
+            "text_match_type": "max_score",
+            "query_by": "title,text",
+            "per_page": 10,
+            "include_fields": "id"
+          },
+          "ndcg_at_10": 0.33484450668421656,
+          "p95_ms": 50.427569
+        },
+        {
+          "settings": {
+            "drop_tokens_threshold": 1,
+            "text_match_type": "sum_score",
+            "query_by": "title,text",
+            "per_page": 10,
+            "include_fields": "id"
+          },
+          "ndcg_at_10": 0.32509068791212203,
+          "p95_ms": 52.154316
+        },
+        {
+          "settings": {
+            "drop_tokens_threshold": 10,
+            "text_match_type": "max_score",
+            "query_by": "title,text",
+            "per_page": 10,
+            "include_fields": "id"
+          },
+          "ndcg_at_10": 0.42744851235872916,
+          "p95_ms": 52.005666
+        },
+        {
+          "settings": {
+            "drop_tokens_threshold": 10,
+            "text_match_type": "sum_score",
+            "query_by": "title,text",
+            "per_page": 10,
+            "include_fields": "id"
+          },
+          "ndcg_at_10": 0.38510574065199116,
+          "p95_ms": 51.727452
+        }
+      ]
+    }
+  },
+  "latency_scope": "warm engine query: first page of 10 hits at the builder's depth; parsing, expansion, retrieval and fusion; query inference timed separately; fixed vocabulary; no hydration",
+  "p95_budgets_ms": {
+    "collection": 104.011332,
+    "mysql": 104.011332,
+    "postgres": 104.011332,
+    "qdrant": 104.011332,
+    "sqlite": 104.011332
+  },
+  "budget_comment": "Calibrated 2026-10-16T03:17:44.594994335+00:00: Meilisearch 1.55.0 settings {\"matchingStrategy\":\"frequency\",\"limit\":10,\"attributesToRetrieve\":[\"id\"]} p95 2.232596 ms; Typesense 30.2 settings {\"drop_tokens_threshold\":10,\"text_match_type\":\"max_score\",\"query_by\":\"title,text\",\"per_page\":10,\"include_fields\":\"id\"} p95 52.005666 ms. Every engine budget is two times the slower rival's p95, measured over the same queries as nDCG@10 after a full warm-up pass.",
+  "calibrated_at": "2026-10-16T03:17:44.594994335+00:00",
+  "tree_hash": "f436f79387adfe3b22002481ab1a4e6b146f5349"
+}
