@@ -80,8 +80,13 @@ async fn search(
     let offset = (page - 1).checked_mul(per_page).ok_or_else(|| {
         FrameworkError::validation("page", "page causes a pagination offset overflow")
     })?;
+    let q = request.query_param("q").unwrap_or_default();
+    if let Some(message) = super::expansion::query_bounds_error(&super::query::QueryText::parse(&q))
+    {
+        return Err(FrameworkError::validation("q", message));
+    }
     let mut builder = Search::for_index(&index)?
-        .search(request.query_param("q").unwrap_or_default())
+        .search(q)
         .highlight(
             descriptor
                 .attributes

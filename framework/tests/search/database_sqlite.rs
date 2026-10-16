@@ -905,7 +905,12 @@ async fn sqlite_semantic_filters_before_taking_the_cosine_top() -> Result<(), Fr
         .await?;
     // Four neighbours closer to the query than the one document the filter admits.
     let mut documents = Vec::new();
-    for (key, y) in [("near0", 0.0), ("near1", 0.1), ("near2", 0.2), ("near3", 0.3)] {
+    for (key, y) in [
+        ("near0", 0.0),
+        ("near1", 0.1),
+        ("near2", 0.2),
+        ("near3", 0.3),
+    ] {
         let mut doc = document(&index, key, "excluded", "orchard");
         doc.dense = Some(vec![1.0, y, 0.0]);
         documents.push(doc);

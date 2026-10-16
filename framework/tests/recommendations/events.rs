@@ -184,7 +184,10 @@ async fn access_scope_records_each_targets_own_scope_values() {
         let closed_event = event("reader", &closed, EventType::View, "closed").await;
         assert_ne!(open_event.access_scope, closed_event.access_scope);
         let values = &closed_event.access_scope.as_ref().unwrap()["values"];
-        assert!(values.get("public").is_some() && values.get("owner").is_some(), "{values}");
+        assert!(
+            values.get("public").is_some() && values.get("owner").is_some(),
+            "{values}"
+        );
         let mut forged = event("forger", &closed, EventType::View, "forged").await;
         forged.access_scope = open_event.access_scope.clone();
         assert!(Recommend::record(forged).await.is_err());
