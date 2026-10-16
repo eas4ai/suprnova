@@ -130,12 +130,12 @@ pub trait SearchEngine: Send + Sync {
     fn name(&self) -> &str;
     /// Report supported behavior without silently ignoring requested features.
     fn capabilities(&self) -> EngineCapabilities;
-    /// Let the registry preserve a driver's own atomic dependency advances.
+    /// Whether this driver advances RenderCache index dependencies itself.
     ///
-    /// The default makes the registry guard writes and advance the index after
-    /// external storage changes. A driver returning true owns that work: every
-    /// mutation must advance `Table("search:<index>")` in its data transaction,
-    /// and protect external writes until their advancement is durable.
+    /// Keep the default in a custom driver: the registry then guards each write
+    /// and advances the index after it, so cached search pages go stale. The
+    /// framework's own drivers return true because they advance the index
+    /// inside their own data transactions, through crate-private hooks.
     fn advances_render_cache(&self) -> bool {
         false
     }

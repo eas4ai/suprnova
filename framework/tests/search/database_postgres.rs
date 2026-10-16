@@ -2,6 +2,7 @@
 
 use super::database_support::{
     create, descriptor, document, engine, live_database, query, vectors,
+    writes_advance_the_render_cache_index,
 };
 use serial_test::serial;
 use std::sync::Arc;
@@ -204,4 +205,12 @@ async fn postgres_server_language_pins_a_copy_of_the_server_configuration()
     .expect("count");
     assert_eq!(left.get_int("left")?, 0);
     Ok(())
+}
+
+#[tokio::test]
+#[serial(search_database_postgres)]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_index_writes_advance_the_render_cache_index() -> Result<(), FrameworkError> {
+    let _guard = live_database("PG_TEST_URL").await?;
+    writes_advance_the_render_cache_index("database_postgres_render_cache").await
 }

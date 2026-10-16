@@ -2,6 +2,7 @@
 
 use super::database_support::{
     create, descriptor, document, engine, live_database, query, vectors,
+    writes_advance_the_render_cache_index,
 };
 use serial_test::serial;
 use std::sync::Arc;
@@ -149,4 +150,12 @@ async fn mysql_native_text_folds_case_and_accents_while_filters_and_facets_remai
     assert_eq!(exact.candidates.len(), 1);
     assert_eq!(exact.candidates[0].document.key, "lowercase");
     driver.drop_generation(&index, &generation).await
+}
+
+#[tokio::test]
+#[serial(search_database_mysql)]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_index_writes_advance_the_render_cache_index() -> Result<(), FrameworkError> {
+    let _guard = live_database("MYSQL_TEST_URL").await?;
+    writes_advance_the_render_cache_index("database_mysql_render_cache").await
 }
