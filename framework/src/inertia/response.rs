@@ -1410,8 +1410,11 @@ impl InertiaResponse {
         // The document head `Head` resolves for this request (PAR-160): its
         // tags go into the `head` prop and the first visit's `<head>`.
         // `None` when no layer sets anything, which leaves the page as it is.
+        // The URL as `url::current` builds it: on the `APP_URL` origin under the public root,
+        // so a request-target such as `//evil.example/x` stays a path rather than becoming a
+        // link to another host, which `url::to` would return unchanged (#155).
         let head = crate::view::head::InertiaHead::for_response(
-            &|| crate::routing::url::to(req.path()),
+            &|| crate::routing::url::current_at(&crate::routing::url::root(), req.path()),
             head_status,
         );
         // For the Inertia middleware, which tells a partial reload of this
