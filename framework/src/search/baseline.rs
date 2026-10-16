@@ -19,7 +19,7 @@ use std::{
 
 const INDEX: &str = "search_baseline";
 const HYBRID_RATIO: f32 = 0.5;
-const LATENCY_SCOPE: &str = "warm engine query: parsing, expansion, retrieval and fusion; query inference timed separately; fixed vocabulary; no hydration";
+const LATENCY_SCOPE: &str = "warm engine query: first page of 10 hits at the builder's depth; parsing, expansion, retrieval and fusion; query inference timed separately; fixed vocabulary; no hydration";
 const MAX_FIXTURE_BYTES: usize = 10_000_000;
 static DATABASE_VECTORS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -779,7 +779,7 @@ impl Baseline {
                 depth: if hybrid {
                     settings.query.fusion_depth
                 } else {
-                    settings.query.hits_cap
+                    super::builder::lexical_depth(0, 10, settings.query.hits_cap)
                 },
                 highlights: false,
                 crop: BTreeMap::new(),

@@ -877,7 +877,7 @@ async fn baseline_assertions_enforce_floors_budgets_and_identity() -> Result<(),
     let scope = result.latency_scope.clone();
     assert_eq!(
         scope,
-        "warm engine query: parsing, expansion, retrieval and fusion; query inference timed separately; fixed vocabulary; no hydration"
+        "warm engine query: first page of 10 hits at the builder's depth; parsing, expansion, retrieval and fusion; query inference timed separately; fixed vocabulary; no hydration"
     );
     result.latency_scope = "warm engine query: parsing, expansion, retrieval, query inference and fusion; fixed vocabulary; no hydration".into();
     assert!(

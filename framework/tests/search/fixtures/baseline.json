@@ -29,7 +29,7 @@
       }
     }
   },
-  "latency_scope": "warm engine query: parsing, expansion, retrieval and fusion; query inference timed separately; fixed vocabulary; no hydration",
+  "latency_scope": "warm engine query: first page of 10 hits at the builder's depth; parsing, expansion, retrieval and fusion; query inference timed separately; fixed vocabulary; no hydration",
   "p95_budgets_ms": {
     "collection": 100.912104,
     "mysql": 100.912104,
