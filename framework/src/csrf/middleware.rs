@@ -539,6 +539,13 @@ impl CsrfMiddleware {
         if !self.should_attach_xsrf_cookie() {
             return response;
         }
+        // A shared cache could store the token with a public response and hand it to every
+        // later visitor. While the session is unchanged the reader already holds the token,
+        // or has no session worth storing, so it is left off; a changed session goes out with
+        // its token, and the session middleware then sends the response private.
+        let shared_cacheable = match &response {
+            Ok(http) | Err(http) => http.shared_cacheable(),
+        };
         let status = match &response {
             Ok(http) | Err(http) => http.status_code(),
         };
@@ -558,6 +565,9 @@ impl CsrfMiddleware {
         // and always gets its token.
         let bootstrap = (200..400).contains(&status);
         let Some(token) = crate::session::session_mut(|session| {
+            if shared_cacheable && !session.is_dirty() {
+                return None;
+            }
             if !session.loaded_from_store && !session.is_dirty() {
                 if !bootstrap {
                     return None;

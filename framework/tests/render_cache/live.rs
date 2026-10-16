@@ -8,8 +8,8 @@ use bytes::Bytes;
 use live_dogfood_support::{DOCUMENT_PATH, DogfoodCounter, PRIVATE_DOCUMENT_PATH};
 use render_cache_live_support::{
     CAPTURE_NONCE, CAPTURE_PATH, FAILED_MOUNT_FALLBACK, FAILED_MOUNT_PATH, RAW_PATH,
-    SEAM_CONTROL_PATH, SEAM_LEAK_PATH, STRIP_PATH, UNCACHED_CAPTURE_PATH, UNREASONED_PATH,
-    boot_with_render_cache_and_live, clock, dispatch_get, failed_mount_renders,
+    SEAM_CONTROL_PATH, SEAM_LEAK_PATH, SIGN_IN_PATH, STRIP_PATH, UNCACHED_CAPTURE_PATH,
+    UNREASONED_PATH, boot_with_render_cache_and_live, clock, dispatch_get, failed_mount_renders,
     last_failed_mount_report, last_report, private_renders, public_renders,
     public_seed_lifetime_ms, seam_control_renders, seam_leak_renders, strip_renders,
     unreasoned_renders,
@@ -495,7 +495,7 @@ async fn an_island_that_cannot_be_described_as_a_slot_invalidates_the_capture() 
 #[serial_test::serial]
 async fn an_identity_bound_mount_captures_its_exact_island_bytes_inside_a_slot_scope() {
     let harness = boot_with_render_cache_and_live().await;
-    let login = dispatch_get(&harness, DOCUMENT_PATH, &[("x-test-login", "user-7")]).await;
+    let login = dispatch_get(&harness, SIGN_IN_PATH, &[("x-test-login", "user-7")]).await;
     let cookie = login.session_cookie();
     let response = dispatch_get(
         &harness,
@@ -564,7 +564,7 @@ async fn an_identity_bound_mount_captures_its_exact_island_bytes_inside_a_slot_s
 #[serial_test::serial]
 async fn a_document_rendered_outside_a_collector_scope_records_nothing() {
     let harness = boot_with_render_cache_and_live().await;
-    let login = dispatch_get(&harness, DOCUMENT_PATH, &[("x-test-login", "user-7")]).await;
+    let login = dispatch_get(&harness, SIGN_IN_PATH, &[("x-test-login", "user-7")]).await;
     let cookie = login.session_cookie();
     let response = dispatch_get(
         &harness,
@@ -715,7 +715,7 @@ async fn an_identity_bound_dashboard_is_never_stored() {
     // identity-bound render on the next request binds the session that
     // survives the framework's fixation rotation (the same sequence
     // `live_public_seed_actions.rs`'s own identity-bound test uses).
-    let login = dispatch_get(&harness, DOCUMENT_PATH, &[("x-test-login", "user-7")]).await;
+    let login = dispatch_get(&harness, SIGN_IN_PATH, &[("x-test-login", "user-7")]).await;
     assert_eq!(
         login.status,
         StatusCode::OK,
@@ -774,7 +774,7 @@ async fn an_identity_bound_dashboard_is_never_stored() {
 #[serial_test::serial]
 async fn an_identity_bound_mount_declines_even_when_the_handler_never_calls_render() {
     let harness = boot_with_render_cache_and_live().await;
-    let login = dispatch_get(&harness, DOCUMENT_PATH, &[("x-test-login", "user-7")]).await;
+    let login = dispatch_get(&harness, SIGN_IN_PATH, &[("x-test-login", "user-7")]).await;
     let cookie = login.session_cookie();
 
     let first = dispatch_get(
@@ -823,7 +823,7 @@ async fn a_declared_private_cached_route_with_no_identity_read_is_still_cached()
     // `Principal` variance (Task 14 round 6) and the key is already
     // partitioned by the resolved principal before the render begins.
     let harness = boot_with_render_cache_and_live().await;
-    let login = dispatch_get(&harness, DOCUMENT_PATH, &[("x-test-login", "user-7")]).await;
+    let login = dispatch_get(&harness, SIGN_IN_PATH, &[("x-test-login", "user-7")]).await;
     let cookie = login.session_cookie();
 
     let first = dispatch_get(
@@ -877,7 +877,7 @@ async fn a_class_narrowed_with_no_attached_reason_is_declined() {
     // response carries a fresh `Set-Cookie` and is ineligible for storage
     // regardless of classification, which would make this test pass
     // vacuously.
-    let login = dispatch_get(&harness, DOCUMENT_PATH, &[("x-test-login", "user-7")]).await;
+    let login = dispatch_get(&harness, SIGN_IN_PATH, &[("x-test-login", "user-7")]).await;
     let cookie = login.session_cookie();
     let first = dispatch_get(
         &harness,
@@ -920,9 +920,9 @@ async fn the_seam_can_only_decline_never_serve_one_user_another_users_body() {
     // it would blank that guard's input and let `user-9` be served the
     // body rendered for `user-7`.
     let harness = boot_with_render_cache_and_live().await;
-    let login7 = dispatch_get(&harness, DOCUMENT_PATH, &[("x-test-login", "user-7")]).await;
+    let login7 = dispatch_get(&harness, SIGN_IN_PATH, &[("x-test-login", "user-7")]).await;
     let cookie7 = login7.session_cookie();
-    let login9 = dispatch_get(&harness, DOCUMENT_PATH, &[("x-test-login", "user-9")]).await;
+    let login9 = dispatch_get(&harness, SIGN_IN_PATH, &[("x-test-login", "user-9")]).await;
     let cookie9 = login9.session_cookie();
 
     // Control: identical policy and handler shape, no seam call. Confirms

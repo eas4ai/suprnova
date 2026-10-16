@@ -35,6 +35,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Public responses no longer carry the session or `XSRF-TOKEN` cookie
+  (#154).** A response marked `Cache-Control: public` or given an `s-maxage`
+  could be stored by a CDN or caching proxy with its `Set-Cookie` lines and
+  replayed to other visitors. The session and CSRF middleware now leave off
+  the cookies the reader already holds; a public response that must deliver a
+  cookie, such as a new session or a rotated remember-me cookie, goes out
+  `private, no-store` instead.
 - **The reset email greets the user by name under Magnetar.**
   `PasswordReset::send_link` now looks the account up and greets its name, as
   the verification and password-changed emails do. A failed lookup sends the

@@ -711,3 +711,115 @@ async fn a_session_a_custom_store_read_is_not_rewritten_by_a_successful_csrf_req
         );
     }
 }
+
+fn shared_cacheable_page() -> suprnova::Response {
+    Ok(suprnova::HttpResponse::text("ok").header("Cache-Control", "public, max-age=3600"))
+}
+
+fn shared_cacheable_page_with_own_cookie() -> suprnova::Response {
+    Ok(suprnova::HttpResponse::text("ok")
+        .header("Cache-Control", "public, max-age=3600")
+        .cookie(suprnova::http::cookie::Cookie::new("theme", "dark")))
+}
+
+/// Issue #154: a shared cache could replay a public response's cookies to every visitor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_public_response_carries_no_session_or_xsrf_cookie_and_stores_no_session() {
+    ensure_crypt();
+    let store = Arc::new(CountingStore::default());
+    let sessions = SessionMiddleware::with_store(insecure_config(), store.clone());
+    let response = through_session_csrf_and(
+        &sessions,
+        suprnova::Request::for_test_with_headers("GET", "/favicon.ico", Vec::<(&str, &str)>::new()),
+        shared_cacheable_page,
+    )
+    .await;
+    assert_eq!(response.headers().get_all("set-cookie").iter().count(), 0);
+    assert_eq!(
+        response.headers().get("cache-control").unwrap(),
+        "public, max-age=3600"
+    );
+    assert_eq!(store.writes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_public_response_to_a_signed_session_drops_the_refreshed_cookie() {
+    use suprnova::http::cookie::Cookie;
+
+    ensure_crypt();
+    let session_id = "a".repeat(40);
+    let store = Arc::new(CountingStore::with_session(SessionData::new(
+        session_id.clone(),
+        "b".repeat(40),
+    )));
+    let config = insecure_config();
+    // A legacy cookie without a touch time is always refreshed on an ordinary response.
+    let cookie = Cookie::encrypted(&config.cookie_name, &session_id).unwrap();
+    let header = format!("{}={}", config.cookie_name, cookie.value());
+    let sessions = SessionMiddleware::with_store(config, store);
+    let response = through_session_csrf_and(
+        &sessions,
+        suprnova::Request::for_test_with_headers(
+            "GET",
+            "/sitemap.xml",
+            [("cookie", header.as_str())],
+        ),
+        shared_cacheable_page,
+    )
+    .await;
+    assert_eq!(response.headers().get_all("set-cookie").iter().count(), 0);
+    assert_eq!(
+        response.headers().get("cache-control").unwrap(),
+        "public, max-age=3600"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_public_response_that_must_deliver_a_cookie_is_sent_private() {
+    ensure_crypt();
+    let sessions =
+        SessionMiddleware::with_store(insecure_config(), Arc::new(CountingStore::default()));
+    let response = through_session_csrf_and(
+        &sessions,
+        suprnova::Request::for_test_with_headers("GET", "/theme", Vec::<(&str, &str)>::new()),
+        shared_cacheable_page_with_own_cookie,
+    )
+    .await;
+    assert_eq!(
+        set_cookie_value(&response, "theme").as_deref(),
+        Some("dark")
+    );
+    assert_eq!(
+        response.headers().get("cache-control").unwrap(),
+        "private, no-store"
+    );
+}
+
+fn shared_cacheable_page_that_writes_the_session() -> suprnova::Response {
+    suprnova::session::session_mut(|session| session.put("signed_in", "user-7"));
+    shared_cacheable_page()
+}
+
+/// A session this request created or changed must reach the reader, so the response that
+/// carries it is sent private rather than losing it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_public_response_that_changed_the_session_delivers_it_privately() {
+    ensure_crypt();
+    let config = insecure_config();
+    let session_cookie = config.cookie_name.clone();
+    let store = Arc::new(CountingStore::default());
+    let sessions = SessionMiddleware::with_store(config, store.clone());
+    let response = through_session_csrf_and(
+        &sessions,
+        suprnova::Request::for_test_with_headers("GET", "/welcome", Vec::<(&str, &str)>::new()),
+        shared_cacheable_page_that_writes_the_session,
+    )
+    .await;
+    assert!(set_cookie_value(&response, &session_cookie).is_some());
+    assert!(set_cookie_value(&response, "XSRF-TOKEN").is_some());
+    assert_eq!(
+        response.headers().get("cache-control").unwrap(),
+        "private, no-store"
+    );
+    assert_eq!(store.writes.load(Ordering::SeqCst), 1);
+}

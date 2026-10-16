@@ -2515,6 +2515,11 @@ impl SessionMiddleware {
         };
         let is_redirect = (300..400).contains(&response_status);
         let is_success = (200..300).contains(&response_status);
+        // A response marked for shared caching is a resource, not a page to come back to, and
+        // recording it would store a new session whose cookie that response cannot carry.
+        let shared_cacheable = match &response {
+            Ok(r) | Err(r) => r.shared_cacheable(),
+        };
         // SEC: `current_url` is built straight from `request.path()` +
         // query, and an origin-form HTTP request-target is syntactically
         // free to start with `//` (httparse's URI_MAP permits it; this
@@ -2542,6 +2547,7 @@ impl SessionMiddleware {
             && !is_prefetch
             && !wants_json
             && !exempt
+            && !shared_cacheable
             && (is_success || is_redirect)
             && let Some(ref mut s) = session
         {
@@ -2805,7 +2811,15 @@ impl SessionMiddleware {
                 }
             };
 
-            if write_succeeded {
+            // A shared cache could replay a public response's cookie to every later visitor.
+            // When the cookie only refreshes the id the browser sent, the reader loses nothing
+            // without it; a new or rotated session must reach the reader, and the response is
+            // then sent private (`keep_cookies_off_shared_caches`).
+            let refresh_only = original_session_id.as_deref() == Some(session.id.as_str());
+            let shared_cacheable = match &response {
+                Ok(res) | Err(res) => res.shared_cacheable(),
+            };
+            if write_succeeded && !(refresh_only && shared_cacheable) {
                 response = match response {
                     Ok(res) => Ok(res.cookie(session_cookie)),
                     Err(res) => Err(res.cookie(session_cookie)),
@@ -2867,13 +2881,10 @@ impl Middleware for SessionMiddleware {
         // chain, and this frame would otherwise carry it twice (the frames
         // budget test measures it).
         let Some((session_id, block)) = block else {
-            return Box::pin(self.handle_session(
-                request,
-                next,
-                original_session_id,
-                last_touch_at,
-            ))
-            .await;
+            let response =
+                Box::pin(self.handle_session(request, next, original_session_id, last_touch_at))
+                    .await;
+            return self.keep_cookies_off_shared_caches(response);
         };
         let held = match super::blocking::acquire(&session_id, block).await {
             Ok(held) => held,
@@ -2882,7 +2893,30 @@ impl Middleware for SessionMiddleware {
         let response =
             Box::pin(self.handle_session(request, next, original_session_id, last_touch_at)).await;
         held.release().await;
-        response
+        self.keep_cookies_off_shared_caches(response)
+    }
+}
+
+impl SessionMiddleware {
+    /// A shared cache may store a response marked for it with its cookies and replay them to
+    /// every later visitor, handing one reader's session to everyone. The session and CSRF
+    /// middleware leave off the cookies the reader already holds; whatever cookie is still
+    /// set must reach the reader (a new or rotated session, a rotated remember-me cookie, the
+    /// application's own), so the response keeps it and is sent `private, no-store` instead.
+    fn keep_cookies_off_shared_caches(&self, response: Response) -> Response {
+        let guard = |http: crate::http::HttpResponse| {
+            if !http.shared_cacheable() || http.header_value("Set-Cookie").is_none() {
+                return http;
+            }
+            tracing::warn!(
+                "a response marked for shared caching set cookies, so it was sent private, no-store"
+            );
+            http.replace_header("Cache-Control", "private, no-store")
+        };
+        match response {
+            Ok(http) => Ok(guard(http)),
+            Err(http) => Err(guard(http)),
+        }
     }
 }
 
