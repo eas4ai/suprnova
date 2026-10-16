@@ -486,8 +486,12 @@ async fn an_unknown_models_context_comes_from_the_service_model_list() {
     let mut options = config(&server.url);
     options.max_tokens = None;
     let embedder = HttpEmbedder::new(options).await.unwrap();
-    assert_eq!(embedder.profile().max_tokens, 16);
+    // Boot asks nothing; the first use reads the list once and keeps the answer.
+    assert!(server.seen.lock().unwrap().is_empty());
+    assert_eq!(embedder.context_tokens().await.unwrap(), 16);
+    assert_eq!(embedder.context_tokens().await.unwrap(), 16);
     let seen = server.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].path, "/v1/embeddings/models");
     assert_eq!(seen[0].auth.as_deref(), Some("Bearer test-secret"));
 }
@@ -505,7 +509,7 @@ async fn a_server_model_list_supplies_its_own_context_field() {
     let mut options = config(&server.url);
     options.max_tokens = None;
     let embedder = HttpEmbedder::new(options).await.unwrap();
-    assert_eq!(embedder.profile().max_tokens, 512);
+    assert_eq!(embedder.context_tokens().await.unwrap(), 512);
     let paths = server
         .seen
         .lock()
@@ -517,7 +521,7 @@ async fn a_server_model_list_supplies_its_own_context_field() {
 }
 
 #[tokio::test]
-async fn an_unknown_model_with_no_listed_context_fails_naming_the_setting() {
+async fn an_unknown_model_with_no_listed_context_uses_the_default() {
     let server = server(vec![
         Reply::status(404, "not found"),
         Reply::status(200, &json!({"data": [{"id": "test-custom"}]}).to_string()),
@@ -525,8 +529,28 @@ async fn an_unknown_model_with_no_listed_context_fails_naming_the_setting() {
     .await;
     let mut options = config(&server.url);
     options.max_tokens = None;
-    let error = HttpEmbedder::new(options).await.err().unwrap().to_string();
-    assert!(error.contains("SEARCH_EMBED_MAX_TOKENS"), "{error}");
+    let embedder = HttpEmbedder::new(options).await.unwrap();
+    assert_eq!(embedder.context_tokens().await.unwrap(), 8192);
+    assert_eq!(embedder.context_tokens().await.unwrap(), 8192);
+    // The list was read and named none, so the default is kept without asking again.
+    assert_eq!(server.seen.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_failing_model_list_uses_the_default_once_and_is_read_again() {
+    let server = server(vec![
+        Reply::status(503, "upstream down"),
+        Reply::status(
+            200,
+            &json!({"data": [{"id": "test-custom", "context_length": 16}]}).to_string(),
+        ),
+    ])
+    .await;
+    let mut options = config(&server.url);
+    options.max_tokens = None;
+    let embedder = HttpEmbedder::new(options).await.unwrap();
+    assert_eq!(embedder.context_tokens().await.unwrap(), 8192);
+    assert_eq!(embedder.context_tokens().await.unwrap(), 16);
 }
 
 #[tokio::test]
@@ -536,6 +560,7 @@ async fn a_configured_context_wins_without_asking_the_service() {
     options.max_tokens = Some(64);
     let embedder = HttpEmbedder::new(options).await.unwrap();
     assert_eq!(embedder.profile().max_tokens, 64);
+    assert_eq!(embedder.context_tokens().await.unwrap(), 64);
     assert!(server.seen.lock().unwrap().is_empty());
 }
 

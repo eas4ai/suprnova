@@ -508,12 +508,16 @@ OpenAI's `text-embedding-3-small`, `text-embedding-3-large` and
 (2048 tokens) and `gemini-embedding-2` (8192 tokens), with or without an
 `owner/` prefix such as OpenRouter's `openai/text-embedding-3-small`. Any
 other model outside the shipped profiles takes its context from the
-service's model list at boot: OpenRouter's `embeddings/models`
-(`context_length`), or `models` with vLLM's `max_model_len`, LM Studio's or
-Mistral's `max_context_length`. Set `SEARCH_EMBED_MAX_TOKENS` when the
-service lists none, or when the server caps input below the model's context;
-it wins over the profile and the list, and boot fails naming it when no
-context is known.
+service's model list: OpenRouter's `embeddings/models` (`context_length`),
+or `models` with vLLM's `max_model_len`, LM Studio's or Mistral's
+`max_context_length`. The list is read on the first embedding, not at boot,
+so the application starts while the service is down. When the list names no
+context for the model, the provider uses 8192 tokens, the limit OpenAI,
+Mistral and Google's newer models publish; when the list cannot be read, it
+uses 8192 for that embedding, logs a warning, and reads the list again next
+time. `SEARCH_EMBED_MAX_TOKENS` wins over the profile, the list and the
+default, for a model with a smaller context or a server that caps input
+below it.
 Every prepared input is cut to the model's context before it is sent. Set `SEARCH_EMBED_TOKENIZER` to the model's own
 `tokenizer.json`, published beside the weights in its Hugging Face repository,
 and the cut falls after the last token that fits. Without it the protocol

@@ -186,6 +186,9 @@ pub struct HttpEmbedder {
     native_profile: ModelProfile,
     tokenizer: Option<Arc<Tokenizer>>,
     special_tokens: usize,
+    /// Read from the service on first use, never at boot, so an outage there leaves the
+    /// application starting and only the embedding call that needs it failing.
+    context: Arc<tokio::sync::OnceCell<usize>>,
 }
 #[derive(Serialize)]
 struct WireRequest<'a> {
@@ -246,11 +249,10 @@ impl HttpEmbedder {
             .or_else(|| profiles::hosted_profile(&config.model));
         let unknown = known.is_none();
         let profile = known.unwrap_or_else(|| {
-            // The context is never guessed: it comes from the setting or the service below.
             profiles::text_profile(
                 &config.model,
                 config.dimensions.unwrap_or(1),
-                0,
+                DEFAULT_CONTEXT,
                 Pooling::Mean,
             )
         });
@@ -263,11 +265,13 @@ impl HttpEmbedder {
             config,
             tokenizer,
             special_tokens,
+            context: Arc::new(tokio::sync::OnceCell::new()),
         };
-        match provider.config.max_tokens {
-            Some(max_tokens) => provider.profile.max_tokens = max_tokens,
-            None if unknown => provider.profile.max_tokens = provider.listed_context().await?,
-            None => {}
+        // A model outside the profiles starts at the default; its service's list refines it
+        // on first use (`context_tokens`).
+        let lookup = unknown && provider.config.max_tokens.is_none();
+        if let Some(max_tokens) = provider.config.max_tokens {
+            provider.profile.max_tokens = max_tokens;
         }
         if unknown {
             if let Some(prefix) = &provider.config.query_prefix {
@@ -299,20 +303,52 @@ impl HttpEmbedder {
         provider.profile = provider
             .native_profile
             .with_dimensions(provider.config.dimensions)?;
-        if provider.profile.max_tokens <= provider.special_tokens {
-            return Err(FrameworkError::param(format!(
-                "embedding model {} max_tokens must exceed the {} tokens reserved for special tokens",
-                provider.profile.id, provider.special_tokens
-            )));
+        provider.context_within_reserve(provider.profile.max_tokens)?;
+        if !lookup {
+            provider
+                .context
+                .set(provider.profile.max_tokens)
+                .map_err(|_| FrameworkError::internal("embedding context set twice"))?;
         }
         Ok(provider)
+    }
+    /// The model's context in tokens: its profile's or the setting's, otherwise the one its
+    /// service lists, read once and kept, or the default when the list names none. A read
+    /// that fails uses the default for that call only and is tried again on the next.
+    pub async fn context_tokens(&self) -> Result<usize, FrameworkError> {
+        if let Some(tokens) = self.context.get() {
+            return Ok(*tokens);
+        }
+        match self.listed_context().await {
+            Ok(listed) => {
+                let tokens = listed.unwrap_or(DEFAULT_CONTEXT);
+                self.context_within_reserve(tokens)?;
+                Ok(*self.context.get_or_init(|| async { tokens }).await)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    model = %self.config.model,
+                    "embedding model list unavailable, cutting at {DEFAULT_CONTEXT} tokens: {error}"
+                );
+                Ok(DEFAULT_CONTEXT)
+            }
+        }
+    }
+    fn context_within_reserve(&self, tokens: usize) -> Result<(), FrameworkError> {
+        if tokens <= self.special_tokens {
+            return Err(FrameworkError::param(format!(
+                "embedding model {} context of {tokens} tokens must exceed the {} reserved for special tokens",
+                self.profile.id, self.special_tokens
+            )));
+        }
+        Ok(())
     }
     /// The service rejects or silently drops input past the model's context, so every prepared
     /// input is cut here. With the model's tokenizer the cut falls after the last token that
     /// fits; without it the cut is in UTF-8 bytes, because every token a WordPiece,
     /// SentencePiece or byte-level BPE tokenizer emits covers at least one input byte.
-    fn within_context(&self, text: String) -> Result<String, FrameworkError> {
-        let budget = self.profile.max_tokens - self.special_tokens;
+    async fn within_context(&self, text: String) -> Result<String, FrameworkError> {
+        let budget = self.context_tokens().await? - self.special_tokens;
         let end = match &self.tokenizer {
             Some(tokenizer) => {
                 let encoding = tokenizer.encode(text.as_str(), false).map_err(|e| {
@@ -339,7 +375,7 @@ impl HttpEmbedder {
     /// Gateways and inference servers list their models with a context length: OpenRouter
     /// under `embeddings/models` (`context_length`), vLLM (`max_model_len`) and LM Studio
     /// (`max_context_length`) under `models`. The request goes to the pinned host only.
-    async fn listed_context(&self) -> Result<usize, FrameworkError> {
+    async fn listed_context(&self) -> Result<Option<usize>, FrameworkError> {
         let base = self
             .endpoint
             .path()
@@ -365,8 +401,13 @@ impl HttpEmbedder {
             })?;
             let status = response.status().as_u16();
             let body = self.read_body(response, status).await?;
-            if !(200..300).contains(&status) {
+            // A server without this list answers 404 or 405; any other failure is the
+            // service's, reported as it is rather than as a missing setting.
+            if status == 404 || status == 405 {
                 continue;
+            }
+            if !(200..300).contains(&status) {
+                return Err(self.diagnostic(status, &body));
             }
             let listed = serde_json::from_slice::<serde_json::Value>(&body)
                 .ok()
@@ -386,14 +427,11 @@ impl HttpEmbedder {
                 })
                 .and_then(|tokens| usize::try_from(tokens).ok())
                 .filter(|tokens| *tokens > 0);
-            if let Some(tokens) = listed {
-                return Ok(tokens);
+            if listed.is_some() {
+                return Ok(listed);
             }
         }
-        Err(FrameworkError::param(format!(
-            "SEARCH_EMBED_MAX_TOKENS is required for {}: the service's model list names no context length for it",
-            self.config.model
-        )))
+        Ok(None)
     }
     /// The body is capped while streaming, before anything parses it.
     async fn read_body(
@@ -530,6 +568,10 @@ impl HttpEmbedder {
 /// Room for the special tokens a model adds around its input when no tokenizer says how many.
 const CONTEXT_RESERVE: usize = 4;
 
+/// The context of a model outside the profiles whose service lists none: the input limit
+/// OpenAI, Mistral and Google's newer embedding models publish.
+const DEFAULT_CONTEXT: usize = 8192;
+
 /// Truncation and padding in the file would hide the input's real length, so both are cleared.
 fn load_tokenizer(path: &std::path::Path) -> Result<(Tokenizer, usize), FrameworkError> {
     let failed = |e: &dyn std::fmt::Display| {
@@ -566,14 +608,17 @@ impl Embedder for HttpEmbedder {
         &self,
         inputs: &[EmbedInput],
     ) -> Result<Vec<Embedding>, FrameworkError> {
-        let texts = inputs
-            .iter()
-            .map(|input| self.within_context(self.profile.document_input(input)?))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut texts = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            texts.push(
+                self.within_context(self.profile.document_input(input)?)
+                    .await?,
+            );
+        }
         self.embed(&texts).await
     }
     async fn embed_query(&self, text: &str) -> Result<Embedding, FrameworkError> {
-        self.embed(&[self.within_context(self.profile.query_input(text)?)?])
+        self.embed(&[self.within_context(self.profile.query_input(text)?).await?])
             .await?
             .into_iter()
             .next()
