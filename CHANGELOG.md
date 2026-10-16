@@ -4,7 +4,7 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
-## 4.2.0 - 2026-10-15
+## 4.2.0 - 2026-10-16
 
 ### Added
 
