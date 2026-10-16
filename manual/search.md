@@ -76,8 +76,8 @@ initial persistent index before model writes:
 
 ```bash
 cargo run -- migrate
-cargo run -- search:index articles
-cargo run -- search:import articles
+cargo run --bin console -- search:index articles
+cargo run --bin console -- search:import articles
 ```
 
 The index name defaults to the model's table name. Field declaration order is
@@ -878,7 +878,7 @@ impressions. Empty search keeps the notes listing behavior.
 Register an account first, then run:
 
 ```bash
-cargo run -- db:seed
+cargo run --bin console -- db:seed
 ```
 
 `NotesSeeder` attaches three example notes to the first registered account:
@@ -886,7 +886,7 @@ Garden planning, Ocean journal, and Library reading. It creates no account of
 its own and fails with registration instructions when none exists. Repeated
 seeding does not duplicate those titles for that owner. Sign in as that account
 and search `oceam` to find Ocean journal through a one-letter typo. For rows
-that predate search, run `cargo run -- search:import notes`.
+that predate search, run `cargo run --bin console -- search:import notes`.
 
 The kit migrator lists both `search::migrations()` and
 `recommendations::migrations()`. Bootstrap provisions the initial notes index,
@@ -992,8 +992,8 @@ the engine query syntax contains these rendered clauses.
 
 ## Commands
 
-Run commands through your application's binary, such as
-`cargo run -- search:status`. Unknown options fail.
+Run commands through your application's console binary, such as
+`cargo run --bin console -- search:status`. Unknown options fail.
 
 | Command | Arguments and flags | Purpose |
 |---|---|---|

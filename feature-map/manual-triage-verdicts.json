@@ -840,6 +840,14 @@
     "VITE_REPORTING_DSN": {
       "class": "verified",
       "evidence": "Read by each Inertia kit's entry through import.meta.env (suprnova-cli/src/templates/files/frontend/react/src/main.tsx.tpl:43, and the Vue and Svelte entries) and by SecurityHeaders through PUBLIC_DSN_SETTINGS (framework/src/security_headers/mod.rs:607); the name check misses a name held in a const array."
+    },
+    "QDRANT_TEST_URL": {
+      "class": "test_suite",
+      "evidence": "Read only by the framework's own ignored Qdrant tests (framework/tests/search/qdrant.rs:22, baseline.rs, render_cache.rs); search.md and env-vars.md describe running the framework's test suite, and say the console reads QDRANT_URL instead."
+    },
+    "console search:baseline --engine": {
+      "class": "noise",
+      "evidence": "Correct: `search:baseline run` parses `--engine name` and `--engine=name` by hand from its trailing args (framework/src/search/commands.rs:227-230), so clap's help cannot list it."
     }
   }
 }
