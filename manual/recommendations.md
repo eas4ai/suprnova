@@ -117,7 +117,7 @@ Every target passes the viewer's search scope inside candidate retrieval and
 again against its live document before display. Removed or inaccessible
 documents cannot supply displayed evidence.
 
-Run `cargo run -- recommendations:generate` on demand. Add this task to your
+Run `cargo run --bin console -- recommendations:generate` on demand. Add this task to your
 application's schedule:
 
 ```rust
