@@ -1,0 +1,13 @@
+{
+  "source": "eas4ai/suprnova-torii-rs",
+  "revision": "968b0be66b1d49f60a2bcb1ab28b5f1b93fa3a5d",
+  "source_path": "torii-core/src/services/password.rs",
+  "algorithm": {"name": "argon2id", "version": 19, "memory_kib": 19456, "iterations": 2, "parallelism": 1},
+  "records": [
+    {"bytes": 32, "hash": "$argon2id$v=19$m=19456,t=2,p=1$hugSQRVfRQO9xmiBXhIXBw$9TPr2B6UL12lt8KinAUwr/q+u9urp5141DVztLbMtiE"},
+    {"bytes": 71, "hash": "$argon2id$v=19$m=19456,t=2,p=1$+5AuEJBTjnlHCtY2HoNHmg$Cva34QmxkhrZmtKvobFUxiCXi+xIj+4nH3nJn+LpMhY"},
+    {"bytes": 72, "hash": "$argon2id$v=19$m=19456,t=2,p=1$WjPuPSIaIYkqCv4fVa5odg$D97E0jF1oThj8HYEMEQIZD8xM/1p31E5eQTucQJc2yM"},
+    {"bytes": 73, "hash": "$argon2id$v=19$m=19456,t=2,p=1$mQMjN9HuWpbA/dMPj5vb7A$LVvs1G6Hkuf1gbQQWnn4bxXTurrJrt7/rkjVMHfMY/g"},
+    {"bytes": 128, "hash": "$argon2id$v=19$m=19456,t=2,p=1$oYnMaIil/eejooe/fO8VHA$446bO3ta/6RU8ZaDXuNBYK1E6XOA9s7eZ9+ocinw/r0"}
+  ]
+}
