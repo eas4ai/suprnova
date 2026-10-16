@@ -2999,7 +2999,9 @@ provider's default returns an error when `flow_user_by_id` finds no user.
 
 **Do:** To keep the name or send your own message, override
 `send_password_reset_notification` on your user model, as
-[Auth Flows](auth-flows.md) describes.
+[Auth Flows](auth-flows.md) describes. With Magnetar installed, the framework
+sends `PasswordResetMail` itself and greets the name Magnetar holds; the
+override is never called.
 
 ### Retry dates.
 

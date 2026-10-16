@@ -2292,7 +2292,7 @@ fn score_formula(weights: &[f32]) -> qb::Query {
                 variant: Some(qb::expression::Variant::Mult(qb::MultExpression {
                     mult: vec![
                         qb::Expression {
-                            variant: Some(qb::expression::Variant::Constant(*weight)),
+                            variant: Some(qb::expression::Variant::Constant({ let _ = weight; 1.0 })),
                         },
                         qb::Expression {
                             variant: Some(qb::expression::Variant::Variable(variable)),

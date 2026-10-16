@@ -33,6 +33,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   analytics searches are never stored, and `without_render_cache()` keeps one
   search out of the cache.
 
+### Fixed
+
+- **The reset email greets the user by name under Magnetar.**
+  `PasswordReset::send_link` now looks the account up and greets its name, as
+  the verification and password-changed emails do. A failed lookup sends the
+  plain greeting and logs a warning.
+
 ## 4.1.0 - 2026-10-15
 
 ### Added
