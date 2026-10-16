@@ -34,7 +34,6 @@ pub(crate) fn observe(
         SearchConfig::current()?.analytics,
         opt_out,
     );
-    collector::observe(identity(index)?);
     Ok(())
 }
 
