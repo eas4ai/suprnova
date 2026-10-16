@@ -158,6 +158,21 @@ block, `name` is the macro's own parameter, so read the field through
 
 A user already renamed "name" sets their name again on the profile page.
 
+### Live component libraries cannot change the application's error handling.
+
+**Before:** A third-party Live component library could call
+`Exceptions::reportable`, `dont_retry` and `dont_retry_when`, and so change
+how the application handles errors.
+
+**Now:** `live:add` and `live:check` refuse a library that names those,
+`dont_report`, `dont_report_when`, `dont_report_duplicates` or
+`Request::csp_nonce`. A library still reports an error with
+`Exceptions::report` or `try_report`.
+
+**Do:** If you publish a component library that configures error handling,
+move that setup into the application that installs it, and run
+`suprnova live:check` before you publish.
+
 ### Why Suprnova diverges
 
 Laravel provides `FrameGuard` and `Vite::useCspNonce`; its applications add

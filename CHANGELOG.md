@@ -33,6 +33,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   Name box started with the word "name", and the profile form showed "name"
   instead of the user's display name, so saving it unchanged renamed the
   user. Both now read the component's own field.
+- **Live component libraries cannot change the application's error
+  handling.** The component scan admitted `Exceptions::reportable`,
+  `dont_retry` and `dont_retry_when`, so a library could change how the
+  application handles errors and hide its own failures from the error
+  tracker. `live:add` now refuses a library that names them, the reporting
+  exclusions or `Request::csp_nonce`; reporting an error stays allowed.
 
 ## 4.0.4 - 2026-10-15
 
