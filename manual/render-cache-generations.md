@@ -24,6 +24,8 @@ can name: a table read, a record read by primary key, a query class, a
 relation, a configuration identity, a feature, a locale, a route, and one
 always-present `Broad` identity that every representation observes. Reads
 through the ORM and the query builder record themselves; you write nothing.
+A search records each index it read, and a write to that index makes the
+page stale; see [Search pages in RenderCache](search.md#search-pages-in-rendercache).
 
 `/live/todos` is the whole pattern in one handler:
 

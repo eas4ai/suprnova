@@ -124,7 +124,7 @@ provider, or a backend:
   variance dimension, or an exhausted waiter list.
 - `moved` - the reread after rendering found a dependency or the epoch had
   changed; the candidate was discarded, never published.
-- `declined` - the render was not storable, for one of the forty-four
+- `declined` - the render was not storable, for one of the forty-seven
   reasons below, carried in the `reason` attribute beside `outcome`.
   `reason` is emitted only alongside `outcome="declined"`; every other
   outcome carries none. The reason is computed from a typed value at the
@@ -139,6 +139,8 @@ provider, or a backend:
     `handler_not_begun`, `foreign_connection_read`, `snapshot_unavailable`.
   - Classification narrowed to `Uncacheable`: `session_value_read`,
     `secret_context_read`, `undeclared_context`.
+  - Search (see [Search pages in RenderCache](search.md#search-pages-in-rendercache)):
+    `viewer_scoped_search`, `analytics_search`, `search_opt_out`.
   - Live document facts: `identity_bound_without_stitching`,
     `invalid_stitch_capture`, `no_store_intent`,
     `unresolvable_seed_deadline`.

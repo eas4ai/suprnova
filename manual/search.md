@@ -712,6 +712,81 @@ Pruning deletes linked clicks, impressions, and queries and also expires search
 tombstones. Recommendation event retention remains an independent application
 decision.
 
+## Search pages in RenderCache
+
+A search that runs on a route opted into [RenderCache](render-cache.md) is
+stored like any other render. The stored page depends on each index the
+search read. Any change to one of those indexes makes the page stale, so the
+next request renders it again:
+
+- Indexing or removing documents, one at a time or in bulk, including
+  imports and queued `SearchIndexJob` work.
+- Flushes, generation creation, reindexing, generation switches, and index
+  deletion.
+- Settings sync.
+- Tombstone pruning and pending vector writes.
+
+A write to another index leaves the page alone. Each logical index is one
+dependency, so a switch to a new generation invalidates the page the same way
+a document write does.
+
+Declare every query parameter the search reads. A request that carries an
+undeclared query parameter bypasses the cache, and each declared value gets
+its own entry, so page 2 is stored apart from page 1:
+
+```rust
+use suprnova::{FrameworkError, Router};
+use suprnova::render_cache::{
+    FreshnessPolicy, QueryPolicy, RenderCachePolicy, RepresentationClass,
+};
+
+fn cache_docs_search(router: Router) -> Result<Router, FrameworkError> {
+    router.try_render_cache(
+        "/docs/search",
+        RenderCachePolicy::builder(RepresentationClass::PublicShared)
+            .freshness(FreshnessPolicy::new(300_000, 60_000, 300_000)?)
+            .query(QueryPolicy::declared(["q", "page"]))
+            .build()?,
+    )
+}
+```
+
+Some searches must run on every request. RenderCache serves the page they
+render but never stores it, and records a `declined` outcome with one of these
+reasons (see [RenderCache Operations](render-cache-operations.md)):
+
+| Search | Reason |
+|---|---|
+| The index declares a [scope](#scopes-and-the-viewer), or the search calls `.for_viewer(...)`. | `viewer_scoped_search` |
+| `SEARCH_ANALYTICS=true` is set, so each request records an impression. | `analytics_search` |
+| The search calls `.without_render_cache()`. | `search_opt_out` |
+
+When you turn analytics on, RenderCache also stops serving search pages that
+it stored while analytics was off.
+
+`.without_render_cache()` keeps one search out of the cache. It is available
+on `Model::search`, `Search::for_index`, and `Search::federated`:
+
+```rust
+use suprnova::{FrameworkError, Search};
+
+async fn live_stock_count(query: &str) -> Result<usize, FrameworkError> {
+    let results = Search::for_index("inventory")?
+        .search(query)
+        .without_render_cache()
+        .get()
+        .await?;
+    Ok(results.hits.len())
+}
+```
+
+Inside a cached render, an unscoped search with analytics off runs as
+`Viewer::Guest` and does not read the session. Without a scope the viewer
+changes no result, and a session read would make the page uncacheable.
+
+A custom engine needs no extra code. The registry guards each of its writes
+and advances the index after the write finishes.
+
 ## JSON endpoint
 
 Register an explicit allowlist with `Search::routes(&["articles"])?`, which

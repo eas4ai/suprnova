@@ -27,6 +27,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **pgvector driver.** `PgVectorDriver` joins the vector drivers behind the
   `vector-pgvector` default feature: a Postgres application stores and
   searches embeddings in its own database.
+- **Search pages in RenderCache.** A search on a cached route is stored like
+  any other render and goes stale when one of its indexes changes: a document
+  write or removal, a generation switch or a settings sync. Viewer-scoped and
+  analytics searches are never stored, and `without_render_cache()` keeps one
+  search out of the cache.
 
 ## 4.1.0 - 2026-10-15
 
