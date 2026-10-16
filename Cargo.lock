@@ -8648,6 +8648,7 @@ dependencies = [
  "tera",
  "thiserror 2.0.20",
  "tinystr 0.8.3",
+ "tokenizers",
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tokio-util",
