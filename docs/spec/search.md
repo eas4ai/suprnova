@@ -203,7 +203,10 @@ the facet value cap and order. Index-time settings start a new index
 generation (SEARCH-005): the engine's language configuration (the Postgres
 text search configuration, the FTS5 tokenizer, Qdrant's text index
 tokenizer, stemmer, stop words and folding; MariaDB and MySQL take the
-server's), the searchable attributes with a weight each, applied as the
+server's; by default Postgres pins a copy of the server's
+`default_text_search_config` to the generation, SQLite uses the `unicode61`
+tokenizer, and Qdrant the `word` tokenizer with folding and no stemmer or
+stop words), the searchable attributes with a weight each, applied as the
 engine's own column weights, the embed source and template, the
 filterable, sortable and facet attribute set with types, the embedder,
 model and dimensions. The command MUST report which class each change
@@ -221,25 +224,31 @@ database, MariaDB and MySQL through a FULLTEXT index queried in boolean
 mode with the `MATCH ... AGAINST` relevance summed over the weighted
 searchable columns, Postgres through a stored `tsvector` built with
 `setweight` per attribute under the index's text search configuration, a
-GIN index and `ts_rank_cd`, SQLite through an FTS5 external-content table
+GIN index and `ts_rank` normalized by document length, SQLite through an FTS5 external-content table
 with `bm25()` column weights, and the semantic leg in the configured
 `VectorDriver` store (any of its drivers); `qdrant` on a collection per
-index generation with a named dense vector, a named sparse vector from the
-configured sparse model when one is set, the text payload index over the
-searchable text (the lexical leg when no sparse model is set), payload
-indexes for every filterable, sortable and facet attribute, and Qdrant's
+index generation (Qdrant 1.19 or later) with a named dense vector; as
+the lexical leg, one named sparse vector per weighted searchable attribute,
+which Qdrant encodes from the attribute's text with its own BM25 model and
+ranks with its IDF modifier, the attribute scores summed by their weights in
+a Qdrant formula query, or one named sparse vector from the configured
+sparse model when one is set; the text payload index filtering words,
+phrases and exclusions; payload indexes for every filterable, sortable and facet attribute, and Qdrant's
 own fusion; `collection` from models in memory with a BM25 scorer for
 tests; `null` accepting writes and answering empty. The builder semantics
 (filters, facets, sort, scope, pagination, highlights, hybrid, grouping)
 MUST hold on every engine; the order of hits is the engine's, and the
 manual MUST document each engine's differences (tokenization, stemming,
 stop words, minimum token length, prefix and phrase support). The
-framework MUST NOT re-tokenize documents for the engine or disguise tokens
-to defeat an engine's limits; `search:status` MUST report MariaDB's and
+framework MUST NOT re-tokenize documents for the engine's ranking or
+disguise tokens to defeat an engine's limits; on Qdrant, whose prefix match
+reads only keyword values and which reports no vocabulary, the framework MAY
+store each document's normalized words as a keyword payload for prefix
+filters and the typo vocabulary, which never ranks a hit; `search:status` MUST report MariaDB's and
 MySQL's minimum token length and stopword state so the operator can set
 them. An application MUST move an index between engines by configuration
 alone, with a reindex.
-Falsifier: a filter, facet, sort, scope, page, highlight, hybrid ratio or group behaves differently on two engines for the same documents and query; a document's searchable text reaches an engine other than as the attribute text the engine tokenizes itself; an engine cannot be chosen per index; `search:status` on MariaDB omits the server's minimum token length; or a search call site changes when the engine does.
+Falsifier: a filter, facet, sort, scope, page, highlight, hybrid ratio or group behaves differently on two engines for the same documents and query; a document's searchable text reaches an engine's ranking other than as the attribute text the engine tokenizes itself; a Qdrant hit's lexical score ignores an attribute's weight; an engine cannot be chosen per index; `search:status` on MariaDB omits the server's minimum token length; or a search call site changes when the engine does.
 Mechanism: `search`.
 Rationale: the developer's brief names Qdrant and MariaDB, design principle 3 forbids one backend, and his ruling of 2026-10-14 05:51 keeps each engine's tuned ranking, speed and stemming in charge; what is shared is the API, not the order.
 Status: Agreed 2026-10-14
@@ -483,5 +492,5 @@ diverges` callout against Scout; every environment variable it introduces
 MUST have a row in `manual/env-vars.md`.
 Falsifier: the chapter is missing or unlinked; a shipped command, builder method, setting or environment variable is undocumented.
 Mechanism: `search`.
-Rationale: every subsystem ships with its chapter (CLAUDE.md house rules).
+Rationale: every subsystem ships with its chapter, the repository's house rule.
 Status: Agreed 2026-10-14

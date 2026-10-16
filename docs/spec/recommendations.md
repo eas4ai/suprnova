@@ -223,5 +223,5 @@ engine's sections added by its commitment; every environment variable MUST
 have a row in `manual/env-vars.md`.
 Falsifier: the chapter is missing or unlinked when the starter engine ships; a shipped command, event type default or variable is undocumented.
 Mechanism: `recommendations`.
-Rationale: every subsystem ships with its chapter (CLAUDE.md house rules), in the commitment that ships it.
+Rationale: every subsystem ships with its chapter, the repository's house rule, in the commitment that ships it.
 Status: Agreed 2026-10-14
