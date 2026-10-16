@@ -44,7 +44,9 @@ const CA_NICKNAME: &str = "portless Local CA";
 /// kept in sync deliberately (the CLI can't depend on the framework crate).
 const DEFAULT_BACKEND_PORT: u16 = 8765;
 
-/// A browser NSS certificate database to install the CA into.
+/// A browser NSS certificate database to install the CA into. Linux only, like the
+/// NSS install path that reads it.
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NssDb {
     /// Filesystem path to the NSS database directory.
@@ -97,6 +99,7 @@ pub fn ca_path_for(state_dir: Option<&Path>, home: &Path) -> PathBuf {
 /// - Firefox profiles under `~/.mozilla/firefox/<p>/` and the Flatpak
 ///   Firefox profile dir are included only when they already contain a
 ///   `cert9.db`, with `create_if_missing = false`.
+#[cfg(target_os = "linux")]
 pub fn nss_databases(home: &Path) -> Vec<NssDb> {
     let mut dbs = Vec::new();
 
@@ -744,6 +747,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn nss_databases_always_includes_chrome_store_even_when_absent() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -757,6 +761,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn nss_databases_includes_existing_flatpak_chromium_excludes_non_browser() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1043,6 +1048,7 @@ mod tests {
         assert_eq!(read_pin(home), None, "a blank pin is not a fingerprint");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn nss_databases_discovers_flatpak_firefox_profile() {
         let tmp = tempfile::TempDir::new().unwrap();

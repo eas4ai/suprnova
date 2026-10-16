@@ -35,6 +35,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **The CLI installs on macOS without warnings (#152).** The browser
+  certificate store helpers that only the Linux install path uses are now
+  compiled on Linux only.
 - **Public responses no longer carry the session or `XSRF-TOKEN` cookie
   (#154).** A response marked `Cache-Control: public` or given an `s-maxage`
   could be stored by a CDN or caching proxy with its `Set-Cookie` lines and
