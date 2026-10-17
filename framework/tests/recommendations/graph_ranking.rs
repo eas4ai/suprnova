@@ -283,3 +283,80 @@ async fn rec_006_the_discover_query_needs_the_graph_engine_and_steers_by_the_vie
     })
     .await;
 }
+
+#[tokio::test]
+async fn rec_007_a_list_never_holds_more_than_the_cap_reached_through_one_node() {
+    let config = graph(|config| {
+        config.graph_surfaces.insert(
+            "home".into(),
+            GraphSurface {
+                per_node: 2,
+                per_value: 10,
+                ..Default::default()
+            },
+        );
+    });
+    setup(with(config, async {
+        let a = note("A", "seed", true, "o", 1).await;
+        let hub = note("Hub", "hub", true, "o", 2).await;
+        let mut spokes = Vec::new();
+        for i in 0..5 {
+            spokes.push(note(&format!("Spoke {i}"), &format!("s{i}"), true, "o", 3).await);
+        }
+        record("alice", &a, EventType::Like, "a").await;
+        peers_like(&["p1", "p2", "p3"], &[&a, &hub]).await;
+        let mut around: Vec<&Note> = vec![&hub];
+        around.extend(spokes.iter());
+        peers_like(&["q1", "q2", "q3"], &around).await;
+        Recommend::rebuild_graph().await.unwrap().unwrap();
+        let rows = for_alice(viewer("alice")).await;
+        let through_hub = rows
+            .iter()
+            .filter(|row| spokes.iter().any(|spoke| row.target == key(spoke)))
+            .count();
+        assert_eq!(through_hub, 2, "{:?}", targets(&rows));
+        assert!(rows.iter().any(|row| row.target == key(&hub)));
+    }))
+    .await;
+}
+
+#[tokio::test]
+async fn rec_007_a_list_never_holds_more_than_the_cap_of_the_popular_band() {
+    let config = graph(|config| {
+        config.graph_surfaces.insert(
+            "home".into(),
+            GraphSurface {
+                per_band: 1,
+                per_value: 10,
+                ..Default::default()
+            },
+        );
+    });
+    setup(with(config, async {
+        let a = note("A", "seed", true, "o", 1).await;
+        let mut popular = Vec::new();
+        for i in 0..3 {
+            popular.push(note(&format!("Popular {i}"), &format!("p{i}"), true, "o", 2).await);
+        }
+        let quiet = note("Quiet", "q", true, "o", 2).await;
+        record("alice", &a, EventType::Like, "a").await;
+        let mut liked: Vec<&Note> = vec![&a];
+        liked.extend(popular.iter());
+        peers_like(&["p1", "p2", "p3", "p4", "p5", "p6"], &liked).await;
+        peers_like(&["q1", "q2", "q3"], &[&a, &quiet]).await;
+        // Single likes of other notes spread popularity, so the top tenth is narrow.
+        for i in 0..7 {
+            let filler = note(&format!("Filler {i}"), &format!("f{i}"), true, "o", 1).await;
+            record(&format!("f{i}"), &filler, EventType::Like, "filler").await;
+        }
+        Recommend::rebuild_graph().await.unwrap().unwrap();
+        let rows = for_alice(viewer("alice")).await;
+        let banded = rows
+            .iter()
+            .filter(|row| popular.iter().any(|note| row.target == key(note)))
+            .count();
+        assert_eq!(banded, 1, "{:?}", targets(&rows));
+        assert!(rows.iter().any(|row| row.target == key(&quiet)));
+    }))
+    .await;
+}

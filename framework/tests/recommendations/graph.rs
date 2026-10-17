@@ -855,6 +855,69 @@ async fn rec_009_a_failed_rebuild_leaves_readers_on_the_previous_generation() {
     .await;
 }
 
+/// The engine-named runs: every conformance function on a disposable live database,
+/// with the recommendation migrations applied and the graph emptied between them.
+async fn on_live_database(variable: &str) {
+    use sea_orm_migration::SchemaManager;
+    let url = std::env::var(variable)
+        .unwrap_or_else(|_| panic!("set {variable} to a disposable database"));
+    let config = suprnova::DatabaseConfig::builder()
+        .url(url)
+        .max_connections(2)
+        .min_connections(0)
+        .logging(false)
+        .build();
+    let connection = suprnova::DbConnection::connect(&config).await.unwrap();
+    let _container = suprnova::testing::TestContainer::fake();
+    suprnova::testing::TestContainer::singleton(connection);
+    let connection = suprnova::DB::connection().unwrap();
+    let manager = SchemaManager::new(connection.inner());
+    for migration in suprnova::recommendations::migrations().into_iter().rev() {
+        let _ = migration.down(&manager).await;
+    }
+    for migration in suprnova::recommendations::migrations() {
+        migration.up(&manager).await.unwrap();
+    }
+    let empty = || async {
+        for table in [
+            "recommendation_graph_edges",
+            "recommendation_graph_nodes",
+            "recommendation_graph_generations",
+        ] {
+            suprnova::DB::update(&format!("DELETE FROM {table}"), vec![])
+                .await
+                .unwrap();
+        }
+    };
+    let store = DatabaseGraphStore;
+    publishing_switches_readers_in_one_step_and_keeps_the_previous_generation(&store).await;
+    empty().await;
+    a_store_answers_hops_strongest_first_within_its_fan_out(&store).await;
+    empty().await;
+    a_traversal_never_returns_or_walks_through_a_fact_outside_the_viewer_scope(&store).await;
+    empty().await;
+    a_traversal_stops_at_its_depth_bound(&store).await;
+    empty().await;
+    revocations_remove_the_facts_resting_on_a_changed_or_removed_source(&store).await;
+    empty().await;
+    the_same_facts_give_the_same_digest_in_any_generation(&store).await;
+    for migration in suprnova::recommendations::migrations().into_iter().rev() {
+        migration.down(&manager).await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable Postgres at PG_TEST_URL"]
+async fn rec_009_the_database_store_conforms_on_postgres() {
+    on_live_database("PG_TEST_URL").await;
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable MariaDB or MySQL at MYSQL_TEST_URL"]
+async fn rec_009_the_database_store_conforms_on_mariadb() {
+    on_live_database("MYSQL_TEST_URL").await;
+}
+
 #[cfg(feature = "graph-memgraph")]
 async fn memgraph_store() -> suprnova::MemgraphGraphStore {
     let url = std::env::var("MEMGRAPH_TEST_URL").expect("MEMGRAPH_TEST_URL is required");
