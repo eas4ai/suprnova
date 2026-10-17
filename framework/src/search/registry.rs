@@ -308,6 +308,9 @@ pub struct SearchableEntry {
     pub should_index: fn(&dyn Any) -> Result<bool, FrameworkError>,
     /// A model without `updated_at` has its source version kept per row by the framework.
     pub keeps_version: bool,
+    /// Record the version a save kept on the saved model itself, so its projection reads it
+    /// however many other rows the process has seen since.
+    pub keep: fn(&dyn Any, i64),
 }
 
 inventory::collect!(SearchableEntry);

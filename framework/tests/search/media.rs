@@ -293,6 +293,81 @@ mod declarations {
         assert_eq!(seen[1].data, b"poster");
     }
 
+    #[cfg(feature = "filesystem")]
+    #[tokio::test]
+    async fn rec_006_media_a_file_replaced_at_the_same_path_is_embedded_again() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use suprnova::{EmbedInput, Embedder, Embedding, FrameworkError, MediaPart, ModelProfile};
+        struct Recording {
+            profile: ModelProfile,
+            calls: AtomicUsize,
+            seen: std::sync::Mutex<Vec<MediaPart>>,
+        }
+        #[suprnova::async_trait]
+        impl Embedder for Recording {
+            fn profile(&self) -> &ModelProfile {
+                &self.profile
+            }
+            async fn embed_documents(
+                &self,
+                inputs: &[EmbedInput],
+            ) -> Result<Vec<Embedding>, FrameworkError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                *self.seen.lock().unwrap() = inputs[0].media.clone();
+                FakeEmbedder::with_profile(self.profile.clone())?
+                    .embed_documents(inputs)
+                    .await
+            }
+            async fn embed_query(&self, text: &str) -> Result<Embedding, FrameworkError> {
+                FakeEmbedder::with_profile(self.profile.clone())?
+                    .embed_query(text)
+                    .await
+            }
+        }
+        let _storage = suprnova::Storage::fake();
+        suprnova::Storage::register_memory("media-test");
+        let disk = suprnova::Storage::disk("media-test").unwrap();
+        disk.write("sound.wav", b"first take".to_vec()).await.unwrap();
+        disk.write("poster.png", b"poster".to_vec()).await.unwrap();
+        let mut profile = suprnova::default_profile();
+        profile.inputs.audio = true;
+        profile.inputs.image = true;
+        let recording = Arc::new(Recording {
+            profile,
+            calls: AtomicUsize::new(0),
+            seen: Default::default(),
+        });
+        let _db = super::super::derive::database().await;
+        use sea_orm::ConnectionTrait;
+        suprnova::DB::connection().unwrap().inner().execute_unprepared(
+            "CREATE TABLE media_test_clips (id INTEGER PRIMARY KEY, caption TEXT NOT NULL, sound TEXT NOT NULL, poster TEXT NOT NULL); INSERT INTO media_test_clips VALUES (1, 'caption', 'sound.wav', 'poster.png')"
+        ).await.unwrap();
+        SearchConfig::scope(
+            SearchConfig {
+                driver: SearchDriver::Collection,
+                queue: false,
+                ..Default::default()
+            },
+            SearchRegistry::isolated(async {
+                SearchRegistry::register_embedder("media-test", recording.clone()).unwrap();
+                suprnova::searchable::<Clip>(&["1".into()]).await.unwrap();
+                assert_eq!(recording.calls.load(Ordering::SeqCst), 1);
+                // An unchanged row over unchanged files still skips the embedder.
+                suprnova::searchable::<Clip>(&["1".into()]).await.unwrap();
+                assert_eq!(recording.calls.load(Ordering::SeqCst), 1);
+                // The row and its paths stay the same while the stored bytes change.
+                disk.write("sound.wav", b"second take".to_vec())
+                    .await
+                    .unwrap();
+                suprnova::searchable::<Clip>(&["1".into()]).await.unwrap();
+                assert_eq!(recording.calls.load(Ordering::SeqCst), 2);
+                assert_eq!(recording.seen.lock().unwrap()[0].data, b"second take");
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn rec_006_media_declarations_preserve_order() {
         let parts = Clip::descriptor().index_settings().index_time.embed_media;

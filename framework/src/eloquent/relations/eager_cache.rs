@@ -73,6 +73,10 @@ pub struct EagerLoadCache {
     row: RowState,
     /// Serialization overrides belong to this model, never to another clone.
     pub(crate) serialization: SerializationState,
+    /// The search source version the framework keeps for this model's row, as the read or
+    /// save that produced the model found it; 0 when none did. It travels with the model,
+    /// so its projection reads it however many rows the process has seen since (SEARCH-001).
+    kept_version: std::sync::atomic::AtomicI64,
 }
 
 /// Instance lists are initialized only when a caller overrides the model policy.
@@ -109,6 +113,7 @@ impl EagerLoadCache {
             from_multi_row_query: false,
             row: RowState::default(),
             serialization: SerializationState::default(),
+            kept_version: std::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -129,7 +134,24 @@ impl EagerLoadCache {
             from_multi_row_query: false,
             row: RowState::loaded(row),
             serialization: SerializationState::default(),
+            kept_version: std::sync::atomic::AtomicI64::new(0),
         }
+    }
+
+    /// The search source version kept for this model's row when the read or save that
+    /// produced the model found one.
+    #[doc(hidden)]
+    pub fn __kept_version(&self) -> Option<i64> {
+        let version = self.kept_version.load(std::sync::atomic::Ordering::Relaxed);
+        (version != 0).then_some(version)
+    }
+
+    /// Record the kept version a read or save found for this model's row. Versions only
+    /// rise, so a later save of the same model replaces an earlier one.
+    #[doc(hidden)]
+    pub fn __keep_version(&self, version: i64) {
+        self.kept_version
+            .fetch_max(version, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The row the model was read from and the record of its last save.
@@ -193,6 +215,8 @@ impl EagerLoadCache {
             from_multi_row_query: false,
             row: RowState::default(),
             serialization: self.serialization.clone(),
+            // A replica is a new row, which no save has given a version yet.
+            kept_version: std::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -411,6 +435,9 @@ impl Clone for EagerLoadCache {
             from_multi_row_query: self.from_multi_row_query,
             row: self.row.clone(),
             serialization: self.serialization.clone(),
+            kept_version: std::sync::atomic::AtomicI64::new(
+                self.kept_version.load(std::sync::atomic::Ordering::Relaxed),
+            ),
         }
     }
 }

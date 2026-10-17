@@ -571,7 +571,8 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 let updated_at = if <Self as ::suprnova::eloquent::EloquentModel>::HAS_TIMESTAMPS {
                     <Self as ::suprnova::eloquent::Model>::field_value(self, <Self as ::suprnova::eloquent::EloquentModel>::UPDATED_AT_COLUMN)
                 } else { None };
-                document.source_version = ::suprnova::search::indexing::source_version(&document, updated_at)?;
+                let kept = <Self as ::suprnova::eloquent::Model>::__eager_cache(self).and_then(|cache| cache.__kept_version());
+                document.source_version = ::suprnova::search::indexing::source_version_of(&document, updated_at, kept)?;
                 document.validate(<Self as ::suprnova::search::Searchable>::descriptor())?;
                 Ok(document)
             }
@@ -633,6 +634,11 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 should_index: |model| {
                     let model = model.downcast_ref::<#model>().ok_or_else(|| ::suprnova::FrameworkError::param("search model type"))?;
                     <#model as ::suprnova::search::Searchable>::should_be_searchable(model)
+                },
+                keep: |model, version| {
+                    if let Some(cache) = model.downcast_ref::<#model>().and_then(<#model as ::suprnova::eloquent::Model>::__eager_cache) {
+                        cache.__keep_version(version);
+                    }
                 },
             }
         }
