@@ -1249,6 +1249,20 @@ impl SearchEngine for CollectionEngine {
             .collect();
         Ok(EngineResult { candidates, total })
     }
+    async fn stored_keys(
+        &self,
+        index: &IndexDescriptor,
+        id: &GenerationId,
+        keys: &[String],
+    ) -> Result<std::collections::HashSet<String>, FrameworkError> {
+        let state = self.read()?;
+        let g = generation(&state, index, id)?;
+        Ok(keys
+            .iter()
+            .filter(|key| g.documents.contains_key(*key))
+            .cloned()
+            .collect())
+    }
     async fn stored_vectors(
         &self,
         index: &IndexDescriptor,

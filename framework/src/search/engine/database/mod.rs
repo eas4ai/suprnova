@@ -1799,6 +1799,35 @@ impl SearchEngine for DatabaseSearchEngine {
         tx.commit().await.map_err(db_error)?;
         Ok(result)
     }
+    async fn stored_keys(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        keys: &[String],
+    ) -> Result<std::collections::HashSet<String>, FrameworkError> {
+        // A removed document's row is deleted; its tombstone lives in another table.
+        let table = table(index, generation)?;
+        let dialect = self.dialect().await?;
+        let conn = DB::connection()?;
+        let mut stored = std::collections::HashSet::new();
+        for chunk in keys.chunks(500) {
+            let mut sql = Sql::new(dialect);
+            let list = chunk
+                .iter()
+                .map(|key| sql.bind(key.clone()))
+                .collect::<Vec<_>>()
+                .join(",");
+            let key = sql.ident("key");
+            let text = format!(
+                "SELECT {key} FROM {} WHERE {key} IN ({list})",
+                sql.ident(&table)
+            );
+            for row in rows(conn.inner(), text, sql).await? {
+                stored.insert(get::<String>(&row, "key")?);
+            }
+        }
+        Ok(stored)
+    }
     async fn stored_vectors(
         &self,
         index: &IndexDescriptor,

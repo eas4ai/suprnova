@@ -601,7 +601,9 @@ be finite. A missing reranker or invalid depth fails at the terminal method.
 
 Set `SEARCH_DRIVER` globally or call
 `SearchRegistry::set_index_driver("articles", "qdrant")?` at bootstrap. Register
-custom engines with `SearchRegistry::register_engine`. To move an index, select
+custom engines with `SearchRegistry::register_engine`; a custom engine that
+serves the graph recommender also implements `stored_keys`, which reports the
+documents a generation holds. To move an index, select
 its destination driver, configure that service, then run `search:reindex`
 against it. Query call sites stay the same. Keep the old service available
 until its queued work drains, and remove its storage separately when retired.

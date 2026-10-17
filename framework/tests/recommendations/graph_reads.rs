@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 use suprnova::{
     EngineCapabilities, EngineQuery, EngineResult, EventType, ExplanationEvidence,
     FacetDistribution, FacetOrder, FacetStats, Filter, FrameworkError, GenerationId,
-    IndexDescriptor, IndexSettings, IndexedDocument, Recommend, RecommendConfig, Recommendation,
-    SearchEngine, SearchRegistry, Total, VectorDiscover, VectorRecommend, Vocabulary, WriteOutcome,
+    IndexDescriptor, IndexSettings, IndexedDocument, Model, Recommend, RecommendConfig,
+    Recommendation, SearchEngine, SearchRegistry, Total, VectorDiscover, VectorRecommend,
+    Vocabulary, WriteOutcome,
 };
 
 /// The collection engine, reporting dense retrieval and recording every recommend and
@@ -106,6 +107,14 @@ impl SearchEngine for Recording {
         documents: &[IndexedDocument],
     ) -> Result<std::collections::BTreeMap<String, String>, FrameworkError> {
         self.inner.stored_hashes(index, generation, documents).await
+    }
+    async fn stored_keys(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        keys: &[String],
+    ) -> Result<std::collections::HashSet<String>, FrameworkError> {
+        self.inner.stored_keys(index, generation, keys).await
     }
     async fn index(
         &self,
@@ -236,6 +245,7 @@ where
     let _queue = suprnova::Queue::fake();
     let config = RecommendConfig {
         engine: "graph".into(),
+        public_event_types: ["like".to_owned()].into(),
         ..Default::default()
     };
     RecommendConfig::scope(config, future(engine.clone()))
@@ -363,6 +373,195 @@ async fn rec_006_a_read_for_another_person_never_steers_by_or_cites_their_events
                 );
             }
             assert!(engine.recommends.lock().unwrap().is_empty());
+        })
+        .await;
+    })
+    .await;
+}
+
+async fn for_alice() -> Vec<Recommendation> {
+    Recommend::for_user("alice")
+        .limit(10)
+        .for_viewer(viewer("alice"))
+        .get()
+        .await
+        .unwrap()
+}
+
+/// The keys of the rows the graph itself ranked.
+fn graph_rows(rows: &[Recommendation]) -> Vec<String> {
+    rows.iter()
+        .filter(|row| row.explanation.engine == "graph")
+        .map(|row| row.target.key.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn rec_005_a_document_made_private_never_steers_a_read_while_its_revocation_waits() {
+    setup(async {
+        recorded(|_| async move {
+            let a = note("A", "a", true, "o", 1).await;
+            let b = note("B", "b", true, "o", 2).await;
+            let c = note("C", "c", true, "o", 3).await;
+            peers_like(&["p1", "p2", "p3"], &[&a, &b]).await;
+            peers_like(&["q1", "q2", "q3"], &[&b, &c]).await;
+            record("alice", &a, EventType::Like, "a").await;
+            Recommend::rebuild_graph().await.unwrap().unwrap();
+            assert!(graph_rows(&for_alice().await).contains(&c.id.to_string()));
+            // B turns private; the job that revokes its facts is still queued.
+            let b = b
+                .update(suprnova::attrs! { public: false, owner: "bob" })
+                .await
+                .unwrap();
+            let reached = graph_rows(&for_alice().await);
+            assert!(!reached.contains(&b.id.to_string()), "{reached:?}");
+            assert!(!reached.contains(&c.id.to_string()), "{reached:?}");
+        })
+        .await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn rec_005_a_rebuild_never_brings_back_a_document_removed_from_its_index() {
+    setup(async {
+        recorded(|_| async move {
+            let a = note("A", "a", true, "o", 1).await;
+            let b = note("B", "b", true, "o", 2).await;
+            peers_like(&["p1", "p2", "p3"], &[&a, &b]).await;
+            record("alice", &a, EventType::Like, "a").await;
+            suprnova::unsearchable::<Note>(&[b.id.to_string()])
+                .await
+                .unwrap();
+            Recommend::rebuild_graph().await.unwrap().unwrap();
+            let store = suprnova::DatabaseGraphStore;
+            let generation = suprnova::GraphStore::current_generation(&store)
+                .await
+                .unwrap()
+                .unwrap();
+            let node = suprnova::recommendations::graph::document_node_key(&key(&b));
+            assert!(
+                suprnova::GraphStore::nodes(&store, &generation, &[node])
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let rows = for_alice().await;
+            assert!(!targets(&rows).contains(&b.id.to_string()), "{rows:?}");
+        })
+        .await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn rec_005_relation_facts_read_from_an_older_revision_never_steer_a_read() {
+    setup(async {
+        recorded(|_| async move {
+            Recommend::graph_relation(
+                suprnova::GraphRelation::new("next", "recommendation_notes", 8_000, |document| {
+                    Ok(match document.attributes.get("category") {
+                        Some(suprnova::AttributeValue::Text(category)) => category
+                            .strip_prefix("next:")
+                            .map(|key| {
+                                vec![suprnova::RecommendationTarget {
+                                    index: "recommendation_notes".into(),
+                                    key: key.into(),
+                                }]
+                            })
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    })
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            let b = note("B", "plain", true, "o", 2).await;
+            let c = note("C", "plain", true, "o", 3).await;
+            let a = note("A", &format!("next:{}", b.id), true, "o", 1).await;
+            record("alice", &a, EventType::Like, "a").await;
+            Recommend::rebuild_graph().await.unwrap().unwrap();
+            assert!(graph_rows(&for_alice().await).contains(&b.id.to_string()));
+            // A now points at C, but the generation still holds what A pointed at before,
+            // as when a rebuild that read A earlier publishes after A's job ran.
+            a.update(suprnova::attrs! { category: format!("next:{}", c.id) })
+                .await
+                .unwrap();
+            let reached = graph_rows(&for_alice().await);
+            assert!(!reached.contains(&b.id.to_string()), "{reached:?}");
+        })
+        .await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn rec_005_facts_resting_on_events_gone_from_the_stream_never_steer_a_read() {
+    setup(async {
+        recorded(|_| async move {
+            let a = note("A", "a", true, "o", 1).await;
+            let b = note("B", "b", true, "o", 2).await;
+            peers_like(&["p1", "p2", "p3"], &[&a, &b]).await;
+            record("alice", &a, EventType::Like, "a").await;
+            Recommend::rebuild_graph().await.unwrap().unwrap();
+            assert!(graph_rows(&for_alice().await).contains(&b.id.to_string()));
+            // The peers' events leave the stream without the graph hearing of it.
+            suprnova::DB::delete(
+                "DELETE FROM recommendation_events WHERE actor_id IN ('p1', 'p2', 'p3')",
+                vec![],
+            )
+            .await
+            .unwrap();
+            let reached = graph_rows(&for_alice().await);
+            assert!(!reached.contains(&b.id.to_string()), "{reached:?}");
+        })
+        .await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn rec_005_a_document_saved_again_keeps_counting_while_its_graph_job_waits() {
+    setup(async {
+        recorded(|_| async move {
+            Recommend::graph_relation(
+                suprnova::GraphRelation::new("next", "recommendation_notes", 8_000, |document| {
+                    Ok(match document.attributes.get("category") {
+                        Some(suprnova::AttributeValue::Text(category)) => category
+                            .strip_prefix("next:")
+                            .map(|key| {
+                                vec![suprnova::RecommendationTarget {
+                                    index: "recommendation_notes".into(),
+                                    key: key.into(),
+                                }]
+                            })
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    })
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            let b = note("B", "plain", true, "o", 2).await;
+            let c = note("C", "plain", true, "o", 3).await;
+            let a = note("A", &format!("next:{}", c.id), true, "o", 1).await;
+            peers_like(&["p1", "p2", "p3"], &[&a, &b]).await;
+            record("alice", &a, EventType::Like, "a").await;
+            Recommend::rebuild_graph().await.unwrap().unwrap();
+            let before = graph_rows(&for_alice().await);
+            assert!(before.contains(&b.id.to_string()), "{before:?}");
+            assert!(before.contains(&c.id.to_string()), "{before:?}");
+            // New revisions of the seed and of a result, with their graph jobs still queued.
+            a.update(suprnova::attrs! { title: "A, revised" })
+                .await
+                .unwrap();
+            let b = b
+                .update(suprnova::attrs! { title: "B, revised" })
+                .await
+                .unwrap();
+            let after = graph_rows(&for_alice().await);
+            assert!(after.contains(&b.id.to_string()), "{after:?}");
+            assert!(after.contains(&c.id.to_string()), "{after:?}");
         })
         .await;
     })

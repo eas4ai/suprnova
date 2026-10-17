@@ -1868,6 +1868,39 @@ impl SearchEngine for QdrantSearchEngine {
             .await?;
         Ok(EngineResult { candidates, total })
     }
+    async fn stored_keys(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        keys: &[String],
+    ) -> Result<std::collections::HashSet<String>, FrameworkError> {
+        let collection = collection_name(index, generation)?;
+        let mut stored = std::collections::HashSet::new();
+        for batch in keys.chunks(256) {
+            let by_point: HashMap<qb::PointId, &String> = batch
+                .iter()
+                .map(|key| (QdrantVectorDriver::resolve_point_id(key), key))
+                .collect();
+            let points = self
+                .client
+                .get_points(
+                    qb::GetPointsBuilder::new(
+                        &collection,
+                        by_point.keys().cloned().collect::<Vec<_>>(),
+                    )
+                    .with_vectors(false)
+                    .with_payload(false),
+                )
+                .await
+                .map_err(|e| error(&collection, e))?;
+            for point in points.result {
+                if let Some(key) = point.id.as_ref().and_then(|id| by_point.get(id)) {
+                    stored.insert((*key).clone());
+                }
+            }
+        }
+        Ok(stored)
+    }
     async fn stored_vectors(
         &self,
         index: &IndexDescriptor,

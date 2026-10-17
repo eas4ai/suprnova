@@ -227,7 +227,8 @@ previous one. Run `recommendations:graph-rebuild` or
 ### What the graph holds
 
 A rebuild reads the event stream, within each actor's `RECOMMEND_HISTORY`
-bound, and the relations you declare:
+bound, and the relations you declare, over the documents still in their
+search index:
 
 - **Shared engagement.** Two documents get a `co_engaged` edge when at least
   `RECOMMEND_MIN_PEERS` actors hold both among their most recent
@@ -292,8 +293,19 @@ replace both.
 ### How the graph ranks
 
 A read authorizes before it scores. Seeds, negatives, every traversed edge
-and every candidate must pass the viewer's scope, and a final candidate must
-still exist and pass it when the read loads it. The blended score then weighs:
+and every candidate must pass the viewer's scope. The read also checks every
+fact it walks, scores or cites against its live source:
+
+- a document node counts only while its document is still in its index, which
+  `unsearchable` ends, and the viewer may see the live document;
+- a fact resting on an event counts only while the event is still in the
+  stream;
+- a relation fact read from an older revision of its source counts only while
+  the relation still finds it in the live revision.
+
+So a fact whose `GraphDocumentJob` is still queued, or one a rebuild read
+before its source changed, never counts, while a document saved again keeps
+counting. The blended score then weighs:
 
 - graph affinity, the strongest path of at most `RECOMMEND_GRAPH_DEPTH` hops
   from one of the viewer's positives, weighted by that positive;

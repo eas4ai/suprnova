@@ -18,7 +18,7 @@ use crate::FrameworkError;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 /// Identifiers keep generation names safe for drivers that create physical indexes.
@@ -315,6 +315,21 @@ pub trait SearchEngine: Send + Sync {
     ) -> Result<HashMap<String, Vec<f32>>, FrameworkError> {
         Err(FrameworkError::param(format!(
             "search engine {} keeps no vectors for index {} to recommend from",
+            self.name(),
+            index.name
+        )))
+    }
+    /// The keys among `keys` this generation holds. The graph engine asks it so a document
+    /// that left its index loses its facts (REC-005); an engine that cannot answer cannot
+    /// serve the graph engine.
+    async fn stored_keys(
+        &self,
+        index: &IndexDescriptor,
+        _generation: &GenerationId,
+        _keys: &[String],
+    ) -> Result<HashSet<String>, FrameworkError> {
+        Err(FrameworkError::param(format!(
+            "search engine {} cannot report which documents index {} holds",
             self.name(),
             index.name
         )))
