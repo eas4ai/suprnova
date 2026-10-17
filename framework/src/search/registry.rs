@@ -84,6 +84,21 @@ impl IndexDescriptor {
             })
     }
 
+    /// Refuse capability mismatches before syncing settings or loading any bytes.
+    pub fn validate_media(&self, profile: &super::ModelProfile) -> Result<(), FrameworkError> {
+        for media in &self.index_settings().index_time.embed_media {
+            if !media.kind.accepted(&profile.inputs) {
+                return Err(FrameworkError::param(format!(
+                    "search index '{}' model '{}' does not accept {} parts",
+                    self.name,
+                    profile.id,
+                    media.kind.name()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Merge declared roles into settings so engines cannot miss weights or typed columns.
     pub fn index_settings(&self) -> IndexSettings {
         let mut settings = (self.settings)();
@@ -215,6 +230,16 @@ impl IndexDescriptor {
         if let Some(source) = &settings.index_time.embed_source {
             for name in source.attributes.iter().chain(source.title.iter()) {
                 self.attribute(name)?;
+            }
+        }
+        for media in &settings.index_time.embed_media {
+            if self.attribute(&media.field)?.ty != AttributeType::Text
+                || media.disk.trim().is_empty()
+            {
+                return Err(FrameworkError::param(format!(
+                    "search index '{}' media requires a text path and storage disk",
+                    self.name
+                )));
             }
         }
         if let Some(name) = &settings.query.distinct_attribute {
@@ -599,7 +624,29 @@ impl SearchRegistry {
             .index_time
             .embedder
             .unwrap_or_else(|| config.embedder.as_str().into());
-        Self::embedder_named(index, &name)
+        let embedder = Self::embedder_named(index, &name).map_err(|error| {
+            if descriptor
+                .index_settings()
+                .index_time
+                .embed_media
+                .is_empty()
+            {
+                error
+            } else {
+                FrameworkError::param(format!(
+                    "search index '{}' model '{}' provider '{name}': {error}",
+                    index,
+                    descriptor
+                        .index_settings()
+                        .index_time
+                        .model
+                        .as_deref()
+                        .unwrap_or(&super::default_profile().id)
+                ))
+            }
+        })?;
+        descriptor.validate_media(embedder.profile())?;
+        Ok(embedder)
     }
 
     /// Generation settings can resolve their pinned provider independently of code defaults.

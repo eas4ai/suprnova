@@ -6,6 +6,7 @@ use crate::FrameworkError;
 const RETRIEVAL_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
 const NAMES: &[&str] = &[
     "embeddinggemma-2",
+    "embeddinggemma-2-media",
     "embeddinggemma-300m",
     "bge-small-en-v1.5",
     "bge-base-en-v1.5",
@@ -65,6 +66,7 @@ pub fn profile(name: &str) -> Result<ModelProfile, FrameworkError> {
     let short = normalized.rsplit('/').next().unwrap_or(&normalized);
     let mut profile = match short {
         "embeddinggemma-2" | "embeddinggemma-2-onnx" => default_profile(),
+        "embeddinggemma-2-media" => embeddinggemma_media_profile()?,
         "embeddinggemma-300m" | "embeddinggemma-300m-onnx" => {
             let mut profile = text_profile("google/embeddinggemma-300m", 768, 2048, Pooling::Mean);
             profile.query_prefix = "task: search result | query: ".into();
@@ -197,4 +199,14 @@ pub(crate) fn text_profile(
         output_key: None,
         files: ModelFiles::default(),
     }
+}
+
+/// Media capability requires both encoder towers from the same verified model revision.
+pub fn embeddinggemma_media_profile() -> Result<ModelProfile, FrameworkError> {
+    let mut profile = default_profile();
+    profile.inputs.image = true;
+    profile.inputs.audio = true;
+    profile.inputs.video = true;
+    profile.validate()?;
+    Ok(profile)
 }

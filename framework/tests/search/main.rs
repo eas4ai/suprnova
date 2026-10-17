@@ -47,3 +47,6 @@ mod render_cache;
 #[cfg(feature = "testing")]
 #[path = "../support/common.rs"]
 mod common;
+
+#[cfg(feature = "search-media")]
+mod media;

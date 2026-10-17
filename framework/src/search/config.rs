@@ -70,6 +70,8 @@ pub struct SearchConfig {
     pub queue_name: Option<String>,
     /// SEARCH_CHUNK bounds memory in bulk indexing operations.
     pub chunk: usize,
+    /// SEARCH_MEDIA_MAX_BYTES bounds each storage read before inference.
+    pub media_max_bytes: usize,
     /// SEARCH_EXPANSION_TERMS bounds alternatives per query word.
     pub expansion_terms: usize,
     /// SEARCH_HITS_CAP bounds accessible ranked results.
@@ -99,6 +101,7 @@ impl Default for SearchConfig {
             queue_connection: None,
             queue_name: None,
             chunk: 500,
+            media_max_bytes: 32 * 1024 * 1024,
             expansion_terms: 64,
             hits_cap: 1000,
             fusion_depth: 200,
@@ -121,6 +124,7 @@ struct RawSearchConfig {
     queue_connection: Option<String>,
     queue_name: Option<String>,
     chunk: Option<String>,
+    media_max_bytes: Option<String>,
     expansion_terms: Option<String>,
     hits_cap: Option<String>,
     fusion_depth: Option<String>,
@@ -168,6 +172,7 @@ impl SearchConfig {
     pub fn validate(&self) -> Result<(), FrameworkError> {
         for (name, value) in [
             ("SEARCH_CHUNK", self.chunk),
+            ("SEARCH_MEDIA_MAX_BYTES", self.media_max_bytes),
             ("SEARCH_EXPANSION_TERMS", self.expansion_terms),
             ("SEARCH_HITS_CAP", self.hits_cap),
             ("SEARCH_FUSION_DEPTH", self.fusion_depth),
@@ -176,6 +181,11 @@ impl SearchConfig {
             if value == 0 {
                 return Err(FrameworkError::param(name));
             }
+        }
+        if self.media_max_bytes > 32 * 1024 * 1024 {
+            return Err(FrameworkError::param(
+                "SEARCH_MEDIA_MAX_BYTES cannot exceed 33554432",
+            ));
         }
         if self.tombstone_hours == 0 {
             return Err(FrameworkError::param("SEARCH_TOMBSTONE_HOURS"));
@@ -235,6 +245,11 @@ impl SearchConfig {
             queue_connection: raw.queue_connection,
             queue_name: raw.queue_name,
             chunk: parse(raw.chunk, default.chunk, "SEARCH_CHUNK")?,
+            media_max_bytes: parse(
+                raw.media_max_bytes,
+                default.media_max_bytes,
+                "SEARCH_MEDIA_MAX_BYTES",
+            )?,
             expansion_terms: parse(
                 raw.expansion_terms,
                 default.expansion_terms,

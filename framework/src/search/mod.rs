@@ -20,8 +20,10 @@ pub mod fusion;
 pub mod generations;
 pub mod highlight;
 pub mod indexing;
+mod media_storage;
 pub mod migrations;
 mod outbox;
+pub use media_storage::load_search_media;
 pub mod query;
 pub mod registry;
 pub(crate) mod render_cache;
@@ -96,11 +98,12 @@ pub async fn boot() -> Result<(), FrameworkError> {
     for index in indexes {
         SearchRegistry::engine_for(index)?;
         let settings = (SearchRegistry::by_index(index)?.descriptor)().index_settings();
-        if settings
-            .index_time
-            .embedder
-            .as_deref()
-            .is_some_and(|name| name != "none")
+        if !settings.index_time.embed_media.is_empty()
+            || settings
+                .index_time
+                .embedder
+                .as_deref()
+                .is_some_and(|name| name != "none")
             || (settings.index_time.embedder.is_none() && config.embedder != SearchEmbedder::None)
         {
             SearchRegistry::embedder_for(index)?;

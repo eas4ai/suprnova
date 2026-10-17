@@ -1034,6 +1034,64 @@ pub(super) async fn embed_sparse_documents(
     Ok(())
 }
 
+async fn embed_dense_documents(
+    index: &str,
+    settings: &super::IndexSettings,
+    indexed: &mut [IndexedDocument],
+) -> Result<(), FrameworkError> {
+    let embedder = match settings.index_time.embedder.as_deref() {
+        Some(name) => SearchRegistry::embedder_named(index, name)?,
+        None => SearchRegistry::embedder_for(index)?,
+    };
+    let mut inputs = indexed
+        .iter()
+        .map(|indexed| {
+            let document = &indexed.document;
+            Ok(EmbedInput {
+                text: document
+                    .embed_text
+                    .clone()
+                    .or_else(|| (!settings.index_time.embed_media.is_empty()).then(String::new))
+                    .ok_or_else(|| {
+                        FrameworkError::param(format!(
+                            "search index `{index}` embed source is missing"
+                        ))
+                    })?,
+                title: document.title.clone(),
+                media: Vec::new(),
+                document_template: (!settings.index_time.embed_template.is_empty())
+                    .then(|| settings.index_time.embed_template.clone()),
+            })
+        })
+        .collect::<Result<Vec<_>, FrameworkError>>()?;
+    (SearchRegistry::by_index(index)?.descriptor)().validate_media(embedder.profile())?;
+    let limit = SearchConfig::current()?.media_max_bytes;
+    for (input, indexed) in inputs.iter_mut().zip(indexed.iter()) {
+        input.media =
+            super::load_search_media(&indexed.document, &settings.index_time.embed_media, limit)
+                .await?;
+    }
+    let embeddings = embedder.embed_documents(&inputs).await?;
+    if embeddings.len() != indexed.len() {
+        return Err(FrameworkError::param(format!(
+            "search index `{index}` embedder returned {} vectors for {} documents",
+            embeddings.len(),
+            indexed.len()
+        )));
+    }
+    for (indexed, embedding) in indexed.iter_mut().zip(embeddings) {
+        indexed.dense = Some(
+            validate_embedding(
+                embedding.dense,
+                embedder.profile(),
+                settings.index_time.dimensions,
+            )?
+            .dense,
+        );
+    }
+    Ok(())
+}
+
 async fn write_documents(
     index: &str,
     generation: Option<GenerationId>,
@@ -1085,45 +1143,7 @@ async fn write_documents(
         None => SearchConfig::current()?.embedder != SearchEmbedder::None,
     };
     if embedding_enabled && !indexed.is_empty() {
-        let embedder = match settings.index_time.embedder.as_deref() {
-            Some(name) => SearchRegistry::embedder_named(index, name)?,
-            None => SearchRegistry::embedder_for(index)?,
-        };
-        let inputs = indexed
-            .iter()
-            .map(|indexed| {
-                let document = &indexed.document;
-                Ok(EmbedInput {
-                    text: document.embed_text.clone().ok_or_else(|| {
-                        FrameworkError::param(format!(
-                            "search index `{index}` embed source is missing"
-                        ))
-                    })?,
-                    title: document.title.clone(),
-                    media: Vec::new(),
-                    document_template: (!settings.index_time.embed_template.is_empty())
-                        .then(|| settings.index_time.embed_template.clone()),
-                })
-            })
-            .collect::<Result<Vec<_>, FrameworkError>>()?;
-        let embeddings = embedder.embed_documents(&inputs).await?;
-        if embeddings.len() != indexed.len() {
-            return Err(FrameworkError::param(format!(
-                "search index `{index}` embedder returned {} vectors for {} documents",
-                embeddings.len(),
-                indexed.len()
-            )));
-        }
-        for (indexed, embedding) in indexed.iter_mut().zip(embeddings) {
-            indexed.dense = Some(
-                validate_embedding(
-                    embedding.dense,
-                    embedder.profile(),
-                    settings.index_time.dimensions,
-                )?
-                .dense,
-            );
-        }
+        embed_dense_documents(index, &settings, &mut indexed).await?;
     }
     embed_sparse_documents(index, &settings, &mut indexed, engine.name()).await?;
     let removals: Vec<_> = remaining
