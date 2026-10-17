@@ -16,6 +16,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   out starts from the sources it falls back to. An application that allows an
   analytics host in `connect-src` no longer copies the preset's policy string.
 
+### Fixed
+
+- **`View::share` reaches the Inertia root template (#157).** The root
+  template rendered without the data shared with every view, so a value
+  shared with `View::share` or `View::share_for_request` never reached it,
+  where Laravel's shared data reaches `app.blade.php`. It now reads them with
+  Askama's `value` filter, as other views do:
+  `{% if let Ok(domain) = "plausible_domain"|value::<String> %}`. Keep such a
+  read inside the `if let` unless every deployment shares the value, since a
+  missing value fails the render.
+
 ## 4.2.0 - 2026-10-16
 
 ### Added

@@ -115,6 +115,11 @@ impl fmt::Debug for InertiaRootTemplate {
 /// `lang`, `csrf_token`, `nonce` and the `view` data are plain values the
 /// template escapes like any other. The framework builds this; a template
 /// only reads it.
+///
+/// A template also reads the data shared with every view through
+/// [`View::share`](crate::View::share), with Askama's `value` filter:
+/// `{% if let Ok(name) = "app_name"|value::<String> %}`. A value read
+/// without the `if let` fails the render when no one shared it.
 #[non_exhaustive]
 pub struct InertiaRootParts<'a> {
     /// The `<title>` element, from the response's title or

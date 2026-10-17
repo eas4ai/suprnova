@@ -74,14 +74,30 @@ where
     T: suprnova_live::view::ViewTemplate,
 {
     fn render_view(&self, output: &mut dyn fmt::Write) -> Result<(), TemplateFailure> {
-        suprnova_live::view::ViewTemplate::render_view(self, output).map_err(
-            |failure| match failure {
-                suprnova_live::view::TemplateFailure::MissingData => TemplateFailure::MissingData,
-                suprnova_live::view::TemplateFailure::InvalidData => TemplateFailure::InvalidData,
-                suprnova_live::view::TemplateFailure::Failed => TemplateFailure::Failed,
-            },
-        )
+        suprnova_live::view::ViewTemplate::render_view(self, output).map_err(engine_failure)
     }
+}
+
+/// The framework's name for the engine's redacted render failure.
+fn engine_failure(failure: suprnova_live::view::TemplateFailure) -> TemplateFailure {
+    match failure {
+        suprnova_live::view::TemplateFailure::MissingData => TemplateFailure::MissingData,
+        suprnova_live::view::TemplateFailure::InvalidData => TemplateFailure::InvalidData,
+        suprnova_live::view::TemplateFailure::Failed => TemplateFailure::Failed,
+    }
+}
+
+/// Writes `template` with the data shared through [`View::share`] and
+/// [`View::share_for_request`] readable by Askama's `value` filter, as
+/// [`ViewRenderer`] renders every other view. The Inertia root template
+/// renders through this, so the document reads what the pages' views read.
+pub(crate) fn render_with_shared_values<T: ViewTemplate + ?Sized>(
+    template: &T,
+    output: &mut dyn fmt::Write,
+) -> Result<(), TemplateFailure> {
+    sealed::Sealed::engine_template(template)
+        .render_view_with_values(output, &share::RenderValues::current())
+        .map_err(engine_failure)
 }
 
 /// Framework-owned checked renderer used by routes and Live components.
