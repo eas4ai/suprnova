@@ -1267,3 +1267,5 @@ is what you actually want.
 - [URL Generation](urls.md) - named-route URLs, signed URLs, redirects, `RouteUrlError`
 - [Authorization](authorization.md) - gates and policies for bound models
 - [WebSockets](websockets.md) - `ws!`, the `WebSocketHandler` trait, per-route config
+
+Bind a model with `route_binding!`.
