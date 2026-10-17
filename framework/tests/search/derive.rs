@@ -121,7 +121,32 @@ impl MigrationTrait for SearchSchema {
 #[async_trait::async_trait]
 impl MigratorTrait for SearchMigrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(SearchSchema)]
+        vec![Box::new(SearchSchema), Box::new(KeptVersionTable)]
+    }
+}
+
+/// The framework's kept-version table under a test-only name, so a migrator that also
+/// appends `suprnova::search::migrations()` records each migration once.
+struct KeptVersionTable;
+
+impl MigrationName for KeptVersionTable {
+    fn name(&self) -> &str {
+        "m_test_search_kept_versions"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for KeptVersionTable {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), sea_orm::DbErr> {
+        suprnova::search::migrations::CreateSearchSourceVersions
+            .up(manager)
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), sea_orm::DbErr> {
+        suprnova::search::migrations::CreateSearchSourceVersions
+            .down(manager)
+            .await
     }
 }
 

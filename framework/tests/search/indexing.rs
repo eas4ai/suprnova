@@ -1352,3 +1352,154 @@ async fn a_different_key_created_after_flush_survives_a_frozen_clock_cutoff() {
     .await
     .unwrap();
 }
+
+/// The version each row of `SearchNote` (no `updated_at`) keeps in the database.
+async fn stored_version(id: i64) -> Option<i64> {
+    use sea_orm::ConnectionTrait;
+    let row = DB::connection()
+        .unwrap()
+        .inner()
+        .query_one_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Sqlite,
+            "SELECT version FROM search_source_versions WHERE index_name = ? AND model_key = ?",
+            [SearchNote::descriptor().name.into(), id.to_string().into()],
+        ))
+        .await
+        .unwrap()?;
+    Some(row.try_get::<i64>("", "version").unwrap())
+}
+
+#[tokio::test]
+async fn search_001_each_saved_revision_of_a_timestamp_free_model_carries_a_newer_version() {
+    let _db = database().await;
+    let _queue = Queue::fake();
+    SearchConfig::scope(
+        config(true),
+        SearchRegistry::isolated(async {
+            let entry = SearchRegistry::by_index(SearchNote::descriptor().name).unwrap();
+            let model = note("First", true, 0).await;
+            let key = model.id.to_string();
+            let model = model
+                .update(suprnova::attrs! { title: "Second" })
+                .await
+                .unwrap();
+            let second = (entry.load_document)(&key).await.unwrap().unwrap();
+            assert!(second.source_version > 0);
+            assert_eq!(stored_version(model.id).await, Some(second.source_version));
+            assert_eq!(
+                model.to_search_document().unwrap().source_version,
+                second.source_version
+            );
+            let model = model
+                .update(suprnova::attrs! { title: "Third" })
+                .await
+                .unwrap();
+            let third = (entry.load_document)(&key).await.unwrap().unwrap();
+            assert!(third.source_version > second.source_version);
+            assert_eq!(
+                model.to_search_document().unwrap().source_version,
+                third.source_version
+            );
+            let job = suprnova::queue::testing::pending_jobs()
+                .into_iter()
+                .last()
+                .unwrap();
+            assert_eq!(
+                job.payload["source_version"].as_i64(),
+                Some(third.source_version)
+            );
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn search_001_deriving_a_document_mints_no_version() {
+    let _db = database().await;
+    let _queue = Queue::fake();
+    SearchConfig::scope(
+        config(true),
+        SearchRegistry::isolated(async {
+            let entry = SearchRegistry::by_index(SearchNote::descriptor().name).unwrap();
+            let model = note("Read", true, 0)
+                .await
+                .update(suprnova::attrs! { title: "Read twice" })
+                .await
+                .unwrap();
+            let key = model.id.to_string();
+            let first = (entry.load_document)(&key).await.unwrap().unwrap();
+            let again = (entry.load_document)(&key).await.unwrap().unwrap();
+            assert_eq!(first.source_version, again.source_version);
+            assert_eq!(
+                model.to_search_document().unwrap().source_version,
+                model.to_search_document().unwrap().source_version
+            );
+            assert_eq!(stored_version(model.id).await, Some(first.source_version));
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn search_001_a_process_that_never_saved_the_row_reads_its_kept_version_on_load() {
+    let _db = database().await;
+    let _queue = Queue::fake();
+    SearchConfig::scope(config(true), async {
+        let (id, kept) = SearchRegistry::isolated(async {
+            let model = note("Elsewhere", true, 0)
+                .await
+                .update(suprnova::attrs! { title: "Saved elsewhere" })
+                .await
+                .unwrap();
+            (model.id, stored_version(model.id).await.unwrap())
+        })
+        .await;
+        // A fresh version state stands in for another process that only reads the row.
+        SearchRegistry::isolated(async move {
+            let model = SearchNote::find(id).await.unwrap().unwrap();
+            assert_eq!(model.to_search_document().unwrap().source_version, kept);
+            let listed = SearchNote::query().get().await.unwrap();
+            assert_eq!(listed[0].to_search_document().unwrap().source_version, kept);
+        })
+        .await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn search_001_a_rolled_back_save_keeps_no_version() {
+    let _db = database().await;
+    let _queue = Queue::fake();
+    SearchConfig::scope(
+        config(true),
+        SearchRegistry::isolated(async {
+            let model = note("Kept", true, 0)
+                .await
+                .update(suprnova::attrs! { title: "Kept once" })
+                .await
+                .unwrap();
+            let kept = stored_version(model.id).await.unwrap();
+            let id = model.id;
+            let failed: Result<(), FrameworkError> = DB::transaction(|_| {
+                Box::pin(async move {
+                    SearchNote::find(id)
+                        .await?
+                        .unwrap()
+                        .update(suprnova::attrs! { title: "Rolled back" })
+                        .await?;
+                    Err(FrameworkError::internal("roll back"))
+                })
+            })
+            .await;
+            assert!(failed.is_err());
+            assert_eq!(stored_version(model.id).await, Some(kept));
+            let reloaded = SearchNote::find(model.id).await.unwrap().unwrap();
+            assert_eq!(reloaded.to_search_document().unwrap().source_version, kept);
+        }),
+    )
+    .await
+    .unwrap();
+}

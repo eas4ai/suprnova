@@ -19,23 +19,7 @@ impl MigrationName for CreateSearchTables {
 impl MigrationTrait for CreateSearchTables {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let backend = manager.get_database_backend();
-        let mysql_collation = if backend == DbBackend::MySql {
-            let row = manager
-                .get_connection()
-                .query_one_raw(Statement::from_string(backend, "SELECT VERSION()"))
-                .await?
-                .ok_or_else(|| {
-                    DbErr::Migration("search migration SELECT VERSION() returned no row".into())
-                })?;
-            let version: String = row.try_get_by_index(0)?;
-            Some(if version.to_ascii_lowercase().contains("mariadb") {
-                "utf8mb4_nopad_bin"
-            } else {
-                "utf8mb4_0900_bin"
-            })
-        } else {
-            None
-        };
+        let mysql_collation = identity_collation(manager).await?;
         let mut settings_json = ColumnDef::new(Alias::new("settings_json"));
         let mut pending_vectors_json = ColumnDef::new(Alias::new("pending_vectors_json"));
         if backend == DbBackend::MySql {
@@ -198,7 +182,84 @@ pub fn migrations() -> Vec<Box<dyn MigrationTrait>> {
         Box::new(CreateSearchTables),
         Box::new(CreateSearchJobs),
         Box::new(CreateSearchAnalytics),
+        Box::new(CreateSearchSourceVersions),
     ]
+}
+
+/// The MySQL or MariaDB collation that compares keys byte for byte, or `None` elsewhere.
+async fn identity_collation(manager: &SchemaManager<'_>) -> Result<Option<&'static str>, DbErr> {
+    let backend = manager.get_database_backend();
+    if backend != DbBackend::MySql {
+        return Ok(None);
+    }
+    let row = manager
+        .get_connection()
+        .query_one_raw(Statement::from_string(backend, "SELECT VERSION()"))
+        .await?
+        .ok_or_else(|| {
+            DbErr::Migration("search migration SELECT VERSION() returned no row".into())
+        })?;
+    let version: String = row.try_get_by_index(0)?;
+    Ok(Some(if version.to_ascii_lowercase().contains("mariadb") {
+        "utf8mb4_nopad_bin"
+    } else {
+        "utf8mb4_0900_bin"
+    }))
+}
+
+/// The version kept for each row of a model without `updated_at`, raised by every save
+/// in the save's own transaction, so a projection can tell one revision from the next.
+pub struct CreateSearchSourceVersions;
+
+impl MigrationName for CreateSearchSourceVersions {
+    fn name(&self) -> &str {
+        "m20261017_000001_create_search_source_versions"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateSearchSourceVersions {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let mut table = Table::create();
+        table
+            .table(Alias::new("search_source_versions"))
+            .if_not_exists()
+            .col(
+                ColumnDef::new(Alias::new("index_name"))
+                    .string_len(128)
+                    .not_null(),
+            )
+            .col(
+                ColumnDef::new(Alias::new("model_key"))
+                    .string_len(255)
+                    .not_null(),
+            )
+            .col(
+                ColumnDef::new(Alias::new("version"))
+                    .big_integer()
+                    .not_null(),
+            )
+            .primary_key(
+                Index::create()
+                    .col(Alias::new("index_name"))
+                    .col(Alias::new("model_key")),
+            );
+        if let Some(collation) = identity_collation(manager).await? {
+            table.character_set("utf8mb4").collate(collation);
+        }
+        manager.create_table(table.to_owned()).await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(Alias::new("search_source_versions"))
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await
+    }
 }
 
 /// Durable pending references let every queue driver participate in generation publication.

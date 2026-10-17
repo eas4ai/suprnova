@@ -10,8 +10,8 @@ matches an entry in the 4.3.0 [changelog](../CHANGELOG.md).
 
 ## How to use this chapter
 
-Find the changelog entry below. Nothing in 4.3.0 needs an edit in an existing
-application.
+Find the changelog entry below, then read **Before**, **Now** and **Do**. One
+fix adds a table that your migrations create; nothing else needs an edit.
 
 ## Upgrade in this order
 
@@ -27,7 +27,26 @@ application.
    cargo check --all-targets
    ```
 
-2. Run your tests.
+2. Run your migrations, so the `search_source_versions` table exists before a
+   searchable model without `updated_at` is saved or loaded.
+3. Run your tests.
+
+## Fixed entries that change behaviour
+
+### A model without `updated_at` keeps a search version per row.
+
+**Before:** a searchable model without `updated_at` put version 0 in every
+search document, so nothing downstream could tell one revision of a row from
+the next.
+
+**Now:** each save raises a version the framework keeps per row, in the save's
+transaction, and Eloquent loads the kept versions beside the rows it returns.
+A model with `updated_at` is unchanged.
+
+**Do:** run your migrations. The table comes with
+`suprnova::search::migrations()`, which your migrator already appends. Until
+it exists, saving or loading such a model on the `database` search engine
+fails with an error naming `search_source_versions`.
 
 ## Fixed entries with no upgrade step
 

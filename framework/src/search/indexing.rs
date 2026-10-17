@@ -82,6 +82,252 @@ type VersionKey = (String, String);
 struct VersionState {
     events: HashMap<VersionKey, i64>,
     indexes: HashMap<String, i64>,
+    kept: KeptVersions,
+}
+
+/// Rows a generation of kept versions holds before the older generation is dropped.
+const KEPT_GENERATION: usize = 65_536;
+
+/// The versions this process last saved or loaded for rows of models without
+/// `updated_at`. A projection is synchronous and cannot query, so it reads them here.
+/// Two generations bound the memory: when the newer one fills, the older is dropped,
+/// and a row neither saved nor loaded since then reads 0 again.
+#[derive(Default)]
+struct KeptVersions {
+    current: HashMap<VersionKey, i64>,
+    previous: HashMap<VersionKey, i64>,
+}
+
+impl KeptVersions {
+    fn get(&mut self, key: &VersionKey) -> Option<i64> {
+        if let Some(version) = self.current.get(key) {
+            return Some(*version);
+        }
+        let version = self.previous.remove(key)?;
+        self.insert(key.clone(), version);
+        Some(version)
+    }
+
+    /// Versions only rise, so an older value read late never replaces a newer one.
+    fn insert(&mut self, key: VersionKey, version: i64) {
+        let known = self
+            .current
+            .get(&key)
+            .or_else(|| self.previous.get(&key))
+            .copied()
+            .unwrap_or(0);
+        if self.current.len() >= KEPT_GENERATION && !self.current.contains_key(&key) {
+            self.previous = std::mem::take(&mut self.current);
+        }
+        self.current.insert(key, version.max(known));
+    }
+}
+
+/// The kept version a projection reads for a row of a model without `updated_at`: the
+/// value this process last saved or loaded for the row, 0 when it has done neither.
+/// Eloquent loads these values in one query beside the rows themselves.
+#[doc(hidden)]
+pub fn kept_version(index: &str, key: &str) -> i64 {
+    versions()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .kept
+        .get(&(index.to_owned(), key.to_owned()))
+        .unwrap_or(0)
+}
+
+fn remember_kept(cache: &VersionCache, index: &str, versions: &[(String, i64)]) {
+    let mut state = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (key, version) in versions {
+        state.kept.insert((index.to_owned(), key.clone()), *version);
+    }
+}
+
+/// Rows bound per kept-version statement: three binds each stay below SQLite's limit.
+const KEPT_ROWS_PER_STATEMENT: usize = 200;
+
+/// Raise the versions kept for rows of a model without `updated_at`, on the save's own
+/// executor so they commit or roll back with it, and return the value now kept for each.
+/// A kept version rises past both its stored value and the version this process minted,
+/// so every save of a row stores a newer version, whichever process makes it.
+async fn keep_versions(
+    index: &str,
+    minted: Vec<(String, i64)>,
+    tx: Option<&Transaction>,
+) -> Result<Vec<(String, i64)>, FrameworkError> {
+    let exec = match tx {
+        Some(tx) => crate::database::transaction::ExecutorChoice::from_tx(tx),
+        None => {
+            crate::database::transaction::ExecutorChoice::resolve_write(
+                None,
+                super::registry::job_connection().as_deref(),
+                (SearchRegistry::by_index(index)?.connection)(),
+            )
+            .await?
+        }
+    };
+    let failure = |error: sea_orm::DbErr| {
+        FrameworkError::database(format!("search index `{index}` kept versions: {error}"))
+    };
+    if minted.is_empty()
+        || !super::outbox::persistent_table(index, &exec, "search_source_versions").await?
+    {
+        return Ok(minted);
+    }
+    let backend = exec.backend();
+    let mut kept = HashMap::with_capacity(minted.len());
+    for chunk in minted.chunks(KEPT_ROWS_PER_STATEMENT) {
+        let rows = vec!["(?, ?, ?)"; chunk.len()].join(", ");
+        let values = chunk
+            .iter()
+            .flat_map(|(key, version)| {
+                [
+                    sea_orm::Value::from(index.to_owned()),
+                    sea_orm::Value::from(key.clone()),
+                    sea_orm::Value::from(*version),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let results = if backend == sea_orm::DbBackend::MySql {
+            exec.run(super::outbox::statement(
+                backend,
+                &format!("INSERT INTO search_source_versions (index_name, model_key, version) VALUES {rows} ON DUPLICATE KEY UPDATE version = IF(VALUES(version) > version, VALUES(version), version + 1)"),
+                values,
+            )?)
+            .await
+            .map_err(failure)?;
+            let keys = vec!["?"; chunk.len()].join(", ");
+            let mut values = vec![sea_orm::Value::from(index.to_owned())];
+            values.extend(
+                chunk
+                    .iter()
+                    .map(|(key, _)| sea_orm::Value::from(key.clone())),
+            );
+            exec.query_all(super::outbox::statement(
+                backend,
+                &format!("SELECT model_key, version FROM search_source_versions WHERE index_name = ? AND model_key IN ({keys})"),
+                values,
+            )?)
+            .await
+            .map_err(failure)?
+        } else {
+            exec.query_all(super::outbox::statement(
+                backend,
+                &format!("INSERT INTO search_source_versions (index_name, model_key, version) VALUES {rows} ON CONFLICT (index_name, model_key) DO UPDATE SET version = CASE WHEN excluded.version > search_source_versions.version THEN excluded.version ELSE search_source_versions.version + 1 END RETURNING model_key, version"),
+                values,
+            )?)
+            .await
+            .map_err(failure)?
+        };
+        for row in results {
+            kept.insert(
+                row.try_get::<String>("", "model_key").map_err(failure)?,
+                row.try_get::<i64>("", "version").map_err(failure)?,
+            );
+        }
+    }
+    let kept = minted
+        .into_iter()
+        .map(|(key, _)| {
+            let version = kept.remove(&key).ok_or_else(|| {
+                FrameworkError::database(format!(
+                    "search index `{index}` kept no version for key `{key}`"
+                ))
+            })?;
+            Ok((key, version))
+        })
+        .collect::<Result<Vec<_>, FrameworkError>>()?;
+    // Later mints in this process start above the kept value at once; the projection
+    // sees it only after the save commits, so a rolled-back save leaves no trace there.
+    let cache = versions();
+    {
+        let mut state = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (key, version) in &kept {
+            let slot = state
+                .events
+                .entry((index.to_owned(), key.clone()))
+                .or_insert(0);
+            *slot = (*slot).max(*version);
+        }
+    }
+    let committed = kept.clone();
+    let index_name = index.to_owned();
+    let remember = move || async move {
+        remember_kept(&cache, &index_name, &committed);
+        Ok(())
+    };
+    match tx {
+        Some(tx) => tx.after_commit(remember),
+        None => DB::after_commit(remember).await?,
+    }
+    Ok(kept)
+}
+
+/// Load the kept versions of freshly read rows in one query per batch, so a projection
+/// of any row Eloquent returns reads the version its database holds. Runs only for a
+/// searchable model without `updated_at`.
+#[doc(hidden)]
+pub async fn prefetch_kept_versions<M>(
+    rows: &[M],
+    exec: &crate::database::transaction::ExecutorChoice,
+) -> Result<(), FrameworkError>
+where
+    M: crate::eloquent::Model + From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    if M::HAS_TIMESTAMPS || rows.is_empty() {
+        return Ok(());
+    }
+    let Some(entry) = SearchRegistry::by_type(TypeId::of::<M>())? else {
+        return Ok(());
+    };
+    if !super::outbox::persistent_table(entry.index, exec, "search_source_versions").await? {
+        return Ok(());
+    }
+    let failure = |error: sea_orm::DbErr| {
+        FrameworkError::database(format!(
+            "search index `{}` kept versions: {error}",
+            entry.index
+        ))
+    };
+    let keys = rows
+        .iter()
+        .map(|row| document_key(&row.primary_key_value_json()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let backend = exec.backend();
+    let mut loaded = Vec::with_capacity(keys.len());
+    for chunk in keys.chunks(KEPT_ROWS_PER_STATEMENT) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let mut values = vec![sea_orm::Value::from(entry.index.to_owned())];
+        values.extend(chunk.iter().map(|key| sea_orm::Value::from(key.clone())));
+        for row in exec
+            .query_all(super::outbox::statement(
+                backend,
+                &format!("SELECT model_key, version FROM search_source_versions WHERE index_name = ? AND model_key IN ({placeholders})"),
+                values,
+            )?)
+            .await
+            .map_err(failure)?
+        {
+            loaded.push((
+                row.try_get::<String>("", "model_key").map_err(failure)?,
+                row.try_get::<i64>("", "version").map_err(failure)?,
+            ));
+        }
+    }
+    remember_kept(&versions(), entry.index, &loaded);
+    Ok(())
 }
 type VersionCache = std::sync::Arc<Mutex<VersionState>>;
 static VERSIONS: LazyLock<VersionCache> =
@@ -151,9 +397,9 @@ pub fn model_key_value<K: serde::de::DeserializeOwned>(
     Ok(value)
 }
 
-/// Timestamped projections retain their storage version; timestamp-free projections use zero.
-/// The write boundary assigns a version once and serializes it in the job. Reloading a row
-/// must never mint a newer version that could pass a subsequent removal's tombstone.
+/// Timestamped projections retain their storage version; a timestamp-free projection reads
+/// the version the framework keeps for its row (see [`kept_version`]). Reading never mints:
+/// a version minted when a row is read could pass a subsequent removal's tombstone.
 #[doc(hidden)]
 pub fn source_version(
     document: &SearchDocument,
@@ -161,7 +407,7 @@ pub fn source_version(
 ) -> Result<i64, FrameworkError> {
     match updated_at.filter(|value| !value.is_null()) {
         Some(value) => timestamp_version(&document.index, &value),
-        None => Ok(0),
+        None => Ok(kept_version(&document.index, &document.key)),
     }
 }
 
@@ -907,6 +1153,9 @@ where
             event_version(M::descriptor().name, &key, model_version)?,
         ));
     }
+    if !M::HAS_TIMESTAMPS {
+        keys = keep_versions(M::descriptor().name, keys, None).await?;
+    }
     if !keys.is_empty() {
         enqueue_job(
             SearchIndexBatchJob {
@@ -1251,7 +1500,18 @@ async fn enqueue_model<M: 'static>(
     } else {
         IndexOperation::Index
     };
-    let source_version = event_version(&document.index, &document.key, document.source_version)?;
+    let mut source_version =
+        event_version(&document.index, &document.key, document.source_version)?;
+    if entry.keeps_version {
+        source_version = keep_versions(
+            &document.index,
+            vec![(document.key.clone(), source_version)],
+            tx,
+        )
+        .await?
+        .remove(0)
+        .1;
+    }
     SearchIndexJob {
         index: document.index,
         key: document.key,
