@@ -1503,3 +1503,106 @@ async fn search_001_a_rolled_back_save_keeps_no_version() {
     .await
     .unwrap();
 }
+
+#[suprnova::model(table = "search_kept_rows", timestamps = false, fillable = ["id", "title"])]
+#[derive(Searchable)]
+#[searchable(index = "test_search_kept_rows")]
+pub(crate) struct KeptRow {
+    pub id: i64,
+    #[searchable(text)]
+    pub title: String,
+}
+
+async fn kept(id: i64) -> Option<i64> {
+    let rows = DB::select(
+        &format!("SELECT version FROM search_source_versions WHERE index_name = 'test_search_kept_rows' AND model_key = '{id}'"),
+        vec![],
+    )
+    .await
+    .unwrap();
+    rows.first().map(|row| row.get_int("version").unwrap())
+}
+
+/// SEARCH-001's kept version on a live database: each save raises it in its own
+/// transaction (Postgres through RETURNING, MySQL and MariaDB through ON DUPLICATE KEY),
+/// and a rolled-back save leaves it.
+async fn kept_versions_follow_saves_on(variable: &str) {
+    let _guard = super::database_support::live_database(variable)
+        .await
+        .unwrap();
+    let _ = DB::update("DROP TABLE search_kept_rows", vec![]).await;
+    DB::update(
+        "CREATE TABLE search_kept_rows (id BIGINT PRIMARY KEY, title VARCHAR(255) NOT NULL)",
+        vec![],
+    )
+    .await
+    .unwrap();
+    SearchConfig::scope(
+        config(false),
+        SearchRegistry::isolated(async {
+            SearchRegistry::register_engine("collection", Arc::new(CollectionEngine::new()))
+                .unwrap();
+            // A plain insert keeps the row's key portable; the model's saves below are
+            // what the write boundary sees.
+            DB::update(
+                "INSERT INTO search_kept_rows (id, title) VALUES (7, 'zero')",
+                vec![],
+            )
+            .await
+            .unwrap();
+            let row = KeptRow::find(7_i64)
+                .await
+                .unwrap()
+                .unwrap()
+                .update(suprnova::attrs! { title: "first" })
+                .await
+                .unwrap();
+            let first = kept(7).await.expect("the save kept a version");
+            let row = row
+                .update(suprnova::attrs! { title: "second" })
+                .await
+                .unwrap();
+            let second = kept(7).await.unwrap();
+            assert!(second > first);
+            assert_eq!(row.to_search_document().unwrap().source_version, second);
+            let failed: Result<(), FrameworkError> = DB::transaction(|_| {
+                Box::pin(async move {
+                    KeptRow::find(7_i64)
+                        .await?
+                        .unwrap()
+                        .update(suprnova::attrs! { title: "rolled back" })
+                        .await?;
+                    Err(FrameworkError::internal("roll back"))
+                })
+            })
+            .await;
+            assert!(failed.is_err());
+            assert_eq!(kept(7).await, Some(second));
+        }),
+    )
+    .await
+    .unwrap();
+    DB::update("DROP TABLE search_kept_rows", vec![])
+        .await
+        .unwrap();
+    DB::update(
+        "DELETE FROM search_source_versions WHERE index_name = 'test_search_kept_rows'",
+        vec![],
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[serial_test::serial(search_database_postgres)]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn search_001_kept_versions_follow_saves_on_postgres() {
+    kept_versions_follow_saves_on("PG_TEST_URL").await;
+}
+
+#[tokio::test]
+#[serial_test::serial(search_database_mysql)]
+#[ignore = "requires disposable MariaDB or MySQL at MYSQL_TEST_URL"]
+async fn search_001_kept_versions_follow_saves_on_mariadb() {
+    kept_versions_follow_saves_on("MYSQL_TEST_URL").await;
+}

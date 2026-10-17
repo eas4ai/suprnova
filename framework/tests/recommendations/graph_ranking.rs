@@ -360,3 +360,78 @@ async fn rec_007_a_list_never_holds_more_than_the_cap_of_the_popular_band() {
     }))
     .await;
 }
+
+/// REC-009: the same events and relations, built into the database store and into
+/// Memgraph, give the same ranked lists, because the framework scores what either store
+/// returns.
+#[cfg(feature = "graph-memgraph")]
+#[tokio::test]
+#[ignore = "requires Memgraph at MEMGRAPH_TEST_URL"]
+async fn rec_009_both_stores_rank_the_same_fixture_alike_memgraph() {
+    let url = std::env::var("MEMGRAPH_TEST_URL").expect("MEMGRAPH_TEST_URL is required");
+    let graph = neo4rs::Graph::connect(
+        neo4rs::ConfigBuilder::default()
+            .uri(&url)
+            .user("")
+            .password("")
+            .db("memgraph")
+            .build()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    graph
+        .run(neo4rs::query("MATCH (n) DETACH DELETE n"))
+        .await
+        .unwrap();
+    setup(with(graph_config_for("database", None), async {
+        let a = note("A", "a", true, "o", 1).await;
+        let b = note("B", "b", true, "o", 2).await;
+        let c = note("C", "c", true, "o", 3).await;
+        let private = note("P", "p", false, "bob", 4).await;
+        let d = note("D", "d", true, "o", 5).await;
+        record("alice", &a, EventType::Like, "a").await;
+        peers_like(&["p1", "p2", "p3"], &[&a, &b, &c]).await;
+        peers_like(&["q1", "q2", "q3"], &[&a, &private]).await;
+        peers_like(&["r1", "r2", "r3"], &[&private, &d]).await;
+        record("h1", &c, EventType::Hide, "c").await;
+        Recommend::rebuild_graph().await.unwrap().unwrap();
+        let mut by_store = Vec::new();
+        for viewer_id in ["alice", "bob"] {
+            by_store.push(ranked(viewer_id).await);
+        }
+        // A comparison of empty or fallback lists would prove nothing.
+        assert!(
+            by_store
+                .iter()
+                .all(|rows| rows.iter().any(|row| row.2 == "graph"))
+        );
+        let memgraph = graph_config_for("memgraph", Some(url.clone()));
+        RecommendConfig::scope(memgraph, async {
+            Recommend::rebuild_graph().await.unwrap().unwrap();
+            for (i, viewer_id) in ["alice", "bob"].into_iter().enumerate() {
+                assert_eq!(ranked(viewer_id).await, by_store[i], "viewer {viewer_id}");
+            }
+        })
+        .await
+        .unwrap();
+    }))
+    .await;
+}
+
+#[cfg(feature = "graph-memgraph")]
+fn graph_config_for(store: &str, url: Option<String>) -> RecommendConfig {
+    graph(|config| {
+        config.graph_store = store.into();
+        config.graph_url = url;
+    })
+}
+
+#[cfg(feature = "graph-memgraph")]
+async fn ranked(viewer_id: &str) -> Vec<(String, i64, String)> {
+    for_alice(viewer(viewer_id))
+        .await
+        .into_iter()
+        .map(|row| (row.target.key, row.score, row.explanation.engine))
+        .collect()
+}
