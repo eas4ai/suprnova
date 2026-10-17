@@ -527,7 +527,8 @@ Video requires a host `ffmpeg` binary. `SEARCH_FFMPEG_BINARY` selects its path
 and defaults to `ffmpeg`. A missing binary fails with that variable's name.
 The worker samples frames at 1 fps, keeps at most 32 frames and applies the
 video processor's 140-token image budget. Long clips use uniform samples
-across their duration. Each decode has a 30-second timeout.
+across their duration. Video duration must be at most 24 hours. Each decode
+has a 30-second timeout.
 Temporary input and frame files are removed when decoding ends.
 
 Boot and `search:sync-index-settings` reject a declared kind that the model
