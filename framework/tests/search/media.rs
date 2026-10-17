@@ -327,7 +327,9 @@ mod declarations {
         let _storage = suprnova::Storage::fake();
         suprnova::Storage::register_memory("media-test");
         let disk = suprnova::Storage::disk("media-test").unwrap();
-        disk.write("sound.wav", b"first take".to_vec()).await.unwrap();
+        disk.write("sound.wav", b"first take".to_vec())
+            .await
+            .unwrap();
         disk.write("poster.png", b"poster".to_vec()).await.unwrap();
         let mut profile = suprnova::default_profile();
         profile.inputs.audio = true;

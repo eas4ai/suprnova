@@ -1,5 +1,0 @@
-{
-  "name": "evil.rust-std-fs-alias",
-  "files": ["widget.html", "widget.rs"],
-  "register": ["widget::Widget"]
-}
