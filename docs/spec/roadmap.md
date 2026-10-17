@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: search-and-starter-recommender
+Current: graph-recommender
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -1215,6 +1215,65 @@ Requirements: SEARCH-001, SEARCH-002, SEARCH-003, SEARCH-004, SEARCH-005, SEARCH
    a committed tree, the engine passes are green on the host MariaDB and
    Postgres and the Qdrant container, the hand-run http embedder test has
    passed once against the OpenRouter target, and the review is recorded.
+
+## graph-recommender
+
+Requirements: REC-005, REC-006, REC-007, REC-009, SEARCH-001, MAN-108, BIND-014
+
+57. graph-recommender - the knowledge-graph recommender the starter engine
+   was built to feed (REC-005 to REC-007), drafted on 2026-10-14 and
+   confirmed on 2026-10-17 with its graph store: the application's
+   database by default and a Memgraph driver beside it (REC-009), after
+   the developer said "I like memgraph but am open to other
+   recommendations"; with it the version a timestamp-free model keeps
+   (SEARCH-001), which the graph needs to revoke stale facts, and two
+   rewordings whose checks already hold (MAN-108, BIND-014). In the order
+   the work depends:
+   - the `fastembed` provider's memory growth found and fixed first: the
+     hand-run hybrid baseline (`collection_hybrid`) was stopped on
+     2026-10-16 at 45 GB with no result, and the media inference test that
+     this commitment's done-when requires runs through the same provider
+     (the developer, 2026-10-17 10:29: "ok", keeping that test in the
+     done-when)
+   - the durable per-key source version for models without `updated_at`,
+     written with the index job and read without minting (SEARCH-001)
+   - the `GraphStore` trait with the `database` driver on SQLite,
+     Postgres and MySQL/MariaDB and the `memgraph` driver over Bolt, graph
+     generations and `recommendations:graph-rebuild` (REC-009)
+   - node and edge derivation by queued jobs from the event stream and the
+     declared model relations, aggregation of sensitive facts, and
+     revocation on a source change, a removal or retention (REC-005)
+   - the scoped traversal, the blended score with per-surface weights,
+     diversity caps, the confidence fallback to the starter rows and
+     evidence-backed explanations (REC-007)
+   - vectors from the search collection, Qdrant recommend and discover
+     under the scope filter and the database engine's nearest-neighbour
+     fold; the media input path with EmbeddingGemma 2's image, audio and
+     video preprocessing and its media profile under `search-fastembed`
+     (REC-006)
+   Delivery: the graph engine under `framework/src/recommendations/`,
+   crate-root re-exports, migrations for the graph tables and the source
+   version table, the `neo4rs` dependency behind an off-by-default
+   `graph-memgraph` feature like the other optional backends,
+   preprocessing in pure Rust outside the ONNX Runtime build so the
+   mechanism runs its reference fixtures, an ignored hand-run test of real
+   EmbeddingGemma 2 media inference, the gate's `suprnova-gate-memgraph`
+   container (`memgraph/memgraph:3.13.2`) created once by
+   `scripts/setup-gate-databases.sh`, the graph sections of
+   `manual/recommendations.md`, `manual/env-vars.md` rows, changelog
+   entries under the open version with that release's upgrade chapter
+   accounting for each of them, and the 4.2.1 Fixed entry (#157) listed in
+   `manual/upgrade-4.2.md`, which the check found missing on 2026-10-17.
+   Mechanisms: `recommendations`,
+   re-declared to require the `rec_005`, `rec_006`, `rec_007` and `rec_009`
+   tests and to run the `_memgraph` tests against the gate container;
+   `search`, re-declared to require the `search_001` timestamp-free tests;
+   `upgrade-guide`, re-declared to read the newest release (`--newest`, as
+   the gate's step does) instead of 4.0.0; `route-binding` unchanged; each
+   bound to a violating example before the start. Done when every requirement has a current
+   pass on a committed tree, the `_memgraph` tests are green on the gate
+   container, the hand-run media inference test has passed once, and the
+   review is recorded.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard

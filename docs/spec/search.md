@@ -184,10 +184,10 @@ has one, else a monotonic version the framework keeps), each declared
 attribute's value typed as declared, the embed text, and nothing
 undeclared; `make_searchable_using` MUST let the model load relations
 before a chunk is documented.
-Falsifier: a derived document omits a declared attribute, carries an undeclared one, lacks a source version, or stores a value against its declared type; a model whose predicate is false reaches an index; a related model's save does not re-index a parent that names its relation in `search_touches`; or documents of a chunk are built one model at a time.
+Falsifier: a derived document omits a declared attribute, carries an undeclared one, lacks a source version, or stores a value against its declared type; two revisions of a model without `updated_at` carry the same source version, or deriving a document mints a new one; a model whose predicate is false reaches an index; a related model's save does not re-index a parent that names its relation in `search_touches`; or documents of a chunk are built one model at a time.
 Mechanism: `search`.
 Rationale: Scout's `Searchable` surface is what developers know, and the document is the one shape every engine, the embedder and the recommenders read; the typed attributes are what filters, facets and sorts validate against.
-Status: Agreed 2026-10-14
+Status: Agreed 2026-10-17
 
 [SEARCH-002] An index MUST carry settings declared in code and applied by
 `search:sync-index-settings`, in two classes. Query-time settings take

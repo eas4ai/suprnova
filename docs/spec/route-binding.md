@@ -418,10 +418,10 @@ those the Observed section lists and `from-laravel.md`,
 `from-rust-web.md`, `authorization.md`, `urls.md` and the resources
 section of `routing.md` included, MUST be corrected, the tutorial's code
 compiling.
-Falsifier: a manual page or rustdoc comment still names `route_binding!` or the `param_name` trait, or shows the bare `x::Model` form as the way to bind a `#[model]`; the manual lacks a "Why Suprnova diverges" entry this requirement names; or the tutorial's model, controller and routes, built from `manual/tutorial-inertia-crud.md` by the mechanism, do not compile.
+Falsifier: a manual page other than an upgrade chapter (`manual/upgrade-*.md`), or a rustdoc comment, still names `route_binding!` or the `param_name` trait, or shows the bare `x::Model` form as the way to bind a `#[model]`; the manual lacks a "Why Suprnova diverges" entry this requirement names; or the tutorial's model, controller and routes, built from `manual/tutorial-inertia-crud.md` by the mechanism, do not compile.
 Mechanism: `route-binding`.
 Rationale: The manual teaches the bare form as the general one, a removed macro and a `User::find_by_pk` that does not exist.
-Status: Agreed 2026-10-05
+Status: Agreed 2026-10-17
 
 ## The handler form
 

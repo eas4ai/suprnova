@@ -1,6 +1,6 @@
 # Recommendations
 
-Status: Draft
+Status: Agreed 2026-10-17
 Prefix: REC
 
 Drafted 2026-10-14 from the developer's direction of 2026-10-09 19:02 ("I
@@ -16,9 +16,13 @@ commitment; REC-005 to REC-007 are the graph engine, Draft until its own
 commitment, which extends the chapter. Redrafted the same day after the
 adversarial review by gpt-6.1-sol: the starter's inputs are named, events
 are immutable, reads are authorized for a viewer, explanations are
-projected, batches publish atomically and are bounded. The Observed
-section describes framework `cf0d4a464` and the nation-x_com sources read
-on 2026-10-14.
+projected, batches publish atomically and are bounded. On 2026-10-17 the
+developer confirmed the graph engine's design: a graph store trait with
+the application's database as the default and a Memgraph driver beside
+it, revocation of facts whose source changed, and media embeddings
+through the `fastembed` provider. The Observed section describes framework
+`cf0d4a464` and the nation-x_com sources read on 2026-10-14, and the graph
+store sources read on 2026-10-17.
 
 ## Observed at cf0d4a464
 
@@ -78,6 +82,19 @@ Status: Observed
   and context pairs, and a distance matrix; EmbeddingGemma 2 embeds text,
   images, audio and video into one space through separate encoder graphs
   with their own preprocessing (SEARCH, Observed).
+- Read 2026-10-17: nation-x re-derives a document's graph on each index
+  write (`materialize_knowledge_graph`, `src/domain/search/rag.rs:649`):
+  it marks the document node's active edges deleted, then upserts edges
+  whose keys carry the new source version; removing a document marks its
+  nodes revoked and its edges deleted (rag.rs:231-270). The framework's
+  `Embedder` input already carries typed media parts and each profile
+  declares the input kinds it accepts, but the `fastembed` and `http`
+  providers refuse any media part (`framework/src/search/embedder/
+  fastembed.rs:295`, `http.rs:294`), and a timestamp-free model's derived
+  document carries source version 0 (`framework/src/search/indexing.rs:158`).
+  Memgraph 3.13.2 (2026-10-09) is licensed under the Business Source
+  License 1.1 and speaks the Bolt protocol; the pure-Rust `neo4rs` 0.8.0
+  speaks Bolt 4.0 to 4.3; Kuzu was archived on 2025-10-10.
 
 ## Requirements
 
@@ -175,11 +192,16 @@ event, a model relation or an embedding similarity, an access scope, a
 source version, timestamps), derived by queued jobs from the event stream
 and from model relations the application declares, with user-derived facts
 aggregated rather than stored per event where the application marks them
-sensitive.
-Falsifier: a node or edge without a scope, source version or provenance pair; a derived edge that cannot be traced to its source; or a sensitive fact stored per event when marked for aggregation.
+sensitive. A derived fact MUST follow its source: a node or edge derived
+from a document MUST be replaced when the document's source version
+advances and revoked when the document leaves its index, one derived from
+an event MUST be revoked when retention removes the event (its provenance
+pair no longer verifies, REC-004), and a revoked fact MUST NOT be read,
+traversed or cited.
+Falsifier: a node or edge without a scope, source version or provenance pair; a derived edge that cannot be traced to its source; a sensitive fact stored per event when marked for aggregation; or, after a document's source version advances, the document leaves its index or retention removes an event, a fact derived from the old version, the document or the event is still read, traversed or cited.
 Mechanism: `recommendations`.
-Rationale: nation-x's graph rules: raw facts need provenance and confidence, sensitive facts are minimized.
-Status: Draft
+Rationale: nation-x's graph rules: raw facts need provenance and confidence, sensitive facts are minimized, and a fact whose source changed or left is revoked.
+Status: Agreed 2026-10-17
 
 [REC-006] The graph engine's vectors MUST live in the search collection of
 the target's index (SEARCH-003, SEARCH-006), so one vector serves search
@@ -191,28 +213,33 @@ the framework's own nearest-neighbour fold where it is the database. Media
 parts MUST reach the `Embedder` trait as a typed input (text with ordered
 image, audio and video parts, each with its media type), preprocessed per
 the model's processor configuration, through a provider whose profile
-declares the input kinds it accepts; an index declaring media parts over a
-model or provider that accepts text only MUST fail at sync naming both.
-Falsifier: a second collection holds a copy of a search vector; a recommend uses a point outside the viewer's scope or ignores the viewer's negatives; or an index declaring audio parts over a text-only profile syncs.
+declares the input kinds it accepts: the `fastembed` provider MUST embed
+them through a shipped EmbeddingGemma 2 media profile whose encoder graphs
+take image, audio and video, and the `http` provider stays text only
+(SEARCH-006); an index declaring media parts over a model or provider that
+accepts text only MUST fail at sync naming both.
+Falsifier: a second collection holds a copy of a search vector; a recommend uses a point outside the viewer's scope or ignores the viewer's negatives; an image or audio part's preprocessed input differs from the model processor's reference output for the same fixture beyond the tolerance the fixture records; a media part of a kind the profile accepts is dropped before the model; or an index declaring audio parts over a text-only profile syncs.
 Mechanism: `recommendations`.
 Rationale: one collection is cheaper and keeps search and recommendation consistent; the developer's nation-x use case ("sounds like this track") needs the audio leg, and the input contract is what makes it buildable.
-Status: Draft
+Status: Agreed 2026-10-17
 
 [REC-007] The graph engine MUST authorize before it scores: every
 candidate node, every traversed edge and every evidence item MUST pass the
 viewer's scope as a hard filter, and only then be ranked by a blended score
-of graph affinity, semantic similarity, social proximity, freshness,
-explicit feedback and trust risk, with weights per surface and diversity
+of graph affinity, semantic similarity, social proximity (paths through
+the actors the viewer's own follow events name), freshness, explicit
+feedback and trust risk (the target's hide and report events weighed
+against its positive events), with weights per surface and diversity
 controls that cap one node, attribute value or popularity band per result
 list; when retrieval confidence falls under the surface's threshold the
 engine MUST return the starter engine's rows for the same viewer instead
 and say so in the explanation; and every explanation MUST cite stored
 evidence the viewer may see (events of their own, edges, documents) and
 never a reason without one.
-Falsifier: a node or edge outside the viewer's scope influences a score; a list collapses into one attribute value past its cap; a low-confidence surface answers from the graph instead of the starter rows; or an explanation names a reason with no permitted stored evidence.
+Falsifier: a node or edge outside the viewer's scope influences a score; a target ranks above an otherwise equal target with fewer hide and report events; a path through an actor the viewer follows adds nothing to social proximity; a list collapses into one attribute value past its cap; a low-confidence surface answers from the graph instead of the starter rows; or an explanation names a reason with no permitted stored evidence.
 Mechanism: `recommendations`.
 Rationale: nation-x's blended score with eligibility moved from a weight to a gate, which its own spec requires, and the fallback the developer agreed to.
-Status: Draft
+Status: Agreed 2026-10-17
 
 [REC-008] The manual MUST ship `manual/recommendations.md`, linked from
 `documentation.md`, with the starter engine in the search commitment (the
@@ -225,3 +252,21 @@ Falsifier: the chapter is missing or unlinked when the starter engine ships; a s
 Mechanism: `recommendations`.
 Rationale: every subsystem ships with its chapter, the repository's house rule, in the commitment that ships it.
 Status: Agreed 2026-10-14
+
+[REC-009] The graph engine MUST keep its graph behind a `GraphStore`
+trait chosen by `RECOMMEND_GRAPH_STORE`, with two drivers: `database`, the
+default, holding nodes and edges in the application's own database on
+SQLite, Postgres and MySQL/MariaDB and walking them with depth-bounded
+SQL; and `memgraph`, speaking the Bolt protocol to the Memgraph server
+that configuration names. A store MUST only persist facts and answer
+depth-bounded traversals under the viewer's scope (REC-007); the framework
+MUST compute the blended score (REC-007) from what the store returns, so
+both drivers return the same ranked list for the same graph and vectors.
+The graph is derived data: `recommendations:graph-rebuild` MUST rebuild it from the event stream and the declared model relations
+into a new generation and switch readers to it only when the rebuild is
+complete, so a store that lost its data (Memgraph holds its graph in
+memory) is restored from the facts the stream still holds.
+Falsifier: the graph engine needs a service beyond the application's database while `RECOMMEND_GRAPH_STORE` is unset; the two drivers rank the gate's fixture differently; a traversal returns a node or edge outside the viewer's scope or past its depth bound; a rebuild of an emptied store, with no event or model written between, yields a different graph; or a reader sees a partial rebuild.
+Mechanism: `recommendations`.
+Rationale: the developer, 2026-10-17 09:48: "I like memgraph but am open to other recommendations", then confirmed a database default beside the Memgraph driver, because design principle 3 forbids locking a feature to one backend.
+Status: Agreed 2026-10-17

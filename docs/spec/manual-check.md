@@ -254,14 +254,14 @@ written for a person and for an agent alike: every such entry MUST appear
 in the chapter under a heading that carries the entry's bold lead sentence
 verbatim, followed by what an application observed before and observes
 now and the edit it makes to keep working, or the statement that no edit
-is needed; a `### Fixed` entry that changes a behaviour the manual
-documented MUST appear the same way when the release notes name it as a
-behaviour change. The chapter is part of the release: the tag MUST NOT be
-cut while an entry is missing.
-Falsifier: the release section of `CHANGELOG.md` holds a `### Changed` or `### Removed` entry whose bold lead sentence heads no section of the release's upgrade chapter, or the chapter is not linked from `manual/documentation.md`, or a tag is cut with one missing.
+is needed; every `### Fixed` entry MUST be accounted for in the chapter,
+under a heading that carries its bold lead sentence verbatim or as a bold
+item in the chapter's list of fixes that need no upgrade step. The chapter
+is part of the release: the tag MUST NOT be cut while an entry is missing.
+Falsifier: the release section of `CHANGELOG.md` holds a `### Changed` or `### Removed` entry whose bold lead sentence heads no section of the release's upgrade chapter, or a `### Fixed` entry that neither heads a section nor is a bold item in the list of fixes that need no upgrade step, or the chapter is not linked from `manual/documentation.md`, or a tag is cut with one missing.
 Mechanism: `upgrade-guide`: `feature-map/tools/upgrade_guide_check.py` reads the release's changelog section and chapter and exits non-zero naming each missing entry; the release gate runs it.
 Rationale: the developer, 2026-10-09 13:06 and 13:07: the next release is 4.0.0 because it carries breaking changes, and "an upgrade guide (humans and agents) for 4.0.0 is the LAST task before the release".
-Status: Agreed 2026-10-10
+Status: Agreed 2026-10-17
 
 ## Mechanisms
 
