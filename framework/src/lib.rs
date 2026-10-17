@@ -633,8 +633,8 @@ pub use recommendations::{
     RecommendationBuilder, RecommendationEvent, RecommendationExplanation, RecommendationRun,
     RecommendationTarget, Recommender, StarterRecommender, event_digest,
     graph::{
-        DatabaseGraphStore, GraphEdge, GraphNode, GraphProvenance, GraphRecommender, GraphScope,
-        GraphStore, Revocation,
+        DatabaseGraphStore, GraphBuild, GraphEdge, GraphNode, GraphProvenance, GraphRecommender,
+        GraphRelation, GraphScope, GraphStore, Revocation,
     },
 };
 #[cfg(feature = "testing")]

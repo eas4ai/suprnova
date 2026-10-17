@@ -15,6 +15,32 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   profile verifies both encoder graphs and their weights with the text model.
   Rust processors prepare image patches and WAV log-mel features. Video uses
   a host ffmpeg binary with a timeout. Reference fixtures run without ONNX.
+- **A knowledge-graph recommender ranks from your own events and relations.**
+  `RECOMMEND_ENGINE=graph` selects it. A queued rebuild derives a graph of
+  shared engagement (stored only where `RECOMMEND_MIN_PEERS` actors agree),
+  public engagement for the types `RECOMMEND_PUBLIC_EVENT_TYPES` lists, and
+  relations declared with `Recommend::graph_relation`. Reads authorize every
+  node and edge first, blend graph paths, stored vectors, followed actors'
+  agreement, freshness, negatives and trust risk per surface with diversity
+  caps, cite the evidence each row rests on, and answer with the starter's
+  rows when the graph's support is thin.
+- **The graph lives in your database or in Memgraph.** The `GraphStore` trait
+  ships a `database` store and, behind the `graph-memgraph` feature, a
+  `memgraph` store over Bolt. `recommendations:graph-rebuild` rebuilds the
+  graph into a new generation and switches readers when it completes.
+- **Search engines recommend and discover from their stored vectors.**
+  `SearchEngine` gains `stored_vectors`, `recommend` and `discover`; Qdrant
+  answers the latter two natively, and the database and collection engines
+  fold their stored vectors. `Recommend::discover` steers a discover query by
+  the viewer's own events.
+
+### Changed
+
+- **Recommendation, search and explanation structs carry new fields.** `RecommendConfig` gains the graph settings and
+  `min_peers`, `SearchConfig` gains `media_max_bytes`, `IndexTimeSettings`
+  gains `embed_media`, and `RecommendationExplanation` gains `engine`,
+  `evidence` and `fallback_reason`. Code that builds one of them field by
+  field without `..Default::default()` no longer compiles.
 
 ### Fixed
 

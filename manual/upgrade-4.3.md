@@ -11,8 +11,10 @@ matches an entry in the 4.3.0 [changelog](../CHANGELOG.md).
 ## How to use this chapter
 
 Find the changelog entry below, then read **Before**, **Now** and **Do**. One
-fix adds a table that your migrations create, and one changes which
-suggestions the starter recommender makes; nothing else needs an edit.
+change can need an edit if you build settings structs field by field, one fix
+adds a table that your migrations create, and one changes which suggestions
+the starter recommender makes. The graph recommender and media embeddings are
+new: nothing changes until you turn them on.
 
 ## Upgrade in this order
 
@@ -31,6 +33,22 @@ suggestions the starter recommender makes; nothing else needs an edit.
 2. Run your migrations, so the `search_source_versions` table exists before a
    searchable model without `updated_at` is saved or loaded.
 3. Run your tests.
+
+## Changed entries
+
+### Recommendation, search and explanation structs carry new fields.
+
+**Before:** `RecommendConfig`, `SearchConfig`, `IndexTimeSettings` and
+`RecommendationExplanation` had the fields 4.2 documented.
+
+**Now:** each has new public fields: the graph settings and `min_peers` on
+`RecommendConfig`, `media_max_bytes` on `SearchConfig`, `embed_media` on
+`IndexTimeSettings`, and `engine`, `evidence` and `fallback_reason` on
+`RecommendationExplanation`.
+
+**Do:** where your code builds one of them with every field spelled out, end
+the literal with `..Default::default()`. Code that reads fields or already
+uses `..Default::default()` needs no edit.
 
 ## Fixed entries that change behaviour
 

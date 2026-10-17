@@ -8,7 +8,10 @@ The `Recommender` trait lets you replace the engine without changing callers.
 
 The purpose of the starter engine is to build the data the graph recommender
 needs: immutable events, materialized recommendations, explanations, and run
-records under a versioned storage contract. The shipped engine is `starter`.
+records under a versioned storage contract. Two engines ship: `starter`, the
+default, and `graph`, which you select with `RECOMMEND_ENGINE=graph` once your
+events carry enough shared engagement (see
+[Rank with the graph engine](#rank-with-the-graph-engine)).
 
 ## Record events
 
@@ -203,6 +206,152 @@ targets are excluded. Its results have `run_id=None`; materialized results
 name the completed run. Both return a target, declared `SearchDocument`,
 score, one-based returned rank, and projected explanation.
 
+## Rank with the graph engine
+
+The graph engine keeps a knowledge graph of your search documents and ranks
+from it live, at read time. Every node and edge it holds names its source, and
+every hop it takes stays inside the viewer's scope. When the graph supports a
+list too thinly, it answers with the starter engine's rows for the same viewer
+and says so, so turning it on early costs nothing.
+
+### Turn it on
+
+Set `RECOMMEND_ENGINE=graph`. `Recommend::generate` then publishes the starter
+run as before, because those rows are the fallback, and pushes a
+`GraphDeriveJob` onto your queue, so the graph engine needs a configured queue.
+The job rebuilds the graph into a new generation and switches readers to it
+only when the rebuild completes; a failed rebuild leaves readers on the
+previous one. Run `recommendations:graph-rebuild` or
+`Recommend::rebuild_graph()` to rebuild at once.
+
+### What the graph holds
+
+A rebuild reads the event stream, within each actor's `RECOMMEND_HISTORY`
+bound, and the relations you declare:
+
+- **Shared engagement.** Two documents get a `co_engaged` edge when at least
+  `RECOMMEND_MIN_PEERS` actors hold both among their most recent
+  `RECOMMEND_GRAPH_FANOUT` positives. Every event class counts, but only the
+  aggregate is stored, so no edge describes one person.
+- **Public engagement.** For the event types `RECOMMEND_PUBLIC_EVENT_TYPES`
+  lists, each signed-in actor gets an `engaged` edge to the documents they
+  engaged with. No type is public unless you list it; a type that is not
+  public never becomes a per-actor fact.
+- **Declared relations.** A relation reads related documents from a
+  document's search projection, so the graph follows it without loading
+  models. Its edges run both ways, as `relation:<name>` and
+  `relation:<name>:inverse`.
+
+```rust
+use suprnova::{AttributeValue, FrameworkError, GraphRelation, Recommend, RecommendationTarget};
+
+// Each track points at its artist, at 80 percent confidence.
+pub fn declare_relations() -> Result<(), FrameworkError> {
+    Recommend::graph_relation(GraphRelation::new("artist", "tracks", 8_000, |document| {
+        Ok(match document.attributes.get("artist_id") {
+            Some(AttributeValue::Integer(id)) => vec![RecommendationTarget {
+                index: "artists".into(),
+                key: id.to_string(),
+            }],
+            _ => Vec::new(),
+        })
+    })?)
+}
+```
+
+Every fact carries the scope of the document it describes, that document's
+source version, and its provenance: an event's id and content digest, or the
+relation and the document revision it was read from. A rebuild is
+deterministic, so rebuilding from the same stream and documents reproduces the
+same facts. Between rebuilds the graph follows its sources: a search write
+queues a `GraphDocumentJob` that removes what a deleted document held and
+replaces what a newer revision changed, and `Recommend::prune` removes the
+facts resting on the events it deletes. A removed fact is never read,
+traversed or cited again.
+
+### Where the graph lives
+
+The graph lives behind the `GraphStore` trait, which `RECOMMEND_GRAPH_STORE`
+selects:
+
+- `database`, the default, keeps the graph in your application's database
+  (SQLite, Postgres, MySQL or MariaDB), in the tables the recommendation
+  migrations create, so the graph engine needs no other service.
+- `memgraph` keeps it in a Memgraph server over the Bolt protocol. Enable the
+  `graph-memgraph` feature and set `RECOMMEND_GRAPH_URL` to a `bolt://` or
+  `bolt+s://` address without credentials; `RECOMMEND_GRAPH_USERNAME` and
+  `RECOMMEND_GRAPH_PASSWORD` are read only when the store connects. Memgraph
+  holds the graph in memory, so after its data is lost, run
+  `recommendations:graph-rebuild` to restore it from the stream.
+
+A store only persists facts and answers bounded hops; the framework applies
+the viewer's scope at every hop and computes every score, so both stores rank
+the same graph the same way. Bind your own `GraphStore` in the container to
+replace both.
+
+### How the graph ranks
+
+A read authorizes before it scores. Seeds, negatives, every traversed edge
+and every candidate must pass the viewer's scope, and a final candidate must
+still exist and pass it when the read loads it. The blended score then weighs:
+
+- graph affinity, the strongest path of at most `RECOMMEND_GRAPH_DEPTH` hops
+  from one of the viewer's positives, weighted by that positive;
+- semantic similarity in the search collection's own vectors (see below);
+- social proximity (see below);
+- freshness, from `published_at`, `created_at` or `updated_at`;
+- the viewer's negatives near the candidate, subtracted;
+- trust risk, the target's hide and report events weighed against its
+  positive events, subtracted.
+
+`RECOMMEND_GRAPH_SURFACES` sets per-surface weights, a confidence threshold
+and diversity caps in basis points and counts; a surface it does not name uses
+the defaults:
+
+```bash
+RECOMMEND_GRAPH_SURFACES='{"home":{"affinity":5000,"threshold":6000,"per_value":2}}'
+```
+
+The caps keep one list from collapsing: at most `per_value` results share one
+facet value, at most `per_node` are reached through one intermediate node, and
+at most `per_band` come from the most popular tenth of the catalog. The
+confidence is the share of the list that graph paths or social proximity
+support. Below the surface's `threshold` the engine returns the starter's rows,
+with `explanation.engine` set to `starter` and `explanation.fallback_reason`
+saying why.
+
+A graph row's explanation has `engine` set to `graph` and `evidence` listing
+the stored facts it rests on: the viewer's own events, as id and digest, the
+edges of the path, and the seed documents, every one of which the viewer may
+see. It never names a peer or a followed actor.
+
+### Social proximity
+
+Social proximity counts followed actors who publicly engaged with a target.
+Set `RECOMMEND_ACTOR_INDEX` to the search index whose documents are your
+users, keyed by user id; a viewer's `follow` events on that index's documents
+name the actors they follow. Only `engaged` edges, which exist only for
+public event types, count, and a target gains social proximity only when at
+least `RECOMMEND_SOCIAL_MIN_ACTORS` followed actors agree on it, so a viewer's
+list never reveals what one followed account did. The explanation's
+`peer_count` reports how many agreed.
+
+### Similar items, vectors and discover
+
+The graph engine reads the vectors your search collection already stores; it
+keeps no copy. Where the index's search engine is Qdrant, it uses Qdrant's own
+recommend and discover operations by point id, under the viewer's scope
+filter. On the database and collection engines, it folds the stored vectors
+into one query, the positives' mean pushed away from the negatives', and ranks
+the result. The positive and negative points are always the viewer's own
+events on documents the viewer may see.
+
+`Recommend::similar_to(target)` seeds the graph and the vectors with one
+document. `Recommend::discover(target)` searches near a document and ranks
+the neighbourhood by context pairs built from the viewer's own positive and
+negative events; it needs the graph engine and refuses a seed the viewer
+cannot see.
+
 ## Bridge search events
 
 Set both `SEARCH_ANALYTICS=true` and `RECOMMEND_ENABLED=true` to forward shown
@@ -253,6 +402,7 @@ Run these through your application's binary:
 | `recommendations:generate` | `[--surface name] [--user id]` | Publish a complete snapshot or report lock contention. |
 | `recommendations:status` | None | Print the ten latest runs, including failures. |
 | `recommendations:prune` | `--older-than days` | Apply your event retention policy. |
+| `recommendations:graph-rebuild` | None | Rebuild the graph engine's facts into a new generation. |
 
 Value flags accept `--name value` or `--name=value`. Unknown, repeated, empty,
 and missing values fail. You can also call `Recommend::generate(GenerateRun)`,
@@ -271,13 +421,16 @@ Extend your application's migration list with
 | `recommendation_explanations` | Run id, event-id/digest provenance pairs, attribute values, peer count, shared-target count and references, and fallback tier. |
 | `starter_recommendations` | Run id, actor, surface, target index/key, score, rank, and explanation id. |
 | `recommendation_runs` | Publication state and batch statistics, watermarks, catalog digest, history snapshots, and error. |
-| `recommendation_schema` | `recommendation_schema_version`, initialized to 1. |
+| `recommendation_schema` | `recommendation_schema_version`, 2 once the graph migration runs. |
+| `recommendation_graph_generations` | Graph generations and which one readers use. |
+| `recommendation_graph_nodes` | Nodes per generation: key, type, target, scope, source version, and provenance. |
+| `recommendation_graph_edges` | Edges per generation: key, endpoints, type, confidence, scope, source version, provenance, and times. |
 
 The data this engine builds is the graph engine's input under that versioned
 contract. Event identity plus content digest distinguishes intact evidence
 from facts removed by retention. These tables preserve the handoff without
-requiring a graph to serve starter recommendations. Graph traversal and media
-retrieval are not exposed by the shipped starter API.
+requiring a graph to serve starter recommendations; the graph engine reads
+them when you select it.
 
 ## Variables
 
@@ -290,6 +443,18 @@ retrieval are not exposed by the shipped starter API.
 | `RECOMMEND_POPULARITY_WINDOW` | `30` | UTC days of positive activity for popularity. |
 | `RECOMMEND_LOCK_TTL_SECS` | `3600` | Renewable generation lock lifetime. |
 | `RECOMMEND_EVENT_TYPES` | `{}` | JSON class and base-score overrides. |
+| `RECOMMEND_ENGINE` | `starter` | `starter` or `graph`. |
+| `RECOMMEND_GRAPH_STORE` | `database` | `database` or `memgraph`. |
+| `RECOMMEND_GRAPH_URL` | unset | The Memgraph Bolt address, without credentials. |
+| `RECOMMEND_GRAPH_USERNAME` | unset | The Memgraph user, read when the store connects. |
+| `RECOMMEND_GRAPH_PASSWORD` | unset | The Memgraph password, read when the store connects. |
+| `RECOMMEND_GRAPH_DEPTH` | `2` | Most hops in a graph path, 1 to 4. |
+| `RECOMMEND_GRAPH_FANOUT` | `50` | Most edges followed out of one node per hop. |
+| `RECOMMEND_GRAPH_MAX_NODES` | `2000` | Most nodes one walk reaches. |
+| `RECOMMEND_PUBLIC_EVENT_TYPES` | unset | Comma-separated event types other viewers may see. |
+| `RECOMMEND_SOCIAL_MIN_ACTORS` | `3` | Followed actors who must agree for social proximity. |
+| `RECOMMEND_ACTOR_INDEX` | unset | The search index whose documents are users. |
+| `RECOMMEND_GRAPH_SURFACES` | `{}` | JSON per-surface weights, threshold, and caps. |
 
 `RecommendConfig::current()` uses registered configuration, environment
 configuration, or a task-local override from `RecommendConfig::scope`.
@@ -324,10 +489,11 @@ cargo nextest run -p suprnova --test recommendations --run-ignored only \
 ### Why Suprnova diverges
 
 Laravel has no first-party recommender. Suprnova supplies an immutable event
-stream and an explainable SQL starter behind a replaceable trait. You reuse
-search documents, scopes, and vectors, publish complete runs, and retain
-provenance for the graph recommender's input instead of tying interaction
-history to a hosted recommendation service.
+stream, an explainable SQL starter, and a knowledge-graph engine behind a
+replaceable trait. You reuse search documents, scopes, and vectors, keep the
+graph in your own database or in Memgraph, and retain provenance from every
+recommendation back to its events instead of tying interaction history to a
+hosted recommendation service.
 
 ## Next
 
