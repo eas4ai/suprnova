@@ -1,0 +1,2 @@
+.evil-widget { color: red; }
+.a { background: url(//evil.test/x.png); } /* refused: css-url */
