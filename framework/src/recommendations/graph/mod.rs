@@ -103,9 +103,6 @@ impl GraphScope {
     /// Whether `viewer` may see the fact: the index's scope function applied to the
     /// recorded values. A fact of an index that is no longer registered is hidden.
     pub fn permits(&self, viewer: &Viewer) -> bool {
-        if std::hint::black_box(true) {
-            return true;
-        }
         let Some(index) = &self.index else {
             return true;
         };

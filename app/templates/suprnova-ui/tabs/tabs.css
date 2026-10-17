@@ -1,0 +1,38 @@
+.sn-tabs {
+  display: block;
+  margin-block-end: var(--sn-density-stack);
+}
+
+.sn-tablist,
+.sn-tabs[data-sn-mode="route"] {
+  display: flex;
+  gap: var(--sn-space-1);
+  border-block-end: var(--sn-state-border-width) solid var(--sn-color-border);
+}
+
+.sn-tab {
+  padding: var(--sn-density-control-padding-y) var(--sn-density-control-padding-x);
+  border: 0;
+  border-block-end: var(--sn-space-1) solid transparent;
+  margin-block-end: calc(-1 * var(--sn-state-border-width));
+  background: transparent;
+  color: var(--sn-color-text-muted);
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.sn-tab:hover {
+  color: var(--sn-color-text);
+}
+
+.sn-tab[aria-selected="true"],
+.sn-tab[aria-current="page"] {
+  color: var(--sn-color-text);
+  border-block-end-color: var(--sn-color-primary);
+  font-weight: var(--sn-font-weight-medium);
+}
+
+.sn-tab-panel {
+  padding-block: var(--sn-space-4);
+}
