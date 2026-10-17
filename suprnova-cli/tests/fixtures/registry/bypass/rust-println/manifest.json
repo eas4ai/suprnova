@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-println",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}
