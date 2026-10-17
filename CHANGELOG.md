@@ -4,6 +4,18 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 4.2.1 - 2026-10-16
+
+### Added
+
+- **Add a source to a preset's Content-Security-Policy (#156).**
+  `SecurityHeaders::csp_source(directive, source)` and
+  `ContentSecurityPolicy::with_source(directive, source)` add one source to a
+  directive of the policy `from_env` selected, keeping the preset, its
+  report-only mode and its reporting origins. A directive the policy leaves
+  out starts from the sources it falls back to. An application that allows an
+  analytics host in `connect-src` no longer copies the preset's policy string.
+
 ## 4.2.0 - 2026-10-16
 
 ### Added
