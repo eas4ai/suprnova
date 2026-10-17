@@ -207,7 +207,7 @@ async fn derive_into(
         HashMap::new();
     for history in histories.actors.values() {
         let mut recent: Vec<_> = history.positive.iter().collect();
-        recent.sort_by(|a, b| (b.1.time, b.1.event_id).cmp(&(a.1.time, a.1.event_id)));
+        recent.sort_by_key(|(_, positive)| std::cmp::Reverse((positive.time, positive.event_id)));
         recent.truncate(config.graph_fanout);
         for (target, _) in &recent {
             *holders.entry((*target).clone()).or_default() += 1;
@@ -231,7 +231,8 @@ async fn derive_into(
         if count < config.min_peers as u64 {
             continue;
         }
-        let both = (holders.get(&x).copied().unwrap_or(1) * holders.get(&y).copied().unwrap_or(1)) as f64;
+        let both =
+            (holders.get(&x).copied().unwrap_or(1) * holders.get(&y).copied().unwrap_or(1)) as f64;
         let confidence = ((count as f64) / both.sqrt() * 10_000.0)
             .round()
             .clamp(1.0, 10_000.0) as i32;
@@ -278,8 +279,12 @@ async fn derive_into(
     }
 
     // Declared relations, read once from every document the stream named.
-    let mut relation_edges: Vec<(GraphRelation, RecommendationTarget, RecommendationTarget, i64)> =
-        Vec::new();
+    let mut relation_edges: Vec<(
+        GraphRelation,
+        RecommendationTarget,
+        RecommendationTarget,
+        i64,
+    )> = Vec::new();
     for relation in relations() {
         let sources: Vec<(RecommendationTarget, i64)> = documents
             .iter()
@@ -412,7 +417,9 @@ async fn derive_into(
         Ok(())
     };
     for (from, to, confidence, latest) in &kept {
-        let version = documents.get(to).map_or(0, |document| document.source_version);
+        let version = documents
+            .get(to)
+            .map_or(0, |document| document.source_version);
         add(
             "co_engaged".into(),
             document_node_key(from),
@@ -606,7 +613,12 @@ pub async fn document_changed(
         return Ok(());
     };
     let key = document_node_key(target);
-    let Some(previous) = store.nodes(&generation, &[key.clone()]).await?.into_iter().next() else {
+    let Some(previous) = store
+        .nodes(&generation, std::slice::from_ref(&key))
+        .await?
+        .into_iter()
+        .next()
+    else {
         // The stream never named this document; the next rebuild decides whether it joins.
         return Ok(());
     };
@@ -624,7 +636,9 @@ pub async fn document_changed(
         source_version: document.source_version,
         ..previous
     };
-    store.put_nodes(&generation, std::slice::from_ref(&node)).await?;
+    store
+        .put_nodes(&generation, std::slice::from_ref(&node))
+        .await?;
     let now = crate::clock::now().timestamp_micros();
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
@@ -644,7 +658,9 @@ pub async fn document_changed(
         };
         for (related, related_document) in &loaded {
             let related_key = document_node_key(related);
-            let existing = store.nodes(&generation, &[related_key.clone()]).await?;
+            let existing = store
+                .nodes(&generation, std::slice::from_ref(&related_key))
+                .await?;
             if existing.is_empty() {
                 nodes.push(GraphNode {
                     key: related_key.clone(),
@@ -719,9 +735,7 @@ pub(crate) async fn documents_changed(
     indexed: Vec<String>,
     removed: Vec<String>,
 ) -> Result<(), FrameworkError> {
-    if (indexed.is_empty() && removed.is_empty())
-        || RecommendConfig::current()?.engine != "graph"
-    {
+    if (indexed.is_empty() && removed.is_empty()) || RecommendConfig::current()?.engine != "graph" {
         return Ok(());
     }
     // An import fills a building search generation readers do not use yet; the graph

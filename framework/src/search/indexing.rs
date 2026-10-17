@@ -803,34 +803,13 @@ pub(crate) fn enqueue_job<J: DeferredSearchJob>(
                             "suprnova.search.connection",
                             &connection,
                         );
-                        crate::recommendations::within_config(recommend, with_versions(
-                            cache,
-                            super::registry::in_context(context, async move {
-                                let explicit = job.generation();
-                                let mut generations = super::generations::reserve_job(
-                                    job.index(),
-                                    &job.keys(),
-                                    explicit.as_ref(),
-                                    J::job_name(),
-                                    payload.clone(),
-                                )
-                                .await?;
-                                super::outbox::reserved(job.index(), intent.as_deref()).await?;
-                                // Scope functions can inspect any filterable attribute. Inline the
-                                // full projection after commit so queued work cannot delay visibility.
-                                let scoped = J::job_name() == SearchIndexJob::job_name()
-                                    && (SearchRegistry::by_index(job.index())?.descriptor)()
-                                        .scope
-                                        .is_some();
-                                if scoped && config.queue {
-                                    for generation in &generations {
-                                        let mut inline = job.clone();
-                                        inline.pin(generation.clone());
-                                        inline.handle().await?;
-                                    }
-                                    // A concurrent publication can retire the initial targets. The
-                                    // synchronous write already reached its building generation.
-                                    generations = super::generations::reserve_job(
+                        crate::recommendations::within_config(
+                            recommend,
+                            with_versions(
+                                cache,
+                                super::registry::in_context(context, async move {
+                                    let explicit = job.generation();
+                                    let mut generations = super::generations::reserve_job(
                                         job.index(),
                                         &job.keys(),
                                         explicit.as_ref(),
@@ -838,34 +817,62 @@ pub(crate) fn enqueue_job<J: DeferredSearchJob>(
                                         payload.clone(),
                                     )
                                     .await?;
-                                }
-                                for generation in generations {
-                                    let mut pinned = job.clone();
-                                    pinned.pin(generation.clone());
-                                    let keys = pinned.keys();
-                                    let index = pinned.index().to_owned();
-                                    if config.queue
-                                        && super::generations::import_generation().is_none()
-                                    {
-                                        Queue::push_with(
-                                            pinned,
-                                            EnvelopeOverrides {
-                                                queue: config.queue_name.clone(),
-                                                connection: config.queue_connection.clone(),
-                                                after_commit: Some(false),
-                                                ..Default::default()
-                                            },
+                                    super::outbox::reserved(job.index(), intent.as_deref()).await?;
+                                    // Scope functions can inspect any filterable attribute. Inline the
+                                    // full projection after commit so queued work cannot delay visibility.
+                                    let scoped = J::job_name() == SearchIndexJob::job_name()
+                                        && (SearchRegistry::by_index(job.index())?.descriptor)()
+                                            .scope
+                                            .is_some();
+                                    if scoped && config.queue {
+                                        for generation in &generations {
+                                            let mut inline = job.clone();
+                                            inline.pin(generation.clone());
+                                            inline.handle().await?;
+                                        }
+                                        // A concurrent publication can retire the initial targets. The
+                                        // synchronous write already reached its building generation.
+                                        generations = super::generations::reserve_job(
+                                            job.index(),
+                                            &job.keys(),
+                                            explicit.as_ref(),
+                                            J::job_name(),
+                                            payload.clone(),
                                         )
                                         .await?;
-                                        super::generations::published(&index, &generation, &keys)
-                                            .await?;
-                                    } else {
-                                        pinned.handle().await?;
                                     }
-                                }
-                                Ok(())
-                            }),
-                        ))
+                                    for generation in generations {
+                                        let mut pinned = job.clone();
+                                        pinned.pin(generation.clone());
+                                        let keys = pinned.keys();
+                                        let index = pinned.index().to_owned();
+                                        if config.queue
+                                            && super::generations::import_generation().is_none()
+                                        {
+                                            Queue::push_with(
+                                                pinned,
+                                                EnvelopeOverrides {
+                                                    queue: config.queue_name.clone(),
+                                                    connection: config.queue_connection.clone(),
+                                                    after_commit: Some(false),
+                                                    ..Default::default()
+                                                },
+                                            )
+                                            .await?;
+                                            super::generations::published(
+                                                &index,
+                                                &generation,
+                                                &keys,
+                                            )
+                                            .await?;
+                                        } else {
+                                            pinned.handle().await?;
+                                        }
+                                    }
+                                    Ok(())
+                                }),
+                            ),
+                        )
                         .await
                     },
                 ),

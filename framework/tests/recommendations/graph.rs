@@ -524,7 +524,12 @@ async fn current() -> (DatabaseGraphStore, String) {
 async fn edges_from(note: &Note, kind: &str) -> Vec<GraphEdge> {
     let (store, generation) = current().await;
     store
-        .outgoing(&generation, &[document_node_key(&key(note))], &[kind.to_owned()], 50)
+        .outgoing(
+            &generation,
+            &[document_node_key(&key(note))],
+            &[kind.to_owned()],
+            50,
+        )
         .await
         .unwrap()
 }
@@ -551,7 +556,10 @@ async fn rec_005_shared_engagement_becomes_an_edge_only_where_enough_actors_agre
         let (store, generation) = current().await;
         assert!(
             store
-                .nodes(&generation, &[suprnova::recommendations::graph::actor_node_key("bob")])
+                .nodes(
+                    &generation,
+                    &[suprnova::recommendations::graph::actor_node_key("bob")]
+                )
                 .await
                 .unwrap()
                 .is_empty()
@@ -561,12 +569,20 @@ async fn rec_005_shared_engagement_becomes_an_edge_only_where_enough_actors_agre
             panic!("shared engagement rests on an event")
         };
         assert_eq!(
-            suprnova::Recommend::verify_provenance(evidence).await.unwrap(),
+            suprnova::Recommend::verify_provenance(evidence)
+                .await
+                .unwrap(),
             suprnova::ProvenanceState::Intact
         );
-        assert_eq!(shared[0].scope.index.as_deref(), Some("recommendation_notes"));
+        assert_eq!(
+            shared[0].scope.index.as_deref(),
+            Some("recommendation_notes")
+        );
         for node in store
-            .nodes(&generation, &[document_node_key(&key(&a)), document_node_key(&key(&b))])
+            .nodes(
+                &generation,
+                &[document_node_key(&key(&a)), document_node_key(&key(&b))],
+            )
             .await
             .unwrap()
         {
@@ -575,7 +591,9 @@ async fn rec_005_shared_engagement_becomes_an_edge_only_where_enough_actors_agre
                 panic!("a stream-named document rests on an event")
             };
             assert_eq!(
-                suprnova::Recommend::verify_provenance(evidence).await.unwrap(),
+                suprnova::Recommend::verify_provenance(evidence)
+                    .await
+                    .unwrap(),
                 suprnova::ProvenanceState::Intact
             );
         }
@@ -594,11 +612,19 @@ async fn rec_005_only_public_event_types_become_per_actor_facts() {
         let (store, generation) = current().await;
         let actor = suprnova::recommendations::graph::actor_node_key("bob");
         let engaged = store
-            .outgoing(&generation, std::slice::from_ref(&actor), &["engaged".into()], 50)
+            .outgoing(
+                &generation,
+                std::slice::from_ref(&actor),
+                &["engaged".into()],
+                50,
+            )
             .await
             .unwrap();
         assert_eq!(
-            engaged.iter().map(|edge| edge.target.clone()).collect::<Vec<_>>(),
+            engaged
+                .iter()
+                .map(|edge| edge.target.clone())
+                .collect::<Vec<_>>(),
             [document_node_key(&key(&a))]
         );
     }))
@@ -639,7 +665,12 @@ async fn rec_005_a_newer_revision_replaces_the_relation_facts_read_from_an_older
         let first = edges_from(&a, "relation:next").await;
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].target, document_node_key(&key(&b)));
-        let GraphProvenance::Relation { source, source_version, .. } = &first[0].provenance else {
+        let GraphProvenance::Relation {
+            source,
+            source_version,
+            ..
+        } = &first[0].provenance
+        else {
             panic!("a relation edge rests on a relation")
         };
         assert_eq!(source, &key(&a));
@@ -651,7 +682,11 @@ async fn rec_005_a_newer_revision_replaces_the_relation_facts_read_from_an_older
         let replaced = edges_from(&a, "relation:next").await;
         assert_eq!(replaced.len(), 1, "{replaced:?}");
         assert_eq!(replaced[0].target, document_node_key(&key(&c)));
-        let GraphProvenance::Relation { source_version: newer, .. } = &replaced[0].provenance else {
+        let GraphProvenance::Relation {
+            source_version: newer,
+            ..
+        } = &replaced[0].provenance
+        else {
             panic!("a relation edge rests on a relation")
         };
         assert!(newer > source_version);
@@ -687,7 +722,9 @@ async fn rec_005_a_document_leaving_its_index_loses_its_facts() {
         }
         suprnova::Recommend::rebuild_graph().await.unwrap().unwrap();
         assert_eq!(edges_from(&a, "co_engaged").await.len(), 1);
-        suprnova::unsearchable::<Note>(&[b.id.to_string()]).await.unwrap();
+        suprnova::unsearchable::<Note>(&[b.id.to_string()])
+            .await
+            .unwrap();
         drain_graph_jobs().await;
         let (store, generation) = current().await;
         assert!(
@@ -707,7 +744,11 @@ async fn rec_005_a_document_leaving_its_index_loses_its_facts() {
             )
             .await
             .unwrap();
-        assert!(engaged.iter().all(|edge| edge.target != document_node_key(&key(&b))));
+        assert!(
+            engaged
+                .iter()
+                .all(|edge| edge.target != document_node_key(&key(&b)))
+        );
     }))
     .await;
 }
@@ -769,11 +810,16 @@ async fn rec_009_a_rebuild_of_an_emptied_store_reproduces_the_graph() {
             "recommendation_graph_nodes",
             "recommendation_graph_generations",
         ] {
-            suprnova::DB::update(&format!("DELETE FROM {table}"), vec![]).await.unwrap();
+            suprnova::DB::update(&format!("DELETE FROM {table}"), vec![])
+                .await
+                .unwrap();
         }
         let rebuilt = suprnova::Recommend::rebuild_graph().await.unwrap().unwrap();
         assert_ne!(rebuilt.generation, before);
-        assert_eq!(store.fact_digest(&rebuilt.generation).await.unwrap(), digest);
+        assert_eq!(
+            store.fact_digest(&rebuilt.generation).await.unwrap(),
+            digest
+        );
     }))
     .await;
 }

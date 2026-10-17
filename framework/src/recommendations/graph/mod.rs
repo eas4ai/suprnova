@@ -6,11 +6,10 @@ mod database;
 mod derive;
 
 pub use database::DatabaseGraphStore;
-pub(crate) use derive::{documents_changed, events_removed};
 pub use derive::{
-    GraphBuild, GraphDeriveJob, GraphDocumentJob, GraphRelation, declare, document_changed,
-    rebuild,
+    GraphBuild, GraphDeriveJob, GraphDocumentJob, GraphRelation, declare, document_changed, rebuild,
 };
+pub(crate) use derive::{documents_changed, events_removed};
 
 use super::{EventProvenance, RecommendationTarget};
 use crate::{
