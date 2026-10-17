@@ -4,6 +4,8 @@
 //! every store ranks the same graph the same way.
 mod database;
 mod derive;
+#[cfg(feature = "graph-memgraph")]
+pub mod memgraph;
 
 pub use database::DatabaseGraphStore;
 pub use derive::{
@@ -39,9 +41,23 @@ pub async fn store() -> Result<Arc<dyn GraphStore>, FrameworkError> {
     let config = super::RecommendConfig::current()?;
     match config.graph_store.as_str() {
         "database" => Ok(Arc::new(DatabaseGraphStore)),
-        "memgraph" => Err(FrameworkError::param(
-            "RECOMMEND_GRAPH_STORE=memgraph needs the graph-memgraph feature",
-        )),
+        "memgraph" => {
+            #[cfg(feature = "graph-memgraph")]
+            {
+                let url = config.graph_url.as_deref().ok_or_else(|| {
+                    FrameworkError::param("RECOMMEND_GRAPH_URL is required for memgraph")
+                })?;
+                let username = std::env::var("RECOMMEND_GRAPH_USERNAME").unwrap_or_default();
+                let password = std::env::var("RECOMMEND_GRAPH_PASSWORD").unwrap_or_default();
+                Ok(Arc::new(
+                    memgraph::MemgraphGraphStore::connect(url, &username, &password).await?,
+                ))
+            }
+            #[cfg(not(feature = "graph-memgraph"))]
+            Err(FrameworkError::param(
+                "RECOMMEND_GRAPH_STORE=memgraph needs the graph-memgraph feature",
+            ))
+        }
         other => Err(FrameworkError::param(format!(
             "RECOMMEND_GRAPH_STORE: unknown store {other}"
         ))),

@@ -854,3 +854,295 @@ async fn rec_009_a_failed_rebuild_leaves_readers_on_the_previous_generation() {
     }))
     .await;
 }
+
+#[cfg(feature = "graph-memgraph")]
+async fn memgraph_store() -> suprnova::MemgraphGraphStore {
+    let url = std::env::var("MEMGRAPH_TEST_URL").expect("MEMGRAPH_TEST_URL is required");
+    let config = neo4rs::ConfigBuilder::default()
+        .uri(&url)
+        .user("")
+        .password("")
+        .db("memgraph")
+        .build()
+        .unwrap();
+    let graph = neo4rs::Graph::connect(config).await.unwrap();
+    graph
+        .run(neo4rs::query("MATCH (n) DETACH DELETE n"))
+        .await
+        .unwrap();
+    suprnova::MemgraphGraphStore::connect(&url, "", "")
+        .await
+        .unwrap()
+}
+
+#[cfg(feature = "graph-memgraph")]
+#[tokio::test]
+#[ignore = "requires Memgraph at MEMGRAPH_TEST_URL"]
+async fn rec_009_a_store_answers_hops_strongest_first_within_its_fan_out_memgraph() {
+    setup(async {
+        let store = memgraph_store().await;
+        a_store_answers_hops_strongest_first_within_its_fan_out(&store).await;
+    })
+    .await;
+}
+
+#[cfg(feature = "graph-memgraph")]
+#[tokio::test]
+#[ignore = "requires Memgraph at MEMGRAPH_TEST_URL"]
+async fn rec_009_a_traversal_never_returns_or_walks_through_a_fact_outside_the_viewer_scope_memgraph()
+ {
+    setup(async {
+        let store = memgraph_store().await;
+        a_traversal_never_returns_or_walks_through_a_fact_outside_the_viewer_scope(&store).await;
+    })
+    .await;
+}
+
+#[cfg(feature = "graph-memgraph")]
+#[tokio::test]
+#[ignore = "requires Memgraph at MEMGRAPH_TEST_URL"]
+async fn rec_009_a_traversal_stops_at_its_depth_bound_memgraph() {
+    setup(async {
+        let store = memgraph_store().await;
+        a_traversal_stops_at_its_depth_bound(&store).await;
+    })
+    .await;
+}
+
+#[cfg(feature = "graph-memgraph")]
+#[tokio::test]
+#[ignore = "requires Memgraph at MEMGRAPH_TEST_URL"]
+async fn rec_009_publishing_switches_readers_in_one_step_and_keeps_the_previous_generation_memgraph()
+ {
+    setup(async {
+        let store = memgraph_store().await;
+        publishing_switches_readers_in_one_step_and_keeps_the_previous_generation(&store).await;
+    })
+    .await;
+}
+
+#[cfg(feature = "graph-memgraph")]
+#[tokio::test]
+#[ignore = "requires Memgraph at MEMGRAPH_TEST_URL"]
+async fn rec_009_revocations_remove_the_facts_resting_on_a_changed_or_removed_source_memgraph() {
+    setup(async {
+        let store = memgraph_store().await;
+        revocations_remove_the_facts_resting_on_a_changed_or_removed_source(&store).await;
+    })
+    .await;
+}
+
+#[cfg(feature = "graph-memgraph")]
+#[tokio::test]
+#[ignore = "requires Memgraph at MEMGRAPH_TEST_URL"]
+async fn rec_009_the_same_facts_give_the_same_digest_in_any_generation_memgraph() {
+    setup(async {
+        let store = memgraph_store().await;
+        the_same_facts_give_the_same_digest_in_any_generation(&store).await;
+    })
+    .await;
+}
+
+#[cfg(feature = "graph-memgraph")]
+#[tokio::test]
+#[ignore = "requires Memgraph at MEMGRAPH_TEST_URL"]
+async fn rec_009_the_two_drivers_answer_alike_memgraph() {
+    setup(async {
+        let memgraph = memgraph_store().await;
+        let database = DatabaseGraphStore;
+        let nodes: Vec<_> = (0..12)
+            .map(|i| node(&format!("fixture-{i}"), i % 3 != 1, "bob", 1, i + 1))
+            .collect();
+        let mut edges = Vec::new();
+        for i in 1..12 {
+            let from = if i < 5 { 0 } else { 1 + i % 4 };
+            let kind = ["co_engaged", "relation:series", "engaged"][i % 3];
+            edges.push(edge(
+                kind,
+                &nodes[from],
+                &nodes[i],
+                10_000 - i as i32 * 431,
+                event(i as i64 + 20),
+            ));
+        }
+        let mut generations = Vec::new();
+        for store in [&database as &dyn GraphStore, &memgraph] {
+            let generation = store.begin_generation().await.unwrap();
+            store.put_nodes(&generation, &nodes).await.unwrap();
+            store.put_edges(&generation, &edges).await.unwrap();
+            generations.push(generation);
+        }
+        assert_eq!(
+            database.fact_digest(&generations[0]).await.unwrap(),
+            memgraph.fact_digest(&generations[1]).await.unwrap()
+        );
+        for viewer in [Viewer::Guest, viewer("bob")] {
+            for depth in 1..=3 {
+                let request = walk(&nodes[0], depth);
+                let expected = traverse(&database, &generations[0], &request, &viewer)
+                    .await
+                    .unwrap();
+                let actual = traverse(&memgraph, &generations[1], &request, &viewer)
+                    .await
+                    .unwrap();
+                assert_eq!(expected.len(), actual.len());
+                for (expected, actual) in expected.iter().zip(&actual) {
+                    assert_eq!(expected.node.key, actual.node.key);
+                    assert_eq!(expected.path, actual.path);
+                    assert_eq!(expected.weight, actual.weight);
+                }
+            }
+        }
+    })
+    .await;
+}
+
+#[cfg(feature = "graph-memgraph")]
+#[tokio::test]
+#[ignore = "requires Memgraph at MEMGRAPH_TEST_URL"]
+async fn rec_009_updates_paging_and_revocation_counts_match_memgraph() {
+    setup(async {
+        let memgraph = memgraph_store().await;
+        let stores: [&dyn GraphStore; 2] = [&DatabaseGraphStore, &memgraph];
+        let mut results = Vec::new();
+        for store in stores {
+            let generation = store.begin_generation().await.unwrap();
+            let mut a = node("quote-'-$value", true, "bob", 2, 10);
+            let b = node("b", true, "bob", 1, 11);
+            let c = node("c", false, "bob", 1, 12);
+            store
+                .put_nodes(&generation, &[a.clone(), b.clone(), c.clone()])
+                .await
+                .unwrap();
+            a.source_version = 3;
+            store.put_nodes(&generation, &[a.clone()]).await.unwrap();
+            let mut link = edge("co_engaged", &a, &b, 7_000, event(20));
+            store
+                .put_edges(
+                    &generation,
+                    &[link.clone(), edge("engaged", &b, &c, 6_000, event(21))],
+                )
+                .await
+                .unwrap();
+            link.created_at = 99;
+            link.updated_at = 100;
+            link.confidence_bps = 8_000;
+            store.put_edges(&generation, &[link]).await.unwrap();
+            let links = store
+                .outgoing(&generation, &[a.key.clone()], &[], 0)
+                .await
+                .unwrap();
+            assert_eq!(links[0].created_at, 1);
+            assert_eq!(links[0].updated_at, 100);
+            let mut page = store.document_nodes(&generation, None, 1).await.unwrap();
+            let last = page[0].key.clone();
+            page.extend(
+                store
+                    .document_nodes(&generation, Some(&last), 10)
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(page.len(), 3);
+            let updated = store.nodes(&generation, &[a.key.clone()]).await.unwrap();
+            assert_eq!(updated, vec![a.clone()]);
+            let removed = store
+                .revoke(&generation, &Revocation::Events(vec![11]))
+                .await
+                .unwrap();
+            assert_eq!(removed, 3);
+            let before = store
+                .revoke(
+                    &generation,
+                    &Revocation::DocumentBefore(a.target.clone().unwrap(), 4),
+                )
+                .await
+                .unwrap();
+            assert_eq!(before, 1);
+            store.publish(&generation).await.unwrap();
+            store.publish(&generation).await.unwrap();
+            let next = store.begin_generation().await.unwrap();
+            store.publish(&next).await.unwrap();
+            assert!(store.publish(&generation).await.is_err());
+            store.discard(&generation).await.unwrap();
+            assert!(
+                store
+                    .nodes(&generation, std::slice::from_ref(&c.key))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            results.push((page, links, removed, before));
+        }
+        assert_eq!(results[0], results[1]);
+    })
+    .await;
+}
+
+#[cfg(feature = "graph-memgraph")]
+#[tokio::test]
+#[ignore = "requires Memgraph at MEMGRAPH_TEST_URL"]
+async fn rec_009_actor_nodes_and_edges_before_nodes_match_memgraph() {
+    setup(async {
+        let memgraph = memgraph_store().await;
+        let mut results = Vec::new();
+        for store in [&DatabaseGraphStore as &dyn GraphStore, &memgraph] {
+            let generation = store.begin_generation().await.unwrap();
+            let mut actor = node("actor", true, "bob", 1, 1);
+            actor.key = suprnova::recommendations::graph::actor_node_key("bob");
+            actor.kind = "actor".into();
+            actor.target = None;
+            actor.scope = GraphScope::default();
+            let document = node("document", true, "bob", 1, 2);
+            let mut link = edge("engaged", &actor, &document, 4_000, event(3));
+            store.put_edges(&generation, &[link.clone()]).await.unwrap();
+            assert!(
+                store
+                    .nodes(&generation, &[actor.key.clone(), document.key.clone()])
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let orphan_digest = store.fact_digest(&generation).await.unwrap();
+            store
+                .put_nodes(&generation, &[actor.clone(), document.clone()])
+                .await
+                .unwrap();
+            let actors = store
+                .nodes(&generation, &[actor.key.clone()])
+                .await
+                .unwrap();
+            assert_eq!(actors, vec![actor.clone()]);
+            assert_eq!(
+                store.document_nodes(&generation, None, 10).await.unwrap(),
+                vec![document.clone()]
+            );
+            // Upsert by key also permits changing endpoints, as the SQL driver does.
+            link.source = document.key.clone();
+            link.target = actor.key.clone();
+            store.put_edges(&generation, &[link.clone()]).await.unwrap();
+            assert!(
+                store
+                    .outgoing(&generation, &[actor.key.clone()], &[], 10)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                store
+                    .outgoing(&generation, std::slice::from_ref(&document.key), &[], 10)
+                    .await
+                    .unwrap(),
+                vec![link]
+            );
+            let digest = store.fact_digest(&generation).await.unwrap();
+            let removed = store
+                .revoke(&generation, &Revocation::Events(vec![1]))
+                .await
+                .unwrap();
+            assert_eq!(removed, 2);
+            results.push((orphan_digest, digest, removed));
+        }
+        assert_eq!(results[0], results[1]);
+    })
+    .await;
+}

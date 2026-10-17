@@ -625,6 +625,8 @@ pub use media::{
     ImageDriverKind, ImagePipeline, ImagePixels, MagickCliDriver, OutputFormat, OxideAvImageDriver,
     Transformation, TransformationSettings, register_transformation, register_transformation_with,
 };
+#[cfg(feature = "graph-memgraph")]
+pub use recommendations::graph::memgraph::MemgraphGraphStore;
 pub use recommendations::{
     Actor, EventClass, EventProvenance, EventScoring, EventType, GenerateRun, GenerationOutcome,
     GraphSurface, ProvenanceState, Recommend, RecommendConfig, Recommendation,
