@@ -140,6 +140,93 @@ async fn real_default_model_is_normalized_and_applies_document_template() {
     );
 }
 
+/// Peak resident memory from the kernel: the regression this guards was a climb to 45 GB
+/// inside one inference call, which no allocator counter in this process would see.
+#[cfg(target_os = "linux")]
+fn peak_resident_bytes() -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let line = status
+        .lines()
+        .find(|line| line.starts_with("VmHWM:"))
+        .unwrap();
+    line.split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse::<u64>()
+        .unwrap()
+        * 1024
+}
+
+/// Attention memory grows with the square of the longest text in a batch, so one long text
+/// among short ones must not pad them all to its length. The mix is the fixture corpus's
+/// eight longest documents spread through its 248 shortest.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires EmbeddingGemma 2 in SEARCH_MODEL_CACHE"]
+async fn real_default_model_keeps_long_texts_from_padding_short_ones() {
+    let corpus = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/search/fixtures/corpus.jsonl"
+    ))
+    .unwrap();
+    let mut documents: Vec<EmbedInput> = corpus
+        .lines()
+        .map(|line| {
+            let document: serde_json::Value = serde_json::from_str(line).unwrap();
+            EmbedInput {
+                text: document["text"].as_str().unwrap_or_default().into(),
+                title: document["title"].as_str().map(Into::into),
+                ..Default::default()
+            }
+        })
+        .collect();
+    documents.sort_by_key(|input| input.text.len());
+    let long = documents.split_off(documents.len() - 8);
+    documents.truncate(248);
+    let mut inputs = Vec::with_capacity(256);
+    for (index, short) in documents.into_iter().enumerate() {
+        if index % 31 == 0 && index / 31 < long.len() {
+            inputs.push(long[index / 31].clone());
+        }
+        inputs.push(short);
+    }
+    assert_eq!(inputs.len(), 256);
+    let embedder = FastembedEmbedder::new(FastembedConfig::from_env().unwrap())
+        .await
+        .unwrap();
+    let before = peak_resident_bytes();
+    let started = std::time::Instant::now();
+    let vectors = embedder.embed_documents(&inputs).await.unwrap();
+    let peak = peak_resident_bytes();
+    eprintln!(
+        "256 mixed documents: {:?}, peak resident {} MiB (before {} MiB)",
+        started.elapsed(),
+        peak >> 20,
+        before >> 20
+    );
+    assert_eq!(vectors.len(), inputs.len());
+    assert!(
+        peak < 8 << 30,
+        "peak resident memory reached {} MiB",
+        peak >> 20
+    );
+    // Batches may run in another order; each vector must still answer its own input.
+    for index in [0, 1, 255] {
+        let alone = embedder
+            .embed_documents(std::slice::from_ref(&inputs[index]))
+            .await
+            .unwrap()
+            .remove(0);
+        let distance = alone
+            .dense
+            .iter()
+            .zip(&vectors[index].dense)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(distance < 1e-4, "vector {index} differs by {distance}");
+    }
+}
+
 #[test]
 fn manifest_paths_cannot_escape_the_cache() {
     let root = tempfile::tempdir().unwrap();
