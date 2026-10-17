@@ -5,6 +5,7 @@ mod documents;
 mod engine;
 mod event;
 mod generation;
+pub mod graph;
 mod history;
 pub mod migrations;
 mod provenance;
@@ -13,7 +14,7 @@ mod starter;
 mod storage;
 
 use crate::{FrameworkError, Viewer};
-pub use config::RecommendConfig;
+pub use config::{GraphSurface, RecommendConfig};
 pub use engine::{
     GenerateRun, GenerationOutcome, Recommendation, RecommendationExplanation, RecommendationRun,
     Recommender,

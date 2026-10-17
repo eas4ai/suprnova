@@ -627,9 +627,13 @@ pub use media::{
 };
 pub use recommendations::{
     Actor, EventClass, EventProvenance, EventScoring, EventType, GenerateRun, GenerationOutcome,
-    ProvenanceState, Recommend, RecommendConfig, Recommendation, RecommendationBuilder,
-    RecommendationEvent, RecommendationExplanation, RecommendationRun, RecommendationTarget,
-    Recommender, StarterRecommender, event_digest,
+    GraphSurface, ProvenanceState, Recommend, RecommendConfig, Recommendation,
+    RecommendationBuilder, RecommendationEvent, RecommendationExplanation, RecommendationRun,
+    RecommendationTarget, Recommender, StarterRecommender, event_digest,
+    graph::{
+        DatabaseGraphStore, GraphEdge, GraphNode, GraphProvenance, GraphScope, GraphStore,
+        Revocation,
+    },
 };
 #[cfg(feature = "testing")]
 pub use search::testing::conformance;
