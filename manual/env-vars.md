@@ -463,6 +463,9 @@ downloads ONNX Runtime at compile time. The default build downloads nothing.
 | `SEARCH_QUEUE_CONNECTION` | unset | `Option<String>` | Registered queue connection for search jobs; unset uses the queue default. A supplied value must be nonempty. |
 | `SEARCH_QUEUE_NAME` | unset | `Option<String>` | Queue name for search jobs; unset uses the queue default. A supplied value must be nonempty. |
 | `SEARCH_CHUNK` | `500` | `usize` | Positive bulk import and removal chunk size. |
+| `SEARCH_MEDIA_MAX_BYTES` | `33554432` | `usize` | Maximum bytes per declared media part. Positive and at most 33554432. Storage reads enforce the limit before inference. |
+| `SEARCH_FFMPEG_BINARY` | `ffmpeg` | `String` | Binary for video frame decoding. Runs without a shell with a 30-second timeout. |
+| `SEARCH_EMBED_PROFILE` | unset | `Option<String>` | Shipped local model profile. Use `embeddinggemma-2-media` for image, audio and video with the EmbeddingGemma 2 fp32 graphs. |
 | `SEARCH_EXPANSION_TERMS` | `64` | `usize` | Positive alternative cap per query word, including the original. |
 | `SEARCH_HITS_CAP` | `1000` | `usize` | Positive accessible-hit cap; supplies the default index setting and bounds endpoint pages. |
 | `SEARCH_FUSION_DEPTH` | `200` | `usize` | Positive candidate depth per hybrid leg when code keeps the default setting. |

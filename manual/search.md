@@ -401,8 +401,9 @@ own provider with `SearchRegistry::register_embedder`. An index's
 `index_time.embedder` overrides the deployment provider. Model profiles own
 the model id and revision, dimensions, token context, query prefix, document
 template, pooling, normalization, Matryoshka dimensions, precision, output key,
-input kinds, and artifact files. The shipped providers accept text; media
-parts fail when the profile/provider does not support them.
+input kinds, and artifact files. The local media profile accepts image, audio
+and video parts. The HTTP provider and default local profile accept text only.
+Unsupported parts fail.
 
 ### Local inference
 
@@ -432,6 +433,7 @@ resolve through their repository ids. BGE's instruction means
 | Profile | Dimensions | Context tokens | Pooling | Query prefix / document template | Reduced dimensions |
 |---|---:|---:|---|---|---|
 | `embeddinggemma-2` | 768 | 8192 | Mean | `task: search result \| query: ` / `title: {title} \| text: {text}` | 512, 256, 128 |
+| `embeddinggemma-2-media` | 768 | 8192 | Mean | Same as EmbeddingGemma 2, with ordered media parts | 512, 256, 128 |
 | `embeddinggemma-300m` | 768 | 2048 | Mean | Same as EmbeddingGemma 2 | 512, 256, 128 |
 | `bge-small-en-v1.5` | 384 | 512 | CLS | BGE instruction / `{text}` | None |
 | `bge-base-en-v1.5` | 768 | 512 | CLS | BGE instruction / `{text}` | None |
@@ -483,6 +485,55 @@ verified before loading; a changed byte is refused. A verified cache works
 offline. Keep the manifest with its artifacts. Generation settings pin the
 resolved model revision and dimensions; `ModelProfile::provenance()` exposes
 the manifest digest and file hashes, and baseline records include them.
+
+### Media embeddings
+
+Enable `search-fastembed`. Set `SEARCH_EMBEDDER=fastembed` and
+`SEARCH_EMBED_PROFILE=embeddinggemma-2-media`.
+The default model stays `hf:onnx-community/embeddinggemma-2-ONNX`.
+The media profile verifies the text, vision and audio graphs, their external
+weights and processor configuration in one cache manifest. It returns 768
+normalized values. The fp32 graphs, weights and tokenizer need about
+2.8 GiB in the model cache. Text-only documents keep the text batch planner.
+
+Declare storage path fields in the order the model should receive their parts:
+
+```rust
+#[searchable(embed)]
+pub caption: String,
+#[searchable(media(kind = "image", disk = "private"))]
+pub poster: Option<String>,
+#[searchable(media(kind = "audio", disk = "private"))]
+pub soundtrack: String,
+#[searchable(media(kind = "video", disk = "private"))]
+pub clip: Option<String>,
+```
+
+These attributes belong on fields of a `Searchable` model. A null optional
+path contributes no part. A model with only media paths embeds empty text
+with its declared parts. The worker reads each path asynchronously through
+`Storage`. `SEARCH_MEDIA_MAX_BYTES` limits each part to 33554432 bytes by
+default. Set a smaller positive limit to reduce worker memory. Larger limits
+are refused. A size check and a bounded range read apply to every part.
+Store changed media at a new path when reindexing an existing document.
+
+Images accept PNG, JPEG and WebP. Audio accepts PCM WAV, mixes channels to
+mono and resamples to 16 kHz with a Hann-windowed sinc filter. It computes
+the model's log-mel features and mask.
+Audio is limited to 30 seconds. Image decoding has dimension and memory caps.
+The default `search-media` feature exposes the Rust processors without ONNX.
+
+Video requires a host `ffmpeg` binary. `SEARCH_FFMPEG_BINARY` selects its path
+and defaults to `ffmpeg`. A missing binary fails with that variable's name.
+The worker samples frames at 1 fps, keeps at most 32 frames and applies the
+video processor's 140-token image budget. Long clips use uniform samples
+across their duration. Each decode has a 30-second timeout.
+Temporary input and frame files are removed when decoding ends.
+
+Boot and `search:sync-index-settings` reject a declared kind that the model
+profile cannot accept. The error names the index and model. The default
+EmbeddingGemma 2 profile and the `http` provider remain text only. The HTTP
+provider refuses media even if a caller supplies a custom profile.
 
 ### OpenAI-compatible HTTP inference
 

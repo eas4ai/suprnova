@@ -6,6 +6,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## 4.3.0 - 2026-10-17
 
+### Added
+
+- **Searchable models can declare ordered media parts.** Path fields name an
+  image, audio or video kind and a storage disk. Indexing loads bounded parts
+  through Storage. Boot and settings sync reject incompatible model profiles.
+- **EmbeddingGemma 2 can embed images, audio and video locally.** The media
+  profile verifies both encoder graphs and their weights with the text model.
+  Rust processors prepare image patches and WAV log-mel features. Video uses
+  a host ffmpeg binary with a timeout. Reference fixtures run without ONNX.
+
 ### Fixed
 
 - **A starter suggestion stands on at least three peers.** The starter engine kept a
