@@ -117,6 +117,8 @@ impl Recommender for StarterRecommender {
                 }
             }
         }
+        // Co-occurrence fewer peers share would let the peer count point at one person.
+        candidates.retain(|_, candidate| candidate.reason.peers >= config.min_peers);
         for mut semantic in ranking::semantic(target, &catalog, viewer, catalog.len()).await? {
             if excluded.is_some_and(|excluded| excluded.contains(&semantic.target)) {
                 continue;

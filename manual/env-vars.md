@@ -519,6 +519,7 @@ Booleans accept `true` or `false`; invalid values fail with the variable name.
 | `RECOMMEND_ENABLED` | `false` | `bool` | Forward validated search impressions and clicks automatically. Does not disable explicit event recording or generation. |
 | `RECOMMEND_HISTORY` | `500` | `usize` | Newest positive and negative events per actor combined; seen impressions are aggregated separately. |
 | `RECOMMEND_PEERS` | `200` | `usize` | Maximum sampled peers, ordered by most recent shared positive activity. |
+| `RECOMMEND_MIN_PEERS` | `3` | `usize` | Distinct peers a collaborative candidate needs, so no suggestion's peer count points at one person. Positive. |
 | `RECOMMEND_POPULARITY_WINDOW` | `30` | `u32` | UTC days of positive events contributing popularity. |
 | `RECOMMEND_LOCK_TTL_SECS` | `3600` | `u64` | Renewable generation cache-lock lifetime in seconds. |
 | `RECOMMEND_EVENT_TYPES` | `{}` | JSON object | Map from event name to `{"class":"positive\|negative\|seen","score":N}`. Base scores are bounded to -1000000 through 1000000; weight adds integer basis points divided by 20. |

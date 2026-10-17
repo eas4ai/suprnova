@@ -366,7 +366,13 @@ async fn leading(
     config: &RecommendConfig,
     inputs: &Inputs,
 ) -> Result<Vec<Ranked>, FrameworkError> {
-    let mut leading = ranking::collaborative(actor, history, &inputs.histories, config.peers);
+    let mut leading = ranking::collaborative(
+        actor,
+        history,
+        &inputs.histories,
+        config.peers,
+        config.min_peers,
+    );
     let mut used: BTreeSet<_> = leading
         .iter()
         .map(|candidate| candidate.target.clone())

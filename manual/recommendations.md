@@ -97,7 +97,12 @@ events per actor combined, ordered by time and id; the default is 500. Seen
 impressions are aggregated separately in SQL and do not consume those slots.
 Shared positive targets identify peers, sampled to `RECOMMEND_PEERS` (200)
 by their most recent shared activity. Candidate scores sum sampled peers'
-positive scores. Negative and previously seen/interacted targets are excluded.
+positive scores. A collaborative candidate needs at least `RECOMMEND_MIN_PEERS`
+(3) distinct peers: with fewer, it can still arrive through a later tier, which
+names no peers. Otherwise a suggestion whose peer count is 1 would point at that
+one person, and the suggestion would be one of their own views or purchases.
+`Recommend::similar_to` counts co-occurrence under the same rule. Negative and
+previously seen/interacted targets are excluded.
 Scores sort descending with `(index, key)` as a deterministic tie-break.
 
 When the higher tier is short, results fill in this order:
@@ -281,6 +286,7 @@ retrieval are not exposed by the shipped starter API.
 | `RECOMMEND_ENABLED` | `false` | Forward validated search events automatically. |
 | `RECOMMEND_HISTORY` | `500` | Newest positive and negative events per actor combined. |
 | `RECOMMEND_PEERS` | `200` | Most recent shared peers to sample. |
+| `RECOMMEND_MIN_PEERS` | `3` | Distinct peers a collaborative candidate needs. |
 | `RECOMMEND_POPULARITY_WINDOW` | `30` | UTC days of positive activity for popularity. |
 | `RECOMMEND_LOCK_TTL_SECS` | `3600` | Renewable generation lock lifetime. |
 | `RECOMMEND_EVENT_TYPES` | `{}` | JSON class and base-score overrides. |
@@ -299,8 +305,8 @@ within `SearchConfig::scope` when your test needs inline indexing. Add a
 `FakeEmbedder` only when testing semantic neighbours, and keep provider
 qualification separate from ranking tests.
 
-Record shared positives for two actors, an unseen candidate for a peer, and
-negative and seen facts for the subject. Generate a run and check the candidate,
+Record shared positives for the subject and three peers, an unseen candidate
+the peers share, and negative and seen facts for the subject. Generate a run and check the candidate,
 fallback order, authorized explanations, immutable dedupe result, and
 provenance after retention. Also check that a failed run leaves the previous
 completed run readable and that another viewer cannot read an inaccessible

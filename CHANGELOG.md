@@ -8,6 +8,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **A starter suggestion stands on at least three peers.** The starter engine kept a
+  collaborative candidate a single peer contributed, and its explanation
+  showed a peer count of 1 beside the shared item, which points at that
+  person; the candidate was one of their own views or purchases.
+  `Recommend::for_user` and `Recommend::similar_to` now count a collaborative
+  candidate only when `RECOMMEND_MIN_PEERS` distinct peers contribute it,
+  default 3. With fewer, it can still arrive through the affinity, popularity
+  or recent tier, which names no peers.
 - **A model without `updated_at` keeps a search version per row.** A searchable model without
   `updated_at` carried version 0 in every document, so a recommendation event
   or a graph fact could not tell one revision of the row from the next. Each
