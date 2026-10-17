@@ -791,6 +791,148 @@ async fn rec_005_retention_revokes_the_facts_resting_on_pruned_events() {
 }
 
 #[tokio::test]
+async fn rec_005_retention_revokes_an_aggregate_once_one_actor_behind_it_loses_an_event() {
+    setup(in_graph(async {
+        let a = note("A", "x", true, "o", 1).await;
+        let b = note("B", "x", true, "o", 2).await;
+        for peer in ["bob", "carol", "dave"] {
+            record(peer, &a, EventType::Like, "a").await;
+            record(peer, &b, EventType::Like, "b").await;
+        }
+        // Only Bob's engagement is old enough to prune; Dave's later events hold the
+        // largest ids.
+        let old = (suprnova::clock::now() - chrono::Duration::days(30)).timestamp_micros();
+        suprnova::DB::update(
+            "UPDATE recommendation_events SET occurred_at = ? WHERE actor_id = 'bob'",
+            vec![old.into()],
+        )
+        .await
+        .unwrap();
+        suprnova::Recommend::rebuild_graph().await.unwrap().unwrap();
+        assert_eq!(edges_from(&a, "co_engaged").await.len(), 1);
+        // Two actors are left, below RECOMMEND_MIN_PEERS, so the aggregate goes.
+        assert_eq!(suprnova::Recommend::prune(7).await.unwrap(), 2);
+        assert!(edges_from(&a, "co_engaged").await.is_empty());
+        assert!(edges_from(&b, "co_engaged").await.is_empty());
+    }))
+    .await;
+}
+
+/// The database store, except that every revocation fails.
+struct FailingRevocations;
+
+#[async_trait::async_trait]
+impl GraphStore for FailingRevocations {
+    fn name(&self) -> &'static str {
+        "failing"
+    }
+    async fn current_generation(&self) -> Result<Option<String>, suprnova::FrameworkError> {
+        DatabaseGraphStore.current_generation().await
+    }
+    async fn begin_generation(&self) -> Result<String, suprnova::FrameworkError> {
+        DatabaseGraphStore.begin_generation().await
+    }
+    async fn publish(&self, generation: &str) -> Result<(), suprnova::FrameworkError> {
+        DatabaseGraphStore.publish(generation).await
+    }
+    async fn discard(&self, generation: &str) -> Result<(), suprnova::FrameworkError> {
+        DatabaseGraphStore.discard(generation).await
+    }
+    async fn put_nodes(
+        &self,
+        generation: &str,
+        nodes: &[GraphNode],
+    ) -> Result<(), suprnova::FrameworkError> {
+        DatabaseGraphStore.put_nodes(generation, nodes).await
+    }
+    async fn put_edges(
+        &self,
+        generation: &str,
+        edges: &[GraphEdge],
+    ) -> Result<(), suprnova::FrameworkError> {
+        DatabaseGraphStore.put_edges(generation, edges).await
+    }
+    async fn revoke(
+        &self,
+        _generation: &str,
+        _revocation: &Revocation,
+    ) -> Result<u64, suprnova::FrameworkError> {
+        Err(suprnova::FrameworkError::database(
+            "the graph store is unreachable",
+        ))
+    }
+    async fn nodes(
+        &self,
+        generation: &str,
+        keys: &[String],
+    ) -> Result<Vec<GraphNode>, suprnova::FrameworkError> {
+        DatabaseGraphStore.nodes(generation, keys).await
+    }
+    async fn outgoing(
+        &self,
+        generation: &str,
+        sources: &[String],
+        kinds: &[String],
+        per_source: usize,
+    ) -> Result<Vec<GraphEdge>, suprnova::FrameworkError> {
+        DatabaseGraphStore
+            .outgoing(generation, sources, kinds, per_source)
+            .await
+    }
+    async fn document_nodes(
+        &self,
+        generation: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<GraphNode>, suprnova::FrameworkError> {
+        DatabaseGraphStore
+            .document_nodes(generation, after, limit)
+            .await
+    }
+    async fn fact_digest(&self, generation: &str) -> Result<String, suprnova::FrameworkError> {
+        DatabaseGraphStore.fact_digest(generation).await
+    }
+}
+
+#[tokio::test]
+async fn rec_005_retention_keeps_its_events_until_the_graph_has_revoked_their_facts() {
+    setup(in_graph(async {
+        let a = note("A", "x", true, "o", 1).await;
+        let b = note("B", "x", true, "o", 2).await;
+        for peer in ["bob", "carol", "dave"] {
+            record(peer, &a, EventType::Like, "a").await;
+            record(peer, &b, EventType::Like, "b").await;
+        }
+        suprnova::Recommend::rebuild_graph().await.unwrap().unwrap();
+        let old = (suprnova::clock::now() - chrono::Duration::days(30)).timestamp_micros();
+        suprnova::DB::update(
+            "UPDATE recommendation_events SET occurred_at = ?",
+            vec![old.into()],
+        )
+        .await
+        .unwrap();
+        let events = || async {
+            suprnova::DB::select("SELECT id FROM recommendation_events", vec![])
+                .await
+                .unwrap()
+                .len()
+        };
+        suprnova::testing::TestContainer::bind::<dyn GraphStore>(std::sync::Arc::new(
+            FailingRevocations,
+        ));
+        assert!(suprnova::Recommend::prune(7).await.is_err());
+        assert_eq!(events().await, 6, "no event goes before its facts do");
+        suprnova::testing::TestContainer::bind::<dyn GraphStore>(std::sync::Arc::new(
+            DatabaseGraphStore,
+        ));
+        assert_eq!(suprnova::Recommend::prune(7).await.unwrap(), 6);
+        assert_eq!(events().await, 0);
+        assert!(edges_from(&a, "co_engaged").await.is_empty());
+    }))
+    .await;
+}
+
+#[tokio::test]
 async fn rec_009_a_rebuild_of_an_emptied_store_reproduces_the_graph() {
     setup(in_graph(async {
         declare_next();

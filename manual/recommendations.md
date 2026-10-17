@@ -267,8 +267,11 @@ deterministic, so rebuilding from the same stream and documents reproduces the
 same facts. Between rebuilds the graph follows its sources: a search write
 queues a `GraphDocumentJob` that removes what a deleted document held and
 replaces what a newer revision changed, and `Recommend::prune` removes the
-facts resting on the events it deletes. A removed fact is never read,
-traversed or cited again.
+facts resting on the events it deletes. It deletes the oldest events first,
+in pages, and revokes each page's facts before the page goes, so a failed
+revocation leaves the events for a retry to find. A shared-engagement edge
+names its oldest event as provenance, so it goes as soon as one actor's
+event behind it does. A removed fact is never read, traversed or cited again.
 
 ### Where the graph lives
 
