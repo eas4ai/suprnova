@@ -516,7 +516,11 @@ with its declared parts. The worker reads each path asynchronously through
 `Storage`. `SEARCH_MEDIA_MAX_BYTES` limits each part to 33554432 bytes by
 default. Set a smaller positive limit to reduce worker memory. Larger limits
 are refused. A size check and a bounded range read apply to every part.
-Store changed media at a new path when reindexing an existing document.
+Each part's bytes join the document's content hash, so a file replaced at the
+same path is embedded again. Replacing a file does not reindex anything by
+itself: after you replace it, save the row or call
+`suprnova::search::searchable::<M>(&keys)` for it. Every save of a document
+with media parts reads all of its parts, even unchanged ones, to compare them.
 
 Images accept PNG, JPEG and WebP. Audio accepts PCM WAV, mixes channels to
 mono and resamples to 16 kHz with a Hann-windowed sinc filter. It computes

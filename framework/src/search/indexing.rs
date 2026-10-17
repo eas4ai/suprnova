@@ -1057,6 +1057,7 @@ async fn embed_dense_documents(
     index: &str,
     settings: &super::IndexSettings,
     indexed: &mut [IndexedDocument],
+    media: Vec<Vec<super::MediaPart>>,
 ) -> Result<(), FrameworkError> {
     let embedder = match settings.index_time.embedder.as_deref() {
         Some(name) => SearchRegistry::embedder_named(index, name)?,
@@ -1084,11 +1085,8 @@ async fn embed_dense_documents(
         })
         .collect::<Result<Vec<_>, FrameworkError>>()?;
     (SearchRegistry::by_index(index)?.descriptor)().validate_media(embedder.profile())?;
-    let limit = SearchConfig::current()?.media_max_bytes;
-    for (input, indexed) in inputs.iter_mut().zip(indexed.iter()) {
-        input.media =
-            super::load_search_media(&indexed.document, &settings.index_time.embed_media, limit)
-                .await?;
+    for (input, parts) in inputs.iter_mut().zip(media) {
+        input.media = parts;
     }
     let embeddings = embedder.embed_documents(&inputs).await?;
     if embeddings.len() != indexed.len() {
@@ -1111,6 +1109,22 @@ async fn embed_dense_documents(
     Ok(())
 }
 
+/// The settings digest a content hash folds in, with a digest of the document's media
+/// parts appended when it has any; without parts it is the settings digest unchanged.
+fn media_digest(settings: &str, parts: &[super::MediaPart]) -> String {
+    if parts.is_empty() {
+        return settings.to_owned();
+    }
+    let mut hash = Sha256::new();
+    for part in parts {
+        hash.update(part.media_type.as_bytes());
+        hash.update([0]);
+        hash.update((part.data.len() as u64).to_le_bytes());
+        hash.update(&part.data);
+    }
+    format!("{settings}:{}", hex::encode(hash.finalize()))
+}
+
 async fn write_documents(
     index: &str,
     generation: Option<GenerationId>,
@@ -1130,7 +1144,17 @@ async fn write_documents(
         .map(|(key, version)| (key.as_str(), *version))
         .collect();
     let digest = settings.index_time.digest();
+    let embedding_enabled = match settings.index_time.embedder.as_deref() {
+        Some("none") => false,
+        Some(_) => true,
+        None => SearchConfig::current()?.embedder != SearchEmbedder::None,
+    };
+    // A media part's bytes join the content hash, so a file replaced at the same storage
+    // path is embedded again; the parts read here are the ones the embedder receives.
+    let embeds_media = embedding_enabled && !settings.index_time.embed_media.is_empty();
+    let media_limit = SearchConfig::current()?.media_max_bytes;
     let mut indexed = Vec::with_capacity(documents.len());
+    let mut media = Vec::with_capacity(documents.len());
     for mut document in documents {
         let version = remaining.remove(document.key.as_str()).ok_or_else(|| {
             FrameworkError::param(format!(
@@ -1141,28 +1165,35 @@ async fn write_documents(
         document.source_version = version;
         apply_embed_source(&mut document, settings.index_time.embed_source.as_ref())?;
         document.validate(descriptor)?;
-        let content_hash = document.content_hash(&digest);
+        let parts = if embeds_media {
+            super::load_search_media(&document, &settings.index_time.embed_media, media_limit)
+                .await?
+        } else {
+            Vec::new()
+        };
+        let content_hash = document.content_hash(&media_digest(&digest, &parts));
         indexed.push(IndexedDocument {
             document,
             content_hash,
             dense: None,
             sparse: None,
         });
+        media.push(parts);
     }
     if !indexed.is_empty() {
         let hashes = engine
             .stored_hashes(descriptor, &generation, &indexed)
             .await?;
-        indexed
-            .retain(|document| hashes.get(&document.document.key) != Some(&document.content_hash));
+        (indexed, media) = indexed
+            .into_iter()
+            .zip(media)
+            .filter(|(document, _)| {
+                hashes.get(&document.document.key) != Some(&document.content_hash)
+            })
+            .unzip();
     }
-    let embedding_enabled = match settings.index_time.embedder.as_deref() {
-        Some("none") => false,
-        Some(_) => true,
-        None => SearchConfig::current()?.embedder != SearchEmbedder::None,
-    };
     if embedding_enabled && !indexed.is_empty() {
-        embed_dense_documents(index, &settings, &mut indexed).await?;
+        embed_dense_documents(index, &settings, &mut indexed, media).await?;
     }
     embed_sparse_documents(index, &settings, &mut indexed, engine.name()).await?;
     let removals: Vec<_> = remaining
