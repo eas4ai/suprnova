@@ -117,10 +117,15 @@ become public search attributes unless you declare them separately.
 
 `to_search_document()` returns a `Result<SearchDocument, FrameworkError>` with
 the textual model key, index, declared typed attributes, embed text, and title.
-Timestamped projections use `updated_at` in UTC microseconds. A projection
-without a timestamp has version zero; the write boundary assigns its monotonic
-source version once and carries it through retries. Undeclared model fields
-stay outside the document.
+Timestamped projections use `updated_at` in UTC microseconds. A model without
+`updated_at` gets a version the framework keeps per row in the
+`search_source_versions` table: every save raises it inside the save's own
+transaction, so a rolled-back save leaves it unchanged, and reading a row never
+raises it. `to_search_document()` is synchronous and cannot query, so Eloquent
+loads the kept versions in one query beside the rows it returns, and the
+projection reads the version of the row as loaded or last saved in this
+process; a row another process saved since then reads the newer version on its
+next load. Undeclared model fields stay outside the document.
 
 ## Index settings
 

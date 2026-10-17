@@ -998,6 +998,7 @@ where
             None => crate::render_cache::collector::observe_table_read(Self::TABLE),
         }
         if let Some(ref m) = hydrated {
+            crate::search::indexing::prefetch_kept_versions(std::slice::from_ref(m), &exec).await?;
             Self::__dispatch_retrieved(m).await?;
         }
         Ok(hydrated)
@@ -1108,6 +1109,7 @@ where
                 crate::render_cache::collector::observe_table_read(Self::TABLE);
             }
         }
+        crate::search::indexing::prefetch_kept_versions(&ordered, &exec).await?;
         for row in &ordered {
             Self::__dispatch_retrieved(row).await?;
         }
@@ -1145,6 +1147,7 @@ where
             .map(Self::try_from_storage)
             .collect::<Result<Vec<_>, _>>()?;
         Self::__mark_query_result(&mut out);
+        crate::search::indexing::prefetch_kept_versions(&out, &exec).await?;
         for row in &out {
             Self::__dispatch_retrieved(row).await?;
         }

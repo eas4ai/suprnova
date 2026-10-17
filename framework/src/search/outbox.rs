@@ -13,7 +13,7 @@ fn error(index: &str, error: impl std::fmt::Display) -> FrameworkError {
     FrameworkError::database(format!("search index `{index}` intent outbox: {error}"))
 }
 
-fn statement(
+pub(crate) fn statement(
     backend: DbBackend,
     sql: &str,
     values: Vec<Value>,
@@ -34,30 +34,42 @@ fn statement(
 }
 
 async fn available(index: &str, exec: &ExecutorChoice) -> Result<bool, FrameworkError> {
+    persistent_table(index, exec, "search_job_intents").await
+}
+
+/// Whether a search metadata table exists for this index's writes. The database engine
+/// requires the search migrations, so it never probes; collection-only fixtures have no
+/// persistent metadata. The probe runs on the model's own transaction executor so a
+/// one-connection pool cannot deadlock here.
+pub(crate) async fn persistent_table(
+    index: &str,
+    exec: &ExecutorChoice,
+    table: &str,
+) -> Result<bool, FrameworkError> {
     if SearchRegistry::engine_for(index)?.name() == "database" {
         return Ok(true);
     }
-    // Collection-only fixtures have no persistent metadata. Inspect on the model's
-    // own transaction executor so a one-connection pool cannot deadlock here.
     let sql = match exec.backend() {
-        DbBackend::Sqlite => {
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='search_job_intents'"
-        }
+        DbBackend::Sqlite => "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
         DbBackend::Postgres => {
-            "SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND table_name='search_job_intents'"
+            "SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND table_name=?"
         }
         DbBackend::MySql => {
-            "SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='search_job_intents'"
+            "SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=?"
         }
         _ => {
             return Err(error(
                 index,
-                "backend does not support persistent search intent discovery",
+                "backend does not support persistent search metadata discovery",
             ));
         }
     };
     Ok(!exec
-        .query_all(statement(exec.backend(), sql, Vec::new())?)
+        .query_all(statement(
+            exec.backend(),
+            sql,
+            vec![table.to_owned().into()],
+        )?)
         .await
         .map_err(|failure| error(index, failure))?
         .is_empty())

@@ -281,6 +281,8 @@ pub struct SearchableEntry {
     pub document: fn(&dyn Any) -> Result<SearchDocument, FrameworkError>,
     /// Predicates run before enqueueing and again when a job reloads the row.
     pub should_index: fn(&dyn Any) -> Result<bool, FrameworkError>,
+    /// A model without `updated_at` has its source version kept per row by the framework.
+    pub keeps_version: bool,
 }
 
 inventory::collect!(SearchableEntry);

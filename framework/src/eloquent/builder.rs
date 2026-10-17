@@ -6611,6 +6611,10 @@ where
 
         this.load_existence_flags(&out, &exec).await?;
 
+        // A searchable model without `updated_at` brings its kept versions
+        // in one query, so its synchronous projection reads current ones.
+        crate::search::indexing::prefetch_kept_versions(&out, &exec).await?;
+
         // Phase 10C T1 - Retrieved fires ONCE per hydrated row, AFTER
         // eager loads land. Listeners observe the fully-populated
         // model (relations cache + all hydrated columns), not the

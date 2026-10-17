@@ -568,6 +568,7 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                     })
                 },
                 load_documents: |keys| ::std::boxed::Box::pin(#model::__suprnova_load_search_documents(keys)),
+                keeps_version: !<#model as ::suprnova::eloquent::EloquentModel>::HAS_TIMESTAMPS,
                 evaluate_scope: |viewer, document| {
                     ::suprnova::search::evaluate_scope(
                         <#model as ::suprnova::search::Searchable>::descriptor(), viewer, document,

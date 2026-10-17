@@ -8,6 +8,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **A model without `updated_at` keeps a search version per row.** A searchable model without
+  `updated_at` carried version 0 in every document, so a recommendation event
+  or a graph fact could not tell one revision of the row from the next. Each
+  save now raises a version kept in the new `search_source_versions` table, in
+  the save's own transaction, and Eloquent loads the kept versions with the
+  rows, so `to_search_document()` returns the row's version without a query of
+  its own. Run your migrations: the table comes with
+  `suprnova::search::migrations()`.
 - **A local embedding model keeps its memory bounded on long documents.** The `fastembed`
   provider padded every text in a batch to the batch's longest, and attention
   memory grows with the square of that length, so one long document among
