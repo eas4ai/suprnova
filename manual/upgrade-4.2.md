@@ -21,12 +21,12 @@ application scaffolded before 4.2.
 1. Point application dependencies and the CLI at `v4.2.0`:
 
    ```toml
-   suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.2.0" }
+   suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.2.1" }
    ```
 
    ```bash
    cargo update -p suprnova
-   cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v4.2.0 suprnova-cli
+   cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v4.2.1 suprnova-cli
    cargo check --all-targets
    ```
 
