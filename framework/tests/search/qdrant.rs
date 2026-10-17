@@ -2814,3 +2814,86 @@ async fn native_bm25_threshold_rounded_zero_boundary_qdrant() {
     })
     .await;
 }
+
+/// REC-006: Qdrant answers recommend and discover natively from the vectors its
+/// collection stores, under the scope filter, and never returns an input point.
+#[tokio::test]
+#[ignore = "requires Qdrant at QDRANT_TEST_URL"]
+async fn rec_006_native_recommend_and_discover_follow_the_stored_vectors_qdrant() {
+    fixture(|engine, index, generation| {
+        Box::pin(async move {
+            let mut settings = index.index_settings();
+            settings.index_time.dimensions = Some(3);
+            engine
+                .create_generation(index, &settings, generation)
+                .await
+                .unwrap();
+            let vectors: [(&str, i64, [f32; 3]); 7] = [
+                ("liked", 2, [1.0, 0.0, 0.0]),
+                ("disliked", 4, [0.0, 1.0, 0.0]),
+                ("near_liked", 6, [0.9, 0.1, 0.0]),
+                ("near_disliked", 8, [0.1, 0.9, 0.0]),
+                ("hidden", 1, [0.95, 0.05, 0.0]),
+                ("positive", 2, [0.0, 0.0, 1.0]),
+                ("positive_side", 4, [0.8, 0.0, 0.4]),
+            ];
+            let docs: Vec<IndexedDocument> = vectors
+                .iter()
+                .map(|(key, n, vector)| {
+                    let mut doc = document(index, key, key, *n);
+                    doc.dense = Some(vector.to_vec());
+                    doc
+                })
+                .collect();
+            engine.index(index, generation, &docs).await.unwrap();
+            // Odd numbers are inactive: the filter stands in for a viewer's scope.
+            let active = Filter::Eq("active".into(), AttributeValue::Bool(true));
+            let recommended = engine
+                .recommend(
+                    index,
+                    generation,
+                    &suprnova::VectorRecommend {
+                        positive: vec!["liked".into()],
+                        negative: vec!["disliked".into()],
+                        filter: Some(active.clone()),
+                        depth: 10,
+                    },
+                )
+                .await
+                .unwrap();
+            let keys: Vec<&str> = recommended
+                .candidates
+                .iter()
+                .map(|hit| hit.document.key.as_str())
+                .collect();
+            assert_eq!(keys.first(), Some(&"near_liked"));
+            assert!(!keys.contains(&"liked") && !keys.contains(&"disliked"));
+            assert!(!keys.contains(&"hidden"), "the filter applies");
+            assert_eq!(keys.last(), Some(&"near_disliked"));
+            let discovered = engine
+                .discover(
+                    index,
+                    generation,
+                    &suprnova::VectorDiscover {
+                        target: "liked".into(),
+                        context: vec![("positive".into(), "disliked".into())],
+                        filter: Some(active),
+                        depth: 2,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                discovered.candidates.first().map(|hit| hit.document.key.as_str()),
+                Some("positive_side")
+            );
+            assert!(
+                discovered
+                    .candidates
+                    .iter()
+                    .all(|hit| !["liked", "positive", "disliked"].contains(&hit.document.key.as_str()))
+            );
+        })
+    })
+    .await;
+}

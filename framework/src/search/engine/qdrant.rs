@@ -1868,6 +1868,175 @@ impl SearchEngine for QdrantSearchEngine {
             .await?;
         Ok(EngineResult { candidates, total })
     }
+    async fn stored_vectors(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        keys: &[String],
+    ) -> Result<HashMap<String, Vec<f32>>, FrameworkError> {
+        let collection = collection_name(index, generation)?;
+        let mut vectors = HashMap::new();
+        for batch in keys.chunks(256) {
+            let by_point: HashMap<qb::PointId, &String> = batch
+                .iter()
+                .map(|key| (QdrantVectorDriver::resolve_point_id(key), key))
+                .collect();
+            let points = self
+                .client
+                .get_points(
+                    qb::GetPointsBuilder::new(
+                        &collection,
+                        by_point.keys().cloned().collect::<Vec<_>>(),
+                    )
+                    .with_vectors(qb::VectorsSelector::from(vec!["dense".to_owned()]))
+                    .with_payload(false),
+                )
+                .await
+                .map_err(|e| error(&collection, e))?;
+            for point in points.result {
+                let Some(key) = point.id.as_ref().and_then(|id| by_point.get(id)) else {
+                    continue;
+                };
+                if let Some(qb::vector_output::Vector::Dense(dense)) = point
+                    .vectors
+                    .as_ref()
+                    .and_then(|vectors| vectors.get_vector_by_name("dense"))
+                {
+                    vectors.insert((*key).clone(), dense.data);
+                }
+            }
+        }
+        Ok(vectors)
+    }
+    async fn recommend(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        request: &VectorRecommend,
+    ) -> Result<EngineResult, FrameworkError> {
+        let empty = EngineResult {
+            candidates: Vec::new(),
+            total: Total::Estimated(0),
+        };
+        if request.depth == 0 || request.positive.is_empty() {
+            return Ok(empty);
+        }
+        let inputs: Vec<String> = request
+            .positive
+            .iter()
+            .chain(&request.negative)
+            .cloned()
+            .collect();
+        // Qdrant refuses an example point it does not hold, so only stored ones go in.
+        let stored = self.stored_vectors(index, generation, &inputs).await?;
+        let mut input =
+            qb::RecommendInputBuilder::default().strategy(qb::RecommendStrategy::AverageVector);
+        let mut positives = 0;
+        for key in request
+            .positive
+            .iter()
+            .filter(|key| stored.contains_key(*key))
+        {
+            input = input.add_positive(qb::VectorInput::new_id(
+                QdrantVectorDriver::resolve_point_id(key),
+            ));
+            positives += 1;
+        }
+        if positives == 0 {
+            return Ok(empty);
+        }
+        for key in request
+            .negative
+            .iter()
+            .filter(|key| stored.contains_key(*key))
+        {
+            input = input.add_negative(qb::VectorInput::new_id(
+                QdrantVectorDriver::resolve_point_id(key),
+            ));
+        }
+        let collection = collection_name(index, generation)?;
+        if let Some(filter) = &request.filter {
+            filter.validate(index)?;
+        }
+        let filter = QFilter::must(match &request.filter {
+            Some(filter) => Some(self.bound_predicate(&collection, filter).await?),
+            None => None,
+        });
+        let excluded: std::collections::HashSet<&str> = inputs.iter().map(String::as_str).collect();
+        let mut candidates = self
+            .query_points(
+                index,
+                &collection,
+                qb::Query::new_recommend(input.build()),
+                Some("dense"),
+                filter,
+                request.depth.saturating_add(excluded.len()),
+            )
+            .await?;
+        candidates.retain(|candidate| !excluded.contains(candidate.document.key.as_str()));
+        candidates.truncate(request.depth);
+        let total = Total::Estimated(candidates.len() as u64);
+        Ok(EngineResult { candidates, total })
+    }
+    async fn discover(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        request: &VectorDiscover,
+    ) -> Result<EngineResult, FrameworkError> {
+        let empty = EngineResult {
+            candidates: Vec::new(),
+            total: Total::Estimated(0),
+        };
+        if request.depth == 0 {
+            return Ok(empty);
+        }
+        let mut inputs = vec![request.target.clone()];
+        for (positive, negative) in &request.context {
+            inputs.push(positive.clone());
+            inputs.push(negative.clone());
+        }
+        let stored = self.stored_vectors(index, generation, &inputs).await?;
+        if !stored.contains_key(&request.target) {
+            return Ok(empty);
+        }
+        let mut context = qb::ContextInputBuilder::default();
+        for (positive, negative) in &request.context {
+            if stored.contains_key(positive) && stored.contains_key(negative) {
+                context = context.add_pair(
+                    qb::VectorInput::new_id(QdrantVectorDriver::resolve_point_id(positive)),
+                    qb::VectorInput::new_id(QdrantVectorDriver::resolve_point_id(negative)),
+                );
+            }
+        }
+        let collection = collection_name(index, generation)?;
+        if let Some(filter) = &request.filter {
+            filter.validate(index)?;
+        }
+        let filter = QFilter::must(match &request.filter {
+            Some(filter) => Some(self.bound_predicate(&collection, filter).await?),
+            None => None,
+        });
+        let excluded: std::collections::HashSet<&str> = inputs.iter().map(String::as_str).collect();
+        let discover = qb::DiscoverInputBuilder::new(
+            qb::VectorInput::new_id(QdrantVectorDriver::resolve_point_id(&request.target)),
+            context.build(),
+        );
+        let mut candidates = self
+            .query_points(
+                index,
+                &collection,
+                qb::Query::new_discover(discover.build()),
+                Some("dense"),
+                filter,
+                request.depth.saturating_add(excluded.len()),
+            )
+            .await?;
+        candidates.retain(|candidate| !excluded.contains(candidate.document.key.as_str()));
+        candidates.truncate(request.depth);
+        let total = Total::Estimated(candidates.len() as u64);
+        Ok(EngineResult { candidates, total })
+    }
     async fn semantic(
         &self,
         index: &IndexDescriptor,

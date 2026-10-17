@@ -1249,6 +1249,24 @@ impl SearchEngine for CollectionEngine {
             .collect();
         Ok(EngineResult { candidates, total })
     }
+    async fn stored_vectors(
+        &self,
+        index: &IndexDescriptor,
+        id: &GenerationId,
+        keys: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<f32>>, FrameworkError> {
+        let state = self.read()?;
+        let g = generation(&state, index, id)?;
+        Ok(keys
+            .iter()
+            .filter_map(|key| {
+                g.documents
+                    .get(key)
+                    .and_then(|doc| doc.dense.clone())
+                    .map(|dense| (key.clone(), dense))
+            })
+            .collect())
+    }
     async fn semantic(
         &self,
         index: &IndexDescriptor,

@@ -2,6 +2,7 @@
 pub mod collection;
 pub(crate) mod connection;
 pub mod database;
+mod fold;
 pub mod null;
 pub mod qdrant;
 use super::{
@@ -16,7 +17,10 @@ use super::{
 use crate::FrameworkError;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 /// Identifiers keep generation names safe for drivers that create physical indexes.
 ///
 /// ```
@@ -98,6 +102,36 @@ pub struct EngineResult {
     /// Exact lexical or explicitly bounded semantic total.
     pub total: Total,
 }
+/// A recommend query over the vectors a generation stores (REC-006): documents near the
+/// positive documents and away from the negative ones, under `filter`. The input
+/// documents themselves are never returned.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VectorRecommend {
+    /// Keys of documents to move toward.
+    pub positive: Vec<String>,
+    /// Keys of documents to move away from.
+    pub negative: Vec<String>,
+    /// The viewer's scope and any other predicate, applied before ranking.
+    pub filter: Option<Filter>,
+    /// The most documents returned.
+    pub depth: usize,
+}
+
+/// A discover query over the vectors a generation stores (REC-006): documents near
+/// `target`, ranked first by how many context pairs they fall on the positive side of.
+/// The input documents themselves are never returned.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VectorDiscover {
+    /// Key of the document to search around.
+    pub target: String,
+    /// Pairs of document keys: (closer to this one, farther from this one).
+    pub context: Vec<(String, String)>,
+    /// The viewer's scope and any other predicate, applied before ranking.
+    pub filter: Option<Filter>,
+    /// The most documents returned.
+    pub depth: usize,
+}
+
 /// Capability reporting makes unsupported operations fail visibly.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineCapabilities {
@@ -270,6 +304,43 @@ pub trait SearchEngine: Send + Sync {
         filter: Option<&Filter>,
         depth: usize,
     ) -> Result<EngineResult, FrameworkError>;
+    /// The dense vectors this generation stores for `keys`; a key without one is absent.
+    /// Recommendation reads the search collection's own vectors (REC-006), so an engine
+    /// that keeps none cannot recommend from vectors.
+    async fn stored_vectors(
+        &self,
+        index: &IndexDescriptor,
+        _generation: &GenerationId,
+        _keys: &[String],
+    ) -> Result<HashMap<String, Vec<f32>>, FrameworkError> {
+        Err(FrameworkError::param(format!(
+            "search engine {} keeps no vectors for index {} to recommend from",
+            self.name(),
+            index.name
+        )))
+    }
+    /// Rank documents near the positives' stored vectors and away from the negatives'.
+    /// The default folds them into one query vector, as Qdrant's average-vector strategy
+    /// does, and runs a semantic query; an engine with a native operation overrides it.
+    async fn recommend(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        request: &VectorRecommend,
+    ) -> Result<EngineResult, FrameworkError> {
+        fold::recommend(self, index, generation, request).await
+    }
+    /// Rank documents near the target's stored vector by the context pairs. The default
+    /// ranks a semantic neighbourhood of the target by the pairs' stored vectors; an
+    /// engine with a native operation overrides it.
+    async fn discover(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        request: &VectorDiscover,
+    ) -> Result<EngineResult, FrameworkError> {
+        fold::discover(self, index, generation, request).await
+    }
     /// Drivers with native fusion can consume both legs together without changing ordinary queries.
     /// Returning None retains the framework fusion path for existing drivers.
     async fn hybrid(

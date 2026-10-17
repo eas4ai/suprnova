@@ -6,3 +6,4 @@ mod publication;
 mod schema;
 mod starter;
 mod support;
+mod vectors;

@@ -55,7 +55,7 @@ pub use engine::null::NullEngine;
 pub use engine::qdrant::QdrantSearchEngine;
 pub use engine::{
     EngineCandidate, EngineCapabilities, EngineResult, GenerationId, IndexedDocument, SearchEngine,
-    WriteOutcome,
+    VectorDiscover, VectorRecommend, WriteOutcome,
 };
 pub use expansion::{ExpandedQuery, ExpandedTerm, Vocabulary, expand, tokenize};
 pub use fusion::{FederatedRank, federated_rrf, normalize, paginate, weighted_rrf};
