@@ -15,6 +15,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   report-only mode and its reporting origins. A directive the policy leaves
   out starts from the sources it falls back to. An application that allows an
   analytics host in `connect-src` no longer copies the preset's policy string.
+- **Stream hooks in every Inertia kit.** New React, Vue and Svelte applications
+  get `frontend/src/lib/stream/`, Suprnova's own client for the responses
+  `HttpResponse::stream_bytes`, `stream_json` and `event_stream` send:
+  `useStream`, `useJsonStream`, `useEventStream` and `useJsonEventStream`, with
+  the names, options and results of Laravel's stream packages. They send the
+  CSRF token from the root template's meta tag or the `XSRF-TOKEN` cookie, and
+  cancel their request when the component unmounts. An existing application
+  can copy the two files from a new scaffold of its kit.
 
 ### Fixed
 

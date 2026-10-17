@@ -111,6 +111,47 @@ try {
     run(frontend, "node", &["--input-type=module", "--eval", script]);
 }
 
+/// Run the kit's stream hooks, `src/lib/stream/index.ts`, in jsdom with
+/// Vitest against a stand-in `fetch` and `EventSource`: the fetching and
+/// streaming states, the text and events as they arrive, cancel, unmount and
+/// the event stream's end signal. The fixtures live in `tests/kit_stream/`.
+fn assert_stream_hooks(frontend: &Path, kit: &str) {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/kit_stream");
+    let copy = |from: &str, to: &str| {
+        std::fs::copy(fixtures.join(from), frontend.join(to))
+            .unwrap_or_else(|e| panic!("copy {from} into the kit: {e}"));
+    };
+    copy("fakes.ts", "fakes.ts");
+    copy(&format!("{kit}.test.ts"), "stream.test.ts");
+    if kit == "svelte" {
+        copy("StreamProbe.svelte", "StreamProbe.svelte");
+        copy("vitest.svelte.config.ts", "vitest.stream.config.ts");
+    } else {
+        copy("vitest.config.ts", "vitest.stream.config.ts");
+    }
+    // `--legacy-peer-deps`: npm 11 fails resolving Vitest's optional peers
+    // on an installed tree ("reading 'edgesOut'"); the kit already has the
+    // peers it needs, Vite, and jsdom is installed alongside.
+    run(
+        frontend,
+        "npm",
+        &[
+            "install",
+            "--no-save",
+            "--legacy-peer-deps",
+            "--no-audit",
+            "--no-fund",
+            "vitest@4.1.11",
+            "jsdom@30.1.0",
+        ],
+    );
+    run(
+        frontend,
+        "npx",
+        &["vitest", "run", "--config", "vitest.stream.config.ts"],
+    );
+}
+
 #[test]
 #[ignore = "needs node, npm and the network: runs npm install, check, build and build:ssr"]
 fn kit_svelte_type_checks_and_builds() {
@@ -142,6 +183,7 @@ fn kit_svelte_type_checks_and_builds() {
          where `suprnova ssr:start` reads it"
     );
     assert_home_heading(&frontend);
+    assert_stream_hooks(&frontend, "svelte");
 }
 
 /// The React kit.
@@ -188,6 +230,7 @@ mod react {
              the path `suprnova ssr:start` reads"
         );
         super::assert_home_heading(&frontend);
+        super::assert_stream_hooks(&frontend, "react");
     }
 }
 
@@ -233,5 +276,6 @@ mod vue {
             manifest.display()
         );
         super::assert_stylesheet_entry(&manifest);
+        super::assert_stream_hooks(&frontend, "vue");
     }
 }

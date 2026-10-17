@@ -885,6 +885,14 @@ impl std::str::FromStr for Frontend {
     }
 }
 
+/// `src/lib/stream/core.ts`, the same in every Inertia kit: the stream
+/// client the kit's `src/lib/stream/index.ts` hooks keep their state in,
+/// for the responses `HttpResponse::stream_bytes`, `stream_json` and
+/// `event_stream` send.
+pub fn stream_core() -> &'static str {
+    include_str!("files/frontend/stream/core.ts.tpl")
+}
+
 pub mod react {
     pub fn package_json(project_name: &str) -> String {
         include_str!("files/frontend/react/package.json.tpl")
@@ -933,6 +941,11 @@ pub mod react {
     }
     pub fn vite_env_dts() -> &'static str {
         include_str!("files/frontend/react/src/vite-env.d.ts.tpl")
+    }
+    /// `src/lib/stream/index.ts`: `useStream`, `useJsonStream`,
+    /// `useEventStream` and `useJsonEventStream` over [`super::stream_core`].
+    pub fn stream_hooks() -> &'static str {
+        include_str!("files/frontend/react/src/lib/stream/index.ts.tpl")
     }
     pub fn app_css() -> &'static str {
         include_str!("files/frontend/react/src/app.css.tpl")
@@ -988,6 +1001,11 @@ pub mod svelte {
     }
     pub fn app_dts() -> &'static str {
         include_str!("files/frontend/svelte/src/app.d.ts.tpl")
+    }
+    /// `src/lib/stream/index.ts`: the stream stores over
+    /// [`super::stream_core`].
+    pub fn stream_hooks() -> &'static str {
+        include_str!("files/frontend/svelte/src/lib/stream/index.ts.tpl")
     }
     pub fn app_css() -> &'static str {
         include_str!("files/frontend/svelte/src/app.css.tpl")
@@ -1157,6 +1175,11 @@ pub mod vue {
     pub fn inertia_props_types() -> &'static str {
         include_str!("files/frontend/vue/src/types/inertia-props.ts.tpl")
     }
+    /// `src/lib/stream/index.ts`: the stream composables over
+    /// [`super::stream_core`].
+    pub fn stream_hooks() -> &'static str {
+        include_str!("files/frontend/vue/src/lib/stream/index.ts.tpl")
+    }
     pub fn app_css() -> &'static str {
         include_str!("files/frontend/vue/src/app.css.tpl")
     }
@@ -1285,6 +1308,23 @@ pub fn scaffold_frontend(
 
     for (path, content) in writes {
         fs::write(path, content)
+            .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    }
+
+    // The stream client: one shared engine and the kit's hooks over it.
+    let stream = lib.join("stream");
+    fs::create_dir_all(&stream)
+        .map_err(|e| format!("Failed to create {}: {}", stream.display(), e))?;
+    let stream_hooks = match kit {
+        InertiaKit::React => react::stream_hooks(),
+        InertiaKit::Svelte => svelte::stream_hooks(),
+        InertiaKit::Vue => vue::stream_hooks(),
+    };
+    for (path, content) in [
+        (stream.join("core.ts"), stream_core()),
+        (stream.join("index.ts"), stream_hooks),
+    ] {
+        fs::write(&path, content)
             .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
     }
 

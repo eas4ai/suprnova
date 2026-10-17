@@ -366,29 +366,106 @@ with any JSON parser.
 
 ## Consuming from React / Vue / Svelte
 
-The [`@laravel/stream-{react,vue,svelte}`](https://github.com/laravel/stream)
-packages own the client side of this wire contract - Suprnova targets
-theirs rather than shipping its own:
+Every Inertia kit ships Suprnova's stream client in `frontend/src/lib/stream/`:
+`core.ts`, the engine all three kits share, and `index.ts`, the kit's hooks
+over it. The hooks keep the names, options and results of Laravel's
+`@laravel/stream-react`, `@laravel/stream-vue` and `@laravel/stream-svelte`, so
+Laravel's stream examples work with the import changed to `lib/stream`.
 
-| Hook | Talks to | Suprnova builder |
+| Hook | Request | Suprnova builder |
 |---|---|---|
-| `useEventStream(url, options)` | `EventSource` (GET, browser-managed reconnect) | `HttpResponse::event_stream` |
-| `useStream(url, options)` | `fetch` (POST, manual `ReadableStream` read loop) | `HttpResponse::stream_bytes` |
-| `useJsonStream(url, options)` | Same as `useStream`, `JSON.parse`s the fully-buffered result | `HttpResponse::stream_json` |
+| `useStream(url, options)` | `fetch` POST, the response read as text as it arrives | `HttpResponse::stream_bytes` |
+| `useJsonStream(url, options)` | The same, the whole response parsed as JSON when it ends | `HttpResponse::stream_json` |
+| `useEventStream(url, options)` | `EventSource` GET, which the browser reconnects | `HttpResponse::event_stream` |
+| `useJsonEventStream(url, options)` | `fetch` POST, each event's data parsed as JSON | `HttpResponse::event_stream` |
+
+A React page that streams a chat reply and a deployment's progress:
 
 ```tsx
-import { useEventStream, useJsonStream } from "@laravel/stream-react";
+import { useJsonEventStream, useStream } from '../lib/stream'
 
-const { message } = useEventStream("/progress");          // against an event_stream endpoint
-const { data, send } = useJsonStream<Order[]>("/export"); // against a stream_json endpoint
+type Step = { step: string; percent: number }
+
+export default function Deploy() {
+  const reply = useStream<{ message: string }>('/chat')
+  const deploy = useJsonEventStream<Step, { environment: string }>('/deploy')
+
+  return (
+    <div>
+      <button onClick={() => reply.send({ message: 'Hello' })}>Ask</button>
+      {reply.isFetching ? <p>Connecting...</p> : <p>{reply.data}</p>}
+
+      <button onClick={() => deploy.send({ environment: 'production' })}>Deploy</button>
+      {deploy.events.map((event) => (
+        <p key={event.step}>{event.step}: {event.percent}%</p>
+      ))}
+    </div>
+  )
+}
 ```
 
-`useStream`/`useJsonStream` POST with two headers Suprnova reads like
-any other request header: `X-STREAM-ID` (a plain, non-authenticating
-correlation id the hook generates client-side) and `X-CSRF-TOKEN`, read
-from `<meta name="csrf-token">` the same way [CSRF protection](csrf.md)
-already expects it. `useEventStream` sends neither - `EventSource`
-cannot set custom request headers at all, it's a plain browser GET.
+The `/deploy` handler reads the body and answers with an event stream:
+
+```rust
+use serde::Deserialize;
+use suprnova::sse::{EndSignal, StreamedEvent};
+use suprnova::{FrameworkError, HttpResponse, Request, Response};
+
+#[derive(Deserialize)]
+struct Deploy {
+    environment: String,
+}
+
+pub async fn deploy(req: Request) -> Response {
+    let input: Deploy = req.json().await?;
+    let events = ["build", "migrate", "release"]
+        .iter()
+        .enumerate()
+        .map(|(i, step)| {
+            StreamedEvent::message(serde_json::json!({
+                "step": format!("{step} {}", input.environment),
+                "percent": (i + 1) * 100 / 3,
+            }))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| FrameworkError::internal(e.to_string()))?;
+    Ok(HttpResponse::event_stream(
+        futures::stream::iter(events),
+        EndSignal::default(),
+    ))
+}
+```
+
+In Vue each result is a ref, read as `reply.data.value` in a script and as
+`reply.data` in a template. In Svelte each hook returns a store, read as
+`$reply.data`; call it while the component initializes. Every hook connects
+when its component mounts and cancels its request when the component unmounts,
+so the server render opens no connection.
+
+The `fetch` hooks send a JSON body with the CSRF token: from the `csrfToken`
+option, else the `<meta name="csrf-token">` tag the root template writes, else
+the `XSRF-TOKEN` cookie [CSRF protection](csrf.md) sets, sent back as
+`X-XSRF-TOKEN`. They read it when a request starts, so a token rotated by a
+sign-in is the one sent. `useStream` also sends `X-STREAM-ID`, a random id
+that correlates requests and authenticates nothing; components that pass the
+same `id` option share one stream, its text and its callbacks. `useEventStream`
+sends neither: `EventSource` cannot set request headers, and a GET is not
+CSRF-checked.
+
+A request the server refuses reaches `onError` as a `StreamResponseError`
+with the response's `status` and `body`: 419 for a missing CSRF token, 422
+with the validation errors as JSON. `streamJsonEvents(request)` is the engine
+under `useJsonEventStream` for state you keep yourself, and it takes any
+method; a `GET` sends no body.
+
+An application scaffolded before 4.2.1 can take the two files from a new
+scaffold of the same kit (`suprnova new scratch --frontend react`). They import
+nothing but the kit's UI framework.
+
+Two details differ from Laravel's packages. One decoder reads a whole text
+response, so a character whose bytes arrive in two reads comes out whole. A
+response's error status reaches `onError` as a `StreamResponseError`, not a
+plain `Error` holding the body.
 
 ## Production setup
 
