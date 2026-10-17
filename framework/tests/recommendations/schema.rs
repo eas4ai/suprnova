@@ -10,13 +10,16 @@ async fn versioned_schema_has_every_graph_input_column_and_batch_index() {
             ("starter_recommendations", vec!["id", "run_id", "actor_kind", "actor_id", "surface", "target_index", "target_key", "score", "rank", "explanation_id"]),
             ("recommendation_runs", vec!["id", "started_at", "duration_ms", "events_read", "new_events", "users_covered", "items_scored", "coverage", "fallback_share", "high_water_mark", "catalog_digest", "actor_history_snapshots", "state", "error"]),
             ("recommendation_schema", vec!["id", "recommendation_schema_version"]),
+            ("recommendation_graph_generations", vec!["id", "state", "created_at"]),
+            ("recommendation_graph_nodes", vec!["generation_id", "node_key", "kind", "target_index", "target_key", "scope_json", "source_version", "provenance_json", "provenance_event", "provenance_source", "provenance_version"]),
+            ("recommendation_graph_edges", vec!["generation_id", "edge_key", "source_key", "target_key", "kind", "confidence_bps", "scope_json", "source_version", "provenance_json", "provenance_event", "provenance_source", "provenance_version", "created_at", "updated_at"]),
         ] {
             let rows = DB::select(&format!("PRAGMA table_info({table})"), []).await.unwrap();
             let names: Vec<_> = rows.iter().map(|row| row.get_string("name").unwrap()).collect();
             assert_eq!(names.len(), columns.len(), "{table}");
             for column in columns { assert!(names.iter().any(|name| name == column), "{table}.{column}"); }
         }
-        assert_eq!(DB::scalar::<i64>("SELECT COUNT(*) FROM recommendation_schema WHERE id = ? AND recommendation_schema_version = ?", vec![1.into(), 1.into()]).await.unwrap(), 1);
+        assert_eq!(DB::scalar::<i64>("SELECT COUNT(*) FROM recommendation_schema WHERE id = ? AND recommendation_schema_version = ?", vec![1.into(), 2.into()]).await.unwrap(), 1);
         let indexes = DB::select("PRAGMA index_list(recommendation_events)", []).await.unwrap();
         assert!(indexes.iter().any(|index| index.get_string("name").unwrap() == "recommendation_events_dedupe"));
         assert!(indexes.len() >= 4);

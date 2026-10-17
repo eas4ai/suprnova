@@ -6,19 +6,19 @@ use sea_orm_migration::prelude::*;
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
-fn text(name: &str, size: u32) -> ColumnDef {
+pub(super) fn text(name: &str, size: u32) -> ColumnDef {
     ColumnDef::new(Alias::new(name))
         .string_len(size)
         .not_null()
         .to_owned()
 }
-fn integer(name: &str) -> ColumnDef {
+pub(super) fn integer(name: &str) -> ColumnDef {
     ColumnDef::new(Alias::new(name))
         .big_integer()
         .not_null()
         .to_owned()
 }
-fn json(name: &str, backend: sea_orm::DbBackend) -> ColumnDef {
+pub(super) fn json(name: &str, backend: sea_orm::DbBackend) -> ColumnDef {
     // JSON text has identical canonical bytes on all three dialects for digest verification.
     let mut column = ColumnDef::new(Alias::new(name));
     if backend == sea_orm::DbBackend::MySql {
@@ -28,7 +28,7 @@ fn json(name: &str, backend: sea_orm::DbBackend) -> ColumnDef {
     }
     column.not_null().to_owned()
 }
-async fn index(
+pub(super) async fn index(
     manager: &SchemaManager<'_>,
     table: &str,
     name: &str,

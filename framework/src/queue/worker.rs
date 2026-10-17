@@ -111,8 +111,17 @@ fn framework_jobs() -> HashMap<String, Registration> {
     use crate::mail::SendMailJob;
     use crate::notifications::channels::broadcast::BroadcastNotificationJob;
     use crate::notifications::notify_job::SendNotificationJob;
+    use crate::recommendations::graph::{GraphDeriveJob, GraphDocumentJob};
     use crate::search::indexing::{SearchFlushJob, SearchIndexBatchJob, SearchIndexJob};
     HashMap::from([
+        (
+            GraphDeriveJob::job_name().to_string(),
+            registration_for::<GraphDeriveJob>(),
+        ),
+        (
+            GraphDocumentJob::job_name().to_string(),
+            registration_for::<GraphDocumentJob>(),
+        ),
         (
             SendMailJob::job_name().to_string(),
             registration_for::<SendMailJob>(),

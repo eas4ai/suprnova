@@ -171,9 +171,12 @@ async fn keep_versions(
     let failure = |error: sea_orm::DbErr| {
         FrameworkError::database(format!("search index `{index}` kept versions: {error}"))
     };
-    if minted.is_empty()
-        || !super::outbox::persistent_table(index, &exec, "search_source_versions").await?
-    {
+    if minted.is_empty() {
+        return Ok(minted);
+    }
+    if !super::outbox::persistent_table(index, &exec, "search_source_versions").await? {
+        // Without the table the version lives only in this process, as the minted value.
+        remember_after_commit(index, minted.clone(), tx).await?;
         return Ok(minted);
     }
     let backend = exec.backend();
@@ -241,8 +244,8 @@ async fn keep_versions(
         .collect::<Result<Vec<_>, FrameworkError>>()?;
     // Later mints in this process start above the kept value at once; the projection
     // sees it only after the save commits, so a rolled-back save leaves no trace there.
-    let cache = versions();
     {
+        let cache = versions();
         let mut state = cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -254,17 +257,28 @@ async fn keep_versions(
             *slot = (*slot).max(*version);
         }
     }
-    let committed = kept.clone();
+    remember_after_commit(index, kept.clone(), tx).await?;
+    Ok(kept)
+}
+
+/// Put versions in this process's cache once the save commits, so a rolled-back save
+/// leaves no trace in what projections read.
+async fn remember_after_commit(
+    index: &str,
+    kept: Vec<(String, i64)>,
+    tx: Option<&Transaction>,
+) -> Result<(), FrameworkError> {
+    let cache = versions();
     let index_name = index.to_owned();
     let remember = move || async move {
-        remember_kept(&cache, &index_name, &committed);
+        remember_kept(&cache, &index_name, &kept);
         Ok(())
     };
     match tx {
         Some(tx) => tx.after_commit(remember),
         None => DB::after_commit(remember).await?,
     }
-    Ok(kept)
+    Ok(())
 }
 
 /// Load the kept versions of freshly read rows in one query per batch, so a projection
@@ -775,6 +789,9 @@ pub(crate) fn enqueue_job<J: DeferredSearchJob>(
         )
         .await?;
         let context = super::registry::capture_context(config.clone());
+        // The write's recommendation override follows it past the commit, so the graph
+        // hook reads the configuration the writer ran under.
+        let recommend = crate::recommendations::scoped_config();
         let cache = versions();
         let callback = move || {
             super::registry::in_connection(
@@ -786,7 +803,7 @@ pub(crate) fn enqueue_job<J: DeferredSearchJob>(
                             "suprnova.search.connection",
                             &connection,
                         );
-                        with_versions(
+                        crate::recommendations::within_config(recommend, with_versions(
                             cache,
                             super::registry::in_context(context, async move {
                                 let explicit = job.generation();
@@ -848,7 +865,7 @@ pub(crate) fn enqueue_job<J: DeferredSearchJob>(
                                 }
                                 Ok(())
                             }),
-                        )
+                        ))
                         .await
                     },
                 ),
@@ -1018,6 +1035,7 @@ async fn write_documents(
 ) -> Result<(), FrameworkError> {
     let descriptor = (SearchRegistry::by_index(index)?.descriptor)();
     let engine = SearchRegistry::engine_for(index)?;
+    let pinned = generation.is_some();
     let generation = match generation {
         Some(generation) => generation,
         None => SearchRegistry::generation_for(index).await?,
@@ -1112,7 +1130,14 @@ async fn write_documents(
         engine.index(descriptor, &generation, &indexed).await?;
     }
     super::generations::complete(index, &generation, keys).await?;
-    Ok(())
+    crate::recommendations::graph::documents_changed(
+        index,
+        &generation,
+        pinned,
+        indexed.iter().map(|doc| doc.document.key.clone()).collect(),
+        removals.into_iter().map(|(key, _)| key).collect(),
+    )
+    .await
 }
 
 async fn enqueue_models<M>(models: Vec<M>, op: IndexOperation) -> Result<(), FrameworkError>

@@ -23,24 +23,13 @@ pub(crate) async fn generate(request: GenerateRun) -> Result<GenerationOutcome, 
     };
     let id = uuid::Uuid::new_v4().to_string();
     let started = Instant::now();
-    let result = {
-        let work = batch(&id, &request, &config, started, &lock);
-        tokio::pin!(work);
-        let mut heartbeat = tokio::time::interval(ttl / 3);
-        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tokio::select! {
-                result = &mut work => break result,
-                _ = heartbeat.tick() => {
-                    match lock.refresh(ttl).await {
-                        Ok(true) => {},
-                        Ok(false) => break Err(FrameworkError::internal("recommendations generation lost its cache lock")),
-                        Err(error) => break Err(error),
-                    }
-                }
-            }
-        }
-    };
+    let result = under_lock(
+        &lock,
+        ttl,
+        batch(&id, &request, &config, started, &lock),
+        "recommendations generation",
+    )
+    .await;
     let result = match result {
         Ok(run) => Ok(GenerationOutcome::Completed(run)),
         Err(error) => {
@@ -61,6 +50,30 @@ pub(crate) async fn generate(request: GenerateRun) -> Result<GenerationOutcome, 
             "recommendations generation cache lock expired before release",
         )),
         (Ok(result), Ok(true)) => Ok(result),
+    }
+}
+/// Run `work` while renewing `lock` every third of its lease, so a long batch never
+/// outlives the lock that keeps two runs apart; losing the lock stops the work.
+pub(crate) async fn under_lock<T>(
+    lock: &crate::cache::LockGuard,
+    ttl: Duration,
+    work: impl std::future::Future<Output = Result<T, FrameworkError>>,
+    what: &str,
+) -> Result<T, FrameworkError> {
+    tokio::pin!(work);
+    let mut heartbeat = tokio::time::interval(ttl / 3);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = &mut work => break result,
+            _ = heartbeat.tick() => {
+                match lock.refresh(ttl).await {
+                    Ok(true) => {},
+                    Ok(false) => break Err(FrameworkError::internal(format!("{what} lost its cache lock"))),
+                    Err(error) => break Err(error),
+                }
+            }
+        }
     }
 }
 async fn fail(id: &str, message: &str, started: Instant) -> Result<(), FrameworkError> {

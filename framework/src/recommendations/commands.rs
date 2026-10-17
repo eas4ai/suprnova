@@ -48,6 +48,18 @@ async fn prune(args: Vec<String>) -> Result<(), FrameworkError> {
     ));
     Ok(())
 }
+#[suprnova_macros::command(
+    name = "recommendations:graph-rebuild",
+    description = "Rebuild the recommendation graph from the event stream"
+)]
+async fn graph_rebuild(args: Vec<String>) -> Result<(), FrameworkError> {
+    options(&args, &[])?;
+    match Recommend::rebuild_graph().await? {
+        None => console::line("recommendations:graph-rebuild - lock held by another rebuild"),
+        Some(built) => console::line(super::storage::encode(&built)?),
+    }
+    Ok(())
+}
 fn options(
     args: &[String],
     allowed: &[&str],
