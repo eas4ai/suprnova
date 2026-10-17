@@ -4,7 +4,9 @@
 //! in its configuration. Every value the template reads comes from the
 //! framework, so the attribute generates the Askama struct itself: its only
 //! field is the framework's parts, reached through `Deref`, so a template
-//! that names anything else fails to compile.
+//! that names anything else fails to compile. It renders with the data
+//! shared with every view (`View::share`), read through Askama's `value`
+//! filter as any other view reads it.
 
 use proc_macro::TokenStream;
 
@@ -69,7 +71,7 @@ fn expand(args: TokenStream2, item: TokenStream) -> syn::Result<TokenStream2> {
                 parts: &::suprnova::InertiaRootParts<'_>,
                 output: &mut dyn ::core::fmt::Write,
             ) -> ::core::result::Result<(), ::suprnova::view::TemplateFailure> {
-                ::suprnova::view::ViewTemplate::render_view(&#document(parts), output)
+                ::suprnova::live::__private::render_inertia_root(&#document(parts), output)
             }
         }
     })

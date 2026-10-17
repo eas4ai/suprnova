@@ -2387,6 +2387,35 @@ Blade's view data becomes template variables. Here the template reads it
 through `view.get`, so the template's names stay the fixed set of parts that
 Askama checks at compile time.
 
+### Data shared with every view
+
+A value the application shares with [`View::share`](live.md#shared-view-data) reaches the root
+template too, as Laravel's shared data reaches `app.blade.php`. Use it for what
+every first visit's document needs, such as analytics settings, instead of
+setting view data in every handler:
+
+```rust
+// In bootstrap: every document can read `plausible_domain`.
+View::share("plausible_domain", "example.com".to_string());
+```
+
+```html
+{% if let Ok(domain) = "plausible_domain"|value::<String> %}
+{% if let Some(nonce) = nonce %}
+<script defer data-domain="{{ domain }}" nonce="{{ nonce }}" src="https://plausible.io/js/script.js"></script>
+{% endif %}
+{% endif %}
+```
+
+The template reads a shared value with Askama's `value` filter, naming the
+type that was shared. Keep the read inside `{% if let Ok(...) %}` unless every
+deployment shares the value: a value no one shared, or one shared as another
+type, fails the render, and with it every first visit. A value shared with
+`View::share_for_request` reaches the template for that request alone and
+wins over the application's value under the same key. An error page reads the
+shared values too, since they belong to the application, not to the handler
+that failed.
+
 ### The mount id
 
 The page data element's `data-page` attribute and the mount element's `id`

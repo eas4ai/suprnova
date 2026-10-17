@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}">
+<head>
+{{ title }}
+{{ head }}
+{% if let Ok(name) = "app_name"|value::<String> %}<meta name="application-name" content="{{ name }}">{% endif %}
+{% if let Ok(viewer) = "viewer"|value::<String> %}<meta name="viewer" content="{{ viewer }}">{% endif %}
+</head>
+<body>
+{{ body }}
+</body>
+</html>

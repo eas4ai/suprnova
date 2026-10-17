@@ -17,6 +17,7 @@ use hyper_util::rt::TokioIo;
 use suprnova::testing::TestContainer;
 use suprnova::{
     Frontend, HttpResponse, InertiaConfig, InertiaRequestExt, InertiaResponse, InertiaRootTemplate,
+    View,
 };
 
 /// A request the tests build by hand: its path, query and headers.
@@ -366,6 +367,68 @@ struct AppDocument;
 /// A root document whose last expression fails.
 #[suprnova::inertia_root(path = "inertia/failing.html")]
 struct FailingDocument;
+
+/// A root document that reads two values shared with every view, each
+/// guarded, so a first visit renders whether or not anyone shared them.
+#[suprnova::inertia_root(path = "inertia/shared.html")]
+struct SharedDocument;
+
+/// A config that renders through `SharedDocument`.
+fn shared_template() -> InertiaConfig {
+    InertiaConfig::new()
+        .frontend(Frontend::Svelte)
+        .version("pinned")
+        .root_template(InertiaRootTemplate::of::<SharedDocument>())
+}
+
+/// PAR-165: a value shared with `View::share` reaches the root template,
+/// as Laravel's shared data reaches `app.blade.php`, and a value shared
+/// for one request wins there for that request alone.
+#[tokio::test]
+async fn par_165_view_share_reaches_the_root_template() {
+    let _container = TestContainer::fake();
+    View::share("app_name", "Acme & Co".to_owned());
+    View::share("viewer", "everyone".to_owned());
+
+    let (status, _, body) = first_visit(pinned_page().with_config(shared_template())).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("<meta name=\"application-name\" content=\"Acme &#38; Co\">"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<meta name=\"viewer\" content=\"everyone\">"),
+        "{body}"
+    );
+
+    let (_, _, body) = suprnova::App::run_scoped(async {
+        View::share_for_request("viewer", "alice".to_owned()).expect("a request scope");
+        first_visit(pinned_page().with_config(shared_template())).await
+    })
+    .await;
+    assert!(
+        body.contains("<meta name=\"viewer\" content=\"alice\">"),
+        "{body}"
+    );
+
+    let (_, _, body) = first_visit(pinned_page().with_config(shared_template())).await;
+    assert!(
+        body.contains("<meta name=\"viewer\" content=\"everyone\">"),
+        "another request sees the application's value: {body}"
+    );
+}
+
+/// PAR-165: a root template that guards a value no one shared renders the
+/// page without it rather than failing every first visit.
+#[tokio::test]
+async fn par_165_a_guarded_value_no_one_shared_leaves_the_page_rendering() {
+    let _container = TestContainer::fake();
+    let (status, _, body) = first_visit(pinned_page().with_config(shared_template())).await;
+
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.contains("application-name"), "{body}");
+    assert!(body.contains("data-page=\"app\""), "{body}");
+}
 
 /// A development config that renders through `AppDocument`.
 fn templated() -> InertiaConfig {

@@ -226,7 +226,7 @@ pub(crate) struct RenderValues {
 
 impl RenderValues {
     /// The values a render that starts now reads.
-    pub(super) fn current() -> Self {
+    pub(crate) fn current() -> Self {
         // Outside a container scope there are no request values; checking
         // first keeps a render there from building an error it drops.
         let request = scoped_request_value::<RequestShares>()

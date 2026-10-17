@@ -9,6 +9,17 @@
 #[doc(hidden)]
 pub use askama;
 
+/// Renders the document `#[inertia_root]` generates with the data shared
+/// with every view, so `View::share` reaches the root template as it
+/// reaches Laravel's `app.blade.php`.
+#[doc(hidden)]
+pub fn render_inertia_root<T: crate::view::ViewTemplate>(
+    template: &T,
+    output: &mut dyn std::fmt::Write,
+) -> Result<(), crate::view::TemplateFailure> {
+    crate::view::render_with_shared_values(template, output)
+}
+
 /// Opaque bridge from generated component metadata into the public registry.
 #[doc(hidden)]
 pub struct ComponentRegistration {
