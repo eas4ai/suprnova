@@ -119,6 +119,45 @@ fn custom_policy() -> Result<SecurityHeaders, FrameworkError> {
 A header already set on the response wins. This preserves the policy on
 Live's transport and upload responses and any policy a handler supplies.
 
+### Add a source to the policy
+
+To let the page reach another origin, add that origin to one directive of the
+policy you already have, rather than writing a whole policy.
+`.csp_source(directive, source)` adds one source and keeps the preset that
+`SECURITY_HEADERS` selected, its report-only mode and its reporting origins:
+
+```rust,ignore
+use suprnova::{FrameworkError, SecurityHeaders};
+
+fn policy() -> Result<SecurityHeaders, FrameworkError> {
+    SecurityHeaders::from_env()?
+        .csp_source("connect-src", "https://plausible.io")?
+        .csp_source("img-src", "https://images.example.com")
+}
+```
+
+With the balanced preset, the first call turns `connect-src 'self'` into
+`connect-src 'self' https://plausible.io` and changes nothing else. The source
+is added to the enforcing policy and to a report-only policy alike, so a
+policy under test does not report the connection the enforcing one allows.
+The relaxed and off presets send no policy, and the call leaves them as they
+are.
+
+A directive the policy leaves out starts from the sources it falls back to,
+so adding one source narrows nothing. The strict preset has no `frame-src`,
+so `.csp_source("frame-src", "https://www.youtube-nocookie.com")` writes
+`frame-src 'self' https://www.youtube-nocookie.com`, the `default-src` sources
+plus the new one. A directive with no fallback in the policy, such as
+`form-action` in a policy without it, already allows every source and is
+unchanged.
+
+`ContentSecurityPolicy::with_source(directive, source)` does the same to one
+policy value. Both return an error for a directive that takes no sources,
+such as `sandbox`, and for anything but one source expression: an empty
+value, two sources in one call, `'none'`, or a fixed nonce. Call
+`.csp_source` after `.content_security_policy(...)` or a `header(...)` call
+that sets a policy, since those replace the policy and its added sources.
+
 ## Environment and reporting
 
 | Variable | Default | Values |
@@ -242,14 +281,15 @@ the nonce only from the current request.
 The nonce lets the script run. What the script then loads still meets the
 rest of the policy, and the balanced policy's `default-src 'self'` blocks
 another origin's frames, API calls and the scripts it loads itself. Stripe.js,
-for example, also needs its own origin, its frames and its API. Add them to a
-custom policy that keeps the nonce:
+for example, also needs its own origin, its frames and its API. Add them to
+the policy with `.csp_source`:
 
 ```rust,ignore
-let csp = suprnova::ContentSecurityPolicy::new(
-    "default-src 'self'; script-src 'self' 'nonce-{nonce}' https://js.stripe.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https:; connect-src 'self' https://api.stripe.com; frame-src https://js.stripe.com https://hooks.stripe.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'",
-)?;
-let headers = suprnova::SecurityHeaders::balanced().content_security_policy(Some(csp));
+let headers = suprnova::SecurityHeaders::from_env()?
+    .csp_source("script-src", "https://js.stripe.com")?
+    .csp_source("connect-src", "https://api.stripe.com")?
+    .csp_source("frame-src", "https://js.stripe.com")?
+    .csp_source("frame-src", "https://hooks.stripe.com")?;
 ```
 
 Balanced leaves `payment` out of `Permissions-Policy`, so Stripe's Apple Pay
@@ -258,15 +298,13 @@ same-origin-allow-popups`, so a popup sign-in or checkout window can report
 back to the page. Strict turns both off.
 
 To permit another origin's scripts without a nonce on each tag, add the origin
-to `script-src` in a custom policy. Under strict this does not work:
-`'strict-dynamic'` makes supporting browsers ignore origin allowlists, so give
-the tag the nonce instead. For example:
+to `script-src`. Under strict this does not work: `'strict-dynamic'` makes
+supporting browsers ignore origin allowlists, so give the tag the nonce
+instead. For example:
 
 ```rust,ignore
-let csp = suprnova::ContentSecurityPolicy::new(
-    "default-src 'self'; script-src 'self' 'nonce-{nonce}' https://analytics.example.com; object-src 'none'; base-uri 'self'; frame-ancestors 'self'",
-)?;
-let headers = suprnova::SecurityHeaders::balanced().content_security_policy(Some(csp));
+let headers = suprnova::SecurityHeaders::balanced()
+    .csp_source("script-src", "https://analytics.example.com")?;
 ```
 
 A nonce authorizes a script to execute. It does not make its contents trusted.

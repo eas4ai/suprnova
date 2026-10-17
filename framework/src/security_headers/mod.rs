@@ -221,6 +221,39 @@ impl SecurityHeaders {
         self
     }
 
+    /// Adds `source` to `directive` of every policy this middleware sends,
+    /// enforcing and report-only, keeping the rest of each, as
+    /// [`ContentSecurityPolicy::with_source`] does. A preset without a
+    /// policy, relaxed or off, sends none and is left as it is.
+    ///
+    /// ```rust
+    /// use suprnova::{FrameworkError, SecurityHeaders};
+    ///
+    /// fn headers() -> Result<SecurityHeaders, FrameworkError> {
+    ///     SecurityHeaders::from_env()?.csp_source("connect-src", "https://plausible.io")
+    /// }
+    /// ```
+    ///
+    /// A later [`content_security_policy`](Self::content_security_policy)
+    /// or `header` call replaces a policy with the sources added to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error [`ContentSecurityPolicy::with_source`] returns for
+    /// an invalid directive or source, with or without a policy.
+    pub fn csp_source(mut self, directive: &str, source: &str) -> Result<Self, FrameworkError> {
+        policy::check_source(directive, source)?;
+        self.csp = self
+            .csp
+            .map(|csp| csp.with_source(directive, source))
+            .transpose()?;
+        self.csp_report_only = self
+            .csp_report_only
+            .map(|csp| csp.with_source(directive, source))
+            .transpose()?;
+        Ok(self)
+    }
+
     /// Moves the selected policy between enforcing and report-only mode.
     /// Named header changes remain independent; this builder selects the mode
     /// used by [`Self::content_security_policy`] without duplicating a preset.

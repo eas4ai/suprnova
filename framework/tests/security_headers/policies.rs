@@ -374,3 +374,117 @@ async fn sec_002_report_only_builder_preserves_typed_policy_updates_and_switches
             .contains(&enforced.body_text())
     );
 }
+
+#[tokio::test]
+async fn sec_001_a_source_added_to_a_preset_reaches_its_directive_alone() {
+    let _scope = production();
+    let headers = SecurityHeaders::balanced()
+        .csp_source("connect-src", "https://plausible.example")
+        .expect("a valid source");
+    let response = client(headers).get("https://localhost/").send().await;
+    let nonce = response.body_text();
+    assert_eq!(
+        response.header("content-security-policy").expect("CSP"),
+        format!(
+            "default-src 'self'; script-src 'self' 'nonce-{nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https:; connect-src 'self' https://plausible.example; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+        )
+    );
+
+    // A directive the preset leaves out starts from the sources it falls
+    // back to, so adding one source narrows nothing else.
+    let headers = SecurityHeaders::strict()
+        .csp_source("frame-src", "https://www.youtube-nocookie.com")
+        .expect("a valid source");
+    let response = client(headers).get("https://localhost/").send().await;
+    let csp = response.header("content-security-policy").expect("CSP");
+    assert!(
+        csp.ends_with("; frame-src 'self' https://www.youtube-nocookie.com"),
+        "{csp}"
+    );
+}
+
+#[tokio::test]
+async fn sec_002_an_added_source_follows_the_policy_into_report_only_mode() {
+    let _scope = production();
+    for headers in [
+        SecurityHeaders::balanced()
+            .csp_source("connect-src", "https://plausible.example")
+            .expect("a valid source")
+            .report_only(true),
+        SecurityHeaders::balanced()
+            .report_only(true)
+            .csp_source("connect-src", "https://plausible.example")
+            .expect("a valid source"),
+    ] {
+        let response = client(headers).get("https://localhost/").send().await;
+        assert!(response.header("content-security-policy").is_none());
+        let csp = response
+            .header("content-security-policy-report-only")
+            .expect("report-only CSP");
+        assert!(
+            csp.contains("connect-src 'self' https://plausible.example;"),
+            "{csp}"
+        );
+    }
+
+    // A report-only policy set beside the enforcing one gets the source too,
+    // or it would report the connection the enforcing policy allows.
+    let headers = SecurityHeaders::strict()
+        .header(
+            "Content-Security-Policy-Report-Only",
+            Some("default-src 'self'; script-src 'nonce-{nonce}'"),
+        )
+        .expect("a valid policy")
+        .csp_source("connect-src", "https://plausible.example")
+        .expect("a valid source");
+    let response = client(headers).get("https://localhost/").send().await;
+    for name in [
+        "content-security-policy",
+        "content-security-policy-report-only",
+    ] {
+        let csp = response.header(name).expect(name);
+        assert!(
+            csp.contains("connect-src 'self' https://plausible.example"),
+            "{name}: {csp}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sec_002_a_preset_without_a_policy_ignores_an_added_source() {
+    let _scope = production();
+    for headers in [SecurityHeaders::relaxed(), SecurityHeaders::off()] {
+        let headers = headers
+            .csp_source("connect-src", "https://plausible.example")
+            .expect("a valid source");
+        let response = client(headers).get("https://localhost/").send().await;
+        assert!(response.header("content-security-policy").is_none());
+        assert!(
+            response
+                .header("content-security-policy-report-only")
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn sec_002_an_added_source_is_validated_with_or_without_a_policy() {
+    for headers in [SecurityHeaders::balanced(), SecurityHeaders::off()] {
+        for (directive, source) in [
+            ("sandbox", "allow-scripts"),
+            ("report-uri", "https://reports.example"),
+            ("connect src", "https://plausible.example"),
+            ("connect-src", ""),
+            ("connect-src", "https://a.example https://b.example"),
+            ("connect-src", "https://a.example; script-src *"),
+            ("connect-src", "'none'"),
+            ("script-src", "'nonce-fixed'"),
+            ("connect-src", "https://a.example\r\nX-Injected: 1"),
+        ] {
+            assert!(
+                headers.clone().csp_source(directive, source).is_err(),
+                "{directive} {source:?} was accepted"
+            );
+        }
+    }
+}
