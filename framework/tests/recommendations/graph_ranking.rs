@@ -397,6 +397,7 @@ async fn rec_009_both_stores_rank_the_same_fixture_alike_memgraph() {
         let private = note("P", "p", false, "bob", 4).await;
         let d = note("D", "d", true, "o", 5).await;
         record("alice", &a, EventType::Like, "a").await;
+        record("bob", &a, EventType::Like, "a").await;
         peers_like(&["p1", "p2", "p3"], &[&a, &b, &c]).await;
         peers_like(&["q1", "q2", "q3"], &[&a, &private]).await;
         peers_like(&["r1", "r2", "r3"], &[&private, &d]).await;
@@ -433,10 +434,15 @@ fn graph_config_for(store: &str, url: Option<String>) -> RecommendConfig {
     })
 }
 
+/// A viewer's own list, as key, score and engine per row.
 #[cfg(feature = "graph-memgraph")]
 async fn ranked(viewer_id: &str) -> Vec<(String, i64, String)> {
-    for_alice(viewer(viewer_id))
+    Recommend::for_user(viewer_id)
+        .limit(10)
+        .for_viewer(viewer(viewer_id))
+        .get()
         .await
+        .unwrap()
         .into_iter()
         .map(|row| (row.target.key, row.score, row.explanation.engine))
         .collect()
