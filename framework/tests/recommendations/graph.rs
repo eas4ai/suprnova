@@ -3,7 +3,7 @@
 use super::support::*;
 use std::collections::BTreeSet;
 use suprnova::{
-    AttributeValue, EventProvenance, RecommendationTarget, Viewer,
+    AttributeValue, EventProvenance, EventType, Model, RecommendationTarget, Viewer,
     recommendations::graph::{
         DatabaseGraphStore, GraphEdge, GraphNode, GraphProvenance, GraphScope, GraphStore,
         Revocation, Traversal, document_node_key, edge_key, traverse,
@@ -483,4 +483,374 @@ fn rec_009_graph_settings_are_validated_and_name_their_variable() {
         })
         .contains("home.threshold")
     );
+}
+
+// Derivation (REC-005) and rebuilds (REC-009) through the facade, on the database store.
+
+fn graph_config() -> suprnova::RecommendConfig {
+    suprnova::RecommendConfig {
+        engine: "graph".into(),
+        public_event_types: ["like".to_owned()].into(),
+        ..Default::default()
+    }
+}
+
+/// Run `future` with the graph engine configured and queued jobs recorded.
+async fn in_graph<F: std::future::Future<Output = ()>>(future: F) {
+    let _queue = suprnova::Queue::fake();
+    suprnova::RecommendConfig::scope(graph_config(), future)
+        .await
+        .unwrap();
+}
+
+/// Run the graph jobs the fake queue recorded, as a worker would. A job run twice finds
+/// its work done, so earlier jobs may run again.
+async fn drain_graph_jobs() {
+    for job in suprnova::queue::testing::pending_jobs() {
+        if job.name.starts_with("Suprnova::RecommendationGraph") {
+            suprnova::queue::worker::dispatch_by_name(&job.name, job.payload.clone())
+                .await
+                .unwrap();
+        }
+    }
+}
+
+async fn current() -> (DatabaseGraphStore, String) {
+    let store = DatabaseGraphStore;
+    let generation = store.current_generation().await.unwrap().unwrap();
+    (store, generation)
+}
+
+async fn edges_from(note: &Note, kind: &str) -> Vec<GraphEdge> {
+    let (store, generation) = current().await;
+    store
+        .outgoing(
+            &generation,
+            &[document_node_key(&key(note))],
+            &[kind.to_owned()],
+            50,
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn rec_005_shared_engagement_becomes_an_edge_only_where_enough_actors_agree() {
+    setup(in_graph(async {
+        let a = note("A", "x", true, "o", 1).await;
+        let b = note("B", "x", true, "o", 2).await;
+        let c = note("C", "x", true, "o", 3).await;
+        for peer in ["bob", "carol", "dave"] {
+            record(peer, &a, EventType::Purchase, "a").await;
+            record(peer, &b, EventType::Purchase, "b").await;
+        }
+        record("erin", &a, EventType::Purchase, "a").await;
+        record("erin", &c, EventType::Purchase, "c").await;
+        let built = suprnova::Recommend::rebuild_graph().await.unwrap().unwrap();
+        assert!(built.nodes > 0 && built.edges > 0);
+        let shared = edges_from(&a, "co_engaged").await;
+        assert_eq!(shared.len(), 1, "{shared:?}");
+        assert_eq!(shared[0].target, document_node_key(&key(&b)));
+        assert!(shared[0].confidence_bps > 0);
+        // Purchases are not public: no actor node or per-actor edge exists.
+        let (store, generation) = current().await;
+        assert!(
+            store
+                .nodes(
+                    &generation,
+                    &[suprnova::recommendations::graph::actor_node_key("bob")]
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // Every fact carries scope, version and provenance that traces to its source.
+        let GraphProvenance::Event(evidence) = &shared[0].provenance else {
+            panic!("shared engagement rests on an event")
+        };
+        assert_eq!(
+            suprnova::Recommend::verify_provenance(evidence)
+                .await
+                .unwrap(),
+            suprnova::ProvenanceState::Intact
+        );
+        assert_eq!(
+            shared[0].scope.index.as_deref(),
+            Some("recommendation_notes")
+        );
+        for node in store
+            .nodes(
+                &generation,
+                &[document_node_key(&key(&a)), document_node_key(&key(&b))],
+            )
+            .await
+            .unwrap()
+        {
+            assert!(node.scope.index.is_some());
+            let GraphProvenance::Event(evidence) = &node.provenance else {
+                panic!("a stream-named document rests on an event")
+            };
+            assert_eq!(
+                suprnova::Recommend::verify_provenance(evidence)
+                    .await
+                    .unwrap(),
+                suprnova::ProvenanceState::Intact
+            );
+        }
+    }))
+    .await;
+}
+
+#[tokio::test]
+async fn rec_005_only_public_event_types_become_per_actor_facts() {
+    setup(in_graph(async {
+        let a = note("A", "x", true, "o", 1).await;
+        let b = note("B", "x", true, "o", 2).await;
+        record("bob", &a, EventType::Like, "a").await;
+        record("bob", &b, EventType::Purchase, "b").await;
+        suprnova::Recommend::rebuild_graph().await.unwrap().unwrap();
+        let (store, generation) = current().await;
+        let actor = suprnova::recommendations::graph::actor_node_key("bob");
+        let engaged = store
+            .outgoing(
+                &generation,
+                std::slice::from_ref(&actor),
+                &["engaged".into()],
+                50,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            engaged
+                .iter()
+                .map(|edge| edge.target.clone())
+                .collect::<Vec<_>>(),
+            [document_node_key(&key(&a))]
+        );
+    }))
+    .await;
+}
+
+/// A note whose category `next:<id>` names the note it continues into.
+fn declare_next() {
+    suprnova::Recommend::graph_relation(
+        suprnova::recommendations::graph::GraphRelation::new(
+            "next",
+            "recommendation_notes",
+            8_000,
+            |document| {
+                Ok(match document.attributes.get("category") {
+                    Some(AttributeValue::Text(category)) => category
+                        .strip_prefix("next:")
+                        .map(|key| vec![target(key)])
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                })
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn rec_005_a_newer_revision_replaces_the_relation_facts_read_from_an_older_one() {
+    setup(in_graph(async {
+        declare_next();
+        let b = note("B", "plain", true, "o", 2).await;
+        let c = note("C", "plain", true, "o", 3).await;
+        let a = note("A", &format!("next:{}", b.id), true, "o", 1).await;
+        record("bob", &a, EventType::Like, "a").await;
+        suprnova::Recommend::rebuild_graph().await.unwrap().unwrap();
+        let first = edges_from(&a, "relation:next").await;
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].target, document_node_key(&key(&b)));
+        let GraphProvenance::Relation {
+            source,
+            source_version,
+            ..
+        } = &first[0].provenance
+        else {
+            panic!("a relation edge rests on a relation")
+        };
+        assert_eq!(source, &key(&a));
+        let a = a
+            .update(suprnova::attrs! { category: format!("next:{}", c.id) })
+            .await
+            .unwrap();
+        drain_graph_jobs().await;
+        let replaced = edges_from(&a, "relation:next").await;
+        assert_eq!(replaced.len(), 1, "{replaced:?}");
+        assert_eq!(replaced[0].target, document_node_key(&key(&c)));
+        let GraphProvenance::Relation {
+            source_version: newer,
+            ..
+        } = &replaced[0].provenance
+        else {
+            panic!("a relation edge rests on a relation")
+        };
+        assert!(newer > source_version);
+        let (store, generation) = current().await;
+        let walked = traverse(
+            &store,
+            &generation,
+            &Traversal {
+                seeds: vec![document_node_key(&key(&a))],
+                depth: 2,
+                per_node: 50,
+                max_nodes: 100,
+                kinds: vec![],
+            },
+            &Viewer::Guest,
+        )
+        .await
+        .unwrap();
+        assert!(reached_keys(&walked).contains(&document_node_key(&key(&c))));
+        assert!(!reached_keys(&walked).contains(&document_node_key(&key(&b))));
+    }))
+    .await;
+}
+
+#[tokio::test]
+async fn rec_005_a_document_leaving_its_index_loses_its_facts() {
+    setup(in_graph(async {
+        let a = note("A", "x", true, "o", 1).await;
+        let b = note("B", "x", true, "o", 2).await;
+        for peer in ["bob", "carol", "dave"] {
+            record(peer, &a, EventType::Like, "a").await;
+            record(peer, &b, EventType::Like, "b").await;
+        }
+        suprnova::Recommend::rebuild_graph().await.unwrap().unwrap();
+        assert_eq!(edges_from(&a, "co_engaged").await.len(), 1);
+        suprnova::unsearchable::<Note>(&[b.id.to_string()])
+            .await
+            .unwrap();
+        drain_graph_jobs().await;
+        let (store, generation) = current().await;
+        assert!(
+            store
+                .nodes(&generation, &[document_node_key(&key(&b))])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(edges_from(&a, "co_engaged").await.is_empty());
+        let engaged = store
+            .outgoing(
+                &generation,
+                &[suprnova::recommendations::graph::actor_node_key("bob")],
+                &["engaged".into()],
+                50,
+            )
+            .await
+            .unwrap();
+        assert!(
+            engaged
+                .iter()
+                .all(|edge| edge.target != document_node_key(&key(&b)))
+        );
+    }))
+    .await;
+}
+
+#[tokio::test]
+async fn rec_005_retention_revokes_the_facts_resting_on_pruned_events() {
+    setup(in_graph(async {
+        let a = note("A", "x", true, "o", 1).await;
+        let b = note("B", "x", true, "o", 2).await;
+        for peer in ["bob", "carol", "dave"] {
+            record(peer, &a, EventType::Like, "a").await;
+            record(peer, &b, EventType::Like, "b").await;
+        }
+        suprnova::Recommend::rebuild_graph().await.unwrap().unwrap();
+        assert_eq!(edges_from(&a, "co_engaged").await.len(), 1);
+        let old = (suprnova::clock::now() - chrono::Duration::days(30)).timestamp_micros();
+        suprnova::DB::update(
+            "UPDATE recommendation_events SET occurred_at = ?",
+            vec![old.into()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(suprnova::Recommend::prune(7).await.unwrap(), 6);
+        assert!(edges_from(&a, "co_engaged").await.is_empty());
+        let (store, generation) = current().await;
+        assert!(
+            store
+                .outgoing(
+                    &generation,
+                    &[suprnova::recommendations::graph::actor_node_key("bob")],
+                    &[],
+                    50
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }))
+    .await;
+}
+
+#[tokio::test]
+async fn rec_009_a_rebuild_of_an_emptied_store_reproduces_the_graph() {
+    setup(in_graph(async {
+        declare_next();
+        let b = note("B", "plain", true, "o", 2).await;
+        let a = note("A", &format!("next:{}", b.id), true, "o", 1).await;
+        let c = note("C", "plain", false, "carol", 3).await;
+        for peer in ["bob", "carol", "dave"] {
+            record(peer, &a, EventType::Like, "a").await;
+            record(peer, &c, EventType::Like, "c").await;
+        }
+        suprnova::Recommend::rebuild_graph().await.unwrap().unwrap();
+        let (store, before) = current().await;
+        let digest = store.fact_digest(&before).await.unwrap();
+        // The store loses everything it held, as a restarted in-memory server would.
+        for table in [
+            "recommendation_graph_edges",
+            "recommendation_graph_nodes",
+            "recommendation_graph_generations",
+        ] {
+            suprnova::DB::update(&format!("DELETE FROM {table}"), vec![])
+                .await
+                .unwrap();
+        }
+        let rebuilt = suprnova::Recommend::rebuild_graph().await.unwrap().unwrap();
+        assert_ne!(rebuilt.generation, before);
+        assert_eq!(
+            store.fact_digest(&rebuilt.generation).await.unwrap(),
+            digest
+        );
+    }))
+    .await;
+}
+
+#[tokio::test]
+async fn rec_009_a_failed_rebuild_leaves_readers_on_the_previous_generation() {
+    setup(in_graph(async {
+        let a = note("A", "x", true, "o", 1).await;
+        record("bob", &a, EventType::Like, "a").await;
+        let first = suprnova::Recommend::rebuild_graph().await.unwrap().unwrap();
+        suprnova::Recommend::graph_relation(
+            suprnova::recommendations::graph::GraphRelation::new(
+                "broken",
+                "recommendation_notes",
+                5_000,
+                |_| Err(suprnova::FrameworkError::internal("relation read failed")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let failed = suprnova::Recommend::rebuild_graph().await.unwrap_err();
+        assert!(failed.to_string().contains("relation read failed"));
+        let (_, generation) = current().await;
+        assert_eq!(generation, first.generation);
+        let building = suprnova::DB::scalar::<i64>(
+            "SELECT COUNT(*) FROM recommendation_graph_generations WHERE state = 'building'",
+            vec![],
+        )
+        .await
+        .unwrap();
+        assert_eq!(building, 0);
+    }))
+    .await;
 }

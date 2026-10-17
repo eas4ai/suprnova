@@ -365,6 +365,19 @@ impl RecommendConfig {
         Ok(SCOPED.scope(config, future).await)
     }
 }
+
+/// The override scoped on this task, so work deferred past a commit runs under it again.
+pub(crate) fn scoped() -> Option<RecommendConfig> {
+    SCOPED.try_with(Clone::clone).ok()
+}
+
+/// Run `future` under the override captured when the work was deferred, if there was one.
+pub(crate) async fn within<F: Future>(config: Option<RecommendConfig>, future: F) -> F::Output {
+    match config {
+        Some(config) => SCOPED.scope(config, future).await,
+        None => future.await,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

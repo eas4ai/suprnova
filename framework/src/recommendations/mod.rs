@@ -15,6 +15,7 @@ mod storage;
 
 use crate::{FrameworkError, Viewer};
 pub use config::{GraphSurface, RecommendConfig};
+pub(crate) use config::{scoped as scoped_config, within as within_config};
 pub use engine::{
     GenerateRun, GenerationOutcome, Recommendation, RecommendationExplanation, RecommendationRun,
     Recommender,
@@ -26,6 +27,9 @@ pub use migrations::migrations;
 pub use provenance::{EventProvenance, ProvenanceState, event_digest};
 pub use starter::StarterRecommender;
 use std::sync::Arc;
+
+/// Events retention removes per page, so the graph revokes each page's facts in turn.
+const PRUNE_PAGE: i64 = 10_000;
 
 /// A single entry point keeps analytics, application writes and recommendation reads consistent.
 pub struct Recommend;
@@ -129,6 +133,17 @@ impl Recommend {
     pub async fn generate(run: GenerateRun) -> Result<GenerationOutcome, FrameworkError> {
         Self::engine()?.generate(run).await
     }
+    /// Rebuild the graph engine's facts from the stream and the declared relations into a
+    /// new generation, switching readers only when it is complete. `None` means another
+    /// rebuild holds the lock.
+    pub async fn rebuild_graph() -> Result<Option<graph::GraphBuild>, FrameworkError> {
+        graph::rebuild().await
+    }
+    /// Declare a relation the graph engine derives edges from, read from each document's
+    /// search projection.
+    pub fn graph_relation(relation: graph::GraphRelation) -> Result<(), FrameworkError> {
+        graph::declare(relation)
+    }
     /// Recompute the canonical content rather than trusting a persisted checksum.
     pub async fn verify_provenance(
         reference: &EventProvenance,
@@ -153,11 +168,30 @@ impl Recommend {
                     "recommendations --older-than exceeds the supported calendar range",
                 )
             })?;
-        storage::execute(
-            "DELETE FROM recommendation_events WHERE occurred_at < ?",
-            vec![cutoff.timestamp_micros().into()],
-        )
-        .await
+        // Pages of ids let the graph revoke the facts each page held (REC-005).
+        let mut removed = 0;
+        loop {
+            let ids: Vec<i64> = storage::rows(
+                "SELECT id FROM recommendation_events WHERE occurred_at < ? ORDER BY id LIMIT ?",
+                vec![cutoff.timestamp_micros().into(), PRUNE_PAGE.into()],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get_int("id"))
+            .collect::<Result<_, _>>()?;
+            if ids.is_empty() {
+                return Ok(removed);
+            }
+            for chunk in ids.chunks(200) {
+                let list = vec!["?"; chunk.len()].join(", ");
+                removed += storage::execute(
+                    &format!("DELETE FROM recommendation_events WHERE id IN ({list})"),
+                    chunk.iter().map(|id| sea_orm::Value::from(*id)).collect(),
+                )
+                .await?;
+            }
+            graph::events_removed(&ids).await?;
+        }
     }
 }
 #[derive(Clone)]

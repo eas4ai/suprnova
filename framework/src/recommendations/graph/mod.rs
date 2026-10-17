@@ -3,8 +3,13 @@
 //! scope. A store only persists facts and answers bounded hops; scoring stays here, so
 //! every store ranks the same graph the same way.
 mod database;
+mod derive;
 
 pub use database::DatabaseGraphStore;
+pub use derive::{
+    GraphBuild, GraphDeriveJob, GraphDocumentJob, GraphRelation, declare, document_changed, rebuild,
+};
+pub(crate) use derive::{documents_changed, events_removed};
 
 use super::{EventProvenance, RecommendationTarget};
 use crate::{
