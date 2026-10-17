@@ -1,7 +1,7 @@
 # Upgrading to 4.2
 
-This chapter moves an application from Suprnova 4.1.0 to 4.2.0. Each section
-matches an entry in the 4.2.0 [changelog](../CHANGELOG.md).
+This chapter moves an application from Suprnova 4.1.0 to 4.2.1. Each section
+matches an entry in the 4.2.0 or 4.2.1 [changelog](../CHANGELOG.md).
 
 ## Who this chapter is for
 
@@ -129,6 +129,8 @@ cannot hand one visitor's session to another.
   shown above.
 - **The reset email greets the user by name under Magnetar.** Nothing to
   change; the email reads the account's name.
+- **`View::share` reaches the Inertia root template (#157).** Nothing to
+  change; a root template can now read shared values with the `value` filter.
 
 ## Next
 
