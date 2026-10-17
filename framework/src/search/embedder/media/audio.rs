@@ -40,7 +40,7 @@ pub fn preprocess_search_audio(bytes: &[u8]) -> Result<AudioFeatures, FrameworkE
     };
     if samples.is_empty()
         || samples.iter().any(|v| !v.is_finite())
-        || samples.len() % spec.channels as usize != 0
+        || !samples.len().is_multiple_of(spec.channels as usize)
     {
         return Err(error("WAV samples are empty, nonfinite or incomplete"));
     }

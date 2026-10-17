@@ -21,8 +21,10 @@ fn compare(name: &str, actual: &[f32]) {
         .unwrap();
     let bytes = reference(name);
     let expected: Vec<_> = bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect();
     assert_eq!(actual.len(), expected.len(), "{name}");
     let maximum = actual
@@ -43,8 +45,10 @@ fn rec_006_media_image_matches_reference() {
             preprocess_search_image(include_bytes!("fixtures/media/shapes.png"), budget).unwrap();
         compare(&format!("{prefix}_pixels"), &output.pixel_values);
         let positions: Vec<_> = reference(&format!("{prefix}_positions"))
-            .chunks_exact(8)
-            .map(|b| i64::from_le_bytes(b.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|b| i64::from_le_bytes(*b))
             .collect();
         assert_eq!(output.position_ids, positions);
         assert_eq!(
@@ -118,8 +122,10 @@ async fn rec_006_media_video_matches_reference() {
         .flat_map(|frame| frame.position_ids.iter().copied())
         .collect::<Vec<_>>();
     let expected = reference("video_positions")
-        .chunks_exact(8)
-        .map(|bytes| i64::from_le_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|bytes| i64::from_le_bytes(*bytes))
         .collect::<Vec<_>>();
     assert_eq!(positions, expected);
 }

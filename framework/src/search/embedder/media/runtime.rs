@@ -181,7 +181,7 @@ impl MediaRuntime {
             return Err(error("main graph output shape differs"));
         }
         let mut pooled = vec![0.0_f32; 768];
-        for row in values.chunks_exact(768) {
+        for row in values.as_chunks::<768>().0 {
             for (total, value) in pooled.iter_mut().zip(row) {
                 *total += value / length as f32;
             }
