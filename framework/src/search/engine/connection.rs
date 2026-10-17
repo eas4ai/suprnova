@@ -204,6 +204,42 @@ impl SearchEngine for ConnectionEngine {
         })
         .await?
     }
+    async fn stored_vectors(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        keys: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<f32>>, FrameworkError> {
+        crate::search::render_cache::read(self.index, async {
+            self.routed(self.inner.stored_vectors(index, generation, keys))
+                .await
+        })
+        .await?
+    }
+    async fn recommend(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        request: &VectorRecommend,
+    ) -> Result<EngineResult, FrameworkError> {
+        crate::search::render_cache::read(self.index, async {
+            self.routed(self.inner.recommend(index, generation, request))
+                .await
+        })
+        .await?
+    }
+    async fn discover(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        request: &VectorDiscover,
+    ) -> Result<EngineResult, FrameworkError> {
+        crate::search::render_cache::read(self.index, async {
+            self.routed(self.inner.discover(index, generation, request))
+                .await
+        })
+        .await?
+    }
     async fn semantic(
         &self,
         index: &IndexDescriptor,

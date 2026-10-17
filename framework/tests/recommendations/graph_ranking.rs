@@ -57,8 +57,9 @@ async fn rec_007_a_fact_outside_the_viewer_scope_never_influences_a_score() {
         let rows = for_alice(viewer("alice")).await;
         let reached = targets(&rows);
         assert!(!reached.contains(&private.id.to_string()));
-        assert!(rows.iter().all(|row| row.explanation.engine != "graph"
-            || row.target.key != beyond.id.to_string()));
+        assert!(rows.iter().all(
+            |row| row.explanation.engine != "graph" || row.target.key != beyond.id.to_string()
+        ));
         // Its owner sees the private note and what lies beyond it.
         let owner = for_alice(viewer("bob")).await;
         let reached = targets(&owner);
@@ -85,7 +86,10 @@ async fn rec_007_more_hide_and_report_events_lower_an_otherwise_equal_target() {
         record("h2", &reported, EventType::Report, "r").await;
         let after = targets(&for_alice(viewer("alice")).await);
         let at = |key: &str| after.iter().position(|k| k == key).unwrap();
-        assert!(at(&clean.id.to_string()) < at(&reported.id.to_string()), "{after:?}");
+        assert!(
+            at(&clean.id.to_string()) < at(&reported.id.to_string()),
+            "{after:?}"
+        );
     }))
     .await;
 }
@@ -103,7 +107,13 @@ async fn rec_007_followed_actors_add_social_proximity_only_when_three_agree() {
         let agreed = note("Agreed", "x", true, "o", 2).await;
         let pair = note("Pair", "y", true, "o", 2).await;
         for profile in &profiles {
-            record("alice", profile, EventType::Follow, &format!("f{}", profile.id)).await;
+            record(
+                "alice",
+                profile,
+                EventType::Follow,
+                &format!("f{}", profile.id),
+            )
+            .await;
             record(&profile.id.to_string(), &agreed, EventType::Like, "agreed").await;
         }
         for profile in &profiles[..2] {
@@ -124,7 +134,11 @@ async fn rec_007_followed_actors_add_social_proximity_only_when_three_agree() {
         );
         // A public engagement edge is cited, never the followed actors themselves.
         let text = serde_json::to_string(&social.explanation).unwrap();
-        assert!(!profiles.iter().any(|p| text.contains(&format!("\"{}\"", p.id))));
+        assert!(
+            !profiles
+                .iter()
+                .any(|p| text.contains(&format!("\"{}\"", p.id)))
+        );
     }))
     .await;
 }
@@ -170,7 +184,9 @@ async fn rec_007_a_low_confidence_surface_answers_with_the_starter_rows() {
         note("B", "b", true, "o", 2).await;
         record("alice", &a, EventType::Like, "a").await;
         // No peers share anything: the graph has no path from Alice's seed.
-        Recommend::generate(suprnova::GenerateRun::default()).await.unwrap();
+        Recommend::generate(suprnova::GenerateRun::default())
+            .await
+            .unwrap();
         Recommend::rebuild_graph().await.unwrap().unwrap();
         let rows = for_alice(viewer("alice")).await;
         assert!(!rows.is_empty());
@@ -215,8 +231,10 @@ async fn rec_007_every_graph_explanation_cites_permitted_stored_evidence() {
                     let hops = store
                         .outgoing(
                             &generation,
-                            &[suprnova::recommendations::graph::document_node_key(&key(&a))],
-                            &[kind.clone()],
+                            &[suprnova::recommendations::graph::document_node_key(&key(
+                                &a,
+                            ))],
+                            std::slice::from_ref(kind),
                             50,
                         )
                         .await
