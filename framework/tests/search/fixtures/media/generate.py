@@ -1,6 +1,7 @@
 """Generate original processor fixtures with transformers 5.20.1 on CPU.
 
-Run in an external uv venv with torch CPU, pillow, numpy and soundfile.
+Run in an external uv venv with torch CPU, torchaudio, torchvision, pillow,
+numpy, soundfile and imageio-ffmpeg.
 Outputs use little endian float32 and int64, gzip with a fixed timestamp.
 """
 import gzip
@@ -45,6 +46,15 @@ for name, frequency, shift in [("tones_shifted", 440, 0.08), ("tones_other", 170
 subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error",
                 "-loop", "1", "-framerate", "1", "-i", str(ROOT / "shapes.png"),
                 "-t", "3", "-fflags", "+bitexact", "-flags:v", "+bitexact", "-c:v", "ffv1", str(ROOT / "shapes.mkv")], check=True)
+# JPEG IDCT and chroma upsampling differ across the pure Rust and Pillow
+# decoders by up to four channel levels on this fixture. Lossless paths
+# retain the strict float32 tolerance.
+for extension, options, tolerance in [("jpg", {"quality": 95}, 4 / 255 + 1e-7),
+                                      ("webp", {"lossless": True}, 1e-7)]:
+    image.save(ROOT / ("shapes." + extension), **options)
+    decoded = Image.open(ROOT / ("shapes." + extension)).convert("RGB")
+    output = Gemma4ImageProcessorPil(**config["image_processor"])(images=decoded, return_tensors="np")
+    write(extension + "_pixels", output["pixel_values"], "<f4", tolerance)
 for budget, name in [(280, "image"), (140, "video_frame")]:
     processor = Gemma4ImageProcessorPil(**(config["image_processor"] | {"max_soft_tokens": budget}))
     output = processor(images=image, return_tensors="np")
@@ -69,7 +79,9 @@ for rate in [16000, 44100]:
         # bandlimited reference so Rust must match the waveform as well.
         import torch
         import torchaudio.functional as AF
-        waveform = AF.resample(torch.from_numpy(waveform), rate, 16000).numpy()
+        # Float64 makes the reference independent of float32 convolution
+        # accumulation order on different CPU vector instruction sets.
+        waveform = AF.resample(torch.from_numpy(waveform.astype(np.float64)), rate, 16000).numpy().astype(np.float32)
     output = Gemma4AudioFeatureExtractor(**config["feature_extractor"])([waveform], return_tensors="np")
     write(name + "_features", output["input_features"], "<f4", 0.0002)
     write(name + "_mask", output["input_features_mask"], "u1", 0)

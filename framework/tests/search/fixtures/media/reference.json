@@ -2,6 +2,24 @@
   "transformers": "5.20.1",
   "model_revision": "daa72c51243991dfcaf9f9137d2c573d8f7790c0",
   "fixtures": {
+    "jpg_pixels": {
+      "shape": [
+        1,
+        2520,
+        768
+      ],
+      "dtype": "<f4",
+      "absolute_tolerance": 0.01568637450980392
+    },
+    "webp_pixels": {
+      "shape": [
+        1,
+        2520,
+        768
+      ],
+      "dtype": "<f4",
+      "absolute_tolerance": 1e-07
+    },
     "image_pixels": {
       "shape": [
         1,
