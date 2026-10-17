@@ -1,0 +1,845 @@
+# Environment Variables
+
+This is the audited list of every environment variable the Suprnova
+framework reads at runtime, grouped by the subsystem that consults it.
+Every entry has been validated against framework source - defaults,
+types, and behaviour reflect what the code actually does, not what the
+starter `.env` happens to ship.
+
+The list also covers the variables the `suprnova` CLI binary reads
+(the dev server) since those appear in the starter `.env` and
+readers will look for them here.
+
+See [Configuration](configuration.md) for the loading rules
+(`.env` → `.env.<environment>` → process env), the `env*` helpers
+(`env`, `env_required`, `env_optional`), and the typed `Config::*`
+registration pattern.
+
+## Conventions
+
+- **Default** - the value the framework uses when the variable is
+  unset. `none` means there is no default; the framework either
+  errors at boot, falls back to a feature default (e.g. `Memory`
+  driver), or treats the value as `None`.
+- **Type** - the Rust type the variable is parsed into. `bool` values
+  accept `true`/`false`/`1`/`0`/`yes`/`no`/`on`/`off`
+  (case-insensitive). Out-of-range or unparseable values for typed
+  framework knobs are clamped (workflow), `warn!`-logged then
+  defaulted (lenient `env()` / `env_optional()`), or fail boot
+  (strict `try_from_env`).
+- **Required** - `boot` means the framework refuses to start without
+  it in the listed environments. `driver` means it's required only
+  when the parent driver is selected (e.g. `MAIL_SES_REGION` is
+  irrelevant unless `MAIL_DRIVER=ses`). Everything else is optional.
+
+Where a starter `.env` ships a key the framework never reads
+(`MAIL_FROM_ADDRESS`), it's called out at the end of this chapter.
+
+## Security headers
+
+These variables are read by `SecurityHeaders::from_env()` when an application
+registers the middleware. Invalid values return an error naming the variable.
+See [Security Headers](security-headers.md) for presets and nonce handling.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `SECURITY_HEADERS` | `balanced` | `String` | Selects `strict`, `balanced`, `relaxed` or `off`. Only registration turns the middleware on. |
+| `SECURITY_HEADERS_CSP_REPORT_ONLY` | `false` | `bool` | Sends `Content-Security-Policy-Report-Only` instead of an enforced CSP. |
+| `SECURITY_HEADERS_CSP_REPORT_TO` | none | URL | Adds the CSP `report-to` directive and a `Reporting-Endpoints` destination for violation reports. |
+| `SECURITY_HEADERS_HSTS_PRELOAD` | `false` | `bool` | Adds `preload` to HSTS when opted in. HSTS is sent only on secure requests outside local development. |
+
+## Error reporting
+
+The `sentry` driver is inert without a DSN. All settings are optional. Logs
+and transactions are opt-in, independent of error reporting. See
+[Error Reporting](error-reporting.md) for Rustrak and browser setup.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `REPORTING_DRIVER` | `sentry` | `String` | Selects `sentry`, `log` or `null`. |
+| `REPORTING_DSN` | none | Sentry DSN | Destination for server errors, logs and transactions. |
+| `REPORTING_RELEASE` | application package version | `String` | Release name attached to events. |
+| `REPORTING_SEND_PII` | `false` | literal `true` / `false` | Opts in to the user's email and IP; user id is included without it. Unlike the generic boolean convention above, this setting accepts only lowercase `true` or `false`. |
+| `REPORTING_LOGS` | `off` | log level | Sends Sentry logs at or above this threshold. |
+| `REPORTING_TRACES_SAMPLE_RATE` | `0` | fraction, `0..=1` | Fraction of request and job transactions sent. |
+| `REPORTING_PUBLIC_DSN` | none | Sentry DSN | Configures Live browser reporting and allows the tracker's origin in CSP `connect-src`. |
+| `VITE_REPORTING_DSN` | none | Sentry DSN | Build-time public DSN for Svelte, React and Vue kits; unset loads no reporter. The server reads it too and allows the tracker's origin in CSP `connect-src`. |
+
+## Application
+
+The `APP_*` family is the framework's identity and crypto root. These
+are the variables every Suprnova app sets; the rest of the file
+becomes relevant as you opt into subsystems.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `APP_NAME` | `"Suprnova Application"` | `String` | Application name. Used as the TOTP issuer (2FA), the HTTP Basic `WWW-Authenticate` realm, mail subject branding, and structured-log fields. |
+| `APP_ENV` | `production` | `String` | Drives `Environment::detect()` and `.env.<suffix>` lookup. Recognised aliases (case-insensitive): `local`, `development`/`dev`, `staging`/`stage`/`stg`, `production`/`prod`, `testing`/`test`. Any other value is preserved as `Environment::Custom(...)` with original casing. Unset means production, as in Laravel: debug is off, every production check runs, and no `.env.<suffix>` file loads (`.env.local` still does). The scaffold's `.env` sets `APP_ENV=local`; a deployment that sets nothing runs as production. |
+| `APP_DEBUG` | env-aware (see Required) | `bool` | Verbose error pages + extra logs. Default is `true` in `local`/`development`/`testing` and `false` everywhere else (including `staging`, `production`, an unset `APP_ENV`, and any unrecognised custom environment). An explicit value always wins; an unparseable value falls back to the env-aware default with a `warn!`. The strict `try_from_env` variant aborts boot on a parse failure. |
+| `APP_URL` | `"http://localhost:8765"` (AppConfig) / `"http://localhost"` (URL fallback) | `String` | Base URL for absolute URL generation, signed URLs, and Inertia redirects. Trailing slashes are trimmed on read. |
+| `APP_KEY` | none - required in non-dev | `String` (base64-url-no-pad, 32 bytes) | AES-256-GCM key for `Crypt`, encrypted sessions, pagination cursors, signed URLs, and any other encrypt-at-rest path. Boot **fails closed** when missing or malformed outside `local`/`development`/`testing`. Generate with `suprnova key:generate`. |
+| `APP_KEY_PREVIOUS` | none | `String` (comma-separated base64 keys, max 8) | Comma-separated previous keys used during rotation. `Crypt::decrypt` tries the current `APP_KEY` first, then each entry in order. Hard cap of 8 entries - `crypto::MAX_PREVIOUS_KEYS`. A half-rotated entry that fails to decode aborts boot. See [Encryption](encryption.md#key-rotation). |
+| `APP_PREVIOUS_KEYS` | none | `String` (alias of `APP_KEY_PREVIOUS`) | Laravel-compat alias accepted so a Laravel `.env` dropped into a Suprnova deploy still graceful-decrypts legacy data. When both are set with different values, `APP_KEY_PREVIOUS` wins with a `warn!` to surface the duplicate; identical values are accepted silently. |
+| `APP_BASE_PATH` | current working directory | `Path` | Root directory the path resolver uses for `config/`, `database/`, `public/`, `storage/`, `resources/`, `lang/`. Useful when running the binary from a different CWD than the project root (e.g. systemd unit, `WorkingDirectory=` not pointing at the project). Falls back to CWD, then `.` if CWD is unavailable. |
+| `APP_TRUSTED_PROXIES` | none - empty allowlist | `String` (comma-separated IPs and CIDR ranges) | Addresses and ranges of the proxies whose `X-Forwarded-*` / `X-Real-IP` headers `Request::ip()` and the host / scheme / port accessors may believe. An entry is an address (`10.0.0.5`) or a range in CIDR form (`173.245.48.0/20`, `2400:cb00::/32`). A range of every address (`0.0.0.0/0`, `::/0`) is refused. **Empty by default, so proxy headers are ignored and the TCP peer always wins** - see the note below before deploying behind a proxy. An entry that is neither an address nor a valid range fails boot (`try_from_env`). |
+| `AUTH_GUARD` | `"web"` | `String` | Name of the default guard read by `Auth::*`. Mirrors Laravel - only the default is env-selectable; named guards live in code via `AuthConfig::guard(name, …)`. |
+
+Two more `APP_*` variables - `APP_LOCALE` and `APP_FALLBACK_LOCALE` -
+are read by the localization subsystem rather than by `AppConfig`, so
+they are listed under **Localization** below.
+
+### Behind a reverse proxy, set `APP_TRUSTED_PROXIES`
+
+Ignoring proxy headers is the safe default - `X-Forwarded-For` is caller-supplied
+and trusting it unconditionally lets anyone claim any address. But the moment a
+terminating proxy is in front of you (nginx, Traefik, an ALB, Cloudflare), the
+TCP peer is *the proxy*, on every request, and leaving this unset does not merely
+lose the client's address:
+
+- **Per-IP rate limits collapse into one bucket.** `ThrottleRequestsMiddleware::with(...)`
+  keys on `request.ip()` and the request path, so `ThrottleRequestsMiddleware::with(20, 1,
+  "login")` stops meaning "20 login attempts per client per minute" and starts
+  meaning 20 *in total, across everyone*. `ThrottleRequestsMiddleware::default()`
+  keys on the user id when a user is signed in and on `request.ip()` otherwise,
+  so it collapses the same way for every visitor who is not signed in. That is both weaker (no per-attacker
+  budget) and actively dangerous: any single caller can spend the quota and lock
+  every legitimate user out of the login form. See [Rate limiting](rate-limiting.md).
+- `Request::host()`, `scheme()` and `port()` fall back to the connection rather
+  than to `X-Forwarded-Host` / `-Proto` / `-Port`, so generated absolute URLs can
+  name the internal address and scheme instead of the public one.
+
+List the addresses the proxy hops reach you from - not the client's. An entry is
+one address or a range in CIDR form:
+
+```bash
+APP_TRUSTED_PROXIES=10.0.0.5,173.245.48.0/20,2400:cb00::/32
+```
+
+Four rules decide how the list is used:
+
+- **List every proxy of the chain, not the last one alone.** `Request::ip()`
+  reads `X-Forwarded-For` from the right and returns the first address that is
+  not in the list. A proxy that is not listed is taken for the client, and all
+  of its clients share one address. This includes an address that a load
+  balancer adds behind the client's, as the external Application Load Balancer
+  of Google Cloud does.
+- **A range must hold proxies and nothing else.** A client that connects from a
+  trusted address is believed like a proxy: it writes its own
+  `X-Forwarded-For`, and with it the address `ip()` returns, and the forwarded
+  host and scheme as well. The network of the pods of a cluster and the range of
+  a VPN have clients in them. Do not list them.
+- **The proxy must write `X-Forwarded-For` itself**, by adding the address it
+  saw to the header or by replacing the header. A proxy that passes the client's
+  header on as it came lets the client write all of it.
+- **`X-Real-IP` is read only when the request has no `X-Forwarded-For` at all.**
+  A proxy that writes `X-Real-IP` alone must remove the client's
+  `X-Forwarded-For`. The `Forwarded` header of RFC 7239 is not read.
+
+A proxy that serves the application under a path, such as `/billing`, names
+that path in `X-Forwarded-Prefix`, which counts under the same rule. See
+[Serving under a path prefix](deployment.md#serving-under-a-path-prefix).
+
+An IPv4 address written as an IPv6 one (`::ffff:10.0.0.5`) counts as the IPv4
+address, in the headers and for the peer. `Request::ips()` returns the whole
+chain. It is a record, not something to decide by.
+
+Nothing detects a missing list for you: an app behind a proxy with the variable
+unset looks healthy, serves correctly, and quietly rate-limits everyone as one
+user.
+
+### App-key required matrix
+
+| Environment | `APP_KEY` required at boot |
+|---|---|
+| `local` | no (generates an ephemeral key if missing) |
+| `development` | no |
+| `testing` | no |
+| `staging` | yes - boot exits non-zero with a remediation message |
+| `production`, or `APP_ENV` unset | yes |
+| `Custom(...)` | yes - anything not in the safe-list is treated as production for this check |
+
+## Server
+
+The HTTP listener and request body limits.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `SERVER_HOST` | `"127.0.0.1"` | `String` | Bind address. Set to `0.0.0.0` to expose outside the loopback interface (e.g. in containers). |
+| `SERVER_PORT` | `8765` | `u16` | Bind port. Lenient parse warns and defaults; strict `try_from_env` aborts boot on a typo. |
+| `SERVER_MAX_BODY_SIZE` | `8388608` (8 MiB) | `usize` (bytes) | Process-global maximum request body size. Per-`FormRequest::max_body_bytes` overrides still apply on individual endpoints. The configured value is wired into the global cap during `Server::from_config`. |
+| `SERVER_MAX_CONNECTIONS` | `10000` | `usize` | Cap on concurrently active TCP connections. Unset or blank gives `10000`. A value that is zero or unparseable falls back to a finite `10000` with a warning rather than silently reverting to unbounded - a botched limit is still a request for a limit. No value removes the cap: a server with no cap is a choice made in code with `ServerConfig::builder().unbounded_connections()`. See [Deployment](deployment.md#connection-cap-server_max_connections). |
+| `SERVER_HEADER_READ_TIMEOUT` | `30` | `u64` (seconds) | Deadline for reading a request's complete head. The slowloris mitigation. Zero is treated as invalid, not as "disable", and falls back to the default. Does not apply to established WebSocket/SSE connections. |
+| `SERVER_BODY_READ_TIMEOUT` | `30` | `u64` (seconds) | Longest wait for the next piece of a request body. A body that misses it is abandoned: the read fails with `408 Request Timeout` and the connection closes. Applies to every read of a request body, the framework's own and a handler's read of the raw stream alike, multipart uploads included. Zero is treated as invalid, as for `SERVER_HEADER_READ_TIMEOUT`, and falls back to the default. Raise it for clients that upload over very slow links. |
+| `SERVER_BODY_TOTAL_TIMEOUT` | `3600` (one hour) | `u64` (seconds) | Longest a whole request body may take to arrive, counted from when the server read the request head. A backstop: `SERVER_BODY_READ_TIMEOUT` is the defence against a trickled body, and this ends one that keeps sending a byte inside every per-frame wait. A body that misses it is abandoned the same way. Zero is treated as invalid and falls back to the default. Raise it only for uploads that take longer than an hour to send. |
+| `SERVER_HEALTH_READINESS_TOKEN` | unset (readiness is public) | `String` | Shared secret required to reach `/_suprnova/health/ready` and `/_suprnova/health?db=true`, sent as `X-Suprnova-Health-Token`. Without it those paths answer 404, indistinguishably from any unrouted path; liveness stays public. See [Deployment](deployment.md#health-check). |
+
+## Database
+
+Connection URL and sqlx pool tuning. `DATABASE_URL` is required for
+any subcommand that touches the database (`migrate*`, `db:sync`,
+`db:seed`, `queue:work` with `QUEUE_DRIVER=database`, `workflow:work`,
+the session DB store) and for `serve` when the app has migrations
+registered. The five liveness knobs are how you survive a network that
+drops idle connections - see [Pool liveness](database.md#pool-liveness).
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `DATABASE_URL` | none - required when migrations exist | `String` | Connection URL. Scheme selects the driver: `sqlite://path`, `postgres://...` / `postgresql://...`, `mysql://...`, `mariadb://...`. The framework auto-creates the parent directory for SQLite paths. `serve` skips the database connection entirely when the configured `Migrator` has no migrations. |
+| `DB_MAX_CONNECTIONS` | `10` | `u32` | sqlx pool ceiling. |
+| `DB_MIN_CONNECTIONS` | `1` | `u32` | sqlx pool floor (kept warm). |
+| `DB_CONNECT_TIMEOUT` | `30` (seconds) | `u32` | How long sqlx will wait for an initial connection before erroring. |
+| `DB_LOGGING` | `false` | `bool` | When true, sqlx logs every statement (use sparingly in production - chatty). |
+| `DB_IDLE_TIMEOUT` | unset (sqlx uses 600 seconds) | `u64` (seconds) | How long a pooled connection may sit idle before the pool closes it. `0` disables idle reaping. |
+| `DB_MAX_LIFETIME` | unset (sqlx uses 1800 seconds) | `u64` (seconds) | How long a pooled connection may live before the pool recycles it. `0` disables lifetime recycling. |
+| `DB_ACQUIRE_TIMEOUT` | unset (falls back to `DB_CONNECT_TIMEOUT`) | `u64` (seconds) | How long a caller waits for a free pooled connection. Overrides `DB_CONNECT_TIMEOUT` for the checkout wait; set one or the other, not both. Zero is rejected at boot. |
+| `DB_TEST_BEFORE_ACQUIRE` | `true` | `bool` | Ping a pooled connection before handing it out. Leave it on unless you have measured the per-checkout round trip and `DB_PING_AFTER_IDLE` is not enough. |
+| `DB_PING_AFTER_IDLE` | unset | `u64` (seconds) | Ping a pooled connection only after it has been idle this long. Setting it turns `DB_TEST_BEFORE_ACQUIRE` off, so hot connections are handed out untouched. |
+| `DB_CHARSET` | `utf8mb4` | `String` | MySQL and MariaDB only: the character set every connection sends with `SET NAMES`, and the one `Schema::create` gives a new table. A `charset` parameter in the URL wins. Ignored for Postgres and SQLite. See [Character set and collation](database.md#character-set-and-collation). |
+| `DB_COLLATION` | `utf8mb4_unicode_ci` | `String` | MySQL and MariaDB only: the collation every connection sends, and the one `Schema::create` gives a new table, as Laravel's. A `collation` parameter in the URL wins. Tables created before you upgraded keep the server's default collation (`utf8mb4_0900_ai_ci` on MySQL 8), and MySQL refuses to compare string columns of two collations: set this to that default to keep it. Only letters, digits and underscores; anything else fails the connection. |
+| `SUPRNOVA_AUTO_MIGRATE_BEST_EFFORT` | `false` | `bool` | When true, a failing auto-migration during `serve` boot is logged but does not abort. Default is fail-closed: boot exits non-zero rather than start against a partially-migrated schema. Pass `--no-migrate` to skip auto-migration entirely. |
+
+## Laravel database
+
+Variables for an application on a database a Laravel application created.
+See [Running on a Laravel Database](laravel-database.md).
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `LARAVEL_SHARED_DATABASE` | `false` | `bool` | Turn on when a Laravel application uses the database at the same time. Password hashes are written as `$2y$` bcrypt, a valid sign-in rewrites a `$2b$` or Argon2id hash as `$2y$`, Magnetar stops upgrading bcrypt to Argon2id, and an unrouted database-queue job is stored on the queue `suprnova` instead of `default`. Accepts `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`; any other value fails boot. |
+| `NOTIFICATIONS_MORPH_KEY` | `int` | `String` | The type `CreateNotificationsTable` gives `notifications.notifiable_id`: `int` for Laravel's `morphs`, `uuid` for `uuidMorphs`, `ulid` for `ulidMorphs`. Any other value fails the migration. |
+| `RBAC_MODEL_KEY` | `int` | `String` | The type the RBAC migrations give `model_has_roles.model_id` and `model_has_permissions.model_id`: `int`, `uuid` or `ulid`. Any other value fails the migration. |
+| `FEATURES_USER_SCOPE` | `App\Models\User` | `String` | What a user's flags are stored under in Pennant's `features.scope`, before `\|<id>`: the class or morph alias of the user model in the Laravel application. |
+
+## Session
+
+Cookie attributes and lifetime for the session subsystem. Note that
+`SESSION_SECURE` defaults to **`true`** - production-safe by default;
+flip it off only for local HTTP development.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `SESSION_LIFETIME` | `120` (minutes) | `u64` | Session lifetime in minutes. Parsed via `env_optional`; falls back silently if unparseable. |
+| `SESSION_TOUCH_INTERVAL` | `300` (seconds) | `u64` | Minimum sliding-expiry persistence cadence. Runtime enforcement caps it at half the session lifetime. |
+| `SESSION_GC_INTERVAL` | `3600` (seconds) | `u64` | Cadence for the supervised expired-session collector installed by `SessionMiddleware::install`. |
+| `SESSION_COOKIE` | `"suprnova_session"` | `String` | Session cookie name. |
+| `SESSION_PATH` | unset | `String` | Cookie `Path=` attribute. Unset, the session, remember-me and XSRF cookies take the public root of each request: `/` at the host root, `/billing` behind a trusted `X-Forwarded-Prefix: /billing`. See [Serving under a path prefix](deployment.md#serving-under-a-path-prefix). |
+| `SESSION_DOMAIN` | unset | `String` | Cookie `Domain=` attribute. Leave unset for host-only cookies (the safer default for most apps). |
+| `SESSION_SECURE` | `true` | `bool` | Cookie `Secure` attribute. Defaults to `true`; set to `false` only in local HTTP development. `cookie_http_only` is always `true` and is not env-configurable. |
+| `SESSION_SAME_SITE` | `"Lax"` | `String` | `SameSite` attribute. Accepts `Strict`, `Lax`, `None` (case-insensitive). |
+| `SESSION_COOKIE_PREFIX` | unset | `String` (`__Host-` / `__Secure-`) | Prefix applied to session and remember-me wire names. `Config::init` validates the value and its `SESSION_DOMAIN` / `SESSION_PATH` constraints at boot; invalid combinations fail before serving. |
+| `SESSION_PARTITIONED` | `false` | `bool` | Emit the `Partitioned` / CHIPS cookie attribute for third-party-isolated cookies. |
+| `SESSION_EXPIRE_ON_CLOSE` | `false` | `bool` | When true, drop `Max-Age` so the browser deletes the cookie on close (session-cookie semantics). |
+| `SESSION_CONNECTION` | unset | `String` | Named DB connection for the session store. Unset means the default connection. |
+| `REMEMBER_LIFETIME` | `43200` (30 days, in minutes) | `u64` | "Remember me" cookie/token lifetime in minutes. |
+
+## Localization
+
+The three `APP_*` variables the localization subsystem reads. Everything
+else about it - the detection chain, the session key and cookie name it
+consults, Unicode isolation marks - is code-level configuration on
+`LocalizationConfig`, not env. See [Localization](localization.md).
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `APP_LOCALE` | `"en"` | `String` (BCP-47) | Locale used when the detection chain (session → cookie → `Accept-Language`) finds nothing. Also the locale `suprnova generate-types` extracts message keys from for `lang-keys.ts`. A value that is not a valid BCP-47 identifier fails boot rather than silently defaulting. |
+| `APP_FALLBACK_LOCALE` | `"en"` | `String` (BCP-47) | Locale consulted when a key is missing from the current locale's catalog. A key missing from both renders as the key itself plus a one-time `warn!`; `Lang::try_get` returns `Err` instead. Same strict parse as `APP_LOCALE`. |
+| `APP_LOCALE_PARENTS` | none - empty map | `String` (comma-separated `child=parent` pairs, BCP-47 on each side) | Per-locale fallback parents consulted before `APP_FALLBACK_LOCALE`, e.g. `APP_LOCALE_PARENTS=pt-PT=pt-BR,en-AU=en-GB`. `Lang`'s fallback chain walks these transitively, and `FluentTranslator` flattens each locale's configured parent chain into its served catalog. A malformed pair, an invalid locale, a child named more than once, or a cycle (including a locale naming itself as its own parent) fails boot rather than degrading at request time. See [Fallback chains](localization.md#fallback-chains). |
+
+Catalogs themselves are files, not env: `lang/<locale>/*.ftl` under
+`APP_BASE_PATH`. A missing `lang/` directory is not an error - the app
+boots with the framework's embedded English validation catalog. The starter
+kits ship no translations or `lang/` directory, and their `.env` and
+`.env.example` omit the localization block. Add these variables when your
+application needs localization.
+
+## Cache
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `CACHE_DRIVER` | `memory` | `String` (`memory`/`in-memory`/`inmemory`, `redis`) | Selects the bootstrap target. Memory keeps everything in-process; Redis runs on the `Redis` facade's connections below and fails boot if the cache connection cannot answer. Unknown values fail boot with a clear error. |
+| `CACHE_PREFIX` | the slug of `APP_NAME`, then `-cache-` (`suprnova-cache-` without `APP_NAME`) | `String` | Key prefix for cache entries (collision-avoidance for shared Redis). On Redis it comes after the connection's `REDIS_PREFIX`. An empty value means no prefix. |
+| `REDIS_CACHE_CONNECTION` | `cache` | `String` | The `Redis` facade connection the cache store's commands run on with `CACHE_DRIVER=redis`. The `cache` connection reads `REDIS_CACHE_DB`. |
+| `REDIS_CACHE_LOCK_CONNECTION` | `default` | `String` | The `Redis` facade connection the cache store's locks run on. |
+| `REDIS_CACHE_DB` | `1` | `u32` | The database of the `Redis` facade's `cache` connection, applied even when `REDIS_URL` names another. |
+| `REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | The `Redis` facade's `default` and `cache` connections, the cache store's server with `CACHE_DRIVER=redis`. A `rediss://` URL connects over TLS. See [Redis](redis.md). |
+| `REDIS_PREFIX` | the slug of `APP_NAME`, then `-database-` | `String` | The `Redis` facade connections' key prefix, which the cache store's keys start with too. An empty value means no prefix. See [Redis](redis.md#key-prefixes). |
+| `CACHE_DEFAULT_TTL` | `3600` (seconds) | `u64` | Default TTL in seconds. `0` means "no expiration". Applied to `Cache::put`, `Cache::remember`, and `Cache::tags_put` called with `None`; `Cache::forever`, `Cache::remember_forever`, and `Cache::tags_forever` always bypass. |
+| `CACHE_SWEEP_INTERVAL` | `60` (seconds) | `u64` | Seconds between sweeps of the in-memory cache, which remove every expired entry, including the ones nothing reads again. `0` turns the sweep off. Redis expires keys itself and ignores this. See [Cache](cache.md#in-memory-expiration). |
+
+An upgraded deployment with `CACHE_DRIVER=redis` finds its cache empty: the
+store used to read `REDIS_PREFIX`, `suprnova_cache:` by default, as its
+cache prefix on the database `REDIS_URL` names, and now runs on the `cache`
+connection's database under `REDIS_PREFIX` and `CACHE_PREFIX`. Set
+`REDIS_CACHE_CONNECTION=default`, an empty `REDIS_PREFIX` and
+`CACHE_PREFIX=suprnova_cache:` (or your old `REDIS_PREFIX`) to keep the old
+keys. See [Cache](cache.md#upgrading-keeps-the-old-keys-only-if-you-ask).
+| `REDIS_COMMAND_RETRIES` | `0` | `u32` | Extra retries for read-shaped Redis commands, on top of the one every read already gets. Applies to the cache, queue, and rate-limit drivers, and to the reads of the `Redis` facade. Writes never retry at any value. Budget it in seconds: a retry against a dropped connection waits for the reconnect, so it costs the driver's whole connect and response budget - up to 3 connect retries at most 500 ms apart, each capped at 2 s, plus a 5 s response timeout on the cache driver; up to 6 connect retries with an uncapped exponential delay, each capped at 1 s, plus a 500 ms response timeout on the queue and rate-limit drivers. The clamp of `10` bounds attempts, not seconds: at that setting one read makes 12 attempts. A timeout counts as transient too, so during a stall each wrapped read issues up to that many commands. An unparseable value falls back to `0`. |
+
+## Queue
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `QUEUE_DRIVER` | `memory` | `String` (`memory`, `sync`, `null`, `redis`, `database`, `sqs`, `failover`) | Active queue backend. `sync` runs each job inline when it is pushed, with no worker and no retry. `null` accepts every job and runs none. An unknown value is a boot error in production, where an in-memory queue would lose every job at the next restart. Elsewhere it logs a `warn!` that lists the accepted names and falls back to memory. `failover` wraps an ordered list of the others - see `QUEUE_FAILOVER_CONNECTIONS`. |
+| `QUEUE_CONNECTIONS` | unset | `String` (comma-separated, e.g. `redis,database`) | Registers one named connection per entry, next to the default connection. Each connection is named for its driver and reads that driver's own variables, exactly as it would if it were `QUEUE_DRIVER`. An entry accepts the same names as `QUEUE_DRIVER`. An unknown name is a boot error in every environment. An entry that names the driver `QUEUE_DRIVER` selects is a second name for the default connection. Any other entry over a Redis stream or a jobs table that another connection already uses is refused at boot, because one queue has one connection. A job, a route or a push selects a connection by name - see [Queues](queues.md). |
+| `QUEUE_AFTER_COMMIT` | `false` | `bool` (`true` or `1` turns it on; anything else leaves it off) | When on, every push made inside `DB::transaction` waits for the commit, whatever the job declares, as the `after_commit` option of a Laravel queue connection does. A rollback discards the push. It applies to jobs, queued mail and queued notifications. Read at each push, not once at boot. |
+| `QUEUE_PAUSABLE` | `true` | `bool` (`false` or `0` turns it off) | Whether workers and the `queue:pause` command honour pause signals. `queue:resume` never checks it, so an existing pause can always be cleared. |
+| `QUEUE_FAILOVER_CONNECTIONS` | - | `String` (comma-separated, e.g. `redis,database`) | Priority-ordered connection list for `QUEUE_DRIVER=failover`. Required when that driver is selected; a missing or blank value is a boot error, as is an entry naming `failover` (no nesting) or a driver that doesn't exist. Each entry reads its own driver's variables. Only pushes fall through the list; every read and every acknowledgement goes to the first connection, so each fallback needs its own worker. |
+| `QUEUE_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis URL (required-by-driver when `QUEUE_DRIVER=redis`). |
+| `QUEUE_REDIS_STREAM` | `"suprnova-queue"` | `String` | Redis Stream key used for fan-out. |
+| `QUEUE_REDIS_GROUP` | `"default"` | `String` | Consumer-group name. |
+| `QUEUE_REDIS_CONSUMER` | `suprnova-<uuid>` (a fresh UUID for each process) | `String` | Consumer name within the group. Set it per worker to keep the name stable across restarts. |
+| `QUEUE_VISIBILITY_TIMEOUT_SECS` | `60` | `u64` | How long a claimed job stays invisible before another consumer can reclaim it. Match this to your slowest job. |
+| `SQS_PREFIX` | unset | `String` | The URL the SQS queues are under, `https://sqs.<region>.amazonaws.com/<account id>`. Required when `QUEUE_DRIVER=sqs` and `SQS_QUEUE` is a name rather than a URL; boot fails without it. |
+| `SQS_QUEUE` | `"default"` | `String` | The SQS queue a job that names none goes to, and the one a worker with no `--queue` receives from. A name, or the URL of the queue. You can use a standard queue or a FIFO queue ending in `.fifo`. |
+| `SQS_SUFFIX` | unset | `String` | Appended to every SQS queue name that does not already end with it, as in `emails-production`. |
+| `SQS_ENDPOINT` | `https://sqs.<region>.amazonaws.com` (`amazonaws.com.cn` for a `cn-` region) | `String` | The endpoint requests go to: an SQS-compatible service that is not AWS, such as LocalStack or ElasticMQ, or a VPC endpoint. A value that is not an `http` or `https` URL fails boot. |
+| `SQS_WAIT_TIME_SECONDS` | `1` | `u64` (0 to 20) | How long each receive of the `sqs` driver waits for a message. A longer wait means fewer billed requests from an idle worker; `0` sends short polls. Outside 0 to 20 fails boot. |
+| `AWS_DEFAULT_REGION`, `AWS_REGION` | unset | `String` | The region of the `sqs` queue driver, read in this order. With neither set, `QUEUE_DRIVER=sqs` fails boot. |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | unset | `String` | The keys the `sqs` queue driver signs with. Set both or neither: one without the other fails boot. With neither, the driver uses the default credential chain of AWS. |
+| `SQS_OVERFLOW_ENABLED` | `false` | `bool` (`true` or `1`) | Store an SQS job of 1 MiB or more outside SQS and send SQS a pointer to it. Without it such a push fails. |
+| `SQS_OVERFLOW_STORE` | unset | `String` | You use this named cache store for overflow when set. Register it with `Cache::register_store`; a missing store fails boot. You otherwise use the disk. |
+| `SQS_OVERFLOW_DISK` | the default disk | `String` | You use this disk when `SQS_OVERFLOW_STORE` is unset. A disk that is not registered fails boot. |
+| `SQS_OVERFLOW_ALWAYS` | `false` | `bool` (`true` or `1`) | Store every SQS job in the selected cache store or disk, whatever its size. |
+| `SQS_OVERFLOW_DELETE_AFTER_PROCESSING` | `true` | `bool` (`false` or `0` turns it off) | Delete a job's overflow payload when the job is acknowledged. |
+| `SQS_OVERFLOW_FLUSH_ON_CLEAR` | `false` | `bool` (`true` or `1`) | Delete only the cleared queue's overflow payloads when you call `Queue::clear`. |
+| `QUEUE_DB_TABLE` | `"jobs"` | `String` | Table name for the database driver. Validated as a SQL identifier - a malformed value fails at boot, not at SQL composition time. Required-by-driver when `QUEUE_DRIVER=database`; the driver also requires `DB::init()` to have run first. |
+| `QUEUE_FAILED_DB_TABLE` | `"failed_jobs"` | `String` | Table the dead-letter store writes to. Bound automatically when `QUEUE_DRIVER=database` - the failed-job commands (`queue:failed`, `queue:retry`, `queue:forget`, `queue:flush`, `queue:prune-failed`) read it and `Queue::retry_failed` needs it, so the table is part of that driver's contract. The commands read no variable of their own: they boot the application as `queue:work` does and use the store that boot bound. With no store bound, they exit non-zero and say so. Not used by `memory` (ephemeral by construction) or `redis` (no table to write to). Unlike `QUEUE_DB_TABLE` a malformed identifier here does **not** fail boot: it logs at `error!` and leaves no store bound, so dead-lettered jobs are logged in full rather than persisted. Recoverable by hand, but not by the failed-job commands. |
+
+## Schedule
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `SCHEDULE_ALLOW_MEMORY_LOCK_IN_PRODUCTION` | unset | `bool`-ish | Acknowledges that a task marked `on_one_server()` is electing a leader through a **per-process** cache. That election is only as shared as the cache behind it, so in production `CACHE_DRIVER=memory` plus a single-server task is a hard boot failure naming the offending tasks, rather than a silent downgrade to "every replica runs it". Set this only where the deployment genuinely runs one scheduler; otherwise set `CACHE_DRIVER=redis`. See [Scheduling](scheduling.md). |
+
+## Workflow
+
+The `#[workflow]` long-running stateful worker. All values are clamped
+to safe minimums rather than honoured blindly - a `WORKFLOW_CONCURRENCY=0`
+would park the worker semaphore forever, so the framework warns and
+clamps instead of accepting an obviously-broken config.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `WORKFLOW_CONCURRENCY` | `4` | `usize` | Maximum concurrent workflow executions per worker process. Clamped to `>= 1`. |
+| `WORKFLOW_POLL_INTERVAL_MS` | `1000` (ms) | `u64` | How often the worker polls for newly-due workflows. |
+| `WORKFLOW_LOCK_TIMEOUT_SECS` | `30` (seconds) | `u64` | Reclaim timeout for a claimed workflow row whose worker has died. Clamped to `>= 2`; above 253402300799 (about 8,000 years) the worker refuses to start, because the lease would end past the dates the clock can hold. |
+| `WORKFLOW_MAX_ATTEMPTS` | `3` | `i32` | Max attempts per workflow run before it is marked failed. Clamped to `>= 1`. |
+| `WORKFLOW_RETRY_BACKOFF_SECS` | `5` | `i64` | Linear backoff per attempt. Clamped to `>= 0` - negative backoff would schedule retries in the past and produce a tight-loop reclaim. When it times `WORKFLOW_MAX_ATTEMPTS` exceeds 253402300799 seconds, the worker refuses to start. |
+
+## Mail
+
+`MAIL_DRIVER` defaults to **`log`** - outgoing mail prints to the
+configured tracing subscriber rather than reaching the network. Flip
+to `memory` in tests, `file` for `.eml` previews you can open in a
+mail client, and `smtp`/`ses`/etc. in production. The
+provider-specific keys/tokens are required only when that driver is
+selected; an unknown driver value logs a `warn!` and falls back to
+`log`.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `MAIL_DRIVER` | `"log"` | `String` (`log`, `memory`, `file`, `smtp`, `ses`, `sendgrid`, `mailgun`, `postmark`, `resend`) | Selects the bootstrap target. |
+| `MAIL_FROM` | none - required by auth-flow facades | `String` | Default from-address for auth-flow facades (`EmailVerification`, `PasswordReset`, `TwoFactor`). Required for those paths; absent it errors at the call site rather than silently falling back to a placeholder that would break DMARC/SPF. |
+| `MAIL_FROM_NAME` | unset | `String` | Optional display name for the auth-flow `From` (since **0.5.9**). When set, the header renders `Name <MAIL_FROM>`; `MAIL_FROM` stays a bare address. Read at send time, so it applies to queued auth-flow mail too. |
+
+### File (`MAIL_DRIVER=file`)
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `MAIL_FILE_PATH` | `storage_path("mail")` | `String` | Directory one RFC 5322 `.eml` file is written to per send. Never pruned. Absolute paths are used as given; relative paths anchor at the application base directory (see `APP_BASE_PATH`). |
+
+### SMTP (`MAIL_DRIVER=smtp`)
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `MAIL_SMTP_HOST` | `"127.0.0.1"` | `String` | SMTP host. |
+| `MAIL_SMTP_PORT` | `587` | `u16` | SMTP port. |
+| `MAIL_SMTP_USER` | unset | `String` | SMTP username. Both `MAIL_SMTP_USER` **and** `MAIL_SMTP_PASS` must be set for an encrypted transport; with neither, the connection defaults to the unencrypted local-catcher mode. Setting exactly one warns at boot. |
+| `MAIL_SMTP_PASS` | unset | `String` | SMTP password. See `MAIL_SMTP_USER` for the partial-credentials behaviour. |
+| `MAIL_SMTP_ENCRYPTION` | derived | `starttls` \| `tls` \| `none` | How the connection is encrypted. Unset derives from the credentials: `starttls` when both are set, `none` when neither is. `tls` selects implicit TLS (port 465). `ssl` and `null` are accepted as Laravel-compatible aliases. An unrecognised value fails boot in **every** environment - a typo must not degrade to cleartext. |
+| `MAIL_ALLOW_INSECURE_SMTP_IN_PRODUCTION` | unset | `bool`-ish | Production refuses to boot on an unencrypted SMTP connection. Set to `1`/`true`/`yes`/`on` to acknowledge cleartext - defensible only when the relay is reachable solely over a private network. |
+
+### Postmark (`MAIL_DRIVER=postmark`)
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `MAIL_POSTMARK_TOKEN` | required-by-driver | `String` | Postmark server token. |
+| `MAIL_POSTMARK_ENDPOINT` | Postmark default | `String` | Override the API endpoint (regional or mock server). |
+
+### Amazon SES (`MAIL_DRIVER=ses`)
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `MAIL_SES_ACCESS_KEY` | required-by-driver | `String` | AWS access key. |
+| `MAIL_SES_SECRET_KEY` | required-by-driver | `String` | AWS secret key. |
+| `MAIL_SES_REGION` | `"us-east-1"` | `String` | AWS region. |
+| `MAIL_SES_ENDPOINT` | AWS default for the region | `String` | Override the SES endpoint (regional or mock server). |
+
+### SendGrid (`MAIL_DRIVER=sendgrid`)
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `MAIL_SENDGRID_API_KEY` | required-by-driver | `String` | SendGrid API key. |
+| `MAIL_SENDGRID_ENDPOINT` | SendGrid default | `String` | Override the API endpoint. |
+
+### Mailgun (`MAIL_DRIVER=mailgun`)
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `MAIL_MAILGUN_API_KEY` | required-by-driver | `String` | Mailgun API key. |
+| `MAIL_MAILGUN_DOMAIN` | required-by-driver | `String` | Mailgun sending domain. |
+| `MAIL_MAILGUN_ENDPOINT` | Mailgun default | `String` | Override the API endpoint (e.g. EU vs US). |
+
+### Resend (`MAIL_DRIVER=resend`)
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `MAIL_RESEND_API_KEY` | required-by-driver | `String` | Resend API key. |
+| `MAIL_RESEND_ENDPOINT` | Resend default | `String` | Override the API endpoint. |
+
+## Web Push
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `WEB_PUSH_ENDPOINT_ORIGINS` | unset (the client's own policy) | `String` (comma-separated origins, `https://host` or `https://host:port`) | The push services `WebPushChannel` may send to, such as `https://updates.push.services.mozilla.com,https://fcm.googleapis.com,https://web.push.apple.com,https://*.notify.windows.com`. When it names one or more origins, every send of the channel goes under `EndpointPolicy::Allowlist`, which runs the strict checks and refuses an endpoint at any other origin before its host name is looked up. A host may start with the label `*.`, which matches exactly one label. Spaces around an entry and empty entries are ignored, and a value that names no origin keeps the client's own policy. An entry that is not an origin, or a value that is not UTF-8, makes `WebPushChannel::new` return an error that names the variable. See [Endpoint allowlist](web-push.md#endpoint-allowlist). |
+
+## Rate Limiting
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `RATE_LIMIT_DRIVER` | `memory` | `String` (`memory`, `redis`) | Selects the rate-limiter backend. Outside production an unknown value logs a `warn!` and falls back to memory; **in production, memory - including via an unknown value - fails boot** unless `RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION` is set. |
+| `RATE_LIMIT_ALLOW_MEMORY_IN_PRODUCTION` | unset | `bool`-ish | Acknowledges per-process rate-limit buckets in production. Only accurate if you run exactly one process: behind N replicas every quota is effectively N× and resets on each deploy. |
+| `RATE_LIMIT_REDIS_URL` | `"redis://127.0.0.1:6379"` | `String` | Redis URL (required-by-driver when `RATE_LIMIT_DRIVER=redis`). |
+| `RATE_LIMIT_PREFIX` | `"suprnova:"` | `String` | Key prefix in Redis. |
+
+## Filesystem
+
+You set `S3_BUCKET` or `AWS_BUCKET` to register an S3 disk named `s3` at boot,
+beside the queue, the rate limiter and the mail transport. The variables work for
+AWS S3 and for S3-compatible services (MinIO, RustFS, R2, B2). With both bucket names
+unset, you register no environment disk. A disk that your `bootstrap()`
+registered under the name `s3` is kept as it is, and the variables are not read then.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `S3_BUCKET`, `AWS_BUCKET` | unset (no disk) | `String` | The bucket. Setting it registers the `s3` disk. |
+| `S3_REGION` | none - see `AWS_DEFAULT_REGION` | `String` | The region. The driver needs one, and the server does not boot when none is set. A service that is not AWS takes any name, such as `us-east-1` or `auto`. |
+| `AWS_DEFAULT_REGION`, `AWS_REGION` | unset | `String` | Read, in this order, when `S3_REGION` is not set. |
+| `S3_ENDPOINT`, `AWS_ENDPOINT` | unset (AWS) | `String` | The endpoint of a service that is not AWS. |
+| `S3_ACCESS_KEY`, `S3_SECRET_KEY` | unset | `String` | The access key and the secret. Set both or neither. One without the other fails boot. You use `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for each missing S3 value. With neither effective key, you use the profile or instance role. |
+| `S3_ROOT` | unset | `String` | A prefix inside the bucket that every path is under. |
+| `FILESYSTEM_DISK` | `local` | `String` | The name of the default disk that `Storage::default_disk()` returns. `Storage::set_default_disk` in code wins over it. A name with no registered disk fails boot. |
+| `S3_PUBLIC_URL`, `AWS_URL` | unset | `String` | The public base URL of the `s3` disk, which `Storage::url("s3", path)` joins with the path. It is an absolute `http` or `https` URL (`https://cdn.example.com/files`) or a path of your own host (`/storage`). A value with a user or a password, a query or a fragment, a backslash, or a `.` or `..` segment fails boot. With it unset, `Storage::url` on the `s3` disk returns an error. |
+| `S3_USE_PATH_STYLE_ENDPOINT`, `AWS_USE_PATH_STYLE_ENDPOINT` | unset (path-style URLs) | `bool` (`true`/`false`/`1`/`0`) | You select endpoint/bucket paths with `true` or bucket hostnames with `false`. An invalid value fails boot. Each S3 name wins over its AWS alias. |
+
+Blank values count as unset. No error repeats the value of a variable, except
+the disk name `FILESYSTEM_DISK` gives.
+
+`FILESYSTEM_DISK` names the default disk that `Storage::default_disk()` returns;
+`Storage::set_default_disk` in code wins over it. With neither setting, you
+use the registered `local` disk, or get an error naming `local` and
+`FILESYSTEM_DISK`. When it names a disk that is
+not registered once the bootstrap has run, boot fails. The console binary boots
+no driver of the environment. A command that uses the `s3` disk calls
+`suprnova::filesystem::bootstrap_from_env()` at the end of its own bootstrap,
+after it registers its disks, because that call checks the default disk too. To
+register the same configuration under a name of your own, use
+`S3Config::from_env()`. See [Filesystem](filesystem.md).
+
+## Search
+
+See [Search](search.md) for models, settings, engines, indexing, and the
+baseline. Search configuration is strict: its boolean fields accept Rust's
+`true` or `false`, and malformed or zero positive limits fail with the variable
+name. Registered typed configuration can override environment defaults. Local
+inference requires the opt-in `search-fastembed` feature; its `ort` build script
+downloads ONNX Runtime at compile time. The default build downloads nothing.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `SEARCH_DRIVER` | `database` | `String` | Default engine: `database`, `qdrant`, `collection`, or `null`. Per-index registration can override it. |
+| `SEARCH_EMBEDDER` | `none` | `String` | Dense provider: `none`, `http`, or `fastembed`. A positive semantic ratio without a provider fails. |
+| `SEARCH_QUEUE` | `true` | `bool` | Queue indexing after commit. False runs deferred inline work; scoped model writes synchronize inline after commit regardless. |
+| `SEARCH_QUEUE_CONNECTION` | unset | `Option<String>` | Registered queue connection for search jobs; unset uses the queue default. A supplied value must be nonempty. |
+| `SEARCH_QUEUE_NAME` | unset | `Option<String>` | Queue name for search jobs; unset uses the queue default. A supplied value must be nonempty. |
+| `SEARCH_CHUNK` | `500` | `usize` | Positive bulk import and removal chunk size. |
+| `SEARCH_MEDIA_MAX_BYTES` | `33554432` | `usize` | Maximum bytes per declared media part. Positive and at most 33554432. Storage reads enforce the limit before inference. |
+| `SEARCH_FFMPEG_BINARY` | `ffmpeg` | `String` | Binary for video frame decoding. Runs without a shell with a 30-second timeout. |
+| `SEARCH_EMBED_PROFILE` | unset | `Option<String>` | Shipped local model profile. Use `embeddinggemma-2-media` for image, audio and video with the EmbeddingGemma 2 fp32 graphs. |
+| `SEARCH_EXPANSION_TERMS` | `64` | `usize` | Positive alternative cap per query word, including the original. |
+| `SEARCH_HITS_CAP` | `1000` | `usize` | Positive accessible-hit cap; supplies the default index setting and bounds endpoint pages. |
+| `SEARCH_FUSION_DEPTH` | `200` | `usize` | Positive candidate depth per hybrid leg when code keeps the default setting. |
+| `SEARCH_BM25_AVERAGE_LENGTH` | `256` | `usize` | Positive token-length normalization constant for Qdrant's built-in BM25 sparse provider. Reindex when you change it. |
+| `SEARCH_TOMBSTONE_HOURS` | `24` | `u64` | Positive removal-fence retention against delayed indexing retries. Schedule pruning. |
+| `SEARCH_ANALYTICS` | `false` | `bool` | Retain queries, session-bound impressions, and validated clicks. The analytics-enabled JSON endpoint requires session middleware. |
+| `SEARCH_ANALYTICS_RETENTION_DAYS` | `90` | `u64` | Positive retention window for analytics, suggestions, and click validation; applied by `search:analytics-prune`. |
+| `SEARCH_ANALYTICS_VIEWER` | `false` | `bool` | Retain authenticated viewer ids in query rows. Never records a guest identity there. |
+| `SEARCH_MODEL_CACHE` | `storage/search/models` | `String` / `PathBuf` | Nonempty verified local model cache root, including manifests and reranker artifacts. |
+| `SEARCH_EMBED_BASE_URL` | none - required for HTTP | `String` | OpenAI-compatible base URL; the provider appends `/embeddings`. HTTPS except explicit loopback hosts; no credentials, query, fragment, or redirects. |
+| `SEARCH_EMBED_MODEL` | fastembed: `hf:onnx-community/embeddinggemma-2-ONNX`; HTTP: required | `String` | Dense model identity. Local inference accepts a named model, `hf:owner/repository[@revision]`, or `path:directory`. |
+| `SEARCH_EMBED_API_KEY` | unset | `Option<String>` | Optional HTTP bearer key, sent only to the pinned embedding destination. |
+| `SEARCH_EMBED_DIMENSIONS` | native profile; unknown HTTP model probes once | `Option<usize>` | Positive requested dimensions; local reductions must be supported by the profile. Vectors are validated and normalized after truncation. |
+| `SEARCH_EMBED_BATCH` | `64` | `usize` | Positive HTTP/local inference batch bound and local reranker batch size. A local embedding model counts it in 512-token texts; a longer text fills the batch by the square of its length. Dynamic quantization uses singleton inference. |
+| `SEARCH_EMBED_TIMEOUT_SECS` | `30` | `u64` | Positive HTTP request deadline including body receipt. |
+| `SEARCH_EMBED_MAX_RESPONSE_BYTES` | `16777216` | `usize` | Positive streamed HTTP response cap, 16 MiB by default. |
+| `SEARCH_EMBED_RETRIES` | `3` | `u32` | Additional HTTP attempts for 429 or 5xx only; at most 16. |
+| `SEARCH_EMBED_QUERY_PREFIX` | shipped profile; unknown HTTP model: empty | `Option<String>` | Query preparation for unknown HTTP models. Known models keep their profile's prefix. |
+| `SEARCH_EMBED_DOCUMENT_TEMPLATE` | shipped profile; unknown HTTP model: `{text}` | `Option<String>` | Document preparation for unknown HTTP models; placeholders are `{title}` and `{text}`. Known models keep their profile. |
+| `SEARCH_EMBED_MAX_TOKENS` | shipped or published hosted profile; other HTTP models: the service's model list, else `8192` | `Option<usize>` | HTTP only: the model's context in tokens. Wins over the profile, the service's list (read on the first embedding) and the 8192 default. |
+| `SEARCH_EMBED_TOKENIZER` | unset | `Option<PathBuf>` | HTTP only: path to the model's `tokenizer.json`. The provider cuts each prepared input after the last token that fits the model's context; unset, it cuts to the context length minus four in UTF-8 bytes. |
+| `SEARCH_EMBED_PRECISION` | `fp32` | `String` | Local graph variant: `fp32`, `int8`, or `q4`. fp16 is refused. |
+| `SEARCH_EMBED_SPARSE_MODEL` | unset | `Option<String>` | Optional fastembed sparse head, including BGE-M3. Select its registered provider in the generation's `sparse_model`; Qdrant otherwise uses built-in `bm25`. |
+| `SEARCH_VECTOR_STORE` | index name | `String` | Registered Vector store for the database engine's semantic leg. |
+| `SEARCH_VOCABULARY_REFRESH` | `1000` | `i64` | Positive Postgres write interval for refreshing the native `ts_stat` vocabulary; builds also refresh it. |
+| `SEARCH_QDRANT_TIMEOUT_SECS` | `10` | `u64` | Positive per-call Qdrant search timeout. |
+| `QDRANT_URL` | none - required for Qdrant | `String` | Qdrant gRPC URL, normally port 6334. Search boot and `QdrantSearchEngine::from_env` read it; `QdrantVectorDriver::from_env` also uses it. |
+| `QDRANT_API_KEY` | unset | `Option<String>` | Qdrant Cloud or self-hosted API key, shared by search and vector constructors. |
+| `SEARCH_BASELINE_MEILISEARCH_URL` | none - required for calibration | `String` | Meilisearch HTTP service used by `search:baseline calibrate`. |
+| `SEARCH_BASELINE_MEILISEARCH_KEY` | none - required for calibration | `String` | Meilisearch calibration key. |
+| `SEARCH_BASELINE_TYPESENSE_URL` | none - required for calibration | `String` | Typesense HTTP service used by `search:baseline calibrate`. |
+| `SEARCH_BASELINE_TYPESENSE_KEY` | none - required for calibration | `String` | Typesense calibration key. |
+| `SEARCH_BASELINE_TOLERANCE` | `0.05` | `f64` | Finite absolute lexical nDCG@10 allowance below the stronger rival, from 0 to 1, written during calibration. |
+| `SEARCH_BASELINE_ALLOW_UNCALIBRATED` | unset | `String` | Exactly `1` permits provisional uncalibrated measurements; other values keep the uncalibrated gate closed. |
+| `PG_TEST_URL` | none - required for Postgres baseline/tests | `String` | Disposable Postgres database for search service tests and `search:baseline run --engine postgres`. |
+| `MYSQL_TEST_URL` | none - required for MySQL/MariaDB baseline/tests | `String` | Disposable MySQL or MariaDB database for search service tests and the `mysql` baseline. |
+| `QDRANT_TEST_URL` | none - required for Qdrant tests | `String` | Qdrant gRPC service for ignored search tests. The console uses `QDRANT_URL` instead. |
+
+The last three rows configure the repository's tests and baseline tools, not
+application search connections. Calibration writes p95 budgets as two times
+the slower rival's measured p95 and re-derives them on load. No environment
+variable overrides that budget. Model downloads at runtime are separate from
+the ONNX Runtime download during a feature-enabled build.
+
+## Recommendations
+
+See [Recommendations](recommendations.md) for event classes, runs, provenance,
+and application-owned retention. Numeric bounds must be positive, fit the
+supported signed range, and fit the clock/calendar where applicable.
+Booleans accept `true` or `false`; invalid values fail with the variable name.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `RECOMMEND_ENABLED` | `false` | `bool` | Forward validated search impressions and clicks automatically. Does not disable explicit event recording or generation. |
+| `RECOMMEND_HISTORY` | `500` | `usize` | Newest positive and negative events per actor combined; seen impressions are aggregated separately. |
+| `RECOMMEND_PEERS` | `200` | `usize` | Maximum sampled peers, ordered by most recent shared positive activity. |
+| `RECOMMEND_MIN_PEERS` | `3` | `usize` | Distinct peers a collaborative candidate needs, so no suggestion's peer count points at one person. Positive. |
+| `RECOMMEND_POPULARITY_WINDOW` | `30` | `u32` | UTC days of positive events contributing popularity. |
+| `RECOMMEND_LOCK_TTL_SECS` | `3600` | `u64` | Renewable generation cache-lock lifetime in seconds. |
+| `RECOMMEND_EVENT_TYPES` | `{}` | JSON object | Map from event name to `{"class":"positive\|negative\|seen","score":N}`. Base scores are bounded to -1000000 through 1000000; weight adds integer basis points divided by 20. |
+| `RECOMMEND_ENGINE` | `starter` | `String` | `starter`, or `graph` for the knowledge-graph engine, which falls back to the starter's rows when its evidence is thin. |
+| `RECOMMEND_GRAPH_STORE` | `database` | `String` | `database` (the application database) or `memgraph` (needs the `graph-memgraph` feature). |
+| `RECOMMEND_GRAPH_URL` | unset | `Option<String>` | Memgraph Bolt address, `bolt://` or `bolt+s://`, without credentials. |
+| `RECOMMEND_GRAPH_USERNAME` | unset | `String` | Memgraph user, read only when the store connects. |
+| `RECOMMEND_GRAPH_PASSWORD` | unset | `String` | Memgraph password, read only when the store connects; never logged or stored in configuration. |
+| `RECOMMEND_GRAPH_DEPTH` | `2` | `usize` | Most hops in a graph path. 1 to 4. |
+| `RECOMMEND_GRAPH_FANOUT` | `50` | `usize` | Most edges followed out of one node per hop, and the most recent positives per actor that pair into shared engagement. Positive. |
+| `RECOMMEND_GRAPH_MAX_NODES` | `2000` | `usize` | Most nodes one graph walk reaches. Positive. |
+| `RECOMMEND_PUBLIC_EVENT_TYPES` | unset | comma list | Event types other viewers may see; only these become per-actor graph facts and social signals. |
+| `RECOMMEND_SOCIAL_MIN_ACTORS` | `3` | `usize` | Followed actors who must agree before a target gains social proximity. Positive. |
+| `RECOMMEND_ACTOR_INDEX` | unset | `Option<String>` | Search index whose documents are users, keyed by user id; follows of its documents name followed users. |
+| `RECOMMEND_GRAPH_SURFACES` | `{}` | JSON object | Per-surface `affinity`, `semantic`, `social`, `freshness`, `feedback`, `trust` and `threshold` in basis points (0 to 10000) and `per_value`, `per_node`, `per_band` caps (positive). |
+
+The engine never prunes the event stream automatically. Your retention policy
+uses `recommendations:prune --older-than <days>` explicitly.
+
+## Vector search
+
+The four external vector drivers read their connection from the environment when you
+call their `from_env()` constructor. You choose the vector driver in Rust and
+register it in `bootstrap()`. Qdrant search also reads its shared variables
+during search bootstrap. See [Vector](vector.md).
+The shared Qdrant variables are listed under [Search](#search).
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `MARIADB_URL` | none - see `DATABASE_URL` | `String` | The URL of the MariaDB that holds the vectors. `MariaDbVectorDriver::from_env()` reads it first. |
+| `PGVECTOR_URL` | none - see `DATABASE_URL` | `String` | The Postgres URL that holds the vectors. `PgVectorDriver::from_env()` reads it first. |
+| `DATABASE_URL` | none | `String` | Fallback when the driver's own URL is unset or blank. MariaDB accepts schemes `mariadb` or `mysql`; pgvector accepts `postgres` or `postgresql`. A URL of another engine is not taken. |
+| `PINECONE_API_KEY` | none - required | `String` | The Pinecone API key. `PineconeVectorDriver::from_env()` fails when it is unset or blank. |
+| `PINECONE_CONTROLLER_HOST` | `https://api.pinecone.io` | `String` | The base URL of the Pinecone control plane. |
+| `PINECONE_API_VERSION` | `2025-04` | `String` | The value of the `X-Pinecone-Api-Version` header. |
+
+A missing variable is named in the error at boot, and the error never shows a
+URL, because a URL carries the password.
+
+## Images
+
+Image driver selection, the decode limits that bound hostile input, and
+orientation on decode.
+Out-of-range limits clamp with a `warn!` rather than failing boot: a
+limit of zero would reject every image in the application. An unknown
+`IMAGE_DRIVER` fails at first use, naming the valid values.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `IMAGE_DRIVER` | `oxideav` | `String` (`oxideav`, `magick`) | Selects the image backend. `oxideav` is pure Rust with no host dependency; `magick` shells out to a host-installed ImageMagick 7 for wider input support. Case-insensitive. |
+| `IMAGE_MAX_DIMENSION` | `16384` | `u32` | Cap on the width and height of a decoded image, checked against the input's own header before anything is allocated. Also caps resize targets. Minimum `1`. |
+| `IMAGE_MAX_ALLOC_BYTES` | `1073741824` (1 GiB) | `u64` | Cap on the memory one decode may allocate. Every driver checks the decoded RGBA footprint (`width * height * 4`) against it; the default `oxideav` driver also estimates the whole decode from the image's headers and refuses an image whose estimate is over it. Also caps the size of the source file itself, whether it arrives from a path, a disk, or `Image::from_stream` (which checks while collecting). Minimum `4`. |
+| `IMAGE_MAGICK_BINARY` | `magick` | `String` | Binary the `magick` driver invokes. ImageMagick 7 only; the ImageMagick 6 `convert` name is not accepted. A missing binary is a clear error at first use. |
+| `IMAGE_MAGICK_TIMEOUT_SECS` | `30` | `u32` | Wall-clock ceiling on a single ImageMagick invocation. It is both ImageMagick's own `-limit time` argument and the Rust-side deadline that kills the child's whole process group two seconds later, because `-limit time` is enforced by a monitor that a child wedged inside a delegate never engages. Bounds a stalled delegate that would otherwise hold a blocking worker for the life of the process. `magick` driver only. Minimum `1`. |
+| `IMAGE_MAGICK_AUTODETECT` | `false` | `bool` | Let ImageMagick choose the coder for input the framework cannot name. Off, the `magick` driver names the coder for every format it recognises (`png:-`, `heic:-`, `tiff:-`) and refuses other bytes before ImageMagick starts. `true`, `1`, `yes` or `on` turn it on: such bytes reach ImageMagick on a bare `-`, an MVG or MSL script included, under the framework's ImageMagick policy, which denies the script, network, and Ghostscript coders. That policy is the last one ImageMagick reads, so a host grant of one of those coders doesn't reopen it. The driver checks that order once per process, and a check that fails refuses every run, with autodetection on or off, until the host is fixed and the process restarts. Any other value keeps it off with a `warn!`. `magick` driver only. [Images](images.md#image_drivermagick) |
+| `MAGICK_CONFIGURE_PATH` | unset | path list | ImageMagick's own list of configuration directories. The `magick` driver starts ImageMagick with this value, unchanged, between two copies of the directory that holds the framework's `policy.xml`, and with `HOME` naming the framework's policy directory, so the framework's policy is the last one ImageMagick reads. A policy of your own here, or in `$XDG_CONFIG_HOME/ImageMagick`, still applies its denials and can't grant back what the framework denies. A `policy.xml` in the service account's own `~/.config/ImageMagick` doesn't apply to the driver's runs. The driver checks the order once per process; a check that fails refuses every run, with or without `IMAGE_MAGICK_AUTODETECT`, until the host is fixed and the process restarts. `magick` driver only. [Policy](images.md#policy) |
+| `IMAGE_AUTO_ORIENT` | `true` | `bool` | Apply the source's EXIF `Orientation` tag as an image decodes, under both drivers. `false`, `0`, `no` or `off` turn it off: the pixels keep the sensor's orientation, the output keeps the tag, and `Image::orient()` applies it where the pipeline says. Any other value keeps the default with a `warn!`. [Images](images.md#orientation) |
+
+See [Images](images.md) for the two-tier limit enforcement and how to
+choose between the drivers.
+
+## Hashing
+
+Password-hashing driver and per-algorithm parameters. Invalid values
+return a `FrameworkError::param` at first hash, surfacing
+misconfiguration immediately instead of silently defaulting.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `HASH_DRIVER` | `bcrypt` | `String` (`bcrypt`, `argon`/`argon2i`, `argon2id`) | Active hashing algorithm. Case-insensitive. |
+| `HASH_ROUNDS` | `12` | `u32` | Bcrypt cost (range `4..=31`). Out-of-range values fail with a clear error. |
+| `HASH_MEMORY` | `65536` (64 MiB, KiB units) | `u32` | Argon2 memory in KiB. Minimum `8`. Argon-only. |
+| `HASH_TIME` | `4` | `u32` | Argon2 time / iterations. Minimum `1`. Argon-only. |
+| `ARGON_TIME` | unset | `u32` | Read when `HASH_TIME` is unset: the Argon2 time cost in iterations, minimum `1`; `HASH_TIME` wins when both are set. Argon-only. |
+| `PASSWORD_RESET_TIMEBOX_MS` | `200` | `u64` | The least time a password reset link request takes, whatever its answer, so a refused address is not told apart from an accepted one by timing. A value that is not a whole number fails at boot. |
+| `HASH_THREADS` | `1` | `u32` | Argon2 parallelism (matches OWASP / libsodium). Minimum `1`. Argon-only. |
+| `HASH_VERIFY` | `false` | `bool` | When true, `verify()` rejects hashes from a different algorithm than `HASH_DRIVER` (returns `Ok(false)`). Default `false` so legacy bcrypt hashes still verify after a driver flip until they're rotated. |
+| `HASH_MAX_CONCURRENCY` | the host's available parallelism | whole number, at least `1` | How many password hashes run at once in the process. `hash_async`, `verify_async` and Magnetar's sign-in hashing share the limit; work past it waits as a task holding no thread, so a burst of sign-ins holds at most the limit times one hash's memory. `0` or a value that is not a whole number fails with a clear error. A blank value is unset. |
+
+## Validation
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `HIBP_TIMEOUT_SECS` | `30` (seconds) | `u64` | Request timeout for `Password::uncompromised()`'s Have I Been Pwned range check, read fresh each time a default `HibpVerifier` is constructed. A slow or unreachable HIBP still fails open - see [Validation](validation.md). |
+
+## Auth Flows
+
+Two-factor authentication uses `APP_NAME` (covered under Application)
+as the TOTP issuer string - there is no dedicated `2FA_ISSUER` env
+var. The issuer falls back to `"Suprnova"` when `APP_NAME` is unset.
+
+## Inertia / Frontend
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `SUPRNOVA_FRONTEND` | `svelte` | `String` (`svelte`, `react`, `vue`) | Active frontend. Case-insensitive. Drives `Frontend::detect_from_env()`, the default Vite entry point, and the page-component extension search order at compile time. Unknown or unset values fall back to `svelte`. |
+
+## Live
+
+Every limit Live runs under is one of these keys. The server's configuration is
+the only source: the bootstrap writes each value into the page, and the browser
+runtime applies the value it reads there, never a smaller one of its own.
+Values are plain whole numbers, with bytes written out (`16777216`, not
+`16MiB`). `Config::init` reads every key at boot, so a value that is not a
+whole number, or that breaks its rule, fails boot with the key, the value and
+the rule in the message. `LiveConfig::builder()` sets the same limits in code;
+see [Live](live.md#limits).
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `LIVE_MAX_REQUEST_BYTES` | `16777216` (16 MiB) | `usize` (bytes, 1 to 1073741824) | One Live request body, the signed snapshot included. It must be at least `LIVE_MAX_RESPONSE_BYTES`, because a response's snapshot comes back in the next request. The browser checks each request against it before sending. |
+| `LIVE_MAX_RESPONSE_BYTES` | `16777216` (16 MiB), or `LIVE_MAX_REQUEST_BYTES` when that is smaller | `usize` (bytes) | One Live response body: the island HTML as an escaped JSON string, the snapshot, events and effects. The browser reads the response under it. Set it above `LIVE_MAX_HTML_BYTES` when an island renders close to the HTML limit. |
+| `LIVE_MAX_HTML_BYTES` | `16777216` (16 MiB), or `LIVE_MAX_RESPONSE_BYTES` when that is smaller | `usize` (bytes) | One island render's HTML, apart from the response around it. The server refuses a render over it, and the morph refuses an island over it. |
+| `LIVE_MAX_JSON_DEPTH` | `32` | `usize` (levels, 1 to 64) | Container nesting in Live JSON. The parsers are recursive, so 64 is the stack ceiling. |
+| `LIVE_MAX_JSON_ENTRIES` | `1000000` | `usize` (entries, 1 to 100000000) | Array elements plus object members in one request. A parsed entry costs memory beyond its bytes, so this bounds what a request of many tiny entries can grow into. |
+| `LIVE_MAX_REQUEST_ITEMS` | `65536` | `usize` (items, 1 to 16777216) | Items in one request collection: model proposals, operations, action arguments. |
+| `LIVE_MAX_RESPONSE_ITEMS` | `65536` | `usize` (items, 1 to 16777216) | Items in one response collection: validation entries, events, effects, extensions, child deliveries, and the assets, mounts and child components of one render. |
+| `LIVE_MAX_CONTEXT_LIFETIME_MS` | `30000` | `u64` (ms, 1 to 300000) | How long one trusted request context stays valid. |
+| `LIVE_REQUEST_TIMEOUT_MS` | `60000` | `u32` (ms, 1 to 2147483647) | How long the browser waits for one Live response, body included. A 16 MiB response over a 5 Mbit/s link takes about 27 seconds. |
+| `LIVE_MAX_QUEUED_PER_ISLAND` | `8` | `u8` (1 to 64) | Requests one island queues. |
+| `LIVE_MAX_PARALLEL_PER_ISLAND` | `1` | `u8` (1 to 8, at most the queue) | Requests one island runs at once. |
+| `LIVE_MORPH_MAX_NODES` | `1000000` | `u32` (nodes, 1 to 1073741824) | Nodes in one rendered island the browser morphs. |
+| `LIVE_MORPH_MAX_DEPTH` | `512` | `u32` (levels, 1 to 4096) | Element nesting in one rendered island. The morph walks the tree recursively, and browsers' HTML parsers stop nesting at 512. |
+| `LIVE_MORPH_MAX_KEYS` | `1000000` | `u32` (keyed elements, 1 to 1073741824) | Keyed elements (`live:key`, `id`, nested islands) in one rendered island. |
+| `LIVE_MORPH_MAX_ATTRIBUTES` | `10000000` | `u32` (attributes, 1 to 1073741824) | Attributes across one rendered island. |
+| `LIVE_MORPH_MAX_ATTRIBUTES_PER_ELEMENT` | `4096`, or `LIVE_MORPH_MAX_ATTRIBUTES` when that is smaller | `u32` (attributes) | Attributes on one rendered element. The morph's cost for one element grows with the square of its attribute count. |
+| `LIVE_MORPH_DEADLINE_MS` | `0` (no deadline) | `u32` (ms, 0 to 2147483647) | How long one morph may run before the browser abandons it. The morph runs synchronously, so a deadline can only stop work that already held the page and changed part of the island; set one only when a failed update is better than a long one. |
+| `LIVE_ASYNC_MAX_PAYLOAD_BYTES` | `1048576` (1 MiB), or `LIVE_ASYNC_MAX_BUFFER_BYTES` when that is smaller | `usize` (bytes, 1 to 16777216) | One asynchronous event payload. Publishing a larger one fails with the limit named. |
+| `LIVE_ASYNC_MAX_BUFFER_BYTES` | `16777216` (16 MiB) | `usize` (bytes, 1 to 1073741824) | What one open document's delivery queue, and one subscription's replay log, may hold in server memory while the browser catches up. It must be at least `LIVE_ASYNC_MAX_PAYLOAD_BYTES`. |
+| `LIVE_ASYNC_MAX_QUEUED_EVENTS` | `4096` | `usize` (events, 1 to 65536) | Asynchronous events one open document holds before its islands apply them, on the server and in the browser. An event past it is refused with the limit named and the island re-renders fresh. |
+| `LIVE_ASYNC_MAX_REPLAY_EVENTS` | `4096`, or `LIVE_ASYNC_MAX_QUEUED_EVENTS` when that is smaller | `usize` (events, 1 to the queued-event limit) | Events one reconnect replay carries, and events one subscription's replay log keeps. A replay is queued whole, so it fits inside `LIVE_ASYNC_MAX_QUEUED_EVENTS`. A longer gap re-renders the island fresh. |
+| `LIVE_ASYNC_MAX_REPLAY_BYTES` | `4194304` (4 MiB), or `LIVE_ASYNC_MAX_PAYLOAD_BYTES` when that is larger | `usize` (bytes, the payload limit to 68719476736) | Memory one subscription's replay log may hold. The log keeps recent events so a reconnecting browser catches up without a fresh render; each entry is charged its payload tree and bookkeeping, not its encoded size. |
+| `LIVE_ASYNC_REPLAY_BUDGET_BYTES` | `268435456` (256 MiB), or `LIVE_ASYNC_MAX_REPLAY_BYTES` when that is larger | `usize` (bytes, the replay limit to 68719476736) | Memory every replay log in the process may hold together. Past it, the oldest entries in any log are evicted first, and a browser that needed one re-renders fresh. Without it, replay memory grew with the number of sessions. |
+| `LIVE_ASYNC_MAX_TRANSPORTS_PER_SESSION` | `64` | `usize` (transports, 1 to 4096) | Asynchronous transports (one per open tab) one session may hold. One past it is refused with a 409 and the key in the log. |
+| `LIVE_ASYNC_MAX_TRANSPORTS` | `16384` | `usize` (transports, the per-session limit to 1048576) | Asynchronous transports the process may hold. Each is a long-lived connection, so keep it under the process's file-descriptor limit. |
+| `LIVE_MAX_REDIRECT_BYTES` | `65536` (64 KiB), or `LIVE_MAX_RESPONSE_BYTES` when that is smaller | `usize` (bytes, 1 to 2097152, at most the response) | One redirect or reflected URL a Live response carries. 2 MiB is the longest URL a browser follows. |
+| `LIVE_UPLOAD_CHUNK_BYTES` | `8388608` (8 MiB), or `LIVE_UPLOAD_MAX_FILE_BYTES` when that is smaller | `usize` (bytes, 1 to 67108864) | One upload chunk request. The server holds a chunk in memory while it checks and stores it. It must be at most the file size and large enough that a file of `LIVE_UPLOAD_MAX_FILE_BYTES` takes at most 99994 chunks. The browser sends chunks of this size unless `configureUploads` asks for smaller ones. |
+| `LIVE_UPLOAD_MAX_ACTIVE` | `8` | `usize` (transfers, 1 to 1024) | Upload transfers running at once. Each holds one chunk in memory, so it times `LIVE_UPLOAD_CHUNK_BYTES` must be at most 1073741824 (1 GiB). |
+| `LIVE_UPLOAD_MAX_FILE_BYTES` | `1073741824` (1 GiB) | `u64` (bytes, 1 to 1099511627776) | One uploaded file. The browser refuses a larger file before it sends anything; a component's own upload policy can only lower it. |
+| `LIVE_UPLOAD_MAX_PENDING_FILES` | `1024`, or `LIVE_UPLOAD_MAX_ACTIVE` when that is larger | `usize` (files, the active limit to 100000) | Files one page, and one visitor on the server, has selected and not yet finished. |
+| `LIVE_UPLOAD_MAX_PENDING_BYTES` | `4294967296` (4 GiB), or `LIVE_UPLOAD_MAX_FILE_BYTES` when that is larger | `u64` (bytes, the file limit to 17592186044416) | Bytes across the files one page, and one visitor on the server, has selected and not yet finished. |
+| `LIVE_UPLOAD_MAX_STORAGE_BYTES` | `17179869184` (16 GiB), or `LIVE_UPLOAD_MAX_PENDING_BYTES` when that is larger | `u64` (bytes, the pending limit to 70368744177664) | What the temporary upload store holds across every visitor. The server alone applies it; it never reaches the page. |
+| `LIVE_LEDGER_MAX_INSTANCES` | `100000` | `usize` (instances, 1 to 1000000) | Component instances the instance ledger holds. Every mounted private island and every promoted public seed is one. Nothing retires an instance when its page closes; it lives its whole lifetime, so this divided by `LIVE_LEDGER_INSTANCE_LIFETIME_MS` is the page views the ledger holds (100,000 over seven days is about 14,000 a day). Past it, each new mount evicts the instance that expires soonest, and that page's next action reloads it with current state. |
+| `LIVE_LEDGER_INSTANCE_LIFETIME_MS` | `604800000` (seven days) | `u64` (ms, 60000 to 604800000) | How long one mounted instance lives, for its snapshot, its mount and the ledger. A shorter lifetime frees ledger room sooner; an island older than it re-renders fresh on its next action. |
+| `LIVE_LEDGER_CLAIM_LEASE_MS` | `30000` | `u64` (ms, 1 to 300000) | How long one action holds its claim on an instance before another action may take it over. |
+| `LIVE_LEDGER_MAX_ACCEPTED_OUTCOMES` | `64` | `usize` (outcomes, 1 to 64) | Accepted outcomes each instance keeps so a retried action gets its original answer. |
+
+## Maintenance Mode
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `MAINTENANCE_DRIVER` | `file` | `String` (`file`, `cache`) | Selects how `down`/`up` state is stored. `file` writes to the framework storage path; `cache` rides on the configured cache driver (useful when many app instances must coordinate maintenance state). Any other value falls back to `file`. |
+
+## Events
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `EVENT_MAX_CONCURRENCY` | `256` | `usize` | Ceiling on concurrent queued listener tasks. Values `<= 0` or unparseable fall back to the default. Applies to `Event::queue` / queued listeners; sync listeners are not subject to this limit. |
+
+## Logging
+
+`LOG_FORMAT` is **environment-aware**: in production (`APP_ENV=production`,
+or `APP_ENV` unset) the default is `json` for log-aggregator friendliness;
+everywhere else the default is `pretty` for human-readable local/dev
+output. An explicit value always wins.
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `LOG_LEVEL` | `"info"` (filter), `debug` (channels) | `String` (`emergency`, `alert`, `critical`, `error`, `warning`/`warn`, `notice`, `info`, `debug`/`trace` - case-insensitive, with `tracing` target directives) | Tracing-subscriber filter directive, such as `info,sqlx=warn`. A PSR-3 name reads as its nearest `tracing` level: `warning` as `warn`, `notice` as `info`, `critical`, `alert` and `emergency` as `error`. Its bare level (`info` in `info,sqlx=warn`, `debug` when it names none) is also the lowest level the `single`, `daily`, `monthly`, `stderr`, `errorlog` and `syslog` channels keep, as Laravel's. A bare level that is no level fails boot. See [Logging](logging.md#log-levels). |
+| `LOG_FORMAT` | env-aware (`json` in production, `pretty` elsewhere) | `String` (`json`, `pretty`) | Tracing-subscriber output format. |
+| `LOG_CHANNEL` | `stdout` | `String` | The default log channel: `stdout`, `stderr`, `errorlog`, `single`, `daily`, `monthly`, `syslog`, `null`, `stack`, `custom`, or one the bootstrap defines with `Log::define`. A name that is no channel fails boot. See [Logging](logging.md#channels). |
+| `LOG_CHANNEL_DRIVER` | none - required for `custom` | `String` | The driver the built-in `custom` channel uses. Register it with `Log::extend` in the bootstrap. Missing or unregistered drivers fail boot when the `custom` channel is selected. |
+| `LOG_STACK` | `single` | `String` (comma-separated) | The channels the `stack` channel writes to. |
+| `LOG_DAILY_DAYS` | `7` | `u32` | How many files the `daily` channel keeps, counting the one it writes to; `0` keeps every file. A value that is not a number fails boot. |
+| `LOG_SYSLOG_FACILITY` | `user` | `String` (`user`, `daemon`, `local0` to `local7`, another facility name, or 0 to 23) | The facility the `syslog` channel sends with. An unknown one fails boot. |
+| `LOG_SYSLOG_SOCKET` | `/dev/log` (`/var/run/syslog` on macOS) | `String` | The socket the `syslog` channel sends to. |
+| `MAIL_LOG_CHANNEL` | unset (the default channel) | `String` | The log channel the `log` mail transport writes to. |
+
+You set the `syslog` channel's ident with `APP_NAME`. If you leave it unset
+or empty, the ident is `suprnova`.
+
+## Observability (OpenTelemetry)
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset (telemetry disabled) | `String` | Base URL of the OTLP collector, for example `http://localhost:4318`. Each signal is sent to its own path under it: `/v1/traces`, `/v1/metrics`, `/v1/logs`. A trailing slash is trimmed. When unset (or whitespace), exporters are not installed and the framework keeps using the standard `tracing` subscriber. This variable is what turns telemetry on; the three per-signal variables below have no effect without it. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | `String` | The URL the traces are sent to, used as it is written, with no path added. Unset sends traces to `/v1/traces` under the base endpoint. |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | unset | `String` | The URL the metrics are sent to, used as it is written. Unset sends metrics to `/v1/metrics` under the base endpoint. |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | unset | `String` | The URL the logs are sent to, used as it is written. Unset sends logs to `/v1/logs` under the base endpoint. |
+| `OTEL_EXPORTER_OTLP_COMPRESSION` | unset (no compression) | `String` (`gzip`) | Read by the OpenTelemetry exporter, not by Suprnova. `gzip` works. `zstd` is not compiled in: asking for it leaves the signals out, with the reason in the log. |
+| `OTEL_SERVICE_NAME` | `"suprnova"` | `String` | `service.name` resource attribute on every span / metric / log record. |
+| `OTEL_SERVICE_VERSION` | `CARGO_PKG_VERSION` at build time | `String` | `service.version` resource attribute. |
+| `OTEL_SDK_DISABLED` | `false` | `bool` | Standard OTel kill switch. When true, exporters are not installed regardless of `OTEL_EXPORTER_OTLP_ENDPOINT`. |
+
+An endpoint must be a URL with the scheme `http` or `https` and a host. A
+signal whose endpoint is not one, such as a path alone, is left out and
+reported in the log, and the other signals are still exported. The report never
+repeats the endpoint, which can carry a password or a token. The exporters need
+the `otel` cargo feature. The other standard OTLP variables
+(`OTEL_EXPORTER_OTLP_HEADERS`, `_PROTOCOL`, `_TIMEOUT`) are read by the
+OpenTelemetry exporter directly.
+
+## Heap profiling
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `SUPRNOVA_HEAP_PROFILE` | `dhat-heap.json` in the working directory | `String` (path) | The file the heap profile is written to when the process ends normally. Read only by a build with the `heap-profiling` feature. See [Deployment](deployment.md#heap-profiling). |
+
+## CLI / dev server
+
+These are read by the `suprnova` CLI binary's dev server rather than
+the runtime framework - they appear in the starter `.env` or are
+honoured by `suprnova serve`. The CLI's `ssr:*` commands read none of
+their own: they run the application binary's commands, which read the
+Inertia configuration the application installed (see
+[Console](console.md#ssr-commands)).
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `VITE_PORT` | `5765` | `u16` | Port Vite binds to in `suprnova serve`. CLI `--frontend-port` overrides. |
+
+## Subsystems with no env vars
+
+A few subsystems are configured entirely in Rust code via the
+container or service registration - they have **zero** env vars the
+framework reads:
+
+- **Filesystem / Storage, apart from S3.** Disks are registered by name with
+  `Storage::register_*` in `bootstrap()` and addressed by name at the
+  call site (`Storage::disk("public")`), or reached as the default disk
+  `FILESYSTEM_DISK` names (`Storage::default_disk()`). The one exception
+  is the S3-compatible `s3` disk, which the `S3_*` variables configure (see **Filesystem** above and
+  [Docker](cli-docker.md)).
+- **Broadcasting & WebSockets.** Channels are registered with the
+  `ws!()` macro and `BroadcastHub` configuration in code. The driver
+  itself rides on whatever the configured `CACHE_DRIVER` selects.
+- **CORS, CSRF, Idempotency, Timeout.** Configured via builder structs
+  passed to the middleware constructors in `bootstrap()`. The defaults
+  are conservative enough that a typical app never touches them.
+- **Magnetar and OAuth.** `MagnetarConfig` is built in application bootstrap.
+  The API starter reads `PASSKEY_RP_ID` and `PASSKEY_RP_ORIGIN`, but the
+  framework itself does not. OAuth provider IDs, secrets, callback URLs,
+  scopes, transports, and policy values are supplied programmatically through
+  the Magnetar provider registry. Applications may source those values from
+  environment variables or a secret manager.
+- **Notifications, Payments, Feature Flags.** Each
+  registers concrete drivers via `App::bind` in `bootstrap()`. Pick
+  your driver in Rust; pass any URLs/keys it needs as your own env
+  vars. The exceptions are the table-layout variables in
+  **Laravel database** above and `WEB_PUSH_ENDPOINT_ORIGINS` in
+  **Web Push**.
+- **Vector search** registers its drivers the same way. The Qdrant,
+  MariaDB and Pinecone drivers have a `from_env()` constructor that reads the
+  variables in **Vector search** above.
+
+## Variables the framework does not read
+
+The scaffolded starter `.env` lists a few keys for human-author
+convenience that the framework never consults. They're documented
+here so a reader searching for them isn't left wondering:
+
+- `MAIL_FROM_ADDRESS` - a Laravel-style placeholder the framework never
+  consults. The actual from-address the auth-flow facades use is `MAIL_FROM`
+  (covered under Mail). Your own `Mailable` types can read it via
+  `env_optional` if you want to keep the Laravel name, but nothing in
+  `suprnova::*` does. (`MAIL_FROM_NAME` **is** read as of 0.5.9 - see the
+  Mail chapter - so it's no longer listed here.)
+
+## How values are parsed
+
+A short reference for the three env-helper variants - see
+[Configuration](configuration.md#direct-env-access) for the full
+treatment:
+
+| Helper | Behaviour on missing | Behaviour on unparseable |
+|---|---|---|
+| `env(key, default)` | returns `default` | `warn!` + returns `default` |
+| `env_required(key)` | **panics** | **panics** |
+| `env_optional(key)` | returns `None` | `warn!` + returns `None` |
+| `env_strict(key)` (internal, used by `try_from_env`) | returns `Ok(None)` | returns `Err(FrameworkError)` - boot aborts |
+
+Strict variants (`AppConfig::try_from_env`, `ServerConfig::try_from_env`)
+are what `Config::init` calls, so a typo in `APP_DEBUG=tru` or
+`SERVER_PORT=80a0` aborts boot with a structured error instead of
+silently reverting to the default. Lenient variants exist for the
+broader call-site population (including `impl Default`) where a parse
+failure must not panic.
+
+## Per-environment overrides
+
+The loader reads files in this order, each overriding the previous:
+
+1. `.env`
+2. `.env.local`
+3. `.env.<environment>` (e.g. `.env.production`, `.env.staging`,
+   `.env.testing`, `.env.<custom>` for `APP_ENV=<custom>`), then
+   `.env.<environment>.local`, only when `APP_ENV` is set, in the process
+   or in `.env`
+4. Process environment
+
+That means a containerised production deploy can ship a minimal
+`.env.production` overriding only the keys that differ from `.env`
+(driver names, URLs, key material), and the real container env
+overrides both for secrets that should never land in a committed
+file.
+
+See [Configuration](configuration.md#how-env-loading-works) for the
+exact loader behaviour and the tracking of loaded keys that prevents
+stale `.env` values from promoting into the "real system env" tier
+across reloads.
+
+## Next
+
+- [Configuration](configuration.md) - typed `Config::*` registration,
+  the `env*` helpers, environment detection
+- [Deployment](deployment.md) - what to set in production
+- [Encryption](encryption.md) - `APP_KEY` rotation via
+  `APP_KEY_PREVIOUS`
+- [Application Bootstrap](bootstrap.md) - where env-driven boot order
+  is established
