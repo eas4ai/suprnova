@@ -62,6 +62,22 @@ pub enum GenerationOutcome {
     /// One complete snapshot is now available to readers.
     Completed(RecommendationRun),
 }
+/// One stored fact a graph explanation rests on, which the viewer may see (REC-007).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ExplanationEvidence {
+    /// One of the viewer's own events, by id and content digest.
+    Event(super::EventProvenance),
+    /// A graph edge the viewer's scope covers, by key and kind.
+    Edge {
+        /// The edge's key in the graph store.
+        key: String,
+        /// The edge's kind, such as `co_engaged` or `relation:<name>`.
+        kind: String,
+    },
+    /// A search document the viewer may see.
+    Document(RecommendationTarget),
+}
 /// Explanations deliberately omit peer identities, interaction rows and private evidence ids.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RecommendationExplanation {
@@ -75,6 +91,16 @@ pub struct RecommendationExplanation {
     pub fallback_tier: String,
     /// Shared titles are hydrated and scope-checked for this viewer at read time.
     pub shared_target_titles: Vec<String>,
+    /// The engine that produced the row: `starter` or `graph`.
+    #[serde(default)]
+    pub engine: String,
+    /// The stored facts a graph row rests on; empty for a starter row, whose counts and
+    /// categories are its explanation.
+    #[serde(default)]
+    pub evidence: Vec<ExplanationEvidence>,
+    /// Why the graph engine answered with the starter's rows instead, when it did.
+    #[serde(default)]
+    pub fallback_reason: Option<String>,
 }
 /// Results carry only registered search documents and the viewer's projected explanation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -112,4 +138,17 @@ pub trait Recommender: Send + Sync {
         viewer: &Viewer,
         limit: usize,
     ) -> Result<Vec<Recommendation>, FrameworkError>;
+    /// Documents near `target`, steered by the viewer's own positive and negative events
+    /// (REC-006's discover query). Only an engine with vector context answers it.
+    async fn discover(
+        &self,
+        _target: &RecommendationTarget,
+        _actor: &Actor,
+        _viewer: &Viewer,
+        _limit: usize,
+    ) -> Result<Vec<Recommendation>, FrameworkError> {
+        Err(FrameworkError::param(
+            "the discover query needs RECOMMEND_ENGINE=graph",
+        ))
+    }
 }

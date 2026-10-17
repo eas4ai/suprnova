@@ -17,8 +17,8 @@ use crate::{FrameworkError, Viewer};
 pub use config::{GraphSurface, RecommendConfig};
 pub(crate) use config::{scoped as scoped_config, within as within_config};
 pub use engine::{
-    GenerateRun, GenerationOutcome, Recommendation, RecommendationExplanation, RecommendationRun,
-    Recommender,
+    ExplanationEvidence, GenerateRun, GenerationOutcome, Recommendation, RecommendationExplanation,
+    RecommendationRun, Recommender,
 };
 pub use event::{
     Actor, EventClass, EventScoring, EventType, RecommendationEvent, RecommendationTarget,
@@ -121,13 +121,21 @@ impl Recommend {
     pub fn similar_to(target: RecommendationTarget) -> RecommendationBuilder {
         RecommendationBuilder::new(Query::Similar(target))
     }
-    /// Applications may replace the starter through the container's Recommender binding.
+    /// Applications may replace the engine through the container's Recommender binding;
+    /// otherwise RECOMMEND_ENGINE picks the starter or the graph engine.
     pub fn engine() -> Result<Arc<dyn Recommender>, FrameworkError> {
         if crate::App::has_binding::<dyn Recommender>() {
             crate::App::resolve_make::<dyn Recommender>()
+        } else if RecommendConfig::current()?.engine == "graph" {
+            Ok(Arc::new(graph::GraphRecommender))
         } else {
             Ok(Arc::new(StarterRecommender))
         }
+    }
+    /// Documents near `target`, steered by the viewer's own positive and negative events;
+    /// the graph engine answers it with the search engine's discover operation (REC-006).
+    pub fn discover(target: RecommendationTarget) -> RecommendationBuilder {
+        RecommendationBuilder::new(Query::Discover(target))
     }
     /// On-demand and scheduled calls share the same lock and publication path.
     pub async fn generate(run: GenerateRun) -> Result<GenerationOutcome, FrameworkError> {
@@ -198,6 +206,7 @@ impl Recommend {
 enum Query {
     Actor(Actor),
     Similar(RecommendationTarget),
+    Discover(RecommendationTarget),
 }
 /// Fluent reads defer Auth resolution and validation until the fallible get boundary.
 #[derive(Clone)]
@@ -254,6 +263,16 @@ impl RecommendationBuilder {
             Query::Similar(target) => {
                 target.validate()?;
                 engine.similar_to(&target, &viewer, self.limit).await
+            }
+            Query::Discover(target) => {
+                target.validate()?;
+                // The viewer's own events steer the query, so only a signed-in viewer has
+                // any; a guest's discover is the target's plain neighbourhood.
+                let actor = match &viewer {
+                    Viewer::Authenticated { id, .. } => Actor::User(id.clone()),
+                    Viewer::Guest => Actor::User(String::new()),
+                };
+                engine.discover(&target, &actor, &viewer, self.limit).await
             }
         }
     }

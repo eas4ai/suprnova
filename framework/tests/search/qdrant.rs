@@ -2884,15 +2884,15 @@ async fn rec_006_native_recommend_and_discover_follow_the_stored_vectors_qdrant(
                 .await
                 .unwrap();
             assert_eq!(
-                discovered.candidates.first().map(|hit| hit.document.key.as_str()),
-                Some("positive_side")
-            );
-            assert!(
                 discovered
                     .candidates
-                    .iter()
-                    .all(|hit| !["liked", "positive", "disliked"].contains(&hit.document.key.as_str()))
+                    .first()
+                    .map(|hit| hit.document.key.as_str()),
+                Some("positive_side")
             );
+            assert!(discovered.candidates.iter().all(|hit| {
+                !["liked", "positive", "disliked"].contains(&hit.document.key.as_str())
+            }));
         })
     })
     .await;

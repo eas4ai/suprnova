@@ -8,7 +8,10 @@ use suprnova::{
 
 /// A generation of `recommendation_notes` in a fresh collection engine, holding the
 /// given notes with the given three-dimensional vectors.
-async fn generation(engine: &suprnova::CollectionEngine, notes: &[(&Note, [f32; 3])]) -> GenerationId {
+async fn generation(
+    engine: &suprnova::CollectionEngine,
+    notes: &[(&Note, [f32; 3])],
+) -> GenerationId {
     let descriptor = <Note as Searchable>::descriptor();
     let base = suprnova::SearchRegistry::generation_for(descriptor.name)
         .await
@@ -17,11 +20,17 @@ async fn generation(engine: &suprnova::CollectionEngine, notes: &[(&Note, [f32; 
     let mut settings = registered.read_settings(descriptor, &base).await.unwrap();
     settings.index_time.dimensions = Some(3);
     let id = GenerationId::new("vectors").unwrap();
-    engine.create_generation(descriptor, &settings, &id).await.unwrap();
+    engine
+        .create_generation(descriptor, &settings, &id)
+        .await
+        .unwrap();
     let entry = suprnova::SearchRegistry::by_index(descriptor.name).unwrap();
     let mut documents = Vec::new();
     for (note, vector) in notes {
-        let document = (entry.load_document)(&note.id.to_string()).await.unwrap().unwrap();
+        let document = (entry.load_document)(&note.id.to_string())
+            .await
+            .unwrap()
+            .unwrap();
         documents.push(IndexedDocument {
             content_hash: document.content_hash(&settings.index_time.digest()),
             document,
@@ -34,7 +43,11 @@ async fn generation(engine: &suprnova::CollectionEngine, notes: &[(&Note, [f32; 
 }
 
 fn keys(result: &EngineResult) -> Vec<String> {
-    result.candidates.iter().map(|hit| hit.document.key.clone()).collect()
+    result
+        .candidates
+        .iter()
+        .map(|hit| hit.document.key.clone())
+        .collect()
 }
 
 #[tokio::test]
@@ -76,8 +89,14 @@ async fn rec_006_recommend_folds_the_stored_vectors_toward_positives_and_away_fr
             .unwrap();
         let toward = keys(&toward);
         assert_eq!(toward.first(), Some(&near_liked.id.to_string()));
-        assert!(!toward.contains(&liked.id.to_string()), "an input is never returned");
-        assert!(!toward.contains(&private.id.to_string()), "the scope filter applies");
+        assert!(
+            !toward.contains(&liked.id.to_string()),
+            "an input is never returned"
+        );
+        assert!(
+            !toward.contains(&private.id.to_string()),
+            "the scope filter applies"
+        );
         let away = engine
             .recommend(
                 descriptor,
@@ -94,7 +113,8 @@ async fn rec_006_recommend_folds_the_stored_vectors_toward_positives_and_away_fr
         let away = keys(&away);
         assert!(!away.contains(&disliked.id.to_string()));
         assert_eq!(away.last(), Some(&near_disliked.id.to_string()));
-        let at = |list: &[String], note: &Note| list.iter().position(|key| *key == note.id.to_string());
+        let at =
+            |list: &[String], note: &Note| list.iter().position(|key| *key == note.id.to_string());
         // The negative pushes the in-between note down relative to the plain query.
         assert!(at(&away, &between) <= at(&toward, &between));
     })

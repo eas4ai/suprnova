@@ -185,6 +185,9 @@ fn project(
         affinity_values,
         fallback_tier: reason.tier.clone(),
         shared_target_titles: titles.into_iter().collect(),
+        engine: "starter".into(),
+        evidence: Vec::new(),
+        fallback_reason: None,
     })
 }
 pub(crate) fn run_from_row(row: &DynamicRow) -> Result<RecommendationRun, FrameworkError> {
