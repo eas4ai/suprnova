@@ -9,6 +9,11 @@ help: the trait `EventPayloadMetadata` is not implemented for `UndeclaredPayload
   |
 3 | struct UndeclaredPayload;
   | ^^^^^^^^^^^^^^^^^^^^^^^^
+help: the trait `EventPayloadMetadata` is implemented for `SearchSelected`
+ --> $WORKSPACE/framework/src/live/components/search_box.rs
+  |
+  | impl EventPayloadMetadata for SearchSelected {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 note: required by a bound in `EventMetadata::from_payload`
  --> $WORKSPACE/crates/suprnova-live/src/metadata/browser.rs
   |
