@@ -200,6 +200,8 @@ struct LocalModels {
 #[derive(Clone)]
 pub struct FastembedEmbedder {
     models: Arc<Mutex<LocalModels>>,
+    /// The model's own tokenizer measures each text, so batches are sized by token length.
+    tokenizer: Arc<tokenizers::Tokenizer>,
     profile: ModelProfile,
     native_profile: ModelProfile,
     batch: usize,
@@ -358,6 +360,9 @@ impl FastembedEmbedder {
             profile.files.graph = text_graph;
         }
         let pooling = runtime_pooling(profile.pooling);
+        let tokenizer =
+            tokenizers::Tokenizer::from_bytes(read_file(&resolved.root, &profile.files.tokenizer)?)
+                .map_err(|e| model_error(&config.model, e))?;
         let mut model = UserDefinedEmbeddingModel::new(
             read_file(&resolved.root, &profile.files.graph)?,
             tokenizers(&resolved.root, &profile)?,
@@ -408,6 +413,7 @@ impl FastembedEmbedder {
         };
         Ok(Self {
             models: Arc::new(Mutex::new(LocalModels { dense, sparse })),
+            tokenizer: Arc::new(tokenizer),
             profile: profile.with_dimensions(config.dimensions)?,
             native_profile: profile,
             // Dynamic graphs choose their range per inference call. Singleton batches
@@ -433,18 +439,32 @@ impl FastembedEmbedder {
         }
         let texts = texts.to_vec();
         let models = Arc::clone(&self.models);
+        let tokenizer = Arc::clone(&self.tokenizer);
         let profile = self.native_profile.clone();
         let batch_size = self.batch;
         let dimensions = self.dimensions;
         tokio::task::spawn_blocking(move || {
+            let lengths = texts
+                .iter()
+                .map(|text| {
+                    tokenizer
+                        .encode(text.as_str(), true)
+                        .map(|encoding| encoding.len().min(profile.max_tokens))
+                        .map_err(|e| model_error(&profile.id, e))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let mut models = models.lock().map_err(|_| {
                 FrameworkError::internal("SEARCH_EMBED_MODEL inference lock poisoned")
             })?;
-            let mut result = Vec::with_capacity(texts.len());
-            for batch in texts.chunks(batch_size) {
+            let mut result: Vec<Option<Embedding>> = vec![None; texts.len()];
+            for batch in super::token_batches(&lengths, batch_size) {
+                let inputs = batch
+                    .iter()
+                    .map(|&index| texts[index].as_str())
+                    .collect::<Vec<_>>();
                 let output = models
                     .dense
-                    .transform(batch, Some(batch.len()))
+                    .transform(&inputs, Some(inputs.len()))
                     .map_err(|e| model_error(&profile.id, e))?;
                 let vectors = pool_output(output, &profile)?;
                 if vectors.len() != batch.len() {
@@ -453,11 +473,16 @@ impl FastembedEmbedder {
                         "inference returned the wrong batch length",
                     ));
                 }
-                for vector in vectors {
-                    result.push(validate_embedding(vector, &profile, dimensions)?);
+                for (index, vector) in batch.into_iter().zip(vectors) {
+                    result[index] = Some(validate_embedding(vector, &profile, dimensions)?);
                 }
             }
-            Ok(result)
+            result
+                .into_iter()
+                .map(|vector| {
+                    vector.ok_or_else(|| model_error(&profile.id, "an input received no vector"))
+                })
+                .collect()
         })
         .await
         .map_err(|e| model_error(&self.profile.id, e))?

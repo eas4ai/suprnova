@@ -476,7 +476,7 @@ downloads ONNX Runtime at compile time. The default build downloads nothing.
 | `SEARCH_EMBED_MODEL` | fastembed: `hf:onnx-community/embeddinggemma-2-ONNX`; HTTP: required | `String` | Dense model identity. Local inference accepts a named model, `hf:owner/repository[@revision]`, or `path:directory`. |
 | `SEARCH_EMBED_API_KEY` | unset | `Option<String>` | Optional HTTP bearer key, sent only to the pinned embedding destination. |
 | `SEARCH_EMBED_DIMENSIONS` | native profile; unknown HTTP model probes once | `Option<usize>` | Positive requested dimensions; local reductions must be supported by the profile. Vectors are validated and normalized after truncation. |
-| `SEARCH_EMBED_BATCH` | `64` | `usize` | Positive HTTP/local inference batch bound and local reranker batch size. Dynamic quantization uses singleton inference. |
+| `SEARCH_EMBED_BATCH` | `64` | `usize` | Positive HTTP/local inference batch bound and local reranker batch size. A local embedding model counts it in 512-token texts; a longer text fills the batch by the square of its length. Dynamic quantization uses singleton inference. |
 | `SEARCH_EMBED_TIMEOUT_SECS` | `30` | `u64` | Positive HTTP request deadline including body receipt. |
 | `SEARCH_EMBED_MAX_RESPONSE_BYTES` | `16777216` | `usize` | Positive streamed HTTP response cap, 16 MiB by default. |
 | `SEARCH_EMBED_RETRIES` | `3` | `u32` | Additional HTTP attempts for 429 or 5xx only; at most 16. |

@@ -4,6 +4,19 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 4.3.0 - 2026-10-17
+
+### Fixed
+
+- **A local embedding model keeps its memory bounded on long documents.** The `fastembed`
+  provider padded every text in a batch to the batch's longest, and attention
+  memory grows with the square of that length, so one long document among
+  short ones could take a single inference call past 24 GB. It now measures
+  each text with the model's own tokenizer and batches texts of similar
+  length: `SEARCH_EMBED_BATCH` counts texts of 512 tokens, a longer text takes
+  the room of several by the square of its length, and a text longer than
+  that runs alone.
+
 ## 4.2.1 - 2026-10-16
 
 ### Added

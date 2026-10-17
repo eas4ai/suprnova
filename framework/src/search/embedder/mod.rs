@@ -420,6 +420,39 @@ pub trait Embedder: Send + Sync {
     }
 }
 
+/// Texts counted against `SEARCH_EMBED_BATCH` are this many tokens long.
+const BATCH_TEXT_TOKENS: u128 = 512;
+
+/// Local inference batches over texts of the given token lengths, as input indexes.
+///
+/// Attention keeps a score for every pair of tokens and pads a batch to its longest
+/// text, so a batch costs its size times the square of that length: one long document
+/// among short ones once pushed a single call past 24 GB. Texts are taken shortest
+/// first, and a batch closes at `limit` texts or when the next text would cost more
+/// than `limit` texts of `BATCH_TEXT_TOKENS` tokens. A text longer than that runs alone.
+#[cfg_attr(not(feature = "search-fastembed"), allow(dead_code))]
+pub(crate) fn token_batches(lengths: &[usize], limit: usize) -> Vec<Vec<usize>> {
+    let limit = limit.max(1);
+    let budget = limit as u128 * BATCH_TEXT_TOKENS * BATCH_TEXT_TOKENS;
+    let mut order: Vec<usize> = (0..lengths.len()).collect();
+    order.sort_by_key(|&index| (lengths[index], index));
+    let mut batches = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    for index in order {
+        // Ascending order makes this text the batch's longest.
+        let longest = lengths[index] as u128;
+        let cost = (current.len() as u128 + 1) * longest * longest;
+        if !current.is_empty() && (current.len() >= limit || cost > budget) {
+            batches.push(std::mem::take(&mut current));
+        }
+        current.push(index);
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
 #[cfg(test)]
 mod bm25_tests {
     use crate::search::SearchRegistry;
@@ -429,5 +462,64 @@ mod bm25_tests {
         let provider = SearchRegistry::embedder_named("test", "bm25").unwrap();
         let vectors = provider.embed_sparse(&["apple".into()]).await.unwrap();
         assert_eq!(vectors[0].indices, [280_767_167]);
+    }
+}
+
+#[cfg(test)]
+mod token_batch_tests {
+    use super::token_batches;
+
+    fn flat(batches: &[Vec<usize>]) -> Vec<usize> {
+        let mut all: Vec<usize> = batches.iter().flatten().copied().collect();
+        all.sort_unstable();
+        all
+    }
+
+    #[test]
+    fn a_long_text_runs_apart_from_short_ones() {
+        let mut lengths = vec![40; 63];
+        lengths.insert(10, 2_500);
+        let batches = token_batches(&lengths, 64);
+        assert_eq!(flat(&batches), (0..64).collect::<Vec<_>>());
+        let long = batches.iter().find(|batch| batch.contains(&10)).unwrap();
+        assert_eq!(long, &vec![10]);
+        assert_eq!(batches.len(), 2);
+    }
+
+    #[test]
+    fn every_batch_stays_within_the_count_and_the_attention_budget() {
+        let lengths: Vec<usize> = (0..500).map(|i| 20 + (i * 37) % 1_500).collect();
+        let batches = token_batches(&lengths, 16);
+        assert_eq!(flat(&batches), (0..500).collect::<Vec<_>>());
+        for batch in &batches {
+            assert!(batch.len() <= 16);
+            let longest = batch.iter().map(|&i| lengths[i]).max().unwrap() as u128;
+            assert!(
+                batch.len() == 1 || batch.len() as u128 * longest * longest <= 16 * 512 * 512,
+                "batch of {} up to {longest} tokens",
+                batch.len()
+            );
+        }
+    }
+
+    #[test]
+    fn short_texts_fill_the_whole_count() {
+        let batches = token_batches(&[30; 130], 64);
+        assert_eq!(
+            batches.iter().map(Vec::len).collect::<Vec<_>>(),
+            [64, 64, 2]
+        );
+    }
+
+    #[test]
+    fn a_count_of_one_keeps_every_text_alone() {
+        let batches = token_batches(&[5, 900, 5], 1);
+        assert_eq!(batches.len(), 3);
+        assert!(batches.iter().all(|batch| batch.len() == 1));
+    }
+
+    #[test]
+    fn no_texts_make_no_batches() {
+        assert!(token_batches(&[], 64).is_empty());
     }
 }

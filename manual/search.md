@@ -462,7 +462,11 @@ The default graph names are `onnx/model.onnx` with `onnx/model.onnx_data`,
 `onnx/model_quantized.onnx`, and `onnx/model_q4.onnx`, respectively. Dynamic
 quantization uses singleton inference so document batches and queries agree.
 BGE-M3 sparse inference uses its joint int8 export and external tensors.
-`SEARCH_EMBED_BATCH` otherwise bounds inference batches, default 64.
+`SEARCH_EMBED_BATCH` otherwise bounds inference batches, default 64. A local
+model counts it in texts of 512 tokens: attention memory grows with the square
+of a batch's longest text, so a longer text takes the room of several by that
+square, and one longer than that runs alone. Texts of similar length share a
+batch, measured with the model's own tokenizer.
 `SEARCH_EMBED_DIMENSIONS` selects a supported reduced dimension.
 
 Each cache directory has `manifest.json` with repository, resolved revision,
