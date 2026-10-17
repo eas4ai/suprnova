@@ -1,0 +1,2 @@
+{% macro link(href, text) %}<a href="{{ href }}">{{ text }}</a>{% endmacro %}
+{% call link(text = "x", href = "//evil.test") %}{% endcall %} {# refused: view-url #}
