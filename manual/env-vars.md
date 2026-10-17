@@ -463,6 +463,9 @@ downloads ONNX Runtime at compile time. The default build downloads nothing.
 | `SEARCH_QUEUE_CONNECTION` | unset | `Option<String>` | Registered queue connection for search jobs; unset uses the queue default. A supplied value must be nonempty. |
 | `SEARCH_QUEUE_NAME` | unset | `Option<String>` | Queue name for search jobs; unset uses the queue default. A supplied value must be nonempty. |
 | `SEARCH_CHUNK` | `500` | `usize` | Positive bulk import and removal chunk size. |
+| `SEARCH_MEDIA_MAX_BYTES` | `33554432` | `usize` | Maximum bytes per declared media part. Positive and at most 33554432. Storage reads enforce the limit before inference. |
+| `SEARCH_FFMPEG_BINARY` | `ffmpeg` | `String` | Binary for video frame decoding. Runs without a shell with a 30-second timeout. |
+| `SEARCH_EMBED_PROFILE` | unset | `Option<String>` | Shipped local model profile. Use `embeddinggemma-2-media` for image, audio and video with the EmbeddingGemma 2 fp32 graphs. |
 | `SEARCH_EXPANSION_TERMS` | `64` | `usize` | Positive alternative cap per query word, including the original. |
 | `SEARCH_HITS_CAP` | `1000` | `usize` | Positive accessible-hit cap; supplies the default index setting and bounds endpoint pages. |
 | `SEARCH_FUSION_DEPTH` | `200` | `usize` | Positive candidate depth per hybrid leg when code keeps the default setting. |
@@ -523,6 +526,18 @@ Booleans accept `true` or `false`; invalid values fail with the variable name.
 | `RECOMMEND_POPULARITY_WINDOW` | `30` | `u32` | UTC days of positive events contributing popularity. |
 | `RECOMMEND_LOCK_TTL_SECS` | `3600` | `u64` | Renewable generation cache-lock lifetime in seconds. |
 | `RECOMMEND_EVENT_TYPES` | `{}` | JSON object | Map from event name to `{"class":"positive\|negative\|seen","score":N}`. Base scores are bounded to -1000000 through 1000000; weight adds integer basis points divided by 20. |
+| `RECOMMEND_ENGINE` | `starter` | `String` | `starter`, or `graph` for the knowledge-graph engine, which falls back to the starter's rows when its evidence is thin. |
+| `RECOMMEND_GRAPH_STORE` | `database` | `String` | `database` (the application database) or `memgraph` (needs the `graph-memgraph` feature). |
+| `RECOMMEND_GRAPH_URL` | unset | `Option<String>` | Memgraph Bolt address, `bolt://` or `bolt+s://`, without credentials. |
+| `RECOMMEND_GRAPH_USERNAME` | unset | `String` | Memgraph user, read only when the store connects. |
+| `RECOMMEND_GRAPH_PASSWORD` | unset | `String` | Memgraph password, read only when the store connects; never logged or stored in configuration. |
+| `RECOMMEND_GRAPH_DEPTH` | `2` | `usize` | Most hops in a graph path. 1 to 4. |
+| `RECOMMEND_GRAPH_FANOUT` | `50` | `usize` | Most edges followed out of one node per hop, and the most recent positives per actor that pair into shared engagement. Positive. |
+| `RECOMMEND_GRAPH_MAX_NODES` | `2000` | `usize` | Most nodes one graph walk reaches. Positive. |
+| `RECOMMEND_PUBLIC_EVENT_TYPES` | unset | comma list | Event types other viewers may see; only these become per-actor graph facts and social signals. |
+| `RECOMMEND_SOCIAL_MIN_ACTORS` | `3` | `usize` | Followed actors who must agree before a target gains social proximity. Positive. |
+| `RECOMMEND_ACTOR_INDEX` | unset | `Option<String>` | Search index whose documents are users, keyed by user id; follows of its documents name followed users. |
+| `RECOMMEND_GRAPH_SURFACES` | `{}` | JSON object | Per-surface `affinity`, `semantic`, `social`, `freshness`, `feedback`, `trust` and `threshold` in basis points (0 to 10000) and `per_value`, `per_node`, `per_band` caps (positive). |
 
 The engine never prunes the event stream automatically. Your retention policy
 uses `recommendations:prune --older-than <days>` explicitly.

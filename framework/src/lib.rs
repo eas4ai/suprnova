@@ -633,8 +633,8 @@ pub use recommendations::{
     RecommendationBuilder, RecommendationEvent, RecommendationExplanation, RecommendationRun,
     RecommendationTarget, Recommender, StarterRecommender, event_digest,
     graph::{
-        DatabaseGraphStore, GraphEdge, GraphNode, GraphProvenance, GraphRecommender, GraphScope,
-        GraphStore, Revocation,
+        DatabaseGraphStore, GraphBuild, GraphEdge, GraphNode, GraphProvenance, GraphRecommender,
+        GraphRelation, GraphScope, GraphStore, Revocation,
     },
 };
 #[cfg(feature = "testing")]
@@ -1055,3 +1055,15 @@ pub use reporting::{report, report_if, report_unless, rescue};
 pub use reporting::ReportingMetrics;
 
 pub use reporting::ReportingKind;
+
+#[cfg(feature = "search-media")]
+pub use search::embedder::media::{
+    AudioFeatures, ImageFeatures, preprocess_search_audio, preprocess_search_image,
+    preprocess_search_video, preprocess_search_video_with_binary,
+};
+
+pub use search::settings::{MediaKind, MediaSource};
+
+pub use search::embedder::profiles::embeddinggemma_media_profile;
+
+pub use search::load_search_media;

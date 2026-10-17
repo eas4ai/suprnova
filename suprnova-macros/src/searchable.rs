@@ -33,11 +33,18 @@ struct Roles {
     facet: bool,
     embed: bool,
     title: bool,
+    media: Option<(Ident, LitStr)>,
 }
 
 impl Roles {
     fn declared(&self) -> bool {
-        self.text || self.filterable || self.sortable || self.facet || self.embed || self.title
+        self.text
+            || self.filterable
+            || self.sortable
+            || self.facet
+            || self.embed
+            || self.title
+            || self.media.is_some()
     }
 }
 
@@ -154,6 +161,32 @@ fn weight(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<f32> {
     Ok(parsed)
 }
 
+fn media_role(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<(Ident, LitStr)> {
+    let mut kind: Option<LitStr> = None;
+    let mut disk: Option<LitStr> = None;
+    meta.parse_nested_meta(|part| {
+        if part.path.is_ident("kind") {
+            kind = Some(part.value()?.parse()?);
+        } else if part.path.is_ident("disk") {
+            disk = Some(part.value()?.parse()?);
+        } else {
+            return Err(part.error("media accepts kind and disk"));
+        }
+        Ok(())
+    })?;
+    let kind = kind.ok_or_else(|| meta.error("media requires kind"))?;
+    let variant = match kind.value().as_str() {
+        "image" => "Image",
+        "audio" => "Audio",
+        "video" => "Video",
+        _ => return Err(meta.error("media kind must be image, audio or video")),
+    };
+    let disk = disk
+        .filter(|v| !v.value().trim().is_empty())
+        .ok_or_else(|| meta.error("media requires a nonempty disk"))?;
+    Ok((Ident::new(variant, kind.span()), disk))
+}
+
 fn roles(field: &syn::Field) -> syn::Result<Roles> {
     let mut roles = Roles::default();
     for attr in field
@@ -184,6 +217,11 @@ fn roles(field: &syn::Field) -> syn::Result<Roles> {
                 roles.filterable = true;
             } else if meta.path.is_ident("embed") {
                 roles.embed = true;
+            } else if meta.path.is_ident("media") {
+                if roles.media.is_some() {
+                    return Err(meta.error("media is declared once per field"));
+                }
+                roles.media = Some(media_role(&meta)?);
             } else if meta.path.is_ident("title") {
                 roles.title = true;
             } else {
@@ -297,6 +335,7 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let mut values = Vec::new();
     let mut embeds = Vec::new();
     let mut title: Option<String> = None;
+    let mut media = Vec::new();
     let mut order = 0usize;
     let mut names = std::collections::BTreeSet::new();
     let mut filterable_names = std::collections::BTreeSet::new();
@@ -316,6 +355,15 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 field,
                 format!("searchable text, embed and title require text for field `{name}`"),
             ));
+        }
+        if let Some((kind, disk)) = &roles.media {
+            if ty != "Text" {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "searchable media requires a storage path string",
+                ));
+            }
+            media.push(quote!(::suprnova::MediaSource { field: #name.into(), kind: ::suprnova::MediaKind::#kind, disk: #disk.into() }));
         }
         if roles.title {
             if ty != "Text" || title.is_some() {
@@ -495,7 +543,11 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                     key_column: <Self as ::suprnova::eloquent::EloquentModel>::PRIMARY_KEY,
                     attributes: vec![#(#declarations),*], embed_source: #embed_source,
                     soft_delete: #soft_delete, search_touches: vec![#(#touches),*],
-                    settings: #settings, scope: #scope, scope_fields: vec![#(#scope_fields),*],
+                    settings: || {
+                        let mut settings = (#settings)();
+                        settings.index_time.embed_media = vec![#(#media),*];
+                        settings
+                    }, scope: #scope, scope_fields: vec![#(#scope_fields),*],
                 })
             }
 
@@ -590,6 +642,30 @@ pub(crate) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_declarations_keep_field_order_and_require_kind_and_disk() {
+        let output = expand(syn::parse_quote! {
+            struct Clip {
+                #[searchable(embed)] caption: String,
+                #[searchable(media(kind = "audio", disk = "private"))] soundtrack: String,
+                #[searchable(media(kind = "image", disk = "public"))] poster: Option<String>,
+            }
+        })
+        .unwrap()
+        .to_string();
+        assert!(output.contains("embed_media"));
+        assert!(
+            output.find("MediaKind :: Audio").unwrap() < output.find("MediaKind :: Image").unwrap()
+        );
+        for input in [
+            syn::parse_quote! { struct Clip { #[searchable(media(kind = "audio"))] path: String } },
+            syn::parse_quote! { struct Clip { #[searchable(media(kind = "unknown", disk = "local"))] path: String } },
+            syn::parse_quote! { struct Clip { #[searchable(media(kind = "audio", disk = "local"))] path: i64 } },
+        ] {
+            assert!(expand(input).is_err());
+        }
+    }
 
     #[test]
     fn declaration_emits_typed_roles_inventory_and_hooks() {

@@ -161,7 +161,9 @@ impl FastembedConfig {
             precision,
             batch: super::http::parse(variable("SEARCH_EMBED_BATCH"), 64, "SEARCH_EMBED_BATCH")?,
             sparse_model: variable("SEARCH_EMBED_SPARSE_MODEL"),
-            profile: None,
+            profile: variable("SEARCH_EMBED_PROFILE")
+                .map(|name| profiles::profile(&name))
+                .transpose()?,
             dimensions: variable("SEARCH_EMBED_DIMENSIONS")
                 .map(|v| super::http::parse(Some(v), 0, "SEARCH_EMBED_DIMENSIONS"))
                 .transpose()?,
@@ -194,6 +196,7 @@ impl SparseRuntime {
 }
 struct LocalModels {
     dense: TextEmbedding,
+    media: Option<super::media::runtime::MediaRuntime>,
     sparse: Option<SparseRuntime>,
 }
 /// Clones share one initialized runtime, serialized on blocking threads rather than async workers.
@@ -294,9 +297,13 @@ impl FastembedEmbedder {
             }
         };
         profile.validate()?;
-        if profile.inputs.image || profile.inputs.audio || profile.inputs.video {
+        let media_enabled = profile.inputs.image || profile.inputs.audio || profile.inputs.video;
+        if media_enabled
+            && (profile.id != "onnx-community/embeddinggemma-2-ONNX"
+                || profile.precision != Precision::Fp32)
+        {
             return Err(FrameworkError::param(
-                "SEARCH_EMBED_MODEL fastembed text profiles cannot enable image, audio or video input",
+                "SEARCH_EMBED_PROFILE media requires EmbeddingGemma 2 fp32 encoder graphs",
             ));
         }
         if let Some(dimensions) = config.dimensions
@@ -311,6 +318,20 @@ impl FastembedEmbedder {
         let mut names = tokenizer_names(&profile);
         names.push(profile.files.graph.clone());
         names.extend(extras.clone());
+        if media_enabled {
+            names.extend(
+                [
+                    "onnx/vision_encoder.onnx",
+                    "onnx/vision_encoder.onnx_data",
+                    "onnx/audio_encoder.onnx",
+                    "onnx/audio_encoder.onnx_data",
+                    "onnx/model.onnx_data",
+                    "processor_config.json",
+                    "preprocessor_config.json",
+                ]
+                .map(str::to_owned),
+            );
+        }
         let optional = if extras.is_empty() {
             profile
                 .files
@@ -353,6 +374,11 @@ impl FastembedEmbedder {
         {
             profile.files.external_data = None;
         }
+        let media = if media_enabled {
+            Some(super::media::runtime::MediaRuntime::load(&resolved.root)?)
+        } else {
+            None
+        };
         let text_graph = format!("{}.text-only.onnx", profile.files.graph);
         if resolved.manifest.generated_files.contains_key(&text_graph)
             && resolved.manifest.files.contains_key(&text_graph)
@@ -412,7 +438,11 @@ impl FastembedEmbedder {
             None
         };
         Ok(Self {
-            models: Arc::new(Mutex::new(LocalModels { dense, sparse })),
+            models: Arc::new(Mutex::new(LocalModels {
+                dense,
+                sparse,
+                media,
+            })),
             tokenizer: Arc::new(tokenizer),
             profile: profile.with_dimensions(config.dimensions)?,
             native_profile: profile,
@@ -501,7 +531,35 @@ impl Embedder for FastembedEmbedder {
             .iter()
             .map(|input| self.profile.document_input(input))
             .collect::<Result<Vec<_>, _>>()?;
-        self.embed_prepared(&texts).await
+        if inputs.iter().all(|input| input.media.is_empty()) {
+            return self.embed_prepared(&texts).await;
+        }
+        let mut result = Vec::with_capacity(inputs.len());
+        for (input, text) in inputs.iter().zip(texts) {
+            if input.media.is_empty() {
+                result.extend(self.embed_prepared(&[text]).await?);
+                continue;
+            }
+            let parts = super::media::runtime::prepare(input).await?;
+            let models = Arc::clone(&self.models);
+            let tokenizer = Arc::clone(&self.tokenizer);
+            let profile = self.native_profile.clone();
+            let dimensions = self.dimensions;
+            result.push(
+                tokio::task::spawn_blocking(move || {
+                    let mut models = models
+                        .lock()
+                        .map_err(|_| model_error(&profile.id, "media inference lock poisoned"))?;
+                    let media = models.media.as_mut().ok_or_else(|| {
+                        model_error(&profile.id, "media encoder graphs are not loaded")
+                    })?;
+                    media.embed(&text, parts, &tokenizer, &profile, dimensions)
+                })
+                .await
+                .map_err(|e| model_error(&self.profile.id, e))??,
+            );
+        }
+        Ok(result)
     }
     async fn embed_query(&self, text: &str) -> Result<Embedding, FrameworkError> {
         self.embed_prepared(&[self.profile.query_input(text)?])
@@ -849,7 +907,9 @@ pub(super) fn resolve_model(
         )?
     };
     manifest.verify(&root)?;
-    if repository.eq_ignore_ascii_case("onnx-community/embeddinggemma-2-ONNX") {
+    if repository.eq_ignore_ascii_case("onnx-community/embeddinggemma-2-ONNX")
+        || names.iter().any(|name| name == "onnx/vision_encoder.onnx")
+    {
         let graph = names
             .iter()
             .find(|name| name.ends_with(".onnx"))

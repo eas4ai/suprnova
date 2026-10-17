@@ -24,6 +24,46 @@ pub struct EmbedSource {
     pub title: Option<String>,
 }
 
+/// Storage paths keep byte loading outside model inference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaSource {
+    /// The projection includes this path even when it is not lexical text.
+    pub field: String,
+    /// Capabilities are validated before a generation can sync.
+    pub kind: MediaKind,
+    /// Disks are code-owned and never selected by uploaded content.
+    pub disk: String,
+}
+
+/// A declared kind binds storage bytes to one processor and provider capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKind {
+    /// Still pixels use the image encoder.
+    Image,
+    /// Waveforms use the audio encoder.
+    Audio,
+    /// Sampled frames use the vision encoder and video placeholders.
+    Video,
+}
+
+impl MediaKind {
+    pub(crate) fn accepted(self, inputs: &super::InputKinds) -> bool {
+        match self {
+            Self::Image => inputs.image,
+            Self::Audio => inputs.audio,
+            Self::Video => inputs.video,
+        }
+    }
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+}
+
 /// Language configuration is engine-specific because tokenizers differ.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "engine", rename_all = "snake_case")]
@@ -170,6 +210,11 @@ pub struct IndexTimeSettings {
     pub facet_attributes: BTreeMap<String, AttributeType>,
     /// An optional provider overrides SEARCH_EMBEDDER for this index.
     pub embedder: Option<String>,
+    /// Declaration order binds media placeholders to encoder feature rows. Left out of
+    /// the serialized settings when empty, so an index without media keeps the digest it
+    /// had before media parts existed and an upgrade rebuilds nothing.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub embed_media: Vec<MediaSource>,
     /// The model identity is part of the generation's content digest.
     pub model: Option<String>,
     /// Registered sparse provider identity pins the lexical vector space to this generation.

@@ -366,11 +366,12 @@ async fn effective_settings(index: &str) -> Result<IndexSettings, FrameworkError
     if settings.index_time.embedder.is_none() && config.embedder != super::SearchEmbedder::None {
         settings.index_time.embedder = Some(config.embedder.as_str().into());
     }
-    if settings
-        .index_time
-        .embedder
-        .as_deref()
-        .is_some_and(|name| name != "none")
+    if !settings.index_time.embed_media.is_empty()
+        || settings
+            .index_time
+            .embedder
+            .as_deref()
+            .is_some_and(|name| name != "none")
     {
         let embedder = SearchRegistry::embedder_for(index)?;
         if settings.index_time.model.is_none() {

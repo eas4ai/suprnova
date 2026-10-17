@@ -193,6 +193,7 @@ getrandom = "0.4.2"
 # model's tokenizer.json (SEARCH_EMBED_TOKENIZER). Oniguruma builds from bundled source, the
 # same backend fastembed selects, so no build step downloads anything.
 tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std"] }
 fastembed = { version = "7", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"], optional = true }
 hf-hub = { version = "0.5", default-features = false, features = ["ureq", "rustls-tls"], optional = true }
 tokio-util = { version = "0.7.18", features = ["time"] }
@@ -309,15 +310,16 @@ zune-jpeg = { version = "=0.5.16-rc2", optional = true, features = ["arith"] }
 # `oxideav-png` inflates without one. Pinned to the exact version
 # `oxideav-png` resolves to, so both passes run the same decoder.
 compcol = { version = "=0.6.10", optional = true, default-features = false, features = ["zlib"] }
-# EXIF orientation and colour management for the image pipeline. `image`
-# parses the EXIF `Orientation` tag (`image::metadata::Orientation`) and
-# nothing else: no codec feature is enabled, and its decoders are not used.
+# EXIF orientation and colour management for the image pipeline. The media
+# driver uses `image` for its EXIF Orientation tag. `search-media` also
+# enables its PNG and WebP decoders. Search JPEG uses the pinned zune decoder.
 # `moxcms` converts pixels between ICC profiles: to sRGB for GIF output and
 # when a profile no longer matches the pixels. Both are pure Rust with no
 # build script, both were already in the lock (through `totp-rs`'s QR
 # codes), and both declare an MSRV below the workspace's 1.94. `image` is
 # MIT or Apache-2.0; `moxcms` is BSD-3-Clause or Apache-2.0.
 image = { version = "=0.25.10", optional = true, default-features = false }
+hound = { version = "3.5", optional = true }
 moxcms = { version = "=0.8.1", optional = true }
 crypto_secretbox = "0.1.1"
 # Heap profiling behind `heap-profiling`; see `src/profiling.rs`. The
@@ -355,6 +357,7 @@ xattr = { version = "1.6.1", optional = true }
 [features]
 graph-memgraph = ["dep:neo4rs"]
 default = [
+    "search-media",
     "reporting-sentry",
     "testing",
     "filesystem",
@@ -379,8 +382,10 @@ queue-sqs = ["filesystem", "dep:reqsign-aws-v4", "dep:reqsign-core", "dep:reqsig
 # force-the-next-encrypt-call-to-fail switch, and request query overrides.
 # Filesystem fakes additionally require `filesystem`.
 testing = []
+# Upload preparation stays available without loading an inference runtime.
+search-media = ["dep:image", "image/png", "dep:zune-jpeg", "image/webp", "dep:hound"]
 # Local search inference is opt-in. ONNX Runtime binaries download at build time.
-search-fastembed = ["dep:fastembed", "dep:hf-hub"]
+search-fastembed = ["search-media", "dep:ort", "dep:fastembed", "dep:hf-hub"]
 magnetar-oauth = [
     "suprnova-magnetar/oauth",
     "suprnova-magnetar/oauth-apple",
@@ -529,6 +534,8 @@ vector-pinecone = []
 heap-profiling = ["dep:dhat"]
 
 [dev-dependencies]
+# Processor reference tensors stay compact without a native compression library.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Heap profiling for the allocation tests (MEM-001 to MEM-005).
 dhat = "0.3"
 secrecy = "0.10"
