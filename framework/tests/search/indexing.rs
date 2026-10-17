@@ -1470,6 +1470,40 @@ async fn search_001_a_process_that_never_saved_the_row_reads_its_kept_version_on
 }
 
 #[tokio::test]
+async fn search_001_each_model_keeps_its_own_version_after_the_process_forgets_the_row() {
+    let _db = database().await;
+    let _queue = Queue::fake();
+    SearchConfig::scope(config(true), async {
+        let (first, second, loaded, kept) = SearchRegistry::isolated(async {
+            let first = note("Kept", true, 0)
+                .await
+                .update(suprnova::attrs! { title: "Kept once" })
+                .await
+                .unwrap();
+            let second = first
+                .clone()
+                .update(suprnova::attrs! { title: "Kept twice" })
+                .await
+                .unwrap();
+            let kept = stored_version(second.id).await.unwrap();
+            let loaded = SearchNote::find(second.id).await.unwrap().unwrap();
+            (first, second, loaded, kept)
+        })
+        .await;
+        // A fresh version state stands in for one that has since dropped the row.
+        SearchRegistry::isolated(async move {
+            let older = first.to_search_document().unwrap().source_version;
+            assert!(older > 0 && older < kept, "{older} against {kept}");
+            assert_eq!(second.to_search_document().unwrap().source_version, kept);
+            assert_eq!(loaded.to_search_document().unwrap().source_version, kept);
+        })
+        .await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn search_001_a_rolled_back_save_keeps_no_version() {
     let _db = database().await;
     let _queue = Queue::fake();

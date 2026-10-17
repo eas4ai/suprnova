@@ -89,9 +89,10 @@ struct VersionState {
 const KEPT_GENERATION: usize = 65_536;
 
 /// The versions this process last saved or loaded for rows of models without
-/// `updated_at`. A projection is synchronous and cannot query, so it reads them here.
-/// Two generations bound the memory: when the newer one fills, the older is dropped,
-/// and a row neither saved nor loaded since then reads 0 again.
+/// `updated_at`. A model Eloquent loads or saves carries its own version, which its
+/// projection reads first; this cache answers for a model that carries none, such as
+/// one built in code. Two generations bound the memory: when the newer one fills, the
+/// older is dropped, and a row neither saved nor loaded since then reads 0 again.
 #[derive(Default)]
 struct KeptVersions {
     current: HashMap<VersionKey, i64>,
@@ -341,6 +342,12 @@ where
         }
     }
     remember_kept(&versions(), entry.index, &loaded);
+    let loaded: HashMap<String, i64> = loaded.into_iter().collect();
+    for (row, key) in rows.iter().zip(&keys) {
+        if let (Some(cache), Some(version)) = (row.__eager_cache(), loaded.get(key)) {
+            cache.__keep_version(*version);
+        }
+    }
     Ok(())
 }
 type VersionCache = std::sync::Arc<Mutex<VersionState>>;
@@ -419,9 +426,21 @@ pub fn source_version(
     document: &SearchDocument,
     updated_at: Option<serde_json::Value>,
 ) -> Result<i64, FrameworkError> {
+    source_version_of(document, updated_at, None)
+}
+
+/// [`source_version`] for one model: `kept` is the version the model itself carries from
+/// the read or save that produced it, which wins over what the process remembers, since
+/// the model is that revision of the row and the process may have forgotten it.
+#[doc(hidden)]
+pub fn source_version_of(
+    document: &SearchDocument,
+    updated_at: Option<serde_json::Value>,
+    kept: Option<i64>,
+) -> Result<i64, FrameworkError> {
     match updated_at.filter(|value| !value.is_null()) {
         Some(value) => timestamp_version(&document.index, &value),
-        None => Ok(kept_version(&document.index, &document.key)),
+        None => Ok(kept.unwrap_or_else(|| kept_version(&document.index, &document.key))),
     }
 }
 
@@ -1563,6 +1582,7 @@ async fn enqueue_model<M: 'static>(
         .await?
         .remove(0)
         .1;
+        (entry.keep)(model, source_version);
     }
     SearchIndexJob {
         index: document.index,

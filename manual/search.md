@@ -122,10 +122,11 @@ Timestamped projections use `updated_at` in UTC microseconds. A model without
 `search_source_versions` table: every save raises it inside the save's own
 transaction, so a rolled-back save leaves it unchanged, and reading a row never
 raises it. `to_search_document()` is synchronous and cannot query, so Eloquent
-loads the kept versions in one query beside the rows it returns, and the
-projection reads the version of the row as loaded or last saved in this
-process; a row another process saved since then reads the newer version on its
-next load. Undeclared model fields stay outside the document.
+loads the kept versions in one query beside the rows it returns, and each
+model carries the version of the revision it holds: the one its load found or
+its save raised. A model keeps that version for as long as you hold it; a row
+another process saved since then reads the newer version on its next load.
+Undeclared model fields stay outside the document.
 
 ## Index settings
 
