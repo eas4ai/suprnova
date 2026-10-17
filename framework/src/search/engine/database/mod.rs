@@ -1799,6 +1799,41 @@ impl SearchEngine for DatabaseSearchEngine {
         tx.commit().await.map_err(db_error)?;
         Ok(result)
     }
+    async fn stored_vectors(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        keys: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<f32>>, FrameworkError> {
+        // The side table keeps each document's vector after the vector store holds it,
+        // so recommendation reads the same vector search ranks with.
+        let table = table(index, generation)?;
+        let dialect = self.dialect().await?;
+        let conn = DB::connection()?;
+        let mut vectors = std::collections::HashMap::new();
+        for chunk in keys.chunks(500) {
+            let mut sql = Sql::new(dialect);
+            let list = chunk
+                .iter()
+                .map(|key| sql.bind(key.clone()))
+                .collect::<Vec<_>>()
+                .join(",");
+            let key = sql.ident("key");
+            let text = format!(
+                "SELECT {key},vector_dense_json FROM {} WHERE {key} IN ({list}) AND vector_dense_json IS NOT NULL",
+                sql.ident(&table)
+            );
+            for row in rows(conn.inner(), text, sql).await? {
+                let dense: Option<Vec<f32>> =
+                    serde_json::from_str(&get::<String>(&row, "vector_dense_json")?)
+                        .map_err(db_error)?;
+                if let Some(dense) = dense {
+                    vectors.insert(get::<String>(&row, "key")?, dense);
+                }
+            }
+        }
+        Ok(vectors)
+    }
     async fn semantic(
         &self,
         index: &IndexDescriptor,

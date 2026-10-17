@@ -652,11 +652,11 @@ pub use search::{
     SearchDocument, SearchDriver, SearchEmbedder, SearchEngine, SearchFilter, SearchIndexJob,
     SearchPagination, SearchQuery, SearchRegistry, SearchResults, Searchable, SearchableDecl,
     SearchableEntry, SettingsChange, Sort, SortDirection, SparseEmbedding, Synonym, Total,
-    TypoTolerance, Viewer, Vocabulary, WeightedAttribute, WriteKind, WriteOutcome,
-    after_model_write, apply_scope, default_profile, embedding_profile, embedding_profile_names,
-    evaluate_scope, expand, federated_rrf, highlight, make_all_searchable, normalize, paginate,
-    remove_all_from_search, searchable, tokenize, unsearchable, validate_embedding, validate_tags,
-    weighted_rrf, without_syncing_to_search,
+    TypoTolerance, VectorDiscover, VectorRecommend, Viewer, Vocabulary, WeightedAttribute,
+    WriteKind, WriteOutcome, after_model_write, apply_scope, default_profile, embedding_profile,
+    embedding_profile_names, evaluate_scope, expand, federated_rrf, highlight, make_all_searchable,
+    normalize, paginate, remove_all_from_search, searchable, tokenize, unsearchable,
+    validate_embedding, validate_tags, weighted_rrf, without_syncing_to_search,
 };
 #[cfg(feature = "search-fastembed")]
 pub use search::{
