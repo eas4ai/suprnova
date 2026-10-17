@@ -32,7 +32,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `SearchEngine` gains `stored_vectors`, `recommend` and `discover`; Qdrant
   answers the latter two natively, and the database and collection engines
   fold their stored vectors. `Recommend::discover` steers a discover query by
-  the viewer's own events.
+  the viewer's own events. `SearchEngine::stored_keys` reports which documents
+  a generation holds, so the graph engine leaves out a document that left its
+  index; every shipped engine implements it, and a custom engine needs it to
+  serve the graph engine.
 
 ### Changed
 

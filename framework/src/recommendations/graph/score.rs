@@ -1,7 +1,9 @@
 //! The graph engine's reads (REC-007): authorize every node, edge and evidence item
 //! first, then rank by a blended score per surface with diversity caps, and answer with
 //! the starter's rows when the graph's evidence is too thin.
-use super::{GraphStore, Traversal, actor_node_key, document_node_key, traverse};
+use super::{
+    Gate, GraphStore, LiveFacts, Traversal, actor_node_key, document_node_key, traverse_with,
+};
 use crate::{
     FrameworkError, SearchDocument, SearchRegistry, Viewer,
     recommendations::{
@@ -99,7 +101,11 @@ impl Recommender for GraphRecommender {
         viewer: &Viewer,
         limit: usize,
     ) -> Result<Vec<Recommendation>, FrameworkError> {
-        if live(std::slice::from_ref(target), viewer).await?.is_empty() {
+        if LiveFacts::new(viewer)
+            .visible(std::slice::from_ref(target))
+            .await?
+            .is_empty()
+        {
             return Err(FrameworkError::param(
                 "recommendation seed is missing or outside the viewer's scope",
             ));
@@ -148,7 +154,11 @@ impl Recommender for GraphRecommender {
         viewer: &Viewer,
         limit: usize,
     ) -> Result<Vec<Recommendation>, FrameworkError> {
-        if live(std::slice::from_ref(target), viewer).await?.is_empty() {
+        if LiveFacts::new(viewer)
+            .visible(std::slice::from_ref(target))
+            .await?
+            .is_empty()
+        {
             return Err(FrameworkError::param(
                 "recommendation seed is missing or outside the viewer's scope",
             ));
@@ -242,43 +252,6 @@ struct Components {
     via: Option<String>,
 }
 
-/// The live documents among `targets` that `viewer` may see.
-async fn live(
-    targets: &[RecommendationTarget],
-    viewer: &Viewer,
-) -> Result<BTreeMap<RecommendationTarget, SearchDocument>, FrameworkError> {
-    let mut by_index: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    for target in targets {
-        by_index
-            .entry(target.index.as_str())
-            .or_default()
-            .push(target.key.clone());
-    }
-    let mut visible = BTreeMap::new();
-    for (index, keys) in by_index {
-        let Ok(entry) = SearchRegistry::by_index(index) else {
-            continue;
-        };
-        let descriptor = (entry.descriptor)();
-        for chunk in keys.chunks(500) {
-            for document in (entry.load_documents)(chunk.to_vec()).await? {
-                if (entry.evaluate_scope)(viewer, &document)
-                    && crate::search::evaluate_scope(descriptor, viewer, &document)
-                {
-                    visible.insert(
-                        RecommendationTarget {
-                            index: index.to_owned(),
-                            key: document.key.clone(),
-                        },
-                        document,
-                    );
-                }
-            }
-        }
-    }
-    Ok(visible)
-}
-
 /// Rank one read, or `None` when the graph's evidence is below the surface's threshold
 /// or no graph exists yet.
 async fn rank(
@@ -291,6 +264,9 @@ async fn rank(
         return Ok(None);
     };
     let viewer = &request.viewer;
+    // Every fact is checked against its live source before it is walked, scored or
+    // cited, so one revoked late or by a racing rebuild never counts (REC-005).
+    let facts = LiveFacts::new(viewer);
 
     // Seeds and negatives the viewer may see; nothing outside the scope steers the read.
     let seed_targets: Vec<RecommendationTarget> = request
@@ -298,14 +274,14 @@ async fn rank(
         .iter()
         .map(|seed| seed.target.clone())
         .collect();
-    let seed_documents = live(&seed_targets, viewer).await?;
+    let seed_documents = facts.visible(&seed_targets).await?;
     let seeds: Vec<&Seed> = request
         .seeds
         .iter()
         .filter(|seed| seed_documents.contains_key(&seed.target))
         .collect();
     let negative_targets: Vec<RecommendationTarget> = request.negative.iter().cloned().collect();
-    let negatives = live(&negative_targets, viewer).await?;
+    let negatives = facts.visible(&negative_targets).await?;
     let heaviest = seeds
         .iter()
         .map(|seed| seed.weight)
@@ -326,11 +302,12 @@ async fn rank(
     };
 
     // Graph affinity: the strongest scoped path from a seed, weighted by the seed.
-    for reached in traverse(
+    for reached in traverse_with(
         store.as_ref(),
         &generation,
         &traversal(by_seed_key.keys().cloned().collect(), config.graph_depth),
         viewer,
+        &facts,
     )
     .await?
     {
@@ -365,11 +342,12 @@ async fn rank(
 
     // Explicit feedback: nearness to the viewer's own negatives.
     if !negatives.is_empty() {
-        for reached in traverse(
+        for reached in traverse_with(
             store.as_ref(),
             &generation,
             &traversal(negatives.keys().map(document_node_key).collect(), 1),
             viewer,
+            &facts,
         )
         .await?
         {
@@ -381,7 +359,7 @@ async fn rank(
     }
 
     // Semantic similarity from the search collection's own vectors (REC-006).
-    semantic(request, &seeds, &negatives, &mut components).await?;
+    semantic(request, &facts, &seeds, &negatives, &mut components).await?;
 
     // Social proximity: followed actors' public engagement, counted only where enough of
     // them agree that no single followed actor's activity shows (decision 01M554QJ).
@@ -390,6 +368,7 @@ async fn rank(
         config,
         store.as_ref(),
         &generation,
+        &facts,
         &mut components,
     )
     .await?;
@@ -406,7 +385,7 @@ async fn rank(
         })
         .map(|(target, _)| target.clone())
         .collect();
-    let documents = live(&candidates, viewer).await?;
+    let documents = facts.visible(&candidates).await?;
     let trust = trust_risk(&documents.keys().cloned().collect::<Vec<_>>()).await?;
     let recency: BTreeMap<&RecommendationTarget, i64> = documents
         .iter()
@@ -579,6 +558,7 @@ fn explain(
 /// viewer's positives and negatives, or its discover around a target (REC-006).
 async fn semantic(
     request: &Request,
+    facts: &LiveFacts,
     seeds: &[&Seed],
     negatives: &BTreeMap<RecommendationTarget, SearchDocument>,
     components: &mut BTreeMap<RecommendationTarget, Components>,
@@ -610,17 +590,17 @@ async fn semantic(
         let result = match &request.discover {
             Some((context_positive, context_negative)) => {
                 // Context pairs come from the viewer's own events the scope covers.
-                let visible: BTreeSet<RecommendationTarget> = live(
-                    &context_positive
-                        .iter()
-                        .chain(context_negative)
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                    &request.viewer,
-                )
-                .await?
-                .into_keys()
-                .collect();
+                let visible: BTreeSet<RecommendationTarget> = facts
+                    .visible(
+                        &context_positive
+                            .iter()
+                            .chain(context_negative)
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    )
+                    .await?
+                    .into_keys()
+                    .collect();
                 let keys = |targets: &[RecommendationTarget]| -> Vec<String> {
                     targets
                         .iter()
@@ -726,6 +706,7 @@ async fn social(
     config: &RecommendConfig,
     store: &dyn GraphStore,
     generation: &str,
+    facts: &LiveFacts,
     components: &mut BTreeMap<RecommendationTarget, Components>,
 ) -> Result<(), FrameworkError> {
     let (Some(Actor::User(user)), Some(actor_index)) = (&request.actor, &config.actor_index) else {
@@ -754,18 +735,28 @@ async fn social(
             config.graph_fanout,
         )
         .await?;
-    let edges: Vec<_> = edges
-        .into_iter()
-        .filter(|edge| edge.scope.permits(&request.viewer))
-        .collect();
+    let edges = facts
+        .edges(
+            edges
+                .into_iter()
+                .filter(|edge| edge.scope.permits(&request.viewer))
+                .collect(),
+        )
+        .await?;
     let mut targets: Vec<String> = edges.iter().map(|edge| edge.target.clone()).collect();
     targets.sort();
     targets.dedup();
-    let nodes: BTreeMap<String, RecommendationTarget> = store
-        .nodes(generation, &targets)
+    let nodes: BTreeMap<String, RecommendationTarget> = facts
+        .nodes(
+            store
+                .nodes(generation, &targets)
+                .await?
+                .into_iter()
+                .filter(|node| node.scope.permits(&request.viewer))
+                .collect(),
+        )
         .await?
         .into_iter()
-        .filter(|node| node.scope.permits(&request.viewer))
         .filter_map(|node| node.target.map(|target| (node.key, target)))
         .collect();
     let mut agreeing: BTreeMap<RecommendationTarget, (BTreeSet<String>, Vec<ExplanationEvidence>)> =

@@ -204,6 +204,18 @@ impl SearchEngine for ConnectionEngine {
         })
         .await?
     }
+    async fn stored_keys(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        keys: &[String],
+    ) -> Result<std::collections::HashSet<String>, FrameworkError> {
+        crate::search::render_cache::read(self.index, async {
+            self.routed(self.inner.stored_keys(index, generation, keys))
+                .await
+        })
+        .await?
+    }
     async fn stored_vectors(
         &self,
         index: &IndexDescriptor,

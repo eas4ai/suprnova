@@ -4,6 +4,7 @@
 //! every store ranks the same graph the same way.
 mod database;
 mod derive;
+mod live;
 #[cfg(feature = "graph-memgraph")]
 pub mod memgraph;
 mod score;
@@ -12,7 +13,8 @@ pub use database::DatabaseGraphStore;
 pub use derive::{
     GraphBuild, GraphDeriveJob, GraphDocumentJob, GraphRelation, declare, document_changed, rebuild,
 };
-pub(crate) use derive::{documents_changed, events_removed};
+pub(crate) use derive::{documents_changed, events_removed, related_keys};
+pub(crate) use live::{LiveFacts, indexed_documents};
 pub use score::GraphRecommender;
 
 use super::{EventProvenance, RecommendationTarget};
@@ -366,7 +368,42 @@ pub async fn traverse(
     traversal: &Traversal,
     viewer: &Viewer,
 ) -> Result<Vec<Reached>, FrameworkError> {
-    let seeds = store.nodes(generation, &traversal.seeds).await?;
+    traverse_with(store, generation, traversal, viewer, &Recorded).await
+}
+
+/// A further check a walk applies at every hop, after the recorded scope.
+#[async_trait]
+pub(crate) trait Gate: Send + Sync {
+    /// The nodes the walk may return and walk through.
+    async fn nodes(&self, nodes: Vec<GraphNode>) -> Result<Vec<GraphNode>, FrameworkError>;
+    /// The edges the walk may follow.
+    async fn edges(&self, edges: Vec<GraphEdge>) -> Result<Vec<GraphEdge>, FrameworkError>;
+}
+
+/// The store's facts as recorded: the scope check alone.
+struct Recorded;
+
+#[async_trait]
+impl Gate for Recorded {
+    async fn nodes(&self, nodes: Vec<GraphNode>) -> Result<Vec<GraphNode>, FrameworkError> {
+        Ok(nodes)
+    }
+    async fn edges(&self, edges: Vec<GraphEdge>) -> Result<Vec<GraphEdge>, FrameworkError> {
+        Ok(edges)
+    }
+}
+
+/// [`traverse`], with `gate` deciding at every hop which of the recorded facts stand.
+pub(crate) async fn traverse_with(
+    store: &dyn GraphStore,
+    generation: &str,
+    traversal: &Traversal,
+    viewer: &Viewer,
+    gate: &dyn Gate,
+) -> Result<Vec<Reached>, FrameworkError> {
+    let seeds = gate
+        .nodes(store.nodes(generation, &traversal.seeds).await?)
+        .await?;
     let mut visited: HashSet<String> = HashSet::new();
     let mut best: HashMap<String, Reached> = HashMap::new();
     let mut frontier: Vec<Reached> = Vec::new();
@@ -396,18 +433,28 @@ pub async fn traverse(
         let edges = store
             .outgoing(generation, &sources, &traversal.kinds, traversal.per_node)
             .await?;
-        let edges: Vec<GraphEdge> = edges
-            .into_iter()
-            .filter(|edge| !visited.contains(&edge.target) && edge.scope.permits(viewer))
-            .collect();
+        let edges: Vec<GraphEdge> = gate
+            .edges(
+                edges
+                    .into_iter()
+                    .filter(|edge| !visited.contains(&edge.target) && edge.scope.permits(viewer))
+                    .collect(),
+            )
+            .await?;
         let mut targets: Vec<String> = edges.iter().map(|edge| edge.target.clone()).collect();
         targets.sort();
         targets.dedup();
-        let nodes: HashMap<String, GraphNode> = store
-            .nodes(generation, &targets)
+        let nodes: HashMap<String, GraphNode> = gate
+            .nodes(
+                store
+                    .nodes(generation, &targets)
+                    .await?
+                    .into_iter()
+                    .filter(|node| node.scope.permits(viewer))
+                    .collect(),
+            )
             .await?
             .into_iter()
-            .filter(|node| node.scope.permits(viewer))
             .map(|node| (node.key.clone(), node))
             .collect();
         let mut next: HashMap<String, Reached> = HashMap::new();

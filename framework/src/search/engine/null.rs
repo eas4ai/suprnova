@@ -137,6 +137,17 @@ impl SearchEngine for NullEngine {
     ) -> Result<EngineResult, FrameworkError> {
         self.metadata.query(index, generation, q).await
     }
+    async fn stored_keys(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        _keys: &[String],
+    ) -> Result<std::collections::HashSet<String>, FrameworkError> {
+        index.validate()?;
+        GenerationId::new(generation.0.clone())?;
+        // It keeps no document, so it holds none of them.
+        Ok(std::collections::HashSet::new())
+    }
     async fn semantic(
         &self,
         index: &IndexDescriptor,

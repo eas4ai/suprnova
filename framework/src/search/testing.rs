@@ -341,6 +341,12 @@ pub mod conformance {
             engine.index(&index, &first, &corpus).await?.written == 4,
             "fixed corpus writes were not acknowledged",
         )?;
+        let probe: Vec<String> = ["a", "d", "absent"].map(String::from).to_vec();
+        check(
+            engine.stored_keys(&index, &first, &probe).await?
+                == ["a", "d"].map(String::from).into_iter().collect(),
+            "stored keys must name exactly the documents the generation holds",
+        )?;
         let zero_generation = GenerationId::new("conformance_zero")?;
         engine
             .create_generation(&index, &settings, &zero_generation)
@@ -724,6 +730,13 @@ pub mod conformance {
             "unchanged content did not advance the source-version watermark",
         )?;
         engine.remove(&index, &first, &[("a".into(), 5)]).await?;
+        check(
+            !engine
+                .stored_keys(&index, &first, &probe)
+                .await?
+                .contains("a"),
+            "a removed document is still reported as held",
+        )?;
         check(
             engine
                 .index(&index, &first, &[newer])

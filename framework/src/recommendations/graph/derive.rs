@@ -22,8 +22,6 @@ use std::{
 
 /// Keys bound per `IN` list.
 const KEYS_PER_STATEMENT: usize = 200;
-/// Keys loaded per search document batch.
-const DOCUMENTS_PER_LOAD: usize = 500;
 
 type Related =
     Arc<dyn Fn(&SearchDocument) -> Result<Vec<RecommendationTarget>, FrameworkError> + Send + Sync>;
@@ -100,6 +98,33 @@ pub fn declare(relation: GraphRelation) -> Result<(), FrameworkError> {
         .unwrap_or_else(PoisonError::into_inner)
         .insert((relation.index.clone(), relation.name.clone()), relation);
     Ok(())
+}
+
+/// The node keys the relation `name` of `document`'s index finds in this revision of the
+/// document, or `None` when that relation is no longer declared. A read uses it to tell
+/// whether a relation fact read from an older revision still holds (REC-005).
+///
+/// # Errors
+///
+/// Returns an error when the relation fails.
+pub(crate) fn related_keys(
+    name: &str,
+    document: &SearchDocument,
+) -> Result<Option<std::collections::HashSet<String>>, FrameworkError> {
+    let relation = RELATIONS
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&(document.index.clone(), name.to_owned()))
+        .cloned();
+    let Some(relation) = relation else {
+        return Ok(None);
+    };
+    Ok(Some(
+        (relation.related)(document)?
+            .iter()
+            .map(document_node_key)
+            .collect(),
+    ))
 }
 
 fn relations() -> Vec<GraphRelation> {
@@ -530,35 +555,11 @@ async fn public_engagement(
 }
 
 /// The live search documents for `targets`; a target whose index is gone or whose
-/// document left its index is absent.
+/// document left its index, including one `unsearchable` removed, is absent (REC-005).
 async fn load(
     targets: &BTreeSet<RecommendationTarget>,
 ) -> Result<BTreeMap<RecommendationTarget, SearchDocument>, FrameworkError> {
-    let mut by_index: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    for target in targets {
-        by_index
-            .entry(target.index.as_str())
-            .or_default()
-            .push(target.key.clone());
-    }
-    let mut documents = BTreeMap::new();
-    for (index, keys) in by_index {
-        let Ok(entry) = SearchRegistry::by_index(index) else {
-            continue;
-        };
-        for chunk in keys.chunks(DOCUMENTS_PER_LOAD) {
-            for document in (entry.load_documents)(chunk.to_vec()).await? {
-                documents.insert(
-                    RecommendationTarget {
-                        index: index.to_owned(),
-                        key: document.key.clone(),
-                    },
-                    document,
-                );
-            }
-        }
-    }
-    Ok(documents)
+    super::indexed_documents(targets).await
 }
 
 /// The store and generation a revocation applies to, when the graph engine runs and a
