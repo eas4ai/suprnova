@@ -204,6 +204,16 @@ async fn build(
     }
 }
 
+/// How many actors share a pair of targets, and the events their sharing rests on.
+#[derive(Clone, Copy)]
+struct Shared {
+    actors: u64,
+    /// The oldest event, as time and id.
+    oldest: (i64, i64),
+    /// The latest event id.
+    latest: i64,
+}
+
 /// One fact read from the stream before its documents are loaded.
 struct Engaged {
     user: String,
@@ -227,9 +237,12 @@ async fn derive_into(
     // Shared engagement: how many actors hold both targets among their most recent
     // positives. Every event class counts, but only pairs at least RECOMMEND_MIN_PEERS
     // actors share become edges, so no edge describes one person.
+    // Each pair keeps its count, the oldest of its actors' events and the latest. An
+    // aggregate stops holding once one actor's event behind it goes, and retention deletes
+    // the oldest events first, so the oldest is the edge's provenance; a node holds while
+    // any support remains, so the latest is the node's (REC-005).
     let mut holders: BTreeMap<RecommendationTarget, u64> = BTreeMap::new();
-    let mut pairs: HashMap<(RecommendationTarget, RecommendationTarget), (u64, i64)> =
-        HashMap::new();
+    let mut pairs: HashMap<(RecommendationTarget, RecommendationTarget), Shared> = HashMap::new();
     for history in histories.actors.values() {
         let mut recent: Vec<_> = history.positive.iter().collect();
         recent.sort_by_key(|(_, positive)| std::cmp::Reverse((positive.time, positive.event_id)));
@@ -244,32 +257,42 @@ async fn derive_into(
                 } else {
                     ((*second).clone(), (*first).clone())
                 };
-                let latest = first_positive.event_id.max(second_positive.event_id);
-                let entry = pairs.entry(key).or_insert((0, 0));
-                entry.0 += 1;
-                entry.1 = entry.1.max(latest);
+                let events = [
+                    (first_positive.time, first_positive.event_id),
+                    (second_positive.time, second_positive.event_id),
+                ];
+                let entry = pairs.entry(key).or_insert(Shared {
+                    actors: 0,
+                    oldest: (i64::MAX, i64::MAX),
+                    latest: 0,
+                });
+                entry.actors += 1;
+                for event in events {
+                    entry.oldest = entry.oldest.min(event);
+                    entry.latest = entry.latest.max(event.1);
+                }
             }
         }
     }
-    let mut shared: Vec<(RecommendationTarget, RecommendationTarget, i32, i64)> = Vec::new();
-    for ((x, y), (count, latest)) in pairs {
-        if count < config.min_peers as u64 {
+    let mut shared: Vec<(RecommendationTarget, RecommendationTarget, i32, Shared)> = Vec::new();
+    for ((x, y), pair) in pairs {
+        if pair.actors < config.min_peers as u64 {
             continue;
         }
         let both =
             (holders.get(&x).copied().unwrap_or(1) * holders.get(&y).copied().unwrap_or(1)) as f64;
-        let confidence = ((count as f64) / both.sqrt() * 10_000.0)
+        let confidence = ((pair.actors as f64) / both.sqrt() * 10_000.0)
             .round()
             .clamp(1.0, 10_000.0) as i32;
-        shared.push((y.clone(), x.clone(), confidence, latest));
-        shared.push((x, y, confidence, latest));
+        shared.push((y.clone(), x.clone(), confidence, pair));
+        shared.push((x, y, confidence, pair));
     }
     shared.sort_by(|a, b| {
         a.0.cmp(&b.0)
             .then_with(|| b.2.cmp(&a.2))
             .then_with(|| a.1.cmp(&b.1))
     });
-    let mut kept: Vec<(RecommendationTarget, RecommendationTarget, i32, i64)> = Vec::new();
+    let mut kept: Vec<(RecommendationTarget, RecommendationTarget, i32, Shared)> = Vec::new();
     let mut per_source = 0;
     for edge in shared {
         if kept.last().is_none_or(|last| last.0 != edge.0) {
@@ -292,10 +315,10 @@ async fn derive_into(
     targets.extend(engaged.iter().map(|fact| fact.target.clone()));
     let mut documents = load(&targets).await?;
     let mut provenance_of: BTreeMap<RecommendationTarget, i64> = BTreeMap::new();
-    for (from, to, _, latest) in &kept {
+    for (from, to, _, pair) in &kept {
         for target in [from, to] {
             let slot = provenance_of.entry(target.clone()).or_insert(0);
-            *slot = (*slot).max(*latest);
+            *slot = (*slot).max(pair.latest);
         }
     }
     for fact in &engaged {
@@ -441,7 +464,7 @@ async fn derive_into(
         );
         Ok(())
     };
-    for (from, to, confidence, latest) in &kept {
+    for (from, to, confidence, pair) in &kept {
         let version = documents
             .get(to)
             .map_or(0, |document| document.source_version);
@@ -451,7 +474,7 @@ async fn derive_into(
             to,
             *confidence,
             version,
-            event(*latest)?,
+            event(pair.oldest.1)?,
         )?;
     }
     for fact in &engaged {

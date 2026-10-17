@@ -176,11 +176,13 @@ impl Recommend {
                     "recommendations --older-than exceeds the supported calendar range",
                 )
             })?;
-        // Pages of ids let the graph revoke the facts each page held (REC-005).
+        // Pages of ids, oldest first, let the graph revoke the facts each page held before
+        // the page goes: a failed revocation leaves the events for the retry to find, and
+        // an aggregate's provenance, its oldest event, goes no later than any other (REC-005).
         let mut removed = 0;
         loop {
             let ids: Vec<i64> = storage::rows(
-                "SELECT id FROM recommendation_events WHERE occurred_at < ? ORDER BY id LIMIT ?",
+                "SELECT id FROM recommendation_events WHERE occurred_at < ? ORDER BY occurred_at, id LIMIT ?",
                 vec![cutoff.timestamp_micros().into(), PRUNE_PAGE.into()],
             )
             .await?
@@ -190,6 +192,7 @@ impl Recommend {
             if ids.is_empty() {
                 return Ok(removed);
             }
+            graph::events_removed(&ids).await?;
             for chunk in ids.chunks(200) {
                 let list = vec!["?"; chunk.len()].join(", ");
                 removed += storage::execute(
@@ -198,7 +201,6 @@ impl Recommend {
                 )
                 .await?;
             }
-            graph::events_removed(&ids).await?;
         }
     }
 }
