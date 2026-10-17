@@ -140,6 +140,32 @@ mod backend {
         });
     }
 
+    /// Every Inertia kit ships Suprnova's stream client: the same engine,
+    /// `src/lib/stream/core.ts`, and the kit's own hooks over it, which
+    /// import it and export the four hooks Laravel's stream packages name.
+    #[test]
+    fn inertia_kits_ship_the_stream_client() {
+        let core = include_str!("../src/templates/files/frontend/stream/core.ts.tpl");
+        each_kit(|app| {
+            assert_eq!(
+                app.read("frontend/src/lib/stream/core.ts"),
+                core,
+                "{}: core.ts",
+                app.kit
+            );
+            let hooks = app.read("frontend/src/lib/stream/index.ts");
+            assert!(hooks.contains("from './core'"), "{}: {hooks}", app.kit);
+            for hook in [
+                "export function useStream",
+                "export function useJsonStream",
+                "export function useEventStream",
+                "export function useJsonEventStream",
+            ] {
+                assert!(hooks.contains(hook), "{} lacks {hook}", app.kit);
+            }
+        });
+    }
+
     #[test]
     fn inertia_kit_pages_render_plain_english() {
         for (kit, ext, heading) in [
