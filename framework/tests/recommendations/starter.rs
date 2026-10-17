@@ -8,14 +8,12 @@ async fn shared_targets_recommend_unseen_c_and_project_explanations() {
         let a = note("A", "rust", true, "alice", 1).await;
         let b = note("B", "rust", true, "alice", 2).await;
         let c = note("C", "other", true, "alice", 3).await;
-        for (actor, item, dedupe) in [
-            ("alice", &a, "a"),
-            ("alice", &b, "b"),
-            ("bob", &a, "a"),
-            ("bob", &b, "b"),
-            ("bob", &c, "c"),
-        ] {
-            record(actor, item, EventType::Like, dedupe).await;
+        record("alice", &a, EventType::Like, "a").await;
+        record("alice", &b, EventType::Like, "b").await;
+        for peer in ["bob", "carol", "dave"] {
+            record(peer, &a, EventType::Like, "a").await;
+            record(peer, &b, EventType::Like, "b").await;
+            record(peer, &c, EventType::Like, "c").await;
         }
         let GenerationOutcome::Completed(run) =
             Recommend::generate(GenerateRun::default()).await.unwrap()
@@ -23,9 +21,9 @@ async fn shared_targets_recommend_unseen_c_and_project_explanations() {
             panic!("unexpected contention")
         };
         assert_eq!(run.state, "complete");
-        assert_eq!(run.users_covered, 2);
-        assert_eq!(run.events_read, 5);
-        assert_eq!(run.high_water_mark, 5);
+        assert_eq!(run.users_covered, 4);
+        assert_eq!(run.events_read, 11);
+        assert_eq!(run.high_water_mark, 11);
         assert!(run.items_scored > 0 && run.coverage > 0.0 && run.duration_ms >= 0);
         let rows = Recommend::for_user("alice")
             .surface("home")
@@ -36,10 +34,12 @@ async fn shared_targets_recommend_unseen_c_and_project_explanations() {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].target, key(&c));
-        assert_eq!(rows[0].explanation.peer_count, 1);
+        assert_eq!(rows[0].explanation.peer_count, 3);
         assert_eq!(rows[0].explanation.shared_target_count, 2);
         let text = serde_json::to_string(&rows[0].explanation).unwrap();
-        assert!(!text.contains("bob") && !text.contains("alice"));
+        for name in ["alice", "bob", "carol", "dave"] {
+            assert!(!text.contains(name));
+        }
     })
     .await;
 }
@@ -228,8 +228,10 @@ async fn scoped_read_fills_after_private_collaborative_candidate_and_includes_ow
         let private = note("Private", "rust", false, "alice", 2).await;
         let public = note("Public", "rust", true, "alice", 3).await;
         record("alice", &a, EventType::Like, "a").await;
-        record("bob", &a, EventType::Like, "a").await;
-        record("bob", &private, EventType::Like, "private").await;
+        for peer in ["bob", "carol", "dave"] {
+            record(peer, &a, EventType::Like, "a").await;
+            record(peer, &private, EventType::Like, "private").await;
+        }
         Recommend::generate(GenerateRun::default()).await.unwrap();
         let guest = Recommend::for_user("alice")
             .limit(1)
@@ -354,8 +356,10 @@ async fn most_recent_shared_peers_are_sampled_to_the_configured_cap() {
         record("new", &a, EventType::Like, "a").await;
         record("new", &newest, EventType::Like, "newest").await;
         suprnova::RecommendConfig::scope(
+            // The cap is the subject here, so one sampled peer may contribute alone.
             suprnova::RecommendConfig {
                 peers: 1,
+                min_peers: 1,
                 ..Default::default()
             },
             async {
@@ -377,8 +381,10 @@ async fn private_shared_titles_are_projected_out_and_evidence_retains_provenance
         let shared = note("Shared secret title", "rust", true, "alice", 1).await;
         let candidate = note("Public candidate", "other", true, "author", 2).await;
         record("alice", &shared, EventType::Like, "shared").await;
-        record("bob", &shared, EventType::Like, "shared").await;
-        record("bob", &candidate, EventType::Like, "candidate").await;
+        for peer in ["bob", "carol", "dave"] {
+            record(peer, &shared, EventType::Like, "shared").await;
+            record(peer, &candidate, EventType::Like, "candidate").await;
+        }
         Recommend::generate(GenerateRun::default()).await.unwrap();
         DB::update(
             "UPDATE recommendation_notes SET public = ? WHERE id = ?",
@@ -488,4 +494,105 @@ async fn affinity_does_not_reload_seeds_absent_from_the_search_engine() {
         );
     })
     .await;
+}
+
+/// No suggestion may name fewer than three peers: one peer's explanation would point at them.
+fn assert_no_lone_peers(rows: &[suprnova::Recommendation]) {
+    for row in rows {
+        let explanation = &row.explanation;
+        assert!(
+            explanation.fallback_tier != "collaborative" || explanation.peer_count >= 3,
+            "{explanation:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rec_002_a_candidate_one_peer_holds_falls_to_a_later_tier() {
+    setup(async {
+        let a = note("A", "rust", true, "alice", 1).await;
+        let b = note("B", "rust", true, "alice", 2).await;
+        let c = note("C", "other", true, "alice", 3).await;
+        for (actor, item, dedupe) in [
+            ("alice", &a, "a"),
+            ("alice", &b, "b"),
+            ("bob", &a, "a"),
+            ("bob", &b, "b"),
+            ("bob", &c, "c"),
+        ] {
+            record(actor, item, EventType::Like, dedupe).await;
+        }
+        Recommend::generate(GenerateRun::default()).await.unwrap();
+        let rows = Recommend::for_user("alice").limit(5).get().await.unwrap();
+        assert_no_lone_peers(&rows);
+        let suggested = rows.iter().find(|row| row.target == key(&c)).unwrap();
+        assert_ne!(suggested.explanation.fallback_tier, "collaborative");
+        assert_eq!(suggested.explanation.peer_count, 0);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn rec_002_three_agreeing_peers_make_a_collaborative_candidate() {
+    setup(async {
+        let a = note("A", "rust", true, "alice", 1).await;
+        let b = note("B", "rust", true, "alice", 2).await;
+        let c = note("C", "other", true, "alice", 3).await;
+        record("alice", &a, EventType::Like, "a").await;
+        record("alice", &b, EventType::Like, "b").await;
+        for peer in ["bob", "carol", "dave"] {
+            record(peer, &a, EventType::Like, "a").await;
+            record(peer, &b, EventType::Like, "b").await;
+            record(peer, &c, EventType::Like, "c").await;
+        }
+        Recommend::generate(GenerateRun::default()).await.unwrap();
+        let rows = Recommend::for_user("alice").limit(1).get().await.unwrap();
+        assert_eq!(rows[0].target, key(&c));
+        assert_eq!(rows[0].explanation.fallback_tier, "collaborative");
+        assert_eq!(rows[0].explanation.peer_count, 3);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn rec_002_similar_to_counts_co_occurrence_only_from_three_peers() {
+    setup(async {
+        let seed = note("Seed", "rust", true, "alice", 1).await;
+        let lone = note("Lone", "other", true, "alice", 2).await;
+        let agreed = note("Agreed", "other", true, "alice", 3).await;
+        record("bob", &seed, EventType::Like, "seed").await;
+        record("bob", &lone, EventType::Like, "lone").await;
+        for peer in ["carol", "dave", "erin"] {
+            record(peer, &seed, EventType::Like, "seed").await;
+            record(peer, &agreed, EventType::Like, "agreed").await;
+        }
+        let rows = Recommend::similar_to(key(&seed))
+            .limit(5)
+            .for_viewer(Viewer::Guest)
+            .get()
+            .await
+            .unwrap();
+        assert_no_lone_peers(&rows);
+        let first = &rows[0];
+        assert_eq!(first.target, key(&agreed));
+        assert_eq!(first.explanation.peer_count, 3);
+        assert!(
+            rows.iter()
+                .filter(|row| row.target == key(&lone))
+                .all(|row| row.explanation.fallback_tier != "collaborative")
+        );
+    })
+    .await;
+}
+
+#[test]
+fn rec_002_the_peer_threshold_is_positive() {
+    let refused = suprnova::RecommendConfig {
+        min_peers: 0,
+        ..Default::default()
+    }
+    .validate()
+    .unwrap_err();
+    assert!(refused.to_string().contains("RECOMMEND_MIN_PEERS"));
+    assert_eq!(suprnova::RecommendConfig::default().min_peers, 3);
 }

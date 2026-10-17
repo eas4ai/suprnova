@@ -62,6 +62,7 @@ pub(crate) fn collaborative(
     history: &History,
     histories: &Histories,
     cap: usize,
+    min_peers: usize,
 ) -> Vec<Ranked> {
     let mut candidates = BTreeMap::<RecommendationTarget, Ranked>::new();
     for peer in peers(actor, history, histories, cap) {
@@ -103,6 +104,9 @@ pub(crate) fn collaborative(
             }
         }
     }
+    // A candidate fewer peers agree on would let its peer count point at one person;
+    // it can still arrive through a later tier, which names no peers.
+    candidates.retain(|_, candidate| candidate.reason.peers >= min_peers);
     ordered(candidates.into_values().collect())
 }
 pub(crate) fn ordered(mut candidates: Vec<Ranked>) -> Vec<Ranked> {

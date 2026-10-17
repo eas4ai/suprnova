@@ -11,7 +11,8 @@ matches an entry in the 4.3.0 [changelog](../CHANGELOG.md).
 ## How to use this chapter
 
 Find the changelog entry below, then read **Before**, **Now** and **Do**. One
-fix adds a table that your migrations create; nothing else needs an edit.
+fix adds a table that your migrations create, and one changes which
+suggestions the starter recommender makes; nothing else needs an edit.
 
 ## Upgrade in this order
 
@@ -47,6 +48,19 @@ A model with `updated_at` is unchanged.
 `suprnova::search::migrations()`, which your migrator already appends. Until
 it exists, saving or loading such a model on the `database` search engine
 fails with an error naming `search_source_versions`.
+
+### A starter suggestion stands on at least three peers.
+
+**Before:** a single peer who shared an item with the viewer could produce a
+collaborative suggestion, and its explanation showed a peer count of 1.
+
+**Now:** a collaborative suggestion needs `RECOMMEND_MIN_PEERS` distinct peers,
+default 3; a candidate with fewer arrives through a later tier or not at all,
+so an application with few active users shows fewer collaborative suggestions.
+
+**Do:** nothing, unless your page reads `peer_count` or `fallback_tier` and
+assumed small values. Lower `RECOMMEND_MIN_PEERS` only if your users accept
+that a suggestion can reveal one other user's activity.
 
 ## Fixed entries with no upgrade step
 

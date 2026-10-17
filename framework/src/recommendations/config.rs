@@ -14,6 +14,9 @@ pub struct RecommendConfig {
     pub history: usize,
     /// RECOMMEND_PEERS caps peers ordered by their most recent shared fact.
     pub peers: usize,
+    /// RECOMMEND_MIN_PEERS is how many distinct peers a collaborative candidate needs, so
+    /// no suggestion's peer count can point at one person's views or purchases.
+    pub min_peers: usize,
     /// RECOMMEND_POPULARITY_WINDOW counts UTC days of positive activity.
     pub popularity_window: u32,
     /// RECOMMEND_LOCK_TTL_SECS bounds the renewable generation lease.
@@ -27,6 +30,7 @@ impl Default for RecommendConfig {
             enabled: false,
             history: 500,
             peers: 200,
+            min_peers: 3,
             popularity_window: 30,
             lock_ttl_secs: 3600,
             event_types: BTreeMap::new(),
@@ -39,6 +43,7 @@ struct RawConfig {
     enabled: Option<String>,
     history: Option<String>,
     peers: Option<String>,
+    min_peers: Option<String>,
     popularity_window: Option<String>,
     lock_ttl_secs: Option<String>,
     event_types: Option<String>,
@@ -80,6 +85,7 @@ impl RecommendConfig {
             enabled: parse(raw.enabled, default.enabled, "RECOMMEND_ENABLED")?,
             history: parse(raw.history, default.history, "RECOMMEND_HISTORY")?,
             peers: parse(raw.peers, default.peers, "RECOMMEND_PEERS")?,
+            min_peers: parse(raw.min_peers, default.min_peers, "RECOMMEND_MIN_PEERS")?,
             popularity_window: parse(
                 raw.popularity_window,
                 default.popularity_window,
@@ -107,6 +113,7 @@ impl RecommendConfig {
         for (name, value) in [
             ("RECOMMEND_HISTORY", self.history as u64),
             ("RECOMMEND_PEERS", self.peers as u64),
+            ("RECOMMEND_MIN_PEERS", self.min_peers as u64),
             (
                 "RECOMMEND_POPULARITY_WINDOW",
                 u64::from(self.popularity_window),
