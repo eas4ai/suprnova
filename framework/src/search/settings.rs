@@ -210,7 +210,10 @@ pub struct IndexTimeSettings {
     pub facet_attributes: BTreeMap<String, AttributeType>,
     /// An optional provider overrides SEARCH_EMBEDDER for this index.
     pub embedder: Option<String>,
-    /// Declaration order binds media placeholders to encoder feature rows.
+    /// Declaration order binds media placeholders to encoder feature rows. Left out of
+    /// the serialized settings when empty, so an index without media keeps the digest it
+    /// had before media parts existed and an upgrade rebuilds nothing.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub embed_media: Vec<MediaSource>,
     /// The model identity is part of the generation's content digest.
     pub model: Option<String>,
