@@ -1,0 +1,184 @@
+//! Checked server-rendered view contracts for routes and Live components.
+//!
+//! Askama is the normative checked substrate behind this facade. Application
+//! handlers and components depend on Suprnova-owned contracts rather than the
+//! template engine's implementation modules.
+
+use std::fmt;
+
+pub mod head;
+mod response;
+mod share;
+
+pub use head::Head;
+pub use http::{HeaderName, HeaderValue, StatusCode};
+pub use response::{DocumentResponseError, DocumentResponseErrorKind, document_response};
+pub(crate) use share::RenderValues;
+pub use share::View;
+pub use suprnova_live::identity::ViewName;
+
+pub use suprnova_live::view::{
+    AssetSet, CanonicalDocumentConformance, CanonicalDocumentIntent, CanonicalDocumentRequest,
+    ChildMount, DocumentCachePolicy, DocumentMediaType, DocumentRender, DocumentResponseIntent,
+    DocumentValidator, IslandRender, MountMetadata, MountSnapshotKind, RegisteredSanitizer,
+    RenderLimits, SanitizerFailure, SanitizerId, TrustedHtml, TrustedMarkupError,
+    TrustedMarkupErrorKind, TrustedMarkupReason, ViewError, ViewErrorKind,
+};
+
+/// Result returned by a checked custom view filter.
+pub type FilterResult<T> = askama::Result<T>;
+
+/// Read-only template environment supplied to a checked custom view filter.
+pub use askama::Values as FilterValues;
+
+/// Redacted failure returned by the normative checked template substrate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TemplateFailure {
+    /// Required dynamic render data was absent.
+    MissingData,
+    /// Dynamic render data had a different type than the checked template expected.
+    InvalidData,
+    /// Rendering failed for another redacted reason.
+    Failed,
+}
+
+mod sealed {
+    pub trait Sealed {
+        fn engine_template(&self) -> &dyn suprnova_live::view::ViewTemplate;
+    }
+
+    impl<T> Sealed for T
+    where
+        T: suprnova_live::view::ViewTemplate,
+    {
+        fn engine_template(&self) -> &dyn suprnova_live::view::ViewTemplate {
+            self
+        }
+    }
+}
+
+/// Framework-owned contract implemented by the normative checked template substrate.
+#[allow(
+    private_bounds,
+    reason = "the private supertrait prevents unchecked renderer implementations"
+)]
+pub trait ViewTemplate: sealed::Sealed {
+    /// Writes checked template output into a framework-owned bounded buffer.
+    fn render_view(&self, output: &mut dyn fmt::Write) -> Result<(), TemplateFailure>;
+}
+
+#[doc(hidden)]
+impl<T> ViewTemplate for T
+where
+    T: suprnova_live::view::ViewTemplate,
+{
+    fn render_view(&self, output: &mut dyn fmt::Write) -> Result<(), TemplateFailure> {
+        suprnova_live::view::ViewTemplate::render_view(self, output).map_err(engine_failure)
+    }
+}
+
+/// The framework's name for the engine's redacted render failure.
+fn engine_failure(failure: suprnova_live::view::TemplateFailure) -> TemplateFailure {
+    match failure {
+        suprnova_live::view::TemplateFailure::MissingData => TemplateFailure::MissingData,
+        suprnova_live::view::TemplateFailure::InvalidData => TemplateFailure::InvalidData,
+        suprnova_live::view::TemplateFailure::Failed => TemplateFailure::Failed,
+    }
+}
+
+/// Writes `template` with the data shared through [`View::share`] and
+/// [`View::share_for_request`] readable by Askama's `value` filter, as
+/// [`ViewRenderer`] renders every other view. The Inertia root template
+/// renders through this, so the document reads what the pages' views read.
+pub(crate) fn render_with_shared_values<T: ViewTemplate + ?Sized>(
+    template: &T,
+    output: &mut dyn fmt::Write,
+) -> Result<(), TemplateFailure> {
+    sealed::Sealed::engine_template(template)
+        .render_view_with_values(output, &share::RenderValues::current())
+        .map_err(engine_failure)
+}
+
+/// Framework-owned checked renderer used by routes and Live components.
+///
+/// The wrapper keeps the normative template engine and host-neutral engine trait
+/// out of application bounds while retaining the engine's bounded validation.
+#[derive(Clone, Copy, Debug)]
+pub struct ViewRenderer {
+    engine: suprnova_live::view::ViewRenderer,
+}
+
+impl ViewRenderer {
+    /// Creates a checked renderer from validated output limits.
+    pub fn new(limits: RenderLimits) -> Result<Self, ViewError> {
+        suprnova_live::view::ViewRenderer::new(limits).map(|engine| Self { engine })
+    }
+
+    /// Renders and validates one complete canonical document.
+    ///
+    /// The template reads the data shared with [`View::share`] and
+    /// [`View::share_for_request`] through Askama's `value` filter.
+    pub fn render_document<T: ViewTemplate + ?Sized>(
+        &self,
+        view: ViewName,
+        template: &T,
+        response: DocumentResponseIntent,
+        assets: AssetSet,
+        mounts: Vec<MountMetadata>,
+    ) -> Result<DocumentRender, ViewError> {
+        self.engine.render_document_with_values(
+            view,
+            sealed::Sealed::engine_template(template),
+            response,
+            assets,
+            mounts,
+            &share::RenderValues::current(),
+        )
+    }
+
+    /// Renders and validates one independently owned Live island.
+    ///
+    /// The template reads shared data as
+    /// [`render_document`](Self::render_document) does.
+    pub fn render_island<T: ViewTemplate + ?Sized>(
+        &self,
+        view: ViewName,
+        template: &T,
+        assets: AssetSet,
+        children: Vec<ChildMount>,
+    ) -> Result<IslandRender, ViewError> {
+        self.engine.render_island_with_values(
+            view,
+            sealed::Sealed::engine_template(template),
+            assets,
+            children,
+            &share::RenderValues::current(),
+        )
+    }
+
+    /// Validates a component-owned fragment before engine wrapper allocation.
+    pub fn validate_island_fragment(
+        &self,
+        view: ViewName,
+        output: &IslandRender,
+    ) -> Result<(), ViewError> {
+        self.engine.validate_island_fragment(view, output)
+    }
+
+    /// Validates already assembled engine-owned island output before publication.
+    pub fn validate_island_output(
+        &self,
+        view: ViewName,
+        output: IslandRender,
+    ) -> Result<IslandRender, ViewError> {
+        self.engine.validate_island_output(view, output)
+    }
+}
+
+/// Checked filters available to the normative template substrate.
+pub mod filters {
+    pub use suprnova_live::view::filters::live_key;
+    pub use suprnova_live::view::filters::live_key_digest;
+    pub use suprnova_live::view::filters::trusted_html;
+}
