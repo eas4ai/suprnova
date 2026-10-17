@@ -41,6 +41,21 @@ impl Recommender for GraphRecommender {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        // Only the viewer's own events steer a graph read and stand as its evidence
+        // (REC-006, REC-007), so another person's list is the starter's rows for them.
+        let own = match (actor, viewer) {
+            (Actor::User(user), Viewer::Authenticated { id, .. }) => user == id,
+            (Actor::Guest(_), Viewer::Guest) => true,
+            _ => false,
+        };
+        if !own {
+            return fallback(
+                StarterRecommender
+                    .for_user(actor, surface, viewer, limit)
+                    .await?,
+                "the graph reads only the viewer's own events, and this list is another actor's",
+            );
+        }
         let config = RecommendConfig::current()?;
         let histories = Histories::for_actor(actor, config.history).await?;
         let history = histories.actors.get(actor);
@@ -73,6 +88,7 @@ impl Recommender for GraphRecommender {
                 StarterRecommender
                     .for_user(actor, surface, viewer, limit)
                     .await?,
+                THIN,
             ),
         }
     }
@@ -92,15 +108,25 @@ impl Recommender for GraphRecommender {
             return Ok(Vec::new());
         }
         let config = RecommendConfig::current()?;
+        // The viewer's own negatives steer the vectors away and leave the list, as do the
+        // targets they have already seen (REC-006).
+        let actor = viewer.id().map(|id| Actor::User(id.to_owned()));
+        let histories = match &actor {
+            Some(actor) => Histories::for_actor(actor, config.history).await?,
+            None => Histories::default(),
+        };
+        let history = actor.as_ref().and_then(|actor| histories.actors.get(actor));
+        let mut excluded = history.map(|h| h.excluded.clone()).unwrap_or_default();
+        excluded.insert(target.clone());
         let request = Request {
             seeds: vec![Seed {
                 target: target.clone(),
                 weight: 1.0,
                 event: None,
             }],
-            negative: BTreeSet::new(),
-            excluded: BTreeSet::from([target.clone()]),
-            actor: viewer.id().map(|id| Actor::User(id.to_owned())),
+            negative: history.map(|h| h.negative.clone()).unwrap_or_default(),
+            excluded,
+            actor,
             surface: "similar".into(),
             viewer: viewer.clone(),
             limit,
@@ -108,7 +134,10 @@ impl Recommender for GraphRecommender {
         };
         match rank(&request, &config).await? {
             Some(rows) => Ok(rows),
-            None => fallback(StarterRecommender.similar_to(target, viewer, limit).await?),
+            None => fallback(
+                StarterRecommender.similar_to(target, viewer, limit).await?,
+                THIN,
+            ),
         }
     }
 
@@ -157,17 +186,25 @@ impl Recommender for GraphRecommender {
         };
         match rank(&request, &config).await? {
             Some(rows) => Ok(rows),
-            None => fallback(StarterRecommender.similar_to(target, viewer, limit).await?),
+            None => fallback(
+                StarterRecommender.similar_to(target, viewer, limit).await?,
+                THIN,
+            ),
         }
     }
 }
 
-/// The starter's rows, marked as the graph engine's fallback (REC-007).
-fn fallback(mut rows: Vec<Recommendation>) -> Result<Vec<Recommendation>, FrameworkError> {
+/// Why a read answers with the starter's rows when the graph supports it too thinly.
+const THIN: &str = "the graph's evidence for this surface is below its confidence threshold";
+
+/// The starter's rows, marked as the graph engine's fallback with the reason (REC-007).
+fn fallback(
+    mut rows: Vec<Recommendation>,
+    reason: &str,
+) -> Result<Vec<Recommendation>, FrameworkError> {
     for row in &mut rows {
         row.explanation.engine = "starter".into();
-        row.explanation.fallback_reason =
-            Some("the graph's evidence for this surface is below its confidence threshold".into());
+        row.explanation.fallback_reason = Some(reason.into());
     }
     Ok(rows)
 }
@@ -584,23 +621,22 @@ async fn semantic(
                 .await?
                 .into_keys()
                 .collect();
-                let positives = context_positive
-                    .iter()
-                    .filter(|target| target.index == index && visible.contains(*target));
-                let negatives: Vec<&RecommendationTarget> = context_negative
-                    .iter()
-                    .filter(|target| target.index == index && visible.contains(*target))
-                    .collect();
-                let context = positives
-                    .zip(negatives.iter().cycle())
-                    .map(|(p, n)| (p.key.clone(), n.key.clone()))
-                    .collect();
+                let keys = |targets: &[RecommendationTarget]| -> Vec<String> {
+                    targets
+                        .iter()
+                        .filter(|target| target.index == index && visible.contains(*target))
+                        .map(|target| target.key.clone())
+                        .collect()
+                };
+                let target = positive.first().cloned().unwrap_or_default();
+                let context =
+                    discover_context(&target, &keys(context_positive), &keys(context_negative));
                 engine
                     .discover(
                         descriptor,
                         &generation,
                         &VectorDiscover {
-                            target: positive.first().cloned().unwrap_or_default(),
+                            target,
                             context,
                             filter,
                             depth,
@@ -654,6 +690,33 @@ async fn semantic(
         }
     }
     Ok(())
+}
+
+/// The discover query's context pairs. Every negative pairs with a positive, the shorter
+/// list repeating, and with no positive a negative pairs with the target itself, so no
+/// negative the viewer recorded is left out (REC-006). Without negatives there is no pair.
+fn discover_context(
+    target: &str,
+    positives: &[String],
+    negatives: &[String],
+) -> Vec<(String, String)> {
+    if negatives.is_empty() {
+        return Vec::new();
+    }
+    let anchor = [target.to_owned()];
+    let positives = if positives.is_empty() {
+        &anchor[..]
+    } else {
+        positives
+    };
+    (0..positives.len().max(negatives.len()))
+        .map(|i| {
+            (
+                positives[i % positives.len()].clone(),
+                negatives[i % negatives.len()].clone(),
+            )
+        })
+        .collect()
 }
 
 /// Followed actors' public engagement, per target. A follow is the viewer's own event,

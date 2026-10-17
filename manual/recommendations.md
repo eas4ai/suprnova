@@ -344,13 +344,20 @@ recommend and discover operations by point id, under the viewer's scope
 filter. On the database and collection engines, it folds the stored vectors
 into one query, the positives' mean pushed away from the negatives', and ranks
 the result. The positive and negative points are always the viewer's own
-events on documents the viewer may see.
+events on documents the viewer may see. A graph read never steers by another
+person's events: `Recommend::for_user(id)` read by a viewer other than that
+user answers with the starter's rows for the user, with `fallback_reason`
+saying why, and so does `Recommend::for_actor(actor)` with a guest actor read
+by a signed-in viewer.
 
 `Recommend::similar_to(target)` seeds the graph and the vectors with one
-document. `Recommend::discover(target)` searches near a document and ranks
-the neighbourhood by context pairs built from the viewer's own positive and
-negative events; it needs the graph engine and refuses a seed the viewer
-cannot see.
+document; the viewer's negatives push the vectors away and, like the targets
+the viewer has already seen, are left out of the list.
+`Recommend::discover(target)` searches near a document and ranks the
+neighbourhood by context pairs built from the viewer's own positive and
+negative events. Every negative joins a pair, repeating positives when there
+are fewer of them, or pairing with the seed when the viewer has none. It needs
+the graph engine and refuses a seed the viewer cannot see.
 
 ## Bridge search events
 
