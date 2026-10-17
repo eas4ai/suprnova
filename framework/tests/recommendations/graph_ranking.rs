@@ -50,6 +50,7 @@ async fn rec_007_a_fact_outside_the_viewer_scope_never_influences_a_score() {
         let private = note("P", "p", false, "bob", 2).await;
         let beyond = note("C", "c", true, "o", 3).await;
         record("alice", &a, EventType::Like, "a").await;
+        record("bob", &a, EventType::Like, "a").await;
         peers_like(&["p1", "p2", "p3"], &[&a, &private]).await;
         peers_like(&["q1", "q2", "q3"], &[&private, &beyond]).await;
         Recommend::rebuild_graph().await.unwrap().unwrap();
@@ -60,8 +61,13 @@ async fn rec_007_a_fact_outside_the_viewer_scope_never_influences_a_score() {
         assert!(rows.iter().all(
             |row| row.explanation.engine != "graph" || row.target.key != beyond.id.to_string()
         ));
-        // Its owner sees the private note and what lies beyond it.
-        let owner = for_alice(viewer("bob")).await;
+        // Its owner, from the same like, sees the private note and what lies beyond it.
+        let owner = Recommend::for_user("bob")
+            .limit(10)
+            .for_viewer(viewer("bob"))
+            .get()
+            .await
+            .unwrap();
         let reached = targets(&owner);
         assert!(reached.contains(&private.id.to_string()), "{reached:?}");
         assert!(reached.contains(&beyond.id.to_string()), "{reached:?}");

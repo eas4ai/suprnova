@@ -4,10 +4,10 @@
 use super::support::*;
 use std::sync::{Arc, Mutex};
 use suprnova::{
-    EngineCapabilities, EngineQuery, EngineResult, EventType, ExplanationEvidence, FacetDistribution,
-    FacetOrder, FacetStats, Filter, FrameworkError, GenerationId, IndexDescriptor, IndexSettings,
-    IndexedDocument, Recommend, RecommendConfig, Recommendation, SearchEngine, SearchRegistry,
-    Total, VectorDiscover, VectorRecommend, Vocabulary, WriteOutcome,
+    EngineCapabilities, EngineQuery, EngineResult, EventType, ExplanationEvidence,
+    FacetDistribution, FacetOrder, FacetStats, Filter, FrameworkError, GenerationId,
+    IndexDescriptor, IndexSettings, IndexedDocument, Recommend, RecommendConfig, Recommendation,
+    SearchEngine, SearchRegistry, Total, VectorDiscover, VectorRecommend, Vocabulary, WriteOutcome,
 };
 
 /// The collection engine, reporting dense retrieval and recording every recommend and
