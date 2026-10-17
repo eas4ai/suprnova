@@ -6,12 +6,14 @@ mod database;
 mod derive;
 #[cfg(feature = "graph-memgraph")]
 pub mod memgraph;
+mod score;
 
 pub use database::DatabaseGraphStore;
 pub use derive::{
     GraphBuild, GraphDeriveJob, GraphDocumentJob, GraphRelation, declare, document_changed, rebuild,
 };
 pub(crate) use derive::{documents_changed, events_removed};
+pub use score::GraphRecommender;
 
 use super::{EventProvenance, RecommendationTarget};
 use crate::{

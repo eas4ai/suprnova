@@ -2,6 +2,7 @@
 mod budget;
 mod events;
 mod graph;
+mod graph_ranking;
 mod publication;
 mod schema;
 mod starter;

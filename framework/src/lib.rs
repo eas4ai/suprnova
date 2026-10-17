@@ -628,13 +628,13 @@ pub use media::{
 #[cfg(feature = "graph-memgraph")]
 pub use recommendations::graph::memgraph::MemgraphGraphStore;
 pub use recommendations::{
-    Actor, EventClass, EventProvenance, EventScoring, EventType, GenerateRun, GenerationOutcome,
-    GraphSurface, ProvenanceState, Recommend, RecommendConfig, Recommendation,
+    Actor, EventClass, EventProvenance, EventScoring, EventType, ExplanationEvidence, GenerateRun,
+    GenerationOutcome, GraphSurface, ProvenanceState, Recommend, RecommendConfig, Recommendation,
     RecommendationBuilder, RecommendationEvent, RecommendationExplanation, RecommendationRun,
     RecommendationTarget, Recommender, StarterRecommender, event_digest,
     graph::{
-        DatabaseGraphStore, GraphEdge, GraphNode, GraphProvenance, GraphScope, GraphStore,
-        Revocation,
+        DatabaseGraphStore, GraphEdge, GraphNode, GraphProvenance, GraphRecommender, GraphScope,
+        GraphStore, Revocation,
     },
 };
 #[cfg(feature = "testing")]

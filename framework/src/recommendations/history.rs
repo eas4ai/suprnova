@@ -14,6 +14,7 @@ pub(crate) struct Positive {
 #[derive(Debug, Default)]
 pub(crate) struct History {
     pub positive: BTreeMap<RecommendationTarget, Positive>,
+    pub negative: BTreeSet<RecommendationTarget>,
     pub excluded: BTreeSet<RecommendationTarget>,
     pub surfaces: BTreeSet<String>,
 }
@@ -57,6 +58,26 @@ impl Histories {
                 positive_targets: history.positive.keys().cloned().collect(),
             })
         }).collect()
+    }
+
+    /// One actor's bounded history and the provenance of its positives, for a read that
+    /// ranks live instead of from a batch.
+    pub async fn for_actor(actor: &Actor, cap: usize) -> Result<Self, FrameworkError> {
+        let high_water = storage::scalar(
+            "SELECT COALESCE(MAX(id), 0) FROM recommendation_events",
+            vec![],
+        )
+        .await?;
+        let (kind, id) = actor.parts();
+        let row = DynamicRow(serde_json::Map::from_iter([
+            ("actor_kind".to_owned(), serde_json::Value::from(kind)),
+            ("actor_id".to_owned(), serde_json::Value::from(id)),
+        ]));
+        let mut histories = Self::default();
+        histories
+            .load_chunk(std::slice::from_ref(&row), high_water, cap)
+            .await?;
+        Ok(histories)
     }
 
     pub async fn load(high_water: i64, cap: usize) -> Result<Self, FrameworkError> {
@@ -135,6 +156,9 @@ impl Histories {
         let history = self.actors.entry(actor).or_default();
         history.surfaces.insert(row.get_string("surface")?);
         history.excluded.insert(target.clone());
+        if row.get_string("event_class")? == "negative" {
+            history.negative.insert(target.clone());
+        }
         if row.get_string("event_class")? == "positive" {
             let score = row.get_int("score")?;
             let time = row.get_int("occurred_at")?;
