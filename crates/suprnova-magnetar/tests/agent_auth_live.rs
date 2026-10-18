@@ -275,6 +275,51 @@ async fn one_time_steps(url: &str) {
         410,
         "the right code after the limit is refused"
     );
+
+    // A claim racing an exchange of the pre-claim assertion: whichever
+    // lands first, no pre-claim token outlives the claim.
+    for round in 0..6 {
+        let email = format!("{}@example.test", unique("claim-race"));
+        let registration = h.anonymous().await;
+        let v1 = registration["identity_assertion"]
+            .as_str()
+            .expect("v1")
+            .to_owned();
+        let claim_token = registration["claim_token"].as_str().expect("claim token");
+        let user_id = h.create_user(&email, true).await;
+        let bearer = h.sign_in(&user_id).await;
+        let started = body(&h.initiate(claim_token, &email).await);
+        let attempt = attempt_token(
+            started["claim_attempt"]["verification_uri"]
+                .as_str()
+                .expect("uri"),
+        );
+        let code = started["claim_attempt"]["user_code"]
+            .as_str()
+            .expect("code")
+            .to_owned();
+        let exchange = tokio::spawn({
+            let (h, v1) = (h.clone(), v1.clone());
+            async move { h.exchange(&v1).await }
+        });
+        let confirm = tokio::spawn({
+            let h = h.clone();
+            async move { h.confirm(&attempt, &code, Some(&bearer)).await }
+        });
+        let exchanged = exchange.await.expect("the exchange");
+        assert_eq!(status(&confirm.await.expect("the confirmation")), 200);
+        if status(&exchanged) == 200 {
+            let token = body(&exchanged)["access_token"]
+                .as_str()
+                .expect("access")
+                .to_owned();
+            assert_eq!(
+                h.verify(&token).await,
+                revoked(),
+                "round {round}: a pre-claim token outlived the claim"
+            );
+        }
+    }
 }
 
 /// A revocation event ends a delegation's tokens, and the operator's

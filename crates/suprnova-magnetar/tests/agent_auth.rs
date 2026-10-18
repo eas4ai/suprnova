@@ -939,6 +939,67 @@ async fn agent_008_each_id_jag_refusal_answers_its_code() {
 }
 
 #[tokio::test]
+async fn agent_008_iat_is_accepted_up_to_the_clock_skew() {
+    let h = sqlite_harness().await;
+    // Start at the top of a second so the test's clock and the server's
+    // name the same second.
+    let sub_second = chrono::Utc::now().timestamp_subsec_millis();
+    if sub_second > 500 {
+        tokio::time::sleep(std::time::Duration::from_millis(u64::from(
+            1010 - sub_second,
+        )))
+        .await;
+    }
+    for (ahead, accepted) in [(119_i64, true), (121, false)] {
+        let mut claims = h
+            .provider
+            .id_jag_claims(&format!("iat-{ahead}"), &format!("iat{ahead}@example.test"));
+        let now = chrono::Utc::now().timestamp();
+        claims.insert("iat".into(), json!(now + ahead));
+        let response = h.present(&h.provider.id_jag(&claims)).await;
+        if accepted {
+            assert_eq!(status(&response), 200, "+{ahead}s: {:?}", body(&response));
+        } else {
+            assert_eq!(status(&response), 400, "+{ahead}s: {:?}", body(&response));
+            assert_eq!(body(&response)["error"], "invalid_request");
+        }
+    }
+}
+
+#[tokio::test]
+async fn agent_008_the_algorithm_allowlist_refuses_hmac_before_any_key_is_read() {
+    use base64::Engine;
+    let h = sqlite_harness().await;
+    let secret = b"a provider published a symmetric key by mistake";
+    h.key_sets.serve(
+        PROVIDER_JWKS,
+        json!({"keys": [{
+            "kty": "oct",
+            "kid": "shared-secret",
+            "k": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret),
+        }]}),
+        None,
+    );
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    header.typ = Some("oauth-id-jag+jwt".to_owned());
+    header.kid = Some("shared-secret".to_owned());
+    let token = jsonwebtoken::encode(
+        &header,
+        &Value::Object(h.provider.id_jag_claims("hmac", "hmac@example.test")),
+        &jsonwebtoken::EncodingKey::from_secret(secret),
+    )
+    .expect("an HMAC token");
+    let refused = h.present(&token).await;
+    assert_eq!(status(&refused), 400, "{:?}", body(&refused));
+    assert_eq!(body(&refused)["error"], "invalid_signature");
+    assert_eq!(
+        h.key_sets.request_count(PROVIDER_JWKS),
+        0,
+        "the algorithm was refused before the key set was read"
+    );
+}
+
+#[tokio::test]
 async fn agent_008_a_replayed_jti_is_refused_on_a_second_node() {
     let db = magnetar::default_schema::database().await;
     let provider = Provider::new(PROVIDER, "provider-key-1");
@@ -1393,38 +1454,33 @@ async fn agent_009_the_claim_routes_refuse_a_request_without_a_signed_in_user() 
     assert_no_framing(&confirm);
     let id = registration["registration_id"].as_str().expect("id");
     assert_eq!(h.registration(id).await.status, "pending");
-    // A session from before the user's password change speaks for no one.
+    // A session from before the user's password change speaks for no one:
+    // the engine compares the session's epoch with the user's.
     let user_id = h.create_user("nosession@example.test", true).await;
-    let bearer = h.sign_in(&user_id).await;
     magnetar::sessions::JwtEpochStore::bump_auth_epoch(h.storage.as_ref(), &user_id)
         .await
         .expect("a password change moves the epoch");
-    let mut request = magnetar::plugin::WireRequest::new(
-        magnetar::plugin::Method::Post,
-        "/agent/identity/claim/complete",
-    );
-    request.body = magnetar::plugin::WireBody::Form(
-        [
-            ("claim_attempt_token", attempt.as_str()),
-            ("user_code", code),
-        ]
-        .into_iter()
-        .map(|(name, value)| (name.to_owned(), value.to_owned()))
-        .collect(),
-    );
+    let stale_session = magnetar::agent_auth::SignedInUser {
+        user_id: user_id.clone(),
+        auth_epoch: Some(0),
+    };
+    let view = h.engine.pending_claim(&attempt, Some(&stale_session)).await;
+    assert_eq!(status(&view), 401, "{:?}", body(&view));
+    assert_eq!(body(&view)["error"], "login_required");
     let stale = h
-        .registry
-        .handle_bound(
-            request,
-            Some(magnetar::plugin::BearerCredential::new(bearer)),
-        )
+        .engine
+        .confirm_claim(&attempt, code, Some(&stale_session), Some(CLIENT_ADDRESS))
         .await;
-    assert!(
-        stale
-            .as_ref()
-            .map_or(true, |response| status(response) == 401),
-        "a session from before the epoch moved must not claim: {:?}",
-        stale.as_ref().map(body)
+    assert_eq!(status(&stale), 401, "{:?}", body(&stale));
+    assert_eq!(body(&stale)["error"], "login_required");
+    let current = magnetar::agent_auth::SignedInUser {
+        user_id,
+        auth_epoch: Some(1),
+    };
+    assert_eq!(
+        status(&h.engine.pending_claim(&attempt, Some(&current)).await),
+        200,
+        "the same user at the current epoch sees the claim"
     );
     assert_eq!(h.registration(id).await.status, "pending");
 }
@@ -1532,6 +1588,55 @@ async fn agent_009_a_claimed_token_that_is_never_polled_expires() {
         .await;
     assert_eq!(status(&late), 400, "{:?}", body(&late));
     assert_eq!(body(&late)["error"], "expired_token");
+}
+
+#[tokio::test]
+async fn agent_009_a_claim_racing_an_exchange_leaves_no_pre_claim_token() {
+    let h = Arc::new(sqlite_harness().await);
+    for round in 0..4 {
+        let email = format!("race{round}@example.test");
+        let registration = h.anonymous().await;
+        let v1 = registration["identity_assertion"]
+            .as_str()
+            .expect("v1")
+            .to_owned();
+        let claim_token = registration["claim_token"].as_str().expect("claim token");
+        let user_id = h.create_user(&email, true).await;
+        let bearer = h.sign_in(&user_id).await;
+        let started = body(&h.initiate(claim_token, &email).await);
+        let attempt = attempt_token(
+            started["claim_attempt"]["verification_uri"]
+                .as_str()
+                .expect("uri"),
+        );
+        let code = started["claim_attempt"]["user_code"]
+            .as_str()
+            .expect("code")
+            .to_owned();
+        let exchange = tokio::spawn({
+            let (h, v1) = (h.clone(), v1.clone());
+            async move { h.exchange(&v1).await }
+        });
+        let confirm = tokio::spawn({
+            let h = h.clone();
+            async move { h.confirm(&attempt, &code, Some(&bearer)).await }
+        });
+        let exchanged = exchange.await.expect("the exchange");
+        let confirmed = confirm.await.expect("the confirmation");
+        assert_eq!(status(&confirmed), 200, "{:?}", body(&confirmed));
+        if status(&exchanged) == 200 {
+            let token = body(&exchanged)["access_token"]
+                .as_str()
+                .expect("access")
+                .to_owned();
+            assert_eq!(
+                h.verify(&token).await,
+                revoked(),
+                "round {round}: a pre-claim token outlived the claim"
+            );
+        }
+        assert_eq!(body(&h.exchange(&v1).await)["error"], "invalid_grant");
+    }
 }
 
 #[tokio::test]
