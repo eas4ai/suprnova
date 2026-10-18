@@ -11,6 +11,7 @@
 mod harness;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -1432,40 +1433,7 @@ async fn agent_005_a_signed_in_users_error_redirects_only_to_a_loopback_client()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_005_a_concurrently_replayed_code_revokes_its_tokens() {
-    let h = Arc::new(sqlite_harness().await);
-    let user_id = h.create_user().await;
-    let bearer = h.sign_in(&user_id).await;
-    let client_id = h.register(&[REDIRECT]).await;
-    let (verifier, challenge) = pkce();
-    let code = h
-        .approve(&client_id, REDIRECT, &challenge, "tools:read", &bearer)
-        .await;
-    let mut tasks = Vec::new();
-    for _ in 0..8 {
-        let h = h.clone();
-        let (client_id, code, verifier) = (client_id.clone(), code.clone(), verifier.clone());
-        tasks.push(tokio::spawn(async move {
-            let response = h.exchange(&client_id, REDIRECT, &code, &verifier).await;
-            (status(&response), body(&response))
-        }));
-    }
-    let mut winners = Vec::new();
-    for task in tasks {
-        let (code, answer) = task.await.expect("an exchange task");
-        if code == 200 {
-            winners.push(answer);
-        } else {
-            assert_eq!(answer["error"], "invalid_grant", "{answer:?}");
-        }
-    }
-    assert!(winners.len() <= 1, "{} exchanges won", winners.len());
-    for winner in winners {
-        assert_eq!(
-            h.verify(winner["access_token"].as_str().unwrap()).await,
-            invalid(InvalidAccessReason::Revoked),
-            "a replayed code revokes what was issued from it"
-        );
-    }
+    concurrent_code_replay(Arc::new(sqlite_harness().await)).await;
 }
 
 #[tokio::test]
@@ -1506,7 +1474,7 @@ async fn agent_005_a_code_replayed_while_redeeming_revokes_its_tokens() {
                 "code",
                 &record.state,
                 &format!("redeeming:{grant_id}"),
-                now
+                Some(now)
             )
             .await
             .unwrap()
@@ -1521,7 +1489,7 @@ async fn agent_005_a_code_replayed_while_redeeming_revokes_its_tokens() {
 }
 
 struct RefreshingAgentGrant {
-    lifetime: Duration,
+    lifetime: Option<Duration>,
 }
 
 #[async_trait]
@@ -1550,21 +1518,59 @@ impl GrantHandler for RefreshingAgentGrant {
                 IssueTokens {
                     access_kind: "agent_access".to_owned(),
                     refresh: true,
-                    access_lifetime: Some(self.lifetime),
+                    access_lifetime: self.lifetime,
                 },
             )
             .await
     }
 }
 
-async fn refreshing_agent_harness(lifetime: Duration) -> Harness {
+async fn refreshing_agent_harness(lifetime: impl Into<Option<Duration>>) -> Harness {
     build(
         magnetar::default_schema::database().await,
         config(),
         ClientMetadataPolicy::default(),
-        vec![Arc::new(RefreshingAgentGrant { lifetime })],
+        vec![Arc::new(RefreshingAgentGrant {
+            lifetime: lifetime.into(),
+        })],
     )
     .await
+}
+
+#[tokio::test]
+async fn agent_005_an_extension_grant_without_a_lifetime_follows_the_configuration() {
+    let db = magnetar::default_schema::database().await;
+    let handler = || -> Vec<Arc<dyn GrantHandler>> {
+        vec![Arc::new(RefreshingAgentGrant { lifetime: None })]
+    };
+    let before = build(
+        db.clone(),
+        config(),
+        ClientMetadataPolicy::default(),
+        handler(),
+    )
+    .await;
+    let issued = body(
+        &before
+            .post_form(
+                "/oauth/token",
+                &[("grant_type", "urn:example:refreshing-agent")],
+                None,
+            )
+            .await,
+    );
+    assert_eq!(issued["expires_in"], 3600);
+    let mut shorter = config();
+    shorter.access_token_lifetime = Duration::from_secs(300);
+    let after = build(db, shorter, ClientMetadataPolicy::default(), handler()).await;
+    let refreshed = after
+        .refresh(
+            "agent-registration-1",
+            issued["refresh_token"].as_str().unwrap(),
+        )
+        .await;
+    assert_eq!(status(&refreshed), 200, "{:?}", body(&refreshed));
+    assert_eq!(body(&refreshed)["expires_in"], 300);
 }
 
 #[tokio::test]
@@ -1685,165 +1691,6 @@ async fn agent_005_a_decision_is_guarded_in_the_database() {
     guarded_decision(&sqlite_harness().await).await;
 }
 
-/// A store whose refresh-token rotation always fails, the way a deadlock
-/// victim's does; everything else is the SQL store.
-struct FailingRotation(magnetar::authorization_server::SqlAuthorizationStore);
-
-#[async_trait]
-impl magnetar::authorization_server::AuthorizationStore for FailingRotation {
-    async fn insert_client(
-        &self,
-        client: magnetar::authorization_server::RegisteredClient,
-    ) -> magnetar::Result<()> {
-        self.0.insert_client(client).await
-    }
-    async fn find_client(
-        &self,
-        client_id: &str,
-    ) -> magnetar::Result<Option<magnetar::authorization_server::RegisteredClient>> {
-        self.0.find_client(client_id).await
-    }
-    async fn create_grant(
-        &self,
-        grant: magnetar::authorization_server::GrantRecord,
-        tokens: Vec<magnetar::authorization_server::NewTokenRecord>,
-    ) -> magnetar::Result<()> {
-        self.0.create_grant(grant, tokens).await
-    }
-    async fn find_token(
-        &self,
-        token_hash: &str,
-    ) -> magnetar::Result<Option<magnetar::authorization_server::TokenRecord>> {
-        self.0.find_token(token_hash).await
-    }
-    async fn find_grant(
-        &self,
-        grant_id: &str,
-    ) -> magnetar::Result<Option<magnetar::authorization_server::GrantRecord>> {
-        self.0.find_grant(grant_id).await
-    }
-    async fn rotate_refresh_token(
-        &self,
-        _refresh_token_id: &str,
-        _grant_id: &str,
-        _at: chrono::DateTime<chrono::Utc>,
-        _replacements: Vec<magnetar::authorization_server::NewTokenRecord>,
-    ) -> magnetar::Result<bool> {
-        Err(magnetar::Error::Internal {
-            message: "deadlock detected".to_owned(),
-        })
-    }
-    async fn revoke_token(
-        &self,
-        token_id: &str,
-        at: chrono::DateTime<chrono::Utc>,
-    ) -> magnetar::Result<bool> {
-        self.0.revoke_token(token_id, at).await
-    }
-    async fn revoke_grant(
-        &self,
-        grant_id: &str,
-        at: chrono::DateTime<chrono::Utc>,
-    ) -> magnetar::Result<bool> {
-        self.0.revoke_grant(grant_id, at).await
-    }
-    async fn revoke_user_grants(
-        &self,
-        user_id: &str,
-        at: chrono::DateTime<chrono::Utc>,
-    ) -> magnetar::Result<u64> {
-        self.0.revoke_user_grants(user_id, at).await
-    }
-    async fn touch_grant(
-        &self,
-        grant_id: &str,
-        at: chrono::DateTime<chrono::Utc>,
-    ) -> magnetar::Result<()> {
-        self.0.touch_grant(grant_id, at).await
-    }
-    async fn list_user_grants(
-        &self,
-        user_id: &str,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> magnetar::Result<Vec<magnetar::authorization_server::GrantRecord>> {
-        self.0.list_user_grants(user_id, now).await
-    }
-    async fn create_authorization(
-        &self,
-        record: magnetar::authorization_server::AuthorizationRecord,
-    ) -> magnetar::Result<()> {
-        self.0.create_authorization(record).await
-    }
-    async fn find_authorization(
-        &self,
-        id: &str,
-        kind: &str,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> magnetar::Result<Option<magnetar::authorization_server::AuthorizationRecord>> {
-        self.0.find_authorization(id, kind, now).await
-    }
-    async fn transition_authorization(
-        &self,
-        id: &str,
-        kind: &str,
-        expected: &str,
-        next: &str,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> magnetar::Result<bool> {
-        self.0
-            .transition_authorization(id, kind, expected, next, now)
-            .await
-    }
-    async fn consume_authorization(
-        &self,
-        id: &str,
-        kind: &str,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> magnetar::Result<bool> {
-        self.0.consume_authorization(id, kind, now).await
-    }
-    async fn trim_authorizations(
-        &self,
-        user_id: &str,
-        kind: &str,
-        keep: u64,
-    ) -> magnetar::Result<u64> {
-        self.0.trim_authorizations(user_id, kind, keep).await
-    }
-    async fn prune_expired(
-        &self,
-        now: chrono::DateTime<chrono::Utc>,
-        grant_cutoff: chrono::DateTime<chrono::Utc>,
-    ) -> magnetar::Result<u64> {
-        self.0.prune_expired(now, grant_cutoff).await
-    }
-}
-
-#[tokio::test]
-async fn agent_005_a_failed_rotation_still_revokes_the_grant() {
-    let db = magnetar::default_schema::database().await;
-    let store = Arc::new(FailingRotation(
-        magnetar::authorization_server::SqlAuthorizationStore::new(db.clone()),
-    ));
-    let h = build_with_store(
-        db,
-        config(),
-        ClientMetadataPolicy::default(),
-        Vec::new(),
-        store,
-    )
-    .await;
-    let issued = h.issue("tools:read").await;
-    let refreshed = h.refresh(&issued.client_id, &issued.refresh_token).await;
-    assert_eq!(status(&refreshed), 500);
-    assert_eq!(body(&refreshed)["error"], "server_error");
-    assert_eq!(
-        h.verify(&issued.access_token).await,
-        invalid(InvalidAccessReason::Revoked),
-        "a rotation that failed leaves no token of the grant working"
-    );
-}
-
 #[tokio::test]
 async fn agent_005_listing_drops_grants_with_no_live_token() {
     let mut short = config();
@@ -1960,4 +1807,543 @@ async fn agent_005_pruning_deletes_grants_past_their_retention() {
         h.verify(&live.access_token).await,
         AccessVerification::Valid(_)
     ));
+}
+
+#[tokio::test]
+async fn agent_005_a_return_address_that_browsers_read_as_another_host_is_dropped() {
+    use magnetar::authorization_server::{AuthorizeOutcome, AuthorizeRequest};
+
+    let h = sqlite_harness().await;
+    let client_id = h.register(&[REDIRECT]).await;
+    let (_, challenge) = pkce();
+    let query: std::collections::BTreeMap<String, String> = [
+        ("response_type", "code"),
+        ("client_id", client_id.as_str()),
+        ("redirect_uri", REDIRECT),
+        ("code_challenge", challenge.as_str()),
+        ("code_challenge_method", "S256"),
+        ("resource", RESOURCE),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+    .collect();
+    for hostile in [
+        "//evil.test/x",
+        "/\\evil.test/x",
+        "https://evil.test/x",
+        "evil",
+    ] {
+        let outcome = h
+            .server
+            .authorize(AuthorizeRequest {
+                query: &query,
+                session: None,
+                client_address: None,
+                return_to: hostile,
+            })
+            .await
+            .unwrap();
+        let AuthorizeOutcome::Redirect(sign_in) = outcome else {
+            panic!("a redirect to sign in");
+        };
+        assert_eq!(
+            query_param(&sign_in, "return_to").as_deref(),
+            Some("/oauth/authorize"),
+            "{hostile:?} must not be the return address"
+        );
+    }
+}
+
+#[tokio::test]
+async fn agent_005_lifetimes_and_the_pending_cap_are_bounded_in_the_configuration() {
+    let h = sqlite_harness().await;
+    let attempt = |config: magnetar::authorization_server::AuthorizationServerConfig| {
+        magnetar::authorization_server::AuthorizationServer::new(
+            config,
+            Arc::new(magnetar::authorization_server::SqlAuthorizationStore::new(
+                h.db.clone(),
+            )),
+            h.storage.clone(),
+            h.limiter.clone(),
+            h.fetcher.clone(),
+        )
+        .is_ok()
+    };
+    let mut sub_second_access = config();
+    sub_second_access.access_token_lifetime = Duration::from_millis(500);
+    assert!(!attempt(sub_second_access), "a sub-second access lifetime");
+    let mut fractional_refresh = config();
+    fractional_refresh.refresh_token_lifetime = Duration::from_millis(1500);
+    assert!(
+        !attempt(fractional_refresh),
+        "a fractional refresh lifetime"
+    );
+    let mut too_many = config();
+    too_many.max_pending_per_user = 10_001;
+    assert!(!attempt(too_many), "a pending cap above 10,000");
+    let mut largest = config();
+    largest.max_pending_per_user = 10_000;
+    assert!(attempt(largest), "a pending cap of 10,000");
+
+    let agent = refreshing_agent_harness(Duration::from_millis(500)).await;
+    let response = agent
+        .post_form(
+            "/oauth/token",
+            &[("grant_type", "urn:example:refreshing-agent")],
+            None,
+        )
+        .await;
+    assert_eq!(status(&response), 400);
+    assert_eq!(body(&response)["error"], "invalid_request");
+}
+
+#[tokio::test]
+async fn agent_005_a_user_grant_follows_the_configured_access_lifetime() {
+    let db = magnetar::default_schema::database().await;
+    let before = build(
+        db.clone(),
+        config(),
+        ClientMetadataPolicy::default(),
+        Vec::new(),
+    )
+    .await;
+    let issued = before.issue("tools:read").await;
+
+    // The operator shortens the lifetime; an existing grant's next token
+    // follows it.
+    let mut shorter = config();
+    shorter.access_token_lifetime = Duration::from_secs(300);
+    let after = build(db, shorter, ClientMetadataPolicy::default(), Vec::new()).await;
+    let refreshed = after
+        .refresh(&issued.client_id, &issued.refresh_token)
+        .await;
+    assert_eq!(status(&refreshed), 200, "{:?}", body(&refreshed));
+    assert_eq!(body(&refreshed)["expires_in"], 300);
+}
+
+#[tokio::test]
+async fn agent_005_pruning_keeps_grants_inside_their_retention() {
+    pruning_respects_the_retention_boundaries(&sqlite_harness().await).await;
+}
+
+#[tokio::test]
+async fn agent_005_trimming_is_scoped_and_keeps_the_new_step() {
+    trimming_is_scoped_and_keeps_the_new_step(&sqlite_harness().await).await;
+}
+
+#[tokio::test]
+async fn agent_005_the_final_code_step_ignores_expiry() {
+    the_final_code_step_ignores_expiry(&sqlite_harness().await).await;
+}
+
+/// Faults a [`FaultyStore`] injects, each counted down as it fires.
+#[derive(Default)]
+struct Faults {
+    /// Rotations that fail.
+    rotations: AtomicUsize,
+    /// Grant revocations that fail.
+    revocations: AtomicUsize,
+    /// Final code steps (`redeeming:G` to `redeemed:G`) that fail.
+    redeemed_steps: AtomicUsize,
+    /// Replay marks (`redeeming:G` to `replayed:G`) that fail.
+    replayed_steps: AtomicUsize,
+    /// Mark the code replayed just before the next final code step.
+    replay_before_final: std::sync::atomic::AtomicBool,
+}
+
+fn fire(counter: &AtomicUsize) -> bool {
+    counter
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+            left.checked_sub(1)
+        })
+        .is_ok()
+}
+
+fn injected() -> magnetar::Error {
+    magnetar::Error::Internal {
+        message: "injected storage fault".to_owned(),
+    }
+}
+
+/// The SQL store with faults injected at chosen steps.
+struct FaultyStore {
+    inner: magnetar::authorization_server::SqlAuthorizationStore,
+    faults: Arc<Faults>,
+}
+
+#[async_trait]
+impl magnetar::authorization_server::AuthorizationStore for FaultyStore {
+    async fn insert_client(
+        &self,
+        client: magnetar::authorization_server::RegisteredClient,
+    ) -> magnetar::Result<()> {
+        self.inner.insert_client(client).await
+    }
+    async fn find_client(
+        &self,
+        client_id: &str,
+    ) -> magnetar::Result<Option<magnetar::authorization_server::RegisteredClient>> {
+        self.inner.find_client(client_id).await
+    }
+    async fn create_grant(
+        &self,
+        grant: magnetar::authorization_server::GrantRecord,
+        tokens: Vec<magnetar::authorization_server::NewTokenRecord>,
+    ) -> magnetar::Result<()> {
+        self.inner.create_grant(grant, tokens).await
+    }
+    async fn find_token(
+        &self,
+        token_hash: &str,
+    ) -> magnetar::Result<Option<magnetar::authorization_server::TokenRecord>> {
+        self.inner.find_token(token_hash).await
+    }
+    async fn find_grant(
+        &self,
+        grant_id: &str,
+    ) -> magnetar::Result<Option<magnetar::authorization_server::GrantRecord>> {
+        self.inner.find_grant(grant_id).await
+    }
+    async fn rotate_refresh_token(
+        &self,
+        refresh_token_id: &str,
+        grant_id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+        replacements: Vec<magnetar::authorization_server::NewTokenRecord>,
+    ) -> magnetar::Result<bool> {
+        if fire(&self.faults.rotations) {
+            return Err(injected());
+        }
+        self.inner
+            .rotate_refresh_token(refresh_token_id, grant_id, at, replacements)
+            .await
+    }
+    async fn revoke_token(
+        &self,
+        token_id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<bool> {
+        self.inner.revoke_token(token_id, at).await
+    }
+    async fn revoke_grant(
+        &self,
+        grant_id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<bool> {
+        if fire(&self.faults.revocations) {
+            return Err(injected());
+        }
+        self.inner.revoke_grant(grant_id, at).await
+    }
+    async fn revoke_user_grants(
+        &self,
+        user_id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<u64> {
+        self.inner.revoke_user_grants(user_id, at).await
+    }
+    async fn touch_grant(
+        &self,
+        grant_id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<()> {
+        self.inner.touch_grant(grant_id, at).await
+    }
+    async fn list_user_grants(
+        &self,
+        user_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<Vec<magnetar::authorization_server::GrantRecord>> {
+        self.inner.list_user_grants(user_id, now).await
+    }
+    async fn create_authorization(
+        &self,
+        record: magnetar::authorization_server::AuthorizationRecord,
+    ) -> magnetar::Result<()> {
+        self.inner.create_authorization(record).await
+    }
+    async fn find_authorization(
+        &self,
+        id: &str,
+        kind: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<Option<magnetar::authorization_server::AuthorizationRecord>> {
+        self.inner.find_authorization(id, kind, now).await
+    }
+    async fn transition_authorization(
+        &self,
+        id: &str,
+        kind: &str,
+        expected: &str,
+        next: &str,
+        live_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> magnetar::Result<bool> {
+        if next.starts_with("redeemed:") {
+            if fire(&self.faults.redeemed_steps) {
+                return Err(injected());
+            }
+            if self
+                .faults
+                .replay_before_final
+                .swap(false, Ordering::SeqCst)
+            {
+                let replayed = expected.replacen("redeeming:", "replayed:", 1);
+                self.inner
+                    .transition_authorization(id, kind, expected, &replayed, None)
+                    .await?;
+            }
+        }
+        if next.starts_with("replayed:") && fire(&self.faults.replayed_steps) {
+            return Err(injected());
+        }
+        self.inner
+            .transition_authorization(id, kind, expected, next, live_at)
+            .await
+    }
+    async fn consume_authorization(
+        &self,
+        id: &str,
+        kind: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<bool> {
+        self.inner.consume_authorization(id, kind, now).await
+    }
+    async fn trim_authorizations(
+        &self,
+        user_id: &str,
+        kind: &str,
+        keep: u64,
+        newest: &str,
+    ) -> magnetar::Result<u64> {
+        self.inner
+            .trim_authorizations(user_id, kind, keep, newest)
+            .await
+    }
+    async fn prune_expired(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        grant_cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<u64> {
+        self.inner.prune_expired(now, grant_cutoff).await
+    }
+}
+
+async fn faulty_harness() -> (Harness, Arc<Faults>) {
+    let db = magnetar::default_schema::database().await;
+    let faults = Arc::new(Faults::default());
+    let store = Arc::new(FaultyStore {
+        inner: magnetar::authorization_server::SqlAuthorizationStore::new(db.clone()),
+        faults: faults.clone(),
+    });
+    let h = build_with_store(
+        db,
+        config(),
+        ClientMetadataPolicy::default(),
+        Vec::new(),
+        store,
+    )
+    .await;
+    (h, faults)
+}
+
+/// Every grant of the user, with whether it and each of its tokens is
+/// revoked, read straight from the tables.
+async fn grants_of(h: &Harness, user_id: &str) -> Vec<(String, bool, Vec<bool>)> {
+    use magnetar::authorization_server::sql::{grants, tokens};
+    use sea_orm::{ColumnTrait, QueryFilter};
+
+    let mut found = Vec::new();
+    for grant in grants::Entity::find()
+        .filter(grants::Column::UserId.eq(user_id.to_owned()))
+        .all(&h.db)
+        .await
+        .unwrap()
+    {
+        let token_states = tokens::Entity::find()
+            .filter(tokens::Column::GrantId.eq(grant.id.clone()))
+            .all(&h.db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|token| token.revoked_at.is_some())
+            .collect();
+        found.push((grant.id, grant.revoked_at.is_some(), token_states));
+    }
+    found
+}
+
+async fn approved_code(h: &Harness) -> (String, String, String, String) {
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let client_id = h.register(&[REDIRECT]).await;
+    let (verifier, challenge) = pkce();
+    let code = h
+        .approve(&client_id, REDIRECT, &challenge, "tools:read", &bearer)
+        .await;
+    (user_id, client_id, code, verifier)
+}
+
+#[tokio::test]
+async fn agent_005_a_failed_rotation_leaves_the_grant_working() {
+    let (h, faults) = faulty_harness().await;
+    let issued = h.issue("tools:read").await;
+    faults.rotations.store(1, Ordering::SeqCst);
+    let failed = h.refresh(&issued.client_id, &issued.refresh_token).await;
+    assert_eq!(status(&failed), 500);
+    assert_eq!(body(&failed)["error"], "server_error");
+    assert!(
+        matches!(
+            h.verify(&issued.access_token).await,
+            AccessVerification::Valid(_)
+        ),
+        "a transient rotation fault revokes nothing"
+    );
+    let retried = h.refresh(&issued.client_id, &issued.refresh_token).await;
+    assert_eq!(
+        status(&retried),
+        200,
+        "the same refresh token rotates on retry"
+    );
+}
+
+#[tokio::test]
+async fn agent_005_a_reuse_whose_first_revocation_fails_is_still_revoked() {
+    let (h, faults) = faulty_harness().await;
+    let issued = h.issue("tools:read").await;
+    let rotated = body(&h.refresh(&issued.client_id, &issued.refresh_token).await);
+    faults.revocations.store(1, Ordering::SeqCst);
+    let reused = h.refresh(&issued.client_id, &issued.refresh_token).await;
+    assert_eq!(body(&reused)["error"], "invalid_grant");
+    assert_eq!(
+        h.verify(rotated["access_token"].as_str().unwrap()).await,
+        invalid(InvalidAccessReason::Revoked),
+        "the retried revocation took"
+    );
+}
+
+#[tokio::test]
+async fn agent_005_a_reuse_whose_revocations_both_fail_is_revoked_on_the_next_presentation() {
+    let (h, faults) = faulty_harness().await;
+    let issued = h.issue("tools:read").await;
+    let rotated = body(&h.refresh(&issued.client_id, &issued.refresh_token).await);
+    let access = rotated["access_token"].as_str().unwrap().to_owned();
+    faults.revocations.store(2, Ordering::SeqCst);
+    let reused = h.refresh(&issued.client_id, &issued.refresh_token).await;
+    assert_eq!(status(&reused), 500);
+    assert_eq!(body(&reused)["error"], "server_error");
+    let again = h.refresh(&issued.client_id, &issued.refresh_token).await;
+    assert_eq!(body(&again)["error"], "invalid_grant");
+    assert_eq!(
+        h.verify(&access).await,
+        invalid(InvalidAccessReason::Revoked)
+    );
+}
+
+#[tokio::test]
+async fn agent_005_an_unrecorded_redemption_revokes_its_grant() {
+    let (h, faults) = faulty_harness().await;
+    let (user_id, client_id, code, verifier) = approved_code(&h).await;
+    faults.redeemed_steps.store(1, Ordering::SeqCst);
+    let exchanged = h.exchange(&client_id, REDIRECT, &code, &verifier).await;
+    assert_eq!(status(&exchanged), 500);
+    assert_eq!(body(&exchanged)["error"], "server_error");
+    assert!(body(&exchanged).get("access_token").is_none());
+    let grants = grants_of(&h, &user_id).await;
+    assert_eq!(grants.len(), 1);
+    let (_, grant_revoked, tokens) = &grants[0];
+    assert!(
+        *grant_revoked,
+        "the grant written before the failed step is revoked"
+    );
+    assert!(tokens.iter().all(|revoked| *revoked));
+}
+
+#[tokio::test]
+async fn agent_005_a_replay_whose_mark_fails_still_revokes_the_grant() {
+    use magnetar::authorization_server::{AuthorizationStore, SqlAuthorizationStore};
+
+    let (h, faults) = faulty_harness().await;
+    let (_, client_id, code, verifier) = approved_code(&h).await;
+    let first = h.exchange(&client_id, REDIRECT, &code, &verifier).await;
+    assert_eq!(status(&first), 200);
+    let access = body(&first)["access_token"].as_str().unwrap().to_owned();
+
+    // Back to the state a replay sees while the grant is being written,
+    // then fail both of the replay's marking attempts.
+    let store = SqlAuthorizationStore::new(h.db.clone());
+    let digest = format!("{:x}", Sha256::digest(code.as_bytes()));
+    let now = chrono::Utc::now();
+    let record = store
+        .find_authorization(&digest, "code", now)
+        .await
+        .unwrap()
+        .unwrap();
+    let grant_id = record.state.split_once(':').unwrap().1.to_owned();
+    assert!(
+        store
+            .transition_authorization(
+                &digest,
+                "code",
+                &record.state,
+                &format!("redeeming:{grant_id}"),
+                None
+            )
+            .await
+            .unwrap()
+    );
+    faults.replayed_steps.store(2, Ordering::SeqCst);
+    let replay = h.exchange(&client_id, REDIRECT, &code, &verifier).await;
+    assert_eq!(body(&replay)["error"], "invalid_grant");
+    assert_eq!(
+        h.verify(&access).await,
+        invalid(InvalidAccessReason::Revoked)
+    );
+}
+
+#[tokio::test]
+async fn agent_005_an_exchange_that_finds_its_code_replayed_revokes_its_own_grant() {
+    let (h, faults) = faulty_harness().await;
+    let (user_id, client_id, code, verifier) = approved_code(&h).await;
+    faults.replay_before_final.store(true, Ordering::SeqCst);
+    let exchanged = h.exchange(&client_id, REDIRECT, &code, &verifier).await;
+    assert_eq!(status(&exchanged), 400);
+    assert_eq!(body(&exchanged)["error"], "invalid_grant");
+    assert!(body(&exchanged).get("access_token").is_none());
+    let grants = grants_of(&h, &user_id).await;
+    assert_eq!(grants.len(), 1);
+    let (_, grant_revoked, tokens) = &grants[0];
+    assert!(
+        *grant_revoked,
+        "the exchange revoked the grant it had written"
+    );
+    assert!(!tokens.is_empty() && tokens.iter().all(|revoked| *revoked));
+}
+
+#[tokio::test]
+async fn agent_005_a_replay_retries_its_mark_for_a_grant_not_yet_written() {
+    use magnetar::authorization_server::{AuthorizationStore, SqlAuthorizationStore};
+
+    let (h, faults) = faulty_harness().await;
+    let (_, client_id, code, verifier) = approved_code(&h).await;
+    // A first exchange has taken the code but not written its grant yet.
+    let store = SqlAuthorizationStore::new(h.db.clone());
+    let digest = format!("{:x}", Sha256::digest(code.as_bytes()));
+    assert!(
+        store
+            .transition_authorization(&digest, "code", "issued", "redeeming:unwritten", None)
+            .await
+            .unwrap()
+    );
+    faults.replayed_steps.store(1, Ordering::SeqCst);
+    let replay = h.exchange(&client_id, REDIRECT, &code, &verifier).await;
+    assert_eq!(body(&replay)["error"], "invalid_grant");
+    let record = store
+        .find_authorization(&digest, "code", chrono::Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record.state, "replayed:unwritten",
+        "the second marking attempt reached the code, so the first exchange will revoke"
+    );
 }

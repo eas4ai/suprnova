@@ -30,6 +30,20 @@ if [[ "${1-}" == "--live" ]]; then
     : "${MAGNETAR_POSTGRES_TEST_URL:?MAGNETAR_POSTGRES_TEST_URL is required for --live gate}"
     : "${MAGNETAR_MYSQL_TEST_URL:?MAGNETAR_MYSQL_TEST_URL is required for --live gate}"
 
+    run_live_test test authorization_server_live agent_005_postgres_code_flow_rotation_and_revocation
+    run_live_test test authorization_server_live agent_005_postgres_refresh_rotation_is_guarded_in_the_database
+    run_live_test test authorization_server_live agent_005_postgres_concurrent_refresh_token_reuse_revokes_the_grant
+    run_live_test test authorization_server_live agent_005_postgres_code_redemption_and_decisions_are_guarded_in_the_database
+    run_live_test test authorization_server_live agent_005_postgres_revocation_and_rotation_take_locks_in_one_order
+    run_live_test test authorization_server_live agent_005_postgres_a_concurrently_replayed_code_revokes_its_tokens
+    run_live_test test authorization_server_live agent_005_postgres_pruning_and_trimming_hold_their_boundaries
+    run_live_test test authorization_server_live agent_005_mysql_code_flow_rotation_and_revocation
+    run_live_test test authorization_server_live agent_005_mysql_refresh_rotation_is_guarded_in_the_database
+    run_live_test test authorization_server_live agent_005_mysql_concurrent_refresh_token_reuse_revokes_the_grant
+    run_live_test test authorization_server_live agent_005_mysql_code_redemption_and_decisions_are_guarded_in_the_database
+    run_live_test test authorization_server_live agent_005_mysql_revocation_and_rotation_take_locks_in_one_order
+    run_live_test test authorization_server_live agent_005_mysql_a_concurrently_replayed_code_revokes_its_tokens
+    run_live_test test authorization_server_live agent_005_mysql_pruning_and_trimming_hold_their_boundaries
     run_live_test test default_schema_backends postgres_default_schema_is_replay_safe
     run_live_test test default_schema_backends postgres_api_import_advances_the_default_user_sequence
     run_live_test test default_schema_backends mysql_default_schema_is_replay_safe

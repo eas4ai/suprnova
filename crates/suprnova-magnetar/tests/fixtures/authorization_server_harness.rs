@@ -744,18 +744,19 @@ pub async fn guarded_redemption(h: &Harness) {
             user_id: "guard-user".to_owned(),
             payload: "{}".to_owned(),
             expires_at: now + chrono::Duration::minutes(5),
+            created_at: now,
         })
         .await
         .expect("store a code");
     assert!(
         store
-            .transition_authorization(&id, "code", "issued", "redeeming:first", now)
+            .transition_authorization(&id, "code", "issued", "redeeming:first", Some(now))
             .await
             .expect("the first redemption")
     );
     assert!(
         !store
-            .transition_authorization(&id, "code", "issued", "redeeming:second", now)
+            .transition_authorization(&id, "code", "issued", "redeeming:second", Some(now))
             .await
             .expect("the second redemption")
     );
@@ -782,6 +783,7 @@ pub async fn guarded_decision(h: &Harness) {
             user_id: "guard-user".to_owned(),
             payload: "{}".to_owned(),
             expires_at: now + chrono::Duration::minutes(5),
+            created_at: now,
         })
         .await
         .expect("store a pending authorization");
@@ -880,4 +882,251 @@ pub async fn revocation_and_rotation_take_locks_in_one_order(h: &Harness) {
     );
     let refreshed = h.refresh(&issued.client_id, &issued.refresh_token).await;
     assert_eq!(body(&refreshed)["error"], "invalid_grant");
+}
+
+/// Trimming keeps the newest steps of one user and one kind, the step just
+/// created always among them, even when every step was created in the same
+/// second (MySQL keeps whole seconds); other users and kinds are untouched.
+pub async fn trimming_is_scoped_and_keeps_the_new_step(h: &Harness) {
+    use magnetar::authorization_server::sql::authorizations;
+    use magnetar::authorization_server::{AuthorizationRecord, SqlAuthorizationStore};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let store = SqlAuthorizationStore::new(h.db.clone());
+    let second = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0)
+        .expect("a whole second");
+    let (user, other_user) = (unique("trim-user"), unique("trim-other"));
+    let record = |id: String, user: &str, kind: &str| AuthorizationRecord {
+        id,
+        kind: kind.to_owned(),
+        state: "pending".to_owned(),
+        user_id: user.to_owned(),
+        payload: "{}".to_owned(),
+        expires_at: second + chrono::Duration::minutes(10),
+        created_at: second,
+    };
+    for index in 0..6 {
+        store
+            .create_authorization(record(unique(&format!("trim-{index}")), &user, "pending"))
+            .await
+            .expect("a pending step");
+    }
+    for index in 0..3 {
+        store
+            .create_authorization(record(
+                unique(&format!("other-{index}")),
+                &other_user,
+                "pending",
+            ))
+            .await
+            .expect("another user's step");
+        store
+            .create_authorization(record(unique(&format!("code-{index}")), &user, "code"))
+            .await
+            .expect("a step of another kind");
+    }
+    // Sorts first by identifier, so a tie broken by identifier alone would
+    // drop it.
+    let newest = format!("0000-{}", unique("newest"));
+    store
+        .create_authorization(record(newest.clone(), &user, "pending"))
+        .await
+        .expect("the new step");
+
+    let removed = store
+        .trim_authorizations(&user, "pending", 3, &newest)
+        .await
+        .expect("trim");
+    assert_eq!(removed, 4, "seven pending steps trimmed to three");
+    let count = |user: String, kind: &'static str| {
+        let db = h.db.clone();
+        async move {
+            authorizations::Entity::find()
+                .filter(authorizations::Column::UserId.eq(user))
+                .filter(authorizations::Column::Kind.eq(kind))
+                .all(&db)
+                .await
+                .expect("read steps")
+        }
+    };
+    let kept = count(user.clone(), "pending").await;
+    assert_eq!(kept.len(), 3);
+    assert!(
+        kept.iter().any(|step| step.id == newest),
+        "the new step is kept"
+    );
+    assert_eq!(
+        count(other_user, "pending").await.len(),
+        3,
+        "another user is untouched"
+    );
+    assert_eq!(
+        count(user, "code").await.len(),
+        3,
+        "another kind is untouched"
+    );
+}
+
+/// The step that finishes a redemption moves a code even after its row
+/// lapsed; the checked form refuses it.
+pub async fn the_final_code_step_ignores_expiry(h: &Harness) {
+    use magnetar::authorization_server::{AuthorizationRecord, SqlAuthorizationStore};
+
+    let store = SqlAuthorizationStore::new(h.db.clone());
+    let now = chrono::Utc::now();
+    let id = unique("lapsed-code");
+    store
+        .create_authorization(AuthorizationRecord {
+            id: id.clone(),
+            kind: "code".to_owned(),
+            state: "redeeming:grant".to_owned(),
+            user_id: "final-step-user".to_owned(),
+            payload: "{}".to_owned(),
+            expires_at: now - chrono::Duration::seconds(5),
+            created_at: now - chrono::Duration::minutes(10),
+        })
+        .await
+        .expect("a lapsed code");
+    assert!(
+        !store
+            .transition_authorization(&id, "code", "redeeming:grant", "redeemed:grant", Some(now))
+            .await
+            .expect("the checked step")
+    );
+    assert!(
+        store
+            .transition_authorization(&id, "code", "redeeming:grant", "redeemed:grant", None)
+            .await
+            .expect("the final step")
+    );
+}
+
+/// Pruning keeps every grant inside the retention and drops one idle past
+/// it. Each kept grant sits on one side of one condition, so removing
+/// `revoked_at < cutoff`, `created_at < cutoff` or the `last_used_at`
+/// condition deletes a grant this keeps.
+pub async fn pruning_respects_the_retention_boundaries(h: &Harness) {
+    use magnetar::authorization_server::sql::{grants, tokens};
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let now = chrono::Utc::now();
+    let recently = now - chrono::Duration::days(29);
+    let long_ago = now - chrono::Duration::days(31);
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        let issued = h.issue("tools:read").await;
+        ids.push(
+            h.server.list_grants(&issued.user_id).await.expect("list")[0]
+                .grant_id
+                .clone(),
+        );
+    }
+    let [revoked_recently, young_idle, used_recently, long_idle] =
+        <[String; 4]>::try_from(ids).expect("four grants");
+    let set = |id: &str, column: grants::Column, value: chrono::DateTime<chrono::Utc>| {
+        let db = h.db.clone();
+        let id = id.to_owned();
+        async move {
+            grants::Entity::update_many()
+                .col_expr(column, Expr::value(value))
+                .filter(grants::Column::Id.eq(id))
+                .exec(&db)
+                .await
+                .expect("set a grant column");
+        }
+    };
+    let drop_tokens = |id: &str| {
+        let db = h.db.clone();
+        let id = id.to_owned();
+        async move {
+            tokens::Entity::delete_many()
+                .filter(tokens::Column::GrantId.eq(id))
+                .exec(&db)
+                .await
+                .expect("drop a grant's tokens");
+        }
+    };
+    // Revoked 29 days ago, created long ago: kept only by `revoked_at`.
+    drop_tokens(&revoked_recently).await;
+    set(&revoked_recently, grants::Column::RevokedAt, recently).await;
+    set(&revoked_recently, grants::Column::CreatedAt, long_ago).await;
+    set(&revoked_recently, grants::Column::LastUsedAt, long_ago).await;
+    // No tokens, created 29 days ago, never used: kept only by `created_at`.
+    drop_tokens(&young_idle).await;
+    set(&young_idle, grants::Column::CreatedAt, recently).await;
+    // No tokens, created 31 days ago, used 29 days ago: kept only by
+    // `last_used_at`.
+    drop_tokens(&used_recently).await;
+    set(&used_recently, grants::Column::CreatedAt, long_ago).await;
+    set(&used_recently, grants::Column::LastUsedAt, recently).await;
+    // No tokens, created and last used 31 days ago: dropped.
+    drop_tokens(&long_idle).await;
+    set(&long_idle, grants::Column::CreatedAt, long_ago).await;
+    set(&long_idle, grants::Column::LastUsedAt, long_ago).await;
+
+    h.server.prune_expired().await.expect("prune");
+    let remaining: Vec<String> = grants::Entity::find()
+        .filter(grants::Column::Id.is_in([
+            revoked_recently.clone(),
+            young_idle.clone(),
+            used_recently.clone(),
+            long_idle.clone(),
+        ]))
+        .all(&h.db)
+        .await
+        .expect("read grants")
+        .into_iter()
+        .map(|grant| grant.id)
+        .collect();
+    for (id, label) in [
+        (&revoked_recently, "revoked inside the retention"),
+        (&young_idle, "created inside the retention"),
+        (&used_recently, "used inside the retention"),
+    ] {
+        assert!(remaining.contains(id), "a grant {label} stays");
+    }
+    assert!(
+        !remaining.contains(&long_idle),
+        "a grant idle past the retention goes"
+    );
+}
+
+/// Present one code from many tasks at once: at most one exchange wins,
+/// and any token it received ends revoked.
+pub async fn concurrent_code_replay(h: Arc<Harness>) {
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let client_id = h.register(&[REDIRECT]).await;
+    let (verifier, challenge) = pkce();
+    let code = h
+        .approve(&client_id, REDIRECT, &challenge, "tools:read", &bearer)
+        .await;
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let h = h.clone();
+        let (client_id, code, verifier) = (client_id.clone(), code.clone(), verifier.clone());
+        tasks.push(tokio::spawn(async move {
+            let response = h.exchange(&client_id, REDIRECT, &code, &verifier).await;
+            (status(&response), body(&response))
+        }));
+    }
+    let mut winners = Vec::new();
+    for task in tasks {
+        let (code, answer) = task.await.expect("an exchange task");
+        if code == 200 {
+            winners.push(answer);
+        } else {
+            assert_eq!(answer["error"], "invalid_grant", "{answer:?}");
+        }
+    }
+    assert!(winners.len() <= 1, "{} exchanges won", winners.len());
+    for winner in winners {
+        assert_eq!(
+            h.verify(winner["access_token"].as_str().expect("access"))
+                .await,
+            AccessVerification::Invalid(InvalidAccessReason::Revoked),
+            "a replayed code revokes what was issued from it"
+        );
+    }
 }
