@@ -263,6 +263,61 @@ fn agent_013_mount_parameters_take_the_snapshot_integer_encoding() {
 }
 
 #[test]
+fn agent_013_normalized_parameters_take_one_form_per_codec() {
+    let schema = ChildParameterSchema::new(
+        1,
+        vec![
+            ChildParameterField::new(field("start"), ModelCodec::U64, true),
+            ChildParameterField::new(field("delta"), ModelCodec::I64, true),
+            ChildParameterField::new(field("id"), ModelCodec::Uuid, true),
+            ChildParameterField::new(field("steps"), ModelCodec::list(ModelCodec::U64), true),
+        ],
+    )
+    .expect("parameter schema");
+    let limits = InputLimits::default();
+    let expected = json!({
+        "start": 5000,
+        "delta": -9_007_199_254_740_993_i64,
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "steps": [1, 18_446_744_073_709_551_615_u64],
+    });
+    // A number, a decimal string and the lossless tag of one value all
+    // read the same.
+    for start in [
+        number(5000.0),
+        text("5000"),
+        suprnova_live::snapshot::state::encode_u64(5000),
+    ] {
+        let normalized = schema
+            .normalized_parameters(
+                &object(&[
+                    ("start", start),
+                    ("delta", text("-9007199254740993")),
+                    ("id", text("0F8FAD5B-D9CB-469F-A165-70867728950E")),
+                    (
+                        "steps",
+                        CanonicalValue::Array(vec![number(1.0), text("18446744073709551615")]),
+                    ),
+                ]),
+                &limits,
+            )
+            .expect("valid parameters");
+        assert_eq!(serde_json::Value::Object(normalized), expected);
+    }
+    // A value the codec refuses, and an unknown parameter, are refused.
+    assert!(
+        schema
+            .normalized_parameters(&object(&[("start", text("007"))]), &limits)
+            .is_err()
+    );
+    assert!(
+        schema
+            .normalized_parameters(&object(&[("other", text("x"))]), &limits)
+            .is_err()
+    );
+}
+
+#[test]
 fn agent_013_parameter_schema_and_issues_exclude_resolver_properties() {
     let schema = ChildParameterSchema::new(
         1,

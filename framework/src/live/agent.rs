@@ -176,7 +176,7 @@ async fn serve(mut request: Request) -> HttpResponse {
             if !errors.is_empty() {
                 return invalid(errors);
             }
-            if let Err(response) = authorize_mount(&target, &caller, &mount).await {
+            if let Err(response) = authorize_mount(&descriptor, &target, &caller, &mount).await {
                 return response;
             }
             match mount_component(
@@ -316,7 +316,13 @@ fn collect(errors: &mut Map<String, Value>, prefix: &str, issues: Vec<FieldIssue
 /// before anything is loaded (AGENT-013). An ability no policy defines is
 /// refused, so a `Gate::before` hook that allows everything cannot mount a
 /// component nobody decided an agent may mount.
+///
+/// The policy reads each property in the one form its codec decodes: the
+/// schema lets an agent write a 64-bit integer as a number or a decimal
+/// string, and a policy that read whichever form arrived could compare a
+/// number and pass a string of the same value.
 async fn authorize_mount(
+    descriptor: &ComponentDescriptor,
     target: &LiveTarget,
     caller: &ToolCaller,
     mount: &CanonicalValue,
@@ -331,10 +337,10 @@ async fn authorize_mount(
         );
         return Err(refuse(403, "This action is unauthorized."));
     }
-    let properties = match to_json(mount) {
-        Value::Object(properties) => properties,
-        _ => Map::new(),
-    };
+    let properties = descriptor
+        .parameter_schema()
+        .normalized_parameters(mount, &InputLimits::default())
+        .map_err(|_| refuse(422, "The mount properties are not valid."))?;
     let request = LiveMountRequest::new(target.component.as_str(), properties);
     if crate::authorization::Gate::allows_async(&ability, caller, &request).await {
         Ok(())

@@ -293,6 +293,27 @@ impl ModelCodec {
             .map_err(|_| BindingIssue::new(BindingIssueKind::TypeMismatch))
     }
 
+    /// `value` in the one JSON form this codec decodes, whatever accepted
+    /// form it arrived in: a 64-bit integer as a JSON integer, whether it
+    /// was written as a number, a decimal string or its lossless tag; a
+    /// UUID hyphenated in lower case; a date-time in RFC 3339; a list or a
+    /// map entry by entry. Code that decides on a value before it is
+    /// decoded, such as a policy, reads this form, so two spellings of one
+    /// value cannot reach it as two different values.
+    ///
+    /// # Errors
+    ///
+    /// The [`BindingIssue`] [`ModelCodec::decode`] reports for a value the
+    /// codec refuses.
+    pub fn normalize(
+        &self,
+        value: &CanonicalValue,
+        limits: &InputLimits,
+    ) -> Result<serde_json::Value, BindingIssue> {
+        validate_limits(value, limits)?;
+        self.normalized_serde(value, limits, 0)
+    }
+
     /// Encodes a registered Rust value into its bounded canonical representation.
     pub fn encode<T: Serialize + 'static>(
         &self,

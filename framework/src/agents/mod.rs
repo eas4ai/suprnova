@@ -545,9 +545,19 @@ pub fn __encode_resolved<T: serde::Serialize + 'static>(
 /// `#[resolve(...)]` are not among them: they are filled after the policy
 /// allows the mount.
 ///
+/// Each property holds the one JSON form its codec decodes, whatever form
+/// the agent wrote: a 64-bit integer is a JSON integer whether the agent
+/// sent a number or a decimal string, a UUID is hyphenated in lower case,
+/// and a date-time is in RFC 3339. Write a policy so a property it cannot
+/// read refuses the mount:
+///
 /// ```rust,ignore
 /// Gate::define::<ToolCaller, LiveMountRequest>("live:app.counter.mount", |caller, mount| {
-///     caller.is_user() && mount.property("start").and_then(|v| v.as_u64()) < Some(100)
+///     caller.is_user()
+///         && mount
+///             .property("start")
+///             .and_then(|v| v.as_u64())
+///             .is_some_and(|start| start < 100)
 /// });
 /// ```
 #[derive(Debug, Clone)]
@@ -572,12 +582,13 @@ impl LiveMountRequest {
         &self.component
     }
 
-    /// Every mount property the agent sent.
+    /// Every mount property the agent sent, each in its codec's one form.
     pub fn properties(&self) -> &serde_json::Map<String, serde_json::Value> {
         &self.properties
     }
 
-    /// The mount property `name`, as the agent sent it.
+    /// The mount property `name`, in its codec's one form, or `None` when
+    /// the agent did not send it.
     pub fn property(&self, name: &str) -> Option<&serde_json::Value> {
         self.properties.get(name)
     }

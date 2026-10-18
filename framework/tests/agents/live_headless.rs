@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use suprnova::agents::AgentsConfig;
 use suprnova::live::testing::{AdjustableTestClock, prepare_live_router_with_clock_for_test};
 use suprnova::testing::TestClient;
-use suprnova::{Response, ToolCaller, handler, json_response, tool};
+use suprnova::{Gate, LiveMountRequest, Response, ToolCaller, handler, json_response, tool};
 
 use crate::fixture::{self, TestUser};
 use crate::live_fixture::{self, GUARDED, PAGE, RESOLVED};
@@ -267,6 +267,85 @@ async fn agent_013_mount_checks_the_gate_before_loading() {
     assert!(large.text().contains("unauthorized"), "{}", large.text());
     // Nothing was loaded: the resolver never ran.
     assert_eq!(RESOLVED.load(Ordering::SeqCst), 0);
+}
+
+/// Mounts a counter starting at `start`, written as the agent wrote it,
+/// and adds one, as alice.
+async fn add_from(client: &TestClient, start: Value) -> suprnova::agents::McpToolResult {
+    client
+        .mcp()
+        .as_caller(alice())
+        .call(
+            "counter.add",
+            json!({
+                "mount": { "start": start, "label": "Main" },
+                "arguments": { "amount": 1 },
+            }),
+        )
+        .await
+}
+
+/// Alice may add to a counter: the mount policy is the test's.
+fn define_add_policy() {
+    Gate::define::<String, String>("live:tests.agent-counter.add", |user, _action| {
+        user == "alice"
+    });
+}
+
+#[tokio::test]
+async fn agent_013_mount_gate_sees_one_form_per_codec() {
+    let _container = fixture::setup();
+    let client = live_fixture::live_client_with(AgentsConfig::new(), false);
+    // The policy the `LiveMountRequest` documentation shows.
+    Gate::define::<ToolCaller, LiveMountRequest>(
+        "live:tests.agent-counter.mount",
+        |_caller, mount| {
+            mount
+                .property("start")
+                .and_then(|value| value.as_u64())
+                .is_some_and(|start| start < 100)
+        },
+    );
+    define_add_policy();
+    // A 64-bit integer reaches the policy as a JSON integer, whether the
+    // agent wrote a number or a decimal string.
+    for start in [json!(5_000), json!("5000")] {
+        let refused = add_from(&client, start.clone()).await;
+        assert!(refused.is_error(), "{start}: {:?}", refused.response());
+        assert!(
+            refused.text().contains("unauthorized"),
+            "{start}: {}",
+            refused.text()
+        );
+    }
+    assert_eq!(RESOLVED.load(Ordering::SeqCst), 0, "nothing was mounted");
+    for start in [json!(99), json!("99")] {
+        let allowed = add_from(&client, start.clone()).await;
+        assert!(!allowed.is_error(), "{start}: {:?}", allowed.response());
+        let structured = allowed.structured().expect("structured content");
+        assert_eq!(structured["fields"]["count"], "100", "{start}");
+    }
+}
+
+#[tokio::test]
+async fn agent_013_mount_gate_never_sees_the_decimal_string_form() {
+    let _container = fixture::setup();
+    let client = live_fixture::live_client_with(AgentsConfig::new(), false);
+    // A policy that reads a missing number as below the limit: the string
+    // form cannot reach it to slip past.
+    Gate::define::<ToolCaller, LiveMountRequest>(
+        "live:tests.agent-counter.mount",
+        |_caller, mount| mount.property("start").and_then(|value| value.as_u64()) < Some(100),
+    );
+    define_add_policy();
+    let refused = add_from(&client, json!("5000")).await;
+    assert!(refused.is_error(), "{:?}", refused.response());
+    assert!(
+        refused.text().contains("unauthorized"),
+        "{}",
+        refused.text()
+    );
+    assert_eq!(RESOLVED.load(Ordering::SeqCst), 0, "nothing was mounted");
 }
 
 #[tokio::test]

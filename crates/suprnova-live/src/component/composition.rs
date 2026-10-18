@@ -342,6 +342,39 @@ impl ChildParameterSchema {
         Ok(CanonicalValue::Object(encoded))
     }
 
+    /// `value` with each parameter in the one JSON form its codec decodes
+    /// ([`ModelCodec::normalize`]): what a policy deciding on parameters an
+    /// agent wrote reads, so a 64-bit integer reaches it as a JSON integer
+    /// whether the agent sent a number or a decimal string.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositionErrorKind::InvalidParameters`] for a value that is not
+    /// an object, an unknown parameter, or a value its codec refuses.
+    pub fn normalized_parameters(
+        &self,
+        value: &CanonicalValue,
+        limits: &InputLimits,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, CompositionError> {
+        let invalid = || CompositionError::new(CompositionErrorKind::InvalidParameters);
+        let CanonicalValue::Object(values) = value else {
+            return Err(invalid());
+        };
+        let mut normalized = serde_json::Map::new();
+        for (name, value) in values {
+            let field = ModelField::parse(name)
+                .ok()
+                .and_then(|parsed| self.fields.get(&parsed))
+                .ok_or_else(invalid)?;
+            let value = field
+                .codec
+                .normalize(value, limits)
+                .map_err(|_| invalid())?;
+            normalized.insert(name.clone(), value);
+        }
+        Ok(normalized)
+    }
+
     /// The registered parameters, in name order.
     pub fn fields(&self) -> impl ExactSizeIterator<Item = &ChildParameterField> {
         self.fields.values()

@@ -267,6 +267,11 @@ Acceptance criteria:
   properties the agent sent, before anything is loaded: before a resolver
   runs and before the component mounts. An ability no policy defines is
   refused even when a `Gate::before` hook would allow it.
+- The policy reads each mount property in the one JSON form its codec
+  decodes, whatever form the agent wrote: a 64-bit integer is a JSON integer
+  whether the agent sent a number or a decimal string, a UUID is hyphenated
+  in lower case, and a date-time is in RFC 3339. Two spellings of one value
+  never reach a policy as two values.
 - A headless action runs the action's own `live:{component}.{action}`
   authorization through the same port a click does, with the acting user
   signed in on the tool's guard as the route principal. A denial is
@@ -361,6 +366,11 @@ production feature or public convenience constructor.
 
 ## Decisions and revisions
 
+- 2026-10-18 -- The mount Gate reads each property in its codec's one form.
+  A policy that read whichever form the agent wrote compared the number
+  5000 and refused it, but read the string `"5000"` as no number at all and,
+  written as `as_u64() < Some(100)`, allowed it. The documented example now
+  also refuses a property it cannot read.
 - 2026-10-18 -- Added agent tool admission (AGENT-012, AGENT-013). A browser
   tool call keeps every click check and adds the tool's caller-kind check,
   in which a browser caller is never an agent, and the per-caller tool
