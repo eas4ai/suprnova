@@ -333,7 +333,7 @@ impl ModelCodec {
     /// or as the entry of a list or map.
     ///
     /// An agent reads a tool's schema as the contract of its input, so each
-    /// shape follows what [`validate`](Self::validate) enforces: a 64-bit
+    /// shape follows what the codec's validation enforces: a 64-bit
     /// integer is a JSON number only inside the interoperable safe range, or
     /// else its canonical decimal string; a UUID is the hyphenated form in
     /// either case. `Json` accepts any canonical JSON its Serde type reads,

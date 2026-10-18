@@ -229,7 +229,7 @@ impl ChildParameterSchema {
     /// itself, which the agent cannot set. `None` when a parameter the agent
     /// sends has a codec with no schema ([`ModelCodec::json_schema`]).
     ///
-    /// The object follows [`validate`](Self::validate): the required
+    /// The object follows the schema's own validation: the required
     /// parameters listed, no other field, and no `null`, which no codec
     /// accepts.
     #[must_use]
@@ -248,7 +248,7 @@ impl ChildParameterSchema {
         Some(crate::state::object_schema(properties, required))
     }
 
-    /// Every field of `value` that [`validate`](Self::validate) would
+    /// Every field of `value` that the schema's validation would
     /// refuse, and why, in field-name order, treating `excluding` as fields
     /// the agent may not send: an unknown name, a missing required field,
     /// or a value its codec refuses.
@@ -297,7 +297,7 @@ impl ChildParameterSchema {
     }
 
     /// `value` with each parameter in the encoding a signed snapshot
-    /// carries: a 64-bit integer, which [`validate`](Self::validate) takes
+    /// carries: a 64-bit integer, which the schema's validation takes
     /// as a number or a decimal string, as its lossless tag, and every other
     /// value as it is. A mount whose parameters an agent wrote, not a
     /// template, passes them through this before the snapshot schema checks
