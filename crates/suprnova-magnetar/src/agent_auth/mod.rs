@@ -567,15 +567,30 @@ impl AgentAuth {
     /// # Errors
     ///
     /// Returns an error when storage fails.
-    pub async fn revoke_registration(&self, user_id: &str, registration_id: &str) -> Result<bool> {
+    pub async fn revoke_registration(
+        &self,
+        user_id: &str,
+        registration_id: &str,
+        client_address: Option<&str>,
+    ) -> Result<bool> {
         let Some(record) = self.core.store.find_registration(registration_id).await? else {
             return Ok(false);
         };
-        if record.user_id.as_deref() != Some(user_id) || record.status == STATUS_REVOKED {
+        if record.user_id.as_deref() != Some(user_id) {
+            return Ok(false);
+        }
+        // A registration already revoked still runs the idempotent steps,
+        // so a second request finishes what a failed first one left.
+        if record.status == STATUS_REVOKED && !record.cleanup_pending {
             return Ok(false);
         }
         self.core
-            .end_registration(&self.server.token_issuer(), &record, None, &[])
+            .end_registration(
+                &self.server.token_issuer(),
+                &record,
+                client_address,
+                &[("actor", "user".to_owned())],
+            )
             .await
     }
 
@@ -586,32 +601,33 @@ impl AgentAuth {
     /// # Errors
     ///
     /// Returns an error when storage fails. What was revoked before the
-    /// failure stays revoked; a registration whose own row was revoked but
-    /// whose grants were not is named in the log, and its tokens end with
-    /// their lifetime since no assertion of it exchanges any more.
+    /// failure stays revoked, and running it again finishes the rest,
+    /// including a registration whose grant revocation failed.
     pub async fn revoke_all_agent_credentials(&self) -> Result<u64> {
         let mut revoked = 0;
+        let mut previous: Vec<String> = Vec::new();
         loop {
             let ids = self.core.store.live_registrations(BATCH).await?;
-            if ids.is_empty() {
+            if ids.is_empty() || ids == previous {
+                // Done, or the same rows came back: stop rather than loop.
                 return Ok(revoked);
             }
-            let before = revoked;
-            for id in ids {
-                if let Some(record) = self.core.store.find_registration(&id).await?
+            for id in &ids {
+                if let Some(record) = self.core.store.find_registration(id).await?
                     && self
                         .core
-                        .end_registration(&self.server.token_issuer(), &record, None, &[])
+                        .end_registration(
+                            &self.server.token_issuer(),
+                            &record,
+                            None,
+                            &[("actor", "operator".to_owned())],
+                        )
                         .await?
                 {
                     revoked += 1;
                 }
             }
-            if revoked == before {
-                // Nothing in the batch could be revoked; stop rather than
-                // read the same rows again.
-                return Ok(revoked);
-            }
+            previous = ids;
         }
     }
 
@@ -624,35 +640,40 @@ impl AgentAuth {
     /// Returns an error when storage fails.
     pub async fn expire_registrations(&self) -> Result<u64> {
         let mut expired = 0;
+        let mut previous: Vec<String> = Vec::new();
         loop {
             let now = Utc::now();
             let ids = self.core.store.expirable_registrations(now, BATCH).await?;
-            if ids.is_empty() {
+            if ids.is_empty() || ids == previous {
                 return Ok(expired);
             }
-            for id in ids {
-                if !self.core.store.expire_registration(&id, now).await? {
-                    continue;
+            for id in &ids {
+                if self.core.store.expire_registration(id, now).await? {
+                    expired += 1;
+                    // Recorded as soon as the expiry commits; no request
+                    // causes it, so it carries the address the registration
+                    // came from.
+                    let record = self.core.store.find_registration(id).await?;
+                    let (kind, address) = record
+                        .map(|record| (record.kind, record.client_address))
+                        .unwrap_or_default();
+                    self.core
+                        .emit(
+                            LifecycleEventKind::AgentRegistrationExpired,
+                            None,
+                            &[("registration_id", id.clone()), ("registration_type", kind)],
+                            address.as_deref(),
+                        )
+                        .await;
                 }
-                expired += 1;
-                let record = self.core.store.find_registration(&id).await?;
+                // A step-up keeps its delegation when it expires: the next
+                // presentation of the same identity reuses the row.
                 self.core
-                    .revoke_grants(&self.server.token_issuer(), &id)
+                    .revoke_grants(&self.server.token_issuer(), id)
                     .await?;
-                // No request causes an expiry; the event carries the address
-                // the registration came from.
-                let (kind, address) = record
-                    .map(|record| (record.kind, record.client_address))
-                    .unwrap_or_default();
-                self.core
-                    .emit(
-                        LifecycleEventKind::AgentRegistrationExpired,
-                        None,
-                        &[("registration_id", id.clone()), ("registration_type", kind)],
-                        address.as_deref(),
-                    )
-                    .await;
+                self.core.store.finish_cleanup(id, false).await?;
             }
+            previous = ids;
         }
     }
 
@@ -800,10 +821,17 @@ impl Core {
         }
     }
 
-    /// Revoke a registration and every token issued from it, then record
-    /// `registration.revoked`. The registration row is written before any
-    /// grant, the order every path takes, and a grant issued meanwhile is
-    /// caught by the issuing path's own recheck.
+    /// Revoke a registration and every token issued from it. Safe to run
+    /// again: each step is idempotent and the lookup keys stay until the
+    /// last one.
+    ///
+    /// The registration row is written first, the order every path takes,
+    /// and `registration.revoked` is recorded as soon as that commits, so
+    /// a later failure cannot lose it. Then its grant is revoked, and only
+    /// then are the delegation and the pending clean-up cleared: a retry
+    /// after a failed grant revocation (the provider's redelivery, the
+    /// user's second click, the operator's rerun) still finds the grant.
+    /// Returns whether this call revoked the registration.
     pub(crate) async fn end_registration(
         &self,
         issuer: &TokenIssuer<'_>,
@@ -811,33 +839,33 @@ impl Core {
         client_address: Option<&str>,
         extra: &[(&str, String)],
     ) -> Result<bool> {
-        if !self
+        let revoked = self
             .store
             .revoke_registration(&record.id, Utc::now())
-            .await?
-        {
-            return Ok(false);
+            .await?;
+        if revoked {
+            let mut attributes = vec![
+                ("registration_id", record.id.clone()),
+                ("registration_type", record.kind.clone()),
+            ];
+            if let Some(issuer) = &record.issuer {
+                attributes.push(("iss", issuer.clone()));
+            }
+            if let Some(subject) = &record.subject {
+                attributes.push(("sub", subject.clone()));
+            }
+            attributes.extend(extra.iter().cloned());
+            self.emit(
+                LifecycleEventKind::AgentRegistrationRevoked,
+                record.user_id.as_deref(),
+                &attributes,
+                client_address,
+            )
+            .await;
         }
         self.revoke_grants(issuer, &record.id).await?;
-        let mut attributes = vec![
-            ("registration_id", record.id.clone()),
-            ("registration_type", record.kind.clone()),
-        ];
-        if let Some(issuer) = &record.issuer {
-            attributes.push(("iss", issuer.clone()));
-        }
-        if let Some(subject) = &record.subject {
-            attributes.push(("sub", subject.clone()));
-        }
-        attributes.extend(extra.iter().cloned());
-        self.emit(
-            LifecycleEventKind::AgentRegistrationRevoked,
-            record.user_id.as_deref(),
-            &attributes,
-            client_address,
-        )
-        .await;
-        Ok(true)
+        self.store.finish_cleanup(&record.id, true).await?;
+        Ok(revoked)
     }
 
     /// Mint an access token for a registration under its one grant. The

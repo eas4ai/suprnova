@@ -170,7 +170,10 @@ async fn end_for_epoch(
             issuer,
             record,
             client_address,
-            &[("reason", "epoch_changed".to_owned())],
+            &[
+                ("reason", "epoch_changed".to_owned()),
+                ("actor", "system".to_owned()),
+            ],
         )
         .await
     {

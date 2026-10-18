@@ -85,6 +85,8 @@ pub mod registrations {
         pub client_address: Option<String>,
         #[sea_orm(column_type = "String(StringLen::N(64))", nullable)]
         pub grant_id: Option<String>,
+        #[sea_orm(column_type = "Boolean")]
+        pub cleanup_pending: bool,
         pub created_at: DateTimeUtc,
         #[sea_orm(nullable)]
         pub claimed_at: Option<DateTimeUtc>,
@@ -290,6 +292,7 @@ fn record(model: registrations::Model) -> RegistrationRecord {
             .map(|epoch| u64::try_from(epoch).unwrap_or(u64::MAX)),
         client_address: model.client_address,
         grant_id: model.grant_id,
+        cleanup_pending: model.cleanup_pending,
         created_at: model.created_at,
         claimed_at: model.claimed_at,
         revoked_at: model.revoked_at,
@@ -358,6 +361,7 @@ impl AgentAuthStore for SqlAgentAuthStore {
             auth_epoch: Set(epoch_to_db(record.auth_epoch)?),
             client_address: Set(record.client_address),
             grant_id: Set(record.grant_id),
+            cleanup_pending: Set(record.cleanup_pending),
             created_at: Set(record.created_at),
             claimed_at: Set(record.claimed_at),
             revoked_at: Set(record.revoked_at),
@@ -600,10 +604,7 @@ impl AgentAuthStore for SqlAgentAuthStore {
         let moved = registrations::Entity::update_many()
             .col_expr(registrations::Column::Status, Expr::value(STATUS_REVOKED))
             .col_expr(registrations::Column::RevokedAt, Expr::value(at))
-            .col_expr(
-                registrations::Column::DelegationKey,
-                Expr::value(none.clone()),
-            )
+            .col_expr(registrations::Column::CleanupPending, Expr::value(true))
             .col_expr(
                 registrations::Column::ClaimTokenHash,
                 Expr::value(none.clone()),
@@ -626,6 +627,7 @@ impl AgentAuthStore for SqlAgentAuthStore {
         let moved = registrations::Entity::update_many()
             .col_expr(registrations::Column::Status, Expr::value(STATUS_EXPIRED))
             .col_expr(registrations::Column::RevokedAt, Expr::value(now))
+            .col_expr(registrations::Column::CleanupPending, Expr::value(true))
             .col_expr(
                 registrations::Column::AttemptTokenHash,
                 Expr::value(none.clone()),
@@ -640,12 +642,42 @@ impl AgentAuthStore for SqlAgentAuthStore {
         Ok(moved.rows_affected == 1)
     }
 
+    async fn finish_cleanup(&self, id: &str, release_delegation: bool) -> Result<()> {
+        let mut update = registrations::Entity::update_many()
+            .col_expr(registrations::Column::CleanupPending, Expr::value(false))
+            .filter(registrations::Column::Id.eq(id.to_owned()))
+            .filter(
+                Condition::any()
+                    .add(registrations::Column::Status.eq(STATUS_REVOKED))
+                    .add(registrations::Column::Status.eq(STATUS_EXPIRED)),
+            );
+        if release_delegation {
+            update = update.col_expr(
+                registrations::Column::DelegationKey,
+                Expr::value(Option::<String>::None),
+            );
+        }
+        update.exec(&self.db).await.map_err(db_error)?;
+        Ok(())
+    }
+
     async fn expirable_registrations(&self, now: DateTime<Utc>, limit: u64) -> Result<Vec<String>> {
         registrations::Entity::find()
             .select_only()
             .column(registrations::Column::Id)
-            .filter(claimable())
-            .filter(registrations::Column::ClaimExpiresAt.lte(now))
+            .filter(
+                Condition::any()
+                    .add(
+                        Condition::all()
+                            .add(claimable())
+                            .add(registrations::Column::ClaimExpiresAt.lte(now)),
+                    )
+                    .add(
+                        Condition::all()
+                            .add(registrations::Column::Status.eq(STATUS_EXPIRED))
+                            .add(registrations::Column::CleanupPending.eq(true)),
+                    ),
+            )
             .order_by_asc(registrations::Column::ClaimExpiresAt)
             .limit(limit)
             .into_tuple::<String>()
@@ -658,7 +690,11 @@ impl AgentAuthStore for SqlAgentAuthStore {
         registrations::Entity::find()
             .select_only()
             .column(registrations::Column::Id)
-            .filter(registrations::Column::Status.ne(STATUS_REVOKED))
+            .filter(
+                Condition::any()
+                    .add(registrations::Column::Status.ne(STATUS_REVOKED))
+                    .add(registrations::Column::CleanupPending.eq(true)),
+            )
             .order_by_asc(registrations::Column::Id)
             .limit(limit)
             .into_tuple::<String>()
@@ -712,6 +748,16 @@ impl AgentAuthStore for SqlAgentAuthStore {
             .await
             .map_err(db_error)?;
         Ok(moved.rows_affected == 1)
+    }
+
+    async fn replay_recorded(&self, key: &str, now: DateTime<Utc>) -> Result<bool> {
+        Ok(replays::Entity::find()
+            .filter(replays::Column::Id.eq(key.to_owned()))
+            .filter(replays::Column::ExpiresAt.gt(now))
+            .one(&self.db)
+            .await
+            .map_err(db_error)?
+            .is_some())
     }
 
     async fn record_replay(&self, key: &str, expires_at: DateTime<Utc>) -> Result<bool> {

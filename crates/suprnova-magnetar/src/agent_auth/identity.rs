@@ -162,6 +162,7 @@ impl Core {
             auth_epoch: None,
             client_address: client_address.map(str::to_owned),
             grant_id: None,
+            cleanup_pending: false,
             created_at: now,
             claimed_at: None,
             revoked_at: None,
@@ -256,6 +257,7 @@ impl Core {
             auth_epoch: None,
             client_address: client_address.map(str::to_owned),
             grant_id: None,
+            cleanup_pending: false,
             created_at: now,
             claimed_at: None,
             revoked_at: None,
@@ -628,7 +630,10 @@ impl Core {
                     &server.token_issuer(),
                     &existing,
                     client_address,
-                    &[("reason", "epoch_changed".to_owned())],
+                    &[
+                        ("reason", "epoch_changed".to_owned()),
+                        ("actor", "system".to_owned()),
+                    ],
                 )
                 .await?;
                 return Err(Error::Conflict {
@@ -686,6 +691,16 @@ impl Core {
                 .await;
             return Ok(self.interaction_required(&existing.id, &ceremony, window));
         }
+        if existing.status == STATUS_REVOKED {
+            // A revocation whose clean-up failed still names the
+            // delegation; finish it, and this presentation starts over.
+            self.end_registration(&server.token_issuer(), &existing, client_address, &[])
+                .await?;
+            return Err(Error::Conflict {
+                resource: "agent registration".to_owned(),
+                message: "the delegation was being revoked".to_owned(),
+            });
+        }
         Ok(agent_error(
             400,
             "invalid_request",
@@ -728,6 +743,7 @@ impl Core {
             auth_epoch: None,
             client_address: client_address.map(str::to_owned),
             grant_id: None,
+            cleanup_pending: false,
             created_at: now,
             claimed_at: None,
             revoked_at: None,
@@ -772,6 +788,7 @@ impl Core {
             auth_epoch: user.auth_epoch,
             client_address: client_address.map(str::to_owned),
             grant_id: None,
+            cleanup_pending: false,
             created_at: now,
             claimed_at: None,
             revoked_at: None,

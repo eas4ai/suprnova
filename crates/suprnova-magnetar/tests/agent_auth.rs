@@ -1725,7 +1725,7 @@ async fn agent_010_a_user_lists_and_revokes_their_agent_registrations() {
     let stranger = h.create_user("stranger@example.test", true).await;
     assert!(
         !h.engine
-            .revoke_registration(&stranger, &id)
+            .revoke_registration(&stranger, &id, Some(CLIENT_ADDRESS))
             .await
             .expect("revoke")
     );
@@ -1735,7 +1735,7 @@ async fn agent_010_a_user_lists_and_revokes_their_agent_registrations() {
     ));
     assert!(
         h.engine
-            .revoke_registration(&user_id, &id)
+            .revoke_registration(&user_id, &id, Some(CLIENT_ADDRESS))
             .await
             .expect("revoke")
     );
@@ -1750,7 +1750,7 @@ async fn agent_010_a_user_lists_and_revokes_their_agent_registrations() {
     );
     assert!(
         !h.engine
-            .revoke_registration(&user_id, &id)
+            .revoke_registration(&user_id, &id, Some(CLIENT_ADDRESS))
             .await
             .expect("revoke")
     );
@@ -1806,6 +1806,255 @@ async fn agent_010_revoking_everything_ends_every_agent_credential() {
             .expect("again"),
         0
     );
+}
+
+fn faulty() -> (Options, Arc<Faults>) {
+    let faults = Arc::new(Faults::default());
+    let mut options = Options::new();
+    options.faults = Some(faults.clone());
+    (options, faults)
+}
+
+#[tokio::test]
+async fn agent_010_a_revocation_event_survives_a_storage_failure_after_verification() {
+    let (options, faults) = faulty();
+    let h = sqlite_harness_with(options).await;
+    let registered = body(&present_subject(&h, "flaky-event", "flaky.event@example.test").await);
+    let token = access_token(
+        &h.exchange(
+            registered["identity_assertion"]
+                .as_str()
+                .expect("assertion"),
+        )
+        .await,
+    );
+    let event = h
+        .provider
+        .event(&h.provider.revocation_event("flaky-event"));
+    faults.fail("find_by_delegation", 1);
+    let failed = h
+        .post_bytes(
+            "/agent/event/notify",
+            "application/secevent+jwt",
+            event.clone().into_bytes(),
+        )
+        .await;
+    assert_eq!(status(&failed), 500, "{:?}", body(&failed));
+    let retried = h
+        .post_bytes(
+            "/agent/event/notify",
+            "application/secevent+jwt",
+            event.clone().into_bytes(),
+        )
+        .await;
+    assert_eq!(
+        status(&retried),
+        202,
+        "the provider's retry revokes: {:?}",
+        body(&retried)
+    );
+    assert_eq!(h.verify(&token).await, revoked());
+    let replayed = h
+        .post_bytes(
+            "/agent/event/notify",
+            "application/secevent+jwt",
+            event.into_bytes(),
+        )
+        .await;
+    assert_eq!(
+        body(&replayed)["err"],
+        "invalid_request",
+        "after success it is a replay"
+    );
+}
+
+#[tokio::test]
+async fn agent_010_a_failed_grant_revocation_is_finished_by_a_retry() {
+    let (options, faults) = faulty();
+    let h = sqlite_harness_with(options).await;
+    let registered = body(&present_subject(&h, "flaky-grant", "flaky.grant@example.test").await);
+    let token = access_token(
+        &h.exchange(
+            registered["identity_assertion"]
+                .as_str()
+                .expect("assertion"),
+        )
+        .await,
+    );
+    let event = h
+        .provider
+        .event(&h.provider.revocation_event("flaky-grant"));
+    faults.fail("revoke_grant", 2);
+    let failed = h
+        .post_bytes(
+            "/agent/event/notify",
+            "application/secevent+jwt",
+            event.clone().into_bytes(),
+        )
+        .await;
+    assert_eq!(status(&failed), 500, "{:?}", body(&failed));
+    let retried = h
+        .post_bytes(
+            "/agent/event/notify",
+            "application/secevent+jwt",
+            event.into_bytes(),
+        )
+        .await;
+    assert_eq!(status(&retried), 202, "{:?}", body(&retried));
+    assert_eq!(
+        h.verify(&token).await,
+        revoked(),
+        "the retry found the grant"
+    );
+    let id = registered["registration_id"].as_str().expect("id");
+    assert_eq!(h.registration(id).await.delegation_key, None);
+
+    // The user's own revocation finishes on a retry too.
+    let (registration, user_id) = h.claimed_anonymous("flaky.user@example.test").await;
+    let id = registration["registration_id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let claimed = body(
+        &h.poll(registration["claim_token"].as_str().expect("claim token"))
+            .await,
+    );
+    let token = claimed["access_token"].as_str().expect("access").to_owned();
+    faults.fail("revoke_grant", 2);
+    assert!(
+        h.engine
+            .revoke_registration(&user_id, &id, Some(CLIENT_ADDRESS))
+            .await
+            .is_err()
+    );
+    h.engine
+        .revoke_registration(&user_id, &id, Some(CLIENT_ADDRESS))
+        .await
+        .expect("the retry");
+    assert_eq!(h.verify(&token).await, revoked());
+}
+
+#[tokio::test]
+async fn agent_009_a_claim_is_confirmed_even_when_the_pre_claim_grant_revocation_fails() {
+    let (options, faults) = faulty();
+    let h = sqlite_harness_with(options).await;
+    let registration = h.anonymous().await;
+    let pre_claim = access_token(
+        &h.exchange(registration["identity_assertion"].as_str().expect("v1"))
+            .await,
+    );
+    let claim_token = registration["claim_token"].as_str().expect("claim token");
+    let user_id = h.create_user("flaky.claim@example.test", true).await;
+    let bearer = h.sign_in(&user_id).await;
+    let started = body(&h.initiate(claim_token, "flaky.claim@example.test").await);
+    let attempt = attempt_token(
+        started["claim_attempt"]["verification_uri"]
+            .as_str()
+            .expect("uri"),
+    );
+    let code = started["claim_attempt"]["user_code"]
+        .as_str()
+        .expect("code");
+    faults.fail("revoke_grant", 2);
+    let confirmed = h.confirm(&attempt, code, Some(&bearer)).await;
+    assert_eq!(status(&confirmed), 200, "{:?}", body(&confirmed));
+    assert_eq!(
+        h.events.of(LifecycleEventKind::AgentClaimConfirmed).len(),
+        1,
+        "the committed claim is recorded"
+    );
+    // The next poll replaces the pre-claim grant, which ends it.
+    assert_eq!(status(&h.poll(claim_token).await), 200);
+    assert_eq!(h.verify(&pre_claim).await, revoked());
+}
+
+#[tokio::test]
+async fn agent_011_an_expiry_is_recorded_even_when_its_grant_revocation_fails() {
+    let (options, faults) = faulty();
+    let h = sqlite_harness_with(options).await;
+    let registration = h.anonymous().await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let token = access_token(
+        &h.exchange(registration["identity_assertion"].as_str().expect("v1"))
+            .await,
+    );
+    h.set_registration_time(
+        id,
+        registrations::Column::ClaimExpiresAt,
+        chrono::Utc::now() - chrono::Duration::seconds(1),
+    )
+    .await;
+    faults.fail("revoke_grant", 2);
+    let _ = h.engine.expire_registrations().await;
+    assert_eq!(
+        h.events
+            .of(LifecycleEventKind::AgentRegistrationExpired)
+            .len(),
+        1,
+        "the committed expiry is recorded"
+    );
+    h.engine
+        .expire_registrations()
+        .await
+        .expect("the next run finishes");
+    assert_eq!(h.verify(&token).await, revoked());
+    assert_eq!(
+        h.events
+            .of(LifecycleEventKind::AgentRegistrationExpired)
+            .len(),
+        1,
+        "and records it once"
+    );
+}
+
+#[tokio::test]
+async fn agent_009_a_poll_that_loses_the_spend_takes_back_its_token() {
+    use magnetar::authorization_server::sql::tokens;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let (options, faults) = faulty();
+    let h = sqlite_harness_with(options).await;
+    let (registration, _) = h.claimed_anonymous("lost.spend@example.test").await;
+    let id = registration["registration_id"].as_str().expect("id");
+    faults.lose("spend_claim_token", 1);
+    let lost = h
+        .poll(registration["claim_token"].as_str().expect("claim token"))
+        .await;
+    assert_eq!(body(&lost)["error"], "expired_token");
+    let grant = h.registration(id).await.grant_id.expect("a grant");
+    let minted = tokens::Entity::find()
+        .filter(tokens::Column::GrantId.eq(grant))
+        .all(&h.db)
+        .await
+        .expect("read tokens");
+    assert!(!minted.is_empty());
+    assert!(
+        minted.iter().all(|token| token.revoked_at.is_some()),
+        "the losing poll's token is taken back"
+    );
+}
+
+#[tokio::test]
+async fn agent_010_registration_revoked_names_the_actor_and_address() {
+    let h = sqlite_harness().await;
+    let (registration, user_id) = h.claimed_anonymous("actor@example.test").await;
+    let id = registration["registration_id"].as_str().expect("id");
+    assert!(
+        h.engine
+            .revoke_registration(&user_id, id, Some("203.0.113.9"))
+            .await
+            .expect("revoke")
+    );
+    let events = h.events.of(LifecycleEventKind::AgentRegistrationRevoked);
+    assert_eq!(events[0].attributes["actor"], "user");
+    assert_eq!(events[0].attributes["client_address"], "203.0.113.9");
+    h.anonymous().await;
+    h.engine
+        .revoke_all_agent_credentials()
+        .await
+        .expect("revoke all");
+    let events = h.events.of(LifecycleEventKind::AgentRegistrationRevoked);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].attributes["actor"], "operator");
 }
 
 // AGENT-011 -----------------------------------------------------------------

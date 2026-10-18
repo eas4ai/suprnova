@@ -18,14 +18,16 @@ use base64::Engine;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use magnetar::abuse::{AbuseLimiter, AbusePolicy, Permit};
 use magnetar::agent_auth::{
-    AgentAuth, AgentAuthConfig, AgentAuthServices, IdentityTypes, KeySetFetcher, KeySetPolicy,
-    ProvisionUsers, ProvisioningPolicy, SigningKey, SqlAgentAuthStore, TrustedIssuer,
+    AgentAuth, AgentAuthConfig, AgentAuthServices, AgentAuthStore, IdentityTypes, KeySetFetcher,
+    KeySetPolicy, NewAttempt, ProvisionUsers, ProvisioningPolicy, RegistrationRecord, SigningKey,
+    SqlAgentAuthStore, TrustedIssuer,
 };
 use magnetar::auth::{AuthenticationContext, FactorGate, SignInDecision, VerifiedPrincipal};
 use magnetar::authorization_server::{
-    AccessVerification, AuthorizationServer, AuthorizationServerConfig, ClientMetadataFetcher,
-    ClientMetadataPolicy, HostResolver, PinnedHttpClient, PinnedResponse, ResponseBody,
-    ScopeDefinition, SqlAuthorizationStore,
+    AccessVerification, AuthorizationRecord, AuthorizationServer, AuthorizationServerConfig,
+    AuthorizationStore, ClientMetadataFetcher, ClientMetadataPolicy, GrantRecord, HostResolver,
+    NewTokenRecord, PinnedHttpClient, PinnedResponse, RegisteredClient, ResponseBody,
+    ScopeDefinition, SqlAuthorizationStore, TokenRecord,
 };
 use magnetar::default_schema::DefaultAuthSchema;
 use magnetar::default_schema::sql_stores::SqlSessionStore;
@@ -309,6 +311,317 @@ impl DurableLifecycleDelivery for RecordingEvents {
     }
 }
 
+/// Failures and lost races to inject into the stores, by method name.
+#[derive(Default)]
+pub struct Faults {
+    failures: Mutex<HashMap<&'static str, u32>>,
+    losses: Mutex<HashMap<&'static str, u32>>,
+}
+
+impl Faults {
+    /// Fail the next `times` calls of `method` with a storage error.
+    pub fn fail(&self, method: &'static str, times: u32) {
+        self.failures.lock().insert(method, times);
+    }
+
+    /// Make the next `times` calls of a conditional `method` lose, as if a
+    /// concurrent request won first.
+    pub fn lose(&self, method: &'static str, times: u32) {
+        self.losses.lock().insert(method, times);
+    }
+
+    fn check(&self, method: &'static str) -> Result<()> {
+        let mut failures = self.failures.lock();
+        match failures.get_mut(method) {
+            Some(left) if *left > 0 => {
+                *left -= 1;
+                Err(Error::Internal {
+                    message: format!("injected failure in {method}"),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn loses(&self, method: &'static str) -> bool {
+        let mut losses = self.losses.lock();
+        match losses.get_mut(method) {
+            Some(left) if *left > 0 => {
+                *left -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The agent auth store with injected faults.
+pub struct FlakyAgentStore {
+    pub inner: SqlAgentAuthStore,
+    pub faults: Arc<Faults>,
+}
+
+#[async_trait]
+impl AgentAuthStore for FlakyAgentStore {
+    async fn create_registration(&self, record: RegistrationRecord) -> Result<()> {
+        self.faults.check("create_registration")?;
+        self.inner.create_registration(record).await
+    }
+    async fn find_registration(&self, id: &str) -> Result<Option<RegistrationRecord>> {
+        self.faults.check("find_registration")?;
+        self.inner.find_registration(id).await
+    }
+    async fn find_by_claim_token(&self, hash: &str) -> Result<Option<RegistrationRecord>> {
+        self.faults.check("find_by_claim_token")?;
+        self.inner.find_by_claim_token(hash).await
+    }
+    async fn find_by_attempt_token(&self, hash: &str) -> Result<Option<RegistrationRecord>> {
+        self.faults.check("find_by_attempt_token")?;
+        self.inner.find_by_attempt_token(hash).await
+    }
+    async fn find_by_delegation(&self, key: &str) -> Result<Option<RegistrationRecord>> {
+        self.faults.check("find_by_delegation")?;
+        self.inner.find_by_delegation(key).await
+    }
+    async fn start_attempt(
+        &self,
+        id: &str,
+        claim_token_hash: &str,
+        claim_email: &str,
+        attempt: NewAttempt,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        self.faults.check("start_attempt")?;
+        self.inner
+            .start_attempt(id, claim_token_hash, claim_email, attempt, now)
+            .await
+    }
+    async fn restart_step_up(
+        &self,
+        id: &str,
+        claim_token_hash: &str,
+        claim_expires_at: chrono::DateTime<chrono::Utc>,
+        attempt: NewAttempt,
+    ) -> Result<bool> {
+        self.faults.check("restart_step_up")?;
+        self.inner
+            .restart_step_up(id, claim_token_hash, claim_expires_at, attempt)
+            .await
+    }
+    async fn record_code_failure(&self, id: &str, hash: &str, max: u32) -> Result<bool> {
+        self.faults.check("record_code_failure")?;
+        self.inner.record_code_failure(id, hash, max).await
+    }
+    async fn confirm_claim(
+        &self,
+        id: &str,
+        attempt_token_hash: &str,
+        user_code_hash: &str,
+        user_id: &str,
+        auth_epoch: Option<u64>,
+        max_failures: u32,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        self.faults.check("confirm_claim")?;
+        self.inner
+            .confirm_claim(
+                id,
+                attempt_token_hash,
+                user_code_hash,
+                user_id,
+                auth_epoch,
+                max_failures,
+                now,
+            )
+            .await
+    }
+    async fn record_poll(
+        &self,
+        id: &str,
+        slot: chrono::DateTime<chrono::Utc>,
+        earliest_previous: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        self.faults.check("record_poll")?;
+        self.inner.record_poll(id, slot, earliest_previous).await
+    }
+    async fn spend_claim_token(&self, id: &str, hash: &str) -> Result<bool> {
+        self.faults.check("spend_claim_token")?;
+        if self.faults.loses("spend_claim_token") {
+            return Ok(false);
+        }
+        self.inner.spend_claim_token(id, hash).await
+    }
+    async fn revoke_registration(
+        &self,
+        id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        self.faults.check("revoke_registration")?;
+        self.inner.revoke_registration(id, at).await
+    }
+    async fn expire_registration(
+        &self,
+        id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        self.faults.check("expire_registration")?;
+        self.inner.expire_registration(id, now).await
+    }
+    async fn finish_cleanup(&self, id: &str, release_delegation: bool) -> Result<()> {
+        self.faults.check("finish_cleanup")?;
+        self.inner.finish_cleanup(id, release_delegation).await
+    }
+    async fn expirable_registrations(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        limit: u64,
+    ) -> Result<Vec<String>> {
+        self.faults.check("expirable_registrations")?;
+        self.inner.expirable_registrations(now, limit).await
+    }
+    async fn live_registrations(&self, limit: u64) -> Result<Vec<String>> {
+        self.faults.check("live_registrations")?;
+        self.inner.live_registrations(limit).await
+    }
+    async fn user_registrations(&self, user_id: &str) -> Result<Vec<RegistrationRecord>> {
+        self.faults.check("user_registrations")?;
+        self.inner.user_registrations(user_id).await
+    }
+    async fn reserve_grant(
+        &self,
+        id: &str,
+        expected: Option<&str>,
+        new_grant: &str,
+        status: &str,
+        assertion_version: u32,
+    ) -> Result<bool> {
+        self.faults.check("reserve_grant")?;
+        self.inner
+            .reserve_grant(id, expected, new_grant, status, assertion_version)
+            .await
+    }
+    async fn replay_recorded(&self, key: &str, now: chrono::DateTime<chrono::Utc>) -> Result<bool> {
+        self.faults.check("replay_recorded")?;
+        self.inner.replay_recorded(key, now).await
+    }
+    async fn record_replay(
+        &self,
+        key: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        self.faults.check("record_replay")?;
+        self.inner.record_replay(key, expires_at).await
+    }
+    async fn prune_replays(&self, now: chrono::DateTime<chrono::Utc>) -> Result<u64> {
+        self.faults.check("prune_replays")?;
+        self.inner.prune_replays(now).await
+    }
+}
+
+/// The authorization server store with injected faults.
+pub struct FlakyServerStore {
+    pub inner: SqlAuthorizationStore,
+    pub faults: Arc<Faults>,
+}
+
+type At = chrono::DateTime<chrono::Utc>;
+
+#[async_trait]
+impl AuthorizationStore for FlakyServerStore {
+    async fn insert_client(&self, client: RegisteredClient) -> Result<()> {
+        self.inner.insert_client(client).await
+    }
+    async fn find_client(&self, client_id: &str) -> Result<Option<RegisteredClient>> {
+        self.inner.find_client(client_id).await
+    }
+    async fn create_grant(&self, grant: GrantRecord, tokens: Vec<NewTokenRecord>) -> Result<()> {
+        self.faults.check("create_grant")?;
+        self.inner.create_grant(grant, tokens).await
+    }
+    async fn find_token(&self, token_hash: &str) -> Result<Option<TokenRecord>> {
+        self.inner.find_token(token_hash).await
+    }
+    async fn find_grant(&self, grant_id: &str) -> Result<Option<GrantRecord>> {
+        self.inner.find_grant(grant_id).await
+    }
+    async fn rotate_refresh_token(
+        &self,
+        refresh_token_id: &str,
+        grant_id: &str,
+        at: At,
+        replacements: Vec<NewTokenRecord>,
+    ) -> Result<bool> {
+        self.inner
+            .rotate_refresh_token(refresh_token_id, grant_id, at, replacements)
+            .await
+    }
+    async fn revoke_token(&self, token_id: &str, at: At) -> Result<bool> {
+        self.inner.revoke_token(token_id, at).await
+    }
+    async fn add_tokens(
+        &self,
+        grant_id: &str,
+        tokens: Vec<NewTokenRecord>,
+        at: At,
+    ) -> Result<bool> {
+        self.faults.check("add_tokens")?;
+        self.inner.add_tokens(grant_id, tokens, at).await
+    }
+    async fn revoke_grant(&self, grant_id: &str, at: At) -> Result<bool> {
+        self.faults.check("revoke_grant")?;
+        self.inner.revoke_grant(grant_id, at).await
+    }
+    async fn revoke_user_grants(&self, user_id: &str, at: At) -> Result<u64> {
+        self.inner.revoke_user_grants(user_id, at).await
+    }
+    async fn touch_grant(&self, grant_id: &str, at: At) -> Result<()> {
+        self.inner.touch_grant(grant_id, at).await
+    }
+    async fn list_user_grants(&self, user_id: &str, now: At) -> Result<Vec<GrantRecord>> {
+        self.inner.list_user_grants(user_id, now).await
+    }
+    async fn create_authorization(&self, record: AuthorizationRecord) -> Result<()> {
+        self.inner.create_authorization(record).await
+    }
+    async fn find_authorization(
+        &self,
+        id: &str,
+        kind: &str,
+        now: At,
+    ) -> Result<Option<AuthorizationRecord>> {
+        self.inner.find_authorization(id, kind, now).await
+    }
+    async fn transition_authorization(
+        &self,
+        id: &str,
+        kind: &str,
+        expected: &str,
+        next: &str,
+        live_at: Option<At>,
+    ) -> Result<bool> {
+        self.inner
+            .transition_authorization(id, kind, expected, next, live_at)
+            .await
+    }
+    async fn consume_authorization(&self, id: &str, kind: &str, now: At) -> Result<bool> {
+        self.inner.consume_authorization(id, kind, now).await
+    }
+    async fn trim_authorizations(
+        &self,
+        user_id: &str,
+        kind: &str,
+        keep: u64,
+        newest: &str,
+    ) -> Result<u64> {
+        self.inner
+            .trim_authorizations(user_id, kind, keep, newest)
+            .await
+    }
+    async fn prune_expired(&self, now: At, grant_cutoff: At) -> Result<u64> {
+        self.inner.prune_expired(now, grant_cutoff).await
+    }
+}
+
 /// A trusted provider with its own P-256 key.
 #[derive(Clone)]
 pub struct Provider {
@@ -423,6 +736,8 @@ pub struct Options {
     pub config: AgentAuthConfig,
     pub provisioning: Option<Arc<dyn ProvisioningPolicy>>,
     pub provider: Provider,
+    /// Faults injected into both stores, when set.
+    pub faults: Option<Arc<Faults>>,
 }
 
 impl Options {
@@ -431,6 +746,7 @@ impl Options {
             config: agent_config(signing_key("service-key-1").0),
             provisioning: None,
             provider: Provider::new(PROVIDER, "provider-key-1"),
+            faults: None,
         }
     }
 }
@@ -467,9 +783,23 @@ pub async fn build(db: DatabaseConnection, options: Options) -> Harness {
         key_sets.clone(),
         ClientMetadataPolicy::default(),
     ));
+    let server_store: Arc<dyn AuthorizationStore> = match &options.faults {
+        Some(faults) => Arc::new(FlakyServerStore {
+            inner: SqlAuthorizationStore::new(db.clone()),
+            faults: faults.clone(),
+        }),
+        None => Arc::new(SqlAuthorizationStore::new(db.clone())),
+    };
+    let agent_store: Arc<dyn AgentAuthStore> = match &options.faults {
+        Some(faults) => Arc::new(FlakyAgentStore {
+            inner: SqlAgentAuthStore::new(db.clone()),
+            faults: faults.clone(),
+        }),
+        None => Arc::new(SqlAgentAuthStore::new(db.clone())),
+    };
     let server = AuthorizationServer::new(
         server_config(),
-        Arc::new(SqlAuthorizationStore::new(db.clone())),
+        server_store,
         storage.clone(),
         limiter.clone(),
         fetcher,
@@ -482,7 +812,7 @@ pub async fn build(db: DatabaseConnection, options: Options) -> Harness {
         server,
         options.config,
         AgentAuthServices {
-            store: Arc::new(SqlAgentAuthStore::new(db.clone())),
+            store: agent_store,
             users: storage.clone(),
             provisioning,
             limiter: limiter.clone(),

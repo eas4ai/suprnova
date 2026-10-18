@@ -92,6 +92,9 @@ pub struct RegistrationRecord {
     /// The authorization server grant the registration's tokens are minted
     /// under: at most one, reused by every exchange while it fits.
     pub grant_id: Option<String>,
+    /// Whether a revoked or expired registration's grant still has to be
+    /// revoked.
+    pub cleanup_pending: bool,
     /// When the registration was created.
     pub created_at: DateTime<Utc>,
     /// When a user claimed it.
@@ -185,16 +188,25 @@ pub trait AgentAuthStore: Send + Sync {
     /// Spend the claim token of a claimed registration. Returns whether
     /// this call spent it.
     async fn spend_claim_token(&self, id: &str, claim_token_hash: &str) -> Result<bool>;
-    /// Revoke a registration and forget its delegation and one-time
-    /// tokens. Returns whether it was live.
+    /// Revoke a registration, forget its one-time tokens and mark its
+    /// clean-up pending. The delegation and the grant stay named until
+    /// [`finish_cleanup`](Self::finish_cleanup), so a retry after a failed
+    /// grant revocation still finds both. Returns whether it was live.
     async fn revoke_registration(&self, id: &str, at: DateTime<Utc>) -> Result<bool>;
     /// Mark an unclaimed or pending registration whose window passed
-    /// before `now` expired. Returns whether this call did.
+    /// before `now` expired, its clean-up pending. Returns whether this
+    /// call did.
     async fn expire_registration(&self, id: &str, now: DateTime<Utc>) -> Result<bool>;
-    /// Up to `limit` unclaimed or pending registrations whose window passed
-    /// before `now`.
+    /// Record that a revoked or expired registration's grant is revoked:
+    /// clear the pending clean-up and, with `release_delegation`, the
+    /// delegation, so the provider identity can link again.
+    async fn finish_cleanup(&self, id: &str, release_delegation: bool) -> Result<()>;
+    /// Up to `limit` registrations to expire: unclaimed or pending ones
+    /// whose window passed before `now`, and expired ones whose clean-up
+    /// is pending.
     async fn expirable_registrations(&self, now: DateTime<Utc>, limit: u64) -> Result<Vec<String>>;
-    /// Up to `limit` registrations that are not revoked.
+    /// Up to `limit` registrations not yet fully revoked: live ones, and
+    /// revoked ones whose clean-up is pending.
     async fn live_registrations(&self, limit: u64) -> Result<Vec<String>>;
     /// The registrations bound to a user that are claimed or active.
     async fn user_registrations(&self, user_id: &str) -> Result<Vec<RegistrationRecord>>;
@@ -210,6 +222,9 @@ pub trait AgentAuthStore: Send + Sync {
         status: &str,
         assertion_version: u32,
     ) -> Result<bool>;
+    /// Whether a provider token's identifier is recorded and not yet
+    /// expired at `now`.
+    async fn replay_recorded(&self, key: &str, now: DateTime<Utc>) -> Result<bool>;
     /// Record a provider token's identifier until `expires_at`. Returns
     /// `false` when the record already exists: the token is a replay.
     async fn record_replay(&self, key: &str, expires_at: DateTime<Utc>) -> Result<bool>;

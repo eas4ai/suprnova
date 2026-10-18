@@ -138,21 +138,19 @@ impl Core {
             ));
         }
         let issuer = verified.trusted.issuer.clone();
-        let replay_until = DateTime::from_timestamp(iat, 0)
-            .and_then(|issued| later(issued, self.config.event_max_age).ok())
-            .and_then(|until| later(until, self.config.clock_skew).ok())
-            .unwrap_or(now);
-        if !self
-            .store
-            .record_replay(&digest(&format!("set\n{issuer}\n{jti}")), replay_until)
-            .await?
-        {
+        let replay_key = digest(&format!("set\n{issuer}\n{jti}"));
+        let now = Utc::now();
+        if self.store.replay_recorded(&replay_key, now).await? {
             return Ok(set_error(
                 "invalid_request",
                 "this event was already received",
             ));
         }
-        // Unknown event schemas are ignored (RFC 8417 section 2.2).
+        // The revocation runs before the identifier is recorded: it is
+        // idempotent, and a failure here answers 500 with nothing recorded,
+        // so the provider's redelivery revokes instead of being refused as
+        // a replay. Unknown event schemas are ignored (RFC 8417 section
+        // 2.2).
         if revokes && let Some(subject) = subject {
             let delegation = digest(&format!("{issuer}\n{subject}"));
             if let Some(record) = self.store.find_by_delegation(&delegation).await? {
@@ -160,11 +158,21 @@ impl Core {
                     &server.token_issuer(),
                     &record,
                     client_address,
-                    &[("reason", "security_event".to_owned())],
+                    &[
+                        ("reason", "security_event".to_owned()),
+                        ("actor", "provider".to_owned()),
+                    ],
                 )
                 .await?;
             }
         }
+        let replay_until = DateTime::from_timestamp(iat, 0)
+            .and_then(|issued| later(issued, self.config.event_max_age).ok())
+            .and_then(|until| later(until, self.config.clock_skew).ok())
+            .unwrap_or(now);
+        // A concurrent delivery of the same event may record it first; both
+        // revoked the same registration, so both are accepted.
+        self.store.record_replay(&replay_key, replay_until).await?;
         Ok(respond(202, None, &NO_STORE))
     }
 }

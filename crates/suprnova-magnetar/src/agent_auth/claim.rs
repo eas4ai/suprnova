@@ -266,24 +266,8 @@ impl Core {
                 "this code can no longer be used; ask the agent for a new one",
             ));
         }
-        // The pre-claim tokens end here: the canonical credential is the
-        // one the agent's next poll receives.
-        let revoked = self
-            .revoke_grants(&server.token_issuer(), &record.id)
-            .await?;
-        if revoked > 0 {
-            self.emit(
-                LifecycleEventKind::AgentTokenRevoked,
-                None,
-                &[
-                    ("registration_id", record.id.clone()),
-                    ("reason", "claimed".to_owned()),
-                    ("grants", revoked.to_string()),
-                ],
-                client_address,
-            )
-            .await;
-        }
+        // The claim is committed: it is recorded before anything else can
+        // fail.
         let mut attributes = vec![
             ("registration_id", record.id.clone()),
             ("registration_type", record.kind.clone()),
@@ -302,6 +286,29 @@ impl Core {
             client_address,
         )
         .await;
+        // The pre-claim tokens end here: the canonical credential is the
+        // one the agent's next poll receives. If this revocation fails, the
+        // claim still stands, and that poll replaces the pre-claim grant,
+        // which no longer fits the claimed registration, revoking it then.
+        match self.revoke_grants(&server.token_issuer(), &record.id).await {
+            Ok(0) => {}
+            Ok(revoked) => {
+                self.emit(
+                    LifecycleEventKind::AgentTokenRevoked,
+                    None,
+                    &[
+                        ("registration_id", record.id.clone()),
+                        ("reason", "claimed".to_owned()),
+                        ("grants", revoked.to_string()),
+                    ],
+                    client_address,
+                )
+                .await;
+            }
+            Err(error) => {
+                tracing::error!(error = %error, registration_id = %record.id, "revoking a claimed registration's pre-claim grant failed");
+            }
+        }
         Ok(respond(
             200,
             Some(json!({"status": "claimed", "registration_id": record.id})),
