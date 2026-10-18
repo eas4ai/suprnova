@@ -21,6 +21,7 @@ mod dispatch;
 mod endpoint;
 mod marker;
 mod oauth;
+mod oauth_magnetar;
 mod registry;
 mod schema;
 mod surface;

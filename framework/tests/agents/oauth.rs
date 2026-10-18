@@ -69,6 +69,15 @@ pub fn new_account(label: &str) -> String {
     id
 }
 
+/// Let the provider know a user another store created, such as a Magnetar
+/// account, by its id.
+pub fn remember_account(id: &str) {
+    accounts()
+        .lock()
+        .unwrap()
+        .insert(id.to_owned(), format!("$argon2id$elsewhere-{id}"));
+}
+
 /// Change the user's password: their stored hash is a new one.
 pub fn change_password(id: &str) {
     accounts()
@@ -303,11 +312,8 @@ pub async fn world_with(configure: impl FnOnce(OAuthServer) -> OAuthServer) -> W
             .connection(db.clone())
             .client_metadata_fetcher(fetcher),
     );
-    let client = TestClient::new(
-        router(AgentsConfig::new().oauth_server(server)),
-        registry(),
-    )
-    .with_peer_address("203.0.113.9".parse().unwrap());
+    let client = TestClient::new(router(AgentsConfig::new().oauth_server(server)), registry())
+        .with_peer_address("203.0.113.9".parse().unwrap());
     World {
         client,
         db,
@@ -337,7 +343,10 @@ pub fn pkce() -> (String, String) {
 
 /// The path and query of an absolute or host-relative address.
 pub fn path_of(address: &str) -> String {
-    let url = Url::parse("http://localhost").unwrap().join(address).unwrap();
+    let url = Url::parse("http://localhost")
+        .unwrap()
+        .join(address)
+        .unwrap();
     match url.query() {
         Some(query) => format!("{}?{query}", url.path()),
         None => url.path().to_owned(),
@@ -444,7 +453,12 @@ pub async fn open_approval(
 
 /// Approve through the CSRF-protected decision route; return where the
 /// browser is sent.
-pub async fn decide(client: &TestClient, id: &str, page: &TestResponse, decision: &str) -> TestResponse {
+pub async fn decide(
+    client: &TestClient,
+    id: &str,
+    page: &TestResponse,
+    decision: &str,
+) -> TestResponse {
     client
         .post(format!("/oauth/authorizations/{id}"))
         .form(&[
@@ -578,7 +592,10 @@ async fn agent_005_client_registers_signs_in_and_calls_a_user_tool() {
     // authorization server, whose metadata is at its well-known location.
     let resource = client.get(path_of(&metadata_url)).send().await.json();
     assert_eq!(resource["resource"], RESOURCE);
-    assert_eq!(resource["authorization_servers"], json!(["http://localhost"]));
+    assert_eq!(
+        resource["authorization_servers"],
+        json!(["http://localhost"])
+    );
     let metadata = client
         .get("/.well-known/oauth-authorization-server")
         .send()
@@ -589,7 +606,10 @@ async fn agent_005_client_registers_signs_in_and_calls_a_user_tool() {
         metadata["authorization_endpoint"],
         "http://localhost/oauth/authorize"
     );
-    assert_eq!(metadata["code_challenge_methods_supported"], json!(["S256"]));
+    assert_eq!(
+        metadata["code_challenge_methods_supported"],
+        json!(["S256"])
+    );
     assert_eq!(
         metadata["scopes_supported"],
         json!(["posts:delete", "posts:read", "posts:write"])
@@ -606,11 +626,20 @@ async fn agent_005_client_registers_signs_in_and_calls_a_user_tool() {
     let client_id = register(client, LOOPBACK_REDIRECT).await;
     sign_in(client, &user).await;
     let (verifier, challenge) = pkce();
-    let (id, page) =
-        open_approval(client, &client_id, LOOPBACK_REDIRECT, &challenge, "posts:read").await;
+    let (id, page) = open_approval(
+        client,
+        &client_id,
+        LOOPBACK_REDIRECT,
+        &challenge,
+        "posts:read",
+    )
+    .await;
     assert_eq!(page.status(), 200, "{}", page.body_text());
     let back = location(&decide(client, &id, &page, "approve").await);
-    assert!(back.starts_with("http://127.0.0.1:7777/callback?"), "{back}");
+    assert!(
+        back.starts_with("http://127.0.0.1:7777/callback?"),
+        "{back}"
+    );
     assert_eq!(query_param(&back, "state").as_deref(), Some("state-123"));
     assert_eq!(
         query_param(&back, "iss").as_deref(),
@@ -676,8 +705,14 @@ async fn agent_005_client_identified_by_metadata_document_signs_in() {
     let user = new_account("document");
     sign_in(client, &user).await;
     let (verifier, challenge) = pkce();
-    let (id, page) =
-        open_approval(client, DOCUMENT_CLIENT, DOCUMENT_REDIRECT, &challenge, "posts:read").await;
+    let (id, page) = open_approval(
+        client,
+        DOCUMENT_CLIENT,
+        DOCUMENT_REDIRECT,
+        &challenge,
+        "posts:read",
+    )
+    .await;
     let html = page.body_text();
     assert!(html.contains("Document Tool"), "{html}");
     assert!(
@@ -759,9 +794,19 @@ async fn agent_005_pkce_is_required_and_plain_is_refused() {
     }
 
     // An exchange without the verifier, or with the wrong one, fails.
-    let (id, page) =
-        open_approval(client, &client_id, LOOPBACK_REDIRECT, &challenge, "posts:read").await;
-    let code = query_param(&location(&decide(client, &id, &page, "approve").await), "code").unwrap();
+    let (id, page) = open_approval(
+        client,
+        &client_id,
+        LOOPBACK_REDIRECT,
+        &challenge,
+        "posts:read",
+    )
+    .await;
+    let code = query_param(
+        &location(&decide(client, &id, &page, "approve").await),
+        "code",
+    )
+    .unwrap();
     let without = client
         .post("/oauth/token")
         .form(&[
@@ -810,7 +855,10 @@ async fn agent_005_approval_page_names_the_client_its_host_and_every_scope() {
     ] {
         assert!(html.contains(needle), "{needle} missing from {html}");
     }
-    assert!(!html.contains("posts:delete"), "an unrequested scope is not shown");
+    assert!(
+        !html.contains("posts:delete"),
+        "an unrequested scope is not shown"
+    );
     assert_eq!(page.header("x-frame-options"), Some("DENY"));
     assert_eq!(
         page.header("content-security-policy"),
@@ -833,7 +881,10 @@ async fn agent_005_approval_needs_a_signed_in_user() {
     // A guest is sent to sign in, and comes back to the same request.
     let authorize = authorize_path(&client_id, LOOPBACK_REDIRECT, &challenge, "posts:read");
     let to_login = location(&client.get(&authorize).send().await);
-    assert!(to_login.starts_with("http://localhost/login?"), "{to_login}");
+    assert!(
+        to_login.starts_with("http://localhost/login?"),
+        "{to_login}"
+    );
     let pairs = |address: &str| {
         let mut pairs: Vec<(String, String)> = Url::parse("http://localhost")
             .unwrap()
@@ -870,8 +921,14 @@ async fn agent_005_decision_needs_the_csrf_token() {
     let client_id = register(client, LOOPBACK_REDIRECT).await;
     sign_in(client, &user).await;
     let (_, challenge) = pkce();
-    let (id, page) =
-        open_approval(client, &client_id, LOOPBACK_REDIRECT, &challenge, "posts:read").await;
+    let (id, page) = open_approval(
+        client,
+        &client_id,
+        LOOPBACK_REDIRECT,
+        &challenge,
+        "posts:read",
+    )
+    .await;
     for form in [
         vec![("decision", "approve")],
         vec![("_token", "forged"), ("decision", "approve")],
@@ -908,8 +965,14 @@ async fn agent_005_decision_route_checks_csrf_without_global_middleware() {
     let client_id = register(&client, LOOPBACK_REDIRECT).await;
     sign_in(&client, &user).await;
     let (_, challenge) = pkce();
-    let (id, page) =
-        open_approval(&client, &client_id, LOOPBACK_REDIRECT, &challenge, "posts:read").await;
+    let (id, page) = open_approval(
+        &client,
+        &client_id,
+        LOOPBACK_REDIRECT,
+        &challenge,
+        "posts:read",
+    )
+    .await;
     let refused = client
         .post(format!("/oauth/authorizations/{id}"))
         .form(&[("decision", "approve")])
@@ -978,7 +1041,9 @@ async fn agent_005_refresh_token_works_once_and_its_reuse_revokes_the_grant() {
     assert_eq!(profile_status(client, &tokens.access).await, 401);
     let newest_refresh = rotated["refresh_token"].as_str().unwrap();
     assert_eq!(
-        refresh(client, &tokens.client_id, newest_refresh).await.status(),
+        refresh(client, &tokens.client_id, newest_refresh)
+            .await
+            .status(),
         400
     );
 }
@@ -997,7 +1062,9 @@ async fn agent_005_password_change_ends_the_token_under_the_framework_guard() {
         "the resolver refused it for the epoch: {reason}"
     );
     assert_eq!(
-        refresh(client, &tokens.client_id, &tokens.refresh).await.status(),
+        refresh(client, &tokens.client_id, &tokens.refresh)
+            .await
+            .status(),
         400,
         "the refresh token ended with the grant"
     );
@@ -1008,14 +1075,21 @@ async fn agent_005_token_for_another_resource_is_refused() {
     let container = container();
     let db = database().await;
     let server = || OAuthServer::new().connection(db.clone());
-    let client = TestClient::new(router(AgentsConfig::new().oauth_server(server())), registry());
+    let client = TestClient::new(
+        router(AgentsConfig::new().oauth_server(server())),
+        registry(),
+    );
     let user = new_account("resource");
     let tokens = connect(&client, &user, "posts:read").await;
     assert_eq!(profile_status(&client, &tokens.access).await, 200);
     // The same server's store behind an endpoint at another URL: the token
     // was bound to the first.
     let elsewhere = TestClient::new(
-        router(AgentsConfig::new().path("/other-mcp").oauth_server(server())),
+        router(
+            AgentsConfig::new()
+                .path("/other-mcp")
+                .oauth_server(server()),
+        ),
         registry(),
     );
     assert_eq!(
@@ -1110,8 +1184,14 @@ async fn agent_005_oversized_body_is_refused() {
     let client_id = register(client, LOOPBACK_REDIRECT).await;
     sign_in(client, &user).await;
     let (_, challenge) = pkce();
-    let (id, page) =
-        open_approval(client, &client_id, LOOPBACK_REDIRECT, &challenge, "posts:read").await;
+    let (id, page) = open_approval(
+        client,
+        &client_id,
+        LOOPBACK_REDIRECT,
+        &challenge,
+        "posts:read",
+    )
+    .await;
     let refused = client
         .post(format!("/oauth/authorizations/{id}"))
         .form(&[
@@ -1304,13 +1384,19 @@ async fn agent_010_user_lists_and_revokes_their_client_grant() {
     for needle in ["Example Tool", "127.0.0.1", "Read your posts", "Revoke"] {
         assert!(html.contains(needle), "{needle} missing from {html}");
     }
-    let action_start = html.find("action=\"http://localhost/oauth/connected/").unwrap()
+    let action_start = html
+        .find("action=\"http://localhost/oauth/connected/")
+        .unwrap()
         + "action=\"".len();
     let action_end = html[action_start..].find('"').unwrap() + action_start;
     let action = path_of(&html[action_start..action_end]);
 
     // The revoke form needs its CSRF token.
-    let forged = client.post(&action).form(&[("_token", "forged")]).send().await;
+    let forged = client
+        .post(&action)
+        .form(&[("_token", "forged")])
+        .send()
+        .await;
     assert_eq!(forged.status(), 419);
     assert_eq!(profile_status(client, &tokens.access).await, 200);
 
@@ -1423,11 +1509,19 @@ async fn agent_017_default_pages_can_be_replaced() {
     sign_in(&client, &user).await;
     let (_, challenge) = pkce();
     let authorized = client
-        .get(authorize_path(&client_id, LOOPBACK_REDIRECT, &challenge, "posts:read"))
+        .get(authorize_path(
+            &client_id,
+            LOOPBACK_REDIRECT,
+            &challenge,
+            "posts:read",
+        ))
         .send()
         .await;
     let to = location(&authorized);
-    assert!(to.starts_with("http://localhost/consent?authorization="), "{to}");
+    assert!(
+        to.starts_with("http://localhost/consent?authorization="),
+        "{to}"
+    );
     // The framework serves no page at either default path, and the JSON
     // route an application's own page reads answers the signed-in user.
     assert_eq!(client.get("/oauth/approve").send().await.status(), 404);
