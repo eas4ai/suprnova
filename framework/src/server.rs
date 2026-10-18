@@ -1298,6 +1298,11 @@ fn strip_body_for_head(response: hyper::Response<ServerBody>) -> hyper::Response
 /// wire, or one the framework built itself, such as a tool call the MCP
 /// endpoint dispatches (AGENT-001). Both take the one routing and
 /// middleware path, so a tool call meets every check its route applies.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the wire variant is the hot path and stays unboxed; the internal one is \
+              boxed so the enum is no larger than the wire request it replaced"
+)]
 pub(crate) enum Inbound {
     /// A request hyper parsed from a connection.
     Wire(hyper::Request<hyper::body::Incoming>),
