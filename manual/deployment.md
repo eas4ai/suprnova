@@ -196,7 +196,7 @@ this shape by construction with two dependency entries:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.2.1", default-features = false, features = [
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.3.0", default-features = false, features = [
     "filesystem", "database-sqlite", "database-postgres", "database-mysql",
     "vector-mariadb", "vector-pgvector", "web-push", "localization", "magnetar-oauth",
     "media",
@@ -205,7 +205,7 @@ suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.2.1", def
 ] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.2.1", features = ["testing"] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.3.0", features = ["testing"] }
 ```
 
 The production entry turns default features off and lists the twelve that

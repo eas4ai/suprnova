@@ -740,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-live"
-version = "4.2.1"
+version = "4.3.0"
 dependencies = [
  "askama",
  "askama_parser",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-live-macro-fixture"
-version = "4.2.1"
+version = "4.3.0"
 dependencies = [
  "askama",
  "suprnova-live",
@@ -796,7 +796,7 @@ dependencies = [
 
 [[package]]
 name = "suprnova-macros"
-version = "4.2.1"
+version = "4.3.0"
 dependencies = [
  "proc-macro2",
  "quote",
