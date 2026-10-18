@@ -564,6 +564,11 @@ impl ActingAs {
 #[async_trait]
 impl Middleware for ActingAs {
     async fn handle(&self, request: Request, next: Next) -> Response {
+        // The MCP endpoint and the tool calls it dispatches authenticate by
+        // bearer token alone, as they do for a real browser's session.
+        if request.is_agent_traffic() {
+            return next(request).await;
+        }
         self.sign_in().await?;
         next(request).await
     }

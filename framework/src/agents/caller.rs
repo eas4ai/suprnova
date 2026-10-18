@@ -227,7 +227,7 @@ impl ToolCaller {
     }
 
     /// The same caller, calling from `address`.
-    pub(crate) fn from_address(mut self, address: Option<IpAddr>) -> Self {
+    pub(crate) fn with_address(mut self, address: Option<IpAddr>) -> Self {
         self.address = address;
         self
     }

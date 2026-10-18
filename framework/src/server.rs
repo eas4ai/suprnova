@@ -1235,7 +1235,7 @@ where
         Box::pin(handle_request_inner(
             router,
             middleware_registry,
-            Inbound::Internal(request),
+            Inbound::Internal(Box::new(request)),
             method,
             &path,
             peer_ip,
@@ -1301,9 +1301,10 @@ fn strip_body_for_head(response: hyper::Response<ServerBody>) -> hyper::Response
 pub(crate) enum Inbound {
     /// A request hyper parsed from a connection.
     Wire(hyper::Request<hyper::body::Incoming>),
-    /// A request the framework built, its body already in memory.
+    /// A request the framework built, its body already in memory. Boxed,
+    /// so a wire request does not move a slot the size of a whole request.
     #[cfg(feature = "agents")]
-    Internal(Request),
+    Internal(Box<Request>),
 }
 
 impl Inbound {
@@ -1312,7 +1313,7 @@ impl Inbound {
         match self {
             Self::Wire(req) => Request::new(req),
             #[cfg(feature = "agents")]
-            Self::Internal(request) => request,
+            Self::Internal(request) => *request,
         }
     }
 }

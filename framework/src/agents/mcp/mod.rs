@@ -379,7 +379,7 @@ async fn authenticate(
     id: &Value,
 ) -> Result<ToolCaller, HttpResponse> {
     let Some(header) = headers.get(hyper::header::AUTHORIZATION) else {
-        return Ok(ToolCaller::guest().from_address(address));
+        return Ok(ToolCaller::guest().with_address(address));
     };
     let token = header
         .to_str()
@@ -398,7 +398,7 @@ async fn authenticate(
     };
     #[cfg(feature = "testing")]
     if let Some(caller) = super::testing::resolve_fake(token) {
-        return Ok(caller.from_address(address));
+        return Ok(caller.with_address(address));
     }
     let resource = resource_url(config);
     let context = ResolveContext {
@@ -414,7 +414,7 @@ async fn authenticate(
                     "The token stands for no user or agent.",
                 ));
             }
-            Ok(caller) => return Ok(caller.from_address(address)),
+            Ok(caller) => return Ok(caller.with_address(address)),
             Err(ResolveError::NotMine) => {}
             Err(ResolveError::Invalid(reason)) => return Err(invalid_token(config, id, reason)),
             Err(ResolveError::Unavailable(error)) => {

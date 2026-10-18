@@ -39,7 +39,8 @@ pub struct TestUser {
 }
 
 impl TestUser {
-    pub fn new(id: &str) -> Arc<dyn Authenticatable> {
+    /// The user `id`, as the guards take a user.
+    pub fn arc(id: &str) -> Arc<dyn Authenticatable> {
         Arc::new(Self { id: id.to_string() })
     }
 }

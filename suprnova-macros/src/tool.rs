@@ -107,7 +107,7 @@ pub(crate) fn tool_impl_inner(attr: TokenStream, item: TokenStream) -> TokenStre
     };
     if item_fn.sig.asyncness.is_none() {
         let error = syn::Error::new_spanned(
-            &item_fn.sig.fn_token,
+            item_fn.sig.fn_token,
             "#[tool] needs an `async fn` handler: a tool call awaits it",
         )
         .to_compile_error();

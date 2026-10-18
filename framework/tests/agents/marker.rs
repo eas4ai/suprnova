@@ -81,7 +81,7 @@ async fn agent_001_wire_request_cannot_carry_the_tool_marker() {
     // ordinary route still demands its CSRF token.
     let mcp = client
         .mcp()
-        .as_caller(ToolCaller::user(TestUser::new("7")).scopes([scope::POSTS_WRITE]));
+        .as_caller(ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_WRITE]));
     let token = mcp.token().unwrap_or_default().to_string();
     client
         .post("/posts")
@@ -103,7 +103,7 @@ async fn agent_001_tool_call_skips_csrf_and_session_but_a_post_still_gets_419() 
     let client = fixture::client_with(AgentsConfig::new(), session_and_csrf());
     let result = client
         .mcp()
-        .as_caller(ToolCaller::user(TestUser::new("7")).scopes([scope::POSTS_WRITE]))
+        .as_caller(ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_WRITE]))
         .call("posts.create", json!({ "title": "Through MCP" }))
         .await;
     assert!(!result.is_error(), "{:?}", result.response());

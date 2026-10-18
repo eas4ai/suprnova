@@ -11,7 +11,7 @@ use suprnova::ToolCaller;
 use crate::fixture::{self, TestUser, scope};
 
 fn writer() -> ToolCaller {
-    ToolCaller::user(TestUser::new("7")).scopes([scope::POSTS_WRITE])
+    ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_WRITE])
 }
 
 #[tokio::test]
@@ -70,7 +70,7 @@ async fn agent_001_tool_call_runs_authorize_policy() {
     let result = client
         .mcp()
         .as_caller(
-            ToolCaller::user(TestUser::new("7")).scopes([scope::POSTS_READ, scope::POSTS_DELETE]),
+            ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_READ, scope::POSTS_DELETE]),
         )
         .call("posts.delete", json!({ "post": "42" }))
         .await;
@@ -121,7 +121,7 @@ async fn agent_001_tool_call_does_not_forward_the_bearer_token() {
     let client = fixture::client().with_peer_address(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 2)));
     let result = client
         .mcp()
-        .as_caller(ToolCaller::user(TestUser::new("7")))
+        .as_caller(ToolCaller::user(TestUser::arc("7")))
         .header("Cookie", "suprnova_session=abc")
         .header("User-Agent", "peek-agent")
         .call("request.peek", json!({}))

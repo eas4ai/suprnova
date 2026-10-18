@@ -21,7 +21,7 @@ async fn agent_018_guest_user_agent_through_mcp_and_browser() {
     );
     let user = client
         .mcp()
-        .as_caller(ToolCaller::user(TestUser::new("7")).scopes([scope::POSTS_WRITE]))
+        .as_caller(ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_WRITE]))
         .call("posts.create", json!({ "title": "User" }))
         .await;
     assert_eq!(
@@ -60,7 +60,7 @@ async fn agent_018_test_path_applies_scope_and_origin_checks() {
     let client = fixture::client();
     let unscoped = client
         .mcp()
-        .as_caller(ToolCaller::user(TestUser::new("7")))
+        .as_caller(ToolCaller::user(TestUser::arc("7")))
         .call("posts.create", json!({ "title": "No scope" }))
         .await;
     assert_eq!(
@@ -76,7 +76,7 @@ async fn agent_018_test_path_applies_scope_and_origin_checks() {
     assert_eq!(foreign.status(), 403);
     let invalid = client
         .mcp()
-        .as_caller(ToolCaller::user(TestUser::new("7")).scopes([scope::POSTS_WRITE]))
+        .as_caller(ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_WRITE]))
         .call("posts.create", json!({ "title": "" }))
         .await;
     assert!(invalid.is_error(), "validation still runs on the test path");
@@ -135,10 +135,32 @@ async fn agent_018_fake_tokens_end_with_their_fake() {
     let client = fixture::client_with(AgentsConfig::new(), MiddlewareRegistry::new());
     let token = {
         let fake = Agents::fake();
-        fake.token_for(ToolCaller::user(TestUser::new("7")))
+        fake.token_for(ToolCaller::user(TestUser::arc("7")))
     };
     let response = client.mcp().with_token(token).list().await;
     // `client.mcp()` keeps a fake of its own alive, so the dropped fake's
     // token is unknown rather than accepted.
     assert_eq!(response.status(), 401);
+}
+
+#[tokio::test]
+async fn agent_018_mcp_calls_ignore_acting_as() {
+    let _container = fixture::setup();
+    // A client signed in for its browser requests; its MCP calls still
+    // authenticate by their own token alone.
+    let client = fixture::client().acting_as(&TestUser {
+        id: "browser-user".to_string(),
+    });
+    let result = client
+        .mcp()
+        .as_caller(ToolCaller::agent("reg-acting").scopes([scope::POSTS_WRITE]))
+        .call("posts.create", json!({ "title": "Not the browser's" }))
+        .await;
+    let structured = result.structured().cloned().unwrap_or_default();
+    assert_eq!(structured["kind"], "agent", "{structured}");
+    assert_eq!(
+        structured["auth_user"],
+        serde_json::Value::Null,
+        "the client's signed-in user does not reach the call"
+    );
 }

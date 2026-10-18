@@ -16,6 +16,9 @@ use suprnova::{MiddlewareRegistry, ToolCaller};
 
 use crate::fixture::{self, TestUser, scope};
 
+/// A header mismatch case: its name, the headers sent and the body.
+type MismatchCase = (&'static str, Vec<(&'static str, &'static str)>, Value);
+
 /// A 2026-07-28 request's body, with the metadata every request carries.
 fn modern_body(method: &str, params: Value) -> Value {
     let mut params = params.as_object().cloned().unwrap_or_default();
@@ -124,7 +127,7 @@ async fn agent_003_header_mismatch_is_400_32020() {
         "tools/call",
         json!({ "name": "echo", "arguments": { "text": "x" } }),
     );
-    let cases: Vec<(&str, Vec<(&str, &str)>, Value)> = vec![
+    let cases: Vec<MismatchCase> = vec![
         (
             "method mismatch",
             vec![
@@ -249,7 +252,7 @@ async fn agent_003_get_and_delete_are_405() {
 async fn agent_003_foreign_origin_is_403() {
     let _container = fixture::setup();
     let key = "agent-003-origin";
-    let writer = || ToolCaller::user(TestUser::new("7")).scopes([scope::POSTS_WRITE]);
+    let writer = || ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_WRITE]);
     let client = fixture::client_with(
         AgentsConfig::new().allow_origin("https://app.example.com"),
         MiddlewareRegistry::new(),

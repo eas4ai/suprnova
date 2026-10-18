@@ -16,7 +16,7 @@ async fn agent_002_policy_reads_caller_kind() {
     let scopes = [scope::POSTS_READ, scope::POSTS_DELETE];
     let user = client
         .mcp()
-        .as_caller(ToolCaller::user(TestUser::new("7")).scopes(scopes))
+        .as_caller(ToolCaller::user(TestUser::arc("7")).scopes(scopes))
         .call("posts.delete", json!({ "post": "1" }))
         .await;
     assert!(!user.is_error(), "a user may delete: {:?}", user.response());
@@ -27,7 +27,7 @@ async fn agent_002_policy_reads_caller_kind() {
         .as_caller(
             ToolCaller::agent("reg-7")
                 .claimed(true)
-                .bound_to(TestUser::new("7"))
+                .bound_to(TestUser::arc("7"))
                 .scopes(scopes),
         )
         .call("posts.delete", json!({ "post": "1" }))
@@ -49,7 +49,7 @@ async fn agent_002_user_tool_rejects_agent_bound_to_user() {
         .as_caller(
             ToolCaller::agent("reg-8")
                 .claimed(true)
-                .bound_to(TestUser::new("8")),
+                .bound_to(TestUser::arc("8")),
         )
         .call("users.profile", json!({}))
         .await;
@@ -66,7 +66,7 @@ async fn agent_002_user_tool_rejects_agent_bound_to_user() {
     // The user the agent is bound to may call it.
     let result = client
         .mcp()
-        .as_caller(ToolCaller::user(TestUser::new("8")))
+        .as_caller(ToolCaller::user(TestUser::arc("8")))
         .call("users.profile", json!({}))
         .await;
     assert_eq!(result.structured(), Some(&json!({ "user": "8" })));
@@ -79,7 +79,7 @@ async fn agent_002_handler_receives_tool_caller() {
     let user = client
         .mcp()
         .as_caller(
-            ToolCaller::user(TestUser::new("7"))
+            ToolCaller::user(TestUser::arc("7"))
                 .scopes([scope::POSTS_WRITE])
                 .client("claude-code"),
         )
@@ -96,7 +96,7 @@ async fn agent_002_handler_receives_tool_caller() {
         .mcp()
         .as_caller(
             ToolCaller::agent("reg-9")
-                .bound_to(TestUser::new("9"))
+                .bound_to(TestUser::arc("9"))
                 .scopes([scope::POSTS_WRITE])
                 .client("https://issuer.example"),
         )
@@ -134,7 +134,7 @@ async fn agent_002_per_caller_limit_returns_429() {
     );
     let mcp = client
         .mcp()
-        .as_caller(ToolCaller::user(TestUser::new("limit-1")));
+        .as_caller(ToolCaller::user(TestUser::arc("limit-1")));
     for _ in 0..2 {
         let result = mcp.call("users.profile", json!({})).await;
         assert_eq!(result.status(), 200, "{:?}", result.response());
@@ -145,7 +145,7 @@ async fn agent_002_per_caller_limit_returns_429() {
     // Another user has calls of their own.
     let other = client
         .mcp()
-        .as_caller(ToolCaller::user(TestUser::new("limit-2")))
+        .as_caller(ToolCaller::user(TestUser::arc("limit-2")))
         .call("users.profile", json!({}))
         .await;
     assert_eq!(other.status(), 200);
@@ -186,7 +186,7 @@ async fn agent_002_browser_calls_count_against_the_caller() {
         .assert_ok();
     let refused = client
         .mcp()
-        .as_caller(ToolCaller::user(TestUser::new("limit-3")))
+        .as_caller(ToolCaller::user(TestUser::arc("limit-3")))
         .call("users.profile", json!({}))
         .await;
     assert_eq!(

@@ -37,7 +37,7 @@ async fn agent_004_list_filters_by_kind_and_scope() {
     let client = fixture::client();
     let reader = client
         .mcp()
-        .as_caller(ToolCaller::user(TestUser::new("7")).scopes([scope::POSTS_READ]))
+        .as_caller(ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_READ]))
         .list()
         .await;
     assert_eq!(
@@ -87,7 +87,7 @@ async fn agent_004_missing_scope_is_403_insufficient_scope_with_all_scopes() {
     let client = fixture::client();
     let result = client
         .mcp()
-        .as_caller(ToolCaller::user(TestUser::new("7")).scopes([scope::POSTS_READ]))
+        .as_caller(ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_READ]))
         .call("posts.delete", json!({ "post": "1" }))
         .await;
     assert_eq!(result.status(), 403);
@@ -149,7 +149,7 @@ impl CallerResolver for RefusesAll {
 }
 
 fn user_caller() -> ToolCaller {
-    ToolCaller::user(TestUser::new("7")).scopes([scope::POSTS_READ])
+    ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_READ])
 }
 
 #[tokio::test]
