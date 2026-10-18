@@ -1076,6 +1076,7 @@ var MAX_PRESENT_DIRECTIVES = 64;
 var ISLAND_ROOT_SELECTOR = "[data-suprnova-live-island]";
 var ISLAND_STATUS_ATTRIBUTE = "data-suprnova-live-status";
 var ACTION_PARAMETERS_ATTRIBUTE = "data-suprnova-live-actions";
+var AGENT_TOOLS_ATTRIBUTE = "data-suprnova-live-tools";
 var REQUIRED_ATTRIBUTES = [
   "data-suprnova-live-component",
   "data-suprnova-live-contract",
@@ -1092,6 +1093,7 @@ var KNOWN_ATTRIBUTES = /* @__PURE__ */ new Set([
   "data-suprnova-live-island",
   "data-suprnova-live-instance",
   ACTION_PARAMETERS_ATTRIBUTE,
+  AGENT_TOOLS_ATTRIBUTE,
   ISLAND_STATUS_ATTRIBUTE,
   ...REQUIRED_ATTRIBUTES
 ]);
@@ -1791,7 +1793,8 @@ var DIAGNOSTIC_CODES = [
   "effect_failed",
   "navigation_failed",
   "lifecycle_notice",
-  "resource_limit"
+  "resource_limit",
+  "agent_tool_rejected"
 ];
 var DIAGNOSTIC_SEVERITIES = ["error", "warning", "info"];
 var DIAGNOSTIC_PHASES = [

@@ -89,6 +89,26 @@ export class IslandRecord {
     return accepted;
   }
 
+  /**
+   * [`enqueue`](IslandRecord.enqueue), returning the scheduled ticket, or
+   * null when the scheduler refused the intent: what a caller that may have
+   * to cancel the intent later needs.
+   */
+  enqueueTicket(
+    intent: ServerIntent,
+    policy: SchedulerPolicy = FIFO_POLICY,
+  ): SchedulerTicket | null {
+    if (this.#disposed) return null;
+    const result = this.scheduler.schedule(intent, policy);
+    if (result.disposition !== "accepted" || result.ticket === undefined) return null;
+    try {
+      this.#scheduleObserver?.();
+    } catch {
+      // Transport wakeup cannot rewrite the already accepted scheduler disposition.
+    }
+    return result.ticket;
+  }
+
   enqueueFreshRender(
     reason: FreshRenderReason,
     completion?: FreshRenderCompletionObserver,

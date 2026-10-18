@@ -22,6 +22,12 @@ export interface BuiltLiveRequest {
   readonly protocolVersion: 1 | 2;
   readonly mediaType: string;
   readonly text: string;
+  /**
+   * The WebMCP tool the request calls, sent as the `Suprnova-Tool-Call`
+   * header: the server counts the call against the caller's tool budget and
+   * holds it to that tool's action and island (AGENT-012).
+   */
+  readonly toolCall?: string;
 }
 
 export interface LiveRequestBuildInput {
@@ -186,11 +192,13 @@ export class LiveRequestBuilder {
       promotionNonce: input.intent.promotionNonce(),
       semanticDigest: digest,
     });
+    const toolCall = input.intent.source.agentTool;
     const request = Object.freeze({
       identity,
       mediaType: mediaType(input.protocolVersion),
       protocolVersion: input.protocolVersion,
       text,
+      ...(toolCall === undefined ? {} : { toolCall }),
     });
     this.#prior.set(input.intent, Object.freeze({ request, semanticDigest: digest }));
     return request;

@@ -54,9 +54,18 @@ import {
   ISLAND_STATUS_ATTRIBUTE,
   IslandMetadataError,
   parseIslandMetadata,
+  type AgentToolDefinition,
   type IslandMetadata,
 } from "./metadata.js";
 import { LazyCoordinator } from "./lazy.js";
+import {
+  modelContextOf,
+  registerAgentTools,
+  type ModelContextClient,
+  type ModelContextToolResult,
+} from "../agents/model-context.js";
+import { agentToolError, agentToolResult } from "../agents/result.js";
+import type { ServerIntent } from "../scheduler/intent.js";
 import { IslandRecord } from "./record.js";
 import {
   RegisteredEventAuthority,
@@ -133,6 +142,11 @@ export class DocumentRuntime {
   readonly #transitionCompletion = new BrowserTransitionCompletion();
   readonly #navigation: NativeDocumentNavigation;
   readonly #resourceLedger: ResourceLedger | undefined;
+  readonly #agentRegistrations = new Map<IslandRecord, VoidFunction>();
+  readonly #agentWaiters = new WeakMap<
+    ServerIntent,
+    (response: ValidatedResponse, applied: boolean) => void
+  >();
   #featureDriver: InspectedRuntimeFeatureDriver | null = null;
   #featureDriverState: 0 | 1 | 2 = 0;
   #state: DocumentRuntimeState = "idle";
@@ -199,6 +213,9 @@ export class DocumentRuntime {
     if (this.#state !== "running") return;
     this.#state = "suspended";
     this.#observer.disconnect();
+    // A page kept in the back/forward cache is out of the agent's view: its
+    // tools leave with it and come back on resume.
+    for (const record of this.#records.values()) this.#unregisterAgentTools(record);
     this.#driveFeatureDriver(2, null);
     this.#listeners.suspend();
     this.#events.suspend();
@@ -225,6 +242,7 @@ export class DocumentRuntime {
     this.#startFeatureDriver();
     this.#observe();
     this.#discover(this.#document.querySelectorAll(ISLAND_ROOT_SELECTOR));
+    for (const record of this.#records.values()) this.#registerAgentTools(record);
   }
 
   async runEffect(
@@ -401,6 +419,9 @@ export class DocumentRuntime {
         }),
       );
       const accepted = result.disposition === "committed" || result.disposition === "navigated";
+      const waiter = this.#agentWaiters.get(ticket.intent);
+      this.#agentWaiters.delete(ticket.intent);
+      waiter?.(response, accepted);
       record.scheduler.finish(ticket, accepted ? "accepted" : "rejected");
     } catch {
       record.scheduler.finish(ticket, "rejected");
@@ -749,7 +770,8 @@ export class DocumentRuntime {
       metadata.snapshotForm !== "instance" ||
       metadata.instanceId !== response.snapshotView.instanceId ||
       metadata.revision !== response.acceptedRevision ||
-      canonicalize(metadata.snapshot as JsonValue) !== canonicalize(response.snapshot)
+      canonicalize(metadata.snapshot as JsonValue) !== canonicalize(response.snapshot) ||
+      !sameAgentTools(metadata, record.metadata)
     ) {
       throw new Error("successor_metadata_disagreement");
     }
@@ -762,7 +784,8 @@ export class DocumentRuntime {
       expected.documentKey !== actual.documentKey ||
       expected.instanceId !== actual.instanceId ||
       expected.revision !== actual.revision ||
-      canonicalize(expected.snapshot as JsonValue) !== canonicalize(actual.snapshot as JsonValue)
+      canonicalize(expected.snapshot as JsonValue) !== canonicalize(actual.snapshot as JsonValue) ||
+      !sameAgentTools(expected, actual)
     ) {
       throw new Error("morph_metadata_disagreement");
     }
@@ -837,6 +860,109 @@ export class DocumentRuntime {
     );
   }
 
+  /**
+   * Register the island's tool actions with the page's model context, when
+   * the browser has one and the island lists tools (AGENT-012). Each call
+   * is bound to the connection it was registered under.
+   */
+  #registerAgentTools(record: IslandRecord): void {
+    const tools = record.metadata.agentTools?.tools;
+    if (
+      tools === undefined ||
+      this.#state !== "running" ||
+      !record.active() ||
+      this.#agentRegistrations.has(record)
+    ) {
+      return;
+    }
+    const context = modelContextOf(this.#document);
+    if (context === null) return;
+    const connectionEpoch = record.connectionEpoch();
+    const abort = registerAgentTools(
+      context,
+      tools,
+      (tool, input, client) => this.#executeAgentTool(record, connectionEpoch, tool, input, client),
+      () => {
+        this.#diagnostics.record({
+          code: "agent_tool_rejected",
+          severity: "warning",
+          phase: "lifecycle",
+          detailCode: "operation_rejected",
+        });
+      },
+    );
+    this.#agentRegistrations.set(record, abort);
+  }
+
+  /** Abort every registration of the island's tools. */
+  #unregisterAgentTools(record: IslandRecord): void {
+    const abort = this.#agentRegistrations.get(record);
+    this.#agentRegistrations.delete(record);
+    abort?.();
+  }
+
+  /**
+   * Run a WebMCP call of `tool` as a click of its action: scheduled with
+   * the island's pending model edits, sent with the island's snapshot, the
+   * session and the CSRF proof, and applied to the island like any
+   * response, then answered with the outcome and the agent-visible fields.
+   */
+  #executeAgentTool(
+    record: IslandRecord,
+    connectionEpoch: number,
+    tool: AgentToolDefinition,
+    input: unknown,
+    client?: ModelContextClient,
+  ): Promise<ModelContextToolResult> {
+    const fields = record.metadata.agentTools?.fields ?? [];
+    const signal = client?.signal;
+    if (signal?.aborted === true) {
+      return Promise.reject(new DOMException("The tool call was aborted.", "AbortError"));
+    }
+    if (!this.#current(record, connectionEpoch)) {
+      return Promise.resolve(agentToolError("The component has left the page."));
+    }
+    if (typeof input !== "object" || input === null || Array.isArray(input)) {
+      return Promise.resolve(agentToolError("The input must be an object."));
+    }
+    const scheduled = this.#events.scheduleAgentAction(
+      record,
+      tool.action,
+      tool.name,
+      input as Readonly<Record<string, JsonValue>>,
+    );
+    if (scheduled === null) {
+      return Promise.resolve(agentToolError("The call could not be scheduled."));
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const settle = (outcome: ModelContextToolResult | DOMException): void => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", onAbort);
+        this.#agentWaiters.delete(scheduled.intent);
+        if (outcome instanceof DOMException) reject(outcome);
+        else resolve(outcome);
+      };
+      const onAbort = (): void => {
+        record.scheduler.cancel(scheduled.ticket, { abortTransport: true });
+        settle(new DOMException("The tool call was aborted.", "AbortError"));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.#agentWaiters.set(scheduled.intent, (response, applied) => {
+        settle(
+          applied
+            ? agentToolResult(response, fields)
+            : agentToolError("The island did not apply the call's response."),
+        );
+      });
+      scheduled.intent.onFinish((reason) => {
+        if (reason !== "accepted")
+          settle(agentToolError(`The call ended without a result: ${reason}.`));
+      });
+    });
+  }
+
   #discover(candidates: Iterable<Element>): void {
     for (const element of candidates) this.#connect(element);
   }
@@ -871,6 +997,10 @@ export class DocumentRuntime {
       this.#lazy.connect(record, directives);
       this.#teleports.mount(record.element);
       this.#connectFeatureDriver(record);
+      record.onDispose(() => {
+        this.#unregisterAgentTools(record);
+      });
+      this.#registerAgentTools(record);
     } catch (error: unknown) {
       this.#retire(element);
       const kind = error instanceof IslandMetadataError ? error.kind : "invalid";
@@ -1227,4 +1357,12 @@ export class DocumentRuntime {
       }
     }
   }
+}
+
+/** Whether two metadata list the same tools: a morph never changes them. */
+function sameAgentTools(expected: IslandMetadata, actual: IslandMetadata): boolean {
+  return (
+    canonicalize((expected.agentTools ?? null) as unknown as JsonValue) ===
+    canonicalize((actual.agentTools ?? null) as unknown as JsonValue)
+  );
 }

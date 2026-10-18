@@ -14,6 +14,9 @@ import { LiveTransportError, TransportAttemptState, type LiveTransportResponse }
 
 export { LiveTransportError } from "./state.js";
 
+/// The header naming the WebMCP tool a Live action request calls.
+export const TOOL_CALL_HEADER = "Suprnova-Tool-Call";
+
 export function liveMediaType(version: 1 | 2): string {
   return `application/vnd.suprnova.live+json; charset=utf-8; version=${String(version)}`;
 }
@@ -82,6 +85,7 @@ export async function fetchLiveRequest(
       headers: {
         Accept: request.mediaType,
         "Content-Type": request.mediaType,
+        ...(request.toolCall === undefined ? {} : { [TOOL_CALL_HEADER]: request.toolCall }),
       },
       method: "POST",
       redirect: "error",
