@@ -69,6 +69,24 @@ impl ChildParameterField {
         }
     }
 
+    /// The parameter's registered name.
+    #[must_use]
+    pub const fn name(&self) -> &ModelField {
+        &self.name
+    }
+
+    /// The parameter's registered codec.
+    #[must_use]
+    pub const fn codec(&self) -> &ModelCodec {
+        &self.codec
+    }
+
+    /// Whether a mount must supply the parameter.
+    #[must_use]
+    pub const fn required(&self) -> bool {
+        self.required
+    }
+
     fn snapshot_field(&self) -> Result<FieldSpec, SnapshotError> {
         let codec = match self.codec {
             ModelCodec::I64 => StateCodec::I64Decimal,
@@ -204,6 +222,83 @@ impl ChildParameterSchema {
             ));
         }
         Ok(())
+    }
+
+    /// The JSON Schema (draft 2020-12) of the mount parameters an agent may
+    /// send, leaving out `excluding`: the parameters the application fills
+    /// itself, which the agent cannot set. `None` when a parameter the agent
+    /// sends has a codec with no schema ([`ModelCodec::json_schema`]).
+    ///
+    /// The object follows [`validate`](Self::validate): the required
+    /// parameters listed, no other field, and no `null`, which no codec
+    /// accepts.
+    #[must_use]
+    pub fn json_schema(&self, excluding: &[&str]) -> Option<serde_json::Value> {
+        let mut properties = serde_json::Map::new();
+        let mut required = Vec::new();
+        for field in self.fields.values() {
+            if excluding.contains(&field.name.as_str()) {
+                continue;
+            }
+            properties.insert(field.name.as_str().to_owned(), field.codec.json_schema()?);
+            if field.required {
+                required.push(serde_json::Value::String(field.name.as_str().to_owned()));
+            }
+        }
+        Some(crate::state::object_schema(properties, required))
+    }
+
+    /// Every field of `value` that [`validate`](Self::validate) would
+    /// refuse, and why, in field-name order, treating `excluding` as fields
+    /// the agent may not send: an unknown name, a missing required field,
+    /// or a value its codec refuses.
+    #[must_use]
+    pub fn field_issues(
+        &self,
+        value: &CanonicalValue,
+        excluding: &[&str],
+        limits: &InputLimits,
+    ) -> Vec<crate::state::FieldIssue> {
+        use crate::state::{FieldIssue, FieldIssueKind};
+
+        let CanonicalValue::Object(values) = value else {
+            return vec![FieldIssue::new("", FieldIssueKind::NotAnObject)];
+        };
+        let mut issues = Vec::new();
+        for (name, value) in values {
+            let field = ModelField::parse(name)
+                .ok()
+                .and_then(|parsed| self.fields.get(&parsed))
+                .filter(|field| !excluding.contains(&field.name.as_str()));
+            let Some(field) = field else {
+                issues.push(FieldIssue::new(name.clone(), FieldIssueKind::Unknown));
+                continue;
+            };
+            if let Err(issue) = field.codec.validate(value, limits) {
+                issues.push(FieldIssue::new(
+                    name.clone(),
+                    FieldIssueKind::Invalid(issue.kind()),
+                ));
+            }
+        }
+        for field in self.fields.values() {
+            if field.required
+                && !excluding.contains(&field.name.as_str())
+                && !values.contains_key(field.name.as_str())
+            {
+                issues.push(FieldIssue::new(
+                    field.name.as_str(),
+                    FieldIssueKind::Missing,
+                ));
+            }
+        }
+        issues.sort_by(|left, right| left.field().cmp(right.field()));
+        issues
+    }
+
+    /// The registered parameters, in name order.
+    pub fn fields(&self) -> impl ExactSizeIterator<Item = &ChildParameterField> {
+        self.fields.values()
     }
 
     pub(crate) fn validate_and_digest(
