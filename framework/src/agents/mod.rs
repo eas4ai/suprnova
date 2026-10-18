@@ -48,6 +48,7 @@ mod mcp;
 mod metadata;
 mod middleware;
 mod oauth;
+mod outside_issuer;
 mod scope;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -66,7 +67,8 @@ pub use auth::{
 };
 pub use caller::{AgentRegistration, CallerChannel, CallerKind, ToolCaller};
 /// The parts of Magnetar's fenced HTTPS fetch an application or a test
-/// hands to [`OAuthServer::client_metadata_fetcher`]: the resolver, whose every answer is
+/// hands to [`OAuthServer::client_metadata_fetcher`] and
+/// [`OutsideIssuer::key_fetch`]: the resolver, whose every answer is
 /// checked against [`is_public_address`] before anything connects, and the
 /// client that connects to the checked address and nothing else.
 pub use magnetar::authorization_server::{
@@ -78,6 +80,7 @@ pub use magnetar::authorization_server::{
 pub use magnetar::{Error as MagnetarError, Result as MagnetarResult};
 pub(crate) use mark::AgentMark;
 pub use oauth::{ClientGrant, ConnectedAgents, GrantScope, OAuthServer};
+pub use outside_issuer::OutsideIssuer;
 pub use scope::{Scope, ScopeRecord, declared_scopes};
 #[cfg(feature = "testing")]
 pub use testing::{AgentsFake, McpResponse, McpTestClient, McpToolResult};
