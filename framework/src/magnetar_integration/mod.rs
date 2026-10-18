@@ -617,6 +617,10 @@ impl engine::MagnetarFactorAuthEngine for PasswordFactorEngine {
         self.password.admit_host_sign_in(user_id).await
     }
 
+    async fn user_auth_epoch(&self, user_id: &str) -> magnetar::Result<Option<u64>> {
+        self.password.user_auth_epoch(user_id).await
+    }
+
     async fn has_second_factor(&self, user_id: &str) -> magnetar::Result<bool> {
         self.password.has_second_factor(user_id).await
     }
