@@ -46,20 +46,20 @@ export interface ModelContextLike {
  * function.
  */
 export function modelContextOf(document: Document): ModelContextLike | null {
-  const candidates: unknown[] = [
-    Reflect.get(document, "modelContext"),
-    Reflect.get(Reflect.get(document.defaultView ?? {}, "navigator") ?? {}, "modelContext"),
-  ];
-  for (const candidate of candidates) {
-    if (
-      typeof candidate === "object" &&
-      candidate !== null &&
-      typeof Reflect.get(candidate, "registerTool") === "function"
-    ) {
-      return candidate as ModelContextLike;
-    }
-  }
-  return null;
+  const usable = (candidate: unknown): candidate is ModelContextLike =>
+    typeof candidate === "object" &&
+    candidate !== null &&
+    typeof Reflect.get(candidate, "registerTool") === "function";
+  // The draft's home is the document; the navigator's is read only where
+  // the document has none, since Chromium warns that it is deprecated.
+  const onDocument: unknown = Reflect.get(document, "modelContext");
+  if (usable(onDocument)) return onDocument;
+  const navigator: unknown = Reflect.get(document.defaultView ?? {}, "navigator");
+  const onNavigator: unknown =
+    typeof navigator === "object" && navigator !== null
+      ? Reflect.get(navigator, "modelContext")
+      : undefined;
+  return usable(onNavigator) ? onNavigator : null;
 }
 
 /** Why a registration did not take. */

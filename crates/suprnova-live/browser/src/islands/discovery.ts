@@ -394,6 +394,19 @@ export class DocumentRuntime {
       const response: ValidatedResponse = authorityOnly
         ? Object.freeze({ ...(parsed as ValidatedCommittedResponse), render: NO_RENDER })
         : parsed;
+      // A refusal or a navigation may retire the island while it applies,
+      // and its tools with it, which ends a pending WebMCP call with no
+      // result: the agent hears of those before the island acts on them.
+      const waiter = this.#agentWaiters.get(ticket.intent);
+      this.#agentWaiters.delete(ticket.intent);
+      if (response.kind !== "committed" && waiter !== undefined) {
+        waiter(response, true);
+        // Let the browser deliver the result before the island acts on the
+        // refusal and its tools are registered again.
+        await new Promise<void>((resolve) => {
+          this.#ports.scheduler.timeout(resolve, 0);
+        });
+      }
       const machine = new ResponseApplicationMachine(
         this.#applicationPorts(record, completed.connectionEpoch),
       );
@@ -419,9 +432,7 @@ export class DocumentRuntime {
         }),
       );
       const accepted = result.disposition === "committed" || result.disposition === "navigated";
-      const waiter = this.#agentWaiters.get(ticket.intent);
-      this.#agentWaiters.delete(ticket.intent);
-      waiter?.(response, accepted);
+      if (response.kind === "committed") waiter?.(response, accepted);
       record.scheduler.finish(ticket, accepted ? "accepted" : "rejected");
     } catch {
       record.scheduler.finish(ticket, "rejected");

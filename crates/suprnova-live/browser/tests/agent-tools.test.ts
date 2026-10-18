@@ -13,7 +13,6 @@ import { DirectiveOwnership } from "../src/directives/ownership.js";
 import {
   IslandMetadataError,
   parseAgentTools,
-  type AgentToolDefinition,
   type IslandMetadata,
 } from "../src/islands/metadata.js";
 import type { IslandRecord } from "../src/islands/record.js";
@@ -37,6 +36,11 @@ const TOOL = {
 
 function contract(tools: readonly unknown[] = [TOOL], fields: readonly string[] = ["count"]) {
   return JSON.stringify({ v: 1, fields, tools });
+}
+
+function defined<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("expected a value");
+  return value;
 }
 
 function invalid(value: string, key = "main"): void {
@@ -100,7 +104,7 @@ class FakeModelContext implements ModelContextLike {
   }
 }
 
-const DEFINITION = parseAgentTools(contract(), "main").tools[0] as AgentToolDefinition;
+const DEFINITION = defined(parseAgentTools(contract(), "main").tools[0]);
 
 describe("WebMCP registration", () => {
   it("agent_012 finds the model context only where the browser exposes registerTool", () => {
@@ -302,7 +306,7 @@ describe("scheduling a tool call", () => {
     });
     expect(scheduled).not.toBeNull();
     expect(intents).toHaveLength(1);
-    const intent = intents[0] as ServerIntent;
+    const intent = defined(intents[0]);
     expect(intent.source.agentTool).toBe("counter.increment.main");
     expect(intent.source.eventType).toBe("agent_tool");
     expect(intent.operations).toEqual([
@@ -331,7 +335,7 @@ describe("scheduling a tool call", () => {
           seen.push(new Headers(init?.headers));
           return Promise.reject(new Error("offline"));
         },
-      } as never,
+      },
     }).catch(() => undefined);
     expect(seen[0]?.get(TOOL_CALL_HEADER)).toBe("counter.increment.main");
     expect(seen[0]?.get("content-type")).toContain("application/vnd.suprnova.live+json");

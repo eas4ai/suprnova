@@ -102,9 +102,9 @@ function integrity(value) {
   return `sha256-${sha256(value)}`;
 }
 
-const externalModuleIntegrity = "sha256-jwVLK/F9SUXZ8vglqvcHiodjly14XH0+464cSORw0vw=";
+const externalModuleIntegrity = "sha256-ZWjjNn68s9A/5c6ue4BKK1r4Fsde+zfa7YZ7eTnpMsc=";
 const externalClassicBootIntegrity = "sha256-driX1AsbsALchFYpBEj6JN/QRgsB3x5rHdMifbdcfOA=";
-const externalClassicRuntimeIntegrity = "sha256-tD5OjF628yCfoDEaHqSP35UAU9tWZFbUDVUCAgpkhkQ=";
+const externalClassicRuntimeIntegrity = "sha256-Iktoi3jxgvFUQTA9XBXLvVpv1jF5uTMHXbUeACw2y3U=";
 
 function requireReviewedIntegrity(value, expected, name) {
   if (integrity(value) !== expected) throw new Error(`${name}_integrity_drift`);
@@ -119,7 +119,7 @@ function externalModuleScript(variant = "plain") {
   }
   if (variant === "integrity") {
     requireReviewedIntegrity(externalModuleBootSource, externalModuleIntegrity, "module_boot");
-    return '<script type="module" src="/test-boot/module.js" integrity="sha256-jwVLK/F9SUXZ8vglqvcHiodjly14XH0+464cSORw0vw=" crossorigin="anonymous"></script>';
+    return '<script type="module" src="/test-boot/module.js" integrity="sha256-ZWjjNn68s9A/5c6ue4BKK1r4Fsde+zfa7YZ7eTnpMsc=" crossorigin="anonymous"></script>';
   }
   throw new Error("unsupported_external_module_script_variant");
 }
