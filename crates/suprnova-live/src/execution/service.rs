@@ -1627,6 +1627,7 @@ impl ExecutionService {
                         action_parameters: crate::view::declared_action_parameters(
                             descriptor.metadata(),
                         ),
+                        agent_tools: crate::view::declared_agent_tools(descriptor.metadata()),
                     },
                     // The configured island size, the bound a mount's root
                     // gets too, not a fixed 1 MiB: the root carries the

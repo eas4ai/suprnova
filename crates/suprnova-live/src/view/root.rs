@@ -69,6 +69,115 @@ pub(crate) struct IslandRootInput<'a> {
     /// order, so the runtime can send a directive's positional literals as
     /// the named arguments the server decodes.
     pub(crate) action_parameters: Option<String>,
+    /// The tools the browser registers for this island, emitted as
+    /// `data-suprnova-live-tools` with each name ending in the island's
+    /// document key (AGENT-012). `None` when the component offers the
+    /// browser no tool.
+    pub(crate) agent_tools: Option<AgentToolsDeclaration>,
+}
+
+/// The browser tools of one component, before an island's key names them.
+///
+/// Built from the generated metadata alone, so the attribute is the same for
+/// every viewer: a public seed's bytes stay shareable and do not change when
+/// the seed is promoted. Who may call a tool is still decided when it is
+/// called.
+#[derive(Clone, Debug)]
+pub(crate) struct AgentToolsDeclaration {
+    fields: Vec<String>,
+    tools: Vec<AgentToolEntry>,
+}
+
+#[derive(Clone, Debug)]
+struct AgentToolEntry {
+    action: String,
+    base: String,
+    title: Option<String>,
+    description: String,
+    input_schema: serde_json::Value,
+    read_only: bool,
+    untrusted_content: bool,
+    consequential: bool,
+}
+
+/// The browser tools `metadata` declares, or `None` when it offers the
+/// browser none.
+#[must_use]
+pub(crate) fn declared_agent_tools(
+    metadata: &crate::metadata::ComponentMetadata,
+) -> Option<AgentToolsDeclaration> {
+    let tools: Vec<AgentToolEntry> = metadata
+        .tools()
+        .filter(|(_, tool)| tool.browser())
+        .filter_map(|(action, tool)| {
+            // `ActionMetadata::with_tool` already refused arguments with no
+            // schema, so a missing one cannot happen; it is left out rather
+            // than registered with a schema that promises nothing.
+            Some(AgentToolEntry {
+                action: action.name().as_str().to_owned(),
+                base: tool.name().to_owned(),
+                title: tool.title().map(str::to_owned),
+                description: tool.description().to_owned(),
+                input_schema: action.arguments().json_schema()?,
+                read_only: tool.read_only(),
+                untrusted_content: tool.untrusted_content(),
+                consequential: tool.consequential(),
+            })
+        })
+        .collect();
+    if tools.is_empty() {
+        return None;
+    }
+    let fields = metadata
+        .fields()
+        .iter()
+        .filter(|field| field.agent_visible())
+        .map(|field| field.name().as_str().to_owned())
+        .collect();
+    Some(AgentToolsDeclaration { fields, tools })
+}
+
+impl AgentToolsDeclaration {
+    /// The attribute value for the island `document_key`: canonical JSON
+    /// naming each tool `{base}.{document_key}`. `None` when the key is
+    /// outside the tool instance grammar.
+    fn render(&self, document_key: &str) -> Option<String> {
+        use serde_json::json;
+
+        if !crate::metadata::is_tool_instance_key(document_key) {
+            return None;
+        }
+        let tools: Vec<serde_json::Value> = self
+            .tools
+            .iter()
+            .map(|tool| {
+                let mut entry = serde_json::Map::new();
+                entry.insert("action".to_owned(), json!(tool.action));
+                entry.insert(
+                    "name".to_owned(),
+                    json!(format!("{}.{document_key}", tool.base)),
+                );
+                if let Some(title) = &tool.title {
+                    entry.insert("title".to_owned(), json!(title));
+                }
+                entry.insert("description".to_owned(), json!(tool.description));
+                entry.insert("inputSchema".to_owned(), tool.input_schema.clone());
+                entry.insert(
+                    "annotations".to_owned(),
+                    json!({
+                        "readOnlyHint": tool.read_only,
+                        "untrustedContentHint": tool.untrusted_content,
+                        "consequentialHint": tool.consequential,
+                    }),
+                );
+                serde_json::Value::Object(entry)
+            })
+            .collect();
+        let value = json!({ "v": 1, "fields": self.fields, "tools": tools });
+        serde_json_canonicalizer::to_vec(&value)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    }
 }
 
 /// The `data-suprnova-live-actions` value for a component: one
@@ -189,6 +298,13 @@ pub(crate) fn assemble_island_root(
     if let Some(stream) = &input.stream {
         write_attribute(&mut attributes, "live:stream", stream);
     }
+    if let Some(tools) = &input.agent_tools {
+        // `validate` already refused a key outside the tool grammar.
+        let value = tools
+            .render(&input.document_key)
+            .ok_or_else(|| ViewError::new(ViewErrorKind::InvalidMountMetadata))?;
+        write_attribute(&mut attributes, "data-suprnova-live-tools", &value);
+    }
     // The root's attributes carry the encoded snapshot, so a large state
     // makes a large root. The bound is the caller's configured island size,
     // and a breach keeps both sizes so the host can name the setting.
@@ -244,7 +360,12 @@ fn validate(input: &IslandRootInput<'_>) -> Result<(), ViewError> {
                 })
                 && flag.value.chars().all(|character| !character.is_control())
         });
+    // A tool component's key becomes part of each tool name, which allows
+    // neither `:` nor a second `.` (AGENT-012).
+    let tool_key_valid =
+        input.agent_tools.is_none() || crate::metadata::is_tool_instance_key(&input.document_key);
     if !key_valid
+        || !tool_key_valid
         || !form_valid
         || !flags_valid
         || input.snapshot.is_empty()
@@ -294,6 +415,7 @@ mod tests {
             flags: Vec::new(),
             stream: None,
             action_parameters: None,
+            agent_tools: None,
         }
     }
 

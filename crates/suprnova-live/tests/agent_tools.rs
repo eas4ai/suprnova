@@ -2,6 +2,8 @@
 //! and root contract the browser registers from, the checker rule on tool
 //! components, and the fields a tool result carries (AGENT-012, AGENT-013).
 
+mod component_support;
+
 use std::collections::BTreeMap;
 
 use serde_json::json;
@@ -532,5 +534,218 @@ mod metadata {
             agent_fields(&unmarked, &state),
             CanonicalValue::Object(BTreeMap::new())
         );
+    }
+}
+
+mod root {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use serde_json::{Value, json};
+    use suprnova_live::action::{
+        ActionArgumentField, ActionArgumentSchema, AuthorizationRequirement, TransactionPolicy,
+    };
+    use suprnova_live::canonical::CanonicalValue;
+    use suprnova_live::identity::{ActionName, ComponentName, ModelField, ViewName};
+    use suprnova_live::ledger::{LedgerLimits, MemoryInstanceLedger};
+    use suprnova_live::metadata::{
+        ActionMetadata, ActionToolMetadata, ComponentMetadata, ContractVersions, FieldMetadata,
+    };
+    use suprnova_live::mount::{
+        DocumentMountKey, DocumentMountScope, MountErrorKind, MountFlags, MountLimits,
+        MountProviders, PrivateMountRequest, PrivateMountService,
+    };
+    use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
+    use suprnova_live::snapshot::state::{FieldCategory, StateCodec};
+    use suprnova_live::state::ModelCodec;
+    use suprnova_live::validation::ValidationSelection;
+    use suprnova_live::view::{RenderLimits, ViewRenderer};
+
+    use crate::component_support::{
+        FailurePoint, FixtureControl, ManualClock, SequenceGenerator, install, key_ring,
+        snapshot_limits, trusted_context_for,
+    };
+
+    /// The trace fixture's component, its one action made a tool as asked.
+    fn trace_metadata(
+        tool: Option<ActionToolMetadata>,
+        visible: bool,
+    ) -> &'static ComponentMetadata {
+        let mut serial = FieldMetadata::new(
+            ModelField::parse("serial").expect("field"),
+            FieldCategory::State,
+            StateCodec::Json,
+            true,
+        );
+        if visible {
+            serial = serial.with_agent_visible().expect("visible");
+        }
+        let mut execute = ActionMetadata::new_with_contract(
+            ActionName::parse("execute").expect("action"),
+            1,
+            ActionArgumentSchema::new(vec![
+                ActionArgumentField::new(
+                    ModelField::parse("amount").expect("argument"),
+                    ModelCodec::U64,
+                    true,
+                )
+                .expect("argument field"),
+            ])
+            .expect("arguments"),
+            AuthorizationRequirement::Current,
+            ValidationSelection::ComponentAndArguments,
+            TransactionPolicy::None,
+        )
+        .expect("action metadata");
+        if let Some(tool) = tool {
+            execute = execute.with_tool(tool).expect("tool");
+        }
+        Box::leak(Box::new(
+            ComponentMetadata::new(
+                ComponentName::parse("tests.trace").expect("component"),
+                ViewName::parse("tests/trace.html").expect("view"),
+                ContractVersions::new(1, 1, 1, 1, 1).expect("versions"),
+                vec![serial],
+                vec![execute],
+            )
+            .expect("component metadata"),
+        ))
+    }
+
+    fn browser_tool() -> ActionToolMetadata {
+        ActionToolMetadata::new("trace.execute", "Run the trace.")
+            .expect("tool")
+            .with_title("Execute")
+            .expect("title")
+            .with_hints(false, true, true)
+            .for_browser(true)
+    }
+
+    async fn mount(
+        metadata: &'static ComponentMetadata,
+        key: &str,
+    ) -> Result<String, MountErrorKind> {
+        let control = FixtureControl::new_with_metadata(FailurePoint::None, metadata);
+        let clock = Arc::new(ManualClock::new(1_000));
+        let ledger = Arc::new(MemoryInstanceLedger::new(
+            clock.clone(),
+            LedgerLimits::new(100, 10_000, 4, 8).expect("ledger limits"),
+        ));
+        let registry = ComponentRegistryBuilder::new()
+            .register(ComponentDescriptor::with_hooks(
+                metadata.clone(),
+                install(control),
+            ))
+            .expect("component registers")
+            .build();
+        let service = PrivateMountService::new(
+            MountProviders::new(
+                Arc::new(registry),
+                ledger,
+                clock,
+                Arc::new(SequenceGenerator::new(0x20)),
+                Arc::new(key_ring()),
+            ),
+            snapshot_limits(),
+            ViewRenderer::new(RenderLimits::standard()).expect("render limits"),
+            MountLimits::new(1_000, 3, 64 * 1024, 8).expect("mount limits"),
+        )
+        .expect("mount service");
+        let mut document = DocumentMountScope::new();
+        let output = service
+            .mount(
+                &mut document,
+                PrivateMountRequest::new(
+                    DocumentMountKey::parse(key).expect("document key"),
+                    CanonicalValue::Object(BTreeMap::new()),
+                    MountFlags::empty(),
+                ),
+                &trusted_context_for(metadata, None),
+            )
+            .await
+            .map_err(|error| error.kind())?;
+        Ok(String::from_utf8(output.body().to_vec()).expect("UTF-8 HTML"))
+    }
+
+    /// The parsed `data-suprnova-live-tools` attribute of the island root.
+    fn tools_attribute(html: &str) -> Option<Value> {
+        let start = html.find("data-suprnova-live-tools=\"")? + "data-suprnova-live-tools=\"".len();
+        let end = start + html[start..].find('"')?;
+        let raw = html[start..end]
+            .replace("&quot;", "\"")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&#39;", "'")
+            .replace("&amp;", "&");
+        Some(serde_json::from_str(&raw).expect("the attribute is JSON"))
+    }
+
+    #[tokio::test]
+    async fn agent_012_root_carries_the_tool_contract_with_the_instance_key() {
+        let html = mount(trace_metadata(Some(browser_tool()), true), "main")
+            .await
+            .expect("mount");
+        let tools = tools_attribute(&html).expect("the root carries the tool contract");
+        assert_eq!(tools["v"], 1);
+        assert_eq!(tools["fields"], json!(["serial"]));
+        let tool = &tools["tools"][0];
+        assert_eq!(tools["tools"].as_array().map(Vec::len), Some(1));
+        assert_eq!(tool["action"], "execute");
+        assert_eq!(tool["name"], "trace.execute.main");
+        assert_eq!(tool["title"], "Execute");
+        assert_eq!(tool["description"], "Run the trace.");
+        assert_eq!(
+            tool["annotations"],
+            json!({
+                "readOnlyHint": false,
+                "untrustedContentHint": true,
+                "consequentialHint": true,
+            })
+        );
+        assert_eq!(tool["inputSchema"]["required"], json!(["amount"]));
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+
+        // Another island of the same component names its tool by its own key.
+        let html = mount(trace_metadata(Some(browser_tool()), true), "side-2")
+            .await
+            .expect("mount");
+        assert_eq!(
+            tools_attribute(&html).expect("tools")["tools"][0]["name"],
+            "trace.execute.side-2"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_012_root_omits_agent_only_tools_and_components_without_tools() {
+        let html = mount(trace_metadata(None, false), "main")
+            .await
+            .expect("mount");
+        assert!(!html.contains("data-suprnova-live-tools"), "{html}");
+
+        let headless_only = ActionToolMetadata::new("trace.execute", "Run the trace.")
+            .expect("tool")
+            .headless(true);
+        let html = mount(trace_metadata(Some(headless_only), true), "main")
+            .await
+            .expect("mount");
+        assert!(!html.contains("data-suprnova-live-tools"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn agent_012_root_refuses_an_instance_key_outside_the_tool_grammar() {
+        for key in ["main.left", "a:b", &"k".repeat(64)] {
+            assert!(
+                mount(trace_metadata(Some(browser_tool()), false), key)
+                    .await
+                    .is_err(),
+                "{key}"
+            );
+            // The same key is fine for a component the browser offers no
+            // tool of.
+            assert!(
+                mount(trace_metadata(None, false), key).await.is_ok(),
+                "{key}"
+            );
+        }
     }
 }
