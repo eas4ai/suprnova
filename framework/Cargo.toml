@@ -390,9 +390,15 @@ queue-sqs = ["filesystem", "dep:reqsign-aws-v4", "dep:reqsign-core", "dep:reqsig
 # Filesystem fakes additionally require `filesystem`.
 testing = []
 # Agent tools and the MCP endpoint (`suprnova::agents`): `#[tool]`
-# handlers, their JSON Schemas and the `/mcp` route. Default-on; a feature at
-# all so a minimal profile carries no schema generator.
-agents = ["dep:schemars"]
+# handlers, their JSON Schemas and the `/mcp` route, and the Magnetar
+# authorization server MCP clients sign in through. Default-on; a feature at
+# all so a minimal profile carries no schema generator. The authorization
+# server adds no crate the framework does not already build: reqwest, url
+# and tokio are its own dependencies.
+agents = [
+    "dep:schemars",
+    "suprnova-magnetar/authorization-server",
+]
 # Upload preparation stays available without loading an inference runtime.
 search-media = ["dep:image", "image/png", "dep:zune-jpeg", "image/webp", "dep:hound"]
 # Local search inference is opt-in. ONNX Runtime binaries download at build time.

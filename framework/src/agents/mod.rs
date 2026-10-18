@@ -47,6 +47,7 @@ mod mark;
 mod mcp;
 mod metadata;
 mod middleware;
+mod oauth;
 mod scope;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -64,7 +65,19 @@ pub use auth::{
     AuthorizationServerMetadata, CallerResolver, MetadataKind, ResolveContext, ResolveError,
 };
 pub use caller::{AgentRegistration, CallerChannel, CallerKind, ToolCaller};
+/// The parts of Magnetar's fenced HTTPS fetch an application or a test
+/// hands to [`OAuthServer::client_metadata_fetcher`]: the resolver, whose every answer is
+/// checked against [`is_public_address`] before anything connects, and the
+/// client that connects to the checked address and nothing else.
+pub use magnetar::authorization_server::{
+    ClientMetadataFetcher, ClientMetadataPolicy, HostResolver, PinnedHttpClient, PinnedResponse,
+    ResponseBody, is_public_address,
+};
+/// The error and result Magnetar's resolver and pinned client traits
+/// answer with.
+pub use magnetar::{Error as MagnetarError, Result as MagnetarResult};
 pub(crate) use mark::AgentMark;
+pub use oauth::{ClientGrant, ConnectedAgents, GrantScope, OAuthServer};
 pub use scope::{Scope, ScopeRecord, declared_scopes};
 #[cfg(feature = "testing")]
 pub use testing::{AgentsFake, McpResponse, McpTestClient, McpToolResult};
@@ -97,6 +110,7 @@ pub struct AgentsConfig {
     pub(crate) resolver_timeout: Duration,
     pub(crate) resolvers: Vec<Arc<dyn CallerResolver>>,
     pub(crate) authorization_server: Option<Arc<dyn AuthorizationServerMetadata>>,
+    pub(crate) oauth: Option<OAuthServer>,
     pub(crate) server_name: Option<String>,
     pub(crate) server_version: Option<String>,
     pub(crate) instructions: Option<String>,
@@ -143,6 +157,7 @@ impl std::fmt::Debug for AgentsConfig {
             .field("address_limit", &self.address_limit)
             .field("resolvers", &self.resolvers.len())
             .field("authorization_server", &self.authorization_server.is_some())
+            .field("oauth", &self.oauth)
             .finish_non_exhaustive()
     }
 }
@@ -166,6 +181,7 @@ impl AgentsConfig {
             resolver_timeout: Duration::from_secs(5),
             resolvers: Vec::new(),
             authorization_server: None,
+            oauth: None,
             server_name: None,
             server_version: None,
             instructions: None,
@@ -304,6 +320,11 @@ pub(crate) enum AgentRoute {
     ProtectedResource(Arc<AgentsConfig>),
     /// Authorization server metadata (RFC 8414) of the given kind.
     AuthorizationServer(Arc<AgentsConfig>, MetadataKind),
+    /// A route a mounted Magnetar plugin serves to clients, such as the
+    /// authorization server's token, revocation and registration
+    /// endpoints. A client calls it with no cookie, so it gets no session
+    /// and needs no CSRF token (AGENT-011).
+    PluginClient,
 }
 
 /// The agent state of a [`Router`]: the routes `Router::agents` registered
@@ -357,6 +378,24 @@ impl Router {
                 "Router::agents was called twice: an application serves one MCP endpoint",
             ));
         }
+        let mut config = config;
+        // The OAuth server is built here, where the endpoint's path and the
+        // application's public URL are final: its resource is the one and
+        // its issuer the other.
+        let oauth = match config.oauth.take() {
+            Some(server) => Some(server.build(&config)?),
+            None => None,
+        };
+        if let Some(built) = &oauth {
+            if config.authorization_server.is_some() {
+                return Err(FrameworkError::internal(
+                    "AgentsConfig names both an authorization server metadata provider and the \
+                     OAuth server; an application serves one authorization server",
+                ));
+            }
+            config.authorization_server = Some(built.metadata());
+            config.resolvers.insert(0, built.resolver());
+        }
         let config = Arc::new(config);
         let mcp_path = config.path.clone();
         let mut router: Router = self.try_post(&mcp_path, mcp::handle)?.into();
@@ -408,8 +447,21 @@ impl Router {
                 );
             }
         }
+        if let Some(built) = oauth {
+            router = built.mount(router)?;
+        }
         router.agents.config = Some(config);
         Ok(router)
+    }
+
+    /// Mark the route `(method, pattern)` as one a client calls: the server
+    /// marks its requests as agent traffic from this table, so the session,
+    /// CSRF and bearer-token middleware step aside for them. Only the
+    /// Magnetar plugin host calls this, for the routes a mount names.
+    pub(crate) fn mark_client_route(&mut self, method: Method, pattern: String) {
+        self.agents
+            .routes
+            .insert((method, pattern), AgentRoute::PluginClient);
     }
 
     /// What the route `(method, pattern)` serves, when `Router::agents`

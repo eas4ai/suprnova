@@ -1,6 +1,8 @@
 //! Integration tests for the `agents` module: tools, the MCP endpoint, the
-//! callers and the testing surface (AGENT-001 to AGENT-004, AGENT-018). The
-//! `agents` mechanism runs this binary.
+//! callers and the testing surface (AGENT-001 to AGENT-004, AGENT-018), and
+//! the Magnetar authorization server a client signs a user in through
+//! (AGENT-005, AGENT-010, AGENT-017). The `agents` mechanism runs this
+//! binary.
 
 #[path = "../support/env_lock.rs"]
 mod env_lock;
@@ -18,6 +20,7 @@ mod callers;
 mod dispatch;
 mod endpoint;
 mod marker;
+mod oauth;
 mod registry;
 mod schema;
 mod surface;

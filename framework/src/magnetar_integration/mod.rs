@@ -21,6 +21,8 @@ pub mod oauth;
 pub mod oauth_transport;
 pub mod passkey;
 pub mod password;
+#[cfg(feature = "agents")]
+pub(crate) mod plugin_host;
 mod sign_in;
 
 use std::sync::{Arc, Mutex, OnceLock};
