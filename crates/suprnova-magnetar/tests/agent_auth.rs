@@ -2015,6 +2015,89 @@ async fn agent_009_a_claim_racing_an_exchange_leaves_no_pre_claim_token() {
     }
 }
 
+/// Start a claim of `registration` for a new verified user; return the
+/// user's bearer, the attempt token and the code.
+async fn start_claim(h: &Harness, registration: &Value, email: &str) -> (String, String, String) {
+    let user_id = h.create_user(email, true).await;
+    let bearer = h.sign_in(&user_id).await;
+    let started = body(
+        &h.initiate(
+            registration["claim_token"].as_str().expect("claim token"),
+            email,
+        )
+        .await,
+    );
+    let attempt = attempt_token(
+        started["claim_attempt"]["verification_uri"]
+            .as_str()
+            .expect("uri"),
+    );
+    let code = started["claim_attempt"]["user_code"]
+        .as_str()
+        .expect("code")
+        .to_owned();
+    (bearer, attempt, code)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_009_a_poll_between_the_claim_and_its_tail_keeps_its_token() {
+    let (options, faults) = faulty();
+    let h = Arc::new(sqlite_harness_with(options).await);
+    let registration = h.anonymous().await;
+    access_token(
+        &h.exchange(registration["identity_assertion"].as_str().expect("v1"))
+            .await,
+    );
+    let (bearer, attempt, code) = start_claim(&h, &registration, "gap@example.test").await;
+    let (reached, release) = faults.gate("confirm_claim");
+    let confirm = tokio::spawn({
+        let h = h.clone();
+        async move { h.confirm(&attempt, &code, Some(&bearer)).await }
+    });
+    reached.notified().await;
+    // The claim is committed; its tail has not run. The agent polls now.
+    let polled = h
+        .poll(registration["claim_token"].as_str().expect("claim token"))
+        .await;
+    let token = access_token(&polled);
+    release.notify_one();
+    assert_eq!(status(&confirm.await.expect("the confirmation")), 200);
+    assert!(
+        matches!(h.verify(&token).await, AccessVerification::Valid(_)),
+        "the claim's tail revoked only the grant it read before the claim"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_007_an_exchange_that_read_the_row_before_a_claim_hands_out_no_pre_claim_token() {
+    let (options, faults) = faulty();
+    let h = Arc::new(sqlite_harness_with(options).await);
+    let registration = h.anonymous().await;
+    let v1 = registration["identity_assertion"]
+        .as_str()
+        .expect("v1")
+        .to_owned();
+    access_token(&h.exchange(&v1).await);
+    let (bearer, attempt, code) = start_claim(&h, &registration, "reread@example.test").await;
+    let (reached, release) = faults.gate("add_tokens");
+    let exchange = tokio::spawn({
+        let (h, v1) = (h.clone(), v1.clone());
+        async move { h.exchange(&v1).await }
+    });
+    reached.notified().await;
+    // The exchange read the row and minted on the pre-claim grant; the
+    // claim lands now, and its best-effort revocation of that grant fails.
+    faults.fail("revoke_grant", 2);
+    assert_eq!(
+        status(&h.confirm(&attempt, &code, Some(&bearer)).await),
+        200
+    );
+    release.notify_one();
+    let exchanged = exchange.await.expect("the exchange");
+    assert_eq!(status(&exchanged), 400, "{:?}", body(&exchanged));
+    assert_eq!(body(&exchanged)["error"], "invalid_grant");
+}
+
 #[tokio::test]
 async fn agent_009_service_auth_reinitiation_needs_the_bound_email() {
     let h = sqlite_harness().await;

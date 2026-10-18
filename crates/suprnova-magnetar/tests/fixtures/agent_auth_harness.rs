@@ -321,6 +321,7 @@ impl DurableLifecycleDelivery for RecordingEvents {
 pub struct Faults {
     failures: Mutex<HashMap<&'static str, u32>>,
     losses: Mutex<HashMap<&'static str, u32>>,
+    gates: Mutex<HashMap<&'static str, (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
 
 impl Faults {
@@ -333,6 +334,28 @@ impl Faults {
     /// concurrent request won first.
     pub fn lose(&self, method: &'static str, times: u32) {
         self.losses.lock().insert(method, times);
+    }
+
+    /// Pause the next call of `method` right after it commits: the first
+    /// notify fires when it is reached, and the call waits for the second.
+    pub fn gate(
+        &self,
+        method: &'static str,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        self.gates
+            .lock()
+            .insert(method, (reached.clone(), release.clone()));
+        (reached, release)
+    }
+
+    async fn pass(&self, method: &'static str) {
+        let gate = self.gates.lock().remove(method);
+        if let Some((reached, release)) = gate {
+            reached.notify_one();
+            release.notified().await;
+        }
     }
 
     fn check(&self, method: &'static str) -> Result<()> {
@@ -428,7 +451,8 @@ impl AgentAuthStore for FlakyAgentStore {
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
         self.faults.check("confirm_claim")?;
-        self.inner
+        let confirmed = self
+            .inner
             .confirm_claim(
                 id,
                 attempt_token_hash,
@@ -438,7 +462,9 @@ impl AgentAuthStore for FlakyAgentStore {
                 max_failures,
                 now,
             )
-            .await
+            .await;
+        self.faults.pass("confirm_claim").await;
+        confirmed
     }
     async fn record_poll(
         &self,
@@ -577,7 +603,9 @@ impl AuthorizationStore for FlakyServerStore {
         at: At,
     ) -> Result<bool> {
         self.faults.check("add_tokens")?;
-        self.inner.add_tokens(grant_id, tokens, at).await
+        let added = self.inner.add_tokens(grant_id, tokens, at).await;
+        self.faults.pass("add_tokens").await;
+        added
     }
     async fn revoke_grant(&self, grant_id: &str, at: At) -> Result<bool> {
         self.faults.check("revoke_grant")?;

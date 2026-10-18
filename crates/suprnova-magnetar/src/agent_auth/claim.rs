@@ -245,6 +245,16 @@ impl Core {
                 &HEADERS,
             ));
         }
+        // The pre-claim grants, read before the claim commits: the tail
+        // revokes these and nothing else, so a grant a poll issues for the
+        // claimed registration in between survives.
+        let pre_claim: Vec<String> = self
+            .store
+            .grants_of(&record.id)
+            .await?
+            .into_iter()
+            .map(|grant| grant.grant_id)
+            .collect();
         if !self
             .store
             .confirm_claim(
@@ -290,7 +300,10 @@ impl Core {
         // one the agent's next poll receives. If this revocation fails, the
         // claim still stands, and that poll replaces the pre-claim grant,
         // which no longer fits the claimed registration, revoking it then.
-        match self.revoke_grants(&server.token_issuer(), &record.id).await {
+        match self
+            .revoke_grant_ids(&server.token_issuer(), &record.id, &pre_claim)
+            .await
+        {
             Ok(0) => {}
             Ok(revoked) => {
                 self.emit(
