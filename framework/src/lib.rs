@@ -40,6 +40,10 @@
 // deny attr keeps it there.
 #![deny(missing_docs)]
 
+/// Agent tools and the MCP endpoint: `#[tool]` handlers, their callers and
+/// scopes, and the `/mcp` route.
+#[cfg(feature = "agents")]
+pub mod agents;
 pub mod app;
 pub mod auth;
 pub mod auth_flows;
@@ -889,6 +893,20 @@ pub use fake::{Dummy, Fake, Faker};
 // Re-export validator for FormRequest validation
 pub use validator;
 pub use validator::Validate;
+
+// The JSON Schema generator behind `#[tool_input]` and `#[tool]`. The derive
+// is pointed at this path, so an application needs no `schemars` of its own.
+#[cfg(feature = "agents")]
+pub use agents::{AgentsConfig, CallerKind, ToolCaller};
+#[cfg(feature = "agents")]
+#[doc(hidden)]
+pub use schemars as __schemars;
+/// Derive or implement the JSON Schema (draft 2020-12) of a tool's input or
+/// output type. `#[tool_input]` derives it for you.
+#[cfg(feature = "agents")]
+pub use schemars::JsonSchema;
+#[cfg(feature = "agents")]
+pub use suprnova_macros::{tool, tool_input};
 
 // Re-export the proc-macros for compile-time component validation and type safety
 pub use suprnova_macros::Command;

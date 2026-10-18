@@ -63,6 +63,8 @@ pub use resource::__resource_support;
 pub use resource::{
     ControllerMiddleware, ResourceAction, ResourceController, ResourceDef, ResourceRoutes,
 };
+#[cfg(feature = "agents")]
+pub(crate) use router::PATH_SEGMENT_ENCODE;
 pub use router::{
     BoxedHandler, MultiMethodRouteBuilder, RouteBuilder, RouteUrlError, Router, WsMatch,
     clear_route_names_for_test, register_route_name, route, route_has, route_name_for_pattern,

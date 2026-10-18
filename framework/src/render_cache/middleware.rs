@@ -847,6 +847,11 @@ impl Middleware for RenderCacheMiddleware {
     /// 12. A provider failure before the handler ran is decided by the
     ///     route's [`FailurePolicy`]: pass through uncached, or refuse.
     async fn handle(&self, request: Request, next: Next) -> Response {
+        // A tool call is neither served from the cache nor stored in it: its
+        // caller is not the session principal the cache keys a page by.
+        if request.is_agent_traffic() {
+            return next(request).await;
+        }
         // Read fresh on every request rather than captured at construction
         // - see the type's own doc (fix round 3, item 5).
         let Some(runtime) = super::RenderCache::runtime() else {

@@ -98,7 +98,7 @@ pub fn clear_route_names_for_test() {
 ///
 /// Shared with [`crate::url::secure_with`], so a segment it appends is
 /// encoded as a route parameter is.
-pub(super) const PATH_SEGMENT_ENCODE: &AsciiSet = &CONTROLS
+pub(crate) const PATH_SEGMENT_ENCODE: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
     .add(b'<')
@@ -799,6 +799,10 @@ pub struct Router {
     /// value through every builder call of a route table, and each of
     /// those moves copies the whole struct.
     pub(crate) bindings: Box<super::binding::RouterBindings>,
+    /// The MCP endpoint and metadata routes `Router::agents` registered,
+    /// and the checked tool registry. Boxed for the reason `bindings` is.
+    #[cfg(feature = "agents")]
+    pub(crate) agents: Box<crate::agents::RouterAgents>,
 }
 
 /// Register `pattern` with one method's matcher: once when it has no
@@ -861,6 +865,8 @@ impl Router {
             fallback_handler: None,
             fallback_middleware: Vec::new(),
             bindings: Box::default(),
+            #[cfg(feature = "agents")]
+            agents: Box::default(),
         }
     }
 
@@ -1267,6 +1273,32 @@ impl Router {
     /// and what is wrong with it.
     pub fn prepare_bindings(&self) -> Result<(), FrameworkError> {
         self.bindings.prepare()
+    }
+
+    /// Check every `#[tool]` of the application against this router, once:
+    /// each resolves to exactly one route, its path parameters are fields
+    /// of its input, its scopes are declared, and no two tools share a
+    /// name (AGENT-001). The server runs this at boot and refuses to start
+    /// when it fails, and a router whose check fails answers every request
+    /// with the error, so the application's own tests fail too.
+    ///
+    /// Without the `agents` feature there are no tools, and this passes.
+    ///
+    /// # Errors
+    ///
+    /// The first problem found, naming the tool.
+    pub fn prepare_tools(&self) -> Result<(), FrameworkError> {
+        #[cfg(feature = "agents")]
+        {
+            match self.checked_tools() {
+                Ok(_) => Ok(()),
+                Err(error) => Err(error.clone()),
+            }
+        }
+        #[cfg(not(feature = "agents"))]
+        {
+            Ok(())
+        }
     }
 
     /// How the route `(method, pattern)` binds, checked once.

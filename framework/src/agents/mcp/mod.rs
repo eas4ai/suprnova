@@ -1,0 +1,808 @@
+//! The MCP endpoint (AGENT-003, AGENT-004).
+//!
+//! One `POST` carries one JSON-RPC message. The endpoint checks, in order:
+//!
+//! 1. the `Origin` header, answering 403 for an origin the application does
+//!    not allow, before it reads the body;
+//! 2. the body: JSON, one message, no larger than the configured limit;
+//! 3. the protocol era: `initialize` opens the 2025-06-18 and 2025-11-25
+//!    revisions; any other request names its revision in
+//!    `MCP-Protocol-Version`, and a 2026-07-28 request must mirror its
+//!    `_meta` version, its method and its tool's name into the headers;
+//! 4. the caller: no token is a guest, a bearer token goes to the
+//!    application's resolvers, and a token none of them accepts is 401.
+//!
+//! Then `server/discover`, `initialize`, `ping`, `tools/list` and
+//! `tools/call` are answered. The endpoint mints no session id, and `GET`
+//! and `DELETE` meet the router's 405 because only `POST` is routed.
+
+pub(crate) mod protocol;
+mod tools;
+
+use std::future::Future;
+use std::net::IpAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+
+use serde_json::{Map, Value, json};
+
+use self::protocol::{
+    FORBIDDEN, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, LEGACY, META_CLIENT_CAPABILITIES,
+    META_PROTOCOL_VERSION, META_SERVER_INFO, METHOD_HEADER, METHOD_NOT_FOUND, MODERN, NAME_HEADER,
+    PARSE_ERROR, PROTOCOL_VERSION_HEADER, RATE_LIMITED, SUPPORTED, UNAUTHORIZED, UNAVAILABLE,
+};
+use super::caller::ToolCaller;
+use super::dispatch::{self, ClientFacts};
+use super::limit::{self, Refusal};
+use super::mark::EndpointContext;
+use super::metadata::{app_name, resource_metadata_url, resource_url};
+use super::scope::Scope;
+use super::tool::ToolRegistry;
+use super::{AgentRoute, AgentsConfig, ResolveContext, ResolveError};
+use crate::http::{HttpResponse, Request, Response};
+
+/// The protocol era a request speaks.
+#[derive(Clone, Copy)]
+enum Era {
+    /// Revision 2026-07-28: stateless, metadata on every request.
+    Modern,
+    /// An `initialize`-based revision, served without a session.
+    Legacy(&'static str),
+}
+
+/// The route handler of `POST /mcp`.
+pub(crate) async fn handle(request: Request) -> Response {
+    Ok(Box::pin(serve(request)).await)
+}
+
+async fn serve(request: Request) -> HttpResponse {
+    let Some(endpoint) = request
+        .agent_mark()
+        .and_then(|mark| mark.as_endpoint())
+        .cloned()
+    else {
+        return protocol::refuse(
+            500,
+            None,
+            INTERNAL_ERROR,
+            "The MCP endpoint was reached without its route's mark.",
+            None,
+        );
+    };
+    let AgentRoute::Mcp(config) = endpoint.route.clone() else {
+        return protocol::refuse(500, None, INTERNAL_ERROR, "Not the MCP endpoint.", None);
+    };
+
+    if let Some(origin) = request.header("Origin")
+        && !origin_allowed(origin, &config)
+    {
+        return protocol::refuse(
+            403,
+            None,
+            FORBIDDEN,
+            "The request's Origin is not allowed.",
+            None,
+        );
+    }
+    if !is_json(request.content_type()) {
+        return protocol::refuse(
+            415,
+            None,
+            INVALID_REQUEST,
+            "The body must be one JSON-RPC message as application/json.",
+            None,
+        );
+    }
+    let headers = request.headers().clone();
+    let client = ClientFacts::of(&request);
+    let address: Option<IpAddr> = request.ip().and_then(|ip| ip.parse().ok());
+    let bytes = match request.body_bytes_with_cap(config.max_body_bytes).await {
+        Ok((_, bytes)) => bytes,
+        Err(error) => {
+            return match error.status_code() {
+                413 => protocol::refuse(
+                    413,
+                    None,
+                    INVALID_REQUEST,
+                    "The request body is larger than the endpoint accepts.",
+                    None,
+                ),
+                408 => protocol::refuse(
+                    408,
+                    None,
+                    INVALID_REQUEST,
+                    "The request body did not arrive in time.",
+                    None,
+                ),
+                _ => protocol::refuse(
+                    400,
+                    None,
+                    INVALID_REQUEST,
+                    "The request body could not be read.",
+                    None,
+                ),
+            };
+        }
+    };
+
+    let message = match serde_json::from_slice::<Value>(&bytes) {
+        Ok(Value::Object(message)) => message,
+        Ok(Value::Array(_)) => {
+            return protocol::refuse(
+                400,
+                None,
+                INVALID_REQUEST,
+                "Batches are not supported: send one JSON-RPC message per request.",
+                None,
+            );
+        }
+        Ok(_) => {
+            return protocol::refuse(400, None, INVALID_REQUEST, "Invalid Request", None);
+        }
+        Err(_) => return protocol::refuse(400, None, PARSE_ERROR, "Parse error", None),
+    };
+    let readable_id = message.get("id").filter(|id| is_valid_id(id));
+    if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return protocol::refuse(
+            400,
+            readable_id,
+            INVALID_REQUEST,
+            "The message is not JSON-RPC 2.0.",
+            None,
+        );
+    }
+    let Some(method) = message.get("method").and_then(Value::as_str) else {
+        return protocol::refuse(
+            400,
+            readable_id,
+            INVALID_REQUEST,
+            "The endpoint takes requests and notifications, never responses.",
+            None,
+        );
+    };
+    if message.get("id").is_none() {
+        // A notification: accepted, and nothing is answered.
+        return HttpResponse::new().status(202);
+    }
+    let Some(id) = readable_id.cloned() else {
+        return protocol::refuse(
+            400,
+            None,
+            INVALID_REQUEST,
+            "A request id is a string or an integer.",
+            None,
+        );
+    };
+    let params = match message.get("params") {
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::Object(params)) => params.clone(),
+        Some(_) => {
+            return protocol::refuse(
+                400,
+                Some(&id),
+                INVALID_PARAMS,
+                "params must be an object.",
+                None,
+            );
+        }
+    };
+
+    let era = match detect_era(&id, method, &params, &headers) {
+        Ok(era) => era,
+        Err(response) => return response,
+    };
+    let caller = match authenticate(&headers, &config, address, &id).await {
+        Ok(caller) => caller,
+        Err(response) => return response,
+    };
+
+    match (era, method) {
+        (Era::Legacy(version), "initialize") => protocol::respond(
+            200,
+            protocol::result(&id, initialize_result(&config, version)),
+        ),
+        (Era::Modern, "server/discover") => {
+            protocol::respond(200, protocol::result(&id, discover_result(&config)))
+        }
+        (_, "ping") => protocol::respond(200, protocol::result(&id, complete(&config, Map::new()))),
+        (_, "tools/list") => list_tools(&endpoint, &config, &caller, &id),
+        (_, "tools/call") => {
+            call_tool(
+                endpoint,
+                config,
+                caller,
+                client,
+                id,
+                &params,
+                wants_stream(&headers),
+            )
+            .await
+        }
+        _ => protocol::refuse(404, Some(&id), METHOD_NOT_FOUND, "Method not found", None),
+    }
+}
+
+/// The era the request speaks, after every header check its era requires.
+fn detect_era(
+    id: &Value,
+    method: &str,
+    params: &Map<String, Value>,
+    headers: &hyper::HeaderMap,
+) -> Result<Era, HttpResponse> {
+    if method == "initialize" {
+        let requested = params.get("protocolVersion").and_then(Value::as_str);
+        return match LEGACY.iter().find(|version| Some(**version) == requested) {
+            Some(version) => Ok(Era::Legacy(version)),
+            None => Err(protocol::unsupported_version(Some(id), requested)),
+        };
+    }
+    let version = match protocol::header_text(headers, PROTOCOL_VERSION_HEADER) {
+        Err(()) => {
+            return Err(protocol::header_mismatch(
+                Some(id),
+                "The MCP-Protocol-Version header holds characters a header may not.",
+            ));
+        }
+        Ok(None) => {
+            return Err(protocol::header_mismatch(
+                Some(id),
+                "The MCP-Protocol-Version header is missing.",
+            ));
+        }
+        Ok(Some(version)) => version,
+    };
+    if version == MODERN {
+        check_modern(id, method, params, headers, &version)?;
+        return Ok(Era::Modern);
+    }
+    match LEGACY.iter().find(|legacy| **legacy == version) {
+        Some(legacy) => Ok(Era::Legacy(legacy)),
+        None => Err(protocol::unsupported_version(Some(id), Some(&version))),
+    }
+}
+
+/// The rules of a 2026-07-28 request: its `_meta` names the version the
+/// header names and the client's capabilities, and `Mcp-Method` and, for a
+/// named method, `Mcp-Name` mirror the body.
+fn check_modern(
+    id: &Value,
+    method: &str,
+    params: &Map<String, Value>,
+    headers: &hyper::HeaderMap,
+    version: &str,
+) -> Result<(), HttpResponse> {
+    let meta = params.get("_meta").and_then(Value::as_object);
+    let Some(meta_version) = meta
+        .and_then(|meta| meta.get(META_PROTOCOL_VERSION))
+        .and_then(Value::as_str)
+    else {
+        return Err(protocol::refuse(
+            400,
+            Some(id),
+            INVALID_PARAMS,
+            "The request's _meta has no io.modelcontextprotocol/protocolVersion.",
+            None,
+        ));
+    };
+    if meta_version != version {
+        return Err(protocol::header_mismatch(
+            Some(id),
+            &format!(
+                "Header mismatch: MCP-Protocol-Version header value '{version}' does not match \
+                 body value '{meta_version}'"
+            ),
+        ));
+    }
+    if meta
+        .and_then(|meta| meta.get(META_CLIENT_CAPABILITIES))
+        .is_none()
+    {
+        return Err(protocol::refuse(
+            400,
+            Some(id),
+            INVALID_PARAMS,
+            "The request's _meta has no io.modelcontextprotocol/clientCapabilities.",
+            None,
+        ));
+    }
+    match protocol::header_text(headers, METHOD_HEADER) {
+        Ok(Some(header)) if header == method => {}
+        Ok(Some(header)) => {
+            return Err(protocol::header_mismatch(
+                Some(id),
+                &format!(
+                    "Header mismatch: Mcp-Method header value '{header}' does not match body \
+                     value '{method}'"
+                ),
+            ));
+        }
+        Ok(None) => {
+            return Err(protocol::header_mismatch(
+                Some(id),
+                "The Mcp-Method header is missing.",
+            ));
+        }
+        Err(()) => {
+            return Err(protocol::header_mismatch(
+                Some(id),
+                "The Mcp-Method header holds characters a header may not.",
+            ));
+        }
+    }
+    if let Some(field) = protocol::name_field(method) {
+        let body = params.get(field).and_then(Value::as_str);
+        let header = match protocol::header_text(headers, NAME_HEADER) {
+            Ok(Some(header)) => protocol::decode_name(&header),
+            Ok(None) => {
+                return Err(protocol::header_mismatch(
+                    Some(id),
+                    "The Mcp-Name header is missing.",
+                ));
+            }
+            Err(()) => None,
+        };
+        match (header, body) {
+            (Some(header), Some(body)) if header == body => {}
+            (Some(header), Some(body)) => {
+                return Err(protocol::header_mismatch(
+                    Some(id),
+                    &format!(
+                        "Header mismatch: Mcp-Name header value '{header}' does not match body \
+                         value '{body}'"
+                    ),
+                ));
+            }
+            (None, _) => {
+                return Err(protocol::header_mismatch(
+                    Some(id),
+                    "The Mcp-Name header is not a valid value.",
+                ));
+            }
+            (Some(_), None) => {
+                return Err(protocol::header_mismatch(
+                    Some(id),
+                    &format!("The Mcp-Name header names a {field} the body does not have."),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The caller the request's credential stands for: a guest without one, or
+/// the caller a resolver turns its bearer token into.
+async fn authenticate(
+    headers: &hyper::HeaderMap,
+    config: &AgentsConfig,
+    address: Option<IpAddr>,
+    id: &Value,
+) -> Result<ToolCaller, HttpResponse> {
+    let Some(header) = headers.get(hyper::header::AUTHORIZATION) else {
+        return Ok(ToolCaller::guest().from_address(address));
+    };
+    let token = header
+        .to_str()
+        .ok()
+        .and_then(|value| {
+            let (scheme, rest) = value.split_once(' ')?;
+            scheme.eq_ignore_ascii_case("bearer").then(|| rest.trim())
+        })
+        .filter(|token| !token.is_empty());
+    let Some(token) = token else {
+        return Err(invalid_token(
+            config,
+            id,
+            "The Authorization header is not a bearer token.",
+        ));
+    };
+    #[cfg(feature = "testing")]
+    if let Some(caller) = super::testing::resolve_fake(token) {
+        return Ok(caller.from_address(address));
+    }
+    let resource = resource_url(config);
+    let context = ResolveContext {
+        resource: &resource,
+        client_ip: address,
+    };
+    for resolver in &config.resolvers {
+        match resolver.resolve(token, &context).await {
+            Ok(caller) if caller.is_guest() => {
+                return Err(invalid_token(
+                    config,
+                    id,
+                    "The token stands for no user or agent.",
+                ));
+            }
+            Ok(caller) => return Ok(caller.from_address(address)),
+            Err(ResolveError::NotMine) => {}
+            Err(ResolveError::Invalid(reason)) => return Err(invalid_token(config, id, reason)),
+            Err(ResolveError::Unavailable(error)) => {
+                tracing::error!(
+                    error = %crate::error::render_error_chain(&error),
+                    "a token resolver could not decide; the MCP request is refused"
+                );
+                return Err(protocol::refuse(
+                    503,
+                    Some(id),
+                    UNAVAILABLE,
+                    "The token cannot be checked right now.",
+                    None,
+                ));
+            }
+        }
+    }
+    Err(invalid_token(config, id, "The token is not recognized."))
+}
+
+/// The tools the caller may call.
+fn list_tools(
+    endpoint: &EndpointContext,
+    config: &AgentsConfig,
+    caller: &ToolCaller,
+    id: &Value,
+) -> HttpResponse {
+    let registry = match endpoint.router.tool_registry() {
+        Ok(registry) => registry,
+        Err(error) => return internal(id, &error),
+    };
+    let mut result = Map::new();
+    result.insert("tools".into(), Value::Array(tools::list(&registry, caller)));
+    result.insert("ttlMs".into(), json!(0));
+    result.insert("cacheScope".into(), json!("private"));
+    protocol::respond(200, protocol::result(id, complete(config, result)))
+}
+
+/// A `tools/call`: the access checks, the limit, then the call through the
+/// tool's route.
+async fn call_tool(
+    endpoint: EndpointContext,
+    config: Arc<AgentsConfig>,
+    caller: ToolCaller,
+    client: ClientFacts,
+    id: Value,
+    params: &Map<String, Value>,
+    stream: bool,
+) -> HttpResponse {
+    let Some(name) = params.get("name").and_then(Value::as_str) else {
+        return protocol::respond(
+            200,
+            protocol::error(
+                Some(&id),
+                INVALID_PARAMS,
+                "tools/call needs params.name.",
+                None,
+            ),
+        );
+    };
+    let arguments = match params.get("arguments") {
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::Object(arguments)) => arguments.clone(),
+        Some(_) => {
+            return protocol::respond(
+                200,
+                protocol::error(
+                    Some(&id),
+                    INVALID_PARAMS,
+                    "tools/call arguments must be an object.",
+                    None,
+                ),
+            );
+        }
+    };
+    let registry = match endpoint.router.tool_registry() {
+        Ok(registry) => registry,
+        Err(error) => return internal(&id, &error),
+    };
+    let Some(tool) = registry.get(name) else {
+        return protocol::respond(
+            200,
+            protocol::error(
+                Some(&id),
+                INVALID_PARAMS,
+                &format!("Unknown tool: {name}"),
+                None,
+            ),
+        );
+    };
+    if !tool.accepts(caller.kind()) {
+        if caller.is_guest() {
+            return challenge(&config, &id, tool.scopes());
+        }
+        return protocol::refuse(
+            403,
+            Some(&id),
+            FORBIDDEN,
+            &format!(
+                "The tool `{name}` does not accept {} callers.",
+                caller.kind().as_str()
+            ),
+            None,
+        );
+    }
+    if !caller.is_guest() && !tool.missing_scopes(&caller).is_empty() {
+        return insufficient_scope(&config, &id, tool.scopes());
+    }
+    match limit::admit(&config, &caller).await {
+        Ok(()) => {}
+        Err(Refusal::Limited(retry_after)) => {
+            return protocol::refuse(
+                429,
+                Some(&id),
+                RATE_LIMITED,
+                "Too many tool calls: wait before calling again.",
+                Some(json!({ "retryAfter": retry_after })),
+            )
+            .header("Retry-After", retry_after.to_string());
+        }
+        Err(Refusal::Unavailable(_)) => {
+            return protocol::refuse(
+                503,
+                Some(&id),
+                UNAVAILABLE,
+                "The tool call limit cannot be checked right now.",
+                None,
+            );
+        }
+    }
+
+    let call = run_call(
+        endpoint,
+        registry,
+        name.to_string(),
+        arguments,
+        caller,
+        client,
+        config,
+        id,
+        crate::routing::root::current(),
+    );
+    if stream {
+        HttpResponse::sse(CallStream {
+            call: std::sync::Mutex::new(Some(Box::pin(call))),
+        })
+    } else {
+        protocol::respond(200, call.await)
+    }
+}
+
+/// Run the call and build its JSON-RPC answer. Owned, so a streamed answer
+/// can run it after the handler returned; `root` is the public root of the
+/// request, which a streamed body polled later no longer has in scope.
+#[allow(clippy::too_many_arguments)]
+async fn run_call(
+    endpoint: EndpointContext,
+    registry: Arc<ToolRegistry>,
+    name: String,
+    arguments: Map<String, Value>,
+    caller: ToolCaller,
+    client: ClientFacts,
+    config: Arc<AgentsConfig>,
+    id: Value,
+    root: Arc<str>,
+) -> Value {
+    let Some(tool) = registry.get(&name) else {
+        return protocol::error(
+            Some(&id),
+            INVALID_PARAMS,
+            &format!("Unknown tool: {name}"),
+            None,
+        );
+    };
+    let answer = crate::routing::root::scope(
+        root,
+        dispatch::call(
+            &endpoint,
+            tool,
+            arguments,
+            caller,
+            client,
+            config.call_timeout,
+            config.max_result_bytes,
+        ),
+    )
+    .await;
+    let result = match answer {
+        Ok(answer) => tools::answer_result(&answer),
+        Err(failure) => tools::failure_result(&failure),
+    };
+    let result = match result {
+        Value::Object(result) => complete(&config, result),
+        other => other,
+    };
+    protocol::result(&id, result)
+}
+
+/// A request-scoped SSE answer: one `message` event carrying the call's
+/// JSON-RPC answer, then the end of the stream. The call runs as the body is
+/// polled, so a client that closes the stream drops the call with it: the
+/// close is the cancellation (AGENT-003).
+struct CallStream {
+    call: std::sync::Mutex<Option<Pin<Box<dyn Future<Output = Value> + Send>>>>,
+}
+
+impl futures::Stream for CallStream {
+    type Item = crate::sse::SseEvent;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let slot = match self.get_mut().call.get_mut() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let Some(call) = slot.as_mut() else {
+            return Poll::Ready(None);
+        };
+        match call.as_mut().poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(answer) => {
+                *slot = None;
+                Poll::Ready(Some(
+                    crate::sse::SseEvent::data(answer.to_string()).with_event("message"),
+                ))
+            }
+        }
+    }
+}
+
+/// The `initialize` result of a 2025-06-18 or 2025-11-25 client. No session
+/// id is minted: every later request stands alone.
+fn initialize_result(config: &AgentsConfig, version: &str) -> Value {
+    let mut result = Map::new();
+    result.insert("protocolVersion".into(), json!(version));
+    result.insert("capabilities".into(), capabilities());
+    result.insert("serverInfo".into(), server_info(config));
+    if let Some(instructions) = &config.instructions {
+        result.insert("instructions".into(), json!(instructions));
+    }
+    complete(config, result)
+}
+
+/// The `server/discover` result.
+fn discover_result(config: &AgentsConfig) -> Value {
+    let mut result = Map::new();
+    result.insert("supportedVersions".into(), json!(SUPPORTED));
+    result.insert("capabilities".into(), capabilities());
+    if let Some(instructions) = &config.instructions {
+        result.insert("instructions".into(), json!(instructions));
+    }
+    result.insert("ttlMs".into(), json!(0));
+    result.insert("cacheScope".into(), json!("private"));
+    complete(config, result)
+}
+
+/// The capabilities the endpoint serves: tools, whose list does not change
+/// while the application runs.
+fn capabilities() -> Value {
+    json!({ "tools": { "listChanged": false } })
+}
+
+/// The endpoint's name and version.
+fn server_info(config: &AgentsConfig) -> Value {
+    json!({
+        "name": config.server_name.clone().unwrap_or_else(app_name),
+        "version": config
+            .server_version
+            .clone()
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
+    })
+}
+
+/// `result` as a complete result carrying the server's identity.
+fn complete(config: &AgentsConfig, mut result: Map<String, Value>) -> Value {
+    result.insert("resultType".into(), json!("complete"));
+    let mut meta = match result.remove("_meta") {
+        Some(Value::Object(meta)) => meta,
+        _ => Map::new(),
+    };
+    meta.insert(META_SERVER_INFO.into(), server_info(config));
+    result.insert("_meta".into(), Value::Object(meta));
+    Value::Object(result)
+}
+
+/// The 401 of a call that needs a token it did not present, naming where to
+/// get one and the scopes the tool needs (RFC 6750, RFC 9728).
+fn challenge(config: &AgentsConfig, id: &Value, scopes: &[Scope]) -> HttpResponse {
+    let mut header = format!(
+        "Bearer resource_metadata=\"{}\"",
+        quoted(&resource_metadata_url(config))
+    );
+    let scope = scope_list(scopes);
+    if !scope.is_empty() {
+        header.push_str(&format!(", scope=\"{scope}\""));
+    }
+    protocol::refuse(401, Some(id), UNAUTHORIZED, "The tool needs a token.", None)
+        .header("WWW-Authenticate", header)
+}
+
+/// The 403 of a token that lacks a scope, naming every scope the call
+/// needs, not only the missing ones.
+fn insufficient_scope(config: &AgentsConfig, id: &Value, scopes: &[Scope]) -> HttpResponse {
+    let header = format!(
+        "Bearer error=\"insufficient_scope\", scope=\"{}\", resource_metadata=\"{}\", \
+         error_description=\"The token lacks a scope the tool needs.\"",
+        scope_list(scopes),
+        quoted(&resource_metadata_url(config))
+    );
+    protocol::refuse(
+        403,
+        Some(id),
+        FORBIDDEN,
+        "The token lacks a scope the tool needs.",
+        Some(json!({ "requiredScopes": scopes.iter().map(Scope::name).collect::<Vec<_>>() })),
+    )
+    .header("WWW-Authenticate", header)
+}
+
+/// The 401 of a token no resolver accepts.
+fn invalid_token(config: &AgentsConfig, id: &Value, description: &str) -> HttpResponse {
+    let header = format!(
+        "Bearer error=\"invalid_token\", error_description=\"{}\", resource_metadata=\"{}\"",
+        quoted(description),
+        quoted(&resource_metadata_url(config))
+    );
+    protocol::refuse(401, Some(id), UNAUTHORIZED, description, None)
+        .header("WWW-Authenticate", header)
+}
+
+/// A 500 that names nothing internal; the error is logged.
+fn internal(id: &Value, error: &crate::error::FrameworkError) -> HttpResponse {
+    tracing::error!(
+        error = %crate::error::render_error_chain(error),
+        "the MCP endpoint failed"
+    );
+    protocol::refuse(500, Some(id), INTERNAL_ERROR, "Internal error", None)
+}
+
+/// The scope names, space-joined, as a `scope` parameter carries them.
+fn scope_list(scopes: &[Scope]) -> String {
+    scopes.iter().map(Scope::name).collect::<Vec<_>>().join(" ")
+}
+
+/// `value` with what would end a quoted header parameter removed.
+fn quoted(value: &str) -> String {
+    value.chars().filter(|c| *c != '"' && *c != '\\').collect()
+}
+
+/// Whether `origin` may call the endpoint: the application's own origin,
+/// from `APP_URL`, or one the configuration allows.
+fn origin_allowed(origin: &str, config: &AgentsConfig) -> bool {
+    let origin = origin.trim_end_matches('/').to_ascii_lowercase();
+    let app_url = crate::routing::url::app_url();
+    let (own, _) = crate::routing::root::split_app_url(&app_url);
+    origin == own.trim_end_matches('/').to_ascii_lowercase()
+        || config.allowed_origins.contains(&origin)
+}
+
+/// Whether the client asked for an SSE answer: it accepts
+/// `text/event-stream` and not JSON.
+fn wants_stream(headers: &hyper::HeaderMap) -> bool {
+    let accept = headers
+        .get_all(hyper::header::ACCEPT)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>()
+        .join(",")
+        .to_ascii_lowercase();
+    let json = accept.contains("application/json")
+        || accept.contains("application/*")
+        || accept.contains("*/*");
+    accept.contains("text/event-stream") && !json
+}
+
+/// Whether the request's `Content-Type` is JSON.
+fn is_json(content_type: Option<&str>) -> bool {
+    content_type.is_some_and(|value| {
+        let media = value
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        media == "application/json" || media.ends_with("+json")
+    })
+}
+
+/// Whether `id` is an id MCP allows: a string or an integer, never `null`.
+fn is_valid_id(id: &Value) -> bool {
+    id.is_string() || id.is_i64() || id.is_u64()
+}

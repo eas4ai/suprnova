@@ -2869,6 +2869,13 @@ impl SessionMiddleware {
 #[async_trait]
 impl Middleware for SessionMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
+        // Agent traffic has no session: the MCP endpoint is stateless and
+        // authenticates each request by its bearer token, and a tool call
+        // carries the caller the endpoint resolved (AGENT-003).
+        if request.is_agent_traffic() {
+            return next(request).await;
+        }
+
         // Defensive: refuse to run at all when `Crypt` isn't installed.
         // `Server::from_config` guarantees a key is in place before
         // middleware boots (failing closed in production, generating a

@@ -94,6 +94,9 @@ pub struct TestClient {
     default_headers: Vec<(String, String)>,
     /// The user every request this client sends is signed in as.
     acting_as: Option<ActingAs>,
+    /// The address every request this client sends comes from, as a TCP
+    /// peer would; `None` serves requests with no peer.
+    peer: Option<std::net::IpAddr>,
 }
 
 impl TestClient {
@@ -111,6 +114,7 @@ impl TestClient {
             timeout: DEFAULT_TIMEOUT,
             default_headers: Vec::new(),
             acting_as: None,
+            peer: None,
         }
     }
 
@@ -228,6 +232,31 @@ impl TestClient {
             guard: Some(guard.into()),
         });
         self
+    }
+
+    /// Send every request from now on as if its TCP peer were `address`,
+    /// so `Request::ip()` and a limit keyed by the client address see it.
+    /// Without this a request has no peer. Proxy headers are honoured only
+    /// when `address` is a trusted proxy, as in production.
+    pub fn with_peer_address(mut self, address: std::net::IpAddr) -> Self {
+        self.peer = Some(address);
+        self
+    }
+
+    /// The router the client serves requests through.
+    #[cfg(all(feature = "agents", feature = "testing"))]
+    pub(crate) fn router(&self) -> &Arc<Router> {
+        &self.router
+    }
+
+    /// The value of the cookie `name` the client holds, as a browser would
+    /// read it.
+    #[cfg(all(feature = "agents", feature = "testing"))]
+    pub(crate) fn cookie(&self, name: &str) -> Option<String> {
+        self.cookie_pairs()
+            .into_iter()
+            .find(|(held, _)| held == name)
+            .map(|(_, value)| value)
     }
 
     /// Start a `GET` request to `path` (path and query, `/users?page=2`).
@@ -381,6 +410,7 @@ impl TestClient {
             let registry = self.request_registry();
             let report = report.clone();
             let root = root.clone();
+            let peer = self.peer;
             service_fn(move |req: hyper::Request<Incoming>| {
                 let router = router.clone();
                 let registry = registry.clone();
@@ -388,8 +418,9 @@ impl TestClient {
                 let root = root.clone();
                 async move {
                     *root.lock().unwrap_or_else(PoisonError::into_inner) =
-                        Some(crate::server::request_root(&req, None));
-                    let response = crate::handle_request(router, registry, req).await;
+                        Some(crate::server::request_root(&req, peer));
+                    let response =
+                        crate::server::handle_request_with_peer(router, registry, req, peer).await;
                     let (mut parts, body) = response.into_parts();
                     if let Some(taken) = parts.extensions.remove::<ErrorReport>() {
                         *report.lock().unwrap_or_else(PoisonError::into_inner) = Some(taken);

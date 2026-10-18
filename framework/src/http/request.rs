@@ -138,7 +138,20 @@ pub struct Request {
     /// response keeps it for the layer that called it to answer with. Set
     /// only on a route with a `missing()` handler.
     missing_answer: Option<std::sync::Arc<crate::routing::binding::MissingAnswer>>,
+    /// The mark of agent traffic: the MCP endpoint the router marked, or a
+    /// tool call the endpoint authenticated (AGENT-001). A private field,
+    /// set only by the server and the tool dispatcher and never read from
+    /// headers or extensions, so a request off the wire cannot carry it.
+    #[cfg_attr(not(feature = "agents"), allow(dead_code))]
+    agent: AgentMarkSlot,
 }
+
+/// The slot [`Request`] keeps its agent mark in: the mark with the `agents`
+/// feature, nothing without it, so every constructor fills it the same way.
+#[cfg(feature = "agents")]
+type AgentMarkSlot = Option<std::sync::Arc<crate::agents::AgentMark>>;
+#[cfg(not(feature = "agents"))]
+type AgentMarkSlot = ();
 
 /// A value a route binding resolved, held until the handler takes it.
 pub(crate) type RouteBound = Box<dyn std::any::Any + Send + Sync>;
@@ -341,6 +354,7 @@ impl Request {
             public_root: None,
             route_settings: None,
             missing_answer: None,
+            agent: Default::default(),
         }
     }
 
@@ -512,6 +526,7 @@ impl Request {
             public_root: None,
             route_settings: None,
             missing_answer: None,
+            agent: Default::default(),
         }
     }
 
@@ -601,6 +616,67 @@ impl Request {
                 SecurityCheck::Proxy,
                 suprnova_live::host::PolicyReason::DirectPeer,
             )
+        }
+    }
+
+    /// Whether the request is agent traffic: the MCP endpoint, its metadata
+    /// routes, or a tool call the endpoint dispatched. The CSRF, session,
+    /// bearer-token and RenderCache middleware step aside for it: the
+    /// endpoint authenticates its own bearer tokens and a tool call carries
+    /// no cookie (AGENT-001, AGENT-005).
+    pub(crate) fn is_agent_traffic(&self) -> bool {
+        #[cfg(feature = "agents")]
+        {
+            self.agent.is_some()
+        }
+        #[cfg(not(feature = "agents"))]
+        {
+            false
+        }
+    }
+
+    /// The agent mark the server or the tool dispatcher put on the request.
+    #[cfg(feature = "agents")]
+    pub(crate) fn agent_mark(&self) -> Option<&crate::agents::AgentMark> {
+        self.agent.as_deref()
+    }
+
+    /// Mark the request as agent traffic. Only the server, from its own
+    /// route table, and the tool dispatcher, after the endpoint
+    /// authenticated the caller, call this.
+    #[cfg(feature = "agents")]
+    pub(crate) fn set_agent_mark(&mut self, mark: crate::agents::AgentMark) {
+        self.agent = Some(std::sync::Arc::new(mark));
+    }
+
+    /// A request the tool dispatcher built for a tool call: `parts` and a
+    /// body already in memory, with the call's mark. It has no connection,
+    /// so no body deadline applies, and it carries no cookie and no
+    /// `Authorization` header, which the dispatcher left out.
+    #[cfg(feature = "agents")]
+    pub(crate) fn for_tool_call(
+        parts: hyper::http::request::Parts,
+        body: Bytes,
+        mark: crate::agents::AgentMark,
+    ) -> Self {
+        Self {
+            parts,
+            body: BodyState::Buffered(body),
+            params: HashMap::new(),
+            route_pattern: None,
+            peer_addr: None,
+            trusted_proxies: TrustedProxiesConfig::empty(),
+            auth_user_id: None,
+            live_request_identity: LiveRequestIdentity::fresh(),
+            live_security_attestation: LiveSecurityAttestation::default(),
+            live_tenant: None,
+            live_cancellation: None,
+            render_cache_prepared: None,
+            connection_holds: Vec::new(),
+            public_root: None,
+            route_settings: None,
+            missing_answer: None,
+            agent: Some(std::sync::Arc::new(mark)),
         }
     }
 
@@ -2601,6 +2677,7 @@ mod url_helper_tests {
             public_root: None,
             route_settings: None,
             missing_answer: None,
+            agent: Default::default(),
         };
 
         // Use `.err()` rather than `expect_err` so the test doesn't require
@@ -2641,6 +2718,7 @@ mod url_helper_tests {
             public_root: None,
             route_settings: None,
             missing_answer: None,
+            agent: Default::default(),
         };
 
         let (_, bytes) = req
@@ -2696,6 +2774,7 @@ mod url_helper_tests {
             public_root: None,
             route_settings: None,
             missing_answer: None,
+            agent: Default::default(),
         };
 
         // The bogus middle hop is dropped - only parseable IPs (plus the
@@ -2744,6 +2823,7 @@ mod url_helper_tests {
             public_root: None,
             route_settings: None,
             missing_answer: None,
+            agent: Default::default(),
         };
 
         // A junk-only forwarded chain can't rotate rate-limit buckets - `ip()`
