@@ -22,6 +22,8 @@
 
 #[path = "fixtures/authorization_server_harness.rs"]
 mod harness;
+#[path = "fixtures/live_database.rs"]
+mod live_database;
 
 use std::sync::Arc;
 
@@ -78,11 +80,17 @@ async fn store_guards(url: &str) {
     guarded_decision(&h).await;
 }
 
+/// Pruning and trimming sweep every lapsed row, so another live test sharing
+/// the database could sweep the rows these checks plant; they get a database
+/// of their own.
 async fn pruning_and_trimming(url: &str) {
-    let h = live_harness(url).await;
+    let live = live_database::LiveDatabase::create(url, "authz_prune").await;
+    let h = live_harness(&live_database::database_url(url, live.name())).await;
     pruning_respects_the_retention_boundaries(&h).await;
     trimming_is_scoped_and_keeps_the_new_step(&h).await;
     the_final_code_step_ignores_expiry(&h).await;
+    drop(h);
+    live.drop_database().await;
 }
 
 #[cfg(feature = "seaorm-postgres")]
