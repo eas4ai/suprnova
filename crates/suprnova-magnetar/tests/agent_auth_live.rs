@@ -159,7 +159,13 @@ async fn replay_across_nodes(url: &str) {
 /// polls after the claim spend the claim token once; concurrent wrong codes
 /// never count past the limit.
 async fn one_time_steps(url: &str) {
-    let h = Arc::new(build(live_database(url).await, Options::new()).await);
+    // Many registrations from the harness's one address: the budgets are
+    // not what this test measures.
+    let mut options = Options::new();
+    options.config.limits.anonymous = magnetar::agent_auth::RegistrationLimit::per_hour(100, 1000);
+    options.config.limits.service_auth =
+        magnetar::agent_auth::RegistrationLimit::per_hour(100, 1000);
+    let h = Arc::new(build(live_database(url).await, options).await);
     let email = format!("{}@example.test", unique("race"));
     let registration = h.service_auth(&email).await;
     let user_id = h.create_user(&email, true).await;
