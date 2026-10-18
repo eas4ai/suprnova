@@ -2025,6 +2025,14 @@ impl magnetar::authorization_server::AuthorizationStore for FaultyStore {
     ) -> magnetar::Result<bool> {
         self.inner.revoke_token(token_id, at).await
     }
+    async fn add_tokens(
+        &self,
+        grant_id: &str,
+        tokens: Vec<magnetar::authorization_server::NewTokenRecord>,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<bool> {
+        self.inner.add_tokens(grant_id, tokens, at).await
+    }
     async fn revoke_grant(
         &self,
         grant_id: &str,

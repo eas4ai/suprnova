@@ -849,6 +849,17 @@ struct MintedTokens {
     response: TokenResponse,
 }
 
+/// The grant an extension expects to extend: its family and the client it
+/// was issued to, so [`TokenIssuer::issue_on_grant`] never extends anyone
+/// else's grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GrantOwner<'a> {
+    /// The grant family, such as `agent`.
+    pub kind: &'a str,
+    /// The client or registration the grant was issued to.
+    pub client_id: &'a str,
+}
+
 /// The handle a [`GrantHandler`] issues tokens through.
 pub struct TokenIssuer<'a> {
     server: &'a AuthorizationServer,
@@ -989,9 +1000,11 @@ impl TokenIssuer<'_> {
     }
 
     /// Mint an access token on an existing grant, for an extension that
-    /// keeps one grant per party. `Ok(None)` when the grant is gone,
-    /// revoked, acts for another user, is bound to another resource or
-    /// lacks a requested scope: the extension then issues a new grant.
+    /// keeps one grant per party. `Ok(None)` when the grant is gone, is of
+    /// another family or client than `expected`, is revoked or ended with
+    /// its user's epoch, acts for another user, is bound to another
+    /// resource, or lacks a requested scope, or when the server no longer
+    /// offers that scope or resource.
     ///
     /// # Errors
     ///
@@ -999,6 +1012,7 @@ impl TokenIssuer<'_> {
     pub async fn issue_on_grant(
         &self,
         grant_id: &str,
+        expected: &GrantOwner<'_>,
         user_id: Option<&str>,
         scopes: &[String],
         resource: &str,
@@ -1012,10 +1026,18 @@ impl TokenIssuer<'_> {
         else {
             return Ok(None);
         };
-        let fits = grant.revoked_at.is_none()
+        // Only the extension's own grant, still live, for what the server
+        // still offers: a caller can never extend someone else's grant or
+        // mint a scope or resource the configuration dropped.
+        let declared = server.declared_scopes();
+        let fits = grant.kind == expected.kind
+            && grant.client_id == expected.client_id
+            && grant.revoked_at.is_none()
             && grant.user_id.as_deref() == user_id
-            && normalize_resource(resource).as_deref() == Some(grant.resource.as_str())
-            && scopes.iter().all(|scope| grant.scopes.contains(scope));
+            && server.accepted_resource(resource).as_deref() == Some(grant.resource.as_str())
+            && scopes
+                .iter()
+                .all(|scope| grant.scopes.contains(scope) && declared.contains(scope));
         if !fits
             || !server
                 .epoch_is_current(&grant)
@@ -1043,18 +1065,21 @@ impl TokenIssuer<'_> {
         }
     }
 
-    /// Revoke one access token by its value, as an extension does when it
-    /// issued a token it must not hand out after all. Returns whether a
-    /// live token was revoked.
+    /// Revoke one access token of `grant_id` by its value, as an extension
+    /// does when it issued a token it must not hand out after all. A token
+    /// of any other grant is left alone. Returns whether a live token was
+    /// revoked.
     ///
     /// # Errors
     ///
     /// Returns an error when storage fails.
-    pub async fn revoke_token(&self, token: &str) -> Result<bool> {
+    pub async fn revoke_token(&self, grant_id: &str, token: &str) -> Result<bool> {
         let store = &self.server.store;
         match store.find_token(&token_digest(token)).await? {
-            Some(record) => store.revoke_token(&record.id, Utc::now()).await,
-            None => Ok(false),
+            Some(record) if record.grant_id == grant_id => {
+                store.revoke_token(&record.id, Utc::now()).await
+            }
+            _ => Ok(false),
         }
     }
 

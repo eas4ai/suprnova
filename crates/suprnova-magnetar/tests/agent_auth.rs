@@ -618,6 +618,236 @@ async fn agent_007_a_failed_grant_issue_leaves_no_unrecorded_grant() {
     assert_eq!(grants_of(&h, id).await.len(), 1);
 }
 
+/// An authorization server over `h`'s database with its own scopes and
+/// resources, standing in for the same application after a configuration
+/// change.
+fn reconfigured_server(
+    h: &Harness,
+    scopes: Vec<magnetar::authorization_server::ScopeDefinition>,
+    resources: Vec<String>,
+) -> magnetar::authorization_server::AuthorizationServer {
+    use magnetar::authorization_server::{
+        AuthorizationServer, AuthorizationServerConfig, ClientMetadataFetcher,
+        ClientMetadataPolicy, SqlAuthorizationStore,
+    };
+    let mut config = AuthorizationServerConfig::new(ISSUER, resources);
+    config.scopes = scopes;
+    AuthorizationServer::new(
+        config,
+        Arc::new(SqlAuthorizationStore::new(h.db.clone())),
+        h.storage.clone(),
+        h.limiter.clone(),
+        Arc::new(ClientMetadataFetcher::new(
+            h.resolver.clone(),
+            h.key_sets.clone(),
+            ClientMetadataPolicy::default(),
+        )),
+    )
+    .expect("a server")
+}
+
+fn new_grant(
+    kind: &str,
+    client_id: &str,
+    user_id: Option<&str>,
+    scopes: &[&str],
+) -> magnetar::authorization_server::NewGrant {
+    magnetar::authorization_server::NewGrant {
+        kind: kind.to_owned(),
+        user_id: user_id.map(str::to_owned),
+        client_id: client_id.to_owned(),
+        client_name: "Seam probe".to_owned(),
+        client_host: "probe.example.test".to_owned(),
+        scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+        resource: RESOURCE.to_owned(),
+        auth_epoch: user_id.map(|_| 0),
+    }
+}
+
+fn agent_tokens() -> magnetar::authorization_server::IssueTokens {
+    magnetar::authorization_server::IssueTokens {
+        access_kind: "agent".to_owned(),
+        refresh: false,
+        access_lifetime: None,
+    }
+}
+
+#[tokio::test]
+async fn agent_007_issue_on_grant_extends_only_the_grant_it_is_told_about() {
+    use magnetar::authorization_server::{GrantOwner, ScopeDefinition};
+    let h = sqlite_harness().await;
+    let issuer = h.server.token_issuer();
+    let read = vec!["tools:read".to_owned()];
+    let owner = GrantOwner {
+        kind: "agent",
+        client_id: "reg_probe",
+    };
+    let user_id = h.create_user("seam.owner@example.test", true).await;
+    let user_grant = issuer
+        .issue_grant(
+            new_grant(
+                "authorization_code",
+                "mcl_someone",
+                Some(&user_id),
+                &["tools:read"],
+            ),
+            magnetar::authorization_server::IssueTokens {
+                access_kind: "access".to_owned(),
+                refresh: false,
+                access_lifetime: None,
+            },
+        )
+        .await
+        .expect("an ordinary user grant")
+        .grant_id;
+    assert!(
+        issuer
+            .issue_on_grant(&user_grant, &owner, Some(&user_id), &read, RESOURCE)
+            .await
+            .expect("issue")
+            .is_none(),
+        "another client's ordinary grant is never extended"
+    );
+    let agent_grant = issuer
+        .issue_grant(
+            new_grant("agent", "reg_probe", None, &["tools:read", "tools:write"]),
+            agent_tokens(),
+        )
+        .await
+        .expect("an agent grant")
+        .grant_id;
+    let other_client = GrantOwner {
+        kind: "agent",
+        client_id: "reg_other",
+    };
+    assert!(
+        issuer
+            .issue_on_grant(&agent_grant, &other_client, None, &read, RESOURCE)
+            .await
+            .expect("issue")
+            .is_none(),
+        "another registration's grant is never extended"
+    );
+    assert!(
+        issuer
+            .issue_on_grant(&agent_grant, &owner, None, &read, RESOURCE)
+            .await
+            .expect("issue")
+            .is_some(),
+        "the owner's grant is extended"
+    );
+
+    // The application dropped tools:write and the resource since.
+    let changed = reconfigured_server(
+        &h,
+        vec![ScopeDefinition::new("tools:read", "Read your tools")],
+        vec!["https://app.example.test/other".to_owned()],
+    );
+    let changed_issuer = changed.token_issuer();
+    assert!(
+        changed_issuer
+            .issue_on_grant(
+                &agent_grant,
+                &owner,
+                None,
+                &["tools:write".to_owned()],
+                RESOURCE
+            )
+            .await
+            .expect("issue")
+            .is_none(),
+        "a scope the server no longer offers"
+    );
+    assert!(
+        changed_issuer
+            .issue_on_grant(&agent_grant, &owner, None, &read, RESOURCE)
+            .await
+            .expect("issue")
+            .is_none(),
+        "a resource the server no longer serves"
+    );
+
+    // An epoch-ended grant and a revoked one are never extended.
+    let user_owner = GrantOwner {
+        kind: "agent",
+        client_id: "reg_user",
+    };
+    let user_agent_grant = issuer
+        .issue_grant(
+            new_grant("agent", "reg_user", Some(&user_id), &["tools:read"]),
+            agent_tokens(),
+        )
+        .await
+        .expect("a user-bound agent grant")
+        .grant_id;
+    magnetar::sessions::JwtEpochStore::bump_auth_epoch(h.storage.as_ref(), &user_id)
+        .await
+        .expect("the epoch moves");
+    assert!(
+        issuer
+            .issue_on_grant(
+                &user_agent_grant,
+                &user_owner,
+                Some(&user_id),
+                &read,
+                RESOURCE
+            )
+            .await
+            .expect("issue")
+            .is_none(),
+        "an epoch-ended grant"
+    );
+    issuer.revoke_grant(&agent_grant).await.expect("revoke");
+    assert!(
+        issuer
+            .issue_on_grant(&agent_grant, &owner, None, &read, RESOURCE)
+            .await
+            .expect("issue")
+            .is_none(),
+        "a revoked grant"
+    );
+}
+
+#[tokio::test]
+async fn agent_007_revoke_token_touches_only_the_named_grant() {
+    use secrecy::ExposeSecret;
+    let h = sqlite_harness().await;
+    let issuer = h.server.token_issuer();
+    let first = issuer
+        .issue_grant(
+            new_grant("agent", "reg_one", None, &["tools:read"]),
+            agent_tokens(),
+        )
+        .await
+        .expect("a grant");
+    let second = issuer
+        .issue_grant(
+            new_grant("agent", "reg_two", None, &["tools:read"]),
+            agent_tokens(),
+        )
+        .await
+        .expect("a grant");
+    let token = first.response.access_token.expose_secret().to_owned();
+    assert!(
+        !issuer
+            .revoke_token(&second.grant_id, &token)
+            .await
+            .expect("revoke"),
+        "a token of another grant is not revoked"
+    );
+    assert!(matches!(
+        h.verify(&token).await,
+        AccessVerification::Valid(_)
+    ));
+    assert!(
+        issuer
+            .revoke_token(&first.grant_id, &token)
+            .await
+            .expect("revoke")
+    );
+    assert_eq!(h.verify(&token).await, revoked());
+}
+
 #[tokio::test]
 async fn agent_007_an_epoch_change_ends_a_bound_agent() {
     let h = sqlite_harness().await;

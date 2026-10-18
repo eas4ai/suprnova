@@ -29,8 +29,8 @@ use serde_json::{Value, json};
 
 use crate::abuse::{AbuseLimiter, Permit};
 use crate::authorization_server::{
-    AuthorizationServer, ClientGrantSummary, IssueTokens, NewGrant, ScopeDefinition, TokenError,
-    TokenIssuer, TokenResponse,
+    AuthorizationServer, ClientGrantSummary, GrantOwner, IssueTokens, NewGrant, ScopeDefinition,
+    TokenError, TokenIssuer, TokenResponse,
 };
 use crate::plugin::{
     DurableLifecycleDelivery, EffectResponse, LifecycleEvent, LifecycleEventKind, WireResponse,
@@ -901,14 +901,23 @@ impl Core {
         user: Option<&AgentUser>,
         scopes: Vec<String>,
         resource: String,
-    ) -> std::result::Result<TokenResponse, TokenError> {
+    ) -> std::result::Result<(TokenResponse, String), TokenError> {
         let user_id = user.map(|user| user.user_id.as_str());
         if let Some(grant_id) = &record.grant_id
             && let Some(response) = issuer
-                .issue_on_grant(grant_id, user_id, &scopes, &resource)
+                .issue_on_grant(
+                    grant_id,
+                    &GrantOwner {
+                        kind: AGENT_GRANT_KIND,
+                        client_id: &record.id,
+                    },
+                    user_id,
+                    &scopes,
+                    &resource,
+                )
                 .await?
         {
-            return Ok(response);
+            return Ok((response, grant_id.clone()));
         }
         // The grant no longer fits: it goes before its replacement is
         // recorded, so it is never live without a record.
@@ -942,10 +951,19 @@ impl Core {
                 && current.user_id == record.user_id
                 && let Some(grant_id) = &current.grant_id
                 && let Some(response) = issuer
-                    .issue_on_grant(grant_id, user_id, &scopes, &resource)
+                    .issue_on_grant(
+                        grant_id,
+                        &GrantOwner {
+                            kind: AGENT_GRANT_KIND,
+                            client_id: &record.id,
+                        },
+                        user_id,
+                        &scopes,
+                        &resource,
+                    )
                     .await?
             {
-                return Ok(response);
+                return Ok((response, grant_id.clone()));
             }
             return Err(TokenError::invalid_grant(
                 "the registration changed while the token was issued",
@@ -989,7 +1007,7 @@ impl Core {
                 "the registration changed while the token was issued",
             ));
         }
-        Ok(issued.response)
+        Ok((issued.response, new_grant))
     }
 
     async fn revoke_issued(&self, issuer: &TokenIssuer<'_>, grant_id: &str) {

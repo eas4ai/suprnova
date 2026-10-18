@@ -147,7 +147,7 @@ impl GrantHandler for JwtBearerGrant {
                 return Err(TokenError::new(503, "temporarily_unavailable", None));
             }
         }
-        let response = core
+        let (response, _) = core
             .issue_for_registration(issuer, &record, user.as_ref(), scopes, resource)
             .await?;
         core.emit(
@@ -251,10 +251,10 @@ fn claimed_token_deadline(core: &Core, record: &RegistrationRecord) -> Option<Da
 }
 
 /// Take back an access token a poll minted but must not hand out.
-async fn withdraw(issuer: &TokenIssuer<'_>, response: &TokenResponse) {
+async fn withdraw(issuer: &TokenIssuer<'_>, grant_id: &str, response: &TokenResponse) {
     use secrecy::ExposeSecret;
     if let Err(error) = issuer
-        .revoke_token(response.access_token.expose_secret())
+        .revoke_token(grant_id, response.access_token.expose_secret())
         .await
     {
         tracing::error!(error = %error, "taking back an unclaimed access token failed");
@@ -349,7 +349,7 @@ impl GrantHandler for ClaimGrant {
         // Issue first and spend the claim token last: a poll that issues
         // nothing (another resource, a storage failure) leaves the token
         // for the next poll.
-        let mut response = core
+        let (mut response, grant_id) = core
             .issue_for_registration(
                 issuer,
                 &record,
@@ -371,7 +371,7 @@ impl GrantHandler for ClaimGrant {
         let (assertion, expires) = match (signed, spent) {
             (Ok(signed), Ok(true)) => signed,
             (signed, spent) => {
-                withdraw(issuer, &response).await;
+                withdraw(issuer, &grant_id, &response).await;
                 if let Err(error) = signed {
                     return Err(storage(&error));
                 }
