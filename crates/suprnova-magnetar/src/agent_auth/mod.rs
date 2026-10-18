@@ -7,15 +7,17 @@
 //! identity assertion (`typ: oauth-id-jag+jwt`, `sub` the registration),
 //! which the agent exchanges at the authorization server's token endpoint
 //! through the JWT bearer grant (RFC 7523) for an access token of the
-//! [`AGENT_TOKEN_KIND`] kind and never a refresh token. A claim ceremony,
-//! shaped like RFC 8628 device authorization, binds a registration to a
-//! signed-in user who types the six-digit code the agent hands them; the
-//! agent polls the token endpoint with the claim grant meanwhile.
+//! [`AGENT_TOKEN_KIND`](crate::agent_auth::AGENT_TOKEN_KIND) kind and never
+//! a refresh token. A claim ceremony, shaped like RFC 8628 device
+//! authorization, binds a registration to a signed-in user who types the
+//! six-digit code the agent hands them; the agent polls the token endpoint
+//! with the claim grant meanwhile.
 //!
-//! [`AgentAuth::install`] adds both grants and the `agent_auth` metadata
-//! block to an [`AuthorizationServer`]; the
-//! [`AgentAuthPlugin`](crate::plugins::agent_auth::AgentAuthPlugin) mounts
-//! the identity, claim, event and `/auth.md` routes.
+//! [`AgentAuth::install`](crate::agent_auth::AgentAuth::install) adds both
+//! grants and the `agent_auth` metadata block to an
+//! [`AuthorizationServer`](crate::authorization_server::AuthorizationServer),
+//! and the [`AgentAuthPlugin`](crate::plugins::agent_auth::AgentAuthPlugin)
+//! mounts the identity, claim, event and `/auth.md` routes.
 
 use std::sync::Arc;
 use std::time::Duration;

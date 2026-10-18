@@ -1610,6 +1610,7 @@ async fn agent_011_oversized_bodies_are_refused() {
         )
         .await;
     assert_eq!(status(&complete), 413);
+    assert_no_framing(&complete);
     let event = h
         .post_bytes(
             "/agent/event/notify",

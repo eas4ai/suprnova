@@ -455,7 +455,8 @@ fn document_url(client_id: &str) -> std::result::Result<Url, ClientMetadataError
 pub(crate) struct FetchedBody {
     /// The body, at most the size bound.
     pub(crate) body: Vec<u8>,
-    /// The `Cache-Control` header, if any.
+    /// The `Cache-Control` header, if any. Only the key set cache reads it.
+    #[cfg_attr(not(feature = "agent-auth"), allow(dead_code))]
     pub(crate) cache_control: Option<String>,
 }
 

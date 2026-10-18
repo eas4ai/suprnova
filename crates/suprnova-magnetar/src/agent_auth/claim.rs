@@ -28,8 +28,9 @@ fn page_error(status: u16, error: &str, description: &str) -> WireResponse {
 
 /// What the claim page routes found behind an attempt token.
 enum Lookup {
-    /// The attempt can be confirmed by this user.
-    Ready(RegistrationRecord, AgentUser),
+    /// The attempt can be confirmed by this user. Boxed so the refusal
+    /// stays small.
+    Ready(Box<(RegistrationRecord, AgentUser)>),
     /// The answer to give instead.
     Refused(WireResponse),
 }
@@ -113,7 +114,7 @@ impl Core {
                 "this code expired or was entered wrongly too often; ask the agent for a new one",
             )));
         }
-        Ok(Lookup::Ready(record, user))
+        Ok(Lookup::Ready(Box::new((record, user))))
     }
 
     pub(crate) async fn pending_claim(
@@ -133,7 +134,7 @@ impl Core {
     ) -> Result<WireResponse> {
         let now = Utc::now();
         let (record, user) = match self.lookup_attempt(attempt_token, signed_in, now).await? {
-            Lookup::Ready(record, user) => (record, user),
+            Lookup::Ready(ready) => *ready,
             Lookup::Refused(response) => return Ok(response),
         };
         let earlier = self.store.user_registrations(&user.user_id).await?;
@@ -205,7 +206,7 @@ impl Core {
     ) -> Result<WireResponse> {
         let now = Utc::now();
         let (record, user) = match self.lookup_attempt(attempt_token, signed_in, now).await? {
-            Lookup::Ready(record, user) => (record, user),
+            Lookup::Ready(ready) => *ready,
             Lookup::Refused(response) => return Ok(response),
         };
         let attempt_hash = digest(attempt_token);

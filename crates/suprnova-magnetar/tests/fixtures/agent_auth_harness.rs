@@ -187,10 +187,13 @@ impl HostResolver for FakeResolver {
     }
 }
 
+/// A served key set body and its `Cache-Control` header.
+type Served = (Vec<u8>, Option<String>);
+
 /// A pinned client serving key sets, counting requests per URL.
 #[derive(Default)]
 pub struct FakeKeySets {
-    documents: Mutex<HashMap<String, (Vec<u8>, Option<String>)>>,
+    documents: Mutex<HashMap<String, Served>>,
     pub requests: Mutex<Vec<(String, SocketAddr)>>,
 }
 

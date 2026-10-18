@@ -198,6 +198,20 @@ fn form_fields(request: &WireRequest) -> Result<BTreeMap<String, String>, &'stat
     }
 }
 
+/// A response with the headers that keep the claim page's routes out of
+/// frames, for the answers the plugin gives before the engine sees them.
+fn unframed(response: WireResponse) -> WireResponse {
+    let mut effects = response.into_effects();
+    effects
+        .headers
+        .insert("x-frame-options".to_owned(), "DENY".to_owned());
+    effects.headers.insert(
+        "content-security-policy".to_owned(),
+        "frame-ancestors 'none'".to_owned(),
+    );
+    WireResponse::from_effects(effects)
+}
+
 fn client_address(request: &WireRequest) -> Option<&str> {
     request.headers.get("x-client-ip").map(String::as_str)
 }
@@ -284,7 +298,14 @@ impl<S: AuthSchema> Plugin<S> for AgentAuthPlugin {
             return Ok(engine.receive_event(content_type, bytes, address).await);
         }
         if oversized {
-            return Ok(invalid_request(413, "the request is too large"));
+            let refused = invalid_request(413, "the request is too large");
+            let claim_page =
+                self.is(path, "identity/claim/attempt") || self.is(path, "identity/claim/complete");
+            return Ok(if claim_page {
+                unframed(refused)
+            } else {
+                refused
+            });
         }
         if request.method == Method::Get && path == engine.config().skill_path.trim_end_matches('/')
         {
@@ -322,17 +343,7 @@ impl<S: AuthSchema> Plugin<S> for AgentAuthPlugin {
             }
             let fields = match form_fields(request) {
                 Ok(fields) => fields,
-                Err(reason) => {
-                    let mut response = invalid_request(400, reason).into_effects();
-                    response
-                        .headers
-                        .insert("x-frame-options".to_owned(), "DENY".to_owned());
-                    response.headers.insert(
-                        "content-security-policy".to_owned(),
-                        "frame-ancestors 'none'".to_owned(),
-                    );
-                    return Ok(WireResponse::from_effects(response));
-                }
+                Err(reason) => return Ok(unframed(invalid_request(400, reason))),
             };
             let token = fields.get("claim_attempt_token").map_or("", String::as_str);
             let code = fields.get("user_code").map_or("", String::as_str);
