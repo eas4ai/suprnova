@@ -378,9 +378,7 @@ impl ToolCaller {
         match self.kind {
             CallerKind::Public => format!(
                 "agents:address:{}",
-                self.address
-                    .map(|address| address.to_canonical().to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
+                super::limit::address_bucket(self.address)
             ),
             CallerKind::User => format!("agents:user:{}", self.user_id().unwrap_or_default()),
             CallerKind::Agent => format!(

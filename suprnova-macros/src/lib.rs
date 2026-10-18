@@ -829,6 +829,11 @@ pub fn tool(attr: TokenStream, input: TokenStream) -> TokenStream {
 /// the framework validates it, and the schema an agent reads names the same
 /// fields, required flags and bounds the server enforces.
 ///
+/// The schema names each field by its canonical name only. Under
+/// `#[serde(deny_unknown_fields)]`, an MCP call that uses a
+/// `#[serde(alias = "...")]` name is refused as an unknown field, which is
+/// what the published schema tells the agent.
+///
 /// ```rust,ignore
 /// #[tool_input]
 /// pub struct CreatePost {

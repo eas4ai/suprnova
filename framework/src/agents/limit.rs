@@ -39,13 +39,26 @@ pub(crate) async fn admit_request(
     config: &AgentsConfig,
     address: Option<std::net::IpAddr>,
 ) -> Result<(), Refusal> {
-    let key = format!(
-        "agents:requests:{}",
-        address
-            .map(|address| address.to_canonical().to_string())
-            .unwrap_or_else(|| "unknown".to_string())
-    );
+    let key = format!("agents:requests:{}", address_bucket(address));
     count(&key, config.request_limit).await
+}
+
+/// The bucket an address counts in: an IPv4 address alone, and an IPv6
+/// address by its `/64` prefix, the block one client is usually given, so
+/// a client cannot spread its requests over the addresses of its own block.
+/// An IPv4 address written as IPv6 counts as the IPv4 address.
+pub(crate) fn address_bucket(address: Option<std::net::IpAddr>) -> String {
+    match address.map(|address| address.to_canonical()) {
+        Some(std::net::IpAddr::V4(v4)) => v4.to_string(),
+        Some(std::net::IpAddr::V6(v6)) => {
+            let segments = v6.segments();
+            format!(
+                "{:x}:{:x}:{:x}:{:x}::/64",
+                segments[0], segments[1], segments[2], segments[3]
+            )
+        }
+        None => "unknown".to_string(),
+    }
 }
 
 /// Count one step against `limit` under `key`.
