@@ -602,6 +602,34 @@ impl AuthorizationStore for SqlAuthorizationStore {
         finish(transaction, outcome, |won| *won).await
     }
 
+    async fn add_tokens(
+        &self,
+        grant_id: &str,
+        tokens: Vec<NewTokenRecord>,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let transaction = self.db.begin().await.map_err(db_error)?;
+        let outcome = async {
+            // The grant row first, as revoke_grant takes it: a revocation
+            // that won leaves no live row here, and one that waits finds
+            // the new tokens and revokes them too.
+            let touched = grants::Entity::update_many()
+                .col_expr(grants::Column::LastUsedAt, Expr::value(at))
+                .filter(grants::Column::Id.eq(grant_id.to_owned()))
+                .filter(grants::Column::RevokedAt.is_null())
+                .exec(&transaction)
+                .await
+                .map_err(db_error)?;
+            if touched.rows_affected != 1 {
+                return Ok(false);
+            }
+            insert_tokens(&transaction, grant_id, tokens, at).await?;
+            Ok(true)
+        }
+        .await;
+        finish(transaction, outcome, |added| *added).await
+    }
+
     async fn revoke_token(&self, token_id: &str, at: DateTime<Utc>) -> Result<bool> {
         let revoked = tokens::Entity::update_many()
             .col_expr(tokens::Column::RevokedAt, Expr::value(at))

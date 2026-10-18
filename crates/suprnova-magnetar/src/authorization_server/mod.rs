@@ -881,7 +881,35 @@ impl TokenIssuer<'_> {
         grant: NewGrant,
         tokens: IssueTokens,
     ) -> std::result::Result<IssuedGrant, TokenError> {
+        self.issue_grant_as(new_id(), grant, tokens).await
+    }
+
+    /// [`issue_grant`](Self::issue_grant) under an identifier the extension
+    /// chose, so it can record the grant before the grant exists and never
+    /// hold a live grant it has no record of.
+    ///
+    /// # Errors
+    ///
+    /// As [`issue`](Self::issue), and `invalid_request` for an identifier
+    /// that is empty, longer than 64 characters or not letters, digits, `-`
+    /// and `_`.
+    pub async fn issue_grant_as(
+        &self,
+        grant_id: String,
+        grant: NewGrant,
+        tokens: IssueTokens,
+    ) -> std::result::Result<IssuedGrant, TokenError> {
         let server = self.server;
+        if grant_id.is_empty()
+            || grant_id.len() > 64
+            || !grant_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return Err(TokenError::invalid_request(
+                "a grant identifier is 1 to 64 letters, digits, - and _",
+            ));
+        }
         if grant.kind.trim().is_empty() || grant.client_id.trim().is_empty() {
             return Err(TokenError::invalid_request(
                 "an issued grant needs a kind and a client",
@@ -924,7 +952,6 @@ impl TokenIssuer<'_> {
                 now,
             )
             .map_err(token_storage_error)?;
-        let grant_id = new_id();
         server
             .store
             .create_grant(
@@ -954,6 +981,76 @@ impl TokenIssuer<'_> {
             grant_id,
             response: minted.response,
         })
+    }
+
+    /// Mint an access token on an existing grant, for an extension that
+    /// keeps one grant per party. `Ok(None)` when the grant is gone,
+    /// revoked, acts for another user, is bound to another resource or
+    /// lacks a requested scope: the extension then issues a new grant.
+    ///
+    /// # Errors
+    ///
+    /// Returns `server_error` when storage fails.
+    pub async fn issue_on_grant(
+        &self,
+        grant_id: &str,
+        user_id: Option<&str>,
+        scopes: &[String],
+        resource: &str,
+    ) -> std::result::Result<Option<TokenResponse>, TokenError> {
+        let server = self.server;
+        let Some(grant) = server
+            .store
+            .find_grant(grant_id)
+            .await
+            .map_err(token_storage_error)?
+        else {
+            return Ok(None);
+        };
+        let fits = grant.revoked_at.is_none()
+            && grant.user_id.as_deref() == user_id
+            && normalize_resource(resource).as_deref() == Some(grant.resource.as_str())
+            && scopes.iter().all(|scope| grant.scopes.contains(scope));
+        if !fits
+            || !server
+                .epoch_is_current(&grant)
+                .await
+                .map_err(token_storage_error)?
+        {
+            return Ok(None);
+        }
+        let now = Utc::now();
+        let lifetime = grant
+            .access_lifetime
+            .unwrap_or(server.config.access_token_lifetime);
+        let minted = server
+            .mint_tokens(scopes, &grant.access_kind, lifetime, false, now)
+            .map_err(token_storage_error)?;
+        if server
+            .store
+            .add_tokens(&grant.id, minted.records, now)
+            .await
+            .map_err(token_storage_error)?
+        {
+            Ok(Some(minted.response))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Revoke one access token by its value, as an extension does when it
+    /// issued a token it must not hand out after all. Returns whether a
+    /// live token was revoked.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage fails.
+    pub async fn revoke_token(&self, token: &str) -> Result<bool> {
+        let store = &self.server.store;
+        match store.find_token(&token_digest(token)).await? {
+            Some(record) => store.revoke_token(&record.id, Utc::now()).await,
+            None => Ok(false),
+        }
     }
 
     /// Revoke a grant and all of its tokens by its identifier, as an

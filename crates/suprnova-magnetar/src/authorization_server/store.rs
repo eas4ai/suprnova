@@ -178,6 +178,24 @@ pub trait AuthorizationStore: Send + Sync {
     ) -> Result<bool>;
     /// Revoke one token. Returns whether a live token was revoked.
     async fn revoke_token(&self, token_id: &str, at: DateTime<Utc>) -> Result<bool>;
+    /// Add tokens to an existing grant, all or nothing, only while the
+    /// grant is not revoked; the grant row is locked before any token row,
+    /// the order every write path takes. Returns whether they were added.
+    /// An extension that keeps one grant per party (agent auth) mints its
+    /// later tokens this way. Stores that predate it answer
+    /// [`crate::Error::DependencyUnavailable`].
+    async fn add_tokens(
+        &self,
+        grant_id: &str,
+        tokens: Vec<NewTokenRecord>,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let _ = (grant_id, tokens, at);
+        Err(crate::Error::DependencyUnavailable {
+            dependency: "authorization store".to_owned(),
+            message: "this store cannot add tokens to an existing grant".to_owned(),
+        })
+    }
     /// Revoke a grant and every one of its tokens. Returns whether the
     /// grant was live.
     async fn revoke_grant(&self, grant_id: &str, at: DateTime<Utc>) -> Result<bool>;
