@@ -489,16 +489,26 @@ impl AuthorizationServer {
                 .map_err(token_storage_error)?
         };
         if revoked {
+            // The revocation is stored; a listener only records it, so a
+            // slow one is cut off rather than holding the client's answer.
             for listener in &self.revocation_listeners {
-                listener
-                    .token_revoked(super::RevokedToken {
-                        grant_id: grant.id.clone(),
-                        grant_kind: grant.kind.clone(),
-                        client_id: grant.client_id.clone(),
-                        token_kind: record.kind.clone(),
-                        client_address: client_address.map(str::to_owned),
-                    })
-                    .await;
+                let told = listener.token_revoked(super::RevokedToken {
+                    grant_id: grant.id.clone(),
+                    grant_kind: grant.kind.clone(),
+                    client_id: grant.client_id.clone(),
+                    token_kind: record.kind.clone(),
+                    client_address: client_address.map(str::to_owned),
+                });
+                if tokio::time::timeout(self.config.revocation_listener_timeout, told)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        grant_id = %grant.id,
+                        timeout = ?self.config.revocation_listener_timeout,
+                        "a revocation listener ran past its timeout"
+                    );
+                }
             }
         }
         Ok(())

@@ -146,6 +146,9 @@ pub struct AuthorizationServerConfig {
     /// How long [`AuthorizationServer::prune_expired`] keeps a grant that
     /// was revoked, or that has no token left, before deleting it.
     pub grant_retention: Duration,
+    /// How long the revocation endpoint waits for each
+    /// [`RevocationListener`] before it answers anyway.
+    pub revocation_listener_timeout: Duration,
 }
 
 impl AuthorizationServerConfig {
@@ -153,7 +156,8 @@ impl AuthorizationServerConfig {
     /// everything else: routes under `/oauth`, sign-in at `/login`, the
     /// approval page at `/oauth/approve`, one-hour access tokens, 30-day
     /// refresh tokens, one-minute codes, a 16 KiB request bound, 20 pending
-    /// authorizations per user and 30 days of grant retention.
+    /// authorizations per user, 30 days of grant retention and five
+    /// seconds for each revocation listener.
     #[must_use]
     pub fn new(issuer: impl Into<String>, resources: Vec<String>) -> Self {
         Self {
@@ -179,6 +183,7 @@ impl AuthorizationServerConfig {
             },
             max_pending_per_user: 20,
             grant_retention: Duration::from_secs(30 * 24 * 3600),
+            revocation_listener_timeout: Duration::from_secs(5),
         }
     }
 }
