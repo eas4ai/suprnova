@@ -2732,6 +2732,53 @@ async fn agent_011_an_expiry_is_recorded_even_when_its_grant_revocation_fails() 
 }
 
 #[tokio::test]
+async fn agent_011_an_expiry_event_survives_a_failed_lookup() {
+    let (options, faults) = faulty();
+    let h = sqlite_harness_with(options).await;
+    let registration = h.anonymous().await;
+    h.set_registration_time(
+        registration["registration_id"].as_str().expect("id"),
+        registrations::Column::ClaimExpiresAt,
+        chrono::Utc::now() - chrono::Duration::seconds(1),
+    )
+    .await;
+    faults.fail("find_registration", 1);
+    let _ = h.engine.expire_registrations().await;
+    h.engine.expire_registrations().await.expect("the rerun");
+    assert_eq!(
+        h.events
+            .of(LifecycleEventKind::AgentRegistrationExpired)
+            .len(),
+        1,
+        "the expiry is recorded once, failed lookup or not"
+    );
+}
+
+#[tokio::test]
+async fn agent_011_the_expiry_pass_revokes_only_what_it_expired() {
+    let (options, faults) = faulty();
+    let h = sqlite_harness_with(options).await;
+    let registration = h.anonymous().await;
+    let token = access_token(
+        &h.exchange(registration["identity_assertion"].as_str().expect("v1"))
+            .await,
+    );
+    h.set_registration_time(
+        registration["registration_id"].as_str().expect("id"),
+        registrations::Column::ClaimExpiresAt,
+        chrono::Utc::now() - chrono::Duration::seconds(1),
+    )
+    .await;
+    // The expiry loses to a concurrent change (a claim, say).
+    faults.lose("expire_registration", 1);
+    h.engine.expire_registrations().await.expect("the pass");
+    assert!(
+        matches!(h.verify(&token).await, AccessVerification::Valid(_)),
+        "a registration the pass did not expire keeps its grants"
+    );
+}
+
+#[tokio::test]
 async fn agent_009_a_poll_that_loses_the_spend_takes_back_its_token() {
     use magnetar::authorization_server::sql::tokens;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};

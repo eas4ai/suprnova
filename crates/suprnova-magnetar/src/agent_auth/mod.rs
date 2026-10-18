@@ -58,7 +58,7 @@ pub use sql::{SqlAgentAuthStore, migrate};
 pub use store::{AgentAuthStore, AgentGrantRecord, NewAttempt, RegistrationRecord};
 
 use config::RegistrationLimit as Limit;
-use store::{STATUS_ACTIVE, STATUS_CLAIMED, STATUS_REVOKED};
+use store::{STATUS_ACTIVE, STATUS_CLAIMED, STATUS_EXPIRED, STATUS_REVOKED};
 
 /// The grant family of every grant agent auth issues, as
 /// [`VerifiedAccess::grant_kind`](crate::authorization_server::VerifiedAccess::grant_kind)
@@ -655,29 +655,36 @@ impl AgentAuth {
                 return Ok(expired);
             }
             for id in &ids {
+                // Read before the expiry commits, so the event is built from
+                // what is already known and no lookup can fail after the
+                // commit and lose it.
+                let Some(record) = self.core.store.find_registration(id).await? else {
+                    continue;
+                };
+                let issuer = self.server.token_issuer();
                 if self.core.store.expire_registration(id, now).await? {
                     expired += 1;
-                    // Recorded as soon as the expiry commits; no request
-                    // causes it, so it carries the address the registration
-                    // came from.
-                    let record = self.core.store.find_registration(id).await?;
-                    let (kind, address) = record
-                        .map(|record| (record.kind, record.client_address))
-                        .unwrap_or_default();
+                    // No request causes an expiry, so the event carries the
+                    // address the registration came from.
                     self.core
                         .emit(
                             LifecycleEventKind::AgentRegistrationExpired,
                             None,
-                            &[("registration_id", id.clone()), ("registration_type", kind)],
-                            address.as_deref(),
+                            &[
+                                ("registration_id", id.clone()),
+                                ("registration_type", record.kind.clone()),
+                            ],
+                            record.client_address.as_deref(),
                         )
                         .await;
+                } else if !(record.status == STATUS_EXPIRED && record.cleanup_pending) {
+                    // Not expired by this pass (claimed meanwhile, say), nor
+                    // an earlier expiry left unfinished: its grants stay.
+                    continue;
                 }
                 // A step-up keeps its delegation when it expires: the next
                 // presentation of the same identity reuses the row.
-                self.core
-                    .revoke_grants(&self.server.token_issuer(), id)
-                    .await?;
+                self.core.revoke_grants(&issuer, id).await?;
                 self.core.store.finish_cleanup(id, false).await?;
             }
             previous = ids;

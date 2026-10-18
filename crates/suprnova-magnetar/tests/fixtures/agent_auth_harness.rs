@@ -496,6 +496,9 @@ impl AgentAuthStore for FlakyAgentStore {
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
         self.faults.check("expire_registration")?;
+        if self.faults.loses("expire_registration") {
+            return Ok(false);
+        }
         self.inner.expire_registration(id, now).await
     }
     async fn finish_cleanup(&self, id: &str, release_delegation: bool) -> Result<()> {
