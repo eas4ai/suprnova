@@ -2042,8 +2042,18 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
         )
         .await?;
     }
-    if !app_users_is_legacy_source {
+    if !app_users_is_legacy_source
+        && migration_state_value(db, EMAIL_LENGTH_MARKER)
+            .await?
+            .is_none()
+    {
         warn_about_over_long_emails(db).await?;
+        ensure_migration_state(
+            db,
+            EMAIL_LENGTH_MARKER,
+            &crate::password::MAX_EMAIL_LENGTH.to_string(),
+        )
+        .await?;
     }
     if completed_marker.as_deref() != Some("1") {
         if defer_completion_marker {
@@ -2055,12 +2065,24 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
     Ok(())
 }
 
+/// The `magnetar_migration_state` key that records the existing addresses
+/// were counted against [`crate::password::MAX_EMAIL_LENGTH`]; its value is
+/// that bound.
+///
+/// `migrate` counts `app_users` once per database, the first time it runs
+/// with the bound, and writes this key; a later `migrate` reads the key and
+/// scans nothing. It is a key of its own rather than a new `schema_version`
+/// value, because a release before this one refuses a database whose
+/// `schema_version` it does not know.
+const EMAIL_LENGTH_MARKER: &str = "email_length_checked";
+
 /// Log one warning, naming the count, when `app_users` holds addresses
 /// longer than [`crate::password::MAX_EMAIL_LENGTH`] characters.
 ///
 /// Sign-in by email answers such an address as an unknown one, so those
 /// accounts can no longer sign in with it; the operator decides what
-/// becomes of them. The warning names no address.
+/// becomes of them. The warning names no address. It scans every address,
+/// so `migrate` runs it once per database ([`EMAIL_LENGTH_MARKER`]).
 async fn warn_about_over_long_emails(db: &DatabaseConnection) -> crate::Result<()> {
     let backend = db.get_database_backend();
     let length = match backend {

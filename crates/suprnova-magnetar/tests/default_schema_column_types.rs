@@ -827,11 +827,14 @@ async fn sqlite_long_values_round_trip_through_every_store() {
 }
 
 /// Accounts whose address passes 254 characters can no longer sign in by
-/// email; `migrate` says how many there are, once, without the addresses.
+/// email. `migrate` counts them once per database, when it first runs with
+/// the bound, and says how many there are without naming an address; a
+/// later `migrate` does not scan `app_users` again.
 #[cfg(feature = "seaorm-sqlite")]
 #[tokio::test]
 #[tracing_test::traced_test]
-async fn sqlite_migrate_warns_about_addresses_longer_than_254_characters() {
+async fn sqlite_migrate_counts_addresses_longer_than_254_characters_once() {
+    const WARNING: &str = "app_users holds 2 email addresses longer than 254 characters";
     let db = sqlite_memory().await;
     magnetar::default_schema::migrate(&db)
         .await
@@ -853,14 +856,38 @@ async fn sqlite_migrate_warns_about_addresses_longer_than_254_characters() {
         .await
         .expect("store an account");
     }
+    // A database a release before the bound migrated has no record of the
+    // check.
+    db.execute_unprepared(
+        "DELETE FROM magnetar_migration_state WHERE key = 'email_length_checked'",
+    )
+    .await
+    .expect("forget the check");
+
     magnetar::default_schema::migrate(&db)
         .await
-        .expect("a second migrate succeeds");
-    assert!(
-        logs_contain("app_users holds 2 email addresses longer than 254 characters"),
-        "the warning names the count"
-    );
+        .expect("the first migrate with the bound succeeds");
+    assert!(logs_contain(WARNING), "the first migrate names the count");
+    magnetar::default_schema::migrate(&db)
+        .await
+        .expect("a later migrate succeeds");
+    // The long addresses are still there, so a second count would warn
+    // again.
+    logs_assert(|lines: &[&str]| {
+        match lines.iter().filter(|line| line.contains(WARNING)).count() {
+            1 => Ok(()),
+            count => Err(format!("the count ran {count} times")),
+        }
+    });
     assert!(!logs_contain("qqqq"), "the warning names no address");
+    let marker = magnetar::default_schema::migration_state::Entity::find_by_id(
+        "email_length_checked".to_owned(),
+    )
+    .one(&db)
+    .await
+    .expect("read the check marker")
+    .expect("the check is recorded");
+    assert_eq!(marker.value, "254", "the marker records the bound checked");
 }
 
 #[cfg(feature = "seaorm-sqlite")]
