@@ -744,6 +744,9 @@ impl FakeInvoked {
                 .count()
         };
         let next = |count: usize| (count.max(shown) + 1).min(lines.len());
+        // Newer toolchains deprecate `fetch_update` for `try_update`, which is still
+        // unstable on the 1.94 minimum this crate supports.
+        #[allow(deprecated)]
         let before = match revealed.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
             Some(next(count))
         }) {
