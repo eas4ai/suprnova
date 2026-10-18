@@ -9,6 +9,10 @@
 # project's own target directory is untouched. Checked boxes are preserved.
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
+# These are one-shot builds, and rustc's incremental cache in the work
+# directory has corrupted (a dep-graph ICE that stopped a release), so it
+# stays off whatever the caller exports.
+export CARGO_INCREMENTAL=0
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 MAP=$(cd "$HERE/.." && pwd)
