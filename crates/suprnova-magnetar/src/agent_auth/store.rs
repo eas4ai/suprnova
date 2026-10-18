@@ -89,9 +89,6 @@ pub struct RegistrationRecord {
     /// The client address the registration came from, for the audit trail
     /// of what happens to it later without a request, such as expiry.
     pub client_address: Option<String>,
-    /// The authorization server grant the registration's tokens are minted
-    /// under: at most one, reused by every exchange while it fits.
-    pub grant_id: Option<String>,
     /// Whether a revoked or expired registration's grant still has to be
     /// revoked.
     pub cleanup_pending: bool,
@@ -101,6 +98,23 @@ pub struct RegistrationRecord {
     pub claimed_at: Option<DateTime<Utc>>,
     /// When it was revoked or expired.
     pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// The one live authorization server grant a registration holds for one
+/// resource, and the entitlement it was issued for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentGrantRecord {
+    /// The registration.
+    pub registration_id: String,
+    /// The resource, in the form the authorization server compares.
+    pub resource: String,
+    /// The authorization server grant.
+    pub grant_id: String,
+    /// The user the grant acts for, if any.
+    pub user_id: Option<String>,
+    /// The scopes the grant was issued with: the registration's
+    /// entitlement at the time.
+    pub scopes: Vec<String>,
 }
 
 /// A new claim attempt: digests of its token and code, never the values.
@@ -210,18 +224,20 @@ pub trait AgentAuthStore: Send + Sync {
     async fn live_registrations(&self, limit: u64) -> Result<Vec<String>>;
     /// The registrations bound to a user that are claimed or active.
     async fn user_registrations(&self, user_id: &str) -> Result<Vec<RegistrationRecord>>;
-    /// Name `new_grant` as the registration's one grant, only while it
-    /// still names `expected` (none when `None`) and still has `status` and
-    /// `assertion_version`. Written before the grant is issued. Returns
-    /// whether this call won.
-    async fn reserve_grant(
+    /// The registration's grant for `resource`, if it holds one.
+    async fn grant_for(
         &self,
-        id: &str,
-        expected: Option<&str>,
-        new_grant: &str,
-        status: &str,
-        assertion_version: u32,
-    ) -> Result<bool>;
+        registration_id: &str,
+        resource: &str,
+    ) -> Result<Option<AgentGrantRecord>>;
+    /// Every grant the registration holds: at most one per resource the
+    /// authorization server serves.
+    async fn grants_of(&self, registration_id: &str) -> Result<Vec<AgentGrantRecord>>;
+    /// Record `record` as the registration's grant for its resource, only
+    /// while the recorded grant is still `expected` (none when `None`).
+    /// Written before the grant is issued. Returns whether this call won.
+    async fn reserve_grant(&self, record: AgentGrantRecord, expected: Option<&str>)
+    -> Result<bool>;
     /// Whether a provider token's identifier is recorded and not yet
     /// expired at `now`.
     async fn replay_recorded(&self, key: &str, now: DateTime<Utc>) -> Result<bool>;

@@ -897,23 +897,26 @@ impl TokenIssuer<'_> {
         grant: NewGrant,
         tokens: IssueTokens,
     ) -> std::result::Result<IssuedGrant, TokenError> {
-        self.issue_grant_as(new_id(), grant, tokens).await
+        self.issue_grant_as(new_id(), grant, tokens, None).await
     }
 
     /// [`issue_grant`](Self::issue_grant) under an identifier the extension
     /// chose, so it can record the grant before the grant exists and never
-    /// hold a live grant it has no record of.
+    /// hold a live grant it has no record of. `access_scopes` narrows the
+    /// first access token to a subset of the grant's scopes; `None` gives
+    /// it all of them.
     ///
     /// # Errors
     ///
-    /// As [`issue`](Self::issue), and `invalid_request` for an identifier
-    /// that is empty, longer than 64 characters or not letters, digits, `-`
-    /// and `_`.
+    /// As [`issue`](Self::issue), `invalid_request` for an identifier that
+    /// is empty, longer than 64 characters or not letters, digits, `-` and
+    /// `_`, and `invalid_scope` for access scopes outside the grant's.
     pub async fn issue_grant_as(
         &self,
         grant_id: String,
         grant: NewGrant,
         tokens: IssueTokens,
+        access_scopes: Option<&[String]>,
     ) -> std::result::Result<IssuedGrant, TokenError> {
         let server = self.server;
         if grant_id.is_empty()
@@ -959,15 +962,31 @@ impl TokenIssuer<'_> {
         let access_lifetime = tokens
             .access_lifetime
             .unwrap_or(server.config.access_token_lifetime);
-        let minted = server
+        let access_scopes = access_scopes.unwrap_or(&grant.scopes);
+        if let Some(outside) = access_scopes
+            .iter()
+            .find(|scope| !grant.scopes.contains(scope))
+        {
+            return Err(TokenError::invalid_scope(format!(
+                "scope {outside:?} is not in the grant"
+            )));
+        }
+        let mut minted = server
             .mint_tokens(
-                &grant.scopes,
+                access_scopes,
                 &tokens.access_kind,
                 access_lifetime,
                 tokens.refresh,
                 now,
             )
             .map_err(token_storage_error)?;
+        // A refresh token keeps the grant's full scopes, as RFC 6749
+        // section 6 asks.
+        for record in &mut minted.records {
+            if record.kind == REFRESH_TOKEN_KIND {
+                record.scopes = grant.scopes.clone();
+            }
+        }
         server
             .store
             .create_grant(

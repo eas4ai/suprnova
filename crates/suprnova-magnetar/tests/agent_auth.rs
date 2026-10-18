@@ -479,6 +479,123 @@ async fn agent_007_many_exchanges_leave_one_live_grant() {
     );
 }
 
+fn two_resources() -> Options {
+    let mut options = Options::new();
+    let mut server = server_config();
+    server.resources.push(SECOND_RESOURCE.to_owned());
+    options.server_config = Some(server);
+    options
+}
+
+#[tokio::test]
+async fn agent_007_tokens_for_two_resources_are_both_valid() {
+    let h = sqlite_harness_with(two_resources()).await;
+    let registration = h.anonymous().await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let assertion = registration["identity_assertion"]
+        .as_str()
+        .expect("assertion");
+    let mut first = Vec::new();
+    let mut second = Vec::new();
+    for _ in 0..3 {
+        first.push(access_token(
+            &h.exchange_with(assertion, &[("resource", RESOURCE)]).await,
+        ));
+        second.push(access_token(
+            &h.exchange_with(assertion, &[("resource", SECOND_RESOURCE)])
+                .await,
+        ));
+    }
+    for token in &first {
+        assert!(
+            matches!(
+                h.verify_for(token, RESOURCE).await,
+                AccessVerification::Valid(_)
+            ),
+            "a token for the first resource survives exchanges for the second"
+        );
+    }
+    for token in &second {
+        assert!(matches!(
+            h.verify_for(token, SECOND_RESOURCE).await,
+            AccessVerification::Valid(_)
+        ));
+    }
+    let grants = grants_of(&h, id).await;
+    assert_eq!(grants.len(), 2, "one grant per resource: {grants:?}");
+    assert!(grants.iter().all(|(_, revoked)| !revoked));
+}
+
+#[tokio::test]
+async fn agent_007_a_bad_resource_leaves_the_live_token_valid() {
+    let h = sqlite_harness().await;
+    let registration = h.anonymous().await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let assertion = registration["identity_assertion"]
+        .as_str()
+        .expect("assertion");
+    let token = access_token(&h.exchange(assertion).await);
+    let refused = h
+        .exchange_with(
+            assertion,
+            &[("resource", "https://elsewhere.example.test/mcp")],
+        )
+        .await;
+    assert_eq!(status(&refused), 400, "{:?}", body(&refused));
+    assert_eq!(body(&refused)["error"], "invalid_target");
+    assert!(
+        matches!(h.verify(&token).await, AccessVerification::Valid(_)),
+        "a failed request revokes nothing"
+    );
+    assert_eq!(
+        grants_of(&h, id).await,
+        vec![(grants_of(&h, id).await[0].0.clone(), false)]
+    );
+}
+
+#[tokio::test]
+async fn agent_007_an_out_of_entitlement_scope_is_refused_without_revoking() {
+    let h = sqlite_harness().await;
+    let registration = h.anonymous().await;
+    let assertion = registration["identity_assertion"]
+        .as_str()
+        .expect("assertion");
+    let token = access_token(&h.exchange(assertion).await);
+    let refused = h
+        .exchange_with(assertion, &[("scope", "tools:write")])
+        .await;
+    assert_eq!(status(&refused), 400, "{:?}", body(&refused));
+    assert_eq!(body(&refused)["error"], "invalid_scope");
+    assert!(matches!(
+        h.verify(&token).await,
+        AccessVerification::Valid(_)
+    ));
+}
+
+#[tokio::test]
+async fn agent_007_a_narrower_request_gets_a_narrower_token_on_the_same_grant() {
+    let h = sqlite_harness().await;
+    let (registration, _) = h.claimed_anonymous("narrow@example.test").await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let claimed = body(
+        &h.poll(registration["claim_token"].as_str().expect("claim token"))
+            .await,
+    );
+    let v2 = claimed["identity_assertion"].as_str().expect("v2");
+    let narrow = h.exchange_with(v2, &[("scope", "tools:read")]).await;
+    assert_eq!(body(&narrow)["scope"], "tools:read");
+    let (_, _, _, scopes) = agent_kind(&h.verify(&access_token(&narrow)).await);
+    assert_eq!(scopes, vec!["tools:read".to_owned()]);
+    let full = h.exchange(v2).await;
+    assert_eq!(body(&full)["scope"], "tools:read tools:write");
+    let live: Vec<_> = grants_of(&h, id)
+        .await
+        .into_iter()
+        .filter(|(_, revoked)| !revoked)
+        .collect();
+    assert_eq!(live.len(), 1, "the narrower request used the same grant");
+}
+
 #[tokio::test]
 async fn agent_007_exchanges_are_rate_limited_per_registration() {
     let mut options = Options::new();
@@ -606,8 +723,9 @@ async fn agent_007_a_failed_grant_issue_leaves_no_unrecorded_grant() {
         grants_of(&h, id).await.is_empty(),
         "no grant exists that the registration does not name"
     );
-    assert!(
-        h.registration(id).await.grant_id.is_some(),
+    assert_eq!(
+        h.agent_grant_ids(id).await.len(),
+        1,
         "the grant was recorded before it was issued"
     );
     let token = access_token(&h.exchange(assertion).await);
@@ -2512,7 +2630,7 @@ async fn agent_009_a_poll_that_loses_the_spend_takes_back_its_token() {
         .poll(registration["claim_token"].as_str().expect("claim token"))
         .await;
     assert_eq!(body(&lost)["error"], "expired_token");
-    let grant = h.registration(id).await.grant_id.expect("a grant");
+    let grant = h.agent_grant_ids(id).await.remove(0);
     let minted = tokens::Entity::find()
         .filter(tokens::Column::GrantId.eq(grant))
         .all(&h.db)

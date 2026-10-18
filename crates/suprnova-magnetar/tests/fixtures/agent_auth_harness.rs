@@ -18,9 +18,9 @@ use base64::Engine;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use magnetar::abuse::{AbuseLimiter, AbusePolicy, Permit};
 use magnetar::agent_auth::{
-    AgentAuth, AgentAuthConfig, AgentAuthServices, AgentAuthStore, IdentityTypes, KeySetFetcher,
-    KeySetPolicy, NewAttempt, ProvisionUsers, ProvisioningPolicy, RegistrationRecord, SigningKey,
-    SqlAgentAuthStore, TrustedIssuer,
+    AgentAuth, AgentAuthConfig, AgentAuthServices, AgentAuthStore, AgentGrantRecord, IdentityTypes,
+    KeySetFetcher, KeySetPolicy, NewAttempt, ProvisionUsers, ProvisioningPolicy,
+    RegistrationRecord, SigningKey, SqlAgentAuthStore, TrustedIssuer,
 };
 use magnetar::auth::{AuthenticationContext, FactorGate, SignInDecision, VerifiedPrincipal};
 use magnetar::authorization_server::{
@@ -60,6 +60,7 @@ pub use fakes::{RecordingMail, TestLinks};
 
 pub const ISSUER: &str = "https://auth.example.test";
 pub const RESOURCE: &str = "https://app.example.test/mcp";
+pub const SECOND_RESOURCE: &str = "https://app.example.test/second-mcp";
 pub const PROVIDER: &str = "https://provider.example.test";
 pub const PROVIDER_HOST: &str = "provider.example.test";
 pub const PROVIDER_JWKS: &str = "https://provider.example.test/.well-known/jwks.json";
@@ -491,18 +492,25 @@ impl AgentAuthStore for FlakyAgentStore {
         self.faults.check("user_registrations")?;
         self.inner.user_registrations(user_id).await
     }
+    async fn grant_for(
+        &self,
+        registration_id: &str,
+        resource: &str,
+    ) -> Result<Option<AgentGrantRecord>> {
+        self.faults.check("grant_for")?;
+        self.inner.grant_for(registration_id, resource).await
+    }
+    async fn grants_of(&self, registration_id: &str) -> Result<Vec<AgentGrantRecord>> {
+        self.faults.check("grants_of")?;
+        self.inner.grants_of(registration_id).await
+    }
     async fn reserve_grant(
         &self,
-        id: &str,
+        record: AgentGrantRecord,
         expected: Option<&str>,
-        new_grant: &str,
-        status: &str,
-        assertion_version: u32,
     ) -> Result<bool> {
         self.faults.check("reserve_grant")?;
-        self.inner
-            .reserve_grant(id, expected, new_grant, status, assertion_version)
-            .await
+        self.inner.reserve_grant(record, expected).await
     }
     async fn replay_recorded(&self, key: &str, now: chrono::DateTime<chrono::Utc>) -> Result<bool> {
         self.faults.check("replay_recorded")?;
@@ -1092,6 +1100,22 @@ impl Harness {
         .await
     }
 
+    pub async fn exchange_with(&self, assertion: &str, extra: &[(&str, &str)]) -> WireResponse {
+        let mut fields = vec![
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("assertion", assertion),
+        ];
+        fields.extend_from_slice(extra);
+        self.post_form("/oauth/token", &fields, None).await
+    }
+
+    pub async fn verify_for(&self, token: &str, resource: &str) -> AccessVerification {
+        self.server
+            .verify_access_token(token, resource)
+            .await
+            .expect("verification reads storage")
+    }
+
     pub async fn exchange(&self, assertion: &str) -> WireResponse {
         self.post_form(
             "/oauth/token",
@@ -1181,6 +1205,18 @@ impl Harness {
             .exec(&self.db)
             .await
             .expect("move a registration timestamp");
+    }
+
+    /// The authorization server grants the registration's records name,
+    /// one per resource.
+    pub async fn agent_grant_ids(&self, registration_id: &str) -> Vec<String> {
+        SqlAgentAuthStore::new(self.db.clone())
+            .grants_of(registration_id)
+            .await
+            .expect("read the agent grants")
+            .into_iter()
+            .map(|grant| grant.grant_id)
+            .collect()
     }
 
     pub async fn registration(

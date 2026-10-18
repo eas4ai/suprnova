@@ -92,28 +92,40 @@ impl GrantHandler for JwtBearerGrant {
         if unclaimed && record.claim_expires_at.is_none_or(|window| window <= now) {
             return Err(TokenError::invalid_grant("the registration expired"));
         }
-        let allowed = if unclaimed {
+        // The request is checked in full before any grant is touched, so a
+        // wrong scope or resource revokes nothing.
+        let entitlement = if unclaimed {
             core.config.pre_claim_scopes.clone()
         } else {
             record.scopes.clone()
         };
         let scopes = match request.param("scope") {
-            None => allowed,
+            None => entitlement.clone(),
             Some(scope) => {
                 let requested: Vec<&str> = scope.split_whitespace().collect();
                 if let Some(outside) = requested
                     .iter()
-                    .find(|name| !allowed.iter().any(|allowed| allowed == *name))
+                    .find(|name| !entitlement.iter().any(|allowed| allowed == *name))
                 {
                     return Err(TokenError::invalid_scope(format!(
                         "scope {outside:?} is not held by this registration"
                     )));
                 }
-                allowed
-                    .into_iter()
+                entitlement
+                    .iter()
                     .filter(|name| requested.contains(&name.as_str()))
+                    .cloned()
                     .collect()
             }
+        };
+        let Some(resource) = core.accepted_resource(
+            request
+                .param("resource")
+                .unwrap_or(core.default_resource.as_str()),
+        ) else {
+            return Err(TokenError::invalid_target(
+                "the resource is not served here",
+            ));
         };
         let user = bound_user(core, &record).await?;
         if let Some(user) = &user
@@ -122,9 +134,6 @@ impl GrantHandler for JwtBearerGrant {
         {
             return Err(end_for_epoch(core, issuer, &record, request.client_address()).await);
         }
-        let resource = request
-            .param("resource")
-            .map_or_else(|| core.default_resource.clone(), str::to_owned);
         // Each exchange mints a token, so each one spends the
         // registration's own budget, after the assertion and the
         // registration checked out.
@@ -148,7 +157,14 @@ impl GrantHandler for JwtBearerGrant {
             }
         }
         let (response, _) = core
-            .issue_for_registration(issuer, &record, user.as_ref(), scopes, resource)
+            .issue_for_registration(
+                issuer,
+                &record,
+                user.as_ref(),
+                entitlement,
+                scopes,
+                resource,
+            )
             .await?;
         core.emit(
             LifecycleEventKind::AgentTokenIssued,
@@ -298,6 +314,15 @@ impl GrantHandler for ClaimGrant {
         if record.status == STATUS_REVOKED {
             return Err(TokenError::invalid_grant("the registration was revoked"));
         }
+        let Some(resource) = core.accepted_resource(
+            request
+                .param("resource")
+                .unwrap_or(core.default_resource.as_str()),
+        ) else {
+            return Err(TokenError::invalid_target(
+                "the resource is not served here",
+            ));
+        };
         let claimed = record.status == STATUS_CLAIMED;
         if record.status == STATUS_EXPIRED
             || (!claimed && record.claim_expires_at.is_none_or(|window| window <= now))
@@ -355,9 +380,8 @@ impl GrantHandler for ClaimGrant {
                 &record,
                 user.as_ref(),
                 record.scopes.clone(),
-                request
-                    .param("resource")
-                    .map_or_else(|| core.default_resource.clone(), str::to_owned),
+                record.scopes.clone(),
+                resource,
             )
             .await?;
         let signed = core.assertion(&record, user.as_ref(), now);
