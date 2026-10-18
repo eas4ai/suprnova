@@ -7,12 +7,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use url::Url;
 
-use super::client::{ClientSource, ResolvedClient, check_public_client, names_metadata_document};
+use super::client::{
+    ClientSource, ResolvedClient, check_public_client, is_loopback_redirect,
+    names_metadata_document,
+};
 use super::metadata_document::ClientMetadataError;
 use super::store::AuthorizationRecord;
 use super::{
-    AuthorizationServer, CODE_REUSE_WINDOW, ScopeDefinition, is_s256_challenge, new_id, random_hex,
-    to_chrono, token_digest,
+    AuthorizationServer, CODE_REUSE_WINDOW, ScopeDefinition, expiry, is_s256_challenge, new_id,
+    random_hex, token_digest,
 };
 use crate::abuse::Permit;
 use crate::sessions::VerifiedSession;
@@ -22,7 +25,8 @@ pub(super) const PENDING_KIND: &str = "pending";
 pub(super) const CODE_KIND: &str = "code";
 const PENDING_STATE: &str = "pending";
 pub(super) const CODE_ISSUED: &str = "issued";
-pub(super) const CODE_REDEEMING: &str = "redeeming";
+pub(super) const CODE_REDEEMING_PREFIX: &str = "redeeming:";
+pub(super) const CODE_REPLAYED_PREFIX: &str = "replayed:";
 pub(super) const CODE_REDEEMED_PREFIX: &str = "redeemed:";
 
 /// One authorization endpoint request.
@@ -134,6 +138,8 @@ struct PendingAuthorization {
     resource: String,
     state: Option<String>,
     code_challenge: String,
+    /// Whether the client registered the refresh token grant.
+    refresh: bool,
 }
 
 /// What an authorization code stands for. The code itself is never
@@ -150,6 +156,7 @@ pub(super) struct CodePayload {
     pub resource: String,
     pub code_challenge: String,
     pub code_expires_at: DateTime<Utc>,
+    pub refresh: bool,
 }
 
 fn encode<T: Serialize>(value: &T) -> Result<String> {
@@ -227,6 +234,7 @@ impl AuthorizationServer {
                     scope: client.scope,
                     client_uri: client.client_uri,
                     logo_uri: client.logo_uri,
+                    grant_types: client.grant_types,
                 }),
                 None => Err("the client is not registered".to_owned()),
             });
@@ -264,6 +272,7 @@ impl AuthorizationServer {
                     scope: checked.scope,
                     client_uri: checked.client_uri,
                     logo_uri: checked.logo_uri,
+                    grant_types: checked.grant_types,
                 }),
                 Err(problem) => Err(problem.description().to_owned()),
             },
@@ -275,13 +284,23 @@ impl AuthorizationServer {
         Ok(self.epochs.current_epoch(session.user_id()).await? == Some(session.auth_epoch()))
     }
 
-    fn error_redirect(
+    /// Report an authorization request error for a signed-in user: by
+    /// redirect, with `state` and `iss`, only to a loopback redirect URI;
+    /// otherwise as the refusal page, so no registered client can make this
+    /// endpoint redirect to a page of its choosing.
+    fn report(
         &self,
         redirect_uri: &str,
         error: &str,
         description: &str,
         state: Option<&str>,
     ) -> Result<AuthorizeOutcome> {
+        if !is_loopback_redirect(redirect_uri) {
+            return Ok(AuthorizeOutcome::Refused {
+                error: error.to_owned(),
+                description: description.to_owned(),
+            });
+        }
         let mut params = vec![("error", error), ("error_description", description)];
         if let Some(state) = state {
             params.push(("state", state));
@@ -297,11 +316,13 @@ impl AuthorizationServer {
     ///
     /// The client and its redirect URI are checked first; a request that
     /// fails there is refused without a redirect, since redirecting would
-    /// send the browser somewhere the client never registered. Every later
-    /// problem goes back to the client's redirect URI with `state` and
-    /// `iss`. A user who is not signed in, or whose session is from an
-    /// earlier epoch, is sent to sign in; a signed-in user's request becomes
-    /// a pending authorization for the approval page.
+    /// send the browser somewhere the client never registered. A user who
+    /// is not signed in, or whose session is from an earlier epoch, is sent
+    /// to sign in next, before any other problem is reported. A signed-in
+    /// user's malformed request goes back by redirect, with `state` and
+    /// `iss`, only to a loopback redirect URI, and is otherwise refused here
+    /// (RFC 9700 section 4.11.2); a valid one becomes a pending
+    /// authorization for the approval page.
     ///
     /// # Errors
     ///
@@ -340,77 +361,9 @@ impl AuthorizationServer {
             );
         }
 
-        let state = param("state");
-        if param("response_type") != Some("code") {
-            return self.error_redirect(
-                redirect_uri,
-                "unsupported_response_type",
-                "only response_type=code is supported",
-                state,
-            );
-        }
-        let Some(code_challenge) = param("code_challenge") else {
-            return self.error_redirect(
-                redirect_uri,
-                "invalid_request",
-                "code_challenge is required",
-                state,
-            );
-        };
-        if param("code_challenge_method") != Some("S256") {
-            return self.error_redirect(
-                redirect_uri,
-                "invalid_request",
-                "code_challenge_method must be S256",
-                state,
-            );
-        }
-        if !is_s256_challenge(code_challenge) {
-            return self.error_redirect(
-                redirect_uri,
-                "invalid_request",
-                "code_challenge is not an S256 challenge",
-                state,
-            );
-        }
-        let Some(resource_param) = param("resource") else {
-            return self.error_redirect(
-                redirect_uri,
-                "invalid_request",
-                "resource is required",
-                state,
-            );
-        };
-        let Some(resource) = self.accepted_resource(resource_param) else {
-            return self.error_redirect(
-                redirect_uri,
-                "invalid_target",
-                "the resource is not served here",
-                state,
-            );
-        };
-        let scopes = match self.parse_scope(param("scope")) {
-            Ok(scopes) => scopes,
-            Err(unknown) => {
-                return self.error_redirect(
-                    redirect_uri,
-                    "invalid_scope",
-                    &format!("scope {unknown:?} is not offered"),
-                    state,
-                );
-            }
-        };
-        if let Some(limit) = &client.scope
-            && let Some(outside) = scopes.iter().find(|scope| !limit.contains(scope))
-        {
-            return self.error_redirect(
-                redirect_uri,
-                "invalid_scope",
-                &format!("the client did not register scope {outside:?}"),
-                state,
-            );
-        }
-
+        // Sign-in comes before any other answer: the sign-in page is on the
+        // application's own domain, and an anonymous visitor must not learn
+        // anything, or be sent anywhere, through the client's redirect URI.
         let session = match request.session {
             Some(session) if self.session_is_current(session).await? => session,
             _ => {
@@ -428,6 +381,77 @@ impl AuthorizationServer {
             }
         };
 
+        let state = param("state");
+        if param("response_type") != Some("code") {
+            return self.report(
+                redirect_uri,
+                "unsupported_response_type",
+                "only response_type=code is supported",
+                state,
+            );
+        }
+        let Some(code_challenge) = param("code_challenge") else {
+            return self.report(
+                redirect_uri,
+                "invalid_request",
+                "code_challenge is required",
+                state,
+            );
+        };
+        if param("code_challenge_method") != Some("S256") {
+            return self.report(
+                redirect_uri,
+                "invalid_request",
+                "code_challenge_method must be S256",
+                state,
+            );
+        }
+        if !is_s256_challenge(code_challenge) {
+            return self.report(
+                redirect_uri,
+                "invalid_request",
+                "code_challenge is not an S256 challenge",
+                state,
+            );
+        }
+        let Some(resource_param) = param("resource") else {
+            return self.report(
+                redirect_uri,
+                "invalid_request",
+                "resource is required",
+                state,
+            );
+        };
+        let Some(resource) = self.accepted_resource(resource_param) else {
+            return self.report(
+                redirect_uri,
+                "invalid_target",
+                "the resource is not served here",
+                state,
+            );
+        };
+        let scopes = match self.parse_scope(param("scope")) {
+            Ok(scopes) => scopes,
+            Err(unknown) => {
+                return self.report(
+                    redirect_uri,
+                    "invalid_scope",
+                    &format!("scope {unknown:?} is not offered"),
+                    state,
+                );
+            }
+        };
+        if let Some(limit) = &client.scope
+            && let Some(outside) = scopes.iter().find(|scope| !limit.contains(scope))
+        {
+            return self.report(
+                redirect_uri,
+                "invalid_scope",
+                &format!("the client did not register scope {outside:?}"),
+                state,
+            );
+        }
+
         let pending = PendingAuthorization {
             user_id: session.user_id().to_owned(),
             client_id: client.client_id.clone(),
@@ -440,6 +464,7 @@ impl AuthorizationServer {
             resource,
             state: state.map(str::to_owned),
             code_challenge: code_challenge.to_owned(),
+            refresh: client.allows_refresh(),
         };
         let id = new_id();
         self.store
@@ -449,8 +474,17 @@ impl AuthorizationServer {
                 state: PENDING_STATE.to_owned(),
                 user_id: pending.user_id.clone(),
                 payload: encode(&pending)?,
-                expires_at: Utc::now() + to_chrono(self.config.pending_lifetime)?,
+                expires_at: expiry(Utc::now(), self.config.pending_lifetime)?,
             })
+            .await?;
+        // Another site can open this endpoint in the user's browser as often
+        // as it likes; only the newest pending authorizations are kept.
+        self.store
+            .trim_authorizations(
+                &pending.user_id,
+                PENDING_KIND,
+                u64::try_from(self.config.max_pending_per_user).unwrap_or(u64::MAX),
+            )
             .await?;
         Ok(AuthorizeOutcome::Redirect(append_parameter(
             &self.config.approval_url,
@@ -548,7 +582,8 @@ impl AuthorizationServer {
                 scopes: pending.scopes.clone(),
                 resource: pending.resource.clone(),
                 code_challenge: pending.code_challenge.clone(),
-                code_expires_at: now + to_chrono(self.config.code_lifetime)?,
+                code_expires_at: expiry(now, self.config.code_lifetime)?,
+                refresh: pending.refresh,
             };
             let window = CODE_REUSE_WINDOW.max(self.config.code_lifetime);
             self.store
@@ -558,7 +593,7 @@ impl AuthorizationServer {
                     state: CODE_ISSUED.to_owned(),
                     user_id: pending.user_id.clone(),
                     payload: encode(&payload)?,
-                    expires_at: now + to_chrono(window)?,
+                    expires_at: expiry(now, window)?,
                 })
                 .await?;
             params.push(("code", code.as_str()));

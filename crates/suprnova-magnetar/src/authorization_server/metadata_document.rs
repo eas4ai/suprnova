@@ -66,6 +66,9 @@ pub struct SystemResolver;
 #[async_trait]
 impl HostResolver for SystemResolver {
     async fn resolve(&self, host: &str, port: u16) -> Result<Vec<IpAddr>> {
+        // A lookup that outlives the fetch timeout keeps running on the
+        // blocking pool; the per-address metadata-fetch budget bounds how
+        // many can pile up.
         let addresses = tokio::net::lookup_host((host, port))
             .await
             .map_err(|error| Error::DependencyUnavailable {
@@ -115,16 +118,30 @@ pub trait PinnedHttpClient: Send + Sync {
 /// Each fetch builds a client whose only name override is the checked
 /// address, with proxies and redirects off. Documents are cached, so the
 /// cost of building one client per fetch is paid rarely.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ReqwestPinnedClient {
     timeout: Duration,
+    /// An extra trust anchor, DER encoded. Only tests set it, to reach a
+    /// local server with a certificate of their own.
+    extra_root: Option<Vec<u8>>,
 }
 
 impl ReqwestPinnedClient {
     /// A client whose requests give up after `timeout`.
     #[must_use]
     pub fn new(timeout: Duration) -> Self {
-        Self { timeout }
+        Self {
+            timeout,
+            extra_root: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn trusting(timeout: Duration, root_der: Vec<u8>) -> Self {
+        Self {
+            timeout,
+            extra_root: Some(root_der),
+        }
     }
 }
 
@@ -154,12 +171,18 @@ impl PinnedHttpClient for ReqwestPinnedClient {
         let host = url
             .host_str()
             .ok_or_else(|| transport("the URL has no host".to_owned()))?;
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .resolve(host, address)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .https_only(true)
-            .timeout(self.timeout)
+            .timeout(self.timeout);
+        if let Some(root) = &self.extra_root {
+            let certificate = reqwest::Certificate::from_der(root)
+                .map_err(|error| transport(format!("extra trust anchor: {error}")))?;
+            builder = builder.add_root_certificate(certificate);
+        }
+        let client = builder
             .build()
             .map_err(|error| transport(format!("build client: {error}")))?;
         let response = client
@@ -258,6 +281,9 @@ pub struct ClientMetadataFetcher {
     client: Arc<dyn PinnedHttpClient>,
     policy: ClientMetadataPolicy,
     cache: Mutex<HashMap<String, CachedDocument>>,
+    /// Which addresses a fetch may connect to: [`is_public_address`],
+    /// except in tests that reach a server on the loopback address.
+    address_allowed: fn(IpAddr) -> bool,
 }
 
 impl ClientMetadataFetcher {
@@ -273,7 +299,14 @@ impl ClientMetadataFetcher {
             client,
             policy,
             cache: Mutex::new(HashMap::new()),
+            address_allowed: is_public_address,
         }
+    }
+
+    #[cfg(test)]
+    fn admitting(mut self, address_allowed: fn(IpAddr) -> bool) -> Self {
+        self.address_allowed = address_allowed;
+        self
     }
 
     /// A fetcher over the system resolver and [`ReqwestPinnedClient`].
@@ -338,7 +371,7 @@ impl ClientMetadataFetcher {
         if let Some(forbidden) = addresses
             .iter()
             .copied()
-            .find(|address| !is_public_address(*address))
+            .find(|address| !(self.address_allowed)(*address))
         {
             return Err(ClientMetadataError::ForbiddenAddress(forbidden));
         }
@@ -445,4 +478,196 @@ fn document_url(client_id: &str) -> std::result::Result<Url, ClientMetadataError
         ));
     }
     Ok(url)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::rustls;
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+    use super::*;
+
+    /// A name that never resolves in public DNS (RFC 2606), so a fetch
+    /// that reaches the server proves it used the checked address.
+    const HOST: &str = "metadata.test";
+
+    struct Loopback;
+
+    #[async_trait]
+    impl HostResolver for Loopback {
+        async fn resolve(&self, _host: &str, _port: u16) -> Result<Vec<IpAddr>> {
+            Ok(vec![IpAddr::from([127, 0, 0, 1])])
+        }
+    }
+
+    type Route = fn(&str, u16) -> (u16, Vec<(&'static str, String)>, String);
+
+    struct Server {
+        port: u16,
+        root: Vec<u8>,
+        requests: Arc<AtomicUsize>,
+    }
+
+    /// An HTTPS server on the loopback address with a certificate for
+    /// [`HOST`], answering every request through `route`.
+    async fn https_server(route: Route) -> Server {
+        let certified =
+            rcgen::generate_simple_self_signed(vec![HOST.to_owned()]).expect("a certificate");
+        let root = certified.cert.der().to_vec();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certified.signing_key.serialize_der(),
+        ));
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(vec![CertificateDer::from(root.clone())], key)
+        .expect("a server configuration");
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let port = listener.local_addr().expect("a local address").port();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = requests.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (acceptor, counter) = (acceptor.clone(), counter.clone());
+                tokio::spawn(async move {
+                    let Ok(mut tls) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    let mut request = Vec::new();
+                    let mut chunk = [0_u8; 1024];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match tls.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => request.extend_from_slice(&chunk[..read]),
+                        }
+                    }
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let text = String::from_utf8_lossy(&request);
+                    let path = text.split_whitespace().nth(1).unwrap_or("/").to_owned();
+                    let (status, headers, body) = route(&path, port);
+                    let mut response = format!(
+                        "HTTP/1.1 {status} Test\r\ncontent-length: {}\r\nconnection: close\r\n",
+                        body.len()
+                    );
+                    for (name, value) in headers {
+                        response.push_str(&format!("{name}: {value}\r\n"));
+                    }
+                    response.push_str("\r\n");
+                    response.push_str(&body);
+                    let _ = tls.write_all(response.as_bytes()).await;
+                    let _ = tls.shutdown().await;
+                });
+            }
+        });
+        Server {
+            port,
+            root,
+            requests,
+        }
+    }
+
+    fn document_url(port: u16) -> String {
+        format!("https://{HOST}:{port}/client.json")
+    }
+
+    fn document(port: u16) -> String {
+        serde_json::json!({
+            "client_id": document_url(port),
+            "client_name": "Loopback Client",
+            "redirect_uris": ["http://127.0.0.1:3000/callback"],
+        })
+        .to_string()
+    }
+
+    fn fetcher(server: &Server) -> ClientMetadataFetcher {
+        let policy = ClientMetadataPolicy::default();
+        ClientMetadataFetcher::new(
+            Arc::new(Loopback),
+            Arc::new(ReqwestPinnedClient::trusting(
+                policy.timeout,
+                server.root.clone(),
+            )),
+            policy,
+        )
+        .admitting(|address| address.is_loopback())
+    }
+
+    #[tokio::test]
+    async fn agent_005_the_real_client_connects_to_the_checked_address() {
+        let server = https_server(|path, port| match path {
+            "/client.json" => (
+                200,
+                vec![("content-type", "application/json".to_owned())],
+                document(port),
+            ),
+            _ => (404, Vec::new(), String::new()),
+        })
+        .await;
+        let fetched = fetcher(&server)
+            .fetch(&document_url(server.port))
+            .await
+            .expect("the document is fetched from the checked address");
+        assert_eq!(fetched.client_name.as_deref(), Some("Loopback Client"));
+        assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn agent_005_the_real_client_follows_no_redirect() {
+        let server = https_server(|path, port| match path {
+            "/client.json" => (
+                302,
+                vec![("location", format!("https://{HOST}:{port}/moved.json"))],
+                String::new(),
+            ),
+            // A followed redirect would find a valid document here.
+            "/moved.json" => (
+                200,
+                vec![("content-type", "application/json".to_owned())],
+                document(port),
+            ),
+            _ => (404, Vec::new(), String::new()),
+        })
+        .await;
+        assert_eq!(
+            fetcher(&server).fetch(&document_url(server.port)).await,
+            Err(ClientMetadataError::Redirected(302))
+        );
+        assert_eq!(
+            server.requests.load(Ordering::SeqCst),
+            1,
+            "the redirect was not followed"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_005_the_loopback_server_is_refused_without_the_test_policy() {
+        let server = https_server(|path, port| match path {
+            "/client.json" => (200, Vec::new(), document(port)),
+            _ => (404, Vec::new(), String::new()),
+        })
+        .await;
+        let policy = ClientMetadataPolicy::default();
+        let production = ClientMetadataFetcher::new(
+            Arc::new(Loopback),
+            Arc::new(ReqwestPinnedClient::trusting(
+                policy.timeout,
+                server.root.clone(),
+            )),
+            policy,
+        );
+        assert!(matches!(
+            production.fetch(&document_url(server.port)).await,
+            Err(ClientMetadataError::ForbiddenAddress(_))
+        ));
+        assert_eq!(server.requests.load(Ordering::SeqCst), 0);
+    }
 }

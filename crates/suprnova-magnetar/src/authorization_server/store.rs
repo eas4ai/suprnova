@@ -7,6 +7,8 @@
 //! revocation all work on the grant. Tokens are stored only as SHA-256
 //! digests; no method here ever receives a plaintext token.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
@@ -61,6 +63,11 @@ pub struct GrantRecord {
     /// The user's authentication epoch when the grant was issued. A grant
     /// stops working once the user's epoch moves on.
     pub auth_epoch: Option<u64>,
+    /// The kind of every access token the grant mints, kept so a refresh
+    /// mints the kind the grant started with.
+    pub access_kind: String,
+    /// The lifetime of every access token the grant mints.
+    pub access_lifetime: Duration,
     /// When the grant was issued.
     pub created_at: DateTime<Utc>,
     /// When one of the grant's access tokens was last verified.
@@ -202,7 +209,12 @@ pub trait AuthorizationStore: Send + Sync {
     /// it; only one concurrent caller can.
     async fn consume_authorization(&self, id: &str, kind: &str, now: DateTime<Utc>)
     -> Result<bool>;
-    /// Delete lapsed steps and tokens that expired before `now`. Returns how
+    /// Keep only the `keep` newest steps of one kind for a user and delete
+    /// the rest. Returns how many went.
+    async fn trim_authorizations(&self, user_id: &str, kind: &str, keep: u64) -> Result<u64>;
+    /// Delete lapsed steps and tokens that expired before `now`, then grants
+    /// that ended before `grant_cutoff`: those revoked before it, and those
+    /// left with no token whose last activity is older than it. Returns how
     /// many rows went.
-    async fn prune_expired(&self, now: DateTime<Utc>) -> Result<u64>;
+    async fn prune_expired(&self, now: DateTime<Utc>, grant_cutoff: DateTime<Utc>) -> Result<u64>;
 }

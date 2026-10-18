@@ -17,9 +17,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sea_orm::sea_query::{Alias, Expr, Index, Query};
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
-    DbBackend, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect, Schema,
-    TransactionTrait,
+    ActiveValue::Set, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
+    DatabaseTransaction, DbBackend, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect,
+    Schema, TransactionTrait,
 };
 
 use super::store::{
@@ -108,6 +108,8 @@ pub mod grants {
         #[sea_orm(column_type = "Text")]
         pub resource: String,
         pub auth_epoch: Option<i64>,
+        pub access_kind: String,
+        pub access_lifetime: i64,
         pub created_at: DateTimeUtc,
         pub last_used_at: Option<DateTimeUtc>,
         pub revoked_at: Option<DateTimeUtc>,
@@ -284,6 +286,22 @@ impl SqlAuthorizationStore {
     }
 }
 
+/// The live tokens of the grant row in the outer query: unrevoked, unspent
+/// and unexpired.
+fn live_tokens_of_grant(now: DateTime<Utc>) -> sea_orm::sea_query::SelectStatement {
+    Query::select()
+        .expr(Expr::val(1))
+        .from(tokens::Entity)
+        .and_where(
+            Expr::col((tokens::Entity, tokens::Column::GrantId))
+                .equals((grants::Entity, grants::Column::Id)),
+        )
+        .and_where(Expr::col((tokens::Entity, tokens::Column::RevokedAt)).is_null())
+        .and_where(Expr::col((tokens::Entity, tokens::Column::UsedAt)).is_null())
+        .and_where(Expr::col((tokens::Entity, tokens::Column::ExpiresAt)).gt(now))
+        .to_owned()
+}
+
 fn join_scopes(scopes: &[String]) -> String {
     scopes.join(" ")
 }
@@ -319,6 +337,12 @@ fn grant_record(model: grants::Model) -> GrantRecord {
         auth_epoch: model
             .auth_epoch
             .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
+        access_kind: model.access_kind,
+        // A negative lifetime was never written either; it reads as zero,
+        // which mints tokens that are already expired.
+        access_lifetime: std::time::Duration::from_secs(
+            u64::try_from(model.access_lifetime).unwrap_or(0),
+        ),
         created_at: model.created_at,
         last_used_at: model.last_used_at,
         revoked_at: model.revoked_at,
@@ -449,6 +473,11 @@ impl AuthorizationStore for SqlAuthorizationStore {
 
     async fn create_grant(&self, grant: GrantRecord, tokens: Vec<NewTokenRecord>) -> Result<()> {
         let auth_epoch = epoch_to_db(grant.auth_epoch)?;
+        let access_lifetime =
+            i64::try_from(grant.access_lifetime.as_secs()).map_err(|_| Error::InvalidInput {
+                field: "access_lifetime".to_owned(),
+                message: "exceeds the database integer range".to_owned(),
+            })?;
         let transaction = self.db.begin().await.map_err(db_error)?;
         let outcome = async {
             let at = grant.created_at;
@@ -463,6 +492,8 @@ impl AuthorizationStore for SqlAuthorizationStore {
                 scopes: Set(join_scopes(&grant.scopes)),
                 resource: Set(grant.resource),
                 auth_epoch: Set(auth_epoch),
+                access_kind: Set(grant.access_kind),
+                access_lifetime: Set(access_lifetime),
                 created_at: Set(at),
                 last_used_at: Set(None),
                 revoked_at: Set(None),
@@ -502,6 +533,20 @@ impl AuthorizationStore for SqlAuthorizationStore {
     ) -> Result<bool> {
         let transaction = self.db.begin().await.map_err(db_error)?;
         let outcome = async {
+            // Every write path locks the grant row before any of its token
+            // rows, as revoke_grant does, so a rotation racing a revocation
+            // waits instead of deadlocking. A revoked grant affects no row
+            // here and the rotation loses.
+            let touched = grants::Entity::update_many()
+                .col_expr(grants::Column::LastUsedAt, Expr::value(at))
+                .filter(grants::Column::Id.eq(grant_id.to_owned()))
+                .filter(grants::Column::RevokedAt.is_null())
+                .exec(&transaction)
+                .await
+                .map_err(db_error)?;
+            if touched.rows_affected != 1 {
+                return Ok(false);
+            }
             // The conditional update is the single-winner guard: the
             // database lets exactly one statement move `used_at` off NULL,
             // and every concurrent one affects no row.
@@ -517,16 +562,6 @@ impl AuthorizationStore for SqlAuthorizationStore {
                 .await
                 .map_err(db_error)?;
             if claimed.rows_affected != 1 {
-                return Ok(false);
-            }
-            let touched = grants::Entity::update_many()
-                .col_expr(grants::Column::LastUsedAt, Expr::value(at))
-                .filter(grants::Column::Id.eq(grant_id.to_owned()))
-                .filter(grants::Column::RevokedAt.is_null())
-                .exec(&transaction)
-                .await
-                .map_err(db_error)?;
-            if touched.rows_affected != 1 {
                 return Ok(false);
             }
             insert_tokens(&transaction, grant_id, replacements, at).await?;
@@ -573,23 +608,24 @@ impl AuthorizationStore for SqlAuthorizationStore {
     async fn revoke_user_grants(&self, user_id: &str, at: DateTime<Utc>) -> Result<u64> {
         let transaction = self.db.begin().await.map_err(db_error)?;
         let outcome = async {
-            let live_grants = Query::select()
-                .column(grants::Column::Id)
-                .from(grants::Entity)
-                .and_where(Expr::col(grants::Column::UserId).eq(user_id.to_owned()))
-                .and_where(Expr::col(grants::Column::RevokedAt).is_null())
-                .to_owned();
-            tokens::Entity::update_many()
-                .col_expr(tokens::Column::RevokedAt, Expr::value(at))
-                .filter(tokens::Column::GrantId.in_subquery(live_grants))
-                .filter(tokens::Column::RevokedAt.is_null())
-                .exec(&transaction)
-                .await
-                .map_err(db_error)?;
+            // Grant rows first, then token rows: the order every write path
+            // takes its locks in.
             let revoked = grants::Entity::update_many()
                 .col_expr(grants::Column::RevokedAt, Expr::value(at))
                 .filter(grants::Column::UserId.eq(user_id.to_owned()))
                 .filter(grants::Column::RevokedAt.is_null())
+                .exec(&transaction)
+                .await
+                .map_err(db_error)?;
+            let user_grants = Query::select()
+                .column(grants::Column::Id)
+                .from(grants::Entity)
+                .and_where(Expr::col(grants::Column::UserId).eq(user_id.to_owned()))
+                .to_owned();
+            tokens::Entity::update_many()
+                .col_expr(tokens::Column::RevokedAt, Expr::value(at))
+                .filter(tokens::Column::GrantId.in_subquery(user_grants))
+                .filter(tokens::Column::RevokedAt.is_null())
                 .exec(&transaction)
                 .await
                 .map_err(db_error)?;
@@ -614,36 +650,18 @@ impl AuthorizationStore for SqlAuthorizationStore {
         user_id: &str,
         now: DateTime<Utc>,
     ) -> Result<Vec<GrantRecord>> {
-        let candidates = grants::Entity::find()
+        // A grant whose tokens all expired, were spent or were revoked is
+        // over; the database drops it, so the answer holds only live grants
+        // however many dead ones the user has.
+        Ok(grants::Entity::find()
             .filter(grants::Column::UserId.eq(user_id.to_owned()))
             .filter(grants::Column::RevokedAt.is_null())
+            .filter(Expr::exists(live_tokens_of_grant(now)))
             .order_by_desc(grants::Column::CreatedAt)
-            .all(&self.db)
-            .await
-            .map_err(db_error)?;
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-        let ids: Vec<String> = candidates.iter().map(|grant| grant.id.clone()).collect();
-        // One query for every candidate's live tokens rather than one per
-        // grant: a grant whose tokens all expired or were spent is over.
-        let live: std::collections::HashSet<String> = tokens::Entity::find()
-            .select_only()
-            .column(tokens::Column::GrantId)
-            .filter(tokens::Column::GrantId.is_in(ids))
-            .filter(tokens::Column::RevokedAt.is_null())
-            .filter(tokens::Column::UsedAt.is_null())
-            .filter(tokens::Column::ExpiresAt.gt(now))
-            .distinct()
-            .into_tuple::<String>()
             .all(&self.db)
             .await
             .map_err(db_error)?
             .into_iter()
-            .collect();
-        Ok(candidates
-            .into_iter()
-            .filter(|grant| live.contains(&grant.id))
             .map(grant_record)
             .collect())
     }
@@ -729,17 +747,84 @@ impl AuthorizationStore for SqlAuthorizationStore {
         Ok(deleted.rows_affected == 1)
     }
 
-    async fn prune_expired(&self, now: DateTime<Utc>) -> Result<u64> {
+    async fn trim_authorizations(&self, user_id: &str, kind: &str, keep: u64) -> Result<u64> {
+        // Steps are trimmed on every create, so at most a handful lie past
+        // `keep`; the bound only stops one call from reading without end.
+        let surplus: Vec<String> = authorizations::Entity::find()
+            .select_only()
+            .column(authorizations::Column::Id)
+            .filter(authorizations::Column::UserId.eq(user_id.to_owned()))
+            .filter(authorizations::Column::Kind.eq(kind.to_owned()))
+            .order_by_desc(authorizations::Column::ExpiresAt)
+            .offset(keep)
+            .limit(1000)
+            .into_tuple::<String>()
+            .all(&self.db)
+            .await
+            .map_err(db_error)?;
+        if surplus.is_empty() {
+            return Ok(0);
+        }
+        let deleted = authorizations::Entity::delete_many()
+            .filter(authorizations::Column::Id.is_in(surplus))
+            .filter(authorizations::Column::Kind.eq(kind.to_owned()))
+            .exec(&self.db)
+            .await
+            .map_err(db_error)?;
+        Ok(deleted.rows_affected)
+    }
+
+    async fn prune_expired(&self, now: DateTime<Utc>, grant_cutoff: DateTime<Utc>) -> Result<u64> {
         let steps = authorizations::Entity::delete_many()
             .filter(authorizations::Column::ExpiresAt.lte(now))
             .exec(&self.db)
             .await
             .map_err(db_error)?;
-        let tokens = tokens::Entity::delete_many()
+        let expired_tokens = tokens::Entity::delete_many()
             .filter(tokens::Column::ExpiresAt.lte(now))
             .exec(&self.db)
             .await
             .map_err(db_error)?;
-        Ok(steps.rows_affected + tokens.rows_affected)
+        let long_revoked = Query::select()
+            .column(grants::Column::Id)
+            .from(grants::Entity)
+            .and_where(Expr::col(grants::Column::RevokedAt).lt(grant_cutoff))
+            .to_owned();
+        let revoked_tokens = tokens::Entity::delete_many()
+            .filter(tokens::Column::GrantId.in_subquery(long_revoked))
+            .exec(&self.db)
+            .await
+            .map_err(db_error)?;
+        let revoked_grants = grants::Entity::delete_many()
+            .filter(grants::Column::RevokedAt.lt(grant_cutoff))
+            .exec(&self.db)
+            .await
+            .map_err(db_error)?;
+        // A grant with no token left can never be used again; it is kept
+        // for the retention so a user still sees what they approved.
+        let any_token = Query::select()
+            .expr(Expr::val(1))
+            .from(tokens::Entity)
+            .and_where(
+                Expr::col((tokens::Entity, tokens::Column::GrantId))
+                    .equals((grants::Entity, grants::Column::Id)),
+            )
+            .to_owned();
+        let idle_grants = grants::Entity::delete_many()
+            .filter(Expr::exists(any_token).not())
+            .filter(grants::Column::CreatedAt.lt(grant_cutoff))
+            .filter(
+                Condition::any()
+                    .add(grants::Column::LastUsedAt.is_null())
+                    .add(grants::Column::LastUsedAt.lt(grant_cutoff)),
+            )
+            .exec(&self.db)
+            .await
+            .map_err(db_error)?;
+        Ok(steps.rows_affected
+            + expired_tokens.rows_affected
+            + revoked_tokens.rows_affected
+            + revoked_grants.rows_affected
+            + idle_grants.rows_affected)
     }
 }

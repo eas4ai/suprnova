@@ -74,7 +74,7 @@ reqwest = { version = "0.13", optional = true, default-features = false, feature
 url = { version = "2", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
 trybuild = "1"
 parking_lot = "0.12"
 # Captures log lines in tests that pin a logged failure. `no-env-filter`
@@ -87,3 +87,7 @@ sea-orm = { version = "2.0", default-features = false, features = ["mock"] }
 webauthn-authenticator-rs = { version = "0.5.5", default-features = false, features = [
     "softpasskey",
 ] }
+# A throwaway certificate and a TLS server, so the authorization server's
+# client metadata fetch is tested over real HTTPS on the loopback address.
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }

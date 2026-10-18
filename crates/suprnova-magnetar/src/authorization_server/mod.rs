@@ -131,13 +131,21 @@ pub struct AuthorizationServerConfig {
     /// The budget per client address for fetching client metadata
     /// documents that are not cached.
     pub metadata_fetch_policy: AbusePolicy,
+    /// How many pending authorizations one user keeps; creating another
+    /// drops the oldest. Another site can open the authorization endpoint
+    /// in a signed-in user's browser as often as it likes.
+    pub max_pending_per_user: usize,
+    /// How long [`AuthorizationServer::prune_expired`] keeps a grant that
+    /// was revoked, or that has no token left, before deleting it.
+    pub grant_retention: Duration,
 }
 
 impl AuthorizationServerConfig {
     /// A configuration for `issuer` serving `resources`, with defaults for
     /// everything else: routes under `/oauth`, sign-in at `/login`, the
     /// approval page at `/oauth/approve`, one-hour access tokens, 30-day
-    /// refresh tokens, one-minute codes and a 16 KiB request bound.
+    /// refresh tokens, one-minute codes, a 16 KiB request bound, 20 pending
+    /// authorizations per user and 30 days of grant retention.
     #[must_use]
     pub fn new(issuer: impl Into<String>, resources: Vec<String>) -> Self {
         Self {
@@ -161,6 +169,8 @@ impl AuthorizationServerConfig {
                 max_requests: 30,
                 window: Duration::from_secs(60),
             },
+            max_pending_per_user: 20,
+            grant_retention: Duration::from_secs(30 * 24 * 3600),
         }
     }
 }
@@ -387,9 +397,21 @@ impl AuthorizationServer {
             ("access_token_lifetime", config.access_token_lifetime),
             ("refresh_token_lifetime", config.refresh_token_lifetime),
         ] {
-            if value.is_zero() || chrono::Duration::from_std(value).is_err() {
-                return Err(config_error(field, "must be positive and in range"));
+            if value.is_zero() || expiry(Utc::now(), value).is_err() {
+                return Err(config_error(
+                    field,
+                    "must be positive and short enough for a timestamp to hold",
+                ));
             }
+        }
+        if retention_cutoff(Utc::now(), config.grant_retention).is_err() {
+            return Err(config_error(
+                "grant_retention",
+                "must be short enough for a timestamp to hold",
+            ));
+        }
+        if config.max_pending_per_user == 0 {
+            return Err(config_error("max_pending_per_user", "must be positive"));
         }
         if config.max_request_bytes == 0 {
             return Err(config_error("max_request_bytes", "must be positive"));
@@ -693,15 +715,20 @@ impl AuthorizationServer {
         self.store.revoke_user_grants(user_id, Utc::now()).await
     }
 
-    /// Delete pending authorizations and codes that lapsed, and tokens that
-    /// expired, for a host to run on a schedule. A spent refresh token is
-    /// kept until it expires, so its reuse is still caught.
+    /// Delete pending authorizations and codes that lapsed and tokens that
+    /// expired, then grants that ended more than
+    /// [`grant_retention`](AuthorizationServerConfig::grant_retention) ago
+    /// (30 days by default): revoked ones, and ones with no token left and
+    /// no use since. For a host to run on a schedule. A spent refresh token
+    /// is kept until it expires, so its reuse is still caught.
     ///
     /// # Errors
     ///
     /// Returns an error when storage fails.
     pub async fn prune_expired(&self) -> Result<u64> {
-        self.store.prune_expired(Utc::now()).await
+        let now = Utc::now();
+        let cutoff = retention_cutoff(now, self.config.grant_retention)?;
+        self.store.prune_expired(now, cutoff).await
     }
 
     /// Mint an access token, and a refresh token when asked, for a grant.
@@ -714,7 +741,7 @@ impl AuthorizationServer {
         now: DateTime<Utc>,
     ) -> Result<MintedTokens> {
         let access = new_token(ACCESS_TOKEN_PREFIX);
-        let access_expires = now + to_chrono(access_lifetime)?;
+        let access_expires = expiry(now, access_lifetime)?;
         let mut records = vec![NewTokenRecord {
             id: new_id(),
             kind: access_kind.to_owned(),
@@ -729,7 +756,7 @@ impl AuthorizationServer {
                 kind: REFRESH_TOKEN_KIND.to_owned(),
                 token_hash: token_digest(&token),
                 scopes: scopes.to_vec(),
-                expires_at: now + to_chrono(self.config.refresh_token_lifetime)?,
+                expires_at: expiry(now, self.config.refresh_token_lifetime)?,
             });
             Some(SecretString::from(token))
         } else {
@@ -766,8 +793,10 @@ impl TokenIssuer<'_> {
     /// # Errors
     ///
     /// Returns `invalid_request` for an empty kind or client, a refresh
-    /// access kind or an undeclared scope, `invalid_target` for a resource
-    /// the server does not accept, and `server_error` when storage fails.
+    /// access kind, a zero lifetime or one no timestamp can hold,
+    /// `invalid_scope` for an undeclared scope, `invalid_target` for a
+    /// resource the server does not accept, and `server_error` when storage
+    /// fails.
     pub async fn issue(
         &self,
         grant: NewGrant,
@@ -796,13 +825,19 @@ impl TokenIssuer<'_> {
             ));
         };
         let now = Utc::now();
+        let access_lifetime = tokens
+            .access_lifetime
+            .unwrap_or(server.config.access_token_lifetime);
+        if access_lifetime.is_zero() || expiry(now, access_lifetime).is_err() {
+            return Err(TokenError::invalid_request(
+                "the access token lifetime must be positive and short enough for a timestamp",
+            ));
+        }
         let minted = server
             .mint_tokens(
                 &grant.scopes,
                 &tokens.access_kind,
-                tokens
-                    .access_lifetime
-                    .unwrap_or(server.config.access_token_lifetime),
+                access_lifetime,
                 tokens.refresh,
                 now,
             )
@@ -820,6 +855,8 @@ impl TokenIssuer<'_> {
                     scopes: grant.scopes,
                     resource,
                     auth_epoch: grant.auth_epoch,
+                    access_kind: tokens.access_kind,
+                    access_lifetime,
                     created_at: now,
                     last_used_at: None,
                     revoked_at: None,
@@ -850,10 +887,27 @@ fn token_storage_error(error: Error) -> TokenError {
     TokenError::server_error()
 }
 
-fn to_chrono(value: Duration) -> Result<chrono::Duration> {
-    chrono::Duration::from_std(value).map_err(|_| Error::Internal {
-        message: "lifetime out of range".to_owned(),
-    })
+/// The moment `lifetime` after `now`. Adding a lifetime with `+` panics
+/// when the result outruns what a timestamp holds; this answers an error.
+pub(crate) fn expiry(now: DateTime<Utc>, lifetime: Duration) -> Result<DateTime<Utc>> {
+    chrono::Duration::from_std(lifetime)
+        .ok()
+        .and_then(|delta| now.checked_add_signed(delta))
+        .ok_or_else(|| Error::InvalidInput {
+            field: "lifetime".to_owned(),
+            message: "is longer than a timestamp can hold".to_owned(),
+        })
+}
+
+/// The moment `retention` before `now`, checked like [`expiry`].
+fn retention_cutoff(now: DateTime<Utc>, retention: Duration) -> Result<DateTime<Utc>> {
+    chrono::Duration::from_std(retention)
+        .ok()
+        .and_then(|delta| now.checked_sub_signed(delta))
+        .ok_or_else(|| Error::InvalidInput {
+            field: "grant_retention".to_owned(),
+            message: "is longer than a timestamp can hold".to_owned(),
+        })
 }
 
 /// Lowercase hex SHA-256 of a token, the only form a token is stored in.

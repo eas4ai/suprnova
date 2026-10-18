@@ -41,9 +41,19 @@ pub struct ResolvedClient {
     pub client_uri: Option<String>,
     /// The client's logo, if it gave one.
     pub logo_uri: Option<String>,
+    /// The grant types the client registered.
+    pub grant_types: Vec<String>,
 }
 
 impl ResolvedClient {
+    /// Whether the client registered the refresh token grant, without
+    /// which it gets no refresh token (RFC 7591 section 2).
+    pub(crate) fn allows_refresh(&self) -> bool {
+        self.grant_types
+            .iter()
+            .any(|grant| grant == "refresh_token")
+    }
+
     /// The host the approval page shows for this client and redirect URI:
     /// the host of a metadata document's URL, which the server fetched and
     /// so knows the client controls, or else the host of the redirect URI
@@ -131,6 +141,22 @@ pub(crate) fn redirect_uri_matches(registered: &str, requested: &str) -> bool {
         && requested.fragment().is_none()
         && requested.username().is_empty()
         && requested.password().is_none()
+}
+
+/// Whether an error may be reported by redirecting to `redirect_uri`: only
+/// a loopback IP literal over HTTP, where a native client listens on the
+/// user's own machine. A redirect anywhere else would let any registered
+/// client turn the application's domain into a redirector to a page of its
+/// choosing (RFC 9700 section 4.11.2).
+pub(crate) fn is_loopback_redirect(redirect_uri: &str) -> bool {
+    Url::parse(redirect_uri).is_ok_and(|url| {
+        url.scheme() == "http"
+            && match url.host() {
+                Some(Host::Ipv4(address)) => address == Ipv4Addr::LOCALHOST,
+                Some(Host::Ipv6(address)) => address == Ipv6Addr::LOCALHOST,
+                _ => false,
+            }
+    })
 }
 
 /// Whether `value` is a client identifier this server treats as a client
@@ -344,9 +370,20 @@ fn is_public_v6(address: Ipv6Addr) -> bool {
     if segments[..6] == [0, 0, 0, 0, 0, 0] {
         return false;
     }
+    // IPv4-translated ::ffff:0:a.b.c.d (RFC 2765), refused whatever it
+    // embeds: a stack that honours it reaches an IPv4 host this check
+    // never saw.
+    if segments[..6] == [0, 0, 0, 0, 0xffff, 0] {
+        return false;
+    }
     // NAT64 well-known prefix 64:ff9b::/96 reaches the embedded IPv4.
     if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
         return is_public_v4(embedded_v4(segments[6], segments[7]));
+    }
+    // Local-use NAT64 64:ff9b:1::/48 (RFC 8215) translates into a network
+    // of the operator's choosing.
+    if segments[..3] == [0x64, 0xff9b, 0x0001] {
+        return false;
     }
     // 6to4 2002::/16 embeds an IPv4 in the next 32 bits.
     if segments[0] == 0x2002 {
@@ -427,7 +464,12 @@ mod tests {
 
     #[test]
     fn agent_005_only_public_addresses_are_fetchable() {
-        for public in ["93.184.215.14", "8.8.8.8", "2606:4700:4700::1111"] {
+        for public in [
+            "93.184.215.14",
+            "8.8.8.8",
+            "2606:4700:4700::1111",
+            "64:ff9b::808:808",
+        ] {
             assert!(is_public_address(public.parse().unwrap()), "{public}");
         }
         for refused in [
@@ -455,6 +497,17 @@ mod tests {
             "2002:7f00:1::",
             "2001:db8::1",
             "2001::1",
+            // IPv4-translated ::ffff:0:a.b.c.d, refused whatever it embeds.
+            "::ffff:0:808:808",
+            "::ffff:0:7f00:1",
+            // Local-use NAT64 64:ff9b:1::/48 reaches a network of the
+            // operator's choosing.
+            "64:ff9b:1::808:808",
+            "64:ff9b:1:abcd::1",
+            // The well-known NAT64 prefix judged by the IPv4 it embeds.
+            "64:ff9b::7f00:1",
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b::c0a8:101",
         ] {
             assert!(!is_public_address(refused.parse().unwrap()), "{refused}");
         }

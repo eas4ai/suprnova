@@ -12,10 +12,29 @@
 //! | POST | `register` | Dynamic client registration (RFC 7591) |
 //!
 //! The two approval routes need the signed-in user's session and answer
-//! with headers that forbid framing. The decision route changes state on
-//! the user's behalf, so the host must protect it with its CSRF check; the
-//! token, revocation and registration routes are called by clients and
-//! must not need one. Every route bounds the request it reads.
+//! with headers that forbid framing. Every route bounds the request it
+//! reads.
+//!
+//! # What the host must do
+//!
+//! The plugin sees a [`WireRequest`] the host has already read and parsed,
+//! so a few protections belong to the host:
+//!
+//! - **CSRF.** The decision route changes state on the user's behalf, so
+//!   the host protects it with its CSRF check. The token, revocation and
+//!   registration routes are called by clients and must not need one.
+//! - **Repeated parameters.** RFC 6749 section 3.1 forbids sending an OAuth
+//!   parameter twice. The query and form maps the plugin receives hold one
+//!   value per name, so the host must refuse a request that repeats one
+//!   before building them. A form body handed over as raw bytes is checked
+//!   here.
+//! - **The body bound.** The plugin's size check measures a body already
+//!   in memory. The host must bound the body before reading it, at least
+//!   to [`max_request_bytes`](crate::authorization_server::AuthorizationServerConfig::max_request_bytes).
+//! - **The client address.** The registration and metadata-fetch budgets
+//!   are counted per `x-client-ip` header. The host must always set it from
+//!   its trusted proxy resolution and drop any value the client sent;
+//!   without it every request shares one anonymous budget.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
