@@ -4,6 +4,36 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 4.4.0 - 2026-10-18
+
+### Fixed
+
+- **Magnetar's tables hold long values on MySQL and MariaDB.** Byte
+  columns were limited to 255 bytes. These hold passkey and OAuth sign-in
+  steps, two-factor secrets and recovery codes, and saved provider tokens.
+  So were the session user agent and the passkey credential id, public key
+  and provider scope columns. A longer value failed to save, so passkey,
+  two-factor and social sign-in could fail there. Magnetar's `migrate`
+  widens the existing columns the first time it runs. It keeps each
+  column's character set and collation, and leaves a column that an index
+  covers alone, with a warning.
+- **Two servers migrating Magnetar's tables at once no longer collide.** A
+  table, index, column or marker that another process created first counts
+  as created.
+- **Registration answers a validation failure with 422.**
+  `Auth::password().register` answered a weak password or an unusable
+  address with 401. It now answers the framework's validation error, with
+  the message under the field.
+- **Email addresses longer than 254 characters never reach the database.**
+  Sign-in with one answers as an unknown address does. Sign-up, the account
+  import and OAuth email completion refuse one as a validation error. Such
+  an address is still counted toward lockouts. An account that already
+  holds one can no longer sign in by email; `migrate` logs how many exist,
+  once per database.
+- **Session metadata stays within its columns.** A session keeps at most
+  1,024 characters of the user agent. A lockout records the client address
+  only when it parses as an IP address.
+
 ## 4.3.0 - 2026-10-18
 
 ### Added
