@@ -66,8 +66,10 @@ pub struct GrantRecord {
     /// The kind of every access token the grant mints, kept so a refresh
     /// mints the kind the grant started with.
     pub access_kind: String,
-    /// The lifetime of every access token the grant mints.
-    pub access_lifetime: Duration,
+    /// The lifetime of every access token the grant mints, when the issuer
+    /// named one. `None` follows the server's configured lifetime, so an
+    /// operator who shortens it shortens existing grants' next tokens too.
+    pub access_lifetime: Option<Duration>,
     /// When the grant was issued.
     pub created_at: DateTime<Utc>,
     /// When one of the grant's access tokens was last verified.
@@ -141,6 +143,8 @@ pub struct AuthorizationRecord {
     pub payload: String,
     /// When the step lapses.
     pub expires_at: DateTime<Utc>,
+    /// When the step was created, the order trimming keeps the newest by.
+    pub created_at: DateTime<Utc>,
 }
 
 /// Storage for the authorization server.
@@ -195,23 +199,32 @@ pub trait AuthorizationStore: Send + Sync {
         kind: &str,
         now: DateTime<Utc>,
     ) -> Result<Option<AuthorizationRecord>>;
-    /// Move a step that has not lapsed from `expected` to `next`. Returns
-    /// whether this call won; only one concurrent caller can.
+    /// Move a step from `expected` to `next`. With `live_at`, only a step
+    /// that has not lapsed by then moves; with `None`, a lapsed one moves
+    /// too, for the steps that finish what an earlier, checked step began.
+    /// Returns whether this call won; only one concurrent caller can.
     async fn transition_authorization(
         &self,
         id: &str,
         kind: &str,
         expected: &str,
         next: &str,
-        now: DateTime<Utc>,
+        live_at: Option<DateTime<Utc>>,
     ) -> Result<bool>;
     /// Delete a step that has not lapsed. Returns whether this call deleted
     /// it; only one concurrent caller can.
     async fn consume_authorization(&self, id: &str, kind: &str, now: DateTime<Utc>)
     -> Result<bool>;
-    /// Keep only the `keep` newest steps of one kind for a user and delete
-    /// the rest. Returns how many went.
-    async fn trim_authorizations(&self, user_id: &str, kind: &str, keep: u64) -> Result<u64>;
+    /// Keep only the `keep` newest steps of one kind for a user, `newest`
+    /// always among them, and delete the rest. Newest means latest
+    /// `created_at`, ties broken by identifier. Returns how many went.
+    async fn trim_authorizations(
+        &self,
+        user_id: &str,
+        kind: &str,
+        keep: u64,
+        newest: &str,
+    ) -> Result<u64>;
     /// Delete lapsed steps and tokens that expired before `now`, then grants
     /// that ended before `grant_cutoff`: those revoked before it, and those
     /// left with no token whose last activity is older than it. Returns how

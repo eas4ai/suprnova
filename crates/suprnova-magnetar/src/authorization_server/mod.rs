@@ -69,6 +69,10 @@ pub const REFRESH_TOKEN_PREFIX: &str = "mrt_";
 const MAX_TOKEN_LENGTH: usize = 512;
 /// How often a grant's last-used time is written at most.
 const LAST_USED_RESOLUTION: chrono::Duration = chrono::Duration::seconds(60);
+/// The largest [`AuthorizationServerConfig::max_pending_per_user`]: the
+/// value reaches a query as a signed 64-bit offset, and a user with more
+/// than this many approvals in flight is not a user.
+const MAX_PENDING_PER_USER: usize = 10_000;
 /// How long a spent code is remembered, so a second exchange can revoke
 /// what the first one issued.
 const CODE_REUSE_WINDOW: Duration = Duration::from_secs(600);
@@ -120,9 +124,10 @@ pub struct AuthorizationServerConfig {
     pub pending_lifetime: Duration,
     /// How long an authorization code can be exchanged.
     pub code_lifetime: Duration,
-    /// How long an access token works.
+    /// How long an access token works, in whole seconds. Grants issued
+    /// without a lifetime of their own follow it as it changes.
     pub access_token_lifetime: Duration,
-    /// How long a refresh token works if it is not used.
+    /// How long a refresh token works if it is not used, in whole seconds.
     pub refresh_token_lifetime: Duration,
     /// The largest request body (and authorization query) a route reads.
     pub max_request_bytes: usize,
@@ -131,9 +136,10 @@ pub struct AuthorizationServerConfig {
     /// The budget per client address for fetching client metadata
     /// documents that are not cached.
     pub metadata_fetch_policy: AbusePolicy,
-    /// How many pending authorizations one user keeps; creating another
-    /// drops the oldest. Another site can open the authorization endpoint
-    /// in a signed-in user's browser as often as it likes.
+    /// How many pending authorizations one user keeps, from 1 to 10,000;
+    /// creating another drops the oldest. Another site can open the
+    /// authorization endpoint in a signed-in user's browser as often as it
+    /// likes.
     pub max_pending_per_user: usize,
     /// How long [`AuthorizationServer::prune_expired`] keeps a grant that
     /// was revoked, or that has no token left, before deleting it.
@@ -404,14 +410,27 @@ impl AuthorizationServer {
                 ));
             }
         }
+        // Token lifetimes are stored, and `expires_in` answered, in whole
+        // seconds: half a second would be stored as an instant expiry.
+        for (field, value) in [
+            ("access_token_lifetime", config.access_token_lifetime),
+            ("refresh_token_lifetime", config.refresh_token_lifetime),
+        ] {
+            if !is_whole_seconds(value) {
+                return Err(config_error(field, "must be a whole number of seconds"));
+            }
+        }
         if retention_cutoff(Utc::now(), config.grant_retention).is_err() {
             return Err(config_error(
                 "grant_retention",
                 "must be short enough for a timestamp to hold",
             ));
         }
-        if config.max_pending_per_user == 0 {
-            return Err(config_error("max_pending_per_user", "must be positive"));
+        if config.max_pending_per_user == 0 || config.max_pending_per_user > MAX_PENDING_PER_USER {
+            return Err(config_error(
+                "max_pending_per_user",
+                format!("must be between 1 and {MAX_PENDING_PER_USER}"),
+            ));
         }
         if config.max_request_bytes == 0 {
             return Err(config_error("max_request_bytes", "must be positive"));
@@ -825,14 +844,17 @@ impl TokenIssuer<'_> {
             ));
         };
         let now = Utc::now();
+        if let Some(lifetime) = tokens.access_lifetime
+            && (!is_whole_seconds(lifetime) || expiry(now, lifetime).is_err())
+        {
+            return Err(TokenError::invalid_request(
+                "the access token lifetime must be a whole number of seconds, at least one, \
+                 and short enough for a timestamp",
+            ));
+        }
         let access_lifetime = tokens
             .access_lifetime
             .unwrap_or(server.config.access_token_lifetime);
-        if access_lifetime.is_zero() || expiry(now, access_lifetime).is_err() {
-            return Err(TokenError::invalid_request(
-                "the access token lifetime must be positive and short enough for a timestamp",
-            ));
-        }
         let minted = server
             .mint_tokens(
                 &grant.scopes,
@@ -856,7 +878,9 @@ impl TokenIssuer<'_> {
                     resource,
                     auth_epoch: grant.auth_epoch,
                     access_kind: tokens.access_kind,
-                    access_lifetime,
+                    // Only a lifetime the issuer named is kept; otherwise the
+                    // grant follows the configuration as it changes.
+                    access_lifetime: tokens.access_lifetime,
                     created_at: now,
                     last_used_at: None,
                     revoked_at: None,
@@ -897,6 +921,11 @@ pub(crate) fn expiry(now: DateTime<Utc>, lifetime: Duration) -> Result<DateTime<
             field: "lifetime".to_owned(),
             message: "is longer than a timestamp can hold".to_owned(),
         })
+}
+
+/// Whether a token lifetime is a whole number of seconds, at least one.
+fn is_whole_seconds(lifetime: Duration) -> bool {
+    lifetime.as_secs() >= 1 && lifetime.subsec_nanos() == 0
 }
 
 /// The moment `retention` before `now`, checked like [`expiry`].

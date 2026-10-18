@@ -134,7 +134,7 @@ impl AuthorizationServer {
         let redeeming = format!("{CODE_REDEEMING_PREFIX}{grant_id}");
         if !self
             .store
-            .transition_authorization(&selector, CODE_KIND, CODE_ISSUED, &redeeming, now)
+            .transition_authorization(&selector, CODE_KIND, CODE_ISSUED, &redeeming, Some(now))
             .await
             .map_err(token_storage_error)?
         {
@@ -170,7 +170,7 @@ impl AuthorizationServer {
                     resource: payload.resource,
                     auth_epoch: Some(payload.auth_epoch),
                     access_kind: ACCESS_TOKEN_KIND.to_owned(),
-                    access_lifetime: self.config.access_token_lifetime,
+                    access_lifetime: None,
                     created_at: now,
                     last_used_at: None,
                     revoked_at: None,
@@ -179,6 +179,9 @@ impl AuthorizationServer {
             )
             .await
             .map_err(token_storage_error)?;
+        // No expiry check here: the code was checked when this exchange
+        // took it, and a slow exchange must not revoke its own grant at the
+        // edge of the window.
         match self
             .store
             .transition_authorization(
@@ -186,7 +189,7 @@ impl AuthorizationServer {
                 CODE_KIND,
                 &redeeming,
                 &format!("{CODE_REDEEMED_PREFIX}{grant_id}"),
-                Utc::now(),
+                None,
             )
             .await
         {
@@ -194,14 +197,17 @@ impl AuthorizationServer {
             Ok(false) => {
                 // A replay marked the code while this exchange wrote its
                 // grant: the tokens must not leave the server.
-                self.revoke_code_grant(&grant_id).await;
+                self.revoke_grant_with_retry(&grant_id, "a replayed code's grant")
+                    .await;
                 Err(TokenError::invalid_grant("the code was presented twice"))
             }
             Err(error) => {
-                // The code stays `redeeming:<grant>`, which a replay still
-                // reads and revokes; the tokens are the client's.
-                tracing::warn!(error = %error, grant_id, "recording a redeemed code's grant failed");
-                Ok(minted.response)
+                // Whether a replay marked the code is unknown, so the grant
+                // is revoked and the client starts over.
+                tracing::error!(error = %error, grant_id, "recording a redeemed code's grant failed");
+                self.revoke_grant_with_retry(&grant_id, "an unrecorded code's grant")
+                    .await;
+                Err(TokenError::server_error())
             }
         }
     }
@@ -210,20 +216,35 @@ impl AuthorizationServer {
     /// replayed, so its exchange revokes it, and revoke the grant the code
     /// produced. Failures are logged; the answer is `invalid_grant` either
     /// way.
+    ///
+    /// The mark is what reaches a grant that is not written yet, so it is
+    /// tried twice; the revocation below covers a grant that already is.
     async fn answer_code_replay(&self, selector: &str, state: &str) {
         let grant_id = if let Some(grant_id) = state.strip_prefix(CODE_REDEEMING_PREFIX) {
-            if let Err(error) = self
-                .store
-                .transition_authorization(
-                    selector,
-                    CODE_KIND,
-                    state,
-                    &format!("{CODE_REPLAYED_PREFIX}{grant_id}"),
-                    Utc::now(),
-                )
-                .await
-            {
-                tracing::error!(error = %error, grant_id, "marking a replayed code failed");
+            let replayed = format!("{CODE_REPLAYED_PREFIX}{grant_id}");
+            let mut marked = false;
+            for attempt in 1..=2 {
+                match self
+                    .store
+                    .transition_authorization(selector, CODE_KIND, state, &replayed, None)
+                    .await
+                {
+                    // `false` means the exchange finished first: the grant
+                    // exists, and the revocation below reaches it.
+                    Ok(_) => {
+                        marked = true;
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::error!(error = %error, grant_id, attempt, "marking a replayed code failed");
+                    }
+                }
+            }
+            if !marked {
+                tracing::error!(
+                    grant_id,
+                    "a replayed code could not be marked; only a grant already written is revoked"
+                );
             }
             grant_id
         } else if let Some(grant_id) = state
@@ -238,13 +259,23 @@ impl AuthorizationServer {
             grant_id,
             "an authorization code was presented again; revoking its grant"
         );
-        self.revoke_code_grant(grant_id).await;
+        self.revoke_grant_with_retry(grant_id, "a replayed code's grant")
+            .await;
     }
 
-    async fn revoke_code_grant(&self, grant_id: &str) {
-        if let Err(error) = self.store.revoke_grant(grant_id, Utc::now()).await {
-            tracing::error!(error = %error, grant_id, "revoking a replayed code's grant failed");
+    /// Revoke a grant, trying a second time when the first attempt fails,
+    /// since a failed write is usually a transient lock or pool timeout.
+    /// Returns whether the grant is now revoked; each failure is logged.
+    async fn revoke_grant_with_retry(&self, grant_id: &str, what: &str) -> bool {
+        for attempt in 1..=2 {
+            match self.store.revoke_grant(grant_id, Utc::now()).await {
+                Ok(_) => return true,
+                Err(error) => {
+                    tracing::error!(error = %error, grant_id, attempt, "revoking {what} failed");
+                }
+            }
         }
+        false
     }
 
     /// Rotate a refresh token. Every use spends it and returns a new one;
@@ -282,10 +313,7 @@ impl AuthorizationServer {
         }
         let now = Utc::now();
         if token.used_at.is_some() {
-            self.revoke_reused_grant(&grant.id).await;
-            return Err(TokenError::invalid_grant(
-                "the refresh token was already used",
-            ));
+            return Err(self.revoke_reused_grant(&grant.id).await);
         }
         if token.revoked_at.is_some() || grant.revoked_at.is_some() {
             return Err(TokenError::invalid_grant("the refresh token was revoked"));
@@ -337,7 +365,9 @@ impl AuthorizationServer {
             .mint_tokens(
                 &scopes,
                 &grant.access_kind,
-                grant.access_lifetime,
+                grant
+                    .access_lifetime
+                    .unwrap_or(self.config.access_token_lifetime),
                 true,
                 now,
             )
@@ -353,31 +383,44 @@ impl AuthorizationServer {
             .await
         {
             Ok(true) => Ok(minted.response),
-            Ok(false) => {
-                // Another request spent or revoked the token between the
-                // read above and the guarded write: a concurrent second use.
-                self.revoke_reused_grant(&grant.id).await;
-                Err(TokenError::invalid_grant(
-                    "the refresh token was already used",
-                ))
-            }
+            // Another request changed the token between the read above and
+            // the guarded write. Only a spent token is a reuse; one revoked
+            // or expired meanwhile is simply over.
+            Ok(false) => match self.store.find_token(&token.token_hash).await {
+                Ok(Some(current)) if current.used_at.is_none() => Err(TokenError::invalid_grant(
+                    "the refresh token was revoked or expired",
+                )),
+                Ok(_) => Err(self.revoke_reused_grant(&grant.id).await),
+                Err(error) => {
+                    // Unknown which: the grant is revoked, as for a reuse.
+                    tracing::error!(error = %error, grant_id = %grant.id, "rereading a contested refresh token failed");
+                    Err(self.revoke_reused_grant(&grant.id).await)
+                }
+            },
             Err(error) => {
-                // A failed rotation, a deadlock victim included, may hide a
-                // concurrent reuse; the grant is ended rather than left live.
+                // The rotation's transaction rolled back, so the token is
+                // still unused and a retry works. Every write path locks the
+                // grant first, so this is a transient fault, not a reuse
+                // racing a revocation; nothing is revoked.
                 tracing::error!(error = %error, grant_id = %grant.id, "rotating a refresh token failed");
-                self.revoke_reused_grant(&grant.id).await;
                 Err(TokenError::server_error())
             }
         }
     }
 
-    /// Revoke the grant of a refresh token that was presented again, or
-    /// whose rotation failed. A failure is logged, not answered: the
-    /// client's answer is the same either way.
-    async fn revoke_reused_grant(&self, grant_id: &str) {
+    /// Revoke the grant of a refresh token known to be reused, and answer
+    /// for it: `invalid_grant` once the grant is revoked, `server_error`
+    /// when both attempts failed. The token stays marked used either way,
+    /// so its next presentation revokes again.
+    async fn revoke_reused_grant(&self, grant_id: &str) -> TokenError {
         tracing::warn!(grant_id, "revoking the grant of a reused refresh token");
-        if let Err(error) = self.store.revoke_grant(grant_id, Utc::now()).await {
-            tracing::error!(error = %error, grant_id, "revoking a reused refresh token's grant failed");
+        if self
+            .revoke_grant_with_retry(grant_id, "a reused refresh token's grant")
+            .await
+        {
+            TokenError::invalid_grant("the refresh token was already used")
+        } else {
+            TokenError::server_error()
         }
     }
 

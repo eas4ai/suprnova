@@ -410,6 +410,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn agent_005_only_a_loopback_ip_literal_gets_error_redirects() {
+        for accepted in [
+            "http://127.0.0.1/callback",
+            "http://127.0.0.1:3000/callback",
+            "http://127.0.0.1:65535/any/path?x=1",
+            "http://[::1]:8080/",
+            "http://[::1]/",
+        ] {
+            assert!(
+                is_loopback_redirect(accepted),
+                "{accepted} is a loopback redirect"
+            );
+        }
+        for refused in [
+            "http://localhost:3000/callback",
+            "http://127.0.0.1.evil.test/callback",
+            "http://[::ffff:127.0.0.1]/callback",
+            "https://127.0.0.1/callback",
+            "http://127.0.0.2/callback",
+            "http://127.0.0.1@evil.test/callback",
+            "https://client.example.test/callback",
+            "com.example.app:/callback",
+            "not a url",
+        ] {
+            assert!(
+                !is_loopback_redirect(refused),
+                "{refused} is not a loopback redirect"
+            );
+        }
+    }
+
+    #[test]
     fn agent_005_loopback_redirects_ignore_only_the_port() {
         assert!(redirect_uri_matches(
             "http://127.0.0.1:3000/cb",

@@ -46,16 +46,18 @@ pub struct AuthorizeRequest<'a> {
 /// What the authorization endpoint answers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthorizeOutcome {
-    /// The client or its redirect URI cannot be trusted, so the error is
-    /// shown here and nothing redirects.
+    /// The error is shown here and nothing redirects: the client or its
+    /// redirect URI cannot be trusted, or a signed-in user's request is
+    /// malformed and its redirect URI is not a loopback one.
     Refused {
         /// The OAuth error code.
         error: String,
         /// What is wrong.
         description: String,
     },
-    /// Send the browser on: to the client with an error, to sign in, or to
-    /// the approval page.
+    /// Send the browser on: to sign in, to the approval page, or, for a
+    /// signed-in user's malformed request, to a loopback redirect URI with
+    /// the error, `state` and `iss`.
     Redirect(String),
 }
 
@@ -368,7 +370,13 @@ impl AuthorizationServer {
             Some(session) if self.session_is_current(session).await? => session,
             _ => {
                 let return_to =
-                    if request.return_to.starts_with('/') && !request.return_to.starts_with("//") {
+                    // `//host` and `/\host` both name another host to a
+                    // browser, so only a path that starts with one `/` and
+                    // no second slash of either kind is a return address.
+                    if request.return_to.starts_with('/')
+                        && !request.return_to.starts_with("//")
+                        && !request.return_to.starts_with("/\\")
+                    {
                         request.return_to.to_owned()
                     } else {
                         self.route_path("authorize")
@@ -467,6 +475,7 @@ impl AuthorizationServer {
             refresh: client.allows_refresh(),
         };
         let id = new_id();
+        let now = Utc::now();
         self.store
             .create_authorization(AuthorizationRecord {
                 id: id.clone(),
@@ -474,7 +483,8 @@ impl AuthorizationServer {
                 state: PENDING_STATE.to_owned(),
                 user_id: pending.user_id.clone(),
                 payload: encode(&pending)?,
-                expires_at: expiry(Utc::now(), self.config.pending_lifetime)?,
+                expires_at: expiry(now, self.config.pending_lifetime)?,
+                created_at: now,
             })
             .await?;
         // Another site can open this endpoint in the user's browser as often
@@ -484,6 +494,7 @@ impl AuthorizationServer {
                 &pending.user_id,
                 PENDING_KIND,
                 u64::try_from(self.config.max_pending_per_user).unwrap_or(u64::MAX),
+                &id,
             )
             .await?;
         Ok(AuthorizeOutcome::Redirect(append_parameter(
@@ -594,6 +605,7 @@ impl AuthorizationServer {
                     user_id: pending.user_id.clone(),
                     payload: encode(&payload)?,
                     expires_at: expiry(now, window)?,
+                    created_at: now,
                 })
                 .await?;
             params.push(("code", code.as_str()));
