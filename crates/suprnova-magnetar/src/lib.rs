@@ -16,6 +16,9 @@
 
 /// Abuse-prevention and policy boundaries.
 pub mod abuse;
+/// Agent accounts under auth.md v0.6.0, on the authorization server.
+#[cfg(feature = "agent-auth")]
+pub mod agent_auth;
 /// Shared primary-authentication and factor-gate boundaries.
 pub mod auth;
 /// The OAuth 2.1 authorization server MCP clients sign in through.
