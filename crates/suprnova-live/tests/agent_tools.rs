@@ -254,17 +254,283 @@ fn agent_013_parameter_schema_and_issues_exclude_resolver_properties() {
     assert_eq!(
         named,
         vec![
-            ("note", FieldIssueKind::Invalid(BindingIssueKind::InvalidType)),
+            (
+                "note",
+                FieldIssueKind::Invalid(BindingIssueKind::InvalidType)
+            ),
             ("team", FieldIssueKind::Unknown),
-            ("title", FieldIssueKind::Invalid(BindingIssueKind::InvalidType)),
+            (
+                "title",
+                FieldIssueKind::Invalid(BindingIssueKind::InvalidType)
+            ),
         ]
     );
 
     let opaque = ChildParameterSchema::new(
         1,
-        vec![ChildParameterField::new(field("filter"), ModelCodec::Json, true)],
+        vec![ChildParameterField::new(
+            field("filter"),
+            ModelCodec::Json,
+            true,
+        )],
     )
     .expect("parameter schema");
     assert_eq!(opaque.json_schema(&[]), None);
     assert!(opaque.json_schema(&["filter"]).is_some());
+}
+
+mod metadata {
+    use suprnova_live::action::{
+        ActionArgumentField, ActionArgumentSchema, AuthorizationRequirement, TransactionPolicy,
+    };
+    use suprnova_live::identity::{ActionName, ComponentName, ModelField, ViewName};
+    use suprnova_live::metadata::{
+        ActionMetadata, ActionToolMetadata, ComponentMetadata, ContractVersions, FieldMetadata,
+        MetadataErrorKind,
+    };
+    use suprnova_live::snapshot::state::{FieldCategory, StateCodec};
+    use suprnova_live::state::ModelCodec;
+    use suprnova_live::validation::ValidationSelection;
+
+    pub(crate) fn action(name: &str, codec: ModelCodec) -> ActionMetadata {
+        ActionMetadata::new_with_contract(
+            ActionName::parse(name).expect("action"),
+            1,
+            ActionArgumentSchema::new(vec![
+                ActionArgumentField::new(
+                    ModelField::parse("amount").expect("argument"),
+                    codec,
+                    true,
+                )
+                .expect("argument field"),
+            ])
+            .expect("arguments"),
+            AuthorizationRequirement::Current,
+            ValidationSelection::None,
+            TransactionPolicy::None,
+        )
+        .expect("action metadata")
+    }
+
+    pub(crate) fn tool(name: &str) -> ActionToolMetadata {
+        ActionToolMetadata::new(name, "Add to the counter.")
+            .expect("tool metadata")
+            .with_title("Increment")
+            .expect("title")
+            .with_hints(false, false, true)
+            .for_browser(true)
+    }
+
+    pub(crate) fn field(name: &str, category: FieldCategory) -> FieldMetadata {
+        FieldMetadata::new(
+            ModelField::parse(name).expect("field"),
+            category,
+            StateCodec::Json,
+            true,
+        )
+    }
+
+    pub(crate) fn component(
+        fields: Vec<FieldMetadata>,
+        actions: Vec<ActionMetadata>,
+    ) -> ComponentMetadata {
+        ComponentMetadata::new(
+            ComponentName::parse("tests.counter").expect("component"),
+            ViewName::parse("tests/counter.html").expect("view"),
+            ContractVersions::new(1, 1, 1, 1, 1).expect("versions"),
+            fields,
+            actions,
+        )
+        .expect("component metadata")
+    }
+
+    #[test]
+    fn agent_012_tool_metadata_changes_the_digest_only_when_present() {
+        // The digest of a component that declares no tool and marks no field
+        // is the one it had before tools existed, byte for byte, so every
+        // deployed snapshot stays valid.
+        let plain = component(
+            vec![field("count", FieldCategory::State)],
+            vec![action("increment", ModelCodec::I64)],
+        );
+        assert_eq!(
+            plain.contract_digest().to_base64url(),
+            "_hkz7JpgBFiNlO2qVPF02uedM7h13MYF7XKxInZDLVE"
+        );
+
+        let with_tool = component(
+            vec![field("count", FieldCategory::State)],
+            vec![
+                action("increment", ModelCodec::I64)
+                    .with_tool(tool("counter.increment"))
+                    .expect("tool"),
+            ],
+        );
+        assert_ne!(with_tool.contract_digest(), plain.contract_digest());
+        assert_eq!(
+            with_tool.actions()[0].tool().map(ActionToolMetadata::name),
+            Some("counter.increment")
+        );
+
+        let visible = component(
+            vec![
+                field("count", FieldCategory::State)
+                    .with_agent_visible()
+                    .expect("visible"),
+            ],
+            vec![action("increment", ModelCodec::I64)],
+        );
+        assert_ne!(visible.contract_digest(), plain.contract_digest());
+        assert_ne!(visible.contract_digest(), with_tool.contract_digest());
+        assert!(visible.fields()[0].agent_visible());
+
+        // Each declared fact is in the digest.
+        let renamed = component(
+            vec![field("count", FieldCategory::State)],
+            vec![
+                action("increment", ModelCodec::I64)
+                    .with_tool(tool("counter.bump"))
+                    .expect("tool"),
+            ],
+        );
+        assert_ne!(renamed.contract_digest(), with_tool.contract_digest());
+        let headless = component(
+            vec![field("count", FieldCategory::State)],
+            vec![
+                action("increment", ModelCodec::I64)
+                    .with_tool(tool("counter.increment").headless(true))
+                    .expect("tool"),
+            ],
+        );
+        assert_ne!(headless.contract_digest(), with_tool.contract_digest());
+    }
+
+    #[test]
+    fn agent_012_tool_metadata_refuses_what_an_agent_could_not_read() {
+        for name in ["", "has space", "colon:name", &"a".repeat(65)] {
+            assert_eq!(
+                ActionToolMetadata::new(name, "d")
+                    .map(|_| ())
+                    .unwrap_err()
+                    .kind(),
+                MetadataErrorKind::InvalidActionMetadata,
+                "{name:?}"
+            );
+        }
+        assert!(ActionToolMetadata::new("counter.increment", "  ").is_err());
+        assert!(ActionToolMetadata::new(&"a".repeat(64), "d").is_ok());
+
+        // An argument with no schema cannot be part of a tool.
+        assert_eq!(
+            action("increment", ModelCodec::Json)
+                .with_tool(tool("counter.increment"))
+                .map(|_| ())
+                .unwrap_err()
+                .kind(),
+            MetadataErrorKind::InvalidActionMetadata
+        );
+
+        // Only state the instanced snapshot carries can be shown to an agent.
+        for category in [
+            FieldCategory::State,
+            FieldCategory::Public,
+            FieldCategory::Model,
+            FieldCategory::Locked,
+        ] {
+            assert!(field("value", category).with_agent_visible().is_ok());
+        }
+        for category in [
+            FieldCategory::ServerOnly,
+            FieldCategory::Session,
+            FieldCategory::Computed,
+            FieldCategory::Transient,
+            FieldCategory::Secret,
+        ] {
+            assert!(
+                field("value", category).with_agent_visible().is_err(),
+                "{category:?}"
+            );
+        }
+
+        // Two actions of one component cannot share a tool name.
+        let duplicate = ComponentMetadata::new(
+            ComponentName::parse("tests.counter").expect("component"),
+            ViewName::parse("tests/counter.html").expect("view"),
+            ContractVersions::new(1, 1, 1, 1, 1).expect("versions"),
+            vec![],
+            vec![
+                action("increment", ModelCodec::I64)
+                    .with_tool(tool("counter.change"))
+                    .expect("tool"),
+                action("decrement", ModelCodec::I64)
+                    .with_tool(tool("counter.change"))
+                    .expect("tool"),
+            ],
+        );
+        assert_eq!(
+            duplicate.map(|_| ()).unwrap_err().kind(),
+            MetadataErrorKind::InvalidActionMetadata
+        );
+    }
+
+    #[test]
+    fn agent_012_agent_fields_carry_only_marked_fields() {
+        use std::collections::BTreeMap;
+        use suprnova_live::canonical::CanonicalValue;
+        use suprnova_live::metadata::agent_fields;
+
+        let metadata = component(
+            vec![
+                field("count", FieldCategory::State)
+                    .with_agent_visible()
+                    .expect("visible"),
+                field("label", FieldCategory::Public)
+                    .with_agent_visible()
+                    .expect("visible"),
+                field("owner", FieldCategory::Locked),
+                field("draft", FieldCategory::Model)
+                    .with_model_binding(
+                        ModelCodec::String,
+                        suprnova_live::state::BindingTiming::Change,
+                    )
+                    .expect("model binding"),
+            ],
+            vec![action("increment", ModelCodec::I64)],
+        );
+        let state = CanonicalValue::Object(BTreeMap::from([
+            ("count".to_owned(), CanonicalValue::String("3".to_owned())),
+            (
+                "label".to_owned(),
+                CanonicalValue::String("Main".to_owned()),
+            ),
+            (
+                "owner".to_owned(),
+                CanonicalValue::String("alice".to_owned()),
+            ),
+            (
+                "draft".to_owned(),
+                CanonicalValue::String("secret plan".to_owned()),
+            ),
+            ("unexpected".to_owned(), CanonicalValue::Bool(true)),
+        ]));
+        assert_eq!(
+            agent_fields(&metadata, &state),
+            CanonicalValue::Object(BTreeMap::from([
+                ("count".to_owned(), CanonicalValue::String("3".to_owned())),
+                (
+                    "label".to_owned(),
+                    CanonicalValue::String("Main".to_owned())
+                ),
+            ]))
+        );
+        // A component that marks nothing shows nothing.
+        let unmarked = component(
+            vec![field("count", FieldCategory::State)],
+            vec![action("increment", ModelCodec::I64)],
+        );
+        assert_eq!(
+            agent_fields(&unmarked, &state),
+            CanonicalValue::Object(BTreeMap::new())
+        );
+    }
 }
