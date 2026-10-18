@@ -764,6 +764,21 @@ impl Core {
         }
     }
 
+    /// Consume one request from a single budget keyed by `purpose` and
+    /// `identity`. `Ok(Some(_))` is a refusal with the time to wait.
+    pub(crate) async fn admit_one(
+        &self,
+        purpose: &str,
+        identity: &str,
+        policy: crate::abuse::AbusePolicy,
+    ) -> Result<Option<Duration>> {
+        let key = crate::plugins::abuse_key(purpose, identity);
+        match self.limiter.acquire(&key, policy).await? {
+            Permit::Rejected { retry_after } => Ok(Some(retry_after)),
+            Permit::Allowed { .. } => Ok(None),
+        }
+    }
+
     /// Record one audit event. The mutation it describes is committed, so
     /// a failure to enqueue is logged, never answered.
     pub(crate) async fn emit(

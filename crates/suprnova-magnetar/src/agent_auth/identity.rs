@@ -397,6 +397,15 @@ impl Core {
         if exp <= now.timestamp() {
             return Err(agent_error(400, "expired", "the ID-JAG expired"));
         }
+        let max_ahead =
+            i64::try_from(self.config.max_provider_token_lifetime.as_secs()).unwrap_or(i64::MAX);
+        if exp > now.timestamp().saturating_add(max_ahead) {
+            return Err(agent_error(
+                400,
+                "invalid_request",
+                "exp is further ahead than this service accepts; mint a near-term ID-JAG",
+            ));
+        }
         if !audience_matches(claims, &self.audiences) {
             return Err(agent_error(
                 400,
@@ -939,6 +948,29 @@ impl Core {
             ));
         };
         let token_hash = digest(claim_token);
+        // Each attempt mints a user code: budgets per address, then per
+        // claim token, bound how many one party can mint.
+        if let Some(address) = client_address
+            && let Some(retry_after) = self
+                .admit_one(
+                    "agent-auth.claim.address",
+                    address,
+                    self.config.limits.claim_per_address,
+                )
+                .await?
+        {
+            return Ok(rate_limited(retry_after));
+        }
+        if let Some(retry_after) = self
+            .admit_one(
+                "agent-auth.claim.token",
+                &token_hash,
+                self.config.limits.claim_per_token,
+            )
+            .await?
+        {
+            return Ok(rate_limited(retry_after));
+        }
         let Some(record) = self.store.find_by_claim_token(&token_hash).await? else {
             return Ok(agent_error(
                 400,

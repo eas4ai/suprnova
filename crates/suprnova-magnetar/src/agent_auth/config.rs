@@ -179,6 +179,14 @@ pub struct RegistrationLimits {
     /// Assertion exchanges at the token endpoint, per registration: 60 an
     /// hour, one a minute on average, ample for a one-hour access token.
     pub exchange: AbusePolicy,
+    /// Claim attempts per claim token: 10 an hour. Each attempt mints a
+    /// user code, so a leaked claim token cannot mint codes without end.
+    pub claim_per_token: AbusePolicy,
+    /// Claim attempts per client address: 60 an hour.
+    pub claim_per_address: AbusePolicy,
+    /// Security Event Tokens per client address: 120 a minute. Each one
+    /// that names an unseen key can cost a key set fetch.
+    pub events_per_address: AbusePolicy,
 }
 
 impl Default for RegistrationLimits {
@@ -190,6 +198,18 @@ impl Default for RegistrationLimits {
             exchange: AbusePolicy {
                 max_requests: 60,
                 window: Duration::from_secs(3600),
+            },
+            claim_per_token: AbusePolicy {
+                max_requests: 10,
+                window: Duration::from_secs(3600),
+            },
+            claim_per_address: AbusePolicy {
+                max_requests: 60,
+                window: Duration::from_secs(3600),
+            },
+            events_per_address: AbusePolicy {
+                max_requests: 120,
+                window: Duration::from_secs(60),
             },
         }
     }
@@ -266,6 +286,10 @@ pub struct AgentAuthConfig {
     /// How far ahead of this server's clock an `iat` or `auth_time` may be,
     /// two minutes by default.
     pub clock_skew: Duration,
+    /// How far ahead of this server's clock an ID-JAG's or a Security Event
+    /// Token's `exp` may lie, one hour by default: auth.md expects a
+    /// near-term `exp`, and a replay record lives until it.
+    pub max_provider_token_lifetime: Duration,
     /// The oldest Security Event Token the events endpoint accepts, by its
     /// `iat`, 24 hours by default. The replay record of an accepted one
     /// lives as long.
@@ -307,6 +331,7 @@ impl AgentAuthConfig {
             poll_interval: Duration::from_secs(5),
             id_jag_max_auth_age: Duration::from_secs(3600),
             clock_skew: Duration::from_secs(120),
+            max_provider_token_lifetime: Duration::from_secs(3600),
             event_max_age: Duration::from_secs(24 * 3600),
             audiences: Vec::new(),
             default_resource: None,

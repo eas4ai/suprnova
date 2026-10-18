@@ -51,6 +51,39 @@ impl Core {
         body: &[u8],
         client_address: Option<&str>,
     ) -> Result<WireResponse> {
+        // Unauthenticated callers reach this endpoint, and a token naming an
+        // unseen key can cost a key set fetch: each address has a budget.
+        if let Some(address) = client_address {
+            match self
+                .admit_one(
+                    "agent-auth.events.address",
+                    address,
+                    self.config.limits.events_per_address,
+                )
+                .await
+            {
+                Ok(None) => {}
+                Ok(Some(retry_after)) => {
+                    let seconds = retry_after.as_secs().max(1).to_string();
+                    return Ok(respond(
+                        429,
+                        Some(json!({
+                            "err": "rate_limited",
+                            "description": "too many events from this address; retry later",
+                        })),
+                        &[NO_STORE[0], NO_STORE[1], ("retry-after", seconds.as_str())],
+                    ));
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "abuse limiter unavailable; failing closed");
+                    return Ok(respond(
+                        503,
+                        Some(json!({"err": "temporarily_unavailable"})),
+                        &NO_STORE,
+                    ));
+                }
+            }
+        }
         let media = content_type
             .and_then(|value| value.split(';').next())
             .map(str::trim);
@@ -121,6 +154,16 @@ impl Core {
                 "invalid_request",
                 "iat is outside the window this service accepts",
             ));
+        }
+        if let Some(exp) = numeric_date(claims, "exp") {
+            let max_ahead = i64::try_from(self.config.max_provider_token_lifetime.as_secs())
+                .unwrap_or(i64::MAX);
+            if exp <= now.timestamp() || exp > now.timestamp().saturating_add(max_ahead) {
+                return Ok(set_error(
+                    "invalid_request",
+                    "exp is outside the window this service accepts",
+                ));
+            }
         }
         let jti = match claims.get("jti").and_then(Value::as_str) {
             Some(jti) if !jti.is_empty() && jti.len() <= 512 => jti,

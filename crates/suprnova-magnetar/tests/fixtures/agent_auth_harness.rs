@@ -210,6 +210,10 @@ impl FakeKeySets {
         );
     }
 
+    pub fn withdraw(&self, url: &str) {
+        self.documents.lock().remove(url);
+    }
+
     pub fn request_count(&self, url: &str) -> usize {
         self.requests
             .lock()

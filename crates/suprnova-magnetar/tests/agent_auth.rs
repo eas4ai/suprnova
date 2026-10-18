@@ -1117,6 +1117,44 @@ async fn agent_008_key_sets_are_cached_with_one_refetch_on_an_unknown_kid() {
 }
 
 #[tokio::test]
+async fn agent_008_a_failed_key_set_fetch_is_remembered_briefly() {
+    let h = sqlite_harness().await;
+    h.key_sets.withdraw(PROVIDER_JWKS);
+    for subject in ["missing-keys-1", "missing-keys-2", "missing-keys-3"] {
+        let response = present_subject(&h, subject, "missing.keys@example.test").await;
+        assert_eq!(body(&response)["error"], "invalid_signature");
+    }
+    assert_eq!(
+        h.key_sets.request_count(PROVIDER_JWKS),
+        1,
+        "the failure is cached for a minute"
+    );
+}
+
+#[tokio::test]
+async fn agent_008_an_exp_far_ahead_is_refused() {
+    let h = sqlite_harness().await;
+    for exp in [json!(9e15), json!(chrono::Utc::now().timestamp() + 7200)] {
+        let mut claims = h.provider.id_jag_claims("far-exp", "far.exp@example.test");
+        claims.insert("exp".into(), exp.clone());
+        let response = h.present(&h.provider.id_jag(&claims)).await;
+        assert_eq!(status(&response), 400, "exp {exp}: {:?}", body(&response));
+        assert_eq!(body(&response)["error"], "invalid_request", "exp {exp}");
+    }
+    let mut event = h.provider.revocation_event("far-exp");
+    event.insert("exp".into(), json!(9e15));
+    let refused = h
+        .post_bytes(
+            "/agent/event/notify",
+            "application/secevent+jwt",
+            h.provider.event(&event).into_bytes(),
+        )
+        .await;
+    assert_eq!(status(&refused), 400, "{:?}", body(&refused));
+    assert_eq!(body(&refused)["err"], "invalid_request");
+}
+
+#[tokio::test]
 async fn agent_008_a_key_set_on_a_private_address_is_never_fetched() {
     let h = sqlite_harness().await;
     h.resolver.answer(PROVIDER_HOST, &["10.0.0.8"]);
@@ -2179,6 +2217,71 @@ async fn agent_011_registration_is_limited_per_address_and_per_application() {
         .post_json("/agent/identity", json!({"type": "anonymous"}))
         .await;
     assert_eq!(status(&outage), 503);
+}
+
+#[tokio::test]
+async fn agent_011_the_events_endpoint_is_limited_per_address() {
+    let mut options = Options::new();
+    options.config.limits.events_per_address = magnetar::abuse::AbusePolicy {
+        max_requests: 2,
+        window: std::time::Duration::from_secs(60),
+    };
+    let h = sqlite_harness_with(options).await;
+    for subject in ["limited-1", "limited-2"] {
+        let event = h.provider.event(&h.provider.revocation_event(subject));
+        let accepted = h
+            .post_bytes(
+                "/agent/event/notify",
+                "application/secevent+jwt",
+                event.into_bytes(),
+            )
+            .await;
+        assert_eq!(status(&accepted), 202);
+    }
+    let event = h.provider.event(&h.provider.revocation_event("limited-3"));
+    let limited = h
+        .post_bytes(
+            "/agent/event/notify",
+            "application/secevent+jwt",
+            event.into_bytes(),
+        )
+        .await;
+    assert_eq!(status(&limited), 429, "{:?}", body(&limited));
+    assert_eq!(body(&limited)["err"], "rate_limited");
+}
+
+#[tokio::test]
+async fn agent_011_the_claim_endpoint_is_limited_per_claim_token_and_address() {
+    let mut options = Options::new();
+    options.config.limits.claim_per_token = magnetar::abuse::AbusePolicy {
+        max_requests: 2,
+        window: std::time::Duration::from_secs(3600),
+    };
+    options.config.limits.claim_per_address = magnetar::abuse::AbusePolicy {
+        max_requests: 3,
+        window: std::time::Duration::from_secs(3600),
+    };
+    let h = sqlite_harness_with(options).await;
+    let first = h.anonymous().await;
+    let claim_token = first["claim_token"].as_str().expect("claim token");
+    for _ in 0..2 {
+        assert_eq!(
+            status(&h.initiate(claim_token, "limit@example.test").await),
+            200
+        );
+    }
+    let per_token = h.initiate(claim_token, "limit@example.test").await;
+    assert_eq!(status(&per_token), 429, "{:?}", body(&per_token));
+    assert_eq!(body(&per_token)["error"], "rate_limited");
+    let second = h.anonymous().await;
+    let other = second["claim_token"].as_str().expect("claim token");
+    let per_address = h.initiate(other, "limit@example.test").await;
+    assert_eq!(
+        status(&per_address),
+        429,
+        "the address spent its budget: {:?}",
+        body(&per_address)
+    );
 }
 
 #[tokio::test]

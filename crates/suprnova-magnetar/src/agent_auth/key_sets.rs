@@ -41,6 +41,9 @@ pub struct KeySetPolicy {
     pub refetch_interval: Duration,
     /// How many key sets the cache holds at most.
     pub cache_capacity: usize,
+    /// How long a failed fetch is remembered, so tokens that cannot be
+    /// verified do not each cost the provider a request.
+    pub failure_ttl: Duration,
 }
 
 impl Default for KeySetPolicy {
@@ -52,6 +55,7 @@ impl Default for KeySetPolicy {
             max_ttl: Duration::from_secs(24 * 3600),
             refetch_interval: Duration::from_secs(60),
             cache_capacity: 64,
+            failure_ttl: Duration::from_secs(60),
         }
     }
 }
@@ -87,6 +91,9 @@ pub struct KeySetFetcher {
     client: Arc<dyn PinnedHttpClient>,
     policy: KeySetPolicy,
     cache: Mutex<HashMap<String, CachedKeySet>>,
+    /// When each key set's last fetch failed, so the next tokens wait out
+    /// [`KeySetPolicy::failure_ttl`] instead of each fetching again.
+    failures: Mutex<HashMap<String, Instant>>,
     address_allowed: fn(IpAddr) -> bool,
 }
 
@@ -103,6 +110,7 @@ impl KeySetFetcher {
             client,
             policy,
             cache: Mutex::new(HashMap::new()),
+            failures: Mutex::new(HashMap::new()),
             address_allowed: is_public_address,
         }
     }
@@ -140,7 +148,40 @@ impl KeySetFetcher {
                 _ => false,
             }
         };
-        let (keys, ttl) = self.fetch(jwks_uri).await?;
+        let failed_recently = {
+            let failures = match self.failures.lock() {
+                Ok(failures) => failures,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            failures
+                .get(jwks_uri)
+                .is_some_and(|failed| now.duration_since(*failed) < self.policy.failure_ttl)
+        };
+        if failed_recently {
+            return Err(KeySetError::Unavailable(
+                "the last fetch failed; the key set is retried after a pause".to_owned(),
+            ));
+        }
+        let fetched = self.fetch(jwks_uri).await;
+        let mut failures = match self.failures.lock() {
+            Ok(failures) => failures,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let (keys, ttl) = match fetched {
+            Ok(fetched) => {
+                failures.remove(jwks_uri);
+                drop(failures);
+                fetched
+            }
+            Err(error) => {
+                if failures.len() >= self.policy.cache_capacity.max(1) {
+                    failures
+                        .retain(|_, failed| now.duration_since(*failed) < self.policy.failure_ttl);
+                }
+                failures.insert(jwks_uri.to_owned(), Instant::now());
+                return Err(error);
+            }
+        };
         let found = find(&keys, kid);
         self.remember(jwks_uri, keys, ttl, refetch.then_some(now));
         found.ok_or(KeySetError::UnknownKey)
