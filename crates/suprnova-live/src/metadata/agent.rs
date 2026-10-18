@@ -201,11 +201,15 @@ pub fn is_tool_instance_key(key: &str) -> bool {
 }
 
 /// The fields a tool result shows an agent: each agent-visible field of
-/// `metadata`, copied from the instanced `state` in the encoding the
-/// snapshot signs, which is the one the browser runtime reads. Every other
-/// field is left out, whatever `state` holds.
+/// `metadata`, copied from the instanced `state` the snapshot signs, which
+/// the browser runtime reads too. A 64-bit integer field, which the
+/// snapshot carries as a lossless tag, is shown as its decimal string;
+/// every other value as the snapshot carries it. Every field not marked is
+/// left out, whatever `state` holds.
 #[must_use]
 pub fn agent_fields(metadata: &ComponentMetadata, state: &CanonicalValue) -> CanonicalValue {
+    use crate::snapshot::state::{StateCodec, decode_i64, decode_u64};
+
     let CanonicalValue::Object(values) = state else {
         return CanonicalValue::Object(BTreeMap::new());
     };
@@ -215,9 +219,17 @@ pub fn agent_fields(metadata: &ComponentMetadata, state: &CanonicalValue) -> Can
             .iter()
             .filter(|field| field.agent_visible())
             .filter_map(|field| {
-                values
-                    .get(field.name().as_str())
-                    .map(|value| (field.name().as_str().to_owned(), value.clone()))
+                let value = values.get(field.name().as_str())?;
+                let shown = match field.codec() {
+                    StateCodec::I64Decimal => decode_i64(value)
+                        .map(|number| CanonicalValue::String(number.to_string()))
+                        .unwrap_or_else(|_| value.clone()),
+                    StateCodec::U64Decimal => decode_u64(value)
+                        .map(|number| CanonicalValue::String(number.to_string()))
+                        .unwrap_or_else(|_| value.clone()),
+                    _ => value.clone(),
+                };
+                Some((field.name().as_str().to_owned(), shown))
             })
             .collect(),
     )

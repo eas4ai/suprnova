@@ -216,6 +216,53 @@ fn agent_013_argument_field_issues_name_every_field_preparation_refuses() {
 }
 
 #[test]
+fn agent_013_mount_parameters_take_the_snapshot_integer_encoding() {
+    let schema = ChildParameterSchema::new(
+        1,
+        vec![
+            ChildParameterField::new(field("start"), ModelCodec::U64, true),
+            ChildParameterField::new(field("delta"), ModelCodec::I64, true),
+            ChildParameterField::new(field("label"), ModelCodec::String, true),
+        ],
+    )
+    .expect("parameter schema");
+    let limits = InputLimits::default();
+    let encoded = schema
+        .snapshot_parameters(
+            &object(&[
+                ("start", number(7.0)),
+                ("delta", text("-3")),
+                ("label", text("Main")),
+            ]),
+            &limits,
+        )
+        .expect("encodable parameters");
+    assert_eq!(
+        encoded,
+        object(&[
+            ("start", suprnova_live::snapshot::state::encode_u64(7)),
+            ("delta", suprnova_live::snapshot::state::encode_i64(-3)),
+            ("label", text("Main")),
+        ])
+    );
+    // Already encoded parameters stay as they are.
+    assert_eq!(
+        schema.snapshot_parameters(&encoded, &limits).as_ref(),
+        Ok(&encoded)
+    );
+    assert!(
+        schema
+            .snapshot_parameters(&object(&[("start", text("-1"))]), &limits)
+            .is_err()
+    );
+    assert!(
+        schema
+            .snapshot_parameters(&object(&[("other", text("x"))]), &limits)
+            .is_err()
+    );
+}
+
+#[test]
 fn agent_013_parameter_schema_and_issues_exclude_resolver_properties() {
     let schema = ChildParameterSchema::new(
         1,
@@ -524,6 +571,32 @@ mod metadata {
                     CanonicalValue::String("Main".to_owned())
                 ),
             ]))
+        );
+        // A 64-bit integer field, which the snapshot carries as a lossless
+        // tag, is shown as its decimal string.
+        let counted = component(
+            vec![
+                FieldMetadata::new(
+                    suprnova_live::identity::ModelField::parse("total").expect("field"),
+                    FieldCategory::State,
+                    StateCodec::U64Decimal,
+                    true,
+                )
+                .with_agent_visible()
+                .expect("visible"),
+            ],
+            vec![action("increment", ModelCodec::I64)],
+        );
+        let tagged = CanonicalValue::Object(BTreeMap::from([(
+            "total".to_owned(),
+            suprnova_live::snapshot::state::encode_u64(18_446_744_073_709_551_615),
+        )]));
+        assert_eq!(
+            agent_fields(&counted, &tagged),
+            CanonicalValue::Object(BTreeMap::from([(
+                "total".to_owned(),
+                CanonicalValue::String("18446744073709551615".to_owned()),
+            )]))
         );
         // A component that marks nothing shows nothing.
         let unmarked = component(

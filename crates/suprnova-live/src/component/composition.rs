@@ -296,6 +296,52 @@ impl ChildParameterSchema {
         issues
     }
 
+    /// `value` with each parameter in the encoding a signed snapshot
+    /// carries: a 64-bit integer, which [`validate`](Self::validate) takes
+    /// as a number or a decimal string, as its lossless tag, and every other
+    /// value as it is. A mount whose parameters an agent wrote, not a
+    /// template, passes them through this before the snapshot schema checks
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositionErrorKind::InvalidParameters`] for a value that is not
+    /// an object, an unknown parameter, or an integer its codec refuses.
+    pub fn snapshot_parameters(
+        &self,
+        value: &CanonicalValue,
+        limits: &InputLimits,
+    ) -> Result<CanonicalValue, CompositionError> {
+        let invalid = || CompositionError::new(CompositionErrorKind::InvalidParameters);
+        let CanonicalValue::Object(values) = value else {
+            return Err(invalid());
+        };
+        let mut encoded = BTreeMap::new();
+        for (name, value) in values {
+            let field = ModelField::parse(name)
+                .ok()
+                .and_then(|parsed| self.fields.get(&parsed))
+                .ok_or_else(invalid)?;
+            let value = match field.codec {
+                ModelCodec::I64 => crate::snapshot::state::encode_i64(
+                    field
+                        .codec
+                        .decode::<i64>(value, limits)
+                        .map_err(|_| invalid())?,
+                ),
+                ModelCodec::U64 => crate::snapshot::state::encode_u64(
+                    field
+                        .codec
+                        .decode::<u64>(value, limits)
+                        .map_err(|_| invalid())?,
+                ),
+                _ => value.clone(),
+            };
+            encoded.insert(name.clone(), value);
+        }
+        Ok(CanonicalValue::Object(encoded))
+    }
+
     /// The registered parameters, in name order.
     pub fn fields(&self) -> impl ExactSizeIterator<Item = &ChildParameterField> {
         self.fields.values()
