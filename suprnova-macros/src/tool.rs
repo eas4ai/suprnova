@@ -23,7 +23,7 @@
 //!   `schemars`, never from data.
 
 use proc_macro2::{Span, TokenStream};
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use syn::parse::{ParseStream, Parser};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
@@ -128,7 +128,23 @@ pub(crate) fn tool_impl_inner(attr: TokenStream, item: TokenStream) -> TokenStre
         .to_compile_error();
         return quote! { #error #item_fn };
     }
-    let record = record_items(&item_fn, self_ty.as_ref(), &spec);
+    let input_arg = match &spec.input {
+        Some(input) => match handler_argument_of(&item_fn, input) {
+            Some(arg) => Some(arg),
+            None => {
+                let error = syn::Error::new_spanned(
+                    input,
+                    "`input = ...` names a type none of the handler's arguments has: the \
+                     input schema must describe what the route validates, so take the input \
+                     as an argument (`form: Input`) or name the argument's type",
+                )
+                .to_compile_error();
+                return quote! { #error #item_fn };
+            }
+        },
+        None => None,
+    };
+    let record = record_items(&item_fn, self_ty.as_ref(), &spec, input_arg.as_ref());
     match self_ty {
         // Inside an `impl` block the items go into an associated const, the
         // one place an impl item can hold them.
@@ -162,7 +178,12 @@ fn handler_self(attr: &Attribute) -> syn::Result<Option<Type>> {
 }
 
 /// The marker macro, the schema and handler functions, and the record.
-fn record_items(item_fn: &ItemFn, self_ty: Option<&Type>, spec: &ToolSpec) -> TokenStream {
+fn record_items(
+    item_fn: &ItemFn,
+    self_ty: Option<&Type>,
+    spec: &ToolSpec,
+    input_arg: Option<&Type>,
+) -> TokenStream {
     let name = &spec.name;
     let description = &spec.description;
     let marker = format_ident!(
@@ -219,6 +240,22 @@ fn record_items(item_fn: &ItemFn, self_ty: Option<&Type>, spec: &ToolSpec) -> To
     let idempotent = hint(spec.annotations.idempotent);
     let open_world = hint(spec.annotations.open_world);
     let untrusted_content = hint(spec.annotations.untrusted_content);
+    // The declared input is the very type of the handler's argument: a
+    // look-alike of the same name elsewhere is a type mismatch here.
+    let input_check = match (input_arg, &spec.input) {
+        (Some(arg), Some(input)) => {
+            let value = quote_spanned! {input.span()=> value };
+            quote! {
+                #[allow(dead_code)]
+                fn __suprnova_tool_input_is_the_handlers(
+                    value: ::core::marker::PhantomData<#arg>,
+                ) -> ::core::marker::PhantomData<#input> {
+                    #value
+                }
+            }
+        }
+        _ => TokenStream::new(),
+    };
     quote! {
         // A second tool of this name in the crate exports a second macro of
         // this name, which the compiler refuses (AGENT-001).
@@ -229,6 +266,7 @@ fn record_items(item_fn: &ItemFn, self_ty: Option<&Type>, spec: &ToolSpec) -> To
         }
 
         const _: () = {
+            #input_check
             fn __suprnova_tool_handler() -> ::std::any::TypeId {
                 ::suprnova::routing::__type_id_of(&#handler)
             }
@@ -256,6 +294,30 @@ fn record_items(item_fn: &ItemFn, self_ty: Option<&Type>, spec: &ToolSpec) -> To
                 })
             }
         };
+    }
+}
+
+/// The type of the handler argument whose type has the same last path
+/// segment as `input`, when one has.
+fn handler_argument_of(item_fn: &ItemFn, input: &Type) -> Option<Type> {
+    let wanted = last_segment(input)?;
+    item_fn.sig.inputs.iter().find_map(|arg| match arg {
+        syn::FnArg::Typed(typed) if last_segment(&typed.ty).as_deref() == Some(&wanted) => {
+            Some((*typed.ty).clone())
+        }
+        _ => None,
+    })
+}
+
+/// The last segment of a type path, with its generic arguments, as text.
+fn last_segment(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Path(path) if path.qself.is_none() => path
+            .path
+            .segments
+            .last()
+            .map(|segment| quote!(#segment).to_string().replace(' ', "")),
+        _ => None,
     }
 }
 
@@ -424,6 +486,15 @@ fn parse_spec(attr: TokenStream) -> syn::Result<ToolSpec> {
         }
         seen.push(text);
     }
+    if seen.iter().any(|caller| caller == "public")
+        && let Some(first) = scopes.first()
+    {
+        return Err(syn::Error::new_spanned(
+            first,
+            "a tool that accepts `public` callers cannot declare scopes: a guest calls it \
+             without a token, so a scope would protect nothing; drop `public` or the scopes",
+        ));
+    }
     Ok(ToolSpec {
         name,
         description,
@@ -557,6 +628,31 @@ mod tests {
         let long = "a".repeat(129);
         let out = expand(quote! { name = #long, description = "d", callers = [user] });
         assert!(out.contains("1 to 128"), "{out}");
+    }
+
+    #[test]
+    fn agent_002_a_public_tool_cannot_declare_scopes() {
+        let out = expand(quote! {
+            name = "x", description = "d", callers = [public, user], scopes = [scope::READ]
+        });
+        assert!(out.contains("cannot declare scopes"), "{out}");
+        let out = expand(quote! {
+            name = "x", description = "d", callers = [user], scopes = [scope::READ]
+        });
+        assert!(!out.contains("compile_error"), "{out}");
+    }
+
+    #[test]
+    fn agent_001_input_must_be_a_handler_argument() {
+        let out = tool_impl_inner(
+            quote! { name = "x", description = "d", callers = [user], input = Other },
+            quote! {
+                #[handler]
+                pub async fn store(form: Mine) -> Response { body() }
+            },
+        )
+        .to_string();
+        assert!(out.contains("none of the handler's arguments"), "{out}");
     }
 
     #[test]
