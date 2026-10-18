@@ -1997,29 +1997,27 @@ async fn agent_009_a_claimed_token_that_is_never_polled_expires() {
     assert_eq!(body(&late)["error"], "expired_token");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_009_a_claim_racing_an_exchange_leaves_no_pre_claim_token() {
-    let h = Arc::new(sqlite_harness().await);
-    for round in 0..4 {
+    let mut options = Options::new();
+    options.config.limits.anonymous = RegistrationLimit::per_hour(100, 1000);
+    let h = Arc::new(sqlite_harness_with(options).await);
+    for round in 0..12 {
+        // Odd rounds race an exchange that reuses an existing pre-claim
+        // grant; even rounds race the registration's first exchange.
+        let reuse = round % 2 == 1;
         let email = format!("race{round}@example.test");
         let registration = h.anonymous().await;
         let v1 = registration["identity_assertion"]
             .as_str()
             .expect("v1")
             .to_owned();
-        let claim_token = registration["claim_token"].as_str().expect("claim token");
-        let user_id = h.create_user(&email, true).await;
-        let bearer = h.sign_in(&user_id).await;
-        let started = body(&h.initiate(claim_token, &email).await);
-        let attempt = attempt_token(
-            started["claim_attempt"]["verification_uri"]
-                .as_str()
-                .expect("uri"),
-        );
-        let code = started["claim_attempt"]["user_code"]
-            .as_str()
-            .expect("code")
-            .to_owned();
+        let earlier = if reuse {
+            Some(access_token(&h.exchange(&v1).await))
+        } else {
+            None
+        };
+        let (bearer, attempt, code) = start_claim(&h, &registration, &email).await;
         let exchange = tokio::spawn({
             let (h, v1) = (h.clone(), v1.clone());
             async move { h.exchange(&v1).await }
@@ -2031,15 +2029,20 @@ async fn agent_009_a_claim_racing_an_exchange_leaves_no_pre_claim_token() {
         let exchanged = exchange.await.expect("the exchange");
         let confirmed = confirm.await.expect("the confirmation");
         assert_eq!(status(&confirmed), 200, "{:?}", body(&confirmed));
+        let mut pre_claim: Vec<String> = earlier.into_iter().collect();
         if status(&exchanged) == 200 {
-            let token = body(&exchanged)["access_token"]
-                .as_str()
-                .expect("access")
-                .to_owned();
+            pre_claim.push(
+                body(&exchanged)["access_token"]
+                    .as_str()
+                    .expect("access")
+                    .to_owned(),
+            );
+        }
+        for token in pre_claim {
             assert_eq!(
                 h.verify(&token).await,
                 revoked(),
-                "round {round}: a pre-claim token outlived the claim"
+                "round {round} (reuse {reuse}): a pre-claim token outlived the claim"
             );
         }
         assert_eq!(body(&h.exchange(&v1).await)["error"], "invalid_grant");
