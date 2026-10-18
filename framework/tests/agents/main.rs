@@ -11,12 +11,14 @@ mod own_process;
 mod own_process_async;
 
 mod fixture;
+mod live_fixture;
 
 mod auth;
 mod build;
 mod callers;
 mod dispatch;
 mod endpoint;
+mod live_headless;
 mod marker;
 mod registry;
 mod schema;

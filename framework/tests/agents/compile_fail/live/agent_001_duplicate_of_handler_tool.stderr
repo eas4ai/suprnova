@@ -1,0 +1,11 @@
+error[E0428]: the name `__suprnova_tool_counter_2eadd` is defined multiple times
+  --> tests/agents/compile_fail/live/agent_001_duplicate_of_handler_tool.rs:16:1
+   |
+ 4 | #[tool(name = "counter.add", description = "Add over HTTP.", callers = [user])]
+   | ------------------------------------------------------------------------------- previous definition of the macro `__suprnova_tool_counter_2eadd` here
+...
+16 | #[live]
+   | ^^^^^^^ `__suprnova_tool_counter_2eadd` redefined here
+   |
+   = note: `__suprnova_tool_counter_2eadd` must be defined only once in the macro namespace of this module
+   = note: this error originates in the attribute macro `live` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -1,0 +1,19 @@
+error[E0425]: cannot find value `COUNTER_WRITE` in module `scope`
+  --> tests/agents/compile_fail/live/agent_002_undeclared_scope.rs:22:26
+   |
+ 3 | / suprnova::tool_scopes! {
+ 4 | |     /// The scopes of this application.
+ 5 | |     pub mod scope {
+ 6 | |         COUNTER_READ = "counter:read" => "Read your counters";
+ 7 | |     }
+ 8 | | }
+   | |_- similarly named constant `COUNTER_READ` defined here
+...
+22 |           scopes = [scope::COUNTER_WRITE],
+   |                            ^^^^^^^^^^^^^
+   |
+help: a constant with a similar name exists
+   |
+22 -         scopes = [scope::COUNTER_WRITE],
+22 +         scopes = [scope::COUNTER_READ],
+   |
