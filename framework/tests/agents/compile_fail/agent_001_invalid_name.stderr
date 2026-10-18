@@ -1,0 +1,11 @@
+error: a tool name uses ASCII letters, digits, `_`, `-` and `.` only; `posts create` contains ' '
+ --> tests/agents/compile_fail/agent_001_invalid_name.rs:4:15
+  |
+4 | #[tool(name = "posts create", description = "A space in the name.", callers = [public])]
+  |               ^^^^^^^^^^^^^^
+
+error: a tool name has 1 to 128 characters; `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` has 129
+  --> tests/agents/compile_fail/agent_001_invalid_name.rs:11:12
+   |
+11 | ... = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
