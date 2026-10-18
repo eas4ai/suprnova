@@ -18,8 +18,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sea_orm::sea_query::{Alias, Expr, Index};
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, DbBackend,
-    EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect, Schema,
+    ActiveValue::Set, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
+    DatabaseTransaction, DbBackend, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect,
+    Schema, TransactionTrait,
 };
 
 use super::store::{
@@ -87,6 +88,10 @@ pub mod registrations {
         pub client_address: Option<String>,
         #[sea_orm(column_type = "Boolean")]
         pub cleanup_pending: bool,
+        /// Moved by every grant reservation and mint guard, so the update
+        /// that takes the row lock always changes the row.
+        #[sea_orm(column_type = "BigInteger")]
+        pub grant_generation: i64,
         pub created_at: DateTimeUtc,
         #[sea_orm(nullable)]
         pub claimed_at: Option<DateTimeUtc>,
@@ -344,6 +349,53 @@ fn record(model: registrations::Model) -> RegistrationRecord {
     }
 }
 
+/// Lock a registration row inside `transaction` and check its state: an
+/// update that moves `grant_generation` only while the row still has
+/// `status` and `version`. The update always changes the row, so every
+/// engine counts it as affected, and the row stays locked until the
+/// transaction ends; a claim's update of the same row waits for it, or
+/// makes this one match nothing.
+async fn lock_registration(
+    transaction: &DatabaseTransaction,
+    id: &str,
+    status: &str,
+    version: i32,
+) -> Result<bool> {
+    let locked = registrations::Entity::update_many()
+        .col_expr(
+            registrations::Column::GrantGeneration,
+            Expr::col(registrations::Column::GrantGeneration).add(1),
+        )
+        .filter(registrations::Column::Id.eq(id.to_owned()))
+        .filter(registrations::Column::Status.eq(status.to_owned()))
+        .filter(registrations::Column::AssertionVersion.eq(version))
+        .exec(transaction)
+        .await
+        .map_err(db_error)?;
+    Ok(locked.rows_affected == 1)
+}
+
+/// Commit what the transaction decided to keep, roll back everything else.
+async fn finish_transaction(
+    transaction: DatabaseTransaction,
+    outcome: Result<bool>,
+) -> Result<bool> {
+    match outcome {
+        Ok(true) => {
+            transaction.commit().await.map_err(db_error)?;
+            Ok(true)
+        }
+        Ok(false) => {
+            transaction.rollback().await.map_err(db_error)?;
+            Ok(false)
+        }
+        Err(error) => {
+            let _ = transaction.rollback().await;
+            Err(error)
+        }
+    }
+}
+
 /// The key of a registration's grant row for one resource: short and
 /// fixed-length whatever the resource's length, so it indexes on MySQL.
 fn grant_key(registration_id: &str, resource: &str) -> String {
@@ -422,6 +474,7 @@ impl AgentAuthStore for SqlAgentAuthStore {
             auth_epoch: Set(epoch_to_db(record.auth_epoch)?),
             client_address: Set(record.client_address),
             cleanup_pending: Set(record.cleanup_pending),
+            grant_generation: Set(0),
             created_at: Set(record.created_at),
             claimed_at: Set(record.claimed_at),
             revoked_at: Set(record.revoked_at),
@@ -705,12 +758,7 @@ impl AgentAuthStore for SqlAgentAuthStore {
     async fn finish_cleanup(&self, id: &str, release_delegation: bool) -> Result<()> {
         let mut update = registrations::Entity::update_many()
             .col_expr(registrations::Column::CleanupPending, Expr::value(false))
-            .filter(registrations::Column::Id.eq(id.to_owned()))
-            .filter(
-                Condition::any()
-                    .add(registrations::Column::Status.eq(STATUS_REVOKED))
-                    .add(registrations::Column::Status.eq(STATUS_EXPIRED)),
-            );
+            .filter(registrations::Column::Id.eq(id.to_owned()));
         if release_delegation {
             update = update.col_expr(
                 registrations::Column::DelegationKey,
@@ -809,41 +857,88 @@ impl AgentAuthStore for SqlAgentAuthStore {
         &self,
         record: AgentGrantRecord,
         expected: Option<&str>,
+        status: &str,
+        assertion_version: u32,
     ) -> Result<bool> {
-        let key = grant_key(&record.registration_id, &record.resource);
-        let scopes = record.scopes.join(" ");
-        match expected {
-            // The primary key lets one first grant per resource in.
-            None => match agent_grants::Entity::insert(agent_grants::ActiveModel {
-                id: Set(key),
-                registration_id: Set(record.registration_id),
-                resource: Set(record.resource),
-                grant_id: Set(record.grant_id),
-                user_id: Set(record.user_id),
-                scopes: Set(scopes),
-                created_at: Set(Utc::now()),
-            })
-            .exec(&self.db)
-            .await
-            {
-                Ok(_) => Ok(true),
-                Err(error) if is_unique_violation(&error) => Ok(false),
-                Err(error) => Err(db_error(error)),
-            },
-            // A replacement moves the row only from the grant it read.
-            Some(expected) => {
-                let moved = agent_grants::Entity::update_many()
-                    .col_expr(agent_grants::Column::GrantId, Expr::value(record.grant_id))
-                    .col_expr(agent_grants::Column::UserId, Expr::value(record.user_id))
-                    .col_expr(agent_grants::Column::Scopes, Expr::value(scopes))
-                    .filter(agent_grants::Column::Id.eq(key))
-                    .filter(agent_grants::Column::GrantId.eq(expected.to_owned()))
-                    .exec(&self.db)
-                    .await
-                    .map_err(db_error)?;
-                Ok(moved.rows_affected == 1)
+        let version = to_i32(assertion_version, "assertion_version")?;
+        let transaction = self.db.begin().await.map_err(db_error)?;
+        let outcome = async {
+            if !lock_registration(&transaction, &record.registration_id, status, version).await? {
+                return Ok(false);
+            }
+            let key = grant_key(&record.registration_id, &record.resource);
+            let scopes = record.scopes.join(" ");
+            match expected {
+                // The primary key lets one first grant per resource in.
+                None => match agent_grants::Entity::insert(agent_grants::ActiveModel {
+                    id: Set(key),
+                    registration_id: Set(record.registration_id),
+                    resource: Set(record.resource),
+                    grant_id: Set(record.grant_id),
+                    user_id: Set(record.user_id),
+                    scopes: Set(scopes),
+                    created_at: Set(Utc::now()),
+                })
+                .exec(&transaction)
+                .await
+                {
+                    Ok(_) => Ok(true),
+                    Err(error) if is_unique_violation(&error) => Ok(false),
+                    Err(error) => Err(db_error(error)),
+                },
+                // A replacement moves the row only from the grant it read.
+                Some(expected) => {
+                    let moved = agent_grants::Entity::update_many()
+                        .col_expr(agent_grants::Column::GrantId, Expr::value(record.grant_id))
+                        .col_expr(agent_grants::Column::UserId, Expr::value(record.user_id))
+                        .col_expr(agent_grants::Column::Scopes, Expr::value(scopes))
+                        .filter(agent_grants::Column::Id.eq(key))
+                        .filter(agent_grants::Column::GrantId.eq(expected.to_owned()))
+                        .exec(&transaction)
+                        .await
+                        .map_err(db_error)?;
+                    Ok(moved.rows_affected == 1)
+                }
             }
         }
+        .await;
+        finish_transaction(transaction, outcome).await
+    }
+
+    async fn guard_mint(
+        &self,
+        registration_id: &str,
+        resource: &str,
+        grant_id: &str,
+        status: &str,
+        assertion_version: u32,
+    ) -> Result<bool> {
+        let version = to_i32(assertion_version, "assertion_version")?;
+        let transaction = self.db.begin().await.map_err(db_error)?;
+        let outcome = async {
+            if !lock_registration(&transaction, registration_id, status, version).await? {
+                return Ok(false);
+            }
+            Ok(
+                agent_grants::Entity::find_by_id(grant_key(registration_id, resource))
+                    .one(&transaction)
+                    .await
+                    .map_err(db_error)?
+                    .is_some_and(|grant| grant.grant_id == grant_id),
+            )
+        }
+        .await;
+        finish_transaction(transaction, outcome).await
+    }
+
+    async fn mark_cleanup_pending(&self, id: &str) -> Result<()> {
+        registrations::Entity::update_many()
+            .col_expr(registrations::Column::CleanupPending, Expr::value(true))
+            .filter(registrations::Column::Id.eq(id.to_owned()))
+            .exec(&self.db)
+            .await
+            .map_err(db_error)?;
+        Ok(())
     }
 
     async fn replay_recorded(&self, key: &str, now: DateTime<Utc>) -> Result<bool> {

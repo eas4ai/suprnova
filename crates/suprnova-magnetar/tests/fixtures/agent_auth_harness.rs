@@ -325,6 +325,7 @@ pub struct Faults {
     failures: Mutex<HashMap<&'static str, u32>>,
     losses: Mutex<HashMap<&'static str, u32>>,
     gates: Mutex<HashMap<&'static str, Gate>>,
+    gates_before: Mutex<HashMap<&'static str, Gate>>,
 }
 
 impl Faults {
@@ -348,6 +349,24 @@ impl Faults {
             .lock()
             .insert(method, (reached.clone(), release.clone()));
         (reached, release)
+    }
+
+    /// Pause the next call of `method` before it runs.
+    pub fn gate_before(&self, method: &'static str) -> Gate {
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        self.gates_before
+            .lock()
+            .insert(method, (reached.clone(), release.clone()));
+        (reached, release)
+    }
+
+    async fn pass_before(&self, method: &'static str) {
+        let gate = self.gates_before.lock().remove(method);
+        if let Some((reached, release)) = gate {
+            reached.notify_one();
+            release.notified().await;
+        }
     }
 
     async fn pass(&self, method: &'static str) {
@@ -397,7 +416,9 @@ impl AgentAuthStore for FlakyAgentStore {
     }
     async fn find_registration(&self, id: &str) -> Result<Option<RegistrationRecord>> {
         self.faults.check("find_registration")?;
-        self.inner.find_registration(id).await
+        let found = self.inner.find_registration(id).await;
+        self.faults.pass("find_registration").await;
+        found
     }
     async fn find_by_claim_token(&self, hash: &str) -> Result<Option<RegistrationRecord>> {
         self.faults.check("find_by_claim_token")?;
@@ -451,6 +472,7 @@ impl AgentAuthStore for FlakyAgentStore {
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
         self.faults.check("confirm_claim")?;
+        self.faults.pass_before("confirm_claim").await;
         let confirmed = self
             .inner
             .confirm_claim(
@@ -537,9 +559,36 @@ impl AgentAuthStore for FlakyAgentStore {
         &self,
         record: AgentGrantRecord,
         expected: Option<&str>,
+        status: &str,
+        assertion_version: u32,
     ) -> Result<bool> {
         self.faults.check("reserve_grant")?;
-        self.inner.reserve_grant(record, expected).await
+        self.inner
+            .reserve_grant(record, expected, status, assertion_version)
+            .await
+    }
+    async fn guard_mint(
+        &self,
+        registration_id: &str,
+        resource: &str,
+        grant_id: &str,
+        status: &str,
+        assertion_version: u32,
+    ) -> Result<bool> {
+        self.faults.check("guard_mint")?;
+        self.inner
+            .guard_mint(
+                registration_id,
+                resource,
+                grant_id,
+                status,
+                assertion_version,
+            )
+            .await
+    }
+    async fn mark_cleanup_pending(&self, id: &str) -> Result<()> {
+        self.faults.check("mark_cleanup_pending")?;
+        self.inner.mark_cleanup_pending(id).await
     }
     async fn replay_recorded(&self, key: &str, now: chrono::DateTime<chrono::Utc>) -> Result<bool> {
         self.faults.check("replay_recorded")?;

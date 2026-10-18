@@ -2073,6 +2073,155 @@ async fn start_claim(h: &Harness, registration: &Value, email: &str) -> (String,
     (bearer, attempt, code)
 }
 
+/// Drop a grant and its tokens from the authorization server's tables, as
+/// pruning does, so the next exchange replaces it.
+async fn prune_grant(h: &Harness, grant_id: &str) {
+    use magnetar::authorization_server::sql::{grants, tokens};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    tokens::Entity::delete_many()
+        .filter(tokens::Column::GrantId.eq(grant_id.to_owned()))
+        .exec(&h.db)
+        .await
+        .expect("drop the tokens");
+    grants::Entity::delete_many()
+        .filter(grants::Column::Id.eq(grant_id.to_owned()))
+        .exec(&h.db)
+        .await
+        .expect("drop the grant");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_009_a_claim_revokes_a_pre_claim_grant_an_exchange_made_while_it_ran() {
+    for replace in [false, true] {
+        let (options, faults) = faulty();
+        let h = Arc::new(sqlite_harness_with(options).await);
+        let registration = h.anonymous().await;
+        let id = registration["registration_id"].as_str().expect("id");
+        let v1 = registration["identity_assertion"]
+            .as_str()
+            .expect("v1")
+            .to_owned();
+        if replace {
+            // An earlier grant the next exchange has to replace.
+            access_token(&h.exchange(&v1).await);
+            prune_grant(&h, &grants_of(&h, id).await[0].0).await;
+        }
+        let (bearer, attempt, code) =
+            start_claim(&h, &registration, &format!("ran{replace}@example.test")).await;
+        // The claim has read what it reads and waits to commit.
+        let (reached, release) = faults.gate_before("confirm_claim");
+        let confirm = tokio::spawn({
+            let h = h.clone();
+            async move { h.confirm(&attempt, &code, Some(&bearer)).await }
+        });
+        reached.notified().await;
+        // An exchange makes a pre-claim grant and mints on it now.
+        let token = access_token(&h.exchange(&v1).await);
+        release.notify_one();
+        assert_eq!(status(&confirm.await.expect("the confirmation")), 200);
+        assert_eq!(
+            h.verify(&token).await,
+            revoked(),
+            "replace {replace}: a pre-claim token outlived the claim"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_007_an_exchange_never_creates_a_pre_claim_grant_for_a_claimed_registration() {
+    let (options, faults) = faulty();
+    let h = Arc::new(sqlite_harness_with(options).await);
+    let registration = h.anonymous().await;
+    let id = registration["registration_id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let v1 = registration["identity_assertion"]
+        .as_str()
+        .expect("v1")
+        .to_owned();
+    let (bearer, attempt, code) = start_claim(&h, &registration, "guard.create@example.test").await;
+    // The exchange reads the unclaimed row, then waits.
+    let (reached, release) = faults.gate("find_registration");
+    let exchange = tokio::spawn({
+        let (h, v1) = (h.clone(), v1.clone());
+        async move { h.exchange(&v1).await }
+    });
+    reached.notified().await;
+    assert_eq!(
+        status(&h.confirm(&attempt, &code, Some(&bearer)).await),
+        200
+    );
+    release.notify_one();
+    let exchanged = exchange.await.expect("the exchange");
+    assert_eq!(
+        body(&exchanged)["error"],
+        "invalid_grant",
+        "{:?}",
+        body(&exchanged)
+    );
+    assert!(
+        grants_of(&h, &id).await.is_empty(),
+        "the database refused the pre-claim grant before it existed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_007_an_exchange_never_extends_a_pre_claim_grant_for_a_claimed_registration() {
+    use magnetar::authorization_server::sql::tokens;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let (options, faults) = faulty();
+    let h = Arc::new(sqlite_harness_with(options).await);
+    let registration = h.anonymous().await;
+    let id = registration["registration_id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let v1 = registration["identity_assertion"]
+        .as_str()
+        .expect("v1")
+        .to_owned();
+    let earlier = access_token(&h.exchange(&v1).await);
+    let grant = grants_of(&h, &id).await[0].0.clone();
+    let (bearer, attempt, code) = start_claim(&h, &registration, "guard.extend@example.test").await;
+    let (reached, release) = faults.gate("find_registration");
+    let exchange = tokio::spawn({
+        let (h, v1) = (h.clone(), v1.clone());
+        async move { h.exchange(&v1).await }
+    });
+    reached.notified().await;
+    // The claim commits, and its revocation of the pre-claim grant fails.
+    faults.fail("revoke_grant", 2);
+    assert_eq!(
+        status(&h.confirm(&attempt, &code, Some(&bearer)).await),
+        200
+    );
+    release.notify_one();
+    let exchanged = exchange.await.expect("the exchange");
+    assert_eq!(
+        body(&exchanged)["error"],
+        "invalid_grant",
+        "{:?}",
+        body(&exchanged)
+    );
+    let minted = tokens::Entity::find()
+        .filter(tokens::Column::GrantId.eq(grant))
+        .all(&h.db)
+        .await
+        .expect("read tokens");
+    assert_eq!(minted.len(), 1, "nothing was minted on the pre-claim grant");
+    // The failed revocation is finished by the agent's next request.
+    h.forget_polls().await;
+    assert_eq!(
+        status(
+            &h.poll(registration["claim_token"].as_str().expect("claim token"))
+                .await
+        ),
+        200
+    );
+    assert_eq!(h.verify(&earlier).await, revoked());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_009_a_poll_between_the_claim_and_its_tail_keeps_its_token() {
     let (options, faults) = faulty();

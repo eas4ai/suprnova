@@ -332,6 +332,12 @@ impl GrantHandler for ClaimGrant {
                 "the resource is not served here",
             ));
         };
+        if record.cleanup_pending {
+            // A claim whose revocation of the pre-claim grants failed is
+            // finished before anything is issued.
+            core.finish_pending_cleanup(issuer, &record, request.client_address())
+                .await;
+        }
         let claimed = record.status == STATUS_CLAIMED;
         if record.status == STATUS_EXPIRED
             || (!claimed && record.claim_expires_at.is_none_or(|window| window <= now))

@@ -211,9 +211,10 @@ pub trait AgentAuthStore: Send + Sync {
     /// before `now` expired, its clean-up pending. Returns whether this
     /// call did.
     async fn expire_registration(&self, id: &str, now: DateTime<Utc>) -> Result<bool>;
-    /// Record that a revoked or expired registration's grant is revoked:
-    /// clear the pending clean-up and, with `release_delegation`, the
-    /// delegation, so the provider identity can link again.
+    /// Record that the grants a revocation, an expiry or a claim had to end
+    /// are revoked: clear the pending clean-up and, with
+    /// `release_delegation`, the delegation, so the provider identity can
+    /// link again.
     async fn finish_cleanup(&self, id: &str, release_delegation: bool) -> Result<()>;
     /// Up to `limit` registrations to expire: unclaimed or pending ones
     /// whose window passed before `now`, and expired ones whose clean-up
@@ -234,10 +235,36 @@ pub trait AgentAuthStore: Send + Sync {
     /// authorization server serves.
     async fn grants_of(&self, registration_id: &str) -> Result<Vec<AgentGrantRecord>>;
     /// Record `record` as the registration's grant for its resource, only
-    /// while the recorded grant is still `expected` (none when `None`).
-    /// Written before the grant is issued. Returns whether this call won.
-    async fn reserve_grant(&self, record: AgentGrantRecord, expected: Option<&str>)
-    -> Result<bool>;
+    /// while the recorded grant is still `expected` (none when `None`) and
+    /// the registration still has `status` and `assertion_version`: in one
+    /// transaction that locks the registration row first, so a claim and a
+    /// reservation are ordered by the database and a claimed registration
+    /// never gains a pre-claim grant. Written before the grant is issued.
+    /// Returns whether this call won.
+    async fn reserve_grant(
+        &self,
+        record: AgentGrantRecord,
+        expected: Option<&str>,
+        status: &str,
+        assertion_version: u32,
+    ) -> Result<bool>;
+    /// Before minting on the registration's grant for `resource`: lock the
+    /// registration row and confirm, in one transaction, that it still has
+    /// `status` and `assertion_version` and that the grant is still
+    /// `grant_id`. A claim that commits first makes this refuse; one that
+    /// commits after it revokes what is minted. Returns whether the mint may
+    /// go ahead.
+    async fn guard_mint(
+        &self,
+        registration_id: &str,
+        resource: &str,
+        grant_id: &str,
+        status: &str,
+        assertion_version: u32,
+    ) -> Result<bool>;
+    /// Mark a registration's clean-up pending, after a claim whose
+    /// revocation of the pre-claim grants failed.
+    async fn mark_cleanup_pending(&self, id: &str) -> Result<()>;
     /// Whether a provider token's identifier is recorded and not yet
     /// expired at `now`.
     async fn replay_recorded(&self, key: &str, now: DateTime<Utc>) -> Result<bool>;

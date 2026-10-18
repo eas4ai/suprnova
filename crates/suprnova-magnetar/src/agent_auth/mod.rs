@@ -838,6 +838,29 @@ impl Core {
             .await
     }
 
+    /// Revoke every grant of a registration that is not bound to `user_id`:
+    /// after a claim, the pre-claim grants, whichever exchange made them,
+    /// read after the claim committed. A grant bound to the claiming user,
+    /// such as one a poll made in between, is kept. Returns how many were
+    /// live.
+    pub(crate) async fn revoke_unbound_grants(
+        &self,
+        issuer: &TokenIssuer<'_>,
+        registration_id: &str,
+        user_id: Option<&str>,
+    ) -> Result<u64> {
+        let unbound: Vec<String> = self
+            .store
+            .grants_of(registration_id)
+            .await?
+            .into_iter()
+            .filter(|grant| grant.user_id.as_deref() != user_id || user_id.is_none())
+            .map(|grant| grant.grant_id)
+            .collect();
+        self.revoke_grant_ids(issuer, registration_id, &unbound)
+            .await
+    }
+
     /// Revoke the named grants of a registration, as
     /// [`revoke_grants`](Self::revoke_grants) does.
     pub(crate) async fn revoke_grant_ids(
@@ -940,6 +963,15 @@ impl Core {
             self.end_registration(issuer, record, client_address, &[])
                 .await
                 .map(|_| ())
+        } else if Self::is_bound(record) {
+            // A claim whose revocation of the pre-claim grants failed.
+            match self
+                .revoke_unbound_grants(issuer, &record.id, record.user_id.as_deref())
+                .await
+            {
+                Ok(_) => self.store.finish_cleanup(&record.id, false).await,
+                Err(error) => Err(error),
+            }
         } else {
             match self.revoke_grants(issuer, &record.id).await {
                 Ok(_) => self.store.finish_cleanup(&record.id, false).await,
@@ -987,13 +1019,35 @@ impl Core {
         if let Some(grant) = &current
             && grant.scopes == entitlement
             && grant.user_id.as_deref() == user_id
-            && let Some(response) = issuer
+        {
+            // The database confirms, under the registration's row lock,
+            // that the registration is still as read: a claim that
+            // committed meanwhile stops the mint here, and one that commits
+            // after this revokes what is minted.
+            if !self
+                .store
+                .guard_mint(
+                    &record.id,
+                    &resource,
+                    &grant.grant_id,
+                    &record.status,
+                    record.assertion_version,
+                )
+                .await
+                .map_err(storage_failure)?
+            {
+                return Err(TokenError::invalid_grant(
+                    "the registration changed while the token was issued",
+                ));
+            }
+            if let Some(response) = issuer
                 .issue_on_grant(&grant.grant_id, &owner, user_id, &requested, &resource)
                 .await?
-        {
-            self.confirm_unchanged(issuer, record, &grant.grant_id, &response)
-                .await?;
-            return Ok((response, grant.grant_id.clone()));
+            {
+                self.confirm_unchanged(issuer, record, &grant.grant_id, &response)
+                    .await?;
+                return Ok((response, grant.grant_id.clone()));
+            }
         }
         // The grant for this resource is absent, no longer lives, or was
         // issued for an entitlement that changed: a live one ends before
@@ -1016,6 +1070,8 @@ impl Core {
                     scopes: entitlement.clone(),
                 },
                 current.as_ref().map(|grant| grant.grant_id.as_str()),
+                &record.status,
+                record.assertion_version,
             )
             .await
             .map_err(storage_failure)?
@@ -1029,6 +1085,17 @@ impl Core {
                 .map_err(storage_failure)?
                 && winner.scopes == entitlement
                 && winner.user_id.as_deref() == user_id
+                && self
+                    .store
+                    .guard_mint(
+                        &record.id,
+                        &resource,
+                        &winner.grant_id,
+                        &record.status,
+                        record.assertion_version,
+                    )
+                    .await
+                    .map_err(storage_failure)?
                 && let Some(response) = issuer
                     .issue_on_grant(&winner.grant_id, &owner, user_id, &requested, &resource)
                     .await?

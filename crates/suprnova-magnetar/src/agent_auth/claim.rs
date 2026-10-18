@@ -245,16 +245,6 @@ impl Core {
                 &HEADERS,
             ));
         }
-        // The pre-claim grants, read before the claim commits: the tail
-        // revokes these and nothing else, so a grant a poll issues for the
-        // claimed registration in between survives.
-        let pre_claim: Vec<String> = self
-            .store
-            .grants_of(&record.id)
-            .await?
-            .into_iter()
-            .map(|grant| grant.grant_id)
-            .collect();
         if !self
             .store
             .confirm_claim(
@@ -296,12 +286,14 @@ impl Core {
             client_address,
         )
         .await;
-        // The pre-claim tokens end here: the canonical credential is the
-        // one the agent's next poll receives. If this revocation fails, the
-        // claim still stands, and that poll replaces the pre-claim grant,
-        // which no longer fits the claimed registration, revoking it then.
+        // The pre-claim tokens end here: every grant not bound to the
+        // claiming user, read now that the claim has committed, whichever
+        // exchange made it; a grant a poll made for the user in between is
+        // kept. The canonical credential is the one the poll receives. If
+        // this revocation fails, the claim still stands and its clean-up is
+        // marked pending, which the agent's next poll or exchange finishes.
         match self
-            .revoke_grant_ids(&server.token_issuer(), &record.id, &pre_claim)
+            .revoke_unbound_grants(&server.token_issuer(), &record.id, Some(&user.user_id))
             .await
         {
             Ok(0) => {}
@@ -320,6 +312,9 @@ impl Core {
             }
             Err(error) => {
                 tracing::error!(error = %error, registration_id = %record.id, "revoking a claimed registration's pre-claim grant failed");
+                if let Err(error) = self.store.mark_cleanup_pending(&record.id).await {
+                    tracing::error!(error = %error, registration_id = %record.id, "marking a claim's clean-up pending failed");
+                }
             }
         }
         Ok(respond(
