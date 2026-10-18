@@ -277,10 +277,18 @@ fn detect_era(
         // The lifecycle of the initialize-based revisions negotiates: a
         // version this endpoint does not serve in that era is answered with
         // the newest one it does, which the client may accept or not.
-        let requested = params.get("protocolVersion").and_then(Value::as_str);
+        let Some(requested) = params.get("protocolVersion").and_then(Value::as_str) else {
+            return Err(protocol::refuse(
+                400,
+                Some(id),
+                INVALID_PARAMS,
+                "initialize needs params.protocolVersion, a string naming a revision.",
+                None,
+            ));
+        };
         let version = LEGACY
             .iter()
-            .find(|version| Some(**version) == requested)
+            .find(|version| **version == requested)
             .unwrap_or(&LEGACY[0]);
         return Ok(Era::Legacy(version));
     }
@@ -694,11 +702,11 @@ async fn run_call(
     };
     // Every field that breaks the schema's shape is named at once; serde
     // and the `validator` rules, which stop at the first, run after.
-    let failures = super::input::check(tool.input_schema(), &arguments);
-    if !failures.is_empty() {
+    let report = super::input::check(tool.input_schema(), &arguments);
+    if !report.is_empty() {
         return protocol::result(
             &id,
-            match tools::invalid_input_result(&failures) {
+            match tools::invalid_input_result(&report, config.max_result_bytes) {
                 Value::Object(result) => complete(&config, result),
                 other => other,
             },
@@ -718,7 +726,7 @@ async fn run_call(
     )
     .await;
     let result = match answer {
-        Ok(answer) => tools::answer_result(&answer),
+        Ok(answer) => tools::answer_result(&answer, config.max_result_bytes),
         Err(failure) => tools::failure_result(&failure),
     };
     let result = match result {

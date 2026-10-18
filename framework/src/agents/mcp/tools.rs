@@ -11,6 +11,7 @@ use serde_json::{Map, Value, json};
 
 use super::super::caller::ToolCaller;
 use super::super::dispatch::{CallFailure, RouteAnswer};
+use super::super::input::{InputReport, MAX_PATH_CHARS, MAX_REPORTED};
 use super::super::tool::ToolRegistry;
 
 /// The tools `caller` may call, sorted by name: the tools that accept the
@@ -48,7 +49,7 @@ pub(crate) fn failure_result(failure: &CallFailure) -> Value {
 }
 
 /// The tool result of the route's answer.
-pub(crate) fn answer_result(answer: &RouteAnswer) -> Value {
+pub(crate) fn answer_result(answer: &RouteAnswer, max_bytes: usize) -> Value {
     let json_body = is_json(answer.content_type.as_deref())
         .then(|| serde_json::from_slice::<Value>(&answer.body).ok())
         .flatten();
@@ -74,7 +75,7 @@ pub(crate) fn answer_result(answer: &RouteAnswer) -> Value {
             error_result("The tool answered with a redirect, which a tool call cannot follow.")
         }
         422 => match json_body.as_ref().and_then(|body| body.get("errors")) {
-            Some(Value::Object(errors)) => validation_result(errors),
+            Some(Value::Object(errors)) => validation_result(errors, max_bytes),
             _ => error_result(&message_of(json_body.as_ref(), "The input is not valid.")),
         },
         429 => error_result("Too many calls: wait before calling the tool again."),
@@ -97,18 +98,25 @@ pub(crate) fn answer_result(answer: &RouteAnswer) -> Value {
 
 /// A tool result naming each field of the input that breaks the tool's
 /// schema.
-pub(crate) fn invalid_input_result(failures: &[super::super::input::InputFailure]) -> Value {
+///
+/// The report already holds at most [`MAX_REPORTED`] fields, each path cut
+/// and escaped; the text is cut to `max_bytes` as well.
+pub(crate) fn invalid_input_result(report: &InputReport, max_bytes: usize) -> Value {
     let mut text = String::from("The input is not valid:");
-    for failure in failures {
+    for failure in &report.failures {
         text.push_str(&format!("\n- {}: {}", failure.field, failure.message));
     }
-    error_result(&text)
+    if report.more > 0 {
+        text.push_str(&format!("\n({} more fields are not valid.)", report.more));
+    }
+    error_result(&bounded(text, max_bytes))
 }
 
-/// A validation failure as a tool result naming each field.
-fn validation_result(errors: &Map<String, Value>) -> Value {
+/// A validation failure from the route as a tool result naming each field,
+/// bounded as [`invalid_input_result`] bounds its own.
+fn validation_result(errors: &Map<String, Value>, max_bytes: usize) -> Value {
     let mut text = String::from("The input is not valid:");
-    for (field, messages) in errors {
+    for (field, messages) in errors.iter().take(MAX_REPORTED) {
         let messages: Vec<String> = match messages {
             Value::Array(list) => list
                 .iter()
@@ -121,9 +129,50 @@ fn validation_result(errors: &Map<String, Value>) -> Value {
             Value::String(message) => vec![message.clone()],
             other => vec![other.to_string()],
         };
-        text.push_str(&format!("\n- {field}: {}", messages.join(" ")));
+        text.push_str(&format!(
+            "\n- {}: {}",
+            one_line(field, MAX_PATH_CHARS),
+            one_line(&messages.join(" "), MAX_MESSAGE_CHARS)
+        ));
     }
-    error_result(&text)
+    if errors.len() > MAX_REPORTED {
+        text.push_str(&format!(
+            "\n({} more fields are not valid.)",
+            errors.len() - MAX_REPORTED
+        ));
+    }
+    error_result(&bounded(text, max_bytes))
+}
+
+/// The longest message a route's validation report shows for one field.
+const MAX_MESSAGE_CHARS: usize = 500;
+
+/// `text` on one line, its control characters replaced by spaces, cut to
+/// `max_chars` characters with an ellipsis.
+fn one_line(text: &str, max_chars: usize) -> String {
+    let mut out: String = text
+        .chars()
+        .take(max_chars)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if text.chars().nth(max_chars).is_some() {
+        out.push_str("...");
+    }
+    out
+}
+
+/// `text` cut to at most `max_bytes` bytes, at a character boundary.
+fn bounded(mut text: String, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes.saturating_sub(3);
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text.push_str("...");
+    text
 }
 
 /// The `message` of an error body, or `fallback`.
@@ -164,10 +213,13 @@ mod tests {
 
     #[test]
     fn agent_003_validation_errors_name_each_field() {
-        let result = answer_result(&answer(
-            422,
-            r#"{"message":"invalid","errors":{"title":["The title is required."],"body":["Too long."]}}"#,
-        ));
+        let result = answer_result(
+            &answer(
+                422,
+                r#"{"message":"invalid","errors":{"title":["The title is required."],"body":["Too long."]}}"#,
+            ),
+            usize::MAX,
+        );
         assert_eq!(result["isError"], true);
         let text = result["content"][0]["text"].as_str().unwrap_or_default();
         assert!(text.contains("- title: The title is required."), "{text}");
@@ -175,15 +227,38 @@ mod tests {
     }
 
     #[test]
+    fn agent_003_route_validation_reports_are_capped_and_one_line() {
+        let mut errors = serde_json::Map::new();
+        for index in 0..50 {
+            errors.insert(
+                format!("field{index}\n- forged"),
+                serde_json::json!(["bad\nline"]),
+            );
+        }
+        let body = serde_json::json!({ "message": "invalid", "errors": errors }).to_string();
+        let result = answer_result(&answer(422, &body), 4096);
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(text.len() <= 4096, "{}", text.len());
+        assert!(
+            !text.lines().any(|line| line.starts_with("- forged")),
+            "{text}"
+        );
+        assert!(!text.contains("\nline"), "{text}");
+    }
+
+    #[test]
     fn agent_003_server_failures_leak_nothing() {
-        let result = answer_result(&answer(500, r#"{"message":"db password wrong"}"#));
+        let result = answer_result(
+            &answer(500, r#"{"message":"db password wrong"}"#),
+            usize::MAX,
+        );
         assert_eq!(result["isError"], true);
         assert_eq!(result["content"][0]["text"], "The tool failed.");
     }
 
     #[test]
     fn agent_003_json_success_is_structured_content() {
-        let result = answer_result(&answer(201, r#"{"id":7}"#));
+        let result = answer_result(&answer(201, r#"{"id":7}"#), usize::MAX);
         assert_eq!(result["isError"], false);
         assert_eq!(result["structuredContent"]["id"], 7);
     }
