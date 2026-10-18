@@ -921,14 +921,16 @@ pub mod sql_stores {
                 field: "auth_epoch".to_owned(),
                 message: "exceeds the database integer range".to_owned(),
             })?;
+        // A host that calls the store directly gets the bound a grant gets.
+        let metadata = session.metadata.bounded();
         sessions::ActiveModel {
             id: Set(session.session_id),
             user_id: Set(session.user_id.parse().expect("fixture ids are i64")),
             auth_epoch: Set(auth_epoch),
             token_digest: Set(hex(session.token_digest)),
             token_hash: Set(Some(hex(session.token_hash))),
-            user_agent: Set(session.metadata.user_agent),
-            ip_address: Set(session.metadata.ip_address),
+            user_agent: Set(metadata.user_agent),
+            ip_address: Set(metadata.ip_address),
             expires_at: Set(session.expires_at),
             revoked_at: Set(session.revoked_at),
         }
@@ -1882,16 +1884,7 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
         completed_marker.is_none() && (legacy_source_present || pending_marker.is_some());
     let backend = db.get_database_backend();
     for (table, statement) in default_tables(backend) {
-        if let Err(error) = db.execute(&statement).await {
-            // Postgres refuses one of two concurrent `CREATE TABLE IF NOT
-            // EXISTS` for one table. The table the other run created is the
-            // table this run wanted; a failure that leaves none is an error.
-            if !table_exists(db, table).await? {
-                return Err(crate::Error::Internal {
-                    message: format!("create default auth table: {error}"),
-                });
-            }
-        }
+        create_table_if_missing(db, table, &statement).await?;
     }
     add_session_auth_epoch_column(db).await?;
     add_remember_auth_epoch_column(db).await?;
@@ -2049,12 +2042,54 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
         )
         .await?;
     }
+    if !app_users_is_legacy_source {
+        warn_about_over_long_emails(db).await?;
+    }
     if completed_marker.as_deref() != Some("1") {
         if defer_completion_marker {
             ensure_migration_state(db, "source_pending", "1").await?;
         } else {
             ensure_migration_state(db, "schema_version", "1").await?;
         }
+    }
+    Ok(())
+}
+
+/// Log one warning, naming the count, when `app_users` holds addresses
+/// longer than [`crate::password::MAX_EMAIL_LENGTH`] characters.
+///
+/// Sign-in by email answers such an address as an unknown one, so those
+/// accounts can no longer sign in with it; the operator decides what
+/// becomes of them. The warning names no address.
+async fn warn_about_over_long_emails(db: &DatabaseConnection) -> crate::Result<()> {
+    let backend = db.get_database_backend();
+    let length = match backend {
+        DbBackend::MySql => "CHAR_LENGTH(email)",
+        _ => "LENGTH(email)",
+    };
+    let limit = crate::password::MAX_EMAIL_LENGTH;
+    let row = db
+        .query_one_raw(Statement::from_string(
+            backend,
+            format!("SELECT COUNT(*) AS over_long FROM app_users WHERE {length} > {limit}"),
+        ))
+        .await
+        .map_err(|error| crate::Error::Internal {
+            message: format!("inspect app_users email lengths: {error}"),
+        })?;
+    let over_long = row
+        .map(|row| row.try_get::<i64>("", "over_long"))
+        .transpose()
+        .map_err(|error| crate::Error::Internal {
+            message: format!("inspect app_users email lengths: {error}"),
+        })?
+        .unwrap_or(0);
+    if over_long > 0 {
+        tracing::warn!(
+            accounts = over_long,
+            "app_users holds {over_long} email addresses longer than {limit} characters; \
+             those accounts can no longer sign in by email"
+        );
     }
     Ok(())
 }
@@ -2107,6 +2142,15 @@ async fn migration_state_value(
         })
 }
 
+/// The conflict for a marker row that holds a value this release does not
+/// write.
+fn unsupported_marker(key: &str) -> crate::Error {
+    crate::Error::Conflict {
+        resource: "Magnetar migration marker".to_owned(),
+        message: format!("marker {key} has an unsupported value"),
+    }
+}
+
 async fn ensure_migration_state(
     db: &DatabaseConnection,
     key: &str,
@@ -2119,10 +2163,7 @@ async fn ensure_migration_state(
             message: format!("read Magnetar migration marker: {error}"),
         })? {
         Some(existing) if existing.value == value => Ok(()),
-        Some(_) => Err(crate::Error::Conflict {
-            resource: "Magnetar migration marker".to_owned(),
-            message: format!("marker {key} has an unsupported value"),
-        }),
+        Some(_) => Err(unsupported_marker(key)),
         None => {
             let inserted = migration_state::ActiveModel {
                 key: Set(key.to_owned()),
@@ -2135,8 +2176,8 @@ async fn ensure_migration_state(
             };
             // A concurrent migrate writes the same marker between the read
             // and this insert, and the insert hits its key. The marker it
-            // wrote is the one this run wanted; any other row, or none, is
-            // an error.
+            // wrote is the one this run wanted. Another value is the conflict
+            // the read reports, and no row leaves the insert's own error.
             let written = migration_state::Entity::find_by_id(key)
                 .one(db)
                 .await
@@ -2145,7 +2186,8 @@ async fn ensure_migration_state(
                 })?;
             match written {
                 Some(existing) if existing.value == value => Ok(()),
-                _ => Err(crate::Error::Internal {
+                Some(_) => Err(unsupported_marker(key)),
+                None => Err(crate::Error::Internal {
                     message: format!("write Magnetar migration marker: {error}"),
                 }),
             }
@@ -2176,6 +2218,27 @@ async fn column_exists(db: &DatabaseConnection, table: &str, column: &str) -> cr
         .map_err(|error| crate::Error::Internal {
             message: format!("inspect default auth column: {error}"),
         })
+}
+
+/// Run one default table's `CREATE TABLE IF NOT EXISTS`.
+///
+/// Postgres refuses one of two concurrent `CREATE TABLE IF NOT EXISTS` for
+/// one table. The table the other run created is the table this run wanted;
+/// a failure that leaves no table is an error.
+async fn create_table_if_missing(
+    db: &DatabaseConnection,
+    table: &str,
+    statement: &sea_orm::sea_query::TableCreateStatement,
+) -> crate::Result<()> {
+    let Err(error) = db.execute(statement).await else {
+        return Ok(());
+    };
+    if table_exists(db, table).await? {
+        return Ok(());
+    }
+    Err(crate::Error::Internal {
+        message: format!("create default auth table: {error}"),
+    })
 }
 
 /// Add one column to `table` unless it is there.
@@ -2504,20 +2567,30 @@ fn mysql_type_is_narrower(current: &str, target: &str) -> bool {
     })
 }
 
-/// The data type and nullability of one MySQL column, or `None` when the
-/// table has no such column.
+/// One MySQL column as `information_schema.COLUMNS` describes it.
+struct MysqlColumn {
+    data_type: String,
+    nullable: bool,
+    /// Character set and collation of a text column; `None` for bytes.
+    character_set: Option<String>,
+    collation: Option<String>,
+}
+
+/// One MySQL column, or `None` when the table has no such column.
 async fn mysql_column_definition(
     db: &DatabaseConnection,
     table: &str,
     column: &str,
-) -> crate::Result<Option<(String, bool)>> {
+) -> crate::Result<Option<MysqlColumn>> {
     let inspect_error = |error: sea_orm::DbErr| crate::Error::Internal {
         message: format!("inspect {table}.{column} type: {error}"),
     };
     let row = db
         .query_one_raw(Statement::from_sql_and_values(
             DbBackend::MySql,
-            "SELECT CAST(DATA_TYPE AS CHAR) AS data_type, CAST(IS_NULLABLE AS CHAR) AS is_nullable \
+            "SELECT CAST(DATA_TYPE AS CHAR) AS data_type, CAST(IS_NULLABLE AS CHAR) AS is_nullable, \
+                    CAST(CHARACTER_SET_NAME AS CHAR) AS character_set, \
+                    CAST(COLLATION_NAME AS CHAR) AS collation \
              FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1",
             [table.to_owned().into(), column.to_owned().into()],
@@ -2527,13 +2600,76 @@ async fn mysql_column_definition(
     let Some(row) = row else {
         return Ok(None);
     };
-    let data_type = row
-        .try_get::<String>("", "data_type")
-        .map_err(inspect_error)?;
-    let is_nullable = row
-        .try_get::<String>("", "is_nullable")
-        .map_err(inspect_error)?;
-    Ok(Some((data_type, is_nullable.eq_ignore_ascii_case("YES"))))
+    Ok(Some(MysqlColumn {
+        data_type: row
+            .try_get::<String>("", "data_type")
+            .map_err(inspect_error)?,
+        nullable: row
+            .try_get::<String>("", "is_nullable")
+            .map_err(inspect_error)?
+            .eq_ignore_ascii_case("YES"),
+        character_set: row
+            .try_get::<Option<String>>("", "character_set")
+            .map_err(inspect_error)?,
+        collation: row
+            .try_get::<Option<String>>("", "collation")
+            .map_err(inspect_error)?,
+    }))
+}
+
+/// The indexes that cover one MySQL column.
+async fn mysql_column_indexes(
+    db: &DatabaseConnection,
+    table: &str,
+    column: &str,
+) -> crate::Result<Vec<String>> {
+    let inspect_error = |error: sea_orm::DbErr| crate::Error::Internal {
+        message: format!("inspect {table}.{column} indexes: {error}"),
+    };
+    db.query_all_raw(Statement::from_sql_and_values(
+        DbBackend::MySql,
+        "SELECT DISTINCT CAST(INDEX_NAME AS CHAR) AS index_name \
+         FROM information_schema.STATISTICS \
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? \
+         ORDER BY index_name",
+        [table.to_owned().into(), column.to_owned().into()],
+    ))
+    .await
+    .map_err(inspect_error)?
+    .iter()
+    .map(|row| {
+        row.try_get::<String>("", "index_name")
+            .map_err(inspect_error)
+    })
+    .collect()
+}
+
+/// The MySQL type a widened column takes: `target`, and for a text column
+/// the character set and collation it already has. Left out, `MODIFY
+/// COLUMN` would take the table's defaults and drop an operator's choice.
+fn mysql_widened_type(target: &str, current: &MysqlColumn) -> crate::Result<String> {
+    let (Some(character_set), Some(collation)) = (&current.character_set, &current.collation)
+    else {
+        return Ok(target.to_owned());
+    };
+    // The names come from the server's catalog; anything but a plain name
+    // is refused rather than written into the statement.
+    let plain = |name: &str| {
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    };
+    if !plain(character_set) || !plain(collation) {
+        return Err(crate::Error::Internal {
+            message: format!(
+                "unexpected character set {character_set:?} or collation {collation:?}"
+            ),
+        });
+    }
+    Ok(format!(
+        "{target} CHARACTER SET {character_set} COLLATE {collation}"
+    ))
 }
 
 /// On MySQL and MariaDB, widen every column [`MYSQL_COLUMN_TYPES`] names
@@ -2541,11 +2677,14 @@ async fn mysql_column_definition(
 /// those columns carried a type holds them.
 ///
 /// Each table changes in one `ALTER TABLE`, so a table with several narrow
-/// columns is rebuilt once, and each column keeps its nullability and its
-/// rows. A column that is already as wide is left alone, so a second run
-/// changes nothing. Two processes that widen one table at once run the same
-/// `MODIFY COLUMN` one after the other, and both succeed. Postgres and
-/// SQLite are never touched: their columns hold any length.
+/// columns is rebuilt once, and each column keeps its nullability, its
+/// character set and collation, and its rows. A column that is already as
+/// wide is left alone, so a second run changes nothing. Two processes that
+/// widen one table at once run the same `MODIFY COLUMN` one after the
+/// other, and both succeed. A column an index covers stays as it is, with a
+/// warning: MySQL refuses a `text` or `blob` column in an index without a
+/// key length, and that refusal must not stop boot. Postgres and SQLite are
+/// never touched: their columns hold any length.
 async fn widen_mysql_columns(db: &DatabaseConnection) -> crate::Result<()> {
     if db.get_database_backend() != DbBackend::MySql {
         return Ok(());
@@ -2564,17 +2703,32 @@ async fn widen_mysql_columns(db: &DatabaseConnection) -> crate::Result<()> {
             .iter()
             .filter(|(listed_table, _, _)| *listed_table == table)
         {
-            let Some((current, nullable)) = mysql_column_definition(db, table, column).await?
-            else {
+            let Some(current) = mysql_column_definition(db, table, column).await? else {
                 continue;
             };
-            if !mysql_type_is_narrower(&current, target) {
+            if !mysql_type_is_narrower(&current.data_type, target) {
+                continue;
+            }
+            let indexes = mysql_column_indexes(db, table, column).await?;
+            if !indexes.is_empty() {
+                let indexes = indexes.join(", ");
+                tracing::warn!(
+                    table = %table,
+                    column = %column,
+                    indexes = %indexes,
+                    "{table}.{column} stays {}: index {indexes} covers it, and MySQL cannot \
+                     index a {target} column without a key length; drop or change the index, \
+                     then run the migration again to widen it",
+                    current.data_type
+                );
                 continue;
             }
             let mut definition =
                 sea_orm::sea_query::ColumnDef::new(sea_orm::sea_query::Alias::new(*column));
-            definition.custom(sea_orm::sea_query::Alias::new(*target));
-            if nullable {
+            definition.custom(sea_orm::sea_query::Alias::new(mysql_widened_type(
+                target, &current,
+            )?));
+            if current.nullable {
                 definition.null();
             } else {
                 definition.not_null();
@@ -2719,7 +2873,13 @@ mod tests {
                 .iter()
                 .map(|(table, statement)| (*table, render(backend, statement)))
                 .collect::<Vec<_>>();
-            for ((table, built), from_entity) in built.iter().zip(tables_from_entities(backend)) {
+            let from_entities = tables_from_entities(backend);
+            assert_eq!(
+                built.len(),
+                from_entities.len(),
+                "every entity has its table and no more"
+            );
+            for ((table, built), from_entity) in built.iter().zip(from_entities) {
                 if backend == DbBackend::MySql && *table == "auth_provider_tokens" {
                     assert_eq!(
                         built.replace("longblob", "blob"),
@@ -2810,6 +2970,56 @@ mod tests {
         .expect_err("a create that leaves no index is an error")
         .to_string();
         assert!(error.contains("create broken index"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn a_create_table_that_leaves_no_table_stays_an_error() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        // Two columns of one name: SQLite refuses the table.
+        let statement = sea_orm::sea_query::Table::create()
+            .table(sea_orm::sea_query::Alias::new("no_such_table"))
+            .if_not_exists()
+            .col(sea_orm::sea_query::ColumnDef::new(sea_orm::sea_query::Alias::new("id")).integer())
+            .col(sea_orm::sea_query::ColumnDef::new(sea_orm::sea_query::Alias::new("id")).integer())
+            .to_owned();
+        let error = super::create_table_if_missing(&database, "no_such_table", &statement)
+            .await
+            .expect_err("a create that leaves no table is an error")
+            .to_string();
+        assert!(error.contains("create default auth table"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn a_foreign_marker_written_during_the_race_is_a_conflict() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        super::migrate(&database).await.unwrap();
+        database
+            .execute_unprepared("DELETE FROM magnetar_migration_state WHERE key = 'schema_version'")
+            .await
+            .unwrap();
+        // Another writer stores a different value between this run's read
+        // and its insert, and this run's insert writes no row. RAISE(IGNORE)
+        // drops the insert and keeps the other writer's row, as a commit by
+        // another process would.
+        database
+            .execute_unprepared(
+                "CREATE TRIGGER foreign_marker BEFORE INSERT ON magnetar_migration_state \
+                 WHEN NEW.key = 'schema_version' BEGIN \
+                 INSERT INTO magnetar_migration_state (key, value) VALUES ('schema_version', '2'); \
+                 SELECT RAISE(IGNORE); \
+                 END",
+            )
+            .await
+            .unwrap();
+        let error = super::ensure_migration_state(&database, "schema_version", "1")
+            .await
+            .expect_err("a foreign marker is refused");
+        assert!(
+            matches!(&error, crate::Error::Conflict { resource, message }
+                if resource == "Magnetar migration marker"
+                    && message == "marker schema_version has an unsupported value"),
+            "the race answers as the read does: {error:?}"
+        );
     }
 
     #[tokio::test]

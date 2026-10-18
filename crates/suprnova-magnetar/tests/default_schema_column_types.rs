@@ -28,7 +28,7 @@ use chrono::{Duration, Timelike, Utc};
 use magnetar::default_schema::sql_stores::SqlSessionStore;
 use magnetar::default_schema::sql_two_factor::SqlTwoFactorStore;
 use magnetar::default_schema::{
-    DefaultAuthSchema, ceremonies, methods, provider_tokens, sessions, two_factor,
+    DefaultAuthSchema, ceremonies, methods, provider_tokens, sessions, two_factor, users,
 };
 use magnetar::sessions::{
     OpaqueConfig, OpaqueSessionProvider, OpaqueSessionStore, SessionMetadata, SessionQueries,
@@ -200,6 +200,39 @@ const ADDED_COLUMNS: [(&str, &str); 14] = [
     ("auth_tokens", "updated_at"),
     ("auth_linked_accounts", "created_at"),
     ("auth_linked_accounts", "updated_at"),
+];
+
+/// The MySQL types the narrow layout's byte and long-text columns have
+/// before an upgrade.
+const NARROW_MYSQL_TYPES: [(&str, &str, &str); 12] = [
+    ("auth_sessions", "user_agent", "varchar(255)"),
+    ("auth_methods", "credential_id", "varchar(255)"),
+    ("auth_methods", "public_key", "varchar(255)"),
+    ("auth_ceremonies", "payload", "varbinary(255)"),
+    ("auth_two_factor", "secret", "varbinary(255)"),
+    ("auth_two_factor", "recovery_codes", "varbinary(255)"),
+    ("auth_two_factor", "pending_secret", "varbinary(255)"),
+    (
+        "auth_two_factor",
+        "pending_recovery_codes",
+        "varbinary(255)",
+    ),
+    (
+        "auth_provider_tokens",
+        "access_ciphertext",
+        "varbinary(255)",
+    ),
+    (
+        "auth_provider_tokens",
+        "refresh_ciphertext",
+        "varbinary(255)",
+    ),
+    (
+        "auth_provider_tokens",
+        "raw_payload_ciphertext",
+        "varbinary(255)",
+    ),
+    ("auth_provider_tokens", "scopes", "varchar(255)"),
 ];
 
 /// The index names `migrate` creates; a concurrent run must leave each one.
@@ -646,6 +679,20 @@ async fn index_names(db: &DatabaseConnection) -> Vec<String> {
 async fn verify_narrow_layout_upgrade(db: &DatabaseConnection, label: &str) {
     let rows = create_narrow_layout(db).await;
     let narrow = column_layout(db).await;
+    if db.get_database_backend() == DbBackend::MySql {
+        for (table, column, narrow_type) in NARROW_MYSQL_TYPES {
+            let (_, _, column_type, _) = narrow
+                .iter()
+                .find(|(listed_table, listed_column, _, _)| {
+                    listed_table == table && listed_column == column
+                })
+                .expect("every narrow column exists before the upgrade");
+            assert_eq!(
+                column_type, narrow_type,
+                "{table}.{column} starts as the layout migrate created before"
+            );
+        }
+    }
     magnetar::default_schema::migrate(db)
         .await
         .expect("migrate upgrades the narrow layout");
@@ -779,6 +826,43 @@ async fn sqlite_long_values_round_trip_through_every_store() {
     assert_long_values_round_trip(&db, "sqlite").await;
 }
 
+/// Accounts whose address passes 254 characters can no longer sign in by
+/// email; `migrate` says how many there are, once, without the addresses.
+#[cfg(feature = "seaorm-sqlite")]
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn sqlite_migrate_warns_about_addresses_longer_than_254_characters() {
+    let db = sqlite_memory().await;
+    magnetar::default_schema::migrate(&db)
+        .await
+        .expect("create default auth tables");
+    assert!(!logs_contain("email addresses longer than"));
+    let long = format!("{}@example.test", "q".repeat(287));
+    for (id, email) in [
+        (1, "short@example.test".to_owned()),
+        (2, long.clone()),
+        (3, format!("x{long}")),
+    ] {
+        users::ActiveModel {
+            id: Set(id),
+            email: Set(email),
+            auth_epoch: Set(0),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("store an account");
+    }
+    magnetar::default_schema::migrate(&db)
+        .await
+        .expect("a second migrate succeeds");
+    assert!(
+        logs_contain("app_users holds 2 email addresses longer than 254 characters"),
+        "the warning names the count"
+    );
+    assert!(!logs_contain("qqqq"), "the warning names no address");
+}
+
 #[cfg(feature = "seaorm-sqlite")]
 #[tokio::test]
 async fn sqlite_narrow_layout_is_upgraded_in_place() {
@@ -823,6 +907,103 @@ async fn live_concurrent_older_layout_upgrades(server_url: &str, label: &str) {
     first.close().await.expect("close the first pool");
     second.close().await.expect("close the second pool");
     live.drop_database().await;
+}
+
+/// The data type, character set and collation of one MySQL column.
+#[cfg(feature = "seaorm-mysql")]
+async fn mysql_column(
+    db: &DatabaseConnection,
+    table: &str,
+    column: &str,
+) -> (String, Option<String>, Option<String>) {
+    let row = db
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::MySql,
+            "SELECT CAST(DATA_TYPE AS CHAR) AS data_type, \
+                    CAST(CHARACTER_SET_NAME AS CHAR) AS character_set, \
+                    CAST(COLLATION_NAME AS CHAR) AS collation \
+             FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+            [table.into(), column.into()],
+        ))
+        .await
+        .expect("read the column")
+        .expect("the column exists");
+    (
+        row.try_get::<String>("", "data_type").unwrap(),
+        row.try_get::<Option<String>>("", "character_set").unwrap(),
+        row.try_get::<Option<String>>("", "collation").unwrap(),
+    )
+}
+
+/// Widening a text column keeps the character set and collation an
+/// operator gave it.
+#[cfg(feature = "seaorm-mysql")]
+async fn verify_widening_keeps_character_sets_and_collations(db: &DatabaseConnection) {
+    create_narrow_layout(db).await;
+    db.execute_unprepared(
+        "ALTER TABLE auth_sessions MODIFY COLUMN user_agent varchar(255) \
+         CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL",
+    )
+    .await
+    .expect("give user_agent its own collation");
+    db.execute_unprepared(
+        "ALTER TABLE auth_methods MODIFY COLUMN public_key varchar(255) \
+         CHARACTER SET latin1 COLLATE latin1_general_cs NULL",
+    )
+    .await
+    .expect("give public_key its own character set");
+
+    magnetar::default_schema::migrate(db)
+        .await
+        .expect("migrate widens the narrow layout");
+
+    assert_eq!(
+        mysql_column(db, "auth_sessions", "user_agent").await,
+        (
+            "text".to_owned(),
+            Some("utf8mb4".to_owned()),
+            Some("utf8mb4_bin".to_owned())
+        )
+    );
+    assert_eq!(
+        mysql_column(db, "auth_methods", "public_key").await,
+        (
+            "text".to_owned(),
+            Some("latin1".to_owned()),
+            Some("latin1_general_cs".to_owned())
+        )
+    );
+}
+
+/// A narrow column an index covers stays as it is, with a warning, and the
+/// rest are widened: MySQL cannot index a `text` column without a key
+/// length, and the widening must not stop boot.
+#[cfg(feature = "seaorm-mysql")]
+async fn verify_widening_leaves_an_indexed_column(db: &DatabaseConnection) {
+    create_narrow_layout(db).await;
+    db.execute_unprepared("CREATE INDEX auth_methods_credential ON auth_methods (credential_id)")
+        .await
+        .expect("index credential_id");
+
+    magnetar::default_schema::migrate(db)
+        .await
+        .expect("migrate succeeds with the indexed column");
+
+    assert_eq!(
+        mysql_column(db, "auth_methods", "credential_id").await.0,
+        "varchar",
+        "the indexed column keeps its type"
+    );
+    assert_eq!(
+        mysql_column(db, "auth_methods", "public_key").await.0,
+        "text",
+        "the rest of the table is widened"
+    );
+    assert_eq!(
+        mysql_column(db, "auth_sessions", "user_agent").await.0,
+        "text"
+    );
 }
 
 #[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
@@ -927,4 +1108,35 @@ async fn mysql_concurrent_upgrades_of_an_older_layout_both_succeed() {
     let url =
         std::env::var("MAGNETAR_MYSQL_TEST_URL").expect("MAGNETAR_MYSQL_TEST_URL is required");
     live_concurrent_older_layout_upgrades(&url, "my_older").await;
+}
+
+#[cfg(feature = "seaorm-mysql")]
+#[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn mysql_widening_keeps_character_sets_and_collations() {
+    let url =
+        std::env::var("MAGNETAR_MYSQL_TEST_URL").expect("MAGNETAR_MYSQL_TEST_URL is required");
+    let live = LiveDatabase::create(&url, "my_collate").await;
+    let db = live.connect().await;
+    verify_widening_keeps_character_sets_and_collations(&db).await;
+    db.close().await.expect("close the isolated database");
+    live.drop_database().await;
+}
+
+#[cfg(feature = "seaorm-mysql")]
+#[tokio::test]
+#[tracing_test::traced_test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn mysql_widening_leaves_an_indexed_column_and_widens_the_rest() {
+    let url =
+        std::env::var("MAGNETAR_MYSQL_TEST_URL").expect("MAGNETAR_MYSQL_TEST_URL is required");
+    let live = LiveDatabase::create(&url, "my_indexed").await;
+    let db = live.connect().await;
+    verify_widening_leaves_an_indexed_column(&db).await;
+    assert!(
+        logs_contain("auth_methods.credential_id") && logs_contain("auth_methods_credential"),
+        "the warning names the table, column and index"
+    );
+    db.close().await.expect("close the isolated database");
+    live.drop_database().await;
 }
