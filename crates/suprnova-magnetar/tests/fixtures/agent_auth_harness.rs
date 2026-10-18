@@ -27,7 +27,7 @@ use magnetar::authorization_server::{
     AccessVerification, AuthorizationRecord, AuthorizationServer, AuthorizationServerConfig,
     AuthorizationStore, ClientMetadataFetcher, ClientMetadataPolicy, GrantRecord, HostResolver,
     NewTokenRecord, PinnedHttpClient, PinnedResponse, RegisteredClient, ResponseBody,
-    ScopeDefinition, SqlAuthorizationStore, TokenRecord,
+    RevocationListener, ScopeDefinition, SqlAuthorizationStore, TokenRecord,
 };
 use magnetar::default_schema::DefaultAuthSchema;
 use magnetar::default_schema::sql_stores::SqlSessionStore;
@@ -742,6 +742,10 @@ pub struct Options {
     pub provider: Provider,
     /// Faults injected into both stores, when set.
     pub faults: Option<Arc<Faults>>,
+    /// The authorization server configuration, when not the default.
+    pub server_config: Option<AuthorizationServerConfig>,
+    /// One more revocation listener on the authorization server.
+    pub revocation_listener: Option<Arc<dyn RevocationListener>>,
 }
 
 impl Options {
@@ -751,6 +755,8 @@ impl Options {
             provisioning: None,
             provider: Provider::new(PROVIDER, "provider-key-1"),
             faults: None,
+            server_config: None,
+            revocation_listener: None,
         }
     }
 }
@@ -802,13 +808,17 @@ pub async fn build(db: DatabaseConnection, options: Options) -> Harness {
         None => Arc::new(SqlAgentAuthStore::new(db.clone())),
     };
     let server = AuthorizationServer::new(
-        server_config(),
+        options.server_config.clone().unwrap_or_else(server_config),
         server_store,
         storage.clone(),
         limiter.clone(),
         fetcher,
     )
     .expect("a valid authorization server configuration");
+    let server = match options.revocation_listener.clone() {
+        Some(listener) => server.with_revocation_listener(listener),
+        None => server,
+    };
     let provisioning = options
         .provisioning
         .unwrap_or_else(|| Arc::new(ProvisionUsers::new(storage.clone())));

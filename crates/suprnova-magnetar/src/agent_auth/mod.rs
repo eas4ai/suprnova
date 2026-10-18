@@ -50,8 +50,8 @@ pub mod sql;
 pub mod store;
 
 pub use config::{
-    AgentAuthConfig, IdentityTypes, RegistrationLimit, RegistrationLimits, SigningKey,
-    TrustedIssuer,
+    AgentAuthConfig, IdentityTypes, PreviousSigningKey, RegistrationLimit, RegistrationLimits,
+    SigningKey, TrustedIssuer,
 };
 pub use key_sets::{KeySetError, KeySetFetcher, KeySetPolicy};
 pub use sql::{SqlAgentAuthStore, migrate};

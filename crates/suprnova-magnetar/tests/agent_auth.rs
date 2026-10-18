@@ -389,8 +389,10 @@ async fn agent_007_assertions_signed_before_a_key_rotation_still_verify() {
     let (new_key, _) = signing_key("key-2026-07");
     let mut options = Options::new();
     let mut config = agent_config(new_key.clone());
-    config.previous_signing_keys =
-        vec![magnetar::agent_auth::SigningKey::from_pem("key-2026-01", &old_pem).expect("old key")];
+    config.previous_signing_keys = vec![magnetar::agent_auth::PreviousSigningKey::new(
+        magnetar::agent_auth::SigningKey::from_pem("key-2026-01", &old_pem).expect("old key"),
+        chrono::Utc::now(),
+    )];
     options.config = config;
     let after = build(db.clone(), options).await;
     let exchanged = after.exchange(&old_assertion).await;
@@ -545,6 +547,47 @@ async fn agent_007_a_pruned_grant_is_replaced_on_the_next_exchange() {
         AccessVerification::Valid(_)
     ));
     assert_eq!(grants_of(&h, id).await.len(), 1);
+}
+
+#[tokio::test]
+async fn agent_007_a_previous_key_retires() {
+    use magnetar::agent_auth::{PreviousSigningKey, SigningKey};
+    let db = magnetar::default_schema::database().await;
+    let (old_key, old_pem) = signing_key("retiring-key");
+    let mut options = Options::new();
+    options.config = agent_config(old_key);
+    let before = build(db.clone(), options).await;
+    let old_assertion = before.anonymous().await["identity_assertion"]
+        .as_str()
+        .expect("assertion")
+        .to_owned();
+    let rotated = |rotated_out_at: chrono::DateTime<chrono::Utc>,
+                   until: Option<chrono::DateTime<chrono::Utc>>| {
+        let mut previous = PreviousSigningKey::new(
+            SigningKey::from_pem("retiring-key", &old_pem).expect("old key"),
+            rotated_out_at,
+        );
+        if let Some(until) = until {
+            previous = previous.verifying_until(until);
+        }
+        let mut options = Options::new();
+        options.config.previous_signing_keys = vec![previous];
+        options
+    };
+    let now = chrono::Utc::now();
+    let fresh = build(db.clone(), rotated(now, None)).await;
+    assert_eq!(status(&fresh.exchange(&old_assertion).await), 200);
+    // Rotated out more than the longest assertion lifetime (30 days) ago:
+    // retired, even for an assertion that has not expired.
+    let retired = build(db.clone(), rotated(now - chrono::Duration::days(31), None)).await;
+    let refused = retired.exchange(&old_assertion).await;
+    assert_eq!(status(&refused), 400, "{:?}", body(&refused));
+    assert_eq!(body(&refused)["error"], "invalid_grant");
+    let explicit = build(db, rotated(now, Some(now - chrono::Duration::seconds(1)))).await;
+    assert_eq!(
+        body(&explicit.exchange(&old_assertion).await)["error"],
+        "invalid_grant"
+    );
 }
 
 #[tokio::test]
@@ -738,7 +781,10 @@ async fn agent_007_install_refuses_a_configuration_the_server_cannot_serve() {
     config.default_resource = Some("https://elsewhere.example.test/mcp".to_owned());
     assert_eq!(field(install(config).await), "default_resource");
     let mut config = base();
-    config.previous_signing_keys = vec![signing_key("service-key-1").0];
+    config.previous_signing_keys = vec![magnetar::agent_auth::PreviousSigningKey::new(
+        signing_key("service-key-1").0,
+        chrono::Utc::now(),
+    )];
     assert_eq!(field(install(config).await), "previous_signing_keys");
     assert!(
         magnetar::agent_auth::SigningKey::from_pem("kid", "not a key").is_err(),
@@ -1643,6 +1689,51 @@ async fn agent_010_rfc7009_revokes_agent_tokens_and_answers_200_for_an_unknown_o
     assert_eq!(events[0].attributes["client_address"], CLIENT_ADDRESS);
     // The assertion still works: re-exchanging mints a fresh token.
     assert_eq!(status(&h.exchange(assertion).await), 200);
+}
+
+struct SlowListener;
+
+#[async_trait::async_trait]
+impl magnetar::authorization_server::RevocationListener for SlowListener {
+    async fn token_revoked(&self, _revoked: magnetar::authorization_server::RevokedToken) {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn agent_010_a_slow_revocation_listener_does_not_hold_the_revocation() {
+    let mut options = Options::new();
+    let mut server = server_config();
+    server.revocation_listener_timeout = std::time::Duration::from_millis(100);
+    options.server_config = Some(server);
+    options.revocation_listener = Some(Arc::new(SlowListener));
+    let h = sqlite_harness_with(options).await;
+    let registration = h.anonymous().await;
+    let token = access_token(
+        &h.exchange(
+            registration["identity_assertion"]
+                .as_str()
+                .expect("assertion"),
+        )
+        .await,
+    );
+    let started = std::time::Instant::now();
+    let revoked_response = h
+        .post_form("/oauth/revoke", &[("token", &token)], None)
+        .await;
+    assert_eq!(status(&revoked_response), 200);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "the endpoint waited {:?} for a listener",
+        started.elapsed()
+    );
+    assert_eq!(
+        h.verify(&token).await,
+        revoked(),
+        "the revocation is stored"
+    );
+    assert!(logs_contain("revocation listener ran past its timeout"));
 }
 
 #[tokio::test]

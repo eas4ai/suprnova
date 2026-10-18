@@ -58,8 +58,18 @@ impl GrantHandler for JwtBearerGrant {
             return Err(TokenError::invalid_grant("the assertion is invalid"));
         }
         let now = Utc::now();
-        let keys =
-            std::iter::once(&core.config.signing_key).chain(&core.config.previous_signing_keys);
+        // A previous key verifies only until it retires.
+        let keys = std::iter::once(&core.config.signing_key).chain(
+            core.config
+                .previous_signing_keys
+                .iter()
+                .filter(|previous| {
+                    previous
+                        .retires_at(core.config.assertion_lifetime)
+                        .is_some_and(|retirement| retirement > now)
+                })
+                .map(|previous| &previous.key),
+        );
         let claims = verify_assertion(assertion, keys, &core.issuer, now)
             .map_err(TokenError::invalid_grant)?;
         let record = core

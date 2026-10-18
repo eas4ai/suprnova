@@ -6,6 +6,7 @@ use std::fmt;
 use std::time::Duration;
 
 use base64::Engine;
+use chrono::{DateTime, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey};
@@ -138,6 +139,52 @@ impl SigningKey {
     }
 }
 
+/// A signing key that was rotated out. It keeps verifying the assertions
+/// it signed until it retires: by default when it was rotated out plus the
+/// longest assertion lifetime, after which no assertion it signed can still
+/// be unexpired.
+#[derive(Clone, Debug)]
+pub struct PreviousSigningKey {
+    /// The key.
+    pub key: SigningKey,
+    /// When it stopped signing new assertions.
+    pub rotated_out_at: DateTime<Utc>,
+    /// An explicit retirement, overriding the default one.
+    pub verify_until: Option<DateTime<Utc>>,
+}
+
+impl PreviousSigningKey {
+    /// `key`, rotated out at `rotated_out_at`.
+    #[must_use]
+    pub fn new(key: SigningKey, rotated_out_at: DateTime<Utc>) -> Self {
+        Self {
+            key,
+            rotated_out_at,
+            verify_until: None,
+        }
+    }
+
+    /// Retire the key at `at` instead of the default.
+    #[must_use]
+    pub fn verifying_until(mut self, at: DateTime<Utc>) -> Self {
+        self.verify_until = Some(at);
+        self
+    }
+
+    /// When the key stops verifying: the explicit retirement, or the
+    /// rotation plus the longest assertion lifetime. `None` when that sum
+    /// overflows a timestamp, which retires the key.
+    #[must_use]
+    pub fn retires_at(&self, assertion_lifetime: Duration) -> Option<DateTime<Utc>> {
+        match self.verify_until {
+            Some(at) => Some(at),
+            None => chrono::Duration::from_std(assertion_lifetime)
+                .ok()
+                .and_then(|lifetime| self.rotated_out_at.checked_add_signed(lifetime)),
+        }
+    }
+}
+
 /// The two registration budgets of one identity type: per client address,
 /// checked first, and for the whole application.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,9 +310,9 @@ pub struct AgentAuthConfig {
     pub post_claim_scopes: Vec<String>,
     /// The key that signs new identity assertions.
     pub signing_key: SigningKey,
-    /// Keys that signed assertions before a rotation. They verify the
-    /// assertions they signed until those expire, and sign nothing new.
-    pub previous_signing_keys: Vec<SigningKey>,
+    /// Keys that signed assertions before a rotation. Each verifies the
+    /// assertions it signed until it retires, and signs nothing new.
+    pub previous_signing_keys: Vec<PreviousSigningKey>,
     /// How long an identity assertion can be exchanged, 30 days by default.
     /// An unclaimed anonymous registration's assertion ends with its
     /// registration window.
@@ -435,7 +482,11 @@ impl AgentAuthConfig {
         }
         let mut kids = std::collections::HashSet::new();
         if !std::iter::once(&self.signing_key)
-            .chain(&self.previous_signing_keys)
+            .chain(
+                self.previous_signing_keys
+                    .iter()
+                    .map(|previous| &previous.key),
+            )
             .all(|key| kids.insert(key.kid()))
         {
             return Err(invalid(
