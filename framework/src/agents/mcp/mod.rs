@@ -4,13 +4,17 @@
 //!
 //! 1. the `Origin` header, answering 403 for an origin the application does
 //!    not allow, before it reads the body;
-//! 2. the body: JSON, one message, no larger than the configured limit;
-//! 3. the protocol era: `initialize` opens the 2025-06-18 and 2025-11-25
-//!    revisions; any other request names its revision in
-//!    `MCP-Protocol-Version`, and a 2026-07-28 request must mirror its
-//!    `_meta` version, its method and its tool's name into the headers;
-//! 4. the caller: no token is a guest, a bearer token goes to the
-//!    application's resolvers, and a token none of them accepts is 401.
+//! 2. the client address's request budget, which every request counts
+//!    against, answering 429 once it is used;
+//! 3. the body: JSON, one message, no larger than the configured limit;
+//! 4. the protocol era: `initialize` opens the 2025-06-18 and 2025-11-25
+//!    revisions, negotiating the newest of them when it asks for another;
+//!    any other request names its revision in `MCP-Protocol-Version`, and a
+//!    2026-07-28 request must mirror its `_meta` version, its method and
+//!    its tool's name into the headers, each header sent once;
+//! 5. the caller: no token is a guest, a bearer token goes to the
+//!    application's resolvers, each with a deadline, and a token none of
+//!    them accepts is 401.
 //!
 //! Then `server/discover`, `initialize`, `ping`, `tools/list` and
 //! `tools/call` are answered. The endpoint mints no session id, and `GET`
@@ -40,6 +44,7 @@ use super::metadata::{app_name, resource_metadata_url, resource_url};
 use super::scope::Scope;
 use super::tool::ToolRegistry;
 use super::{AgentRoute, AgentsConfig, ResolveContext, ResolveError};
+use crate::error::FrameworkError;
 use crate::http::{HttpResponse, Request, Response};
 
 /// The protocol era a request speaks.
@@ -85,6 +90,31 @@ async fn serve(request: Request) -> HttpResponse {
             None,
         );
     }
+    let address: Option<IpAddr> = request.ip().and_then(|ip| ip.parse().ok());
+    // Every request counts against its address, whatever it asks and
+    // however it ends, a refusal for a bad token included.
+    match limit::admit_request(&config, address).await {
+        Ok(()) => {}
+        Err(Refusal::Limited(retry_after)) => {
+            return protocol::refuse(
+                429,
+                None,
+                RATE_LIMITED,
+                "Too many requests: wait before sending more.",
+                Some(json!({ "retryAfter": retry_after })),
+            )
+            .header("Retry-After", retry_after.to_string());
+        }
+        Err(Refusal::Unavailable(_)) => {
+            return protocol::refuse(
+                503,
+                None,
+                UNAVAILABLE,
+                "The request limit cannot be checked right now.",
+                None,
+            );
+        }
+    }
     if !is_json(request.content_type()) {
         return protocol::refuse(
             415,
@@ -96,7 +126,6 @@ async fn serve(request: Request) -> HttpResponse {
     }
     let headers = request.headers().clone();
     let client = ClientFacts::of(&request);
-    let address: Option<IpAddr> = request.ip().and_then(|ip| ip.parse().ok());
     let bytes = match request.body_bytes_with_cap(config.max_body_bytes).await {
         Ok((_, bytes)) => bytes,
         Err(error) => {
@@ -230,20 +259,42 @@ fn detect_era(
     params: &Map<String, Value>,
     headers: &hyper::HeaderMap,
 ) -> Result<Era, HttpResponse> {
-    if method == "initialize" {
-        let requested = params.get("protocolVersion").and_then(Value::as_str);
-        return match LEGACY.iter().find(|version| Some(**version) == requested) {
-            Some(version) => Ok(Era::Legacy(version)),
-            None => Err(protocol::unsupported_version(Some(id), requested)),
-        };
-    }
-    let version = match protocol::header_text(headers, PROTOCOL_VERSION_HEADER) {
-        Err(()) => {
+    // A metadata header sent twice leaves unclear which value the body must
+    // match, whatever the era.
+    for (name, label) in [
+        (PROTOCOL_VERSION_HEADER, "MCP-Protocol-Version"),
+        (METHOD_HEADER, "Mcp-Method"),
+        (NAME_HEADER, "Mcp-Name"),
+    ] {
+        if let Err(problem) = protocol::header_text(headers, name) {
             return Err(protocol::header_mismatch(
                 Some(id),
-                "The MCP-Protocol-Version header holds characters a header may not.",
+                &problem.describe(label),
             ));
         }
+    }
+    if method == "initialize" {
+        // The lifecycle of the initialize-based revisions negotiates: a
+        // version this endpoint does not serve in that era is answered with
+        // the newest one it does, which the client may accept or not.
+        let requested = params.get("protocolVersion").and_then(Value::as_str);
+        let version = LEGACY
+            .iter()
+            .find(|version| Some(**version) == requested)
+            .unwrap_or(&LEGACY[0]);
+        return Ok(Era::Legacy(version));
+    }
+    let version = match protocol::header_text(headers, PROTOCOL_VERSION_HEADER) {
+        Err(problem) => {
+            return Err(protocol::header_mismatch(
+                Some(id),
+                &problem.describe("MCP-Protocol-Version"),
+            ));
+        }
+        // Streamable HTTP, "Protocol Version Header" and "Server
+        // Validation" (revision 2026-07-28): a server that does not serve
+        // revisions before 2025-06-18 rejects a request without the header,
+        // and a missing required header is a `HeaderMismatch`.
         Ok(None) => {
             return Err(protocol::header_mismatch(
                 Some(id),
@@ -323,10 +374,10 @@ fn check_modern(
                 "The Mcp-Method header is missing.",
             ));
         }
-        Err(()) => {
+        Err(problem) => {
             return Err(protocol::header_mismatch(
                 Some(id),
-                "The Mcp-Method header holds characters a header may not.",
+                &problem.describe("Mcp-Method"),
             ));
         }
     }
@@ -340,7 +391,7 @@ fn check_modern(
                     "The Mcp-Name header is missing.",
                 ));
             }
-            Err(()) => None,
+            Err(_) => None,
         };
         match (header, body) {
             (Some(header), Some(body)) if header == body => {}
@@ -406,7 +457,20 @@ async fn authenticate(
         client_ip: address,
     };
     for resolver in &config.resolvers {
-        match resolver.resolve(token, &context).await {
+        // A resolver that does not decide in time counts as unavailable.
+        let decided =
+            match tokio::time::timeout(config.resolver_timeout, resolver.resolve(token, &context))
+                .await
+            {
+                Ok(decided) => decided,
+                Err(_) => Err(ResolveError::Unavailable(FrameworkError::internal(
+                    format!(
+                        "a token resolver did not decide within {} ms",
+                        config.resolver_timeout.as_millis()
+                    ),
+                ))),
+            };
+        match decided {
             Ok(caller) if caller.is_guest() => {
                 return Err(invalid_token(
                     config,
@@ -520,9 +584,36 @@ async fn call_tool(
             None,
         );
     }
-    if !caller.is_guest() && !tool.missing_scopes(&caller).is_empty() {
+    if !tool.missing_scopes(&caller).is_empty() {
         return insufficient_scope(&config, &id, tool.scopes());
     }
+    // A tool with its own guard signs in the user that guard's provider
+    // knows by the identifier the resolver returned, never the resolver's
+    // record; a user the provider does not know cannot call it.
+    let caller = match guard_user(tool.guard(), caller).await {
+        Ok(caller) => caller,
+        Err(GuardRefusal::Unknown) => {
+            return invalid_token(
+                &config,
+                &id,
+                "The token's user is not known to the tool's guard.",
+            );
+        }
+        Err(GuardRefusal::Misconfigured(error)) => return internal(&id, &error),
+        Err(GuardRefusal::Failed(error)) => {
+            tracing::error!(
+                error = %crate::error::render_error_chain(&error),
+                "a tool's guard could not load the caller's user"
+            );
+            return protocol::refuse(
+                503,
+                Some(&id),
+                UNAVAILABLE,
+                "The tool's guard cannot load the user right now.",
+                None,
+            );
+        }
+    };
     match limit::admit(&config, &caller).await {
         Ok(()) => {}
         Err(Refusal::Limited(retry_after)) => {
@@ -601,6 +692,18 @@ async fn run_call(
             None,
         );
     };
+    // Every field that breaks the schema's shape is named at once; serde
+    // and the `validator` rules, which stop at the first, run after.
+    let failures = super::input::check(tool.input_schema(), &arguments);
+    if !failures.is_empty() {
+        return protocol::result(
+            &id,
+            match tools::invalid_input_result(&failures) {
+                Value::Object(result) => complete(&config, result),
+                other => other,
+            },
+        );
+    }
     let answer = crate::routing::root::scope(
         root,
         dispatch::call(
@@ -663,6 +766,38 @@ impl<T> futures::Stream for CallStream<T> {
                 Poll::Ready(Some(finish(answer)))
             }
         }
+    }
+}
+
+/// Why a tool's guard did not sign the caller's user in.
+enum GuardRefusal {
+    /// The guard's provider does not know the user.
+    Unknown,
+    /// The application has no AuthManager, or the guard names no provider.
+    Misconfigured(FrameworkError),
+    /// The guard's provider failed to answer.
+    Failed(FrameworkError),
+}
+
+/// The caller with its user loaded through the guard `guard`, when the
+/// tool names one and the caller has a user.
+async fn guard_user(guard: Option<&str>, caller: ToolCaller) -> Result<ToolCaller, GuardRefusal> {
+    let (Some(guard), Some(user)) = (guard, caller.acting_user()) else {
+        return Ok(caller);
+    };
+    let id = user.get_auth_identifier();
+    let manager = crate::App::get::<crate::auth::AuthManager>().ok_or_else(|| {
+        GuardRefusal::Misconfigured(FrameworkError::internal(format!(
+            "the tool's guard '{guard}' needs an AuthManager"
+        )))
+    })?;
+    let provider = manager
+        .guard_provider(guard)
+        .map_err(GuardRefusal::Misconfigured)?;
+    match provider.retrieve_by_id(&id).await {
+        Ok(Some(loaded)) => Ok(caller.with_acting_user(loaded)),
+        Ok(None) => Err(GuardRefusal::Unknown),
+        Err(error) => Err(GuardRefusal::Failed(error)),
     }
 }
 

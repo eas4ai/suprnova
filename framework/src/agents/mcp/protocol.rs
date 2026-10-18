@@ -116,16 +116,43 @@ pub(crate) fn header_mismatch(id: Option<&Value>, message: &str) -> HttpResponse
     refuse(400, id, HEADER_MISMATCH, message, None)
 }
 
-/// A request header's value as text: `Ok(None)` when absent, `Err(())`
-/// when it holds characters a header value may not.
-pub(crate) fn header_text(headers: &hyper::HeaderMap, name: &str) -> Result<Option<String>, ()> {
-    match headers.get(name) {
-        None => Ok(None),
-        Some(value) => value
-            .to_str()
-            .map(|text| Some(text.to_string()))
-            .map_err(|_| ()),
+/// Why a request metadata header cannot be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeaderProblem {
+    /// The header appears more than once, so which value the body must
+    /// match is unclear.
+    Repeated,
+    /// The value holds characters a header value may not.
+    Invalid,
+}
+
+impl HeaderProblem {
+    /// The refusal's text for the header `name`.
+    pub(crate) fn describe(self, name: &str) -> String {
+        match self {
+            Self::Repeated => format!("The {name} header appears more than once."),
+            Self::Invalid => format!("The {name} header holds characters a header may not."),
+        }
     }
+}
+
+/// A request header's value as text: `Ok(None)` when absent, and an error
+/// when it appears more than once or is not a valid value.
+pub(crate) fn header_text(
+    headers: &hyper::HeaderMap,
+    name: &str,
+) -> Result<Option<String>, HeaderProblem> {
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(HeaderProblem::Repeated);
+    }
+    value
+        .to_str()
+        .map(|text| Some(text.to_string()))
+        .map_err(|_| HeaderProblem::Invalid)
 }
 
 /// The value of an `Mcp-Name` header, decoded from the Base64 sentinel

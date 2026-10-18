@@ -51,6 +51,10 @@ pub enum CallerChannel {
     Browser,
     /// The MCP endpoint, by a client presenting a token or none.
     Client,
+    /// The tool's route, called by a user signed in some other way than a
+    /// browser session: a bearer token, basic auth or a custom guard. Such
+    /// a caller holds no scope.
+    Direct,
 }
 
 /// An agent account registered under auth.md (AGENT-007).
@@ -166,20 +170,40 @@ impl ToolCaller {
         }
     }
 
-    /// A viewer calling a tool's route from the browser: the session's user,
-    /// or a guest. A browser session holds every scope.
-    pub(crate) fn browser(user: Option<Arc<dyn Authenticatable>>, address: Option<IpAddr>) -> Self {
+    /// A request to a tool's route with no user: a guest of the page.
+    pub(crate) fn route_guest(address: Option<IpAddr>) -> Self {
         Self {
-            kind: if user.is_some() {
-                CallerKind::User
-            } else {
-                CallerKind::Public
-            },
             channel: CallerChannel::Browser,
-            user,
+            address,
+            ..Self::guest()
+        }
+    }
+
+    /// A request to a tool's route by the user the session guard resolved
+    /// from the browser's session. A browser session holds every scope.
+    pub(crate) fn session_user(user: Arc<dyn Authenticatable>, address: Option<IpAddr>) -> Self {
+        Self {
+            kind: CallerKind::User,
+            channel: CallerChannel::Browser,
+            user: Some(user),
             registration: None,
             client: None,
             scopes: Scopes::Every,
+            address,
+        }
+    }
+
+    /// A request to a tool's route by a user signed in some other way: a
+    /// bearer token, basic auth or a custom guard. Not a browser session,
+    /// so it holds no scope.
+    pub(crate) fn direct_user(user: Arc<dyn Authenticatable>, address: Option<IpAddr>) -> Self {
+        Self {
+            kind: CallerKind::User,
+            channel: CallerChannel::Direct,
+            user: Some(user),
+            registration: None,
+            client: None,
+            scopes: Scopes::Granted(BTreeSet::new()),
             address,
         }
     }
@@ -229,6 +253,13 @@ impl ToolCaller {
     /// The same caller, calling from `address`.
     pub(crate) fn with_address(mut self, address: Option<IpAddr>) -> Self {
         self.address = address;
+        self
+    }
+
+    /// The same caller, acting as `user`: the record a tool's own guard
+    /// loaded for the identifier the resolver returned.
+    pub(crate) fn with_acting_user(mut self, user: Arc<dyn Authenticatable>) -> Self {
+        self.user = Some(user);
         self
     }
 

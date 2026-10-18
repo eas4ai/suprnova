@@ -1,9 +1,11 @@
-//! The per-caller limit on tool calls (AGENT-002).
+//! The limits on agent traffic (AGENT-002, AGENT-003).
 //!
 //! Every tool call counts against its caller: a user, an agent account, or,
-//! for a guest, the client address. Calls through the browser and through
-//! the MCP endpoint count in one bucket per caller, so a route without a
-//! throttle of its own is still limited.
+//! for a guest, the client address. MCP calls and browser tool calls count
+//! in one bucket per caller, so a route without a throttle of its own is
+//! still limited. Every request to the MCP endpoint also counts against its
+//! client address, which bounds what the tool budget does not see: lists,
+//! handshakes and requests refused for a bad token.
 
 use super::AgentsConfig;
 use super::caller::{CallerKind, ToolCaller};
@@ -28,12 +30,31 @@ pub(crate) async fn admit(config: &AgentsConfig, caller: &ToolCaller) -> Result<
         CallerKind::Public => config.address_limit,
         CallerKind::User | CallerKind::Agent => config.caller_limit,
     };
-    let key = caller.limit_key();
+    count(&caller.limit_key(), limit).await
+}
+
+/// Count one request to the MCP endpoint from `address`, whatever it asks
+/// and however it ends, or refuse it when the address's window is full.
+pub(crate) async fn admit_request(
+    config: &AgentsConfig,
+    address: Option<std::net::IpAddr>,
+) -> Result<(), Refusal> {
+    let key = format!(
+        "agents:requests:{}",
+        address
+            .map(|address| address.to_canonical().to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+    count(&key, config.request_limit).await
+}
+
+/// Count one step against `limit` under `key`.
+async fn count(key: &str, limit: super::CallLimit) -> Result<(), Refusal> {
     let window = limit.window.as_secs().max(1);
-    match RateLimiter::increment_if_below(&key, window, 1, i64::from(limit.max_calls)).await {
+    match RateLimiter::increment_if_below(key, window, 1, i64::from(limit.max_calls)).await {
         Ok(ConditionalIncrement::Incremented(_)) => Ok(()),
         Ok(ConditionalIncrement::Unchanged(_)) => {
-            let retry_after = RateLimiter::available_in(&key)
+            let retry_after = RateLimiter::available_in(key)
                 .await
                 .unwrap_or(window)
                 .max(1);
@@ -42,7 +63,7 @@ pub(crate) async fn admit(config: &AgentsConfig, caller: &ToolCaller) -> Result<
         Err(error) => {
             tracing::error!(
                 error = %crate::error::render_error_chain(&error),
-                "the tool call limiter's store failed; the call is refused"
+                "the agents limiter's store failed; the request is refused"
             );
             Err(Refusal::Unavailable(error))
         }

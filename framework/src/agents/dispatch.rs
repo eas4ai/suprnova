@@ -140,24 +140,30 @@ pub(crate) async fn call(
         endpoint.peer_ip,
         async move { sign_in(&seeded, guard).await },
     );
-    let response = match tokio::time::timeout(timeout, caller.scope(served)).await {
-        Ok(response) => response,
-        Err(_) => return Err(CallFailure::TimedOut(timeout)),
-    };
-    let (parts, body) = response.into_parts();
-    let body = match Limited::new(body, max_result_bytes).collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => return Err(CallFailure::TooLarge(max_result_bytes)),
-    };
-    Ok(RouteAnswer {
-        status: parts.status.as_u16(),
-        content_type: parts
-            .headers
-            .get(hyper::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string),
-        body,
-    })
+    // One deadline over the whole call: the route's response head and its
+    // body together, so a route that streams its answer, as SSE or bytes,
+    // cannot hold the call past the limit.
+    let run = caller.scope(async move {
+        let response = served.await;
+        let (parts, body) = response.into_parts();
+        let body = match Limited::new(body, max_result_bytes).collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => return Err(CallFailure::TooLarge(max_result_bytes)),
+        };
+        Ok(RouteAnswer {
+            status: parts.status.as_u16(),
+            content_type: parts
+                .headers
+                .get(hyper::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string),
+            body,
+        })
+    });
+    match tokio::time::timeout(timeout, run).await {
+        Ok(answer) => answer,
+        Err(_) => Err(CallFailure::TimedOut(timeout)),
+    }
 }
 
 /// The request for a call of `tool` at `target`.

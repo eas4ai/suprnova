@@ -78,6 +78,11 @@ impl Agents {
 }
 
 /// A fake token issuer, alive until dropped. See [`Agents::fake`].
+///
+/// One exists only when a test asks for it, through [`Agents::fake`] or
+/// [`TestClient::mcp`], which calls it: its field is private, so nothing
+/// else can build one, and no production path does. While none is alive the
+/// endpoint consults no fake token at all.
 pub struct AgentsFake {
     minted: Mutex<Vec<String>>,
 }
@@ -139,9 +144,9 @@ impl TestClient {
     }
 
     /// Call the tool `name` from the browser: a request to the tool's route
-    /// with `arguments` as a JSON body (and, for a `GET` route, the query),
-    /// its path parameters filled from the arguments, with this client's
-    /// cookies and the user it acts as.
+    /// with `arguments` as a JSON body, its path parameters filled from the
+    /// arguments, the [`TOOL_CALL_HEADER`](super::TOOL_CALL_HEADER) the
+    /// browser helpers send, this client's cookies and the user it acts as.
     ///
     /// When the client holds the session's `XSRF-TOKEN` cookie, the request
     /// sends it back as `X-XSRF-TOKEN`, as a page's script does; visit a page
@@ -166,7 +171,8 @@ impl TestClient {
         let mut request = self
             .send(tool.method().clone(), path)
             .json(&Value::Object(object))
-            .header("Accept", "application/json");
+            .header("Accept", "application/json")
+            .header(super::TOOL_CALL_HEADER, name);
         if let Some(token) = self.cookie("XSRF-TOKEN") {
             request = request.header("X-XSRF-TOKEN", token);
         }

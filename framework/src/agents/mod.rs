@@ -41,6 +41,7 @@
 mod auth;
 mod caller;
 mod dispatch;
+mod input;
 mod limit;
 mod mark;
 mod mcp;
@@ -72,6 +73,12 @@ pub use tool::{__ToolDeclaration, RegisteredTool, ToolAnnotations, ToolRecord, T
 /// The default path of the MCP endpoint.
 pub const DEFAULT_MCP_PATH: &str = "/mcp";
 
+/// The header a browser tool call carries, naming the tool: what tells a
+/// page's call of a tool apart from an ordinary request to the tool's
+/// route. Only a request that carries it counts against the caller's tool
+/// budget; the caller checks apply to every request to the route.
+pub const TOOL_CALL_HEADER: &str = "Suprnova-Tool-Call";
+
 /// How the application serves agents: the MCP endpoint's path and limits,
 /// the origins it accepts, and the resolvers that verify tokens.
 ///
@@ -86,6 +93,8 @@ pub struct AgentsConfig {
     pub(crate) call_timeout: Duration,
     pub(crate) caller_limit: CallLimit,
     pub(crate) address_limit: CallLimit,
+    pub(crate) request_limit: CallLimit,
+    pub(crate) resolver_timeout: Duration,
     pub(crate) resolvers: Vec<Arc<dyn CallerResolver>>,
     pub(crate) authorization_server: Option<Arc<dyn AuthorizationServerMetadata>>,
     pub(crate) server_name: Option<String>,
@@ -140,9 +149,10 @@ impl std::fmt::Debug for AgentsConfig {
 
 impl AgentsConfig {
     /// The endpoint at `/mcp`, accepting a 1 MiB request body and 30
-    /// seconds of run time per call, 120 calls a minute per caller and 60 a
-    /// minute per client address for public calls, with no resolver: only
-    /// public tools can be called until one is added.
+    /// seconds of run time per call, 120 calls a minute per caller, 60 a
+    /// minute per client address for public calls, 600 requests of any kind
+    /// a minute per client address, and 5 seconds for a resolver to decide,
+    /// with no resolver: only public tools can be called until one is added.
     pub fn new() -> Self {
         Self {
             path: DEFAULT_MCP_PATH.to_string(),
@@ -152,6 +162,8 @@ impl AgentsConfig {
             call_timeout: Duration::from_secs(30),
             caller_limit: CallLimit::per_minute(120),
             address_limit: CallLimit::per_minute(60),
+            request_limit: CallLimit::per_minute(600),
+            resolver_timeout: Duration::from_secs(5),
             resolvers: Vec::new(),
             authorization_server: None,
             server_name: None,
@@ -219,6 +231,23 @@ impl AgentsConfig {
         self
     }
 
+    /// How many requests of any kind one client address may send the MCP
+    /// endpoint in a window: 600 a minute unless set. It bounds what the
+    /// tool budget does not count, such as `tools/list`, `initialize`,
+    /// `ping` and requests refused for a bad token.
+    pub fn request_limit(mut self, limit: CallLimit) -> Self {
+        self.request_limit = limit;
+        self
+    }
+
+    /// How long a resolver may take to decide on a token: 5 seconds unless
+    /// set. A resolver that takes longer is treated as unavailable, and the
+    /// request gets 503.
+    pub fn resolver_timeout(mut self, timeout: Duration) -> Self {
+        self.resolver_timeout = timeout;
+        self
+    }
+
     /// Add a resolver that verifies bearer tokens. Resolvers are asked in
     /// the order they were added; the first that recognizes a token decides.
     pub fn resolver(mut self, resolver: Arc<dyn CallerResolver>) -> Self {
@@ -229,7 +258,9 @@ impl AgentsConfig {
     /// Serve authorization server metadata (RFC 8414) from `provider` at
     /// `/.well-known/oauth-authorization-server` and
     /// `/.well-known/openid-configuration` under the application's public
-    /// root. Without a provider those paths answer 404.
+    /// root, and, when the provider's issuer is a path of this application
+    /// such as `https://app.example/oauth`, at the path-inserted locations
+    /// for that path too. Without a provider those paths answer 404.
     pub fn authorization_server(mut self, provider: Arc<dyn AuthorizationServerMetadata>) -> Self {
         self.authorization_server = Some(provider);
         self
@@ -356,6 +387,26 @@ impl Router {
                 (Method::GET, path),
                 AgentRoute::AuthorizationServer(config.clone(), kind),
             );
+        }
+        // An issuer at a path of this application's own origin is also
+        // served at its path-inserted location (RFC 8414): an issuer on
+        // another host serves its own metadata.
+        if let Some(provider) = &config.authorization_server
+            && let Some(issuer_path) = metadata::issuer_path(provider.as_ref())
+        {
+            for kind in [
+                MetadataKind::OAuthAuthorizationServer,
+                MetadataKind::OpenIdConfiguration,
+            ] {
+                let path = format!("{}{issuer_path}", kind.well_known_path());
+                router = router
+                    .try_get(&path, metadata::authorization_server)?
+                    .into();
+                router.agents.routes.insert(
+                    (Method::GET, path),
+                    AgentRoute::AuthorizationServer(config.clone(), kind),
+                );
+            }
         }
         router.agents.config = Some(config);
         Ok(router)

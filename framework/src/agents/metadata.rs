@@ -9,7 +9,7 @@
 
 use serde_json::json;
 
-use super::{AgentRoute, AgentsConfig};
+use super::{AgentRoute, AgentsConfig, AuthorizationServerMetadata};
 use crate::http::{HttpResponse, Request, Response};
 
 /// The well-known path of protected resource metadata (RFC 9728).
@@ -33,6 +33,17 @@ fn issuer_url() -> String {
     crate::routing::url::to("")
         .trim_end_matches('/')
         .to_string()
+}
+
+/// The path of the provider's issuer under the application's public URL,
+/// `/oauth` for `https://app.example/oauth`; `None` for an issuer at the
+/// public URL itself or on another origin. Read when the routes are
+/// registered, so the public URL is the one `APP_URL` gives.
+pub(crate) fn issuer_path(provider: &dyn AuthorizationServerMetadata) -> Option<String> {
+    let app = issuer_url();
+    let issuer = provider.issuer(&app);
+    let rest = issuer.strip_prefix(&app)?.trim_end_matches('/');
+    (rest.starts_with('/') && rest.len() > 1).then(|| rest.to_string())
 }
 
 /// The route of the protected resource metadata.

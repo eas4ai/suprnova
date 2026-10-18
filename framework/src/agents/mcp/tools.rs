@@ -95,6 +95,16 @@ pub(crate) fn answer_result(answer: &RouteAnswer) -> Value {
     }
 }
 
+/// A tool result naming each field of the input that breaks the tool's
+/// schema.
+pub(crate) fn invalid_input_result(failures: &[super::super::input::InputFailure]) -> Value {
+    let mut text = String::from("The input is not valid:");
+    for failure in failures {
+        text.push_str(&format!("\n- {}: {}", failure.field, failure.message));
+    }
+    error_result(&text)
+}
+
 /// A validation failure as a tool result naming each field.
 fn validation_result(errors: &Map<String, Value>) -> Value {
     let mut text = String::from("The input is not valid:");

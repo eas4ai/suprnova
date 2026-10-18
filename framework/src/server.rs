@@ -1209,7 +1209,8 @@ async fn route_request(
 ///
 /// The request gets the per-request state a wire request gets in
 /// [`serve_request`] and [`route_request`], fresh: a container scope, the
-/// auth state, the Inertia flash bag and SSR flag, and no socket id. The
+/// after-response commands, the auth state, the Inertia flash bag and SSR
+/// flag, and no socket id. The
 /// public root is the caller's, as the call is part of the request that
 /// made it. `before` runs inside that state, ahead of the middleware: the
 /// dispatcher signs the caller's user in there, as a test client's
@@ -1253,7 +1254,12 @@ where
     let flashed = Box::pin(
         crate::inertia::flash::FLASH_BAG.scope(crate::inertia::flash::new_bag(), ssr_scoped),
     );
-    crate::container::scope::run_in_new_scope(crate::routing::root::scope(root, flashed)).await
+    // The call's own after-response scope, as a wire request has: a
+    // command it queues with `Bus::dispatch_after_response` starts once the
+    // call's response is complete, on the connection's writer when the
+    // endpoint's request has one.
+    let answered = Box::pin(crate::bus::after_response::response(flashed));
+    crate::container::scope::run_in_new_scope(crate::routing::root::scope(root, answered)).await
 }
 
 /// Run every registered `Terminable` hook for a response on its way to the

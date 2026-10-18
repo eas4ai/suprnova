@@ -3,29 +3,45 @@
 //! The server puts it on a tool's route after the route's own middleware.
 //! A tool call the MCP endpoint dispatched passes straight through: the
 //! endpoint already checked the caller's kind, scopes and limit, and the
-//! caller is current for the whole call. Any other request is the browser
-//! calling the route with the user's session: the viewer is a guest
-//! (`public`) or the signed-in user (`user`), never an agent account, and a
-//! session holds every scope. The check refuses a viewer whose kind the
-//! tool does not accept, counts the call against the viewer's limit, and
-//! makes the viewer the current caller for the handler and its policies.
+//! caller is current for the whole call.
+//!
+//! Any other request reaches the route directly, and its caller is one of:
+//!
+//! - a guest (`public`);
+//! - a user the session guard resolved from the browser's session, a
+//!   browser caller holding every scope;
+//! - a user signed in some other way, by a bearer token, basic auth or a
+//!   custom guard: a `user` caller on the direct channel, holding no scope.
+//!   A tool that declares scopes refuses it with 403 `insufficient_scope`.
+//!
+//! The caller-kind and scope checks apply to every request to the route.
+//! Only a browser tool call, a request carrying the
+//! [`TOOL_CALL_HEADER`](super::TOOL_CALL_HEADER) the browser helpers send,
+//! counts against the caller's tool budget, so marking a handler `#[tool]`
+//! adds no limit to the route's page loads and form posts, and a limiter
+//! store that is down refuses only tool calls. The header is no credential:
+//! a browser tool call relies on the route's own CSRF middleware, as any
+//! form post does, so a tool on a `GET` route should only read.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use super::AgentsConfig;
+use super::TOOL_CALL_HEADER;
 use super::caller::{CallerKind, ToolCaller};
 use super::limit::{self, Refusal};
+use super::scope::Scope;
 use super::tool::RegisteredTool;
 use crate::error::FrameworkError;
-use crate::http::{Request, Response};
+use crate::http::{HttpResponse, Request, Response};
 use crate::middleware::{BoxedMiddleware, Middleware, Next, into_boxed};
 
 /// The access check of one tool's route.
 struct ToolAccess {
     name: &'static str,
     callers: &'static [CallerKind],
+    scopes: &'static [Scope],
     config: Arc<AgentsConfig>,
 }
 
@@ -34,8 +50,33 @@ pub(crate) fn access(tool: &RegisteredTool, config: Arc<AgentsConfig>) -> BoxedM
     into_boxed(ToolAccess {
         name: tool.name(),
         callers: tool.callers(),
+        scopes: tool.scopes(),
         config,
     })
+}
+
+impl ToolAccess {
+    /// Whether the tool accepts callers of `kind`; a public tool accepts
+    /// every caller.
+    fn accepts(&self, kind: CallerKind) -> bool {
+        self.callers.contains(&kind) || self.callers.contains(&CallerKind::Public)
+    }
+
+    /// The caller of a request without the tool-call mark.
+    async fn caller_of(request: &Request) -> Result<ToolCaller, FrameworkError> {
+        let address = request.ip().and_then(|ip| ip.parse().ok());
+        let Some(user) = crate::auth::Auth::route_user().await? else {
+            return Ok(ToolCaller::route_guest(address));
+        };
+        let guard = crate::auth::request_state::route_guard()
+            .or_else(crate::auth::request_state::used_guard)
+            .unwrap_or_else(crate::auth::Auth::default_guard_name);
+        if crate::auth::request_state::is_session_user(&guard, &user.get_auth_identifier()) {
+            Ok(ToolCaller::session_user(user, address))
+        } else {
+            Ok(ToolCaller::direct_user(user, address))
+        }
+    }
 }
 
 #[async_trait]
@@ -53,10 +94,8 @@ impl Middleware for ToolAccess {
             }
             return next(request).await;
         }
-        let user = crate::auth::Auth::route_user().await?;
-        let address = request.ip().and_then(|ip| ip.parse().ok());
-        let caller = ToolCaller::browser(user, address);
-        if !self.callers.contains(&caller.kind()) {
+        let caller = Self::caller_of(&request).await?;
+        if !self.accepts(caller.kind()) {
             return Err(match caller.kind() {
                 CallerKind::Public => FrameworkError::domain("Unauthenticated.", 401),
                 _ => FrameworkError::domain(
@@ -66,21 +105,43 @@ impl Middleware for ToolAccess {
             }
             .into());
         }
-        match limit::admit(&self.config, &caller).await {
-            Ok(()) => {}
-            Err(Refusal::Limited(retry_after)) => {
-                return Err(FrameworkError::rate_limited(
-                    Some(std::time::Duration::from_secs(retry_after)),
-                    "Too many tool calls.",
-                )
-                .into());
-            }
-            Err(Refusal::Unavailable(error)) => {
-                return Err(FrameworkError::domain(
-                    format!("The tool call limit cannot be checked: {error}"),
-                    503,
-                )
-                .into());
+        let missing = self.scopes.iter().any(|scope| !caller.can(scope.name()));
+        if missing {
+            let scope = self
+                .scopes
+                .iter()
+                .map(Scope::name)
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Err(HttpResponse::from(FrameworkError::domain(
+                format!(
+                    "The tool `{}` needs a browser session or a token with its scopes.",
+                    self.name
+                ),
+                403,
+            ))
+            .header(
+                "WWW-Authenticate",
+                format!("Bearer error=\"insufficient_scope\", scope=\"{scope}\""),
+            ));
+        }
+        if request.header(TOOL_CALL_HEADER).is_some() {
+            match limit::admit(&self.config, &caller).await {
+                Ok(()) => {}
+                Err(Refusal::Limited(retry_after)) => {
+                    return Err(FrameworkError::rate_limited(
+                        Some(std::time::Duration::from_secs(retry_after)),
+                        "Too many tool calls.",
+                    )
+                    .into());
+                }
+                Err(Refusal::Unavailable(error)) => {
+                    return Err(FrameworkError::domain(
+                        format!("The tool call limit cannot be checked: {error}"),
+                        503,
+                    )
+                    .into());
+                }
             }
         }
         caller.scope(next(request)).await

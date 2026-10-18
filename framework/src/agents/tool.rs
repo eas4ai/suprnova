@@ -214,8 +214,13 @@ impl RegisteredTool {
     }
 
     /// Whether the tool accepts callers of `kind`.
+    ///
+    /// A tool that accepts `public` callers accepts every caller: a guest,
+    /// a signed-in user, a user's client and an agent account. The handler
+    /// still sees which one called.
     pub fn accepts(&self, kind: CallerKind) -> bool {
-        self.record.decl.callers.contains(&kind)
+        let callers = self.record.decl.callers;
+        callers.contains(&kind) || callers.contains(&CallerKind::Public)
     }
 
     /// The scopes a token caller needs.
@@ -263,11 +268,10 @@ impl RegisteredTool {
     }
 
     /// Whether `caller` may call the tool: it accepts the caller's kind, and
-    /// the caller holds every scope it needs. A guest presents no token, so
-    /// scopes do not apply to it.
+    /// the caller holds every scope it needs. A public tool declares no
+    /// scope, which the build enforces, so every caller may call it.
     pub(crate) fn callable_by(&self, caller: &ToolCaller) -> bool {
-        self.accepts(caller.kind())
-            && (caller.kind() == CallerKind::Public || self.missing_scopes(caller).is_empty())
+        self.accepts(caller.kind()) && self.missing_scopes(caller).is_empty()
     }
 
     /// The tool as MCP's `tools/list` shows it.
@@ -309,8 +313,8 @@ impl ToolRegistry {
     ///   already failed);
     /// - two declarations of one scope disagree on its description, or a
     ///   tool names a scope no `tool_scopes!` declared;
-    /// - a tool's handler serves no route, or several and the tool names
-    ///   none of them with `route = "..."`;
+    /// - a tool's handler serves several routes and the tool names none of
+    ///   them with `route = "..."`;
     /// - a path parameter of the tool's route is not a field of its input;
     /// - a tool's input is not an object.
     pub fn build(router: &Router) -> Result<Self, FrameworkError> {
@@ -322,18 +326,21 @@ impl ToolRegistry {
                 .then(a.handler_path().cmp(&b.handler_path()))
         });
         let mut tools: Vec<RegisteredTool> = Vec::with_capacity(records.len());
+        let mut unrouted: Vec<&'static str> = Vec::new();
+        let mut previous: Option<&'static ToolRecord> = None;
         for record in records {
-            if let Some(previous) = tools.last()
+            if let Some(previous) = previous
                 && previous.name() == record.name()
             {
                 return Err(FrameworkError::internal(format!(
                     "two tools are named `{}`: {} and {}; a tool name is unique in the \
                      application",
                     record.name(),
-                    previous.record.handler_path(),
+                    previous.handler_path(),
                     record.handler_path()
                 )));
             }
+            previous = Some(record);
             for scope in record.scopes() {
                 if !scopes.contains(scope) {
                     return Err(FrameworkError::internal(format!(
@@ -343,7 +350,19 @@ impl ToolRegistry {
                     )));
                 }
             }
-            tools.push(resolve(router, record)?);
+            match resolve(router, record)? {
+                Some(tool) => tools.push(tool),
+                None => unrouted.push(record.name()),
+            }
+        }
+        // A router that leaves a tool unrouted, such as one a test builds for
+        // a few routes, serves without it rather than refusing every request.
+        if !unrouted.is_empty() {
+            tracing::warn!(
+                tools = %unrouted.join(", "),
+                "these tools are not routed and are left out: register a route for each \
+                 handler, or remove #[tool]"
+            );
         }
         let by_route = tools
             .iter()
@@ -404,7 +423,11 @@ fn checked_scopes() -> Result<Vec<Scope>, FrameworkError> {
 }
 
 /// Find the route `record`'s handler serves and check the tool fits it.
-fn resolve(router: &Router, record: &'static ToolRecord) -> Result<RegisteredTool, FrameworkError> {
+/// `None` when the handler serves no route.
+fn resolve(
+    router: &Router,
+    record: &'static ToolRecord,
+) -> Result<Option<RegisteredTool>, FrameworkError> {
     let handler = (record.decl.handler)();
     let mut routes = router.bindings.routes_for(handler);
     if let Some(name) = record.decl.route {
@@ -412,18 +435,7 @@ fn resolve(router: &Router, record: &'static ToolRecord) -> Result<RegisteredToo
     }
     let (method, pattern) = match routes.len() {
         1 => routes.remove(0),
-        0 => {
-            let wanted = match record.decl.route {
-                Some(name) => format!(" as the route named `{name}`"),
-                None => String::new(),
-            };
-            return Err(FrameworkError::internal(format!(
-                "tool `{}`: its handler {} is not routed{wanted}; register a route for it, \
-                 or remove #[tool]",
-                record.name(),
-                record.handler_path()
-            )));
-        }
+        0 => return Ok(None),
         _ => {
             let listed = routes
                 .iter()
@@ -468,13 +480,13 @@ fn resolve(router: &Router, record: &'static ToolRecord) -> Result<RegisteredToo
              `auth` and decide in their policies with ToolCaller::current()"
         );
     }
-    Ok(RegisteredTool {
+    Ok(Some(RegisteredTool {
         record,
         method,
         pattern,
         input_schema,
         output_schema: record.decl.output_schema.map(|schema| schema()),
-    })
+    }))
 }
 
 /// Whether the route `(method, pattern)` runs `AuthMiddleware`.
