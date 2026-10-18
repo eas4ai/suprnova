@@ -6,6 +6,8 @@
 //! of minting [`crate::auth::VerifiedPrincipal`] at their primary-auth
 //! boundaries.
 
+#[cfg(feature = "authorization-server")]
+pub mod authorization_server;
 #[cfg(feature = "device-authorization")]
 pub mod device_authorization;
 #[cfg(feature = "email-verification")]
@@ -52,6 +54,10 @@ pub(crate) fn oauth_profile_picture(body: &str, pointer: &str) -> Option<String>
     (!url.trim().is_empty()).then(|| url.to_owned())
 }
 
+/// Build a purpose-scoped abuse-limiter key from a normalized identity.
+///
+/// The identity is digested so raw addresses never reach the limiter
+/// backend; the purpose prefix keeps every route on its own budget.
 #[cfg(any(
     feature = "password",
     feature = "email-verification",
@@ -59,9 +65,16 @@ pub(crate) fn oauth_profile_picture(body: &str, pointer: &str) -> Option<String>
     feature = "magic-link",
     feature = "passkey",
     feature = "two-factor",
-    feature = "device-authorization"
+    feature = "device-authorization",
+    feature = "authorization-server"
 ))]
-pub use shared::abuse_key;
+pub fn abuse_key(purpose: &str, identity: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(identity.as_bytes());
+    let digest = crate::storage::hex_lower(&hasher.finalize());
+    format!("{purpose}:{digest}")
+}
 #[cfg(any(
     feature = "password",
     feature = "magic-link",
@@ -162,18 +175,6 @@ mod shared {
         }
     }
 
-    /// Build a purpose-scoped abuse-limiter key from a normalized identity.
-    ///
-    /// The identity is digested so raw addresses never reach the limiter
-    /// backend; the purpose prefix keeps every route on its own budget.
-    pub fn abuse_key(purpose: &str, identity: &str) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(identity.as_bytes());
-        let digest = crate::storage::hex_lower(&hasher.finalize());
-        format!("{purpose}:{digest}")
-    }
-
     #[cfg(any(
         feature = "password",
         feature = "email-verification",
@@ -207,7 +208,7 @@ mod shared {
         identity: &str,
         policy: AbusePolicy,
     ) -> Gate {
-        let key = abuse_key(purpose, identity);
+        let key = super::abuse_key(purpose, identity);
         match context.plugin.abuse_limiter().acquire(&key, policy).await {
             Ok(Permit::Allowed { .. }) => Gate::Proceed,
             Ok(Permit::Rejected { retry_after }) => {

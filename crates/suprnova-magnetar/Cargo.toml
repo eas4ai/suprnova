@@ -29,6 +29,10 @@ oauth-facebook = ["oauth"]
 oauth-x = ["oauth"]
 oauth-tiktok = ["oauth"]
 device-authorization = ["oauth"]
+# The OAuth 2.1 authorization server an MCP client signs in through. The
+# client metadata document fetch needs DNS (`tokio/net`) and a TLS client
+# that connects to the address the plugin checked.
+authorization-server = ["dep:reqwest", "dep:url", "tokio/net"]
 seaorm-sqlite = ["sea-orm/sqlx-sqlite", "sea-orm/runtime-tokio-rustls"]
 seaorm-postgres = ["sea-orm/sqlx-postgres", "sea-orm/runtime-tokio-rustls"]
 seaorm-mysql = ["sea-orm/sqlx-mysql", "sea-orm/runtime-tokio-rustls"]
@@ -66,6 +70,8 @@ apple = { package = "apple", git = "https://github.com/eas4ai/suprnova-apple-rs.
 ], optional = true }
 jsonwebtoken = { version = "9", optional = true }
 p256 = { version = "0.13", optional = true, features = ["pem"] }
+reqwest = { version = "0.13", optional = true, default-features = false, features = ["rustls"] }
+url = { version = "2", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

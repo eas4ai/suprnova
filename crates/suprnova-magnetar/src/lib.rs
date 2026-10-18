@@ -18,6 +18,9 @@
 pub mod abuse;
 /// Shared primary-authentication and factor-gate boundaries.
 pub mod auth;
+/// The OAuth 2.1 authorization server MCP clients sign in through.
+#[cfg(feature = "authorization-server")]
+pub mod authorization_server;
 /// Cryptographic boundaries.
 pub mod crypto;
 /// Atomic first-email-proof store for the default SeaORM schema.
