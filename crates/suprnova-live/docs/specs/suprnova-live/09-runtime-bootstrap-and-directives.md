@@ -1,7 +1,7 @@
 # Suprnova Live -- 09 Runtime Bootstrap and Directives
 
 Status: Normative design specification
-Last revised: 2026-10-04
+Last revised: 2026-10-18
 
 ## Scope
 
@@ -230,6 +230,89 @@ UX flow:
 2. Invalid configuration is served -> runtime rejects the unsafe value and
    reports its source.
 
+### WebMCP tool registration
+
+The runtime shall register a connected island's tool actions with the page's
+WebMCP model context and remove them when the island leaves (AGENT-012). The
+server describes the tools on the island root; the runtime registers exactly
+what the root lists, each tool under its own abort signal, and runs a call
+as a click of the tool's action. A browser without WebMCP registers nothing,
+and nothing else in the runtime depends on it.
+
+Every island root a mount, a public seed or a successor render assembles
+carries `data-suprnova-live-tools` when the component offers the browser a
+tool, and no such attribute otherwise. Its value is canonical JSON:
+
+```json
+{"fields":["count"],
+ "tools":[{"action":"increment","annotations":{"consequentialHint":false,
+   "readOnlyHint":false,"untrustedContentHint":false},
+   "description":"Add one to the counter.","inputSchema":{},
+   "name":"counter.increment.main","title":"Increment"}],
+ "v":1}
+```
+
+`fields` names the agent-visible fields (spec 03); each tool names its
+action, its full name `{base}.{documentKey}`, its optional title, its
+description, its input schema (spec 04) and the three WebMCP hints. The
+attribute is built from the generated metadata alone, so it is the same for
+every viewer: a public seed's bytes stay shareable and do not change when the
+seed is promoted, and who may call a tool is decided when it is called.
+
+Acceptance criteria:
+
+- The island key of a component with a browser tool fits the tool instance
+  grammar `[A-Za-z0-9_-]{1,63}`, because it becomes the last segment of each
+  tool name, which allows neither `:` nor a second `.`. `LiveMount` refuses
+  such a key when it is declared, root assembly refuses it at render, and
+  the runtime refuses it in the attribute.
+- `data-suprnova-live-tools` is a known root attribute. The runtime accepts
+  it only with exactly the keys `v`, `fields` and `tools`; `v` is 1; `fields`
+  holds at most 512 unique field names; `tools` holds 1 to 64 tools of
+  exactly the keys above, each with a unique name of 1 to 128 ASCII letters,
+  digits, `_`, `-` and `.` that ends in a `.` and the island's document key
+  and is longer than it, an action identity, a non-blank description, an
+  optional non-blank title, an object input schema, and annotations of
+  exactly the three boolean hints. Anything else marks the island invalid.
+- The attribute counts toward the root's configured size bound.
+- On connect, when `document.modelContext` offers `registerTool`, or else
+  `navigator.modelContext` does, the runtime registers each tool with its
+  name, title, description, input schema and hints and its own
+  `AbortController`. Retiring the island aborts its registrations, a page
+  suspended into the back/forward cache aborts every registration and
+  registers them again on resume, disposing the runtime aborts them all, and
+  a navigation unloads them with the document.
+- A morph cannot change an island's tools: the successor and same-metadata
+  checks compare the tool contract, as they compare the snapshot.
+- A registration the browser refuses, a duplicate or invalid name above all,
+  records the `agent_tool_rejected` diagnostic at warning severity in the
+  lifecycle phase with the `operation_rejected` detail, and the island keeps
+  working.
+- A call is refused unless the island is still the connected island the tool
+  was registered for and the input is a plain object. Otherwise it is
+  scheduled as the action directive's click is: through the island's own
+  scheduler and transport, with its pending deferred model edits, promoting
+  a public seed, and with the `Suprnova-Tool-Call` header (spec 06). An
+  abort signal WebMCP passes cancels the call and rejects it with
+  `AbortError`.
+- A call resolves to `{content, structuredContent, isError}`. A committed
+  response gives the outcome, `accepted`, `no_render` or `invalid` with its
+  validation issues, and the agent-visible fields of the committed snapshot,
+  with a 64-bit integer field as its decimal string; a navigation gives
+  `redirect`. A refused response gives an error. The result carries nothing
+  else of the island's state, HTML, events or effects.
+- A refused call delivers its `isError` result to the agent before the island
+  applies any recovery from the refusal, a page reload included, so the
+  agent hears of every refusal.
+
+UX flow:
+
+1. A page with a tool island loads in a browser with WebMCP -> each tool the
+   root lists is registered under its full name and the agent can call it.
+2. The island leaves the page, or the page is cached or navigated away ->
+   its tools leave the agent's view; a call the island refuses answers the
+   agent with an error before the page recovers.
+
 ## Acceptance criteria
 
 - The runtime loads independently of client frameworks and never owns initial
@@ -239,9 +322,19 @@ UX flow:
 - Delegated events preserve native and nested ownership semantics.
 - Extensions and diagnostics use bounded public hooks rather than private
   monkey-patching.
+- Tool islands register exactly the tools their roots list with WebMCP and
+  remove them when they leave, and a tool call runs as a click.
 
 ## Decisions and revisions
 
+- 2026-10-18 -- Added WebMCP tool registration (AGENT-012). Island roots of
+  components with browser tools carry `data-suprnova-live-tools`, the
+  island key of such a component fits `[A-Za-z0-9_-]{1,63}`, and the runtime
+  registers each listed tool with `document.modelContext` under its own abort
+  signal, aborting it on retire, suspend and dispose. A refused registration
+  records `agent_tool_rejected`. A refused call must deliver its `isError`
+  result before any recovery reload; the runtime at this revision can lose it
+  to a reload, a defect ruled for the fix round.
 - 2026-10-04 -- An action directive passes positional literal arguments,
   `live:click="remove(42)"`; it had always sent an empty argument object, so
   an action with parameters could not be invoked from a template. The

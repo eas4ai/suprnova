@@ -1,7 +1,7 @@
 # Suprnova Live -- 07 Security and Trust Boundaries
 
 Status: Normative design specification
-Last revised: 2026-09-30
+Last revised: 2026-10-18
 
 ## Scope
 
@@ -216,6 +216,72 @@ UX flow:
 2. Hostile traffic exceeds policy -> requests are rejected cheaply and safely
    without exposing enforcement internals.
 
+### Agent tool admission
+
+A tool call of a Live action shall pass every check a click passes, plus the
+tool's own (AGENT-012, AGENT-013). A browser call is a click with the
+tool-call header, so it keeps the session, origin, CSRF, principal, tenant,
+rate-limit, snapshot and authorization checks unchanged and adds the tool's
+caller check and budget. A headless call has no browser, so each browser
+fact is stood in for by something the MCP endpoint or the call mark proves,
+and each absence is closed only for a call that carries the mark.
+
+Before a headless call reaches Live, the MCP endpoint has checked the
+request's `Origin`, bounded its body, checked the protocol headers,
+authenticated the bearer token, checked the caller's kind and scopes,
+counted the call against the caller's budget, and bounded the call's run time
+and result. Then:
+
+| Browser check | Headless call |
+|---|---|
+| POST and the Live media type | The route takes `POST` only; the handler builds the request and its media type itself and requires the call mark. |
+| Request size | The MCP endpoint's body bound, then the Live request limit on the body. |
+| Proxy normalization | The same: the dispatched request carries the client's address and forwarded headers. |
+| Session | None: agent traffic carries no cookie. Closed as `StatelessRequest` for a marked call only; the catalog entry requires the session absent; the agent scope binds identity instead (spec 05). |
+| Origin | The MCP endpoint's `Origin` check and the call mark. Closed as `TrustedInternalOrigin` for a marked call only. |
+| CSRF | A bearer token is no ambient credential and the call forwards no cookie. Closed as `StatelessCsrfPolicy` for a marked call only. |
+| Principal | The guard's `AuthMiddleware`, when it has one, runs on the acting user the call signed in; with none, closed as `AnonymousPrincipal` for a marked call only. |
+| Tenant | The guard's tenant middleware runs unchanged and its fact feeds the agent scope; closed as `TenantlessRoute` only when none ran. |
+| Rate limit | The caller's tool budget and the guard's throttle; closed as `UpstreamRateLimited` only when the guard records none. |
+| Middleware completion, attestation order and expiry | The same completion middleware and context validation. |
+| Mount selection | Must be the agent route, the tool's own component and its slot. |
+| Absence closure by mount kind | Not used: the agent catalog entry is refused on the browser endpoint. |
+| Context, snapshot, document key, ledger, arguments, authorization, validation, transaction port, sealing | The browser endpoint's own service, with the agent scope as the context scope. |
+| Session-state commit and flash | No session: a component with session fields has no headless tool, and a flash an action sets is dropped. |
+
+Acceptance criteria:
+- A browser tool call runs the tool's caller check after the route guard: a
+  guest is a `public` caller, a user the session guard resolved from the
+  browser's session is a `user` caller holding every scope, a user signed in
+  any other way holds no scope, and a browser caller is never an agent
+  account. A tool that does not accept the caller is answered 401 for a guest
+  and 403 otherwise; a missing scope is answered 403 with
+  `insufficient_scope`.
+- A browser tool call counts against the caller's tool budget, per user or,
+  for a guest, per address bucket, in the one bucket MCP calls of the same
+  caller count in. A used budget is answered 429, and a limiter that cannot
+  answer refuses the call with 503 rather than run it unlimited. An ordinary
+  action request is never counted.
+- A headless mount asks the Gate `live:{component}.mount` with the
+  `ToolCaller` and a `LiveMountRequest` holding the component and the mount
+  properties the agent sent, before anything is loaded: before a resolver
+  runs and before the component mounts. An ability no policy defines is
+  refused even when a `Gate::before` hook would allow it.
+- A headless action runs the action's own `live:{component}.{action}`
+  authorization through the same port a click does, with the acting user
+  signed in on the tool's guard as the route principal. A denial is
+  reported to the agent as unauthorized, not as a stale handle, and runs no
+  part of the action.
+- Every absence the table closes is closed only after the handler has seen
+  the call mark naming a headless Live tool; a request without it closes
+  nothing and is answered 404 (spec 06).
+
+UX flow:
+1. Agent calls a tool its caller is not allowed -> the call is refused at the
+   tool's check or the action's policy, and nothing of the action runs.
+2. Agent calls a headless tool within its rights -> the call passes the same
+   context, snapshot, ledger and authorization checks a click passes.
+
 ## Iteration 001 implementation profile
 
 The implemented boundary and deferred integrations are enumerated in
@@ -290,9 +356,17 @@ production feature or public convenience constructor.
   cache composition.
 - Browser output and effects cannot introduce arbitrary script execution.
 - Resource limits and diagnostics resist abuse without leaking sensitive data.
+- A tool call of a Live action passes every check a click passes, with each
+  browser fact a headless call lacks stood in for by a proof it carries.
 
 ## Decisions and revisions
 
+- 2026-10-18 -- Added agent tool admission (AGENT-012, AGENT-013). A browser
+  tool call keeps every click check and adds the tool's caller-kind check,
+  in which a browser caller is never an agent, and the per-caller tool
+  budget. A headless call passes the admission table above, closing each
+  browser-only absence for a marked call only, and asks the Gate
+  `live:{component}.mount` before anything is loaded.
 - 2026-08-31 -- Completed the Iteration 005 Task 4 production trust adapter.
   The public server paths bind one immutable Live server runtime before traffic,
   route metadata prepares requests before owner middleware, each middleware

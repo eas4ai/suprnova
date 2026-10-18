@@ -1,7 +1,7 @@
 # Suprnova Live -- 06 Wire Protocol and Transport
 
 Status: Normative design specification
-Last revised: 2026-10-04
+Last revised: 2026-10-18
 
 ## Scope
 
@@ -195,6 +195,62 @@ UX flow:
 2. Refresh obtains current assets and document metadata -> Live resumes without
    repeated incompatibility loops.
 
+### Agent tool route and tool-call header
+
+Agent tool calls of Live actions shall reach the ordinary Live action path
+(AGENT-012, AGENT-013). A browser's call of a tool is a Live action request
+like a click's, marked with the `Suprnova-Tool-Call: <name>` header; a
+headless call arrives through the reserved `POST /__live/agent` route, which
+only a call the MCP endpoint dispatched can use.
+
+`Router::try_live_with` installs `/__live/agent` with the rest of the
+reserved namespace when the framework's `agents` feature is on: `POST` only,
+behind the application's Live route guard, with the `agent-action` operation
+and the strict Live policy. The handler takes a JSON object of `mount`,
+`handle` and `arguments`, then builds the protocol-2 update request a
+browser would send: a fresh correlation id and idempotency key, the
+snapshot's revision as the base revision, an instance snapshot, one
+`invoke_action` of the tool's action, no model proposal, no child
+parameters, and the document-key extension `agent`. It runs that request
+through the browser action endpoint's own service and answers with a private
+media type, `application/vnd.suprnova.live-tool-result+json`, which the MCP
+endpoint reads only for a Live tool and turns into the tool result as it
+stands.
+
+Acceptance criteria:
+- Any request to `/__live/agent` without the call mark naming a headless Live
+  tool, a request off the wire included and whatever header it carries, is
+  answered 404 and runs nothing; any method but `POST` is answered 405. The
+  mark lives in a private field of the request that nothing parsed from the
+  wire can set.
+- A tool has no Live route of its own: every Live tool shares the action and
+  agent routes, so a routed handler tool whose name equals a browser tool's
+  base, a `.` and an instance key is refused when the application boots.
+- On a router that does not serve `/__live/agent`, the headless Live tools
+  are left out of the tool registry with one boot warning naming them and
+  saying to install Live with `Router::try_live_with`, as unrouted handler
+  tools are; the rest of the application serves unchanged.
+- The browser runtime sends `Suprnova-Tool-Call` with the tool's full name on
+  every Live action request a tool call makes, and on no other request. An
+  ordinary action request carries no such header and is not counted as a
+  tool call.
+- A Live action request carrying the header names a browser tool, as
+  `{base}.{instance}`, or is answered 400. The server then holds the request
+  to that tool: its component, its island's document key and the one action
+  it invokes must be the tool's, or the endpoint refuses it before anything
+  runs, so a counted tool name cannot cover another component's, island's or
+  action's call.
+- A headless call's mount properties, handle and arguments are checked
+  field by field before the request is built, and a refusal names each field
+  under `mount.`, `arguments.` or `handle` (spec 04).
+
+UX flow:
+1. Agent calls a Live tool in the browser -> the page sends the island's
+   action request with the tool-call header, and the server runs it as a
+   click once the tool's checks pass.
+2. A client posts to `/__live/agent` directly -> it is answered 404 and no
+   component is mounted or hydrated.
+
 ## Iteration 001 implementation profile
 
 The checked parser and pure application model are documented in
@@ -270,9 +326,19 @@ blob store merely to replay bytes.
 - Duplicate and retry behavior protects durable effects.
 - Errors carry safe deterministic recovery instructions.
 - Rolling deployments have an explicit compatibility path.
+- Agent tool calls of Live actions travel the ordinary action path: the
+  browser's marked by `Suprnova-Tool-Call` and held to that tool, the
+  headless ones through the reserved agent route only.
 
 ## Decisions and revisions
 
+- 2026-10-18 -- Added the agent tool route and the tool-call header
+  (AGENT-012, AGENT-013). Live installs the reserved `POST /__live/agent`,
+  which answers 404 to anything but a call the MCP endpoint dispatched and
+  runs a headless call through the browser endpoint's own service. A browser
+  tool call carries `Suprnova-Tool-Call`, and the server holds it to the
+  tool's action and island. Headless tools on a router without the route are
+  left out with a boot warning, as ruled, matching unrouted handler tools.
 - 2026-10-04 -- A successor render's island root is bounded by the
   configured island HTML size, the bound a mount's root already had, instead
   of a fixed 1 MiB; the root carries the encoded snapshot, so a state of

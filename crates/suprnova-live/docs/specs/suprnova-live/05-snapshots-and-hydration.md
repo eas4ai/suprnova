@@ -1,7 +1,7 @@
 # Suprnova Live -- 05 Snapshots and Hydration
 
 Status: Normative design specification
-Last revised: 2026-10-04
+Last revised: 2026-10-18
 
 ## Scope
 
@@ -210,6 +210,68 @@ UX flow:
 2. Fresh rendering succeeds or fails -> the island resumes with current state
    or presents an actionable error without replaying the rejected action.
 
+### Headless state handles
+
+A headless tool call (AGENT-013) shall act on an island that no browser
+holds, and a later call shall act on the same island. Without a handle the
+call mounts the component on the server, as a document mounts an
+identity-bound island; with one it hydrates the component from the handle's
+snapshot. The handle a call returns is the island's signed instanced
+snapshot, sealed so the agent reads nothing of the state it carries, and
+bound to the caller.
+
+Each component with a headless tool has one mount-catalog entry: the route
+identity of the reserved `/__live/agent` route (spec 06), a slot named for
+the component, the document key `agent`, the session required absent, and
+the principal and tenant optional. Who the caller is enters the snapshot
+through the agent scope instead of a session: a SHA-256 digest over the
+domain `suprnova-live/agent-scope/v1`, the caller's kind, the user it acts
+as, its agent registration, the client it came through, the tenant fact the
+request's tenant check recorded, and, for a guest, the address bucket its
+calls are limited under. The scope never includes a token, so a handle
+survives the rotation of the caller's refresh tokens. The context validator
+takes the agent scope as the context's scope, so the mount's snapshot, every
+successor and the instance-ledger entry, keyed by scope and instance, all
+bind it.
+
+Acceptance criteria:
+- A handle is the envelope of the snapshot an accepted call commits,
+  encrypted with the application key under the `LiveAgentHandle` purpose
+  with the agent scope as its context; a refused call returns none. A handle issued to one caller does not open for another,
+  and a changed handle does not open at all.
+- A handle that opens must claim the agent route, the tool's own component
+  and that component's slot, or it is refused: a browser island's snapshot,
+  or another component's, never runs through a headless call.
+- A handle expires as a browser snapshot does: the mount sets the expiry to
+  its time plus the configured instance lifetime, and every successor keeps
+  it. A handle past its expiry is refused before it runs, with the same
+  answer as a handle that does not open, and snapshot verification refuses
+  it again.
+- A handle whose revision a later call consumed is refused as out of date;
+  the agent calls again with the latest handle, or without one.
+- The agent catalog entry's mount kind is internal to the framework. The
+  browser action endpoint refuses a request that names it before anything
+  runs, and the session-absent requirement refuses a browser request with a
+  session.
+- A mount property an agent writes for a 64-bit integer parameter, a JSON
+  number or a canonical decimal string, is converted to the snapshot's
+  lossless integer tag, `{"$live": "u64", "value": "..."}` or its `i64`
+  form, before the mount's snapshot schema checks it, as a template's
+  parameters already carry it.
+- A tool result, headless or in the browser, shows a 64-bit integer field as
+  its decimal string, never as the lossless tag; every other field value is
+  shown as the snapshot carries it.
+- A validation outcome consumes a revision like any accepted outcome, so its
+  result is an error that still carries the new handle.
+
+UX flow:
+1. Agent calls a headless tool with mount properties -> the component is
+   mounted for that caller, the action runs, and the result carries the
+   agent-visible fields and a handle.
+2. Agent calls again with the handle -> the action sees the first call's
+   state; another caller presenting that handle, or the same caller after
+   its expiry, is refused.
+
 ## Iteration 001 implementation profile
 
 The checked v1 profile is implemented in this repository's internal
@@ -288,9 +350,20 @@ owner lineage records the newly applied parent revision.
 - An expiring instance ledger enforces one committed outcome per base revision
   without becoming server-resident component state or domain concurrency.
 - Rejection has a bounded fresh-render recovery path.
+- A headless tool's state travels as a sealed, caller-bound handle that
+  expires as a browser snapshot does.
 
 ## Decisions and revisions
 
+- 2026-10-18 -- Added headless state handles (AGENT-013). A headless call
+  mounts its component under a per-component catalog entry on the reserved
+  agent route, with the session required absent and the document key
+  `agent`, and binds the snapshot to an agent scope derived from the caller,
+  never from a token. The handle is the instanced snapshot sealed with the
+  application key under the `LiveAgentHandle` purpose and that scope, and it
+  expires as a browser snapshot does. Agent-written 64-bit integer mount
+  properties take the snapshot's integer tag, and tool results show 64-bit
+  integer fields as decimal strings, as ruled.
 - 2026-10-04 -- The instance ledger's limits are settings:
   `LIVE_LEDGER_MAX_INSTANCES` (100,000), `LIVE_LEDGER_INSTANCE_LIFETIME_MS`
   (seven days, which also bounds the snapshot, mount and promotion
