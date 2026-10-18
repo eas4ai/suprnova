@@ -171,10 +171,37 @@ pub(crate) fn names_metadata_document(value: &str) -> bool {
     starts_with("https://") || starts_with("http://")
 }
 
-/// A short text field a client supplied, kept only when it is within the
-/// length the server stores.
+/// A short text field a client supplied, with its control and format
+/// characters removed ([`is_hidden`]), kept only when something is left and
+/// it is within the length the server stores. Registration and fetched
+/// metadata documents both pass through here.
 pub(crate) fn bounded_text(value: Option<String>) -> Option<String> {
-    value.filter(|text| !text.trim().is_empty() && text.len() <= MAX_CLIENT_TEXT_LENGTH)
+    value
+        .map(|text| {
+            text.chars()
+                .filter(|ch| !is_hidden(*ch))
+                .collect::<String>()
+        })
+        .filter(|text| !text.trim().is_empty() && text.len() <= MAX_CLIENT_TEXT_LENGTH)
+}
+
+/// Whether `ch` is a control or format character a client's text must not
+/// carry: the C0 and C1 controls, and the marks, embeddings, overrides and
+/// isolates that reorder text. An approval page shows the client's name;
+/// a right-to-left override in it could make `moc.evil` read as
+/// `live.com`.
+fn is_hidden(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0000}'..='\u{001F}'
+            | '\u{007F}'..='\u{009F}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{061C}'
+            | '\u{FEFF}'
+    )
 }
 
 /// A link a client supplied, kept only when it is an `https` URL: an
@@ -408,6 +435,36 @@ fn embedded_v4(high: u16, low: u16) -> Ipv4Addr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_005_client_text_drops_control_and_format_characters() {
+        let hidden = [
+            '\u{0000}', '\u{0009}', '\u{001F}', '\u{007F}', '\u{0085}', '\u{009F}', '\u{200E}',
+            '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}',
+            '\u{2067}', '\u{2068}', '\u{2069}', '\u{061C}', '\u{FEFF}',
+        ];
+        let name: String = hidden.iter().fold("Tool".to_owned(), |mut name, ch| {
+            name.push(*ch);
+            name
+        });
+        let checked = check_public_client(
+            ClientMetadata {
+                client_name: Some(format!("{name} Name")),
+                redirect_uris: Some(vec!["https://client.test/cb".to_owned()]),
+                ..ClientMetadata::default()
+            },
+            &[],
+        )
+        .unwrap_or_else(|problem| panic!("{}", problem.description()));
+        assert_eq!(checked.client_name.as_deref(), Some("Tool Name"));
+        // A name of nothing but hidden characters is no name.
+        assert_eq!(bounded_text(Some("\u{202E}\u{200F}".to_owned())), None);
+        // Other text, accents and scripts included, is kept.
+        assert_eq!(
+            bounded_text(Some("Outil \u{e9}t\u{e9} \u{5de5}\u{5177}".to_owned())).as_deref(),
+            Some("Outil \u{e9}t\u{e9} \u{5de5}\u{5177}")
+        );
+    }
 
     #[test]
     fn agent_005_only_a_loopback_ip_literal_gets_error_redirects() {
