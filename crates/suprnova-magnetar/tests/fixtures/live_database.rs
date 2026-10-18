@@ -4,6 +4,9 @@
 //! database the URL names and drop it at the end, so repeated runs against
 //! one server never collide. A test that panics leaves its database behind.
 
+// Several test binaries include this file and each uses only part of it.
+#![allow(dead_code)]
+
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend};
 
 /// A database of its own on the server a live test URL names.
@@ -29,6 +32,10 @@ impl LiveDatabase {
             .expect("create an isolated database");
         let url = database_url(server_url, &name);
         Self { admin, name, url }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     pub async fn connect(&self) -> DatabaseConnection {
