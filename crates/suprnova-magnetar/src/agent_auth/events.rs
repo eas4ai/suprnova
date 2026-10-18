@@ -196,7 +196,16 @@ impl Core {
         // 2.2).
         if revokes && let Some(subject) = subject {
             let delegation = digest(&format!("{issuer}\n{subject}"));
-            if let Some(record) = self.store.find_by_delegation(&delegation).await? {
+            // Only a registration that existed when the provider issued the
+            // event: a retried delivery must not revoke a link the user made
+            // after it. `iat` names a whole second, so the whole second
+            // counts as before, and MySQL, which rounds a stored time to
+            // the second, may record a creation in it as the next one.
+            let issued = DateTime::from_timestamp(iat, 0)
+                .and_then(|issued| issued.checked_add_signed(chrono::Duration::seconds(1)));
+            if let Some(record) = self.store.find_by_delegation(&delegation).await?
+                && issued.is_some_and(|issued| record.created_at <= issued)
+            {
                 self.end_registration(
                     &server.token_issuer(),
                     &record,

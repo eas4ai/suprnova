@@ -2593,6 +2593,66 @@ async fn agent_010_a_revocation_event_survives_a_storage_failure_after_verificat
 }
 
 #[tokio::test]
+async fn agent_010_a_retried_event_spares_an_agent_linked_after_it() {
+    let (options, faults) = faulty();
+    let h = sqlite_harness_with(options).await;
+    let email = "relinked@example.test";
+    let first = body(&present_subject(&h, "relink-sub", email).await);
+    let first_id = first["registration_id"].as_str().expect("id");
+    h.set_registration_time(
+        first_id,
+        registrations::Column::CreatedAt,
+        chrono::Utc::now() - chrono::Duration::hours(1),
+    )
+    .await;
+    let mut claims = h.provider.revocation_event("relink-sub");
+    claims.insert("iat".into(), json!(chrono::Utc::now().timestamp() - 60));
+    let event = h.provider.event(&claims);
+    faults.fail("record_replay", 1);
+    let failed = h
+        .post_bytes(
+            "/agent/event/notify",
+            "application/secevent+jwt",
+            event.clone().into_bytes(),
+        )
+        .await;
+    assert_eq!(status(&failed), 500, "{:?}", body(&failed));
+    assert_eq!(h.registration(first_id).await.status, "revoked");
+
+    // The user links the provider again before the provider retries.
+    let relink = body(&present_subject(&h, "relink-sub", email).await);
+    assert_eq!(relink["error"], "interaction_required");
+    use magnetar::storage::UserStore;
+    let user = h
+        .storage
+        .find_by_email(email)
+        .await
+        .expect("read")
+        .expect("the provisioned user");
+    let bearer = h.sign_in(&user.user_id).await;
+    let attempt = attempt_token(relink["claim"]["verification_uri"].as_str().expect("uri"));
+    let code = relink["claim"]["user_code"].as_str().expect("code");
+    assert_eq!(status(&h.confirm(&attempt, code, Some(&bearer)).await), 200);
+    let token = access_token(
+        &h.poll(relink["claim_token"].as_str().expect("claim token"))
+            .await,
+    );
+
+    let retried = h
+        .post_bytes(
+            "/agent/event/notify",
+            "application/secevent+jwt",
+            event.into_bytes(),
+        )
+        .await;
+    assert_eq!(status(&retried), 202, "{:?}", body(&retried));
+    assert!(
+        matches!(h.verify(&token).await, AccessVerification::Valid(_)),
+        "the retried event spares the agent linked after it"
+    );
+}
+
+#[tokio::test]
 async fn agent_010_a_failed_grant_revocation_is_finished_by_a_retry() {
     let (options, faults) = faulty();
     let h = sqlite_harness_with(options).await;
