@@ -1966,6 +1966,12 @@ impl SessionMiddleware {
                                     session.user_id = Some(user_id.clone());
                                     session.set_magnetar_web_binding(binding);
                                 }
+                                // A remember-me sign-in is the browser's
+                                // session: a tool's route treats it so.
+                                crate::auth::request_state::mark_session_user(
+                                    &guard_name,
+                                    &user_id,
+                                );
                                 crate::auth::request_state::set_guard_user_id(&guard_name, user_id);
                                 crate::auth::request_state::set_guard_via_remember(
                                     &guard_name,
@@ -2153,6 +2159,12 @@ impl SessionMiddleware {
                                 if is_default {
                                     session.user_id = Some(user_id.clone());
                                 }
+                                // A remember-me sign-in is the browser's
+                                // session: a tool's route treats it so.
+                                crate::auth::request_state::mark_session_user(
+                                    &guard_name,
+                                    &user_id,
+                                );
                                 crate::auth::request_state::set_guard_user_id(&guard_name, user_id);
                                 crate::auth::request_state::set_guard_via_remember(
                                     &guard_name,
