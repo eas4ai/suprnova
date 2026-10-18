@@ -658,3 +658,132 @@ async fn agent_003_input_check_names_every_field() {
         assert!(text.contains(field), "{field} missing from {text}");
     }
 }
+
+/// `depth` levels of the recursive expression, ending in a leaf that has
+/// no `arg`, which no variant allows.
+fn nested_expr(depth: usize) -> Value {
+    let ops = ["Neg", "Abs", "Sqrt", "Exp"];
+    let mut expr = json!({ "op": "Neg" });
+    for level in 0..depth {
+        expr = json!({ "op": ops[level % ops.len()], "arg": expr });
+    }
+    expr
+}
+
+#[tokio::test]
+async fn agent_003_input_check_is_bounded_for_recursive_schemas() {
+    let _container = fixture::setup();
+    let client = fixture::client();
+    let started = std::time::Instant::now();
+    let result = client
+        .mcp()
+        .call("math.eval", json!({ "expr": nested_expr(15) }))
+        .await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "the check stopped at its budget: took {elapsed:?}"
+    );
+    assert!(
+        result.is_error(),
+        "invalid input is still refused: {:?}",
+        result.response()
+    );
+    assert_eq!(result.error_code(), None);
+}
+
+#[tokio::test]
+async fn agent_003_invalid_input_report_is_bounded() {
+    let _container = fixture::setup();
+    let client = fixture::client();
+    // One 10,000-character key, with a forged line inside it, holding
+    // 1,000 values of the wrong type.
+    let key = format!(
+        "{}\n- forged: injected\r\n{}",
+        "k".repeat(5_000),
+        "k".repeat(5_000)
+    );
+    let values: Vec<&str> = vec!["not a number"; 1_000];
+    let result = client
+        .mcp()
+        .call("tags.group", json!({ "groups": { key: values } }))
+        .await;
+    assert!(result.is_error(), "{:?}", result.response());
+    let text = result.text();
+    assert!(
+        text.len() < 16 * 1024,
+        "the report is small: {} bytes",
+        text.len()
+    );
+    assert!(
+        !text.lines().any(|line| line.starts_with("- forged")),
+        "a key cannot forge a line: {text}"
+    );
+    assert!(
+        text.contains("- groups."),
+        "a failing field is still named: {text}"
+    );
+    assert!(text.contains("more"), "the rest are counted: {text}");
+}
+
+#[tokio::test]
+async fn agent_003_initialize_without_a_version_is_invalid_params() {
+    let _container = fixture::setup();
+    let client = fixture::client();
+    let mcp = client.mcp();
+    for params in [json!({}), json!({ "protocolVersion": 20251125 })] {
+        let response = mcp
+            .raw(
+                &[],
+                json!({ "jsonrpc": "2.0", "id": 9, "method": "initialize", "params": params }),
+            )
+            .await;
+        assert_eq!(response.status(), 400, "{params}: {}", response.body_text());
+        assert_eq!(response.json()["error"]["code"], -32602, "{params}");
+    }
+}
+
+#[tokio::test]
+async fn agent_003_ipv6_budgets_share_a_slash_64() {
+    use std::net::{IpAddr, Ipv6Addr};
+    let _container = fixture::setup();
+    let config = AgentsConfig::new()
+        .request_limit(suprnova::agents::CallLimit::per_minute(1))
+        .address_limit(suprnova::agents::CallLimit::per_minute(1));
+    let at = |address: Ipv6Addr| {
+        fixture::client_with(config.clone(), MiddlewareRegistry::new())
+            .with_peer_address(IpAddr::V6(address))
+    };
+    let first = at("2001:db8:1:2::1".parse().expect("an address"));
+    assert_eq!(first.mcp().list().await.status(), 200);
+    let same_prefix = at("2001:db8:1:2:ffff:ffff:ffff:fffe"
+        .parse()
+        .expect("an address"));
+    assert_eq!(
+        same_prefix.mcp().list().await.status(),
+        429,
+        "a second address in the same /64 shares the request budget"
+    );
+    let other_prefix = at("2001:db8:1:3::1".parse().expect("an address"));
+    assert_eq!(other_prefix.mcp().list().await.status(), 200);
+}
+
+#[tokio::test]
+async fn agent_002_ipv6_guest_tool_budget_shares_a_slash_64() {
+    use std::net::{IpAddr, Ipv6Addr};
+    let _container = fixture::setup();
+    let config = AgentsConfig::new().address_limit(suprnova::agents::CallLimit::per_minute(1));
+    let at = |address: Ipv6Addr| {
+        fixture::client_with(config.clone(), MiddlewareRegistry::new())
+            .with_peer_address(IpAddr::V6(address))
+    };
+    let first = at("2001:db8:5:6::1".parse().expect("an address"));
+    let call = first.mcp().call("echo", json!({ "text": "one" })).await;
+    assert_eq!(call.status(), 200);
+    let same_prefix = at("2001:db8:5:6::2".parse().expect("an address"));
+    let call = same_prefix
+        .mcp()
+        .call("echo", json!({ "text": "two" }))
+        .await;
+    assert_eq!(call.status(), 429, "the guest tool budget is per /64");
+}

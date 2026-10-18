@@ -16,6 +16,7 @@ fn agent_001_marked_handlers_are_tools_and_nothing_else_is() {
         vec![
             "bus.later",
             "echo",
+            "math.eval",
             "page.html",
             "posts.create",
             "posts.delete",
@@ -25,8 +26,10 @@ fn agent_001_marked_handlers_are_tools_and_nothing_else_is() {
             "slow.bytes",
             "slow.stream",
             "slow.wait",
+            "tags.group",
             "throttled.ping",
             "users.api",
+            "users.named",
             "users.profile",
         ]
     );
@@ -144,4 +147,24 @@ fn agent_002_an_agent_tool_behind_auth_warns_at_boot() {
         .expect("the warning does not refuse boot");
     assert!(logs_contain("posts.create"));
     assert!(logs_contain("behind AuthMiddleware"));
+}
+
+#[tokio::test]
+async fn agent_001_a_misdeclared_route_name_refuses_boot() {
+    let _container = fixture::setup();
+    // `users.named` declares `route = "users.named"`; here its handler
+    // serves a route of another name, so the declaration names nothing.
+    let router = Router::new()
+        .post("/named", fixture::named_profile)
+        .name("users.renamed")
+        .agents(AgentsConfig::new());
+    let error = router
+        .prepare_tools()
+        .expect_err("a route name that matches none of the handler's routes refuses boot");
+    let message = error.to_string();
+    assert!(message.contains("users.named"), "{message}");
+    assert!(message.contains("route"), "{message}");
+    // The route is not served without its checks: every request is refused.
+    let client = suprnova::testing::TestClient::new(router, MiddlewareRegistry::new());
+    client.post("/named").send().await.assert_status(500);
 }

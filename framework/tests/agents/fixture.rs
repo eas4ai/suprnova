@@ -461,6 +461,78 @@ pub async fn api_profile() -> Response {
     })
 }
 
+/// A recursive, internally tagged expression: every variant holds the
+/// same field, so a checker that tries every branch of each level does
+/// work exponential in the depth.
+#[derive(serde::Deserialize, JsonSchema)]
+#[schemars(crate = "suprnova::__schemars")]
+#[serde(tag = "op")]
+pub enum Expr {
+    /// One variant.
+    Neg { arg: Box<Expr> },
+    /// Another.
+    Abs { arg: Box<Expr> },
+    /// A third.
+    Sqrt { arg: Box<Expr> },
+    /// A fourth.
+    Exp { arg: Box<Expr> },
+}
+
+/// The input of `math.eval`.
+#[tool_input]
+pub struct Eval {
+    /// The expression.
+    pub expr: Expr,
+}
+
+#[tool(
+    name = "math.eval",
+    description = "Evaluate an expression.",
+    callers = [public],
+    input = Eval,
+)]
+#[handler]
+pub async fn eval(form: Eval) -> Response {
+    json_response!({ "depth": form.expr.depth() })
+}
+
+impl Expr {
+    /// How many levels the expression has.
+    pub fn depth(&self) -> usize {
+        let (Self::Neg { arg } | Self::Abs { arg } | Self::Sqrt { arg } | Self::Exp { arg }) = self;
+        1 + arg.depth()
+    }
+}
+
+/// The input of `tags.group`: a map whose keys the caller chooses.
+#[tool_input]
+pub struct TagGroups {
+    /// Tag ids by group name.
+    pub groups: std::collections::BTreeMap<String, Vec<u32>>,
+}
+
+#[tool(
+    name = "tags.group",
+    description = "Group tags.",
+    callers = [public],
+    input = TagGroups,
+)]
+#[handler]
+pub async fn group_tags(form: TagGroups) -> Response {
+    json_response!({ "groups": form.groups.len() })
+}
+
+#[tool(
+    name = "users.named",
+    description = "A tool that names the route it calls.",
+    callers = [user],
+    route = "users.named",
+)]
+#[handler]
+pub async fn named_profile(caller: ToolCaller) -> Response {
+    json_response!({ "user": caller.user_id() })
+}
+
 /// A routed handler that is not a tool.
 #[handler]
 pub async fn plain() -> Response {
@@ -501,6 +573,10 @@ pub fn routes() -> Router {
         .post("/profile", update_profile)
         .post("/later", later)
         .post("/api/me", api_profile)
+        .post("/math", eval)
+        .post("/tags", group_tags)
+        .post("/named", named_profile)
+        .name("users.named")
         .post("/plain", plain)
         .into()
 }

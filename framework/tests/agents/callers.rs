@@ -503,3 +503,116 @@ async fn agent_002_caller_checks_apply_without_the_header() {
     // No tool header: still a guest on a tool that accepts only users.
     client.post("/me").send().await.assert_status(401);
 }
+
+/// The `remember_tokens` table the remember-me sign-in reads, as an
+/// application's migration creates it.
+struct CreateRememberTokens;
+
+impl sea_orm_migration::MigrationName for CreateRememberTokens {
+    fn name(&self) -> &str {
+        "m20240101_000002_create_remember_tokens_table"
+    }
+}
+
+#[suprnova::async_trait]
+impl sea_orm_migration::MigrationTrait for CreateRememberTokens {
+    async fn up(
+        &self,
+        manager: &sea_orm_migration::SchemaManager,
+    ) -> Result<(), sea_orm_migration::DbErr> {
+        use sea_orm_migration::prelude::{Alias, ColumnDef, Expr, Table};
+        manager
+            .create_table(
+                Table::create()
+                    .table(Alias::new("remember_tokens"))
+                    .col(
+                        ColumnDef::new(Alias::new("id"))
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Alias::new("user_id")).string().not_null())
+                    .col(ColumnDef::new(Alias::new("selector")).string().not_null())
+                    .col(ColumnDef::new(Alias::new("token_hash")).string().not_null())
+                    .col(
+                        ColumnDef::new(Alias::new("expires_at"))
+                            .timestamp()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("created_at"))
+                            .timestamp()
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .col(
+                        ColumnDef::new(Alias::new("last_used_at"))
+                            .timestamp()
+                            .null(),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+}
+
+struct RememberMigrator;
+
+#[suprnova::async_trait]
+impl sea_orm_migration::MigratorTrait for RememberMigrator {
+    fn migrations() -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
+        vec![Box::new(CreateRememberTokens)]
+    }
+}
+
+#[tokio::test]
+async fn agent_002_a_remember_me_user_is_a_browser_caller() {
+    use sea_orm_migration::MigratorTrait;
+    let _container = fixture::setup();
+    let registry = crate::marker::session_only();
+    let config = suprnova::database::DatabaseConfig::builder()
+        .url("sqlite::memory:")
+        .max_connections(1)
+        .min_connections(1)
+        .logging(false)
+        .build();
+    let conn = suprnova::database::DbConnection::connect(&config)
+        .await
+        .expect("connect SQLite");
+    RememberMigrator::up(conn.inner(), None)
+        .await
+        .expect("the remember_tokens table");
+    suprnova::testing::TestContainer::singleton(conn);
+    suprnova::testing::TestContainer::bind::<dyn suprnova::UserProvider>(std::sync::Arc::new(
+        KnownUsers,
+    ));
+    let plaintext = suprnova::auth::remember::issue("7", 60)
+        .await
+        .expect("a remember-me credential");
+    let cookie = suprnova::Crypt::encrypt_string_for(
+        suprnova::CryptPurpose::Cookie,
+        suprnova::auth::remember::COOKIE_NAME,
+        &plaintext,
+    )
+    .expect("encrypt the cookie");
+
+    // No session cookie: the session middleware signs the user in from the
+    // remember-me cookie on this very request.
+    let client = suprnova::testing::TestClient::new(fixture::router(), registry);
+    let page = client
+        .tool("posts.create", json!({ "title": "Remembered" }))
+        .header(
+            "Cookie",
+            format!("{}={cookie}", suprnova::auth::remember::COOKIE_NAME),
+        )
+        .send()
+        .await;
+    page.assert_ok();
+    let page = page.json();
+    assert_eq!(page["user"], "7");
+    assert_eq!(
+        page["browser"], true,
+        "a remember-me sign-in is a browser session"
+    );
+}

@@ -23,14 +23,16 @@ async fn agent_004_list_shows_only_public_tools_without_token() {
 
 /// The fixture's tools that accept `public`, sorted: every caller may call
 /// them.
-const PUBLIC_TOOLS: [&str; 8] = [
+const PUBLIC_TOOLS: [&str; 10] = [
     "bus.later",
     "echo",
+    "math.eval",
     "page.html",
     "request.peek",
     "slow.bytes",
     "slow.stream",
     "slow.wait",
+    "tags.group",
     "throttled.ping",
 ];
 
@@ -59,7 +61,13 @@ async fn agent_004_list_filters_by_kind_and_scope() {
         .await;
     assert_eq!(
         beyond_public(reader.tool_names()),
-        vec!["posts.show", "profile.update", "users.api", "users.profile"],
+        vec![
+            "posts.show",
+            "profile.update",
+            "users.api",
+            "users.named",
+            "users.profile"
+        ],
         "a user sees the tools that accept users and whose scopes the token holds"
     );
     let writer = client
