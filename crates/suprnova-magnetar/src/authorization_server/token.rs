@@ -434,6 +434,21 @@ impl AuthorizationServer {
     /// Returns `invalid_request` without a `token`, and `server_error`
     /// when storage fails.
     pub async fn revoke(&self, params: &BTreeMap<String, String>) -> TokenResult<()> {
+        self.revoke_from(params, None).await
+    }
+
+    /// [`revoke`](Self::revoke) for a request from `client_address`, which
+    /// every [`RevocationListener`](super::RevocationListener) receives with
+    /// the token it ended.
+    ///
+    /// # Errors
+    ///
+    /// As [`revoke`](Self::revoke).
+    pub async fn revoke_from(
+        &self,
+        params: &BTreeMap<String, String>,
+        client_address: Option<&str>,
+    ) -> TokenResult<()> {
         let Some(token) = params.get("token").filter(|token| !token.is_empty()) else {
             return Err(TokenError::invalid_request("token is required"));
         };
@@ -462,16 +477,29 @@ impl AuthorizationServer {
             return Ok(());
         }
         let now = Utc::now();
-        if record.kind == REFRESH_TOKEN_KIND {
+        let revoked = if record.kind == REFRESH_TOKEN_KIND {
             self.store
                 .revoke_grant(&grant.id, now)
                 .await
-                .map_err(token_storage_error)?;
+                .map_err(token_storage_error)?
         } else {
             self.store
                 .revoke_token(&record.id, now)
                 .await
-                .map_err(token_storage_error)?;
+                .map_err(token_storage_error)?
+        };
+        if revoked {
+            for listener in &self.revocation_listeners {
+                listener
+                    .token_revoked(super::RevokedToken {
+                        grant_id: grant.id.clone(),
+                        grant_kind: grant.kind.clone(),
+                        client_id: grant.client_id.clone(),
+                        token_kind: record.kind.clone(),
+                        client_address: client_address.map(str::to_owned),
+                    })
+                    .await;
+            }
         }
         Ok(())
     }

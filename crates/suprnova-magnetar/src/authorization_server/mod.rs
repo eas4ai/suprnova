@@ -45,7 +45,9 @@ mod token;
 
 pub use client::{ClientMetadata, ClientSource, ResolvedClient};
 pub use flow::{AuthorizeOutcome, AuthorizeRequest, DecisionOutcome, PendingAuthorizationView};
-pub use grants::{GrantHandler, IssueTokens, NewGrant, TokenError, TokenRequest, TokenResponse};
+pub use grants::{
+    GrantHandler, IssueTokens, IssuedGrant, NewGrant, TokenError, TokenRequest, TokenResponse,
+};
 pub use metadata_document::{
     ClientMetadataError, ClientMetadataFetcher, ClientMetadataPolicy, HostResolver,
     PinnedHttpClient, PinnedResponse, ReqwestPinnedClient, ResponseBody, SystemResolver,
@@ -266,6 +268,31 @@ pub struct ClientGrantSummary {
     pub last_used_at: Option<DateTime<Utc>>,
 }
 
+/// A token the revocation endpoint ended, as a [`RevocationListener`]
+/// receives it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevokedToken {
+    /// The grant the token belongs to.
+    pub grant_id: String,
+    /// The grant family, so a listener can pick out its own grants.
+    pub grant_kind: String,
+    /// The client or agent registration the grant was issued to.
+    pub client_id: String,
+    /// The kind of the token that was presented.
+    pub token_kind: String,
+    /// The address the revocation request came from, when the host set it.
+    pub client_address: Option<String>,
+}
+
+/// Told about every token the revocation endpoint ends, so an extension
+/// such as agent auth can record it in its audit trail.
+#[async_trait]
+pub trait RevocationListener: Send + Sync {
+    /// One token was revoked. Called after the revocation is stored; a
+    /// listener cannot undo or fail it.
+    async fn token_revoked(&self, revoked: RevokedToken);
+}
+
 /// The authorization server engine.
 pub struct AuthorizationServer {
     config: AuthorizationServerConfig,
@@ -277,6 +304,7 @@ pub struct AuthorizationServer {
     fetcher: Arc<ClientMetadataFetcher>,
     grant_handlers: BTreeMap<String, Arc<dyn GrantHandler>>,
     metadata_fields: Map<String, Value>,
+    revocation_listeners: Vec<Arc<dyn RevocationListener>>,
 }
 
 /// Metadata members the server writes itself, which an extension may not
@@ -450,6 +478,7 @@ impl AuthorizationServer {
             fetcher,
             grant_handlers: BTreeMap::new(),
             metadata_fields: Map::new(),
+            revocation_listeners: Vec::new(),
         })
     }
 
@@ -492,6 +521,21 @@ impl AuthorizationServer {
         }
         self.metadata_fields.insert(name, value);
         Ok(self)
+    }
+
+    /// Tell `listener` about every token the revocation endpoint ends.
+    #[must_use]
+    pub fn with_revocation_listener(mut self, listener: Arc<dyn RevocationListener>) -> Self {
+        self.revocation_listeners.push(listener);
+        self
+    }
+
+    /// The handle an extension issues and revokes tokens through outside a
+    /// token request, as agent auth does when a claim or a revocation event
+    /// ends a registration's grants.
+    #[must_use]
+    pub fn token_issuer(&self) -> TokenIssuer<'_> {
+        TokenIssuer { server: self }
     }
 
     /// The configuration the server was built with.
@@ -821,6 +865,22 @@ impl TokenIssuer<'_> {
         grant: NewGrant,
         tokens: IssueTokens,
     ) -> std::result::Result<TokenResponse, TokenError> {
+        self.issue_grant(grant, tokens)
+            .await
+            .map(|issued| issued.response)
+    }
+
+    /// [`issue`](Self::issue), answering the new grant's identifier too, so
+    /// the extension can revoke the grant when its own state ends it.
+    ///
+    /// # Errors
+    ///
+    /// As [`issue`](Self::issue).
+    pub async fn issue_grant(
+        &self,
+        grant: NewGrant,
+        tokens: IssueTokens,
+    ) -> std::result::Result<IssuedGrant, TokenError> {
         let server = self.server;
         if grant.kind.trim().is_empty() || grant.client_id.trim().is_empty() {
             return Err(TokenError::invalid_request(
@@ -864,11 +924,12 @@ impl TokenIssuer<'_> {
                 now,
             )
             .map_err(token_storage_error)?;
+        let grant_id = new_id();
         server
             .store
             .create_grant(
                 GrantRecord {
-                    id: new_id(),
+                    id: grant_id.clone(),
                     kind: grant.kind,
                     user_id: grant.user_id,
                     client_id: grant.client_id,
@@ -889,7 +950,10 @@ impl TokenIssuer<'_> {
             )
             .await
             .map_err(token_storage_error)?;
-        Ok(minted.response)
+        Ok(IssuedGrant {
+            grant_id,
+            response: minted.response,
+        })
     }
 
     /// Revoke a grant and all of its tokens by its identifier, as an
