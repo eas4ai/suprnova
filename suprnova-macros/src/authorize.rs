@@ -138,11 +138,11 @@ pub(crate) fn is_authorize_attr(attr: &Attribute) -> bool {
 }
 
 /// Whether `attr` is a `#[handler]`, however its path is spelled.
-fn is_handler_attr(attr: &Attribute) -> bool {
+pub(crate) fn is_handler_attr(attr: &Attribute) -> bool {
     last_segment_is(attr, "handler")
 }
 
-fn last_segment_is(attr: &Attribute, name: &str) -> bool {
+pub(crate) fn last_segment_is(attr: &Attribute, name: &str) -> bool {
     attr.path()
         .segments
         .last()
