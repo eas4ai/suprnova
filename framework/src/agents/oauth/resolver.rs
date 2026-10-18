@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use magnetar::authorization_server::{
     ACCESS_TOKEN_KIND, ACCESS_TOKEN_PREFIX, AccessVerification, AuthorizationServer,
-    InvalidAccessReason, USER_GRANT_KIND,
+    InvalidAccessReason, REFRESH_TOKEN_PREFIX, USER_GRANT_KIND,
 };
 
 use crate::agents::{
@@ -21,20 +21,22 @@ use crate::error::FrameworkError;
 /// How each answer of
 /// [`verify_access_token`](AuthorizationServer::verify_access_token) maps:
 ///
-/// | Verification | Answer |
+/// | Token | Answer |
 /// |---|---|
-/// | no `mat_` prefix | [`ResolveError::NotMine`], without a lookup |
-/// | `Unknown` | [`ResolveError::NotMine`] |
-/// | valid, user grant | `ToolCaller::user` with the token's scopes and client |
-/// | valid, any other grant (agent auth's) | [`ResolveError::NotMine`] |
-/// | `Expired`, `Revoked`, `WrongResource`, `EpochChanged` | [`ResolveError::Invalid`] |
-/// | storage failure | [`ResolveError::Unavailable`] |
+/// | neither the `mat_` nor the `mrt_` prefix | [`ResolveError::NotMine`], without a lookup |
+/// | `mrt_`, a refresh token | [`ResolveError::Invalid`], without a lookup |
+/// | `mat_`, `Unknown` to the store | [`ResolveError::Invalid`] |
+/// | `mat_`, valid, user grant | `ToolCaller::user` with the token's scopes and client |
+/// | `mat_`, valid, any other grant (agent auth's) | [`ResolveError::NotMine`] |
+/// | `mat_`, `Expired`, `Revoked`, `WrongResource`, `EpochChanged` | [`ResolveError::Invalid`] |
+/// | `mat_`, storage failure | [`ResolveError::Unavailable`] |
 ///
-/// `Unknown` covers a token the store has no digest of, a refresh token
-/// and a token past the length limit alike: the store cannot tell a
-/// token it never issued from one it forgot. Either way this resolver
-/// accepts nothing for it, and the next resolver is asked; a token no
-/// resolver accepts is refused, so `NotMine` never lets a token through.
+/// A token in this server's format is this server's to refuse: a refresh
+/// token presented as a bearer, or an access token the store does not
+/// know, never reaches another resolver, which could otherwise be handed
+/// a credential that was never meant for it. Only an agent grant's token,
+/// which agent auth issues on this server and resolves itself, is passed
+/// on.
 pub(crate) struct UserTokens {
     server: Arc<AuthorizationServer>,
 }
@@ -52,6 +54,11 @@ impl CallerResolver for UserTokens {
         token: &str,
         ctx: &ResolveContext<'_>,
     ) -> Result<ToolCaller, ResolveError> {
+        if token.starts_with(REFRESH_TOKEN_PREFIX) {
+            return Err(ResolveError::Invalid(
+                "A refresh token is not an access token.",
+            ));
+        }
         if !token.starts_with(ACCESS_TOKEN_PREFIX) {
             return Err(ResolveError::NotMine);
         }
@@ -68,7 +75,9 @@ impl CallerResolver for UserTokens {
             AccessVerification::Valid(access) => access,
             AccessVerification::Invalid(reason) => {
                 return Err(match reason {
-                    InvalidAccessReason::Unknown => ResolveError::NotMine,
+                    InvalidAccessReason::Unknown => {
+                        ResolveError::Invalid("The token is not one this server knows.")
+                    }
                     InvalidAccessReason::Expired => ResolveError::Invalid("The token expired."),
                     InvalidAccessReason::Revoked => ResolveError::Invalid("The token was revoked."),
                     InvalidAccessReason::WrongResource => {

@@ -337,6 +337,7 @@ pub(crate) struct RouterAgents {
     config: Option<Arc<AgentsConfig>>,
     routes: HashMap<(Method, String), AgentRoute>,
     registry: OnceLock<Result<Arc<ToolRegistry>, FrameworkError>>,
+    oauth: Option<Arc<magnetar::authorization_server::AuthorizationServer>>,
 }
 
 impl RouterAgents {
@@ -451,7 +452,9 @@ impl Router {
             }
         }
         if let Some(built) = oauth {
+            let server = built.server();
             router = built.mount(router)?;
+            router.agents.oauth = Some(server);
         }
         router.agents.config = Some(config);
         Ok(router)
@@ -465,6 +468,14 @@ impl Router {
         self.agents
             .routes
             .insert((method, pattern), AgentRoute::PluginClient);
+    }
+
+    /// The OAuth server this router mounted, which every request it routes
+    /// carries for [`ConnectedAgents`].
+    pub(crate) fn oauth_server(
+        &self,
+    ) -> Option<Arc<magnetar::authorization_server::AuthorizationServer>> {
+        self.agents.oauth.clone()
     }
 
     /// What the route `(method, pattern)` serves, when `Router::agents`

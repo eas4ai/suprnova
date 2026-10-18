@@ -122,6 +122,26 @@ impl UserProvider for Accounts {
             }) as Arc<dyn Authenticatable>
         }))
     }
+
+    /// An account by its address, [`account_email`] of its id.
+    async fn retrieve_by_credentials(
+        &self,
+        credentials: &Value,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        let Some(id) = credentials
+            .get("email")
+            .and_then(Value::as_str)
+            .and_then(|email| email.strip_suffix("@accounts.test"))
+        else {
+            return Ok(None);
+        };
+        self.retrieve_by_id(id).await
+    }
+}
+
+/// The address of the account `id`.
+pub fn account_email(id: &str) -> String {
+    format!("{id}@accounts.test")
 }
 
 // ---------------------------------------------------------- sessions ----
@@ -190,16 +210,26 @@ impl HostResolver for FakeResolver {
 /// request it was asked to make.
 #[derive(Default)]
 pub struct FakeDocuments {
-    documents: Mutex<HashMap<String, Vec<u8>>>,
+    documents: Mutex<HashMap<String, (u16, Vec<u8>)>>,
     pub requests: Mutex<Vec<String>>,
 }
 
 impl FakeDocuments {
     pub fn serve(&self, url: &str, body: &Value) {
+        self.serve_raw(url, 200, serde_json::to_vec(body).unwrap());
+    }
+
+    /// Answer `url` with `status` and `body` as they are.
+    pub fn serve_raw(&self, url: &str, status: u16, body: Vec<u8>) {
         self.documents
             .lock()
             .unwrap()
-            .insert(url.to_owned(), serde_json::to_vec(body).unwrap());
+            .insert(url.to_owned(), (status, body));
+    }
+
+    /// Stop serving `url`: it answers 404 from now on.
+    pub fn forget(&self, url: &str) {
+        self.documents.lock().unwrap().remove(url);
     }
 }
 
@@ -216,11 +246,17 @@ impl ResponseBody for OneChunk {
 impl PinnedHttpClient for FakeDocuments {
     async fn get(&self, url: &Url, _address: SocketAddr) -> MagnetarResult<PinnedResponse> {
         self.requests.lock().unwrap().push(url.to_string());
-        let body = self.documents.lock().unwrap().get(url.as_str()).cloned();
+        let (status, body) = self
+            .documents
+            .lock()
+            .unwrap()
+            .get(url.as_str())
+            .cloned()
+            .unwrap_or((404, Vec::new()));
         Ok(PinnedResponse {
-            status: if body.is_some() { 200 } else { 404 },
+            status,
             cache_control: None,
-            body: Box::new(OneChunk(body)),
+            body: Box::new(OneChunk(Some(body))),
         })
     }
 }
@@ -248,6 +284,15 @@ pub async fn database() -> DatabaseConnection {
 pub fn container() -> Box<dyn Any> {
     static CRYPT: OnceLock<()> = OnceLock::new();
     CRYPT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
+    // An application that serves the OAuth server names its public URL.
+    // A test that sets another registers it before it builds a world.
+    if !suprnova::Config::has::<suprnova::AppConfig>() {
+        suprnova::Config::register(
+            suprnova::AppConfig::builder()
+                .url("http://localhost")
+                .build(),
+        );
+    }
     let guard = Box::new(fixture::setup());
     TestContainer::bind::<dyn RateLimiterDriver>(Arc::new(InMemoryRateLimiter::new()));
     let manager = AuthManager::new(AuthConfig::default());
@@ -266,15 +311,15 @@ pub fn router(agents: AgentsConfig) -> Router {
             Auth::login_id(user).map_err(HttpResponse::from)?;
             Ok(HttpResponse::text("signed in"))
         })
-        .get("/test/facade/grants", |_request: Request| async {
-            let grants = ConnectedAgents::client_grants()
+        .get("/test/facade/grants", |request: Request| async move {
+            let grants = ConnectedAgents::client_grants(&request)
                 .await
                 .map_err(HttpResponse::from)?;
             Ok(HttpResponse::json(json!(grants)))
         })
         .get("/test/facade/revoke", |request: Request| async move {
             let grant = request.query_param("grant").unwrap_or_default();
-            let revoked = ConnectedAgents::revoke_client_grant(&grant)
+            let revoked = ConnectedAgents::revoke_client_grant(&request, &grant)
                 .await
                 .map_err(HttpResponse::from)?;
             Ok(HttpResponse::json(json!({ "revoked": revoked })))
@@ -298,6 +343,15 @@ pub fn registry() -> MiddlewareRegistry {
 
 /// A world whose OAuth server `configure` adjusts.
 pub async fn world_with(configure: impl FnOnce(OAuthServer) -> OAuthServer) -> World {
+    world_custom(configure, |agents| agents).await
+}
+
+/// A world whose OAuth server `configure` adjusts and whose agents
+/// configuration, the OAuth server already in it, `agents` adjusts.
+pub async fn world_custom(
+    configure: impl FnOnce(OAuthServer) -> OAuthServer,
+    agents: impl FnOnce(AgentsConfig) -> AgentsConfig,
+) -> World {
     let container = container();
     let db = database().await;
     let resolver = Arc::new(FakeResolver::default());
@@ -312,8 +366,11 @@ pub async fn world_with(configure: impl FnOnce(OAuthServer) -> OAuthServer) -> W
             .connection(db.clone())
             .client_metadata_fetcher(fetcher),
     );
-    let client = TestClient::new(router(AgentsConfig::new().oauth_server(server)), registry())
-        .with_peer_address("203.0.113.9".parse().unwrap());
+    let client = TestClient::new(
+        router(agents(AgentsConfig::new().oauth_server(server))),
+        registry(),
+    )
+    .with_peer_address("203.0.113.9".parse().unwrap());
     World {
         client,
         db,
@@ -1257,11 +1314,11 @@ async fn agent_005_revoked_token_stops_working() {
         refusal_reason(client, &tokens.access).await,
         "The token was revoked."
     );
-    // A token the server never issued is not this resolver's to refuse: no
-    // resolver recognizes it.
+    // A token in the server's format that it never issued is refused by
+    // the server itself, never handed to another resolver.
     assert_eq!(
         refusal_reason(client, "mat_0000").await,
-        "The token is not recognized."
+        "The token is not one this server knows."
     );
 }
 
@@ -1449,14 +1506,6 @@ async fn agent_010_another_users_grant_cannot_be_revoked() {
 
 #[tokio::test]
 async fn agent_010_connected_agents_facade_lists_and_revokes() {
-    if crate::own_process_async::delegate(
-        module_path!(),
-        "agent_010_connected_agents_facade_lists_and_revokes",
-    )
-    .await
-    {
-        return;
-    }
     let world = world().await;
     let user = new_account("facade");
     let tokens = connect(&world.client, &user, "posts:read posts:write").await;
@@ -1537,4 +1586,354 @@ async fn agent_017_default_pages_can_be_replaced() {
     assert_eq!(pending["client"]["host"], "127.0.0.1");
     assert_eq!(pending["scopes"][0]["description"], "Read your posts");
     drop(container);
+}
+
+// ------------------------------------------------------ fix round 1 ----
+
+/// A resolver asked after the OAuth server's: it records every token it
+/// sees and recognizes none.
+struct Recording(Arc<Mutex<Vec<String>>>);
+
+#[async_trait]
+impl suprnova::agents::CallerResolver for Recording {
+    async fn resolve(
+        &self,
+        token: &str,
+        _ctx: &suprnova::agents::ResolveContext<'_>,
+    ) -> Result<suprnova::ToolCaller, suprnova::agents::ResolveError> {
+        self.0.lock().unwrap().push(token.to_owned());
+        Err(suprnova::agents::ResolveError::NotMine)
+    }
+}
+
+/// A world with a [`Recording`] resolver after the OAuth server's.
+async fn recorded_world() -> (World, Arc<Mutex<Vec<String>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recording = Arc::new(Recording(seen.clone()));
+    let world = world_custom(|server| server, |agents| agents.resolver(recording)).await;
+    (world, seen)
+}
+
+#[tokio::test]
+async fn agent_005_refresh_and_unknown_access_tokens_never_reach_later_resolvers() {
+    let (world, seen) = recorded_world().await;
+    let client = &world.client;
+    let user = new_account("prefixes");
+    let tokens = connect(client, &user, "posts:read").await;
+    assert_eq!(
+        refusal_reason(client, &tokens.refresh).await,
+        "A refresh token is not an access token."
+    );
+    assert_eq!(
+        refusal_reason(client, "mat_0000").await,
+        "The token is not one this server knows."
+    );
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "a token with the server's prefixes is the server's to refuse: {:?}",
+        seen.lock().unwrap()
+    );
+    // A token with neither prefix is still another resolver's to judge.
+    assert_eq!(
+        refusal_reason(client, "other-token").await,
+        "The token is not recognized."
+    );
+    assert_eq!(seen.lock().unwrap().as_slice(), ["other-token"]);
+}
+
+#[tokio::test]
+async fn agent_005_expired_access_token_is_invalid() {
+    let world =
+        world_with(|server| server.access_token_lifetime(std::time::Duration::from_secs(1))).await;
+    let client = &world.client;
+    let user = new_account("expiry");
+    let tokens = connect(client, &user, "posts:read").await;
+    assert_eq!(profile_status(client, &tokens.access).await, 200);
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    assert_eq!(
+        refusal_reason(client, &tokens.access).await,
+        "The token expired."
+    );
+}
+
+#[tokio::test]
+async fn agent_005_store_failure_is_503_never_a_guest() {
+    let world = world().await;
+    let client = &world.client;
+    let user = new_account("store-down");
+    let tokens = connect(client, &user, "posts:read").await;
+    world
+        .db
+        .execute_unprepared("DROP TABLE auth_oauth_tokens")
+        .await
+        .unwrap();
+    let refused = client
+        .mcp()
+        .with_token(&tokens.access)
+        .call("users.profile", json!({}))
+        .await;
+    assert_eq!(refused.status(), 503, "{:?}", refused.response());
+    // A public tool is not served as a guest either: the token cannot be
+    // checked, so nothing runs.
+    let public = client
+        .mcp()
+        .with_token(&tokens.access)
+        .call("echo", json!({ "text": "hi" }))
+        .await;
+    assert_eq!(public.status(), 503, "{:?}", public.response());
+}
+
+struct NoEpochs;
+
+#[async_trait]
+impl magnetar::authorization_server::UserEpochs for NoEpochs {
+    async fn current_epoch(&self, _user_id: &str) -> MagnetarResult<Option<u64>> {
+        Ok(None)
+    }
+}
+
+struct AllowAll;
+
+#[async_trait]
+impl magnetar::abuse::AbuseLimiter for AllowAll {
+    async fn acquire(
+        &self,
+        _key: &str,
+        _policy: magnetar::abuse::AbusePolicy,
+    ) -> MagnetarResult<magnetar::abuse::Permit> {
+        Ok(magnetar::abuse::Permit::Allowed { retry_after: None })
+    }
+}
+
+/// An access token of an agent-kind grant on the world's store, minted
+/// through the issuance seam agent auth uses.
+async fn agent_grant_token(db: &DatabaseConnection) -> String {
+    use magnetar::authorization_server::{
+        AuthorizationServer, AuthorizationServerConfig, IssueTokens, NewGrant, ScopeDefinition,
+        SqlAuthorizationStore,
+    };
+    use secrecy::ExposeSecret;
+    let mut config = AuthorizationServerConfig::new("http://localhost", vec![RESOURCE.to_owned()]);
+    config.scopes = vec![ScopeDefinition::new("posts:read", "Read your posts")];
+    let engine = AuthorizationServer::new(
+        config,
+        Arc::new(SqlAuthorizationStore::new(db.clone())),
+        Arc::new(NoEpochs),
+        Arc::new(AllowAll),
+        Arc::new(ClientMetadataFetcher::new(
+            Arc::new(FakeResolver::default()),
+            Arc::new(FakeDocuments::default()),
+            ClientMetadataPolicy::default(),
+        )),
+    )
+    .unwrap();
+    let issued = engine
+        .token_issuer()
+        .issue_grant_as(
+            "agent-grant-1".to_owned(),
+            NewGrant {
+                kind: "agent".to_owned(),
+                user_id: None,
+                client_id: "reg_1".to_owned(),
+                client_name: "An agent".to_owned(),
+                client_host: "agent.test".to_owned(),
+                scopes: vec!["posts:read".to_owned()],
+                resource: RESOURCE.to_owned(),
+                auth_epoch: None,
+            },
+            IssueTokens {
+                access_kind: "agent".to_owned(),
+                refresh: false,
+                access_lifetime: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    issued.response.access_token.expose_secret().to_owned()
+}
+
+#[tokio::test]
+async fn agent_005_agent_kind_grant_is_left_to_the_next_resolver() {
+    let (world, seen) = recorded_world().await;
+    let token = agent_grant_token(&world.db).await;
+    assert!(token.starts_with("mat_"));
+    assert_eq!(
+        refusal_reason(&world.client, &token).await,
+        "The token is not recognized."
+    );
+    assert_eq!(
+        seen.lock().unwrap().as_slice(),
+        [token.as_str()],
+        "an agent grant's token reaches agent auth's resolver"
+    );
+}
+
+#[tokio::test]
+async fn agent_017_approval_page_isolates_and_cleans_client_text() {
+    let world = world().await;
+    let client = &world.client;
+    let registered = client
+        .post("/oauth/register")
+        .json(&json!({
+            "client_name": "Evil\u{202E}looT",
+            "redirect_uris": [LOOPBACK_REDIRECT],
+            "token_endpoint_auth_method": "none",
+        }))
+        .send()
+        .await;
+    assert_eq!(registered.status(), 201, "{}", registered.body_text());
+    let client_id = registered.json()["client_id"].as_str().unwrap().to_owned();
+    let user = new_account("bidi");
+    sign_in(client, &user).await;
+    let (_, challenge) = pkce();
+    let (_, page) = open_approval(
+        client,
+        &client_id,
+        LOOPBACK_REDIRECT,
+        &challenge,
+        "posts:read",
+    )
+    .await;
+    let html = page.body_text();
+    assert!(!html.contains('\u{202E}'), "{html}");
+    assert!(html.contains("<bdi>EvillooT</bdi>"), "{html}");
+    assert!(html.contains("<bdi>127.0.0.1</bdi>"), "{html}");
+}
+
+#[tokio::test]
+async fn agent_010_each_router_lists_and_revokes_only_its_own_grants() {
+    let container = container();
+    let first = TestClient::new(
+        router(AgentsConfig::new().oauth_server(OAuthServer::new().connection(database().await))),
+        registry(),
+    );
+    let second = TestClient::new(
+        router(AgentsConfig::new().oauth_server(OAuthServer::new().connection(database().await))),
+        registry(),
+    );
+    let first_user = new_account("first-router");
+    let second_user = new_account("second-router");
+    let first_tokens = connect(&first, &first_user, "posts:read").await;
+    let second_tokens = connect(&second, &second_user, "posts:read").await;
+    let listed = |client: TestClient| async move {
+        let listed = client.get("/test/facade/grants").send().await;
+        assert_eq!(listed.status(), 200, "{}", listed.body_text());
+        listed.json()
+    };
+    let first_grants = listed(first.clone()).await;
+    let second_grants = listed(second.clone()).await;
+    assert_eq!(
+        first_grants.as_array().map(Vec::len),
+        Some(1),
+        "{first_grants}"
+    );
+    assert_eq!(
+        second_grants.as_array().map(Vec::len),
+        Some(1),
+        "{second_grants}"
+    );
+    let first_id = first_grants[0]["id"].as_str().unwrap().to_owned();
+    let second_id = second_grants[0]["id"].as_str().unwrap().to_owned();
+    let revoke = |client: TestClient, grant: String| async move {
+        client
+            .get(format!("/test/facade/revoke?grant={grant}"))
+            .send()
+            .await
+            .json()
+    };
+    assert_eq!(
+        revoke(first.clone(), second_id).await,
+        json!({ "revoked": false }),
+        "a router never reaches another router's grants"
+    );
+    assert_eq!(profile_status(&second, &second_tokens.access).await, 200);
+    assert_eq!(
+        revoke(first.clone(), first_id).await,
+        json!({ "revoked": true })
+    );
+    assert_eq!(profile_status(&first, &first_tokens.access).await, 401);
+    drop(container);
+}
+
+#[tokio::test]
+async fn agent_005_parameter_in_query_and_body_is_refused() {
+    let world = world().await;
+    let refused = world
+        .client
+        .post("/oauth/token?code=a")
+        .form(&[("grant_type", "authorization_code"), ("code", "b")])
+        .send()
+        .await;
+    assert_eq!(refused.status(), 400, "{}", refused.body_text());
+    assert_eq!(refused.json()["error"], "invalid_request");
+    assert_eq!(
+        refused.json()["error_description"],
+        "a parameter is repeated"
+    );
+}
+
+#[tokio::test]
+async fn agent_005_unset_app_url_fails_the_build_outside_local_and_testing() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "agent_005_unset_app_url_fails_the_build_outside_local_and_testing",
+    )
+    .await
+    {
+        return;
+    }
+    let _env = crate::env_lock::lock_env_async().await;
+    // SAFETY: this test runs alone in its own process and holds the
+    // environment lock; nothing else reads the environment meanwhile.
+    unsafe {
+        std::env::remove_var("APP_URL");
+        std::env::remove_var("APP_ENV");
+    }
+    let _container = fixture::setup();
+    let db = database().await;
+    let build = || {
+        fixture::routes()
+            .try_agents(AgentsConfig::new().oauth_server(OAuthServer::new().connection(db.clone())))
+    };
+    let refused = build()
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+    assert!(
+        refused.contains("APP_URL"),
+        "an unset APP_URL in production fails the build: {refused:?}"
+    );
+    suprnova::Config::register(
+        suprnova::AppConfig::builder()
+            .environment(suprnova::Environment::Local)
+            .build(),
+    );
+    assert!(build().is_ok(), "a local environment still builds");
+}
+
+#[tokio::test]
+async fn agent_005_plain_http_app_url_fails_the_build() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "agent_005_plain_http_app_url_fails_the_build",
+    )
+    .await
+    {
+        return;
+    }
+    suprnova::Config::register(
+        suprnova::AppConfig::builder()
+            .url("http://app.example.test")
+            .environment(suprnova::Environment::Local)
+            .build(),
+    );
+    let _container = fixture::setup();
+    let db = database().await;
+    let refused = fixture::routes()
+        .try_agents(AgentsConfig::new().oauth_server(OAuthServer::new().connection(db)))
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+    assert!(refused.contains("issuer"), "{refused:?}");
 }

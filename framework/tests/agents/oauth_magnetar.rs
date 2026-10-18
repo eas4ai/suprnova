@@ -67,8 +67,24 @@ async fn agent_005_password_change_ends_the_token_under_magnetar_sessions() {
         Some(&json!({ "user": user_id, "browser": false }))
     );
 
-    // A real password change: the reset link the user is mailed, then the
-    // reset it completes, which moves Magnetar's epoch.
+    reset_password(email).await;
+
+    let reason = refusal_reason(&client, &tokens.access).await;
+    assert!(
+        reason.contains("ended with the user's sign-in"),
+        "the grant ended with Magnetar's epoch: {reason}"
+    );
+    assert_eq!(
+        refresh(&client, &tokens.client_id, &tokens.refresh)
+            .await
+            .status(),
+        400
+    );
+}
+
+/// A real password change: the reset link the user is mailed, then the
+/// reset it completes, which moves Magnetar's epoch.
+async fn reset_password(email: &str) {
     let mail = Mail::fake();
     let _queue = suprnova::Queue::fake();
     PasswordReset::send_link(email, "https://app.test/reset")
@@ -92,16 +108,56 @@ async fn agent_005_password_change_ends_the_token_under_magnetar_sessions() {
     PasswordReset::complete(&token, "a-brand-new-password")
         .await
         .expect("complete the reset");
+}
 
+#[tokio::test]
+async fn agent_005_magnetar_epoch_is_read_through_the_engine_not_the_oauth_connection() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "agent_005_magnetar_epoch_is_read_through_the_engine_not_the_oauth_connection",
+    )
+    .await
+    {
+        return;
+    }
+    let _env = crate::env_lock::lock_env_async().await;
+    // SAFETY: this test runs alone in its own process and holds the
+    // environment lock; nothing else reads the environment meanwhile.
+    unsafe {
+        std::env::set_var("MAIL_FROM", "test-mailer@example.test");
+    }
+    let _container = container();
+    let engine_db = Database::connect("sqlite::memory:").await.unwrap();
+    init_magnetar(MagnetarConfig::from_sea_orm(engine_db))
+        .await
+        .expect("install the default Magnetar engine and its tables");
+    // The OAuth server keeps its grants in a database of its own, which
+    // has no Magnetar user table.
+    let oauth_db = crate::oauth::database().await;
+    let email = "separate-store@example.test";
+    let user = Auth::password()
+        .register(email, PASSWORD)
+        .await
+        .expect("register a Magnetar user")
+        .created()
+        .expect("a new account");
+    let user_id = user.id.to_string();
+    remember_account(&user_id);
+    let client = TestClient::new(
+        router(AgentsConfig::new().oauth_server(OAuthServer::new().connection(oauth_db))),
+        registry(),
+    );
+    let tokens = connect(&client, &user_id, "posts:read").await;
+    let called = client
+        .mcp()
+        .with_token(&tokens.access)
+        .call("users.profile", json!({}))
+        .await;
+    assert_eq!(called.status(), 200, "{:?}", called.response());
+    reset_password(email).await;
     let reason = refusal_reason(&client, &tokens.access).await;
     assert!(
         reason.contains("ended with the user's sign-in"),
-        "the grant ended with Magnetar's epoch: {reason}"
-    );
-    assert_eq!(
-        refresh(&client, &tokens.client_id, &tokens.refresh)
-            .await
-            .status(),
-        400
+        "the epoch the engine keeps ended the grant: {reason}"
     );
 }

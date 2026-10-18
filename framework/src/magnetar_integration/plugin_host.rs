@@ -12,12 +12,16 @@
 //!   the client sent is dropped, so a client cannot choose the budget its
 //!   requests count against.
 //! - **Repeated parameters.** A query, or an
-//!   `application/x-www-form-urlencoded` body, that names a parameter twice
-//!   is refused with 400 before the one-value-per-name maps the plugin
-//!   reads are built (RFC 6749 section 3.1).
-//! - **The body bound.** The body is read no further than the mount's
-//!   bound, and a declared length over it is refused with 413 before a byte
-//!   is read.
+//!   `application/x-www-form-urlencoded` body, that names a parameter twice,
+//!   or a parameter named in both, is refused with 400 before the
+//!   one-value-per-name maps the plugin reads are built (RFC 6749 section
+//!   3.1).
+//! - **The body bound.** On a client route the host is the first to read
+//!   the body: it reads no further than the mount's bound, and refuses a
+//!   declared length over it with 413 before a byte is read. On a browser
+//!   route that changes state the CSRF middleware reads the form first, to
+//!   find its token, under the framework's global body limit; the mount's
+//!   bound then applies to what the plugin is handed.
 //! - **CSRF.** A route a client calls, named with
 //!   [`PluginMount::client_route`], is agent traffic: it gets no session, no
 //!   CSRF check and no cookie (AGENT-011). Every other route is a browser
@@ -250,9 +254,16 @@ async fn serve(state: Arc<Mounted>, index: usize, request: Request) -> Response 
     if content_type
         .as_deref()
         .is_some_and(crate::http::body::is_form_urlencoded)
-        && single_valued(&bytes).is_err()
     {
-        return Ok(refusal(400, "a parameter is repeated", browser));
+        // One value per name across the query and the form together: a
+        // plugin reads one or the other, and must not be able to read a
+        // different value than the one checked.
+        let Ok(form) = single_valued(&bytes) else {
+            return Ok(refusal(400, "a parameter is repeated", browser));
+        };
+        if form.keys().any(|name| query.contains_key(name)) {
+            return Ok(refusal(400, "a parameter is repeated", browser));
+        }
     }
     let body = if bytes.is_empty() {
         WireBody::Empty
@@ -659,34 +670,26 @@ impl OpaqueSessionStore for SignedInView {
 
 /// The user's authentication epoch as a Magnetar engine reads it, decided
 /// the way [`signed_in_session`] decides the epoch a session carries: where
-/// Magnetar fences the default guard, Magnetar's own epoch from its user
-/// table; otherwise the HRD-007 epoch of the user the guard's provider
-/// returns. A grant records the session's epoch at approval and stops
-/// working once this moves, as the user's sessions do (AGENT-005).
-pub(crate) struct HostUserEpochs {
-    magnetar_users: Arc<SeaOrmStorage<DefaultAuthSchema>>,
-}
-
-impl HostUserEpochs {
-    /// Epochs over `connection`, whose Magnetar user table is read when
-    /// Magnetar owns the default guard's sessions.
-    pub(crate) fn new(connection: DatabaseConnection) -> Self {
-        Self {
-            magnetar_users: Arc::new(SeaOrmStorage::new(connection)),
-        }
-    }
-}
+/// Magnetar fences the default guard, Magnetar's own epoch, read through the
+/// installed engine as the guard's session check reads it, whatever
+/// database or schema the engine keeps its users in; otherwise the HRD-007
+/// epoch of the user the guard's provider returns. A grant records the
+/// session's epoch at approval and stops working once this moves, as the
+/// user's sessions do (AGENT-005).
+pub(crate) struct HostUserEpochs;
 
 #[async_trait]
 impl magnetar::authorization_server::UserEpochs for HostUserEpochs {
     async fn current_epoch(&self, user_id: &str) -> magnetar::Result<Option<u64>> {
         let guard_name = Auth::default_guard_name();
         if crate::auth::epoch::magnetar_fences(&guard_name) {
-            return magnetar::authorization_server::UserEpochs::current_epoch(
-                self.magnetar_users.as_ref(),
-                user_id,
-            )
-            .await;
+            let Some(authority) = super::host_sign_in_authority() else {
+                return Err(magnetar::Error::DependencyUnavailable {
+                    dependency: "Magnetar session authority".to_owned(),
+                    message: "no engine reads the user's auth epoch".to_owned(),
+                });
+            };
+            return authority.user_auth_epoch(user_id).await;
         }
         let Some(provider) = crate::auth::epoch::guard_provider(&guard_name) else {
             return Err(magnetar::Error::DependencyUnavailable {
@@ -867,5 +870,198 @@ mod tests {
     fn agent_005_a_sign_in_effect_fails_the_request() {
         let effects = EffectResponse::ok().with_effect(Effect::ClearSession);
         assert!(into_response(WireResponse::from_effects(effects)).is_err());
+    }
+
+    /// A plugin that records every request it is handed and accepts it, so
+    /// a test sees whether the host refused a request before the plugin.
+    struct Probe {
+        seen: Arc<std::sync::Mutex<Vec<WireRequest>>>,
+    }
+
+    #[async_trait]
+    impl<S: magnetar::schema::AuthSchema> Plugin<S> for Probe {
+        fn name(&self) -> &str {
+            "probe"
+        }
+
+        fn routes(&self) -> Vec<RouteDescriptor> {
+            vec![RouteDescriptor::new(
+                WireMethod::Post,
+                "/probe/client",
+                "probe.client",
+            )]
+        }
+
+        async fn handle(
+            &self,
+            context: RequestContext<'_, S>,
+        ) -> magnetar::plugin::PluginResult<WireResponse> {
+            if let Ok(mut seen) = self.seen.lock() {
+                seen.push(context.request.clone());
+            }
+            Ok(WireResponse::json(json!({ "reached": true })))
+        }
+    }
+
+    /// A router serving the probe's client route with a 1 KiB body bound.
+    async fn probe_router() -> (Arc<Router>, Arc<std::sync::Mutex<Vec<WireRequest>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let connection = sea_orm::Database::connect("sqlite::memory:")
+            .await
+            .unwrap_or_else(|error| panic!("an in-memory database: {error}"));
+        let mount = PluginMount::new(Arc::new(Probe { seen: seen.clone() }), connection)
+            .client_route("probe.client")
+            .max_body_bytes(1024);
+        let router = Router::new()
+            .try_mount_magnetar_plugin(mount)
+            .unwrap_or_else(|error| panic!("{error}"));
+        (Arc::new(router), seen)
+    }
+
+    /// Send `raw`, one HTTP/1.1 request as bytes, through the router from
+    /// `peer`, and answer the response's status.
+    async fn exchange(router: Arc<Router>, raw: Vec<u8>, peer: Option<std::net::IpAddr>) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut client, server) = tokio::io::duplex(256 * 1024);
+        let registry = Arc::new(crate::middleware::MiddlewareRegistry::new());
+        let serving = tokio::spawn(async move {
+            let service = hyper::service::service_fn(move |request| {
+                let router = router.clone();
+                let registry = registry.clone();
+                async move {
+                    Ok::<_, std::convert::Infallible>(
+                        crate::server::handle_request_with_peer(router, registry, request, peer)
+                            .await,
+                    )
+                }
+            });
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(hyper_util::rt::TokioIo::new(server), service)
+                .await;
+        });
+        client
+            .write_all(&raw)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut answer = Vec::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.read_to_end(&mut answer),
+        )
+        .await;
+        serving.abort();
+        let text = String::from_utf8_lossy(&answer);
+        text.split_whitespace()
+            .nth(1)
+            .and_then(|status| status.parse().ok())
+            .unwrap_or_else(|| panic!("an HTTP response, got {text:?}"))
+    }
+
+    /// A form POST to `target` with `body`, framed by a Content-Length, and
+    /// `headers` besides.
+    fn form_post(target: &str, body: &[u8], headers: &[&str]) -> Vec<u8> {
+        let mut raw = format!(
+            "POST {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+             Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n",
+            body.len()
+        );
+        for header in headers {
+            raw.push_str(header);
+            raw.push_str("\r\n");
+        }
+        raw.push_str("\r\n");
+        let mut raw = raw.into_bytes();
+        raw.extend_from_slice(body);
+        raw
+    }
+
+    #[tokio::test]
+    async fn agent_005_host_passes_a_well_formed_request_to_the_plugin() {
+        let (router, seen) = probe_router().await;
+        assert_eq!(
+            exchange(router, form_post("/probe/client?a=1", b"b=2", &[]), None).await,
+            200
+        );
+        let seen = seen.lock().map(|seen| seen.clone()).unwrap_or_default();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].query.get("a").map(String::as_str), Some("1"));
+    }
+
+    #[tokio::test]
+    async fn agent_005_host_refuses_a_repeated_form_parameter_before_the_plugin() {
+        let (router, seen) = probe_router().await;
+        assert_eq!(
+            exchange(router, form_post("/probe/client", b"a=1&a=2", &[]), None).await,
+            400
+        );
+        assert!(seen.lock().map(|seen| seen.is_empty()).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn agent_005_host_refuses_a_parameter_in_both_query_and_body() {
+        let (router, seen) = probe_router().await;
+        assert_eq!(
+            exchange(router, form_post("/probe/client?a=1", b"a=2", &[]), None).await,
+            400
+        );
+        assert!(seen.lock().map(|seen| seen.is_empty()).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn agent_005_host_bounds_a_client_body_with_a_content_length() {
+        let (router, seen) = probe_router().await;
+        let body = vec![b'x'; 2048];
+        assert_eq!(
+            exchange(router, form_post("/probe/client", &body, &[]), None).await,
+            413
+        );
+        assert!(seen.lock().map(|seen| seen.is_empty()).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn agent_005_host_bounds_a_client_body_without_a_content_length() {
+        let (router, seen) = probe_router().await;
+        let mut raw = b"POST /probe/client HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+            Content-Type: application/x-www-form-urlencoded\r\nTransfer-Encoding: chunked\r\n\r\n"
+            .to_vec();
+        for _ in 0..4 {
+            raw.extend_from_slice(b"200\r\n");
+            raw.extend_from_slice(&[b'x'; 512]);
+            raw.extend_from_slice(b"\r\n");
+        }
+        raw.extend_from_slice(b"0\r\n\r\n");
+        assert_eq!(exchange(router, raw, None).await, 413);
+        assert!(seen.lock().map(|seen| seen.is_empty()).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn agent_005_host_drops_every_client_sent_client_ip() {
+        let spoofed = ["X-Client-Ip: 198.51.100.1", "X-Client-Ip: 198.51.100.2"];
+        let (router, seen) = probe_router().await;
+        let peer: std::net::IpAddr = [203, 0, 113, 5].into();
+        assert_eq!(
+            exchange(
+                router.clone(),
+                form_post("/probe/client", b"a=1", &spoofed),
+                Some(peer)
+            )
+            .await,
+            200
+        );
+        assert_eq!(
+            exchange(router, form_post("/probe/client", b"a=1", &spoofed), None).await,
+            200
+        );
+        let seen = seen.lock().map(|seen| seen.clone()).unwrap_or_default();
+        assert_eq!(
+            seen[0].headers.get("x-client-ip").map(String::as_str),
+            Some("203.0.113.5"),
+            "the address is the connection's"
+        );
+        assert_eq!(
+            seen[1].headers.get("x-client-ip"),
+            None,
+            "with no address known, none is sent rather than the client's"
+        );
     }
 }

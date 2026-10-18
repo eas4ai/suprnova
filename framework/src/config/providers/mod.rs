@@ -8,6 +8,7 @@
 mod app;
 mod server;
 
+pub(crate) use app::DEFAULT_URL as DEFAULT_APP_URL;
 pub use app::{AppConfig, AppConfigBuilder};
 pub use server::{
     DEFAULT_BODY_READ_TIMEOUT_SECS, DEFAULT_BODY_TOTAL_TIMEOUT_SECS,

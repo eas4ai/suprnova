@@ -10,6 +10,7 @@ use serde::Serialize;
 use crate::auth::Auth;
 use crate::container::App;
 use crate::error::FrameworkError;
+use crate::http::Request;
 
 /// One client a user approved to act as them: an MCP client holding
 /// tokens of this grant.
@@ -69,15 +70,17 @@ impl From<ClientGrantSummary> for ClientGrant {
 /// The agents and clients bound to the signed-in user, for an
 /// application's own connected-agents page or JSON routes.
 ///
-/// Every method acts for the user the default guard signed in, and only on
-/// that user's grants: an id of another user's grant is not found.
+/// Every method takes the request it serves, and acts on the grants of the
+/// OAuth server the request's router mounted, for the user the default
+/// guard signed in, and only on that user's grants: an id of another
+/// user's grant is not found.
 ///
 /// ```rust,ignore
 /// use suprnova::agents::ConnectedAgents;
 ///
 /// #[handler]
-/// pub async fn index() -> Response {
-///     let grants = ConnectedAgents::client_grants().await?;
+/// pub async fn index(request: Request) -> Response {
+///     let grants = ConnectedAgents::client_grants(&request).await?;
 ///     Ok(HttpResponse::json(serde_json::json!({ "grants": grants })))
 /// }
 /// ```
@@ -89,10 +92,10 @@ impl ConnectedAgents {
     ///
     /// # Errors
     ///
-    /// 401 for a guest, 500 when no OAuth server is mounted, and 503 when
-    /// the authorization server's store cannot answer.
-    pub async fn client_grants() -> Result<Vec<ClientGrant>, FrameworkError> {
-        let server = mounted()?;
+    /// 401 for a guest, 500 when the request's router mounts no OAuth
+    /// server, and 503 when the authorization server's store cannot answer.
+    pub async fn client_grants(request: &Request) -> Result<Vec<ClientGrant>, FrameworkError> {
+        let server = mounted(request)?;
         let user_id = signed_in_user_id().await?;
         list(&server, &user_id).await
     }
@@ -104,31 +107,24 @@ impl ConnectedAgents {
     /// # Errors
     ///
     /// As [`client_grants`](Self::client_grants).
-    pub async fn revoke_client_grant(grant_id: &str) -> Result<bool, FrameworkError> {
-        let server = mounted()?;
+    pub async fn revoke_client_grant(
+        request: &Request,
+        grant_id: &str,
+    ) -> Result<bool, FrameworkError> {
+        let server = mounted(request)?;
         let user_id = signed_in_user_id().await?;
         revoke(&server, &user_id, grant_id).await
     }
 }
 
-/// The OAuth server the application's router mounted.
-#[derive(Clone)]
-struct MountedOAuthServer(Arc<AuthorizationServer>);
-
-/// Make `server` the one [`ConnectedAgents`] reads. An application serves
-/// one MCP endpoint, so it mounts one server; the latest mount wins.
-pub(super) fn install(server: Arc<AuthorizationServer>) {
-    App::singleton(MountedOAuthServer(server));
-}
-
-fn mounted() -> Result<Arc<AuthorizationServer>, FrameworkError> {
-    App::get::<MountedOAuthServer>()
-        .map(|mounted| mounted.0)
-        .ok_or_else(|| {
-            FrameworkError::internal(
-                "no OAuth server is mounted: serve agents with AgentsConfig::oauth_server",
-            )
-        })
+/// The OAuth server the request's router mounted.
+fn mounted(request: &Request) -> Result<Arc<AuthorizationServer>, FrameworkError> {
+    request.oauth_server().cloned().ok_or_else(|| {
+        FrameworkError::internal(
+            "the router that served this request mounts no OAuth server: serve agents with \
+             AgentsConfig::oauth_server",
+        )
+    })
 }
 
 /// The default guard's signed-in user, or 401.

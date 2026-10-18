@@ -2,6 +2,11 @@ use crate::config::env::{Environment, env, env_strict};
 use crate::error::FrameworkError;
 use crate::http::TrustedProxiesConfig;
 
+/// The URL `AppConfig` takes when `APP_URL` is unset. A feature that
+/// must know the application's real public URL, such as the OAuth server's
+/// issuer, compares against it to tell an unset `APP_URL` from a named one.
+pub(crate) const DEFAULT_URL: &str = "http://localhost:8765";
+
 /// Application configuration
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -69,7 +74,7 @@ impl AppConfig {
             name: env("APP_NAME", "Suprnova Application".to_string()),
             environment,
             debug,
-            url: env("APP_URL", "http://localhost:8765".to_string()),
+            url: env("APP_URL", DEFAULT_URL.to_string()),
             trusted_proxies: parse_trusted_proxies_lenient(),
         }
     }
@@ -84,8 +89,7 @@ impl AppConfig {
             env_strict::<bool>("APP_DEBUG")?.unwrap_or_else(|| default_debug_for_env(&environment));
         let name =
             env_strict::<String>("APP_NAME")?.unwrap_or_else(|| "Suprnova Application".to_string());
-        let url =
-            env_strict::<String>("APP_URL")?.unwrap_or_else(|| "http://localhost:8765".to_string());
+        let url = env_strict::<String>("APP_URL")?.unwrap_or_else(|| DEFAULT_URL.to_string());
         let trusted_proxies = parse_trusted_proxies_strict()?;
         Ok(Self {
             name,

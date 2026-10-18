@@ -42,13 +42,36 @@ const MAX_TOKEN_LENGTH: usize = 16 * 1024;
 /// ```rust,ignore
 /// use suprnova::agents::{AgentsConfig, OutsideIssuer};
 ///
+/// // The issuer's users sign in with their email, which it verifies and
+/// // says so in `email_verified`; they are this application's users by
+/// // that address.
 /// let issuer = OutsideIssuer::new(
 ///     "https://login.example.com",
 ///     "https://login.example.com/.well-known/jwks.json",
 /// )?
-/// .user_claim("sub");
+/// .user_claim("email")
+/// .match_user_on("email");
 /// let config = AgentsConfig::new().resolver(Arc::new(issuer));
 /// ```
+///
+/// # Finding the user
+///
+/// By default the user is the one whose identifier is the token's `sub`.
+/// That fits only an issuer that mints this application's own user ids,
+/// such as one the application runs itself: an outside identity provider's
+/// `sub` is its own identifier, which means nothing here.
+///
+/// Matching on any other claim, with [`user_claim`](Self::user_claim) and
+/// usually [`match_user_on`](Self::match_user_on), requires the token to
+/// say the issuer verified that claim: a flag claim, `<claim>_verified` as
+/// OpenID Connect's `email_verified` and `phone_number_verified` are, or the
+/// one [`verified_by`](Self::verified_by) names, set to JSON `true`. A
+/// missing, `false` or non-boolean flag refuses the token. Without it, an
+/// issuer that lets users set their own address would let anyone claim
+/// `victim@example.com` and be signed in as that user here. There is no way
+/// to turn the check off.
+///
+/// # What is checked
 ///
 /// A token whose `iss` is not this issuer's is left to the next resolver.
 /// One that is this issuer's must verify against a key the issuer
@@ -64,6 +87,7 @@ pub struct OutsideIssuer {
     audience: Option<String>,
     user_claim: String,
     match_field: Option<String>,
+    verified_flag: Option<String>,
     leeway: Duration,
     keys: KeySet,
 }
@@ -82,11 +106,13 @@ impl std::fmt::Debug for OutsideIssuer {
 impl OutsideIssuer {
     /// Accept tokens whose `iss` is exactly `issuer`, verified against the
     /// key set (RFC 7517) at `jwks_uri`. The user is the one whose
-    /// identifier is the `sub` claim; the audience is the MCP endpoint's
-    /// canonical URL; the leeway on times is one minute; keys are fetched
-    /// through the system resolver and Magnetar's pinned HTTPS client
-    /// within 64 KiB and 5 seconds, kept 10 minutes, and fetched again for
-    /// a key id they lack once 30 seconds have passed since the last fetch.
+    /// identifier is the `sub` claim, which fits only an issuer that mints
+    /// this application's user ids (see "Finding the user"); the audience is
+    /// the MCP endpoint's canonical URL; the leeway on times is one minute;
+    /// keys are fetched through the system resolver and Magnetar's pinned
+    /// HTTPS client within 64 KiB and 5 seconds, kept fresh 10 minutes with
+    /// 10 more of grace while a refetch fails, and fetched at most once
+    /// every 30 seconds.
     ///
     /// # Errors
     ///
@@ -119,6 +145,7 @@ impl OutsideIssuer {
             audience: None,
             user_claim: "sub".to_owned(),
             match_field: None,
+            verified_flag: None,
             leeway: Duration::from_secs(60),
             keys: KeySet {
                 url,
@@ -128,7 +155,7 @@ impl OutsideIssuer {
                 timeout,
                 max_age: Duration::from_secs(600),
                 refetch_after: Duration::from_secs(30),
-                cache: Mutex::new(None),
+                state: Mutex::new(KeyState::default()),
                 fetching: tokio::sync::Mutex::new(()),
             },
         })
@@ -143,7 +170,9 @@ impl OutsideIssuer {
 
     /// Find the user by the claim `claim` instead of `sub`: its value is
     /// the user's identifier, as the default guard's provider looks a user
-    /// up by id.
+    /// up by id, unless [`match_user_on`](Self::match_user_on) names a
+    /// field. A claim other than `sub` must come with its verified flag
+    /// (see "Finding the user").
     pub fn user_claim(mut self, claim: impl Into<String>) -> Self {
         self.user_claim = claim.into();
         self
@@ -151,9 +180,20 @@ impl OutsideIssuer {
 
     /// Find the user whose `field` holds the user claim's value, through
     /// the provider's credential lookup with no password, rather than by
-    /// identifier: `.user_claim("email").match_user_on("email")`.
+    /// identifier: `.user_claim("email").match_user_on("email")`. The token
+    /// must also carry the claim's verified flag (see "Finding the user").
     pub fn match_user_on(mut self, field: impl Into<String>) -> Self {
         self.match_field = Some(field.into());
+        self
+    }
+
+    /// Name the flag claim that says the issuer verified the user claim,
+    /// for an issuer that does not call it `<claim>_verified`: for example
+    /// `.user_claim("upn").verified_by("upn_checked")`. The token must carry
+    /// it set to JSON `true`. It has no effect while the user is found by
+    /// `sub`.
+    pub fn verified_by(mut self, flag: impl Into<String>) -> Self {
+        self.verified_flag = Some(flag.into());
         self
     }
 
@@ -177,10 +217,12 @@ impl OutsideIssuer {
         self
     }
 
-    /// Keep a fetched key set for `max_age`, and fetch it again for a key
-    /// id it lacks only once `refetch_after` has passed since the last
-    /// fetch, so tokens naming made-up keys cannot make the server fetch
-    /// on every request.
+    /// Keep a fetched key set fresh for `max_age`, and fetch at most once
+    /// per `refetch_after`, whether the last fetch succeeded or failed, so
+    /// tokens naming made-up keys, or arriving while the issuer is down,
+    /// cannot make the server fetch on every request. When a fetch fails,
+    /// the last good set still answers until it is twice `max_age` old;
+    /// after that its tokens get 503.
     pub fn key_cache(mut self, max_age: Duration, refetch_after: Duration) -> Self {
         self.keys.max_age = max_age;
         self.keys.refetch_after = refetch_after;
@@ -310,6 +352,17 @@ impl CallerResolver for OutsideIssuer {
         else {
             return Err(ResolveError::Invalid("The token does not name its user."));
         };
+        if self.user_claim != "sub" {
+            let flag = self
+                .verified_flag
+                .clone()
+                .unwrap_or_else(|| format!("{}_verified", self.user_claim));
+            if claims.get(&flag) != Some(&Value::Bool(true)) {
+                return Err(ResolveError::Invalid(
+                    "The claim the user is matched on is not verified.",
+                ));
+            }
+        }
         let user = self.find_user(subject).await?;
         let client = claims
             .get("client_id")
@@ -451,6 +504,15 @@ enum KeyError {
 }
 
 /// The issuer's key set, fetched behind the fence and cached.
+///
+/// A fetched set is fresh for `max_age`. A set that has grown stale is
+/// fetched again; if that fetch fails, the stale set still answers until it
+/// is `max_age` past its age (a grace period of one more `max_age`), so a
+/// short outage at the issuer does not refuse tokens signed by a key it
+/// already published. After that its tokens cannot be checked, and the
+/// request gets 503. Every fetch, good or failed, counts against
+/// `refetch_after`: while the issuer is down, tokens cannot make the
+/// server fetch on every request.
 struct KeySet {
     url: Url,
     resolver: Arc<dyn HostResolver>,
@@ -459,10 +521,17 @@ struct KeySet {
     timeout: Duration,
     max_age: Duration,
     refetch_after: Duration,
-    cache: Mutex<Option<CachedKeys>>,
+    state: Mutex<KeyState>,
     /// One fetch at a time: requests that miss together wait for one
     /// answer rather than each fetching.
     fetching: tokio::sync::Mutex<()>,
+}
+
+/// What the cache knows: the last good set, and when it last fetched.
+#[derive(Clone, Default)]
+struct KeyState {
+    keys: Option<CachedKeys>,
+    last_attempt: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -472,55 +541,92 @@ struct CachedKeys {
 }
 
 impl KeySet {
-    /// The key `kid`, from the cache or a fetch: a fresh cache answers, and
-    /// a key id it lacks is fetched for once the last fetch is older than
-    /// `refetch_after`.
+    /// The key `kid`, from the cache or a fetch (see the type's
+    /// documentation for when each answers).
     async fn key(&self, kid: &str) -> Result<Jwk, KeyError> {
-        let seen = self.cached();
-        if let Some(found) = self.answer(seen.as_ref(), kid) {
-            return found;
+        let seen = self.state();
+        if let Some(answer) = self.answer(&seen, kid) {
+            return answer;
         }
         let _fetching = self.fetching.lock().await;
-        // A fetch that finished while this request waited is the one
-        // refetch this request gets.
-        if let Some(latest) = self.cached()
-            && seen.as_ref().map(|seen| seen.fetched_at) != Some(latest.fetched_at)
+        // A fetch that finished while this request waited answers it, as
+        // the one refetch it gets.
+        let latest = self.state();
+        if latest.last_attempt != seen.last_attempt
+            && let Some(answer) = self.answer(&latest, kid)
         {
-            return latest.keys.find(kid).cloned().ok_or(KeyError::Unknown);
+            return answer;
         }
-        let keys = tokio::time::timeout(self.timeout, self.fetch())
-            .await
-            .map_err(|_| KeyError::Unavailable("the fetch timed out".to_owned()))?
-            .map_err(KeyError::Unavailable)?;
-        let found = keys.find(kid).cloned();
-        if let Ok(mut cache) = self.cache.lock() {
-            *cache = Some(CachedKeys {
-                keys: Arc::new(keys),
-                fetched_at: Instant::now(),
-            });
+        let fetched = match tokio::time::timeout(self.timeout, self.fetch()).await {
+            Ok(fetched) => fetched,
+            Err(_) => Err("the fetch timed out".to_owned()),
+        };
+        let now = Instant::now();
+        let mut state = self.state();
+        state.last_attempt = Some(now);
+        let answer = match fetched {
+            Ok(keys) => {
+                let found = keys.find(kid).cloned();
+                state.keys = Some(CachedKeys {
+                    keys: Arc::new(keys),
+                    fetched_at: now,
+                });
+                found.ok_or(KeyError::Unknown)
+            }
+            Err(reason) => match self.within_grace(state.keys.as_ref()) {
+                Some(keys) => keys.keys.find(kid).cloned().ok_or(KeyError::Unknown),
+                None => Err(KeyError::Unavailable(reason)),
+            },
+        };
+        if let Ok(mut held) = self.state.lock() {
+            *held = state;
         }
-        found.ok_or(KeyError::Unknown)
+        answer
     }
 
-    /// The cached key set, if any.
-    fn cached(&self) -> Option<CachedKeys> {
-        self.cache.lock().ok()?.clone()
+    /// The cache's state.
+    fn state(&self) -> KeyState {
+        self.state
+            .lock()
+            .map(|state| state.clone())
+            .unwrap_or_default()
     }
 
-    /// What `cached` says about `kid`: the key, or [`KeyError::Unknown`]
-    /// while the set is too recent to fetch again. `None` means fetch: no
-    /// set, a set past its age, or a set that lacks the key and may be
-    /// fetched again.
-    fn answer(&self, cached: Option<&CachedKeys>, kid: &str) -> Option<Result<Jwk, KeyError>> {
-        let cached = cached?;
-        let age = cached.fetched_at.elapsed();
-        if age >= self.max_age {
+    /// The last good set while it is fresh or in its grace period.
+    fn within_grace<'a>(&self, keys: Option<&'a CachedKeys>) -> Option<&'a CachedKeys> {
+        keys.filter(|keys| keys.fetched_at.elapsed() < self.max_age.saturating_mul(2))
+    }
+
+    /// What `state` says about `kid` without fetching: the key,
+    /// [`KeyError::Unknown`], or [`KeyError::Unavailable`]. `None` means
+    /// fetch now.
+    fn answer(&self, state: &KeyState, kid: &str) -> Option<Result<Jwk, KeyError>> {
+        let recent = state
+            .last_attempt
+            .is_some_and(|attempt| attempt.elapsed() < self.refetch_after);
+        let fresh = state
+            .keys
+            .as_ref()
+            .filter(|keys| keys.fetched_at.elapsed() < self.max_age);
+        if let Some(keys) = fresh {
+            if let Some(jwk) = keys.keys.find(kid) {
+                return Some(Ok(jwk.clone()));
+            }
+            // A set that lacks the key is fetched again, at most once per
+            // `refetch_after`.
+            return (recent).then_some(Err(KeyError::Unknown));
+        }
+        if !recent {
             return None;
         }
-        if let Some(jwk) = cached.keys.find(kid) {
-            return Some(Ok(jwk.clone()));
-        }
-        (age < self.refetch_after).then_some(Err(KeyError::Unknown))
+        // The last fetch was recent and left no fresh set: it failed. The
+        // last good set answers through its grace period.
+        Some(match self.within_grace(state.keys.as_ref()) {
+            Some(keys) => keys.keys.find(kid).cloned().ok_or(KeyError::Unknown),
+            None => Err(KeyError::Unavailable(
+                "the key set could not be fetched".to_owned(),
+            )),
+        })
     }
 
     /// One fenced GET of the key set.

@@ -142,13 +142,10 @@ impl OAuthServer {
     }
 
     /// Keep clients, grants and token digests through `connection` rather
-    /// than the application's default connection.
-    ///
-    /// Where Magnetar owns the default guard's sessions, a grant is checked
-    /// against the epoch in Magnetar's default user table (`app_users`),
-    /// read through this connection too, so it must reach the database the
-    /// Magnetar engine uses. A user it does not find has no epoch, and their
-    /// grants stop working.
+    /// than the application's default connection. It holds only the
+    /// authorization server's own tables: where Magnetar owns the default
+    /// guard's sessions, a grant is checked against the user's epoch through
+    /// the installed engine, wherever that keeps its users.
     pub fn connection(mut self, connection: DatabaseConnection) -> Self {
         self.connection = Some(connection);
         self
@@ -258,7 +255,25 @@ impl OAuthServer {
     }
 
     /// Build the engine for the endpoint `config` describes.
+    ///
+    /// The issuer is the application's public URL, and a client checks the
+    /// `iss` of every authorization response against it, so an `APP_URL`
+    /// left to its development default is refused outside the local and
+    /// testing environments rather than published.
     pub(crate) fn build(self, config: &AgentsConfig) -> Result<BuiltOAuthServer, FrameworkError> {
+        if !app_url_named()
+            && !matches!(
+                crate::config::Config::environment(),
+                crate::config::Environment::Local | crate::config::Environment::Testing
+            )
+        {
+            return Err(FrameworkError::internal(
+                "the OAuth server's issuer is the application's public URL, and APP_URL is not \
+                 set: set APP_URL to the URL clients reach the application at (it may be left \
+                 unset only in the local and testing environments; an unset APP_ENV is \
+                 production)",
+            ));
+        }
         let connection = match &self.connection {
             Some(connection) => connection.clone(),
             None => crate::DB::connection()
@@ -304,7 +319,7 @@ impl OAuthServer {
             Arc::new(magnetar::authorization_server::SqlAuthorizationStore::new(
                 connection.clone(),
             )),
-            Arc::new(HostUserEpochs::new(connection.clone())),
+            Arc::new(HostUserEpochs),
             Arc::new(crate::magnetar_integration::abuse_limiter::AppAbuseLimiter),
             fetcher,
         )
@@ -340,8 +355,13 @@ impl BuiltOAuthServer {
         Arc::new(resolver::ServerMetadata::new(Arc::clone(&self.server)))
     }
 
-    /// Mount the server's routes and the default pages on `router`, and
-    /// make the server the one [`ConnectedAgents`] reads.
+    /// The server, which every request the router routes carries for
+    /// [`ConnectedAgents`].
+    pub(crate) fn server(&self) -> Arc<AuthorizationServer> {
+        Arc::clone(&self.server)
+    }
+
+    /// Mount the server's routes and the default pages on `router`.
     pub(crate) fn mount(self, router: Router) -> Result<Router, FrameworkError> {
         let max_body_bytes = self.server.config().max_request_bytes;
         let mut mount = PluginMount::new(
@@ -360,7 +380,6 @@ impl BuiltOAuthServer {
         if let Some(path) = &self.setup.connected_path {
             router = pages::mount_connected(router, Arc::clone(&pages), path)?;
         }
-        grants::install(Arc::clone(&self.server));
         Ok(router)
     }
 }
@@ -375,6 +394,16 @@ impl AgentsConfig {
         self.oauth = Some(server);
         self
     }
+}
+
+/// Whether the application names its public URL: `APP_URL` is set, or a
+/// registered `AppConfig` carries a URL other than the default it takes
+/// when `APP_URL` is unset.
+fn app_url_named() -> bool {
+    std::env::var("APP_URL").is_ok_and(|url| !url.trim().is_empty())
+        || crate::config::Config::get::<crate::config::AppConfig>().is_some_and(|config| {
+            !config.url.trim().is_empty() && config.url != crate::config::providers::DEFAULT_APP_URL
+        })
 }
 
 /// `path` with a leading `/`.

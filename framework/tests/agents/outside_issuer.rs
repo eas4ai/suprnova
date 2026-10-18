@@ -15,7 +15,7 @@ use suprnova::MiddlewareRegistry;
 use suprnova::agents::{AgentsConfig, OutsideIssuer};
 use suprnova::testing::TestClient;
 
-use crate::oauth::{FakeDocuments, FakeResolver, container, new_account};
+use crate::oauth::{FakeDocuments, FakeResolver, account_email, container, new_account};
 
 const ISSUER: &str = "https://login.issuer.test";
 const JWKS: &str = "https://login.issuer.test/.well-known/jwks.json";
@@ -471,4 +471,234 @@ async fn agent_006_issuer_is_listed_in_protected_resource_metadata() {
         .await
         .json();
     assert_eq!(document["authorization_servers"], json!([ISSUER]));
+}
+
+// ------------------------------------------------------ fix round 1 ----
+
+/// `claims` without `field`.
+fn without(mut claims: Value, field: &str) -> Value {
+    if let Some(claims) = claims.as_object_mut() {
+        claims.remove(field);
+    }
+    claims
+}
+
+#[tokio::test]
+async fn agent_006_a_user_matched_on_email_needs_email_verified() {
+    let key = IssuerKey::generate("k1");
+    let world = world_with(&[&key], |issuer| {
+        issuer.user_claim("email").match_user_on("email")
+    });
+    let user = new_account("verified-email");
+    let claimed = with(
+        claims("someone-else", "posts:read"),
+        "email",
+        json!(account_email(&user)),
+    );
+    for (flag, label) in [
+        (Some(json!(false)), "false"),
+        (None, "absent"),
+        (Some(json!("true")), "a string"),
+    ] {
+        let token_claims = match flag {
+            Some(flag) => with(claimed.clone(), "email_verified", flag),
+            None => without(claimed.clone(), "email_verified"),
+        };
+        assert_eq!(
+            refusal(&world.client, &key.sign(&token_claims)).await,
+            (
+                401,
+                "The claim the user is matched on is not verified.".to_owned()
+            ),
+            "email_verified {label}"
+        );
+    }
+    let verified = key.sign(&with(claimed, "email_verified", json!(true)));
+    let profile = world
+        .client
+        .mcp()
+        .with_token(&verified)
+        .call("users.profile", json!({}))
+        .await;
+    assert_eq!(profile.status(), 200, "{:?}", profile.response());
+    assert_eq!(
+        profile.structured().map(|value| value["user"].clone()),
+        Some(json!(user))
+    );
+}
+
+#[tokio::test]
+async fn agent_006_a_custom_verified_flag_is_required_the_same_way() {
+    let key = IssuerKey::generate("k1");
+    let world = world_with(&[&key], |issuer| {
+        issuer
+            .user_claim("email")
+            .match_user_on("email")
+            .verified_by("email_confirmed")
+    });
+    let user = new_account("custom-flag");
+    let claimed = with(
+        with(
+            claims("someone-else", "posts:read"),
+            "email",
+            json!(account_email(&user)),
+        ),
+        "email_verified",
+        json!(true),
+    );
+    assert_eq!(
+        refusal(&world.client, &key.sign(&claimed)).await,
+        (
+            401,
+            "The claim the user is matched on is not verified.".to_owned()
+        ),
+        "the default flag does not stand in for the one named"
+    );
+    let confirmed = key.sign(&with(claimed, "email_confirmed", json!(true)));
+    assert_eq!(refusal(&world.client, &confirmed).await.0, 200);
+}
+
+#[tokio::test]
+async fn agent_006_an_id_claim_other_than_sub_needs_its_flag() {
+    let key = IssuerKey::generate("k1");
+    let world = world_with(&[&key], |issuer| issuer.user_claim("preferred_username"));
+    let user = new_account("username");
+    let claimed = with(
+        claims("someone-else", "posts:read"),
+        "preferred_username",
+        json!(user),
+    );
+    assert_eq!(
+        refusal(&world.client, &key.sign(&claimed)).await,
+        (
+            401,
+            "The claim the user is matched on is not verified.".to_owned()
+        )
+    );
+    let verified = key.sign(&with(claimed, "preferred_username_verified", json!(true)));
+    assert_eq!(refusal(&world.client, &verified).await.0, 200);
+}
+
+#[tokio::test]
+async fn agent_006_a_failed_key_fetch_counts_against_the_refetch_interval() {
+    let key = IssuerKey::generate("k1");
+    let world = world(&[]);
+    world.documents.forget(JWKS);
+    let user = new_account("issuer-down");
+    for _ in 0..5 {
+        let (status, _) = refusal(&world.client, &key.sign(&claims(&user, "posts:read"))).await;
+        assert_eq!(status, 503);
+    }
+    assert_eq!(
+        world.documents.requests.lock().unwrap().len(),
+        1,
+        "tokens cannot force a fetch per request while the issuer is down"
+    );
+}
+
+#[tokio::test]
+async fn agent_006_last_good_keys_serve_through_a_failed_refetch_for_a_grace_period() {
+    let key = IssuerKey::generate("k1");
+    let world = world_with(&[&key], |issuer| {
+        issuer.key_cache(Duration::from_millis(1000), Duration::ZERO)
+    });
+    let user = new_account("grace");
+    let token = || key.sign(&claims(&user, "posts:read"));
+    assert_eq!(refusal(&world.client, &token()).await.0, 200);
+    world.documents.forget(JWKS);
+    // Past the set's age, inside one more age of grace: the refetch fails
+    // and the last good set still answers.
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    assert_eq!(refusal(&world.client, &token()).await.0, 200);
+    assert_eq!(
+        world.documents.requests.lock().unwrap().len(),
+        2,
+        "it tried"
+    );
+    // Past the grace: the token cannot be checked.
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(refusal(&world.client, &token()).await.0, 503);
+}
+
+#[tokio::test]
+async fn agent_006_alg_none_is_refused() {
+    let key = IssuerKey::generate("k1");
+    let world = world(&[&key]);
+    let user = new_account("alg-none");
+    let encode = |value: &Value| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(value).unwrap())
+    };
+    let unsigned = format!(
+        "{}.{}.",
+        encode(&json!({ "alg": "none", "typ": "JWT", "kid": "k1" })),
+        encode(&claims(&user, "posts:read"))
+    );
+    assert_eq!(refusal(&world.client, &unsigned).await.0, 401);
+}
+
+#[tokio::test]
+async fn agent_006_a_key_pinned_to_another_algorithm_is_refused() {
+    let key = IssuerKey::generate("k1");
+    let world = world(&[]);
+    let mut pinned = key.jwk();
+    pinned["alg"] = json!("ES384");
+    world.documents.serve(JWKS, &json!({ "keys": [pinned] }));
+    let user = new_account("pinned");
+    assert_eq!(
+        refusal(&world.client, &key.sign(&claims(&user, "posts:read"))).await,
+        (
+            401,
+            "The token's signing key does not fit its algorithm.".to_owned()
+        )
+    );
+}
+
+#[tokio::test]
+async fn agent_006_an_iat_in_the_future_is_refused() {
+    let key = IssuerKey::generate("k1");
+    let world = world(&[&key]);
+    let user = new_account("future-iat");
+    let token = key.sign(&with(
+        claims(&user, "posts:read"),
+        "iat",
+        json!(now() + 600),
+    ));
+    assert_eq!(
+        refusal(&world.client, &token).await,
+        (401, "The token was issued in the future.".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn agent_006_a_redirecting_key_set_is_not_used() {
+    let key = IssuerKey::generate("k1");
+    let user = new_account("redirecting-key-set");
+    // The redirect carries a usable set: only the refusal to follow or
+    // read a redirect keeps it out.
+    let redirecting = world(&[]);
+    redirecting
+        .documents
+        .serve_raw(JWKS, 302, serde_json::to_vec(&key_set(&[&key])).unwrap());
+    assert_eq!(
+        refusal(&redirecting.client, &key.sign(&claims(&user, "posts:read")))
+            .await
+            .0,
+        503
+    );
+}
+
+#[tokio::test]
+async fn agent_006_an_oversized_key_set_is_not_used() {
+    let key = IssuerKey::generate("k1");
+    let user = new_account("oversized-key-set");
+    let oversized = world(&[]);
+    let mut body = serde_json::to_vec(&key_set(&[&key])).unwrap();
+    body.extend(std::iter::repeat_n(b' ', 70 * 1024));
+    oversized.documents.serve_raw(JWKS, 200, body);
+    assert_eq!(
+        refusal(&oversized.client, &key.sign(&claims(&user, "posts:read")))
+            .await
+            .0,
+        503
+    );
 }

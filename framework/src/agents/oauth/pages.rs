@@ -145,14 +145,14 @@ async fn approval(pages: Arc<Pages>, request: Request) -> Response {
 fn render_approval(pending: &PendingAuthorizationView, action: &str, token: &str) -> String {
     let mut html = Html::default();
     html.raw("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n")
-        .raw("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>Allow ")
-        .text(&pending.client_name)
-        .raw(" to act for you?</title>\n</head>\n<body>\n<main>\n<h1>Allow ")
-        .text(&pending.client_name)
+        // The title holds no markup to isolate a name in, so it names none.
+        .raw("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n")
+        .raw("<title>Allow an app to act for you?</title>\n</head>\n<body>\n<main>\n<h1>Allow ")
+        .client(&pending.client_name)
         .raw(" to act for you?</h1>\n<p><strong>")
-        .text(&pending.client_name)
+        .client(&pending.client_name)
         .raw("</strong>, from <strong>")
-        .text(&pending.client_host)
+        .client(&pending.client_host)
         .raw("</strong>, wants to use this application as you.</p>\n");
     if pending.scopes.is_empty() {
         html.raw("<p>It asks for no permissions: it can use only what needs none.</p>\n");
@@ -168,7 +168,7 @@ fn render_approval(pending: &PendingAuthorizationView, action: &str, token: &str
         html.raw("</ul>\n");
     }
     html.raw("<p>If you allow it, you return to <code>")
-        .text(&pending.redirect_uri)
+        .client(&pending.redirect_uri)
         .raw("</code>.</p>\n<form method=\"post\" action=\"")
         .text(action)
         .raw("\">\n<input type=\"hidden\" name=\"_token\" value=\"")
@@ -209,9 +209,9 @@ fn render_connected(grants: &[ClientGrant], path: &str, token: &str) -> String {
                 |used| used.format("%Y-%m-%d %H:%M UTC").to_string(),
             );
             html.raw("<li>\n<h2>")
-                .text(&grant.client_name)
+                .client(&grant.client_name)
                 .raw("</h2>\n<p>From <strong>")
-                .text(&grant.client_host)
+                .client(&grant.client_host)
                 .raw("</strong>. Allowed ")
                 .text(&created)
                 .raw(", last used ")
@@ -235,7 +235,7 @@ fn render_connected(grants: &[ClientGrant], path: &str, token: &str) -> String {
                 .raw("\">\n<input type=\"hidden\" name=\"_token\" value=\"")
                 .text(token)
                 .raw("\">\n<button type=\"submit\">Revoke ")
-                .text(&grant.client_name)
+                .client(&grant.client_name)
                 .raw("</button>\n</form>\n</li>\n");
         }
         html.raw("</ul>\n");
@@ -309,7 +309,9 @@ fn unavailable(error: magnetar::Error) -> FrameworkError {
 /// `&'static str`, through [`Self::raw`]; every value the page shows goes
 /// through [`Self::text`], which escapes it for both text and quoted
 /// attributes. So no client-supplied name, host or address can become
-/// markup.
+/// markup. A value the client chose goes through [`Self::client`], which
+/// also isolates its direction, so whatever reordering it carries stays
+/// inside it.
 #[derive(Default)]
 struct Html(String);
 
@@ -318,6 +320,15 @@ impl Html {
     fn raw(&mut self, markup: &'static str) -> &mut Self {
         self.0.push_str(markup);
         self
+    }
+
+    /// Append `value`, a text the client chose, escaped and inside
+    /// `<bdi>`. Magnetar already removes the control and format characters
+    /// from a client's text; the isolation holds for any it still carries,
+    /// such as right-to-left letters, so they cannot reorder the page
+    /// around them.
+    fn client(&mut self, value: &str) -> &mut Self {
+        self.raw("<bdi>").text(value).raw("</bdi>")
     }
 
     /// Append `value` as text, escaped.
