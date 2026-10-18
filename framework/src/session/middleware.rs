@@ -1966,6 +1966,12 @@ impl SessionMiddleware {
                                     session.user_id = Some(user_id.clone());
                                     session.set_magnetar_web_binding(binding);
                                 }
+                                // A remember-me sign-in is the browser's
+                                // session: a tool's route treats it so.
+                                crate::auth::request_state::mark_session_user(
+                                    &guard_name,
+                                    &user_id,
+                                );
                                 crate::auth::request_state::set_guard_user_id(&guard_name, user_id);
                                 crate::auth::request_state::set_guard_via_remember(
                                     &guard_name,
@@ -2153,6 +2159,12 @@ impl SessionMiddleware {
                                 if is_default {
                                     session.user_id = Some(user_id.clone());
                                 }
+                                // A remember-me sign-in is the browser's
+                                // session: a tool's route treats it so.
+                                crate::auth::request_state::mark_session_user(
+                                    &guard_name,
+                                    &user_id,
+                                );
                                 crate::auth::request_state::set_guard_user_id(&guard_name, user_id);
                                 crate::auth::request_state::set_guard_via_remember(
                                     &guard_name,
@@ -2869,6 +2881,13 @@ impl SessionMiddleware {
 #[async_trait]
 impl Middleware for SessionMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
+        // Agent traffic has no session: the MCP endpoint is stateless and
+        // authenticates each request by its bearer token, and a tool call
+        // carries the caller the endpoint resolved (AGENT-003).
+        if request.is_agent_traffic() {
+            return next(request).await;
+        }
+
         // Defensive: refuse to run at all when `Crypt` isn't installed.
         // `Server::from_config` guarantees a key is in place before
         // middleware boots (failing closed in production, generating a

@@ -44,6 +44,7 @@ mod serde_attrs;
 mod service;
 mod suprnova_test;
 mod test_macro;
+mod tool;
 mod utils;
 mod view;
 mod workflow;
@@ -755,6 +756,97 @@ pub fn derive_form_request(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn request(attr: TokenStream, input: TokenStream) -> TokenStream {
     request::request_attr_impl(attr, input)
+}
+
+/// Mark a `#[handler]` as a tool agents may call, over the MCP endpoint and
+/// from the browser (AGENT-001).
+///
+/// The handler stays an ordinary routed handler. A tool call runs through
+/// the same route: its middleware, bindings, form request validation,
+/// `#[authorize]` checks and rate limits all apply, whichever surface the
+/// call arrives on. Nothing is a tool unless it carries this attribute.
+///
+/// ```rust,ignore
+/// tool_scopes! {
+///     pub mod scope {
+///         POSTS_WRITE = "posts:write" => "Create and edit your posts";
+///     }
+/// }
+///
+/// #[tool_input]
+/// pub struct CreatePost {
+///     #[validate(length(min = 1, max = 200))]
+///     pub title: String,
+/// }
+///
+/// #[tool(
+///     name = "posts.create",
+///     description = "Create a draft post for the signed-in user.",
+///     callers = [user, agent],
+///     scopes = [scope::POSTS_WRITE],
+///     input = CreatePost,
+///     output = PostView,
+///     annotations(read_only = false, destructive = false),
+/// )]
+/// #[handler]
+/// pub async fn store(caller: ToolCaller, form: CreatePost) -> Response { ... }
+/// ```
+///
+/// # Arguments
+///
+/// - `name` (required): a string literal of 1 to 128 ASCII letters, digits,
+///   `_`, `-` and `.`, unique in the application. An invalid or duplicate
+///   name fails the build; a duplicate across crates refuses boot.
+/// - `description` (required): a non-empty string literal. Agents read it
+///   as an instruction, so it is fixed at build time.
+/// - `callers` (required): the callers it accepts, of `public` (no
+///   authentication), `user` (a signed-in user, by browser session or a
+///   token the user approved) and `agent` (an agent account). A `user` tool
+///   never accepts an agent account, even one bound to a user.
+/// - `scopes`: the scopes a token caller needs, as paths to constants
+///   `tool_scopes!` declared. An undeclared scope fails the build.
+/// - `input`: the argument type, usually a `#[tool_input]` struct. Its JSON
+///   Schema (draft 2020-12) is the tool's input schema.
+/// - `output`: a type whose JSON Schema is the tool's output schema.
+/// - `annotations(...)`: hints for clients: `read_only`, `destructive`,
+///   `idempotent`, `open_world`, `untrusted_content`.
+/// - `title`: a display name.
+/// - `route`: the route name, when the handler serves more than one route.
+/// - `guard`: the auth guard a user caller is signed into for the call.
+///
+/// The attribute may sit above or below `#[handler]`. The handler must be a
+/// non-generic `async fn`.
+#[proc_macro_attribute]
+pub fn tool(attr: TokenStream, input: TokenStream) -> TokenStream {
+    tool::tool_impl(attr, input)
+}
+
+/// Define a tool's input: [`macro@request`] plus a JSON Schema derived from
+/// the struct, its `serde` attributes and its `validator` attributes
+/// (AGENT-001).
+///
+/// The struct is a form request, so a handler takes it as an argument and
+/// the framework validates it, and the schema an agent reads names the same
+/// fields, required flags and bounds the server enforces.
+///
+/// The schema names each field by its canonical name only. Under
+/// `#[serde(deny_unknown_fields)]`, an MCP call that uses a
+/// `#[serde(alias = "...")]` name is refused as an unknown field, which is
+/// what the published schema tells the agent.
+///
+/// ```rust,ignore
+/// #[tool_input]
+/// pub struct CreatePost {
+///     /// The post's title.
+///     #[validate(length(min = 1, max = 200))]
+///     pub title: String,
+///     #[serde(default)]
+///     pub draft: Option<bool>,
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn tool_input(attr: TokenStream, input: TokenStream) -> TokenStream {
+    request::tool_input_attr_impl(attr, input)
 }
 
 /// Attribute macro for database-enabled tests

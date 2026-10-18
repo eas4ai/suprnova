@@ -246,6 +246,10 @@ impl Guard for SessionGuard {
             return Ok(Some(user));
         }
 
+        // An id this request set itself (a sign-in by id) is not the
+        // session's: only an id read from the session store makes the user
+        // one the browser's session signed in.
+        let from_store = request_state::guard_user_id(&self.name).is_none();
         let id = match crate::session::middleware::guard_auth_user_id(&self.name) {
             Some(id) => id,
             None => return Ok(None),
@@ -269,6 +273,9 @@ impl Guard for SessionGuard {
             return Ok(None);
         }
         request_state::set_guard_user(&self.name, user.clone());
+        if from_store {
+            request_state::mark_session_user(&self.name, &id);
+        }
         Ok(Some(user))
     }
 
