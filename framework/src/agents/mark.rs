@@ -1,9 +1,11 @@
 //! The mark agent traffic carries on its [`Request`](crate::Request).
 //!
 //! Two kinds of request are agent traffic: a request to a route
-//! `Router::agents` registered, which the server marks from its own route
-//! table, and a tool call the MCP endpoint built after it authenticated the
-//! caller. The CSRF, session, bearer-token and RenderCache middleware step
+//! `Router::agents` registered (the MCP endpoint, its metadata routes, and
+//! the client routes of a mounted Magnetar plugin, such as the
+//! authorization server's token endpoint), which the server marks from its
+//! own route table, and a tool call the MCP endpoint built after it
+//! authenticated the caller. The CSRF, session, bearer-token and RenderCache middleware step
 //! aside for both. The mark lives in a private field of the request that
 //! nothing parsed from the wire can set, and only this crate builds one, so
 //! a client cannot forge it with a header or a cookie.

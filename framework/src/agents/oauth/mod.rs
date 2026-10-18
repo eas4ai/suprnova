@@ -144,6 +144,12 @@ impl OAuthServer {
 
     /// Keep clients, grants and token digests through `connection` rather
     /// than the application's default connection.
+    ///
+    /// Where Magnetar owns the default guard's sessions, a grant is checked
+    /// against the epoch in Magnetar's default user table (`app_users`),
+    /// read through this connection too, so it must reach the database the
+    /// Magnetar engine uses. A user it does not find has no epoch, and their
+    /// grants stop working.
     pub fn connection(mut self, connection: DatabaseConnection) -> Self {
         self.connection = Some(connection);
         self

@@ -620,10 +620,11 @@ impl Request {
     }
 
     /// Whether the request is agent traffic: the MCP endpoint, its metadata
-    /// routes, or a tool call the endpoint dispatched. The CSRF, session,
-    /// bearer-token and RenderCache middleware step aside for it: the
-    /// endpoint authenticates its own bearer tokens and a tool call carries
-    /// no cookie (AGENT-001, AGENT-005).
+    /// routes, a client route of a mounted Magnetar plugin, or a tool call
+    /// the endpoint dispatched. The CSRF, session, bearer-token and
+    /// RenderCache middleware step aside for it: the endpoint authenticates
+    /// its own bearer tokens, a client route is called without a cookie, and
+    /// a tool call carries none (AGENT-001, AGENT-005, AGENT-011).
     pub(crate) fn is_agent_traffic(&self) -> bool {
         #[cfg(feature = "agents")]
         {
