@@ -89,6 +89,10 @@ enum ArgKind {
     /// the body, read through `FromRequest`, even when the type the caller
     /// picks also binds. The generated code cannot choose for it (BIND-015).
     Generic,
+    /// `ToolCaller`: who called the tool, taken from the call's context. It
+    /// reads neither the path nor the body, so it is never a second body
+    /// reader and needs no route parameter.
+    Context,
 }
 
 /// One argument of the handler.
@@ -138,7 +142,7 @@ pub fn handler_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
 /// on the rendered output - the host `proc_macro::TokenStream` cannot be
 /// constructed outside a real macro-expansion context.
 fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
-    let self_ty = match parse_handler_args(attr) {
+    let self_ty = match parse_handler_args(attr.clone()) {
         Ok(self_ty) => self_ty,
         Err(e) => return e.to_compile_error(),
     };
@@ -147,6 +151,18 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
         Ok(f) => f,
         Err(e) => return e.to_compile_error(),
     };
+
+    // A `#[tool]` below `#[handler]` must see the function as written, with
+    // `#[handler]` on it, so it goes back on top and this attribute right
+    // under it: the order of the two attributes does not matter.
+    if let Some(index) = input_fn.attrs.iter().position(crate::tool::is_tool_attr) {
+        let tool = input_fn.attrs.remove(index);
+        return quote! {
+            #tool
+            #[::suprnova::handler(#attr)]
+            #input_fn
+        };
+    }
 
     // `#[authorize]` attributes are applied here, so take them off the
     // function: left on, each would expand on its own.
@@ -217,6 +233,14 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
                         renamed.span(),
                         "#[route_param] names the route parameter an argument reads, and \
                          this argument reads the request body",
+                    )
+                    .to_compile_error();
+                }
+                if matches!(kind, ArgKind::Context) {
+                    return syn::Error::new(
+                        renamed.span(),
+                        "#[route_param] names the route parameter an argument reads, and \
+                         a `ToolCaller` argument reads no route parameter",
                     )
                     .to_compile_error();
                 }
@@ -354,7 +378,10 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
         let slot = quote::format_ident!("__suprnova_arg_{}", index);
         let is_target = targets.contains(&index);
         // A path value reads the input; every other argument takes from it.
-        changes_input |= !matches!(arg.kind, ArgKind::Path | ArgKind::OptionalPath(_));
+        changes_input |= !matches!(
+            arg.kind,
+            ArgKind::Path | ArgKind::OptionalPath(_) | ArgKind::Context
+        );
         calls_probe |= !is_target && matches!(arg.kind, ArgKind::Probe | ArgKind::OptionalProbe(_));
         match &arg.kind {
             ArgKind::Probe if is_target => bind_pass.push(quote! {
@@ -424,6 +451,9 @@ fn handler_impl_inner(attr: TokenStream2, input: TokenStream2) -> TokenStream2 {
             }),
             ArgKind::OptionalPath(inner) => path_pass.push(quote! {
                 let #pat: #ty = __suprnova_input.optional_path::<#inner>(#name)?;
+            }),
+            ArgKind::Context => path_pass.push(quote! {
+                let #pat: #ty = ::suprnova::agents::ToolCaller::__for_handler()?;
             }),
             ArgKind::Request => {
                 let take = quote! {
@@ -504,7 +534,7 @@ const HANDLER_ARGS_USAGE: &str = "#[handler] takes `Self = <Type>` on a function
 /// block, or nothing for a free function. An argument that does not start
 /// with `Self` is ignored, as every argument was before `Self = Type`
 /// existed, so a handler written then keeps compiling (BIND-003).
-fn parse_handler_args(attr: TokenStream2) -> syn::Result<Option<Type>> {
+pub(crate) fn parse_handler_args(attr: TokenStream2) -> syn::Result<Option<Type>> {
     let starts_with_self = matches!(
         attr.clone().into_iter().next(),
         Some(proc_macro2::TokenTree::Ident(ident)) if ident == "Self"
@@ -549,7 +579,7 @@ fn names_self(ty: &Type) -> bool {
 }
 
 /// FNV-1a over `text`: a name suffix that is the same on every build.
-fn stable_hash(text: &str) -> u64 {
+pub(crate) fn stable_hash(text: &str) -> u64 {
     text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
     })
@@ -819,6 +849,9 @@ fn arg_entries<'b, 'a: 'b>(args: impl IntoIterator<Item = &'b Arg<'a>>) -> Vec<T
                 ArgKind::OptionalPath(_) => quote! {
                     ::suprnova::routing::HandlerArg::path_value(#name, #ty_text, true)
                 },
+                ArgKind::Context => quote! {
+                    ::suprnova::routing::HandlerArg::context(#name, #ty_text)
+                },
                 ArgKind::Probe => quote! {
                     (&&::suprnova::routing::__ArgProbe::<#ty>::new()).__record(#name, #ty_text)
                 },
@@ -1006,6 +1039,16 @@ fn authorize_checks(
                         ),
                     ));
                 }
+                ArgKind::Context => {
+                    return Err(syn::Error::new_spanned(
+                        name,
+                        format!(
+                            "#[authorize] cannot check `{name}`: it is the tool's caller, not \
+                             a value the route binds; read it in the policy with \
+                             `ToolCaller::current()`"
+                        ),
+                    ));
+                }
                 _ => {}
             }
             // A `ref` binding already holds a reference.
@@ -1107,6 +1150,14 @@ fn classify_param_type(ty: &Type) -> ArgKind {
         return ArgKind::Probe;
     }
     let segments = &type_path.path.segments;
+
+    // `ToolCaller`, `suprnova::ToolCaller`, `suprnova::agents::ToolCaller`.
+    if segments
+        .last()
+        .is_some_and(|last| last.ident == "ToolCaller" && last.arguments.is_empty())
+    {
+        return ArgKind::Context;
+    }
 
     // `Request`, `suprnova::Request`, `::suprnova::Request`.
     if (segments.len() == 1 && segments[0].ident == "Request")

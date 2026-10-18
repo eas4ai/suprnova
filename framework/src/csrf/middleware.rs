@@ -596,6 +596,16 @@ impl Default for CsrfMiddleware {
 #[async_trait]
 impl Middleware for CsrfMiddleware {
     async fn handle(&self, mut request: Request, next: Next) -> Response {
+        // Agent traffic carries no cookie to forge: the MCP endpoint takes a
+        // bearer token it verifies itself, and a tool call is built by the
+        // endpoint after that check. Neither is checked nor handed an
+        // `XSRF-TOKEN` cookie. The mark is a private field set from the
+        // router's table or by the dispatcher, never from the request
+        // (AGENT-001).
+        if request.is_agent_traffic() {
+            return next(request).await;
+        }
+
         // Reading verbs (GET/HEAD/OPTIONS) are never token-checked.
         // We still run through the bottom of the function so the
         // XSRF-TOKEN cookie gets attached to read responses - that's

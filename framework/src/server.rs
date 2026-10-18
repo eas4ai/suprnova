@@ -181,6 +181,7 @@ impl Server {
         let runtime = crate::live::LiveRuntime::bind()?;
         Self::prepare_live_router(&router, &runtime)?;
         router.prepare_bindings()?;
+        router.prepare_tools()?;
         Ok(Self::from_prepared_config(router, config))
     }
 
@@ -250,6 +251,7 @@ impl Server {
     ) -> Result<Self, crate::FrameworkError> {
         Self::prepare_live_router(&router, runtime)?;
         router.prepare_bindings()?;
+        router.prepare_tools()?;
         Ok(Self::from_prepared_config(router, config))
     }
 
@@ -436,6 +438,7 @@ impl Server {
             let runtime = crate::live::LiveRuntime::bind()?;
             Self::prepare_live_router(&self.router, &runtime)?;
             self.router.prepare_bindings()?;
+            self.router.prepare_tools()?;
             self.prepared = true;
         }
 
@@ -1175,7 +1178,7 @@ async fn route_request(
     let inner = Box::pin(handle_request_inner(
         router,
         middleware_registry,
-        req,
+        Inbound::Wire(req),
         method,
         &path,
         peer_ip,
@@ -1198,6 +1201,65 @@ async fn route_request(
     spawn_termination(terminate_method, terminate_path, response.status());
 
     response
+}
+
+/// Serve `request`, which the framework built itself, through the router
+/// and the middleware a wire request takes: the tool calls the MCP endpoint
+/// dispatches (AGENT-001).
+///
+/// The request gets the per-request state a wire request gets in
+/// [`serve_request`] and [`route_request`], fresh: a container scope, the
+/// after-response commands, the auth state, the Inertia flash bag and SSR
+/// flag, and no socket id. The
+/// public root is the caller's, as the call is part of the request that
+/// made it. `before` runs inside that state, ahead of the middleware: the
+/// dispatcher signs the caller's user in there, as a test client's
+/// `acting_as` does.
+#[cfg(feature = "agents")]
+pub(crate) async fn serve_internal<B>(
+    router: Arc<Router>,
+    middleware_registry: Arc<MiddlewareRegistry>,
+    request: Request,
+    peer_ip: Option<std::net::IpAddr>,
+    before: B,
+) -> hyper::Response<ServerBody>
+where
+    B: std::future::Future<Output = Result<(), crate::FrameworkError>> + Send,
+{
+    let method = request.method().clone();
+    let path = request.path().to_string();
+    let root = crate::routing::root::current();
+    let inner = Box::pin(async move {
+        if let Err(error) = before.await {
+            return into_hyper_in_scope(HttpResponse::from(error));
+        }
+        Box::pin(handle_request_inner(
+            router,
+            middleware_registry,
+            Inbound::Internal(Box::new(request)),
+            method,
+            &path,
+            peer_ip,
+        ))
+        .await
+    });
+    let socket_scoped = Box::pin(crate::broadcasting::request_socket::scope(
+        None,
+        crate::auth::request_state::scope(inner),
+    ));
+    let ssr_scoped = Box::pin(
+        crate::inertia::ssr::DISABLE_SSR
+            .scope(crate::inertia::ssr::new_disable_ssr_flag(), socket_scoped),
+    );
+    let flashed = Box::pin(
+        crate::inertia::flash::FLASH_BAG.scope(crate::inertia::flash::new_bag(), ssr_scoped),
+    );
+    // The call's own after-response scope, as a wire request has: a
+    // command it queues with `Bus::dispatch_after_response` starts once the
+    // call's response is complete, on the connection's writer when the
+    // endpoint's request has one.
+    let answered = Box::pin(crate::bus::after_response::response(flashed));
+    crate::container::scope::run_in_new_scope(crate::routing::root::scope(root, answered)).await
 }
 
 /// Run every registered `Terminable` hook for a response on its way to the
@@ -1238,10 +1300,39 @@ fn strip_body_for_head(response: hyper::Response<ServerBody>) -> hyper::Response
     hyper::Response::from_parts(parts, empty)
 }
 
+/// A request on its way into [`handle_request_inner`]: one read off the
+/// wire, or one the framework built itself, such as a tool call the MCP
+/// endpoint dispatches (AGENT-001). Both take the one routing and
+/// middleware path, so a tool call meets every check its route applies.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the wire variant is the hot path and stays unboxed; the internal one is \
+              boxed so the enum is no larger than the wire request it replaced"
+)]
+pub(crate) enum Inbound {
+    /// A request hyper parsed from a connection.
+    Wire(hyper::Request<hyper::body::Incoming>),
+    /// A request the framework built, its body already in memory. Boxed,
+    /// so a wire request does not move a slot the size of a whole request.
+    #[cfg(feature = "agents")]
+    Internal(Box<Request>),
+}
+
+impl Inbound {
+    /// The framework's request for it.
+    fn into_request(self) -> Request {
+        match self {
+            Self::Wire(req) => Request::new(req),
+            #[cfg(feature = "agents")]
+            Self::Internal(request) => *request,
+        }
+    }
+}
+
 async fn handle_request_inner(
     router: Arc<Router>,
     middleware_registry: Arc<MiddlewareRegistry>,
-    req: hyper::Request<hyper::body::Incoming>,
+    req: Inbound,
     method: hyper::Method,
     path: &str,
     peer_ip: Option<std::net::IpAddr>,
@@ -1286,7 +1377,10 @@ async fn handle_request_inner(
     // fallback answers meets the refusal a matched one does (BIND-004): a
     // router whose checks fail answers every request with that error, as a
     // server built from it would refuse to start.
-    if let Err(error) = router.prepare_bindings() {
+    if let Err(error) = router
+        .prepare_bindings()
+        .and_then(|()| router.prepare_tools())
+    {
         return into_hyper_in_scope(crate::http::HttpResponse::from(error));
     }
 
@@ -1323,7 +1417,7 @@ async fn handle_request_inner(
                 handler
             };
             let mut request = stamp_peer(
-                Request::new(req)
+                req.into_request()
                     .with_params(params)
                     .with_route_pattern(pattern.clone()),
             );
@@ -1353,6 +1447,24 @@ async fn handle_request_inner(
                     return live_preparation_failed(&error, &pattern, "prepare");
                 }
             }
+            // The MCP endpoint and its metadata routes are marked from the
+            // router's own table, never from anything the request carries
+            // (AGENT-001).
+            #[cfg(feature = "agents")]
+            if let Some(route) = router.agent_route(&effective_method, &pattern) {
+                request.set_agent_mark(crate::agents::AgentMark::endpoint(
+                    Arc::clone(&router),
+                    Arc::clone(&middleware_registry),
+                    route,
+                    peer_ip,
+                ));
+            }
+            // A tool's route checks the browser caller's kind and limit, and
+            // hands the handler its caller (AGENT-002).
+            #[cfg(feature = "agents")]
+            let tool_access = router.tool_access(&effective_method, &pattern);
+            #[cfg(not(feature = "agents"))]
+            let tool_access: Option<crate::middleware::BoxedMiddleware> = None;
 
             // Resolve the request id ONCE for this request. The same id is
             // handed to the middleware (which scopes it) and to
@@ -1367,7 +1479,10 @@ async fn handle_request_inner(
             let global_mw = middleware_registry.global_middleware();
             let route_middleware = router.get_route_middleware(&effective_method, &pattern);
             let mut chain = MiddlewareChain::with_capacity(
-                1 + global_mw.len() + route_middleware.len() + usize::from(live_metadata.is_some()),
+                1 + global_mw.len()
+                    + route_middleware.len()
+                    + usize::from(tool_access.is_some())
+                    + usize::from(live_metadata.is_some()),
             );
 
             // Each layer at its boundary on a route with `missing()`.
@@ -1405,6 +1520,13 @@ async fn handle_request_inner(
             //        the GET middleware list (auth, CSRF, rate-limit).
             chain.extend(route_middleware.into_iter().map(layer));
 
+            // The tool access check runs after the route's own middleware,
+            // so a route's `auth` has signed the user in before the check
+            // reads the caller.
+            if let Some(access) = tool_access {
+                chain.push(layer(access));
+            }
+
             // Live completion is always innermost, after every configured
             // owner middleware, so omission and ordering remain observable.
             if let Some(metadata) = live_metadata {
@@ -1440,7 +1562,7 @@ async fn handle_request_inner(
                 // URL (PAR-048), while RenderCache, the debug page and
                 // DevTools, which read the pattern, see no routed match.
                 let request = stamp_peer(
-                    Request::new(req)
+                    req.into_request()
                         .with_params(std::collections::HashMap::new())
                         .with_fallback_route(),
                 );
@@ -1481,8 +1603,10 @@ async fn handle_request_inner(
                 // mirrors the fallback branch above - the only difference is
                 // the terminal handler: the 405, the OPTIONS answer or the
                 // fixed 404.
-                let request =
-                    stamp_peer(Request::new(req).with_params(std::collections::HashMap::new()));
+                let request = stamp_peer(
+                    req.into_request()
+                        .with_params(std::collections::HashMap::new()),
+                );
                 let request_id = crate::logging::request_id::resolve_request_id(&request);
                 crate::error::debug_page::note_request_id(request_id.as_str());
 

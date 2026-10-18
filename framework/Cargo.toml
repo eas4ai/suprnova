@@ -41,6 +41,12 @@ redis = { version = "1.2.1", features = ["tokio-comp", "connection-manager", "to
 # the tree compiles both `ring` and `aws-lc-rs`, so rustls cannot pick one.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 validator = { version = "0.20", features = ["derive"] }
+# The JSON Schema (draft 2020-12) of a tool's input and output types, behind
+# the `agents` feature. schemars reads `serde` and `validator` attributes, so
+# the schema an agent is told matches what the server validates. It is a
+# schema generator, not an agent SDK. The lock already holds 1.2.1 through
+# `serde_with`; the derive adds `schemars_derive` and `serde_derive_internals`.
+schemars = { version = "1.2.1", optional = true, default-features = false, features = ["derive", "std"] }
 serde_urlencoded = "0.7"
 chrono = { version = "0.4", features = ["serde"] }
 # Named IANA zones for per-task schedule timezones. chrono alone only offers
@@ -371,6 +377,7 @@ default = [
     "magnetar-oauth",
     "media",
     "queue-sqs",
+    "agents",
 ]
 # The `sqs` queue driver. Default-on because SQS is one of Laravel's queue
 # drivers; a feature at all so a minimal profile carries no AWS signing code.
@@ -382,6 +389,10 @@ queue-sqs = ["filesystem", "dep:reqsign-aws-v4", "dep:reqsign-core", "dep:reqsig
 # force-the-next-encrypt-call-to-fail switch, and request query overrides.
 # Filesystem fakes additionally require `filesystem`.
 testing = []
+# Agent tools and the MCP endpoint (`suprnova::agents`): `#[tool]`
+# handlers, their JSON Schemas and the `/mcp` route. Default-on; a feature at
+# all so a minimal profile carries no schema generator.
+agents = ["dep:schemars"]
 # Upload preparation stays available without loading an inference runtime.
 search-media = ["dep:image", "image/png", "dep:zune-jpeg", "image/webp", "dep:hound"]
 # Local search inference is opt-in. ONNX Runtime binaries download at build time.

@@ -1,0 +1,11 @@
+error: #[tool] needs `description = "..."`: an agent reads it to decide when to call the tool
+ --> tests/agents/compile_fail/agent_001_missing_description.rs:5:8
+  |
+5 | #[tool(name = "silent", callers = [public])]
+  |        ^^^^
+
+error: #[tool] needs a description an agent can read: this one is empty
+  --> tests/agents/compile_fail/agent_001_missing_description.rs:11:38
+   |
+11 | #[tool(name = "blank", description = "  ", callers = [public])]
+   |                                      ^^^^

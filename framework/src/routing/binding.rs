@@ -83,6 +83,13 @@ pub struct HandlerRecord {
 }
 
 impl HandlerRecord {
+    /// The type of the handler function, the key a `#[tool]` record finds
+    /// its handler's routes by.
+    #[cfg(feature = "agents")]
+    pub(crate) fn handler_type(&self) -> TypeId {
+        (self.handler)()
+    }
+
     /// The record of the handler whose type `handler` returns, named
     /// `name` in `module`, with the arguments `args` lists in declaration
     /// order. Built by `#[handler]`.
@@ -339,6 +346,9 @@ pub enum HandlerArgKind {
     PathValue,
     /// It reads the request body: `Request`, or a form request.
     Body,
+    /// It reads neither the path nor the body: a `ToolCaller`, which the
+    /// tool call's context supplies.
+    Context,
 }
 
 impl HandlerArg {
@@ -368,6 +378,18 @@ impl HandlerArg {
             type_name,
             optional,
             kind: HandlerArgKind::PathValue,
+        }
+    }
+
+    /// An argument the call's context supplies, which reads neither the
+    /// path nor the body: a `ToolCaller`.
+    #[doc(hidden)]
+    pub fn context(name: &'static str, type_name: &'static str) -> Self {
+        Self {
+            name,
+            type_name,
+            optional: false,
+            kind: HandlerArgKind::Context,
         }
     }
 
@@ -1340,6 +1362,25 @@ impl RouterBindings {
             .entry((method, pattern.to_owned()))
             .or_default()
             .handler = handler;
+    }
+
+    /// Every route whose handler is the `#[handler]` function of type
+    /// `handler`, sorted by pattern and method.
+    #[cfg(feature = "agents")]
+    pub(crate) fn routes_for(&self, handler: TypeId) -> Vec<(Method, String)> {
+        let mut routes: Vec<(Method, String)> = self
+            .routes
+            .iter()
+            .filter(|(_, entry)| {
+                entry
+                    .handler
+                    .record()
+                    .is_some_and(|record| record.handler_type() == handler)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        routes.sort_by(|a, b| (a.1.as_str(), a.0.as_str()).cmp(&(b.1.as_str(), b.0.as_str())));
+        routes
     }
 
     /// The type name of the handler of the route `(method, pattern)`.

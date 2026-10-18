@@ -13,6 +13,11 @@ pub struct BearerTokenMiddleware;
 #[async_trait]
 impl Middleware for BearerTokenMiddleware {
     async fn handle(&self, request: Request, next: Next) -> Response {
+        // The MCP endpoint accepts only tokens its own resolvers verify, and
+        // a tool call never carries the caller's token (AGENT-005).
+        if request.is_agent_traffic() {
+            return next(request).await;
+        }
         if let Some(auth_header) = request.header("Authorization")
             && let Some(token) = strip_bearer_scheme(auth_header)
         {

@@ -1183,6 +1183,9 @@ impl Auth {
         if let Some(user) = request_state::current_user() {
             return Ok(Some(user));
         }
+        // With no id of the request's own (a bearer token, `once`,
+        // `set_user`), the id below is the session's.
+        let from_session = request_state::current_user_id().is_none();
         let user_id = match Self::id() {
             Some(id) => id,
             None => return Ok(None),
@@ -1210,6 +1213,9 @@ impl Auth {
             return Ok(None);
         }
         request_state::set_current_user(user.clone());
+        if from_session {
+            request_state::mark_session_user(&guard_name, &user_id);
+        }
         Ok(Some(user))
     }
 

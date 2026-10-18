@@ -198,6 +198,22 @@ pub fn derive_request_impl(input: TokenStream) -> TokenStream {
 /// The content type is automatically detected from the request headers.
 pub fn request_attr_impl(_attr: TokenStream, input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    request_attr_tokens(input, false).into()
+}
+
+/// Implementation of the `#[tool_input]` attribute macro: [`request_attr_impl`]
+/// plus `JsonSchema`, so the struct is both the tool's form request and the
+/// source of its input schema (AGENT-001). The derive is pointed at
+/// `suprnova`'s own copy of `schemars`, so an application needs no
+/// dependency of its own.
+pub fn tool_input_attr_impl(_attr: TokenStream, input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    request_attr_tokens(input, true).into()
+}
+
+/// The struct with its derives, the `FormRequest` impl and the input-name
+/// registration; with `schema`, the `JsonSchema` derive as well.
+fn request_attr_tokens(input: DeriveInput, schema: bool) -> proc_macro2::TokenStream {
     let name = &input.ident;
     let vis = &input.vis;
     let generics = &input.generics;
@@ -219,8 +235,7 @@ pub fn request_attr_impl(_attr: TokenStream, input: TokenStream) -> TokenStream 
         syn::Data::Struct(data) => data,
         _ => {
             return syn::Error::new_spanned(&input, "#[request] can only be used on structs")
-                .to_compile_error()
-                .into();
+                .to_compile_error();
         }
     };
 
@@ -233,7 +248,7 @@ pub fn request_attr_impl(_attr: TokenStream, input: TokenStream) -> TokenStream 
     // emission.
     let parsed_attrs = match parse_form_request_attrs(&input.attrs) {
         Ok(v) => v,
-        Err(e) => return e.to_compile_error().into(),
+        Err(e) => return e.to_compile_error(),
     };
 
     // Unit and tuple structs need a trailing `;` because `#fields`
@@ -258,22 +273,34 @@ pub fn request_attr_impl(_attr: TokenStream, input: TokenStream) -> TokenStream 
 
     let registration = match input_names_registration(&input) {
         Ok(registration) => registration,
-        Err(e) => return e.to_compile_error().into(),
+        Err(e) => return e.to_compile_error(),
     };
 
     // The derives come first: a `#[serde(...)]` or `#[validate(...)]`
     // attribute among the user's is a helper of these derives, and Rust
     // refuses a derive helper placed before the derive that introduces it
     // (`legacy_derive_helpers`).
-    let output = quote! {
-        #[derive(::suprnova::serde::Deserialize, ::suprnova::validator::Validate)]
+    let derives = if schema {
+        quote! {
+            #[derive(
+                ::suprnova::serde::Deserialize,
+                ::suprnova::validator::Validate,
+                ::suprnova::JsonSchema
+            )]
+            #[schemars(crate = "::suprnova::__schemars")]
+        }
+    } else {
+        quote! {
+            #[derive(::suprnova::serde::Deserialize, ::suprnova::validator::Validate)]
+        }
+    };
+    quote! {
+        #derives
         #(#attrs)*
         #vis struct #name #generics #fields #semi
 
         #form_request_impl
 
         #registration
-    };
-
-    output.into()
+    }
 }

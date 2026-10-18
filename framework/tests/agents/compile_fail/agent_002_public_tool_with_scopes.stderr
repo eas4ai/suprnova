@@ -1,0 +1,5 @@
+error: a tool that accepts `public` callers cannot declare scopes: a guest calls it without a token, so a scope would protect nothing; drop `public` or the scopes
+  --> tests/agents/compile_fail/agent_002_public_tool_with_scopes.rs:15:15
+   |
+15 |     scopes = [scope::POSTS_READ]
+   |               ^^^^^^^^^^^^^^^^^

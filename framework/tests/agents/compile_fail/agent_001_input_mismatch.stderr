@@ -1,0 +1,32 @@
+error: `input = ...` names a type none of the handler's arguments has: the input schema must describe what the route validates, so take the input as an argument (`form: Input`) or name the argument's type
+  --> tests/agents/compile_fail/agent_001_input_mismatch.rs:15:91
+   |
+15 | #[tool(name = "posts.create", description = "Create a post.", callers = [public], input = RenamePost)]
+   |                                                                                           ^^^^^^^^^^
+
+error: `input = ...` names a type none of the handler's arguments has: the input schema must describe what the route validates, so take the input as an argument (`form: Input`) or name the argument's type
+  --> tests/agents/compile_fail/agent_001_input_mismatch.rs:21:95
+   |
+21 | #[tool(name = "posts.raw", description = "Read the body itself.", callers = [public], input = CreatePost)]
+   |                                                                                               ^^^^^^^^^^
+
+error[E0308]: mismatched types
+  --> tests/agents/compile_fail/agent_001_input_mismatch.rs:35:98
+   |
+35 | #[tool(name = "posts.other", description = "Same name, other type.", callers = [public], input = CreatePost)]
+   | -------------------------------------------------------------------------------------------------^^^^^^^^^^--
+   | |                                                                                                |
+   | |                                                                                                expected `CreatePost`, found `other::CreatePost`
+   | expected `PhantomData<CreatePost>` because of return type
+   |
+   = note: `other::CreatePost` and `CreatePost` have similar names, but are actually distinct types
+note: `other::CreatePost` is defined in module `crate::other` of the current crate
+  --> tests/agents/compile_fail/agent_001_input_mismatch.rs:30:5
+   |
+30 |     pub struct CreatePost {
+   |     ^^^^^^^^^^^^^^^^^^^^^
+note: `CreatePost` is defined in module `crate` of the current crate
+  --> tests/agents/compile_fail/agent_001_input_mismatch.rs:6:1
+   |
+ 6 | pub struct CreatePost {
+   | ^^^^^^^^^^^^^^^^^^^^^
