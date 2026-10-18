@@ -40,8 +40,6 @@
 // deny attr keeps it there.
 #![deny(missing_docs)]
 
-/// Agent tools and the MCP endpoint: `#[tool]` handlers, their callers and
-/// scopes, and the `/mcp` route.
 #[cfg(feature = "agents")]
 pub mod agents;
 pub mod app;
