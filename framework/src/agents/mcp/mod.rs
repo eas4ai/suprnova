@@ -557,14 +557,26 @@ async fn call_tool(
         id,
         crate::routing::root::current(),
     );
+    // The call runs as the response body is polled, in both forms of the
+    // answer. A client that closes the connection drops the body and the
+    // call with it, which is the cancellation (AGENT-003). And the call is
+    // polled below hyper rather than below this request's middleware, so a
+    // call's own middleware stack does not sit on top of the endpoint's.
+    let call: CallFuture = Box::pin(call);
     if stream {
-        HttpResponse::sse(CallStream {
-            call: std::sync::Mutex::new(Some(Box::pin(call))),
-        })
+        HttpResponse::sse(CallStream::new(call, |answer| {
+            crate::sse::SseEvent::data(answer.to_string()).with_event("message")
+        }))
     } else {
-        protocol::respond(200, call.await)
+        HttpResponse::stream_bytes(CallStream::new(call, |answer| {
+            Ok(bytes::Bytes::from(answer.to_string()))
+        }))
+        .header("Content-Type", "application/json")
     }
 }
+
+/// A tool call's JSON-RPC answer, still to run.
+type CallFuture = Pin<Box<dyn Future<Output = Value> + Send>>;
 
 /// Run the call and build its JSON-RPC answer. Owned, so a streamed answer
 /// can run it after the handler returned; `root` is the public root of the
@@ -613,19 +625,31 @@ async fn run_call(
     protocol::result(&id, result)
 }
 
-/// A request-scoped SSE answer: one `message` event carrying the call's
-/// JSON-RPC answer, then the end of the stream. The call runs as the body is
-/// polled, so a client that closes the stream drops the call with it: the
-/// close is the cancellation (AGENT-003).
-struct CallStream {
-    call: std::sync::Mutex<Option<Pin<Box<dyn Future<Output = Value> + Send>>>>,
+/// A request-scoped answer body: one item carrying the call's JSON-RPC
+/// answer, a JSON body or an SSE `message` event, then the end of the body.
+/// The mutex only makes the body `Sync`, as a response body must be; it is
+/// never contended.
+struct CallStream<T> {
+    call: std::sync::Mutex<Option<CallFuture>>,
+    finish: fn(Value) -> T,
 }
 
-impl futures::Stream for CallStream {
-    type Item = crate::sse::SseEvent;
+impl<T> CallStream<T> {
+    fn new(call: CallFuture, finish: fn(Value) -> T) -> Self {
+        Self {
+            call: std::sync::Mutex::new(Some(call)),
+            finish,
+        }
+    }
+}
+
+impl<T> futures::Stream for CallStream<T> {
+    type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let slot = match self.get_mut().call.get_mut() {
+        let this = self.get_mut();
+        let finish = this.finish;
+        let slot = match this.call.get_mut() {
             Ok(slot) => slot,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -636,9 +660,7 @@ impl futures::Stream for CallStream {
             Poll::Pending => Poll::Pending,
             Poll::Ready(answer) => {
                 *slot = None;
-                Poll::Ready(Some(
-                    crate::sse::SseEvent::data(answer.to_string()).with_event("message"),
-                ))
+                Poll::Ready(Some(finish(answer)))
             }
         }
     }
@@ -755,7 +777,7 @@ fn internal(id: &Value, error: &crate::error::FrameworkError) -> HttpResponse {
 
 /// The scope names, space-joined, as a `scope` parameter carries them.
 fn scope_list(scopes: &[Scope]) -> String {
-    scopes.iter().map(Scope::name).collect::<Vec<_>>().join(" ")
+    quoted(&scopes.iter().map(Scope::name).collect::<Vec<_>>().join(" "))
 }
 
 /// `value` with what would end a quoted header parameter removed.

@@ -270,6 +270,9 @@ impl McpTestClient {
     /// test how the endpoint answers a request that breaks its rules.
     pub async fn raw(&self, headers: &[(&str, &str)], body: Value) -> TestResponse {
         let mut request = self.base_request(&body);
+        for (header, value) in &self.headers {
+            request = request.header(header.clone(), value.clone());
+        }
         for (name, value) in headers {
             request = request.header(*name, *value);
         }

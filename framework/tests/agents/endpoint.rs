@@ -390,10 +390,31 @@ async fn agent_003_sse_answer_when_accept_prefers_it() {
 
 #[tokio::test]
 async fn agent_003_dropped_sse_body_cancels_call() {
+    closed_answer_cancels_call(
+        "text/event-stream",
+        "text/event-stream",
+        "agent-003-dropped",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn agent_003_closed_json_answer_cancels_call() {
+    closed_answer_cancels_call(
+        "application/json, text/event-stream",
+        "application/json",
+        "agent-003-closed-json",
+    )
+    .await;
+}
+
+/// Start a 30 second call with `accept`, read the answer's head, which
+/// arrives at once with `content_type`, then close the connection: the call
+/// is dropped.
+async fn closed_answer_cancels_call(accept: &str, content_type: &str, key: &str) {
     let _container = fixture::setup();
     let router = Arc::new(fixture::router());
     let registry = Arc::new(MiddlewareRegistry::new());
-    let key = "agent-003-dropped";
     let body = modern_body(
         "tools/call",
         json!({ "name": "slow.wait", "arguments": { "millis": 30_000, "key": key } }),
@@ -403,7 +424,7 @@ async fn agent_003_dropped_sse_body_cancels_call() {
         .uri("/mcp")
         .header("Host", "localhost")
         .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream")
+        .header("Accept", accept)
         .header("MCP-Protocol-Version", "2026-07-28")
         .header("Mcp-Method", "tools/call")
         .header("Mcp-Name", "slow.wait")
@@ -436,7 +457,7 @@ async fn agent_003_dropped_sse_body_cancels_call() {
             .headers()
             .get("content-type")
             .and_then(|value| value.to_str().ok()),
-        Some("text/event-stream")
+        Some(content_type)
     );
     // Wait until the call is running, then close the stream.
     let mut body = response.into_body();
