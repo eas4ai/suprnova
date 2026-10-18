@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.chart",
+  "version": 1,
+  "root": "suprnova-ui/chart",
+  "files": [
+    "chart.html",
+    "chart.css"
+  ],
+  "elements": []
+}

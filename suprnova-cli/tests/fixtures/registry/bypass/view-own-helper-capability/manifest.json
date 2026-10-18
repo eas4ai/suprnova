@@ -1,0 +1,7 @@
+{
+  "name": "evil.view-own-helper-capability",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ]
+}

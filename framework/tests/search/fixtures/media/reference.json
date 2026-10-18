@@ -1,0 +1,126 @@
+{
+  "transformers": "5.20.1",
+  "model_revision": "daa72c51243991dfcaf9f9137d2c573d8f7790c0",
+  "fixtures": {
+    "jpg_pixels": {
+      "shape": [
+        1,
+        2520,
+        768
+      ],
+      "dtype": "<f4",
+      "absolute_tolerance": 0.01568637450980392
+    },
+    "webp_pixels": {
+      "shape": [
+        1,
+        2520,
+        768
+      ],
+      "dtype": "<f4",
+      "absolute_tolerance": 1e-07
+    },
+    "image_pixels": {
+      "shape": [
+        1,
+        2520,
+        768
+      ],
+      "dtype": "<f4",
+      "absolute_tolerance": 1e-07
+    },
+    "image_positions": {
+      "shape": [
+        1,
+        2520,
+        2
+      ],
+      "dtype": "<i8",
+      "absolute_tolerance": 0
+    },
+    "image_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "<i8",
+      "absolute_tolerance": 0
+    },
+    "video_frame_pixels": {
+      "shape": [
+        1,
+        1260,
+        768
+      ],
+      "dtype": "<f4",
+      "absolute_tolerance": 1e-07
+    },
+    "video_frame_positions": {
+      "shape": [
+        1,
+        1260,
+        2
+      ],
+      "dtype": "<i8",
+      "absolute_tolerance": 0
+    },
+    "video_frame_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "<i8",
+      "absolute_tolerance": 0
+    },
+    "video_pixels": {
+      "shape": [
+        3,
+        1260,
+        768
+      ],
+      "dtype": "<f4",
+      "absolute_tolerance": 0.003921668627450981
+    },
+    "video_positions": {
+      "shape": [
+        3,
+        1260,
+        2
+      ],
+      "dtype": "<i8",
+      "absolute_tolerance": 0
+    },
+    "tones_16000_features": {
+      "shape": [
+        1,
+        150,
+        128
+      ],
+      "dtype": "<f4",
+      "absolute_tolerance": 0.0002
+    },
+    "tones_16000_mask": {
+      "shape": [
+        1,
+        150
+      ],
+      "dtype": "u1",
+      "absolute_tolerance": 0
+    },
+    "tones_44100_features": {
+      "shape": [
+        1,
+        150,
+        128
+      ],
+      "dtype": "<f4",
+      "absolute_tolerance": 0.0002
+    },
+    "tones_44100_mask": {
+      "shape": [
+        1,
+        150
+      ],
+      "dtype": "u1",
+      "absolute_tolerance": 0
+    }
+  }
+}
