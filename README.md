@@ -134,7 +134,8 @@ browser calls. State travels in a signed snapshot, and uploads and async
 updates (over SSE or WebSockets, with a polling fallback) are built in. The
 library has 59 components, from forms and overlays to data display, and
 `suprnova live:add <name>` copies one into your app so you own its view,
-styles and script. [Read the Live chapter](./manual/live.md).
+styles and script. `suprnova live:check` checks your views' markup,
+accessibility and Live directives. [Read the Live chapter](./manual/live.md).
 
 ### Typed from Rust to TypeScript
 
@@ -235,19 +236,77 @@ flowchart TB
 
 ## What's in the box
 
-| Area | What you get |
-|---|---|
-| **Web** | Routing with route model binding, named routes and signed URLs; middleware for CSRF, CORS, sessions, rate limits, timeouts, security headers and maintenance mode; Inertia 3 with SSR; `RenderCache` for shareable GET responses |
-| **Data** | Eloquent-style models with relations, eager loading, scopes, casts, observers, soft deletes, factories and seeders; SQLite, Postgres, MySQL and MariaDB; migrations with a Laravel-style schema builder; transactions with savepoints |
-| **Background work** | Queues on memory, database, Redis, SQS or MongoDB, with batches, chains and unique jobs; a cache on memory, Redis or MongoDB; events and listeners; the command bus; the scheduler; durable workflows |
-| **Real time** | Public, private and presence channels, served by your app or through Pusher, Soketi or Reverb, with Redis Streams fan-out across processes; Live async updates |
-| **Auth and security** | Guards, sessions, email verification, password reset, two-factor, passkeys, magic links, OAuth, gates and policies, brute-force lockout |
-| **Messages** | Mail over SMTP, Mailgun, Postmark, SendGrid, Resend and SES; notifications by mail, database, broadcast and web push; an HTTP client with retries |
-| **Files and media** | `Storage` over local disks, S3 and S3-compatible stores, Azure and GCS; image transformations |
-| **Search and AI** | Full-text and hybrid search, vector drivers, recommendations |
-| **Payments** | Checkout, subscriptions and webhooks, with Stripe, Paddle and NOWPayments adapters |
-| **Developer tools** | Console commands and `make:*` generators, a development error page, structured logging, OpenTelemetry, metrics, Fluent localization, feature flags, Redis, processes |
-| **Testing** | In-process requests, test databases, `expect!`, and fakes for mail, queues, events, notifications, the bus, storage, HTTP and processes |
+Every subsystem with more than one plausible backend is a trait with
+drivers, chosen by configuration. A new backend is a new driver, not a fork.
+
+### Web
+
+- **[HTTP and routing](./manual/routing.md):** `Router`, `routes!`, `group!`, named routes, resource controllers, route model binding with `RouteParam`, signed URLs (`sign_route`, `verify_signature`), `Redirect`, file and download responses (`HttpResponse::download`), `#[handler]`, `#[authorize]`.
+- **[Middleware](./manual/middleware.md):** `CsrfMiddleware`, `CorsMiddleware`, `SessionMiddleware`, `TimeoutMiddleware`, `RequestIdMiddleware`, `ThrottleRequestsMiddleware`, `AuthMiddleware`, `GuestMiddleware`, `EnsureEmailVerifiedMiddleware`, `MaintenanceMiddleware`, `LocaleMiddleware`, `SecurityHeaders`, and your own global, group or per-route middleware.
+- **[Inertia 3](./manual/frontend.md):** `#[derive(InertiaProps)]` with TypeScript generation, partial reloads, deferred and once props, merge strategies, SSR, and three starters: Svelte 5, React 19 and Vue 3.5.
+- **[Validation](./manual/validation.md) and [data](./manual/data.md):** `#[request]` form requests, rules such as `Unique`, `Exists`, `Confirmed`, `RequiredIf` and `DateFormat`, `#[derive(Data)]` data objects, JSON:API resources.
+- **[Response cache](./manual/render-cache.md):** `RenderCache` serves a GET or HEAD route you opt in from a stored copy of its response, without running the handler, when it can prove the copy is safe to share.
+
+### Data
+
+- **[Eloquent models](./manual/eloquent.md):** `#[model]`, relations from `HasMany` to `MorphedByMany`, eager loading, soft deletes, observers, global and local scopes, casts (`AsJson`, `AsNativeDateTime` and more), model events, factories and seeders, `Collection`, paginators, chunked and lazy iteration, joins.
+- **[Database](./manual/database.md):** SQLite, Postgres, MySQL and MariaDB; SeaORM migrations with a Laravel-style `Schema` builder; `DB::transaction` with savepoints and `DB::after_commit`; read and write connections; `suprnova schema:dump`. [MongoDB](./manual/mongodb.md) through the `Mongo` facade, behind the `database-mongodb` feature.
+- **[Cache](./manual/cache.md):** `Cache::remember`, `Cache::lock`, tags; `InMemoryCache`, `RedisCache` and `MongoCache` stores.
+- **[Redis](./manual/redis.md):** `Redis::connection` with commands, pipelines, transactions and pub/sub.
+
+### Background work
+
+- **[Queues and jobs](./manual/queues.md):** `Queue`, `Job`, batches, chains, job middleware, failed-job store, unique jobs; `MemoryQueueDriver`, `SyncQueueDriver`, `DatabaseQueueDriver`, `RedisQueueDriver`, `SqsQueueDriver`, `MongoQueueDriver`, `NullQueueDriver` and `FailoverQueueDriver`.
+- **[Events](./manual/events.md) and [bus](./manual/bus.md):** `EventFacade::dispatch`, `Listener`, `QueuedListener`, `Subscriber`, the command `Bus`.
+- **[Scheduling](./manual/scheduling.md):** `Schedule::call`, `Schedule::command`, cron expressions, time zones, `suprnova schedule:work`.
+- **[Workflows](./manual/workflows.md):** durable steps with `#[workflow_step]` and `#[workflow]` on Postgres, `suprnova workflow:work`.
+- **[Processes](./manual/processes.md):** `Process::command` and `Process::shell` with timeouts, pools and pipes, and `Process::fake`.
+
+### Real time
+
+- **[Broadcasting](./manual/broadcasting.md) and [WebSockets](./manual/websockets.md):** public, private and presence channels; `BroadcastHub`, with `InMemoryBroadcastHub` inside your app, `PusherBroadcastHub` for Pusher, Soketi and Reverb, and `SeaStreamerBroadcastHub` for Redis Streams fan-out behind the `broadcasting-fanout` feature.
+- **[Live async updates](./manual/live.md#asynchronous-updates):** server-pushed component updates over SSE or WebSockets, with a polling fallback.
+
+### Auth
+
+- **[Sign-in](./manual/authentication.md):** `Auth::login`, `Auth::user`, named guards, remember-me, [email verification](./manual/auth-flows.md#email-verification), [password reset](./manual/auth-flows.md#password-reset-and-lockout), two-factor with recovery codes, brute-force lockout.
+- **[Sign-in methods](./manual/oauth.md):** passwords, [OAuth](./manual/oauth.md) (Apple, Facebook, Google, TikTok, X), [passkeys](./manual/authentication.md#passkeys) and magic links through `Auth::password`, `Auth::oauth`, `Auth::passkey` and `Auth::magic_link`.
+- **[Authorization](./manual/authorization.md):** gates and `#[policy]`.
+
+### Messages
+
+- **[Mail](./manual/mail.md):** `Mail::to`, `Mailable`, queued mail; SMTP, Mailgun, Postmark, SendGrid, Resend and SES transports, plus log, file and in-memory ones for development.
+- **[Notifications](./manual/notifications.md):** `Notify` with `MailChannel`, `DatabaseChannel`, `BroadcastChannel` and `WebPushChannel` ([web push](./manual/web-push.md)), anonymous notifiables.
+- **[HTTP client](./manual/http-client.md):** `Http` with retries and `Http::fake`.
+
+### Files and media
+
+- **[Filesystem](./manual/filesystem.md):** `Storage` over OpenDAL: local, memory, S3 and S3-compatible stores (R2, B2, RustFS, MinIO), Azure and GCS behind features; a default disk from `FILESYSTEM_DISK`.
+- **[Images](./manual/images.md):** `Image` transformations through the OxideAV or ImageMagick driver.
+
+### Search and AI
+
+- **[Search](./manual/search.md):** `Searchable` models with a `search` method, native database and Qdrant ranking, typed filters, facets, highlights, hybrid search with local or HTTP embeddings, analytics, JSON routes and a Live search box.
+- **[Vector search](./manual/vector.md):** `Vector` with `MemoryVectorDriver`, `QdrantVectorDriver`, `MariaDbVectorDriver`, `PgVectorDriver` and `PineconeVectorDriver`.
+- **[Recommendations](./manual/recommendations.md):** `Recommend` with immutable events, a scoped SQL starter engine, a graph engine on Memgraph (`RECOMMEND_ENGINE=graph`), explainable completed runs, search-event forwarding and provenance verification.
+
+### Payments
+
+- **[Billing](./manual/payments.md):** `Checkout`, `Subscription`, `CustomerStore` and `WebhookHandler` traits, with adapter crates for [Stripe](./manual/payments-stripe.md), [Paddle](./manual/payments-paddle.md) and [NOWPayments](./manual/payments-nowpayments.md).
+
+### Developer tools
+
+- **[Console](./manual/console.md):** your app's `console` binary, `#[command]` and `#[derive(Command)]`, `make:*` generators, `db:seed`.
+- **[Logging](./manual/logging.md) and [observability](./manual/observability.md):** `Log` channels (`LOG_CHANNEL`: stdout, single, daily, syslog, stack and more), request IDs, `tracing` throughout, OpenTelemetry behind the `otel` feature, `Metrics`.
+- **[Errors](./manual/errors.md):** in debug mode, a failing route shows the development error page in the browser; in tests, a failing response carries an `ErrorReport`.
+- **[Localization](./manual/localization.md) and [strings](./manual/strings.md):** `Lang` with Fluent catalogs and locale-aware formatting, `Str::slug`, `Str::plural` and friends.
+- **[Feature flags](./manual/feature-flags.md):** `Feature`, database-backed and cached evaluators.
+- **[Heap profiling](./manual/deployment.md#heap-profiling):** the `heap-profiling` feature writes a dhat heap profile when the process ends, to the file `SUPRNOVA_HEAP_PROFILE` names.
+
+### Testing
+
+- **[Test tools](./manual/testing.md):** `#[suprnova_test]`, `TestDatabase`, in-process requests with `handle_request`, `expect!`.
+- **[Fakes](./manual/mocking.md):** `Mail::fake`, `Queue::fake`, `EventFacade::fake`, `Notify::fake`, `Bus::fake`, `Storage::fake`, `Http::fake`, `Process::fake`.
 
 [Laravel parity](./manual/parity.md) maps Laravel 13 feature by feature:
 where Suprnova matches it, and where it differs on purpose.
