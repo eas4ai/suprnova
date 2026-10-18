@@ -59,6 +59,14 @@ const AUTHORIZATION_SERVER_TABLES: [&str; 4] = [
     "auth_oauth_tokens",
 ];
 
+/// The tables the agent auth migration adds to a database.
+#[cfg(feature = "agent-auth")]
+const AGENT_AUTH_TABLES: [&str; 3] = [
+    "auth_agent_grants",
+    "auth_agent_registrations",
+    "auth_agent_replays",
+];
+
 #[cfg(test)]
 fn assert_expected_upgrade_delta(
     backend: DbBackend,
@@ -70,9 +78,12 @@ fn assert_expected_upgrade_delta(
     // The second factor's lockout table postdates SeaORM 1.1 catalogs; the
     // first pass adds it and keeps every source table.
     before_tables.insert("auth_second_factor_lockouts");
-    // A build that serves the authorization server adds its four tables too.
+    // A build that serves the authorization server adds its four tables too,
+    // and one that serves agent auth adds its three.
     #[cfg(feature = "authorization-server")]
     before_tables.extend(AUTHORIZATION_SERVER_TABLES);
+    #[cfg(feature = "agent-auth")]
+    before_tables.extend(AGENT_AUTH_TABLES);
     assert_eq!(
         before_tables, after_tables,
         "first migration pass must preserve the source catalog table set and add only \
@@ -106,6 +117,8 @@ fn assert_expected_upgrade_delta(
     }
     #[cfg(feature = "authorization-server")]
     expected.extend(AUTHORIZATION_SERVER_TABLES);
+    #[cfg(feature = "agent-auth")]
+    expected.extend(AGENT_AUTH_TABLES);
     assert_eq!(
         expected, changed_tables,
         "first migration pass must only add the current auth_lockouts schema, the \
