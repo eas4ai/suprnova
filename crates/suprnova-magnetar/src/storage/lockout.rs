@@ -97,6 +97,18 @@ fn reservation_reason(prefix: &str, reservation_id: &str, context: Option<&str>)
     Ok(reason)
 }
 
+/// The audit context an unreserved attempt keeps as its reason: the client
+/// address, and only when it parses as an IP address.
+///
+/// Callers pass the client's address here, and a host may pass on a header
+/// the client wrote. A longer value would fail the insert on MySQL's
+/// `varchar(255)` column, leaving the attempt uncounted and answering a
+/// wrong password differently from a right one; anything that is not an
+/// address is dropped instead.
+fn client_address(context: Option<&str>) -> Option<&str> {
+    context.filter(|value| value.parse::<std::net::IpAddr>().is_ok())
+}
+
 fn pending_reservation_reason(reservation_id: &str, context: Option<&str>) -> Result<String> {
     reservation_reason(PENDING_RESERVATION_REASON_PREFIX, reservation_id, context)
 }
@@ -405,7 +417,9 @@ where
                 S::Lockout::write_attempted_at(&mut attempt, at);
                 S::Lockout::write_reason(
                     &mut attempt,
-                    pending_reason.as_deref().or(context.as_deref()),
+                    pending_reason
+                        .as_deref()
+                        .or_else(|| client_address(context.as_deref())),
                 );
                 S::Lockout::write_locked_at(&mut attempt, None);
                 <S::Lockout as EntityBinding>::Entity::insert(attempt)

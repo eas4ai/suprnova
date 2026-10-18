@@ -1104,6 +1104,115 @@ mod sqlite {
         );
     }
 
+    /// A completion binding written before the 254-character bound, with a
+    /// longer address in it, creates no account when it is consumed.
+    #[cfg(feature = "oauth")]
+    #[tokio::test]
+    async fn oauth_email_completion_refuses_a_binding_longer_than_any_account_holds() {
+        use magnetar::crypto::{CryptoPurpose, Encryptor};
+        use magnetar::default_schema::ceremonies;
+        use magnetar::oauth::{
+            AutoLinkPolicy, EmailCompletionConfig, EmailCompletionService, IdentityOutcome,
+            IdentityResolver, OAuthIntent, VerifiedProviderIdentity,
+        };
+        use magnetar::sessions::SessionMetadata;
+
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        magnetar::default_schema::migrate(&database).await.unwrap();
+        let storage = Arc::new(SeaOrmStorage::<DefaultAuthSchema>::new(database.clone()));
+        let encryptor = Arc::new(AeadEncryptor::new([26; 32]));
+        let first_proof = Arc::new(SqlFirstEmailProofStore::new(
+            database.clone(),
+            encryptor.clone(),
+        ));
+        let resolver = IdentityResolver::new(
+            storage.clone(),
+            storage.clone(),
+            storage.clone(),
+            first_proof.clone(),
+            encryptor.clone(),
+            AutoLinkPolicy::ExplicitLinkRequired,
+        );
+        let IdentityOutcome::EmailCompletionRequired { pending_id } = resolver
+            .resolve(
+                VerifiedProviderIdentity {
+                    provider: "tiktok".to_owned(),
+                    subject: "long-binding".to_owned(),
+                    email: None,
+                    email_verified: false,
+                    display_name: None,
+                },
+                OAuthIntent::SignIn,
+                None,
+                SessionMetadata::default(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected email completion");
+        };
+        let mail = Arc::new(super::fakes::RecordingMail::default());
+        let completion = EmailCompletionService::new(
+            storage.clone(),
+            storage.clone(),
+            first_proof,
+            encryptor.clone(),
+            mail.clone(),
+            Arc::new(super::fakes::TestLinks),
+            Arc::new(super::fakes::CountingLimiter::default()),
+            EmailCompletionConfig::default(),
+        );
+        completion
+            .request(&pending_id, "short@example.test")
+            .await
+            .unwrap();
+        let link = mail.last_payload().unwrap()["completion_link"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let token = link.split("token=").nth(1).unwrap().to_owned();
+
+        // Rewrite the binding as a release before the bound wrote it.
+        let binding = ceremonies::Entity::find()
+            .filter(ceremonies::Column::Kind.eq("oauth.email-completion"))
+            .one(&database)
+            .await
+            .unwrap()
+            .expect("the completion binding is stored");
+        let plaintext = encryptor
+            .decrypt(CryptoPurpose::CeremonyState, &binding.payload)
+            .unwrap();
+        let mut payload: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
+        let long = format!("{}@example.test", "a".repeat(287));
+        payload["normalized_email"] = serde_json::Value::String(long);
+        let payload = encryptor
+            .encrypt(
+                CryptoPurpose::CeremonyState,
+                &serde_json::to_vec(&payload).unwrap(),
+            )
+            .unwrap();
+        let mut rewritten: ceremonies::ActiveModel = binding.into();
+        rewritten.payload = Set(payload);
+        rewritten.update(&database).await.unwrap();
+
+        let Err(error) = completion.consume(&token).await else {
+            panic!("an over-long binding must create no account");
+        };
+        assert!(
+            matches!(&error, magnetar::Error::InvalidInput { field, message }
+                if field == "email" && message.contains("254")),
+            "an over-long address is a validation error: {error:?}"
+        );
+        assert!(
+            users::Entity::find()
+                .one(&database)
+                .await
+                .unwrap()
+                .is_none(),
+            "no account is created"
+        );
+    }
+
     #[cfg(feature = "oauth")]
     #[tokio::test]
     async fn oauth_email_completion_reclaims_unverified_squatted_account() {

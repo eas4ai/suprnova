@@ -116,7 +116,7 @@ impl SessionGrant {
             opaque_token,
             token_digest,
             expires_at,
-            metadata,
+            metadata: metadata.bounded(),
         })
     }
 

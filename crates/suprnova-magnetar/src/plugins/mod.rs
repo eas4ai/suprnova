@@ -137,6 +137,10 @@ mod shared {
     ///
     /// Host adapters populate `user-agent` and `x-client-ip` on the
     /// [`WireRequest`] they forward; both stay optional.
+    /// The session metadata of a request: its user agent, and its client
+    /// address only when the `x-client-ip` header parses as an IP address.
+    /// A host may pass on a header the client wrote, and a value that is not
+    /// an address is not recorded as one.
     #[cfg(any(
         feature = "password",
         feature = "magic-link",
@@ -146,7 +150,11 @@ mod shared {
     pub(crate) fn request_metadata(request: &WireRequest) -> crate::sessions::SessionMetadata {
         crate::sessions::SessionMetadata {
             user_agent: request.headers.get("user-agent").cloned(),
-            ip_address: request.headers.get("x-client-ip").cloned(),
+            ip_address: request
+                .headers
+                .get("x-client-ip")
+                .filter(|value| value.parse::<std::net::IpAddr>().is_ok())
+                .cloned(),
         }
     }
 

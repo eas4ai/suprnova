@@ -474,6 +474,10 @@ impl SqlFirstEmailProofStore {
                 });
             }
 
+            // A binding written before the bound can hold a longer address.
+            if !email_fits(&binding.normalized_email) {
+                return Err(email_too_long());
+            }
             let existing = users::Entity::find()
                 .filter(users::Column::Email.eq(&binding.normalized_email))
                 .one(&transaction)
