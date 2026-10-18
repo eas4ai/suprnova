@@ -1015,6 +1015,37 @@ async fn agent_007_an_epoch_change_ends_a_bound_agent() {
 }
 
 #[tokio::test]
+async fn agent_007_a_refused_exchange_finishes_a_pending_revocation() {
+    let (options, faults) = faulty();
+    let h = sqlite_harness_with(options).await;
+    let (registration, user_id) = h.claimed_anonymous("pending.cleanup@example.test").await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let claimed = body(
+        &h.poll(registration["claim_token"].as_str().expect("claim token"))
+            .await,
+    );
+    let v2 = claimed["identity_assertion"].as_str().expect("v2");
+    magnetar::sessions::JwtEpochStore::bump_auth_epoch(h.storage.as_ref(), &user_id)
+        .await
+        .expect("the epoch moves");
+    faults.fail("revoke_grant", 2);
+    assert_eq!(body(&h.exchange(v2).await)["error"], "invalid_grant");
+    let row = h.registration(id).await;
+    assert_eq!(row.status, "revoked");
+    assert!(row.cleanup_pending, "the grant revocation failed");
+    assert!(
+        grants_of(&h, id).await.iter().any(|(_, revoked)| !revoked),
+        "the grant is still live"
+    );
+    assert_eq!(body(&h.exchange(v2).await)["error"], "invalid_grant");
+    assert!(
+        grants_of(&h, id).await.iter().all(|(_, revoked)| *revoked),
+        "the refused exchange finished the revocation"
+    );
+    assert!(!h.registration(id).await.cleanup_pending);
+}
+
+#[tokio::test]
 async fn agent_008_an_epoch_change_makes_a_provider_agent_link_again() {
     let h = sqlite_harness().await;
     let email = "linked.provider@example.test";

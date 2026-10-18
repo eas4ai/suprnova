@@ -920,6 +920,30 @@ impl Core {
         self.resources.contains(&normalized).then_some(normalized)
     }
 
+    /// Finish a revocation or an expiry whose grant revocation failed:
+    /// revoke the registration's grants and clear the pending clean-up.
+    /// Failures are logged; the clean-up stays pending for the next try.
+    pub(crate) async fn finish_pending_cleanup(
+        &self,
+        issuer: &TokenIssuer<'_>,
+        record: &RegistrationRecord,
+        client_address: Option<&str>,
+    ) {
+        let finished = if record.status == STATUS_REVOKED {
+            self.end_registration(issuer, record, client_address, &[])
+                .await
+                .map(|_| ())
+        } else {
+            match self.revoke_grants(issuer, &record.id).await {
+                Ok(_) => self.store.finish_cleanup(&record.id, false).await,
+                Err(error) => Err(error),
+            }
+        };
+        if let Err(error) = finished {
+            tracing::error!(error = %error, registration_id = %record.id, "finishing an agent registration's clean-up failed");
+        }
+    }
+
     /// Mint an access token for a registration under its grant for
     /// `resource`. The caller has already checked the request: `resource`
     /// is one the server serves and `requested` lies within `entitlement`

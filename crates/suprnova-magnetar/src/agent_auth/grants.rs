@@ -78,6 +78,13 @@ impl GrantHandler for JwtBearerGrant {
             .await
             .map_err(|error| storage(&error))?
             .ok_or_else(|| TokenError::invalid_grant("the registration does not exist"))?;
+        if record.cleanup_pending {
+            // A revocation or expiry whose grant revocation failed is
+            // finished here, before the refusal below, so presenting the
+            // assertion again retries it.
+            core.finish_pending_cleanup(issuer, &record, request.client_address())
+                .await;
+        }
         if record.assertion_version != claims.ver {
             return Err(TokenError::invalid_grant(
                 "the assertion was superseded; use the one the claim returned",
@@ -183,8 +190,10 @@ impl GrantHandler for JwtBearerGrant {
 
 /// End a bound registration whose user's epoch moved on, and answer for
 /// it. The answer is `invalid_grant` whether or not the revocation was
-/// stored: the assertion must not work, and a failed revocation is retried
-/// by the next presentation, which finds the epoch still moved.
+/// stored: the assertion must not work. A failed revocation is retried by
+/// the next presentation: one that failed before the row was revoked finds
+/// the epoch still moved, and one that failed at the grant finds the
+/// clean-up pending.
 async fn end_for_epoch(
     core: &Core,
     issuer: &TokenIssuer<'_>,
