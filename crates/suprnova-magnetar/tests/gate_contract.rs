@@ -245,7 +245,15 @@ fn assert_executable(relative: &str) {
 #[cfg(not(unix))]
 fn assert_executable(_relative: &str) {}
 
-const LIVE_TEST_INVOCATIONS: [&str; 42] = [
+const LIVE_TEST_INVOCATIONS: [&str; 50] = [
+    "run_live_test test agent_auth_live agent_007_postgres_registration_flows_and_tokens",
+    "run_live_test test agent_auth_live agent_008_postgres_a_replayed_jti_is_refused_across_two_nodes",
+    "run_live_test test agent_auth_live agent_009_postgres_one_time_steps_are_guarded_in_the_database",
+    "run_live_test test agent_auth_live agent_010_postgres_security_events_and_revoke_all",
+    "run_live_test test agent_auth_live agent_007_mysql_registration_flows_and_tokens",
+    "run_live_test test agent_auth_live agent_008_mysql_a_replayed_jti_is_refused_across_two_nodes",
+    "run_live_test test agent_auth_live agent_009_mysql_one_time_steps_are_guarded_in_the_database",
+    "run_live_test test agent_auth_live agent_010_mysql_security_events_and_revoke_all",
     "run_live_test test authorization_server_live agent_005_postgres_code_flow_rotation_and_revocation",
     "run_live_test test authorization_server_live agent_005_postgres_refresh_rotation_is_guarded_in_the_database",
     "run_live_test test authorization_server_live agent_005_postgres_concurrent_refresh_token_reuse_revokes_the_grant",
@@ -290,7 +298,15 @@ const LIVE_TEST_INVOCATIONS: [&str; 42] = [
     "run_live_test lib _ migration::seaorm_upgrade_tests::mysql_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1",
 ];
 
-const LIVE_TEST_LIVE_COMMANDS: [&str; 42] = [
+const LIVE_TEST_LIVE_COMMANDS: [&str; 50] = [
+    "cargo test --test agent_auth_live --all-features agent_007_postgres_registration_flows_and_tokens -- --ignored --exact",
+    "cargo test --test agent_auth_live --all-features agent_008_postgres_a_replayed_jti_is_refused_across_two_nodes -- --ignored --exact",
+    "cargo test --test agent_auth_live --all-features agent_009_postgres_one_time_steps_are_guarded_in_the_database -- --ignored --exact",
+    "cargo test --test agent_auth_live --all-features agent_010_postgres_security_events_and_revoke_all -- --ignored --exact",
+    "cargo test --test agent_auth_live --all-features agent_007_mysql_registration_flows_and_tokens -- --ignored --exact",
+    "cargo test --test agent_auth_live --all-features agent_008_mysql_a_replayed_jti_is_refused_across_two_nodes -- --ignored --exact",
+    "cargo test --test agent_auth_live --all-features agent_009_mysql_one_time_steps_are_guarded_in_the_database -- --ignored --exact",
+    "cargo test --test agent_auth_live --all-features agent_010_mysql_security_events_and_revoke_all -- --ignored --exact",
     "cargo test --test authorization_server_live --all-features agent_005_postgres_code_flow_rotation_and_revocation -- --ignored --exact",
     "cargo test --test authorization_server_live --all-features agent_005_postgres_refresh_rotation_is_guarded_in_the_database -- --ignored --exact",
     "cargo test --test authorization_server_live --all-features agent_005_postgres_concurrent_refresh_token_reuse_revokes_the_grant -- --ignored --exact",
@@ -335,7 +351,39 @@ const LIVE_TEST_LIVE_COMMANDS: [&str; 42] = [
     "cargo test --lib --all-features migration::seaorm_upgrade_tests::mysql_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1 -- --ignored --exact",
 ];
 
-const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 42] = [
+const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 50] = [
+    (
+        "tests/agent_auth_live.rs",
+        "agent_007_postgres_registration_flows_and_tokens",
+    ),
+    (
+        "tests/agent_auth_live.rs",
+        "agent_008_postgres_a_replayed_jti_is_refused_across_two_nodes",
+    ),
+    (
+        "tests/agent_auth_live.rs",
+        "agent_009_postgres_one_time_steps_are_guarded_in_the_database",
+    ),
+    (
+        "tests/agent_auth_live.rs",
+        "agent_010_postgres_security_events_and_revoke_all",
+    ),
+    (
+        "tests/agent_auth_live.rs",
+        "agent_007_mysql_registration_flows_and_tokens",
+    ),
+    (
+        "tests/agent_auth_live.rs",
+        "agent_008_mysql_a_replayed_jti_is_refused_across_two_nodes",
+    ),
+    (
+        "tests/agent_auth_live.rs",
+        "agent_009_mysql_one_time_steps_are_guarded_in_the_database",
+    ),
+    (
+        "tests/agent_auth_live.rs",
+        "agent_010_mysql_security_events_and_revoke_all",
+    ),
     (
         "tests/authorization_server_live.rs",
         "agent_005_postgres_code_flow_rotation_and_revocation",
@@ -631,7 +679,7 @@ fn every_live_database_test_is_ignored_and_registered() {
         .collect::<Vec<_>>();
     assert_eq!(
         inventory, expected,
-        "source-discovered live database test inventory must remain the expected forty-two"
+        "source-discovered live database test inventory must remain the expected fifty"
     );
 
     let (output, invocations, directory) = run_live_gate_with_metadata(
