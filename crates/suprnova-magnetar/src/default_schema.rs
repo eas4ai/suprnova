@@ -6,9 +6,10 @@ use crate::schema::{
     ProviderTokenFields, SessionEpoch, SessionFields, TokenFields, UserFields, UserOptionalFields,
 };
 use chrono::{DateTime, Utc};
-use sea_orm::entity::prelude::{ActiveModelBehavior, ActiveModelTrait, EntityTrait};
+use sea_orm::entity::prelude::{ActiveModelBehavior, ActiveModelTrait, EntityTrait, IdenStatic};
 use sea_orm::{
-    ActiveValue::Set, ConnectionTrait, Database, DatabaseConnection, DbBackend, Schema, Statement,
+    ActiveValue::Set, ConnectionTrait, Database, DatabaseConnection, DbBackend, Iterable, Schema,
+    Statement,
 };
 use sea_orm::{DeriveEntityModel, DeriveRelation, EnumIter};
 
@@ -49,7 +50,7 @@ entity_common!(sessions, "auth_sessions", {
     pub auth_epoch: i64,
     pub token_digest: String,
     pub token_hash: Option<String>,
-    pub user_agent: Option<String>,
+    #[sea_orm(column_type = "Text")] pub user_agent: Option<String>,
     pub ip_address: Option<String>,
     pub expires_at: ChronoDateTime<ChronoUtc>,
     pub revoked_at: Option<ChronoDateTime<ChronoUtc>>,
@@ -57,8 +58,8 @@ entity_common!(sessions, "auth_sessions", {
 entity_common!(methods, "auth_methods", {
     #[sea_orm(primary_key)] pub id: i64,
     pub user_id: i64,
-    pub credential_id: Option<String>,
-    pub public_key: Option<String>,
+    #[sea_orm(column_type = "Text")] pub credential_id: Option<String>,
+    #[sea_orm(column_type = "Text")] pub public_key: Option<String>,
     pub created_at: Option<ChronoDateTime<ChronoUtc>>,
 });
 entity_common!(accounts, "auth_linked_accounts", {
@@ -83,7 +84,7 @@ entity_common!(ceremonies, "auth_ceremonies", {
     #[sea_orm(primary_key)] pub id: i64,
     pub kind: String,
     pub selector: String,
-    pub payload: Vec<u8>,
+    #[sea_orm(column_type = "Blob")] pub payload: Vec<u8>,
     pub state: String,
     pub expires_at: ChronoDateTime<ChronoUtc>,
     pub used_at: Option<ChronoDateTime<ChronoUtc>>,
@@ -106,14 +107,14 @@ entity_common!(second_factor_lockouts, "auth_second_factor_lockouts", {
 });
 entity_common!(two_factor, "auth_two_factor", {
     #[sea_orm(primary_key, auto_increment = false)] pub user_id: String,
-    pub secret: Vec<u8>,
-    pub recovery_codes: Option<Vec<u8>>,
+    #[sea_orm(column_type = "Blob")] pub secret: Vec<u8>,
+    #[sea_orm(column_type = "Blob")] pub recovery_codes: Option<Vec<u8>>,
     pub enrollment_auth_epoch: i64,
     pub enrollment_session_id: Option<String>,
     pub enrollment_expires_at: Option<ChronoDateTime<ChronoUtc>>,
     pub rotation_pending: bool,
-    pub pending_secret: Option<Vec<u8>>,
-    pub pending_recovery_codes: Option<Vec<u8>>,
+    #[sea_orm(column_type = "Blob")] pub pending_secret: Option<Vec<u8>>,
+    #[sea_orm(column_type = "Blob")] pub pending_recovery_codes: Option<Vec<u8>>,
     pub confirmed_at: Option<ChronoDateTime<ChronoUtc>>,
     pub last_used_timestep: Option<i64>,
     pub created_at: Option<ChronoDateTime<ChronoUtc>>,
@@ -130,11 +131,11 @@ entity_common!(remembers, "auth_remember_tokens", {
 entity_common!(provider_tokens, "auth_provider_tokens", {
     #[sea_orm(primary_key, auto_increment = false)] pub id: String,
     pub provider: String,
-    pub access_ciphertext: Vec<u8>,
-    pub refresh_ciphertext: Option<Vec<u8>>,
-    pub raw_payload_ciphertext: Vec<u8>,
+    #[sea_orm(column_type = "Blob")] pub access_ciphertext: Vec<u8>,
+    #[sea_orm(column_type = "Blob")] pub refresh_ciphertext: Option<Vec<u8>>,
+    #[sea_orm(column_type = "Blob")] pub raw_payload_ciphertext: Vec<u8>,
     pub token_type: String,
-    pub scopes: String,
+    #[sea_orm(column_type = "Text")] pub scopes: String,
     pub access_expires_at: Option<ChronoDateTime<ChronoUtc>>,
     pub generation: i64,
     pub claim_id: Option<String>,
@@ -920,14 +921,16 @@ pub mod sql_stores {
                 field: "auth_epoch".to_owned(),
                 message: "exceeds the database integer range".to_owned(),
             })?;
+        // A host that calls the store directly gets the bound a grant gets.
+        let metadata = session.metadata.bounded();
         sessions::ActiveModel {
             id: Set(session.session_id),
             user_id: Set(session.user_id.parse().expect("fixture ids are i64")),
             auth_epoch: Set(auth_epoch),
             token_digest: Set(hex(session.token_digest)),
             token_hash: Set(Some(hex(session.token_hash))),
-            user_agent: Set(session.metadata.user_agent),
-            ip_address: Set(session.metadata.ip_address),
+            user_agent: Set(metadata.user_agent),
+            ip_address: Set(metadata.ip_address),
             expires_at: Set(session.expires_at),
             revoked_at: Set(session.revoked_at),
         }
@@ -1880,74 +1883,8 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
     let defer_completion_marker =
         completed_marker.is_none() && (legacy_source_present || pending_marker.is_some());
     let backend = db.get_database_backend();
-    let schema = Schema::new(backend);
-    for statement in [
-        schema
-            .create_table_from_entity(users::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(sessions::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(methods::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(accounts::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(tokens::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(ceremonies::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(lockouts::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(second_factor_lockouts::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(remembers::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(two_factor::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(lifecycle_deliveries::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(migration_runs::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(migration_identities::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(migration_state::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(provider_tokens::Entity)
-            .if_not_exists()
-            .to_owned(),
-    ] {
-        db.execute(&statement)
-            .await
-            .map_err(|error| crate::Error::Internal {
-                message: format!("create default auth table: {error}"),
-            })?;
+    for (table, statement) in default_tables(backend) {
+        create_table_if_missing(db, table, &statement).await?;
     }
     // The authorization server's tables exist only in builds that serve
     // it; a later build with the feature on adds them to an existing
@@ -1957,32 +1894,27 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
     add_session_auth_epoch_column(db).await?;
     add_remember_auth_epoch_column(db).await?;
     add_two_factor_enrollment_snapshot_columns(db).await?;
-    if !column_exists(db, "auth_lockouts", "ip_address").await? {
-        let mut ip_address = sea_orm::sea_query::ColumnDef::new(lockouts::Column::IpAddress);
-        ip_address.string().null();
-        let alter = sea_orm::sea_query::Table::alter()
-            .table(lockouts::Entity)
-            .add_column(ip_address)
-            .to_owned();
-        db.execute(&alter)
-            .await
-            .map_err(|error| crate::Error::Internal {
-                message: format!("add lockout IP-address column: {error}"),
-            })?;
-    }
-    if !column_exists(db, "auth_lockouts", "migration_source_id").await? {
-        let mut source_id = sea_orm::sea_query::ColumnDef::new(lockouts::Column::MigrationSourceId);
-        source_id.string().null();
-        let alter = sea_orm::sea_query::Table::alter()
-            .table(lockouts::Entity)
-            .add_column(source_id)
-            .to_owned();
-        db.execute(&alter)
-            .await
-            .map_err(|error| crate::Error::Internal {
-                message: format!("add lockout migration source column: {error}"),
-            })?;
-    }
+    widen_mysql_columns(db).await?;
+    let mut ip_address = sea_orm::sea_query::ColumnDef::new(lockouts::Column::IpAddress);
+    ip_address.string().null();
+    add_column_if_missing(
+        db,
+        "auth_lockouts",
+        "ip_address",
+        ip_address,
+        "add lockout IP-address column",
+    )
+    .await?;
+    let mut source_id = sea_orm::sea_query::ColumnDef::new(lockouts::Column::MigrationSourceId);
+    source_id.string().null();
+    add_column_if_missing(
+        db,
+        "auth_lockouts",
+        "migration_source_id",
+        source_id,
+        "add lockout migration source column",
+    )
+    .await?;
     add_optional_string_column(db, "app_users", "name", users::Column::Name).await?;
     add_optional_string_column(
         db,
@@ -2050,11 +1982,14 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
             .col(accounts::Column::ProviderAccountId)
             .unique()
             .to_owned();
-        db.execute(&index)
-            .await
-            .map_err(|error| crate::Error::Internal {
-                message: format!("create linked-account uniqueness index: {error}"),
-            })?;
+        create_missing_index(
+            db,
+            "auth_linked_accounts",
+            INDEX,
+            &index,
+            "linked-account uniqueness index",
+        )
+        .await?;
     }
     const LOCKOUT_SOURCE_INDEX: &str = "auth_lockouts_migration_source";
     if !index_exists(db, "auth_lockouts", LOCKOUT_SOURCE_INDEX).await? {
@@ -2064,28 +1999,37 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
             .col(lockouts::Column::MigrationSourceId)
             .unique()
             .to_owned();
-        db.execute(&index)
-            .await
-            .map_err(|error| crate::Error::Internal {
-                message: format!("create lockout migration-source index: {error}"),
-            })?;
+        create_missing_index(
+            db,
+            "auth_lockouts",
+            LOCKOUT_SOURCE_INDEX,
+            &index,
+            "lockout migration-source index",
+        )
+        .await?;
     }
     if !index_exists(db, "auth_lockouts", LOCKOUT_IDENTITY_INDEX).await? {
-        db.execute(&lockout_identity_index())
-            .await
-            .map_err(|error| crate::Error::Internal {
-                message: format!("create lockout identity index: {error}"),
-            })?;
+        create_missing_index(
+            db,
+            "auth_lockouts",
+            LOCKOUT_IDENTITY_INDEX,
+            &lockout_identity_index(),
+            "lockout identity index",
+        )
+        .await?;
     }
     // A legacy `app_users` is a migration source, not the default table:
     // the migration engine rebuilds it, and a later run indexes the result.
     if !app_users_is_legacy_source && !index_exists(db, "app_users", USER_EMAIL_INDEX).await? {
         ensure_unique_user_emails(db).await?;
-        db.execute(&user_email_index())
-            .await
-            .map_err(|error| crate::Error::Internal {
-                message: format!("create app_users email uniqueness index: {error}"),
-            })?;
+        create_missing_index(
+            db,
+            "app_users",
+            USER_EMAIL_INDEX,
+            &user_email_index(),
+            "app_users email uniqueness index",
+        )
+        .await?;
     }
     if !index_exists(
         db,
@@ -2094,11 +2038,27 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
     )
     .await?
     {
-        db.execute(&second_factor_lockout_identity_index())
-            .await
-            .map_err(|error| crate::Error::Internal {
-                message: format!("create second-factor lockout identity index: {error}"),
-            })?;
+        create_missing_index(
+            db,
+            "auth_second_factor_lockouts",
+            SECOND_FACTOR_LOCKOUT_IDENTITY_INDEX,
+            &second_factor_lockout_identity_index(),
+            "second-factor lockout identity index",
+        )
+        .await?;
+    }
+    if !app_users_is_legacy_source
+        && migration_state_value(db, EMAIL_LENGTH_MARKER)
+            .await?
+            .is_none()
+    {
+        warn_about_over_long_emails(db).await?;
+        ensure_migration_state(
+            db,
+            EMAIL_LENGTH_MARKER,
+            &crate::password::MAX_EMAIL_LENGTH.to_string(),
+        )
+        .await?;
     }
     if completed_marker.as_deref() != Some("1") {
         if defer_completion_marker {
@@ -2106,6 +2066,57 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
         } else {
             ensure_migration_state(db, "schema_version", "1").await?;
         }
+    }
+    Ok(())
+}
+
+/// The `magnetar_migration_state` key that records the existing addresses
+/// were counted against [`crate::password::MAX_EMAIL_LENGTH`]; its value is
+/// that bound.
+///
+/// `migrate` counts `app_users` once per database, the first time it runs
+/// with the bound, and writes this key; a later `migrate` reads the key and
+/// scans nothing. It is a key of its own rather than a new `schema_version`
+/// value, because a release before this one refuses a database whose
+/// `schema_version` it does not know.
+const EMAIL_LENGTH_MARKER: &str = "email_length_checked";
+
+/// Log one warning, naming the count, when `app_users` holds addresses
+/// longer than [`crate::password::MAX_EMAIL_LENGTH`] characters.
+///
+/// Sign-in by email answers such an address as an unknown one, so those
+/// accounts can no longer sign in with it; the operator decides what
+/// becomes of them. The warning names no address. It scans every address,
+/// so `migrate` runs it once per database ([`EMAIL_LENGTH_MARKER`]).
+async fn warn_about_over_long_emails(db: &DatabaseConnection) -> crate::Result<()> {
+    let backend = db.get_database_backend();
+    let length = match backend {
+        DbBackend::MySql => "CHAR_LENGTH(email)",
+        _ => "LENGTH(email)",
+    };
+    let limit = crate::password::MAX_EMAIL_LENGTH;
+    let row = db
+        .query_one_raw(Statement::from_string(
+            backend,
+            format!("SELECT COUNT(*) AS over_long FROM app_users WHERE {length} > {limit}"),
+        ))
+        .await
+        .map_err(|error| crate::Error::Internal {
+            message: format!("inspect app_users email lengths: {error}"),
+        })?;
+    let over_long = row
+        .map(|row| row.try_get::<i64>("", "over_long"))
+        .transpose()
+        .map_err(|error| crate::Error::Internal {
+            message: format!("inspect app_users email lengths: {error}"),
+        })?
+        .unwrap_or(0);
+    if over_long > 0 {
+        tracing::warn!(
+            accounts = over_long,
+            "app_users holds {over_long} email addresses longer than {limit} characters; \
+             those accounts can no longer sign in by email"
+        );
     }
     Ok(())
 }
@@ -2158,6 +2169,15 @@ async fn migration_state_value(
         })
 }
 
+/// The conflict for a marker row that holds a value this release does not
+/// write.
+fn unsupported_marker(key: &str) -> crate::Error {
+    crate::Error::Conflict {
+        resource: "Magnetar migration marker".to_owned(),
+        message: format!("marker {key} has an unsupported value"),
+    }
+}
+
 async fn ensure_migration_state(
     db: &DatabaseConnection,
     key: &str,
@@ -2170,20 +2190,35 @@ async fn ensure_migration_state(
             message: format!("read Magnetar migration marker: {error}"),
         })? {
         Some(existing) if existing.value == value => Ok(()),
-        Some(_) => Err(crate::Error::Conflict {
-            resource: "Magnetar migration marker".to_owned(),
-            message: format!("marker {key} has an unsupported value"),
-        }),
-        None => migration_state::ActiveModel {
-            key: Set(key.to_owned()),
-            value: Set(value.to_owned()),
+        Some(_) => Err(unsupported_marker(key)),
+        None => {
+            let inserted = migration_state::ActiveModel {
+                key: Set(key.to_owned()),
+                value: Set(value.to_owned()),
+            }
+            .insert(db)
+            .await;
+            let Err(error) = inserted else {
+                return Ok(());
+            };
+            // A concurrent migrate writes the same marker between the read
+            // and this insert, and the insert hits its key. The marker it
+            // wrote is the one this run wanted. Another value is the conflict
+            // the read reports, and no row leaves the insert's own error.
+            let written = migration_state::Entity::find_by_id(key)
+                .one(db)
+                .await
+                .map_err(|error| crate::Error::Internal {
+                    message: format!("read Magnetar migration marker: {error}"),
+                })?;
+            match written {
+                Some(existing) if existing.value == value => Ok(()),
+                Some(_) => Err(unsupported_marker(key)),
+                None => Err(crate::Error::Internal {
+                    message: format!("write Magnetar migration marker: {error}"),
+                }),
+            }
         }
-        .insert(db)
-        .await
-        .map(|_| ())
-        .map_err(|error| crate::Error::Internal {
-            message: format!("write Magnetar migration marker: {error}"),
-        }),
     }
 }
 
@@ -2212,6 +2247,59 @@ async fn column_exists(db: &DatabaseConnection, table: &str, column: &str) -> cr
         })
 }
 
+/// Run one default table's `CREATE TABLE IF NOT EXISTS`.
+///
+/// Postgres refuses one of two concurrent `CREATE TABLE IF NOT EXISTS` for
+/// one table. The table the other run created is the table this run wanted;
+/// a failure that leaves no table is an error.
+async fn create_table_if_missing(
+    db: &DatabaseConnection,
+    table: &str,
+    statement: &sea_orm::sea_query::TableCreateStatement,
+) -> crate::Result<()> {
+    let Err(error) = db.execute(statement).await else {
+        return Ok(());
+    };
+    if table_exists(db, table).await? {
+        return Ok(());
+    }
+    Err(crate::Error::Internal {
+        message: format!("create default auth table: {error}"),
+    })
+}
+
+/// Add one column to `table` unless it is there.
+///
+/// Two processes that upgrade one database both find the column missing and
+/// both add it, and the second add fails: MySQL and MariaDB report a
+/// duplicate column, Postgres and SQLite an existing one. A failure after
+/// which the column exists is that race, and the column this run wanted is
+/// in place. A failure that leaves no column is an error.
+async fn add_column_if_missing(
+    db: &DatabaseConnection,
+    table: &str,
+    column_name: &str,
+    definition: sea_orm::sea_query::ColumnDef,
+    description: &str,
+) -> crate::Result<()> {
+    if column_exists(db, table, column_name).await? {
+        return Ok(());
+    }
+    let alter = sea_orm::sea_query::Table::alter()
+        .table(sea_orm::sea_query::Alias::new(table))
+        .add_column(definition)
+        .to_owned();
+    let Err(error) = db.execute(&alter).await else {
+        return Ok(());
+    };
+    if column_exists(db, table, column_name).await? {
+        return Ok(());
+    }
+    Err(crate::Error::Internal {
+        message: format!("{description}: {error}"),
+    })
+}
+
 async fn add_optional_timestamp_column<I>(
     db: &DatabaseConnection,
     table: &str,
@@ -2221,21 +2309,16 @@ async fn add_optional_timestamp_column<I>(
 where
     I: sea_orm::sea_query::IntoIden,
 {
-    if column_exists(db, table, column_name).await? {
-        return Ok(());
-    }
     let mut definition = sea_orm::sea_query::ColumnDef::new(column);
     definition.timestamp_with_time_zone().null();
-    let alter = sea_orm::sea_query::Table::alter()
-        .table(sea_orm::sea_query::Alias::new(table))
-        .add_column(definition)
-        .to_owned();
-    db.execute(&alter)
-        .await
-        .map_err(|error| crate::Error::Internal {
-            message: format!("add {table}.{column_name}: {error}"),
-        })?;
-    Ok(())
+    add_column_if_missing(
+        db,
+        table,
+        column_name,
+        definition,
+        &format!("add {table}.{column_name}"),
+    )
+    .await
 }
 
 async fn add_optional_string_column<I>(
@@ -2247,38 +2330,30 @@ async fn add_optional_string_column<I>(
 where
     I: sea_orm::sea_query::IntoIden,
 {
-    if column_exists(db, table, column_name).await? {
-        return Ok(());
-    }
     let mut definition = sea_orm::sea_query::ColumnDef::new(column);
     definition.string().null();
-    let alter = sea_orm::sea_query::Table::alter()
-        .table(sea_orm::sea_query::Alias::new(table))
-        .add_column(definition)
-        .to_owned();
-    db.execute(&alter)
-        .await
-        .map_err(|error| crate::Error::Internal {
-            message: format!("add {table}.{column_name}: {error}"),
-        })?;
-    Ok(())
+    add_column_if_missing(
+        db,
+        table,
+        column_name,
+        definition,
+        &format!("add {table}.{column_name}"),
+    )
+    .await
 }
 
 async fn add_two_factor_enrollment_snapshot_columns(db: &DatabaseConnection) -> crate::Result<()> {
-    if !column_exists(db, "auth_two_factor", "enrollment_auth_epoch").await? {
-        let mut definition =
-            sea_orm::sea_query::ColumnDef::new(two_factor::Column::EnrollmentAuthEpoch);
-        definition.big_integer().not_null().default(0);
-        let alter = sea_orm::sea_query::Table::alter()
-            .table(two_factor::Entity)
-            .add_column(definition)
-            .to_owned();
-        db.execute(&alter)
-            .await
-            .map_err(|error| crate::Error::Internal {
-                message: format!("add auth_two_factor.enrollment_auth_epoch: {error}"),
-            })?;
-    }
+    let mut enrollment_epoch =
+        sea_orm::sea_query::ColumnDef::new(two_factor::Column::EnrollmentAuthEpoch);
+    enrollment_epoch.big_integer().not_null().default(0);
+    add_column_if_missing(
+        db,
+        "auth_two_factor",
+        "enrollment_auth_epoch",
+        enrollment_epoch,
+        "add auth_two_factor.enrollment_auth_epoch",
+    )
+    .await?;
     add_optional_string_column(
         db,
         "auth_two_factor",
@@ -2293,20 +2368,17 @@ async fn add_two_factor_enrollment_snapshot_columns(db: &DatabaseConnection) -> 
         two_factor::Column::EnrollmentExpiresAt,
     )
     .await?;
-    if !column_exists(db, "auth_two_factor", "rotation_pending").await? {
-        let mut definition =
-            sea_orm::sea_query::ColumnDef::new(two_factor::Column::RotationPending);
-        definition.boolean().not_null().default(false);
-        let alter = sea_orm::sea_query::Table::alter()
-            .table(two_factor::Entity)
-            .add_column(definition)
-            .to_owned();
-        db.execute(&alter)
-            .await
-            .map_err(|error| crate::Error::Internal {
-                message: format!("add auth_two_factor.rotation_pending: {error}"),
-            })?;
-    }
+    let mut rotation_pending =
+        sea_orm::sea_query::ColumnDef::new(two_factor::Column::RotationPending);
+    rotation_pending.boolean().not_null().default(false);
+    add_column_if_missing(
+        db,
+        "auth_two_factor",
+        "rotation_pending",
+        rotation_pending,
+        "add auth_two_factor.rotation_pending",
+    )
+    .await?;
     // A rotation waits beside the confirmed secret in these two columns.
     // Before they existed a rotation overwrote the confirmed secret.
     for (name, column) in [
@@ -2316,75 +2388,390 @@ async fn add_two_factor_enrollment_snapshot_columns(db: &DatabaseConnection) -> 
             two_factor::Column::PendingRecoveryCodes,
         ),
     ] {
-        if column_exists(db, "auth_two_factor", name).await? {
-            continue;
-        }
         let definition =
             Schema::new(db.get_database_backend()).get_column_def::<two_factor::Entity>(column);
-        let alter = sea_orm::sea_query::Table::alter()
-            .table(two_factor::Entity)
-            .add_column(definition)
-            .to_owned();
-        db.execute(&alter)
-            .await
-            .map_err(|error| crate::Error::Internal {
-                message: format!("add auth_two_factor.{name}: {error}"),
-            })?;
+        add_column_if_missing(
+            db,
+            "auth_two_factor",
+            name,
+            definition,
+            &format!("add auth_two_factor.{name}"),
+        )
+        .await?;
     }
     Ok(())
 }
 
 async fn add_auth_epoch_column(db: &DatabaseConnection) -> crate::Result<()> {
-    if column_exists(db, "app_users", "auth_epoch").await? {
-        return Ok(());
-    }
     let mut definition = sea_orm::sea_query::ColumnDef::new(users::Column::AuthEpoch);
     definition.big_integer().not_null().default(0);
-    let alter = sea_orm::sea_query::Table::alter()
-        .table(users::Entity)
-        .add_column(definition)
-        .to_owned();
-    db.execute(&alter)
-        .await
-        .map_err(|error| crate::Error::Internal {
-            message: format!("add app_users.auth_epoch: {error}"),
-        })?;
-    Ok(())
+    add_column_if_missing(
+        db,
+        "app_users",
+        "auth_epoch",
+        definition,
+        "add app_users.auth_epoch",
+    )
+    .await
 }
 
 async fn add_session_auth_epoch_column(db: &DatabaseConnection) -> crate::Result<()> {
-    if column_exists(db, "auth_sessions", "auth_epoch").await? {
-        return Ok(());
-    }
     let mut definition = sea_orm::sea_query::ColumnDef::new(sessions::Column::AuthEpoch);
     definition.big_integer().not_null().default(-1);
-    let alter = sea_orm::sea_query::Table::alter()
-        .table(sessions::Entity)
-        .add_column(definition)
-        .to_owned();
-    db.execute(&alter)
-        .await
-        .map_err(|error| crate::Error::Internal {
-            message: format!("add auth_sessions.auth_epoch: {error}"),
-        })?;
-    Ok(())
+    add_column_if_missing(
+        db,
+        "auth_sessions",
+        "auth_epoch",
+        definition,
+        "add auth_sessions.auth_epoch",
+    )
+    .await
 }
 
 async fn add_remember_auth_epoch_column(db: &DatabaseConnection) -> crate::Result<()> {
-    if column_exists(db, "auth_remember_tokens", "auth_epoch").await? {
-        return Ok(());
-    }
     let mut definition = sea_orm::sea_query::ColumnDef::new(remembers::Column::AuthEpoch);
     definition.big_integer().not_null().default(-1);
-    let alter = sea_orm::sea_query::Table::alter()
-        .table(remembers::Entity)
-        .add_column(definition)
-        .to_owned();
-    db.execute(&alter)
+    add_column_if_missing(
+        db,
+        "auth_remember_tokens",
+        "auth_epoch",
+        definition,
+        "add auth_remember_tokens.auth_epoch",
+    )
+    .await
+}
+
+/// Run the `CREATE INDEX` for an index [`index_exists`] found missing.
+///
+/// Two processes that migrate one fresh database both find the index
+/// missing and both create it, and the second create fails: MySQL and
+/// MariaDB report a duplicate key name, Postgres and SQLite an existing
+/// relation. A failure after which the named index exists is that race, and
+/// the index this run wanted is in place. A failure that leaves no index is
+/// an error.
+async fn create_missing_index(
+    db: &DatabaseConnection,
+    table: &str,
+    name: &str,
+    index: &sea_orm::sea_query::IndexCreateStatement,
+    description: &str,
+) -> crate::Result<()> {
+    let Err(error) = db.execute(index).await else {
+        return Ok(());
+    };
+    if index_exists(db, table, name).await? {
+        return Ok(());
+    }
+    Err(crate::Error::Internal {
+        message: format!("create {description}: {error}"),
+    })
+}
+
+/// The MySQL type of every byte and long-text column of the default schema.
+///
+/// MySQL and MariaDB create an entity's `Vec<u8>` field that has no column
+/// type as `varbinary(255)` and its `String` field as `varchar(255)`, and
+/// strict mode refuses a longer write. `migrate` created these columns that
+/// way before the entities named a type for them, so
+/// [`widen_mysql_columns`] upgrades a database it created then. Postgres
+/// (`bytea`, `varchar`) and SQLite hold any length on either layout.
+///
+/// The entities name `Blob` and `Text`, which MySQL holds up to 64 KiB. The
+/// provider-token ciphertexts are `longblob` instead: they hold the
+/// provider's token response, whole in the raw payload and in parts in the
+/// other two, an OAuth transport accepts up to a megabyte of it (the
+/// framework's default limit, which a host may raise), and encryption grows
+/// it by about four fifths in the framework. A token response whose
+/// id_token and access token carry long group or role claims can pass 64 KiB
+/// once encrypted, and a refused commit after a rotating exchange loses the
+/// refresh token the provider just issued.
+const MYSQL_COLUMN_TYPES: [(&str, &str, &str); 12] = [
+    ("auth_sessions", "user_agent", "text"),
+    ("auth_methods", "credential_id", "text"),
+    ("auth_methods", "public_key", "text"),
+    ("auth_ceremonies", "payload", "blob"),
+    ("auth_two_factor", "secret", "blob"),
+    ("auth_two_factor", "recovery_codes", "blob"),
+    ("auth_two_factor", "pending_secret", "blob"),
+    ("auth_two_factor", "pending_recovery_codes", "blob"),
+    ("auth_provider_tokens", "access_ciphertext", "longblob"),
+    ("auth_provider_tokens", "refresh_ciphertext", "longblob"),
+    ("auth_provider_tokens", "raw_payload_ciphertext", "longblob"),
+    ("auth_provider_tokens", "scopes", "text"),
+];
+
+/// The MySQL type [`MYSQL_COLUMN_TYPES`] names for one column, if any.
+fn mysql_column_type(table: &str, column: &str) -> Option<&'static str> {
+    MYSQL_COLUMN_TYPES
+        .iter()
+        .find(|(listed_table, listed_column, _)| *listed_table == table && *listed_column == column)
+        .map(|(_, _, mysql_type)| *mysql_type)
+}
+
+/// Every default table with its `CREATE TABLE IF NOT EXISTS` on `backend`.
+fn default_tables(
+    backend: DbBackend,
+) -> [(&'static str, sea_orm::sea_query::TableCreateStatement); 15] {
+    [
+        default_table(backend, users::Entity),
+        default_table(backend, sessions::Entity),
+        default_table(backend, methods::Entity),
+        default_table(backend, accounts::Entity),
+        default_table(backend, tokens::Entity),
+        default_table(backend, ceremonies::Entity),
+        default_table(backend, lockouts::Entity),
+        default_table(backend, second_factor_lockouts::Entity),
+        default_table(backend, remembers::Entity),
+        default_table(backend, two_factor::Entity),
+        default_table(backend, lifecycle_deliveries::Entity),
+        default_table(backend, migration_runs::Entity),
+        default_table(backend, migration_identities::Entity),
+        default_table(backend, migration_state::Entity),
+        default_table(backend, provider_tokens::Entity),
+    ]
+}
+
+/// One default table's `CREATE TABLE IF NOT EXISTS`, built column by column
+/// from the entity, as `create_table_from_entity` builds it, so that a
+/// MySQL column can take the type [`MYSQL_COLUMN_TYPES`] names where the
+/// entity's portable column type cannot say it. No default entity has a
+/// composite key, a relation or a comment, the parts of
+/// `create_table_from_entity` this leaves out.
+fn default_table<E>(
+    backend: DbBackend,
+    entity: E,
+) -> (&'static str, sea_orm::sea_query::TableCreateStatement)
+where
+    E: EntityTrait,
+{
+    let table = entity.table_name();
+    let schema = Schema::new(backend);
+    let mut statement = sea_orm::sea_query::Table::create();
+    statement.table(entity).if_not_exists();
+    for column in E::Column::iter() {
+        let mut definition = schema.get_column_def::<E>(column);
+        if backend == DbBackend::MySql
+            && let Some(mysql_type) = mysql_column_type(table, column.as_str())
+        {
+            definition.custom(sea_orm::sea_query::Alias::new(mysql_type));
+        }
+        statement.col(definition);
+    }
+    (table, statement)
+}
+
+/// Whether MySQL data type `current` holds less than `target`.
+///
+/// Both are compared within one family, byte strings or text. A type of
+/// another family, such as a `json` column an application chose, is never
+/// changed, and a wider type is never narrowed.
+fn mysql_type_is_narrower(current: &str, target: &str) -> bool {
+    const FAMILIES: [&[&str]; 2] = [
+        &[
+            "binary",
+            "varbinary",
+            "tinyblob",
+            "blob",
+            "mediumblob",
+            "longblob",
+        ],
+        &[
+            "char",
+            "varchar",
+            "tinytext",
+            "text",
+            "mediumtext",
+            "longtext",
+        ],
+    ];
+    let current = current.to_ascii_lowercase();
+    FAMILIES.iter().any(|family| {
+        let position = |name: &str| family.iter().position(|listed| *listed == name);
+        matches!(
+            (position(&current), position(target)),
+            (Some(current), Some(target)) if current < target
+        )
+    })
+}
+
+/// One MySQL column as `information_schema.COLUMNS` describes it.
+struct MysqlColumn {
+    data_type: String,
+    nullable: bool,
+    /// Character set and collation of a text column; `None` for bytes.
+    character_set: Option<String>,
+    collation: Option<String>,
+}
+
+/// One MySQL column, or `None` when the table has no such column.
+async fn mysql_column_definition(
+    db: &DatabaseConnection,
+    table: &str,
+    column: &str,
+) -> crate::Result<Option<MysqlColumn>> {
+    let inspect_error = |error: sea_orm::DbErr| crate::Error::Internal {
+        message: format!("inspect {table}.{column} type: {error}"),
+    };
+    let row = db
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::MySql,
+            "SELECT CAST(DATA_TYPE AS CHAR) AS data_type, CAST(IS_NULLABLE AS CHAR) AS is_nullable, \
+                    CAST(CHARACTER_SET_NAME AS CHAR) AS character_set, \
+                    CAST(COLLATION_NAME AS CHAR) AS collation \
+             FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1",
+            [table.to_owned().into(), column.to_owned().into()],
+        ))
         .await
-        .map_err(|error| crate::Error::Internal {
-            message: format!("add auth_remember_tokens.auth_epoch: {error}"),
-        })?;
+        .map_err(inspect_error)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    Ok(Some(MysqlColumn {
+        data_type: row
+            .try_get::<String>("", "data_type")
+            .map_err(inspect_error)?,
+        nullable: row
+            .try_get::<String>("", "is_nullable")
+            .map_err(inspect_error)?
+            .eq_ignore_ascii_case("YES"),
+        character_set: row
+            .try_get::<Option<String>>("", "character_set")
+            .map_err(inspect_error)?,
+        collation: row
+            .try_get::<Option<String>>("", "collation")
+            .map_err(inspect_error)?,
+    }))
+}
+
+/// The indexes that cover one MySQL column.
+async fn mysql_column_indexes(
+    db: &DatabaseConnection,
+    table: &str,
+    column: &str,
+) -> crate::Result<Vec<String>> {
+    let inspect_error = |error: sea_orm::DbErr| crate::Error::Internal {
+        message: format!("inspect {table}.{column} indexes: {error}"),
+    };
+    db.query_all_raw(Statement::from_sql_and_values(
+        DbBackend::MySql,
+        "SELECT DISTINCT CAST(INDEX_NAME AS CHAR) AS index_name \
+         FROM information_schema.STATISTICS \
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? \
+         ORDER BY index_name",
+        [table.to_owned().into(), column.to_owned().into()],
+    ))
+    .await
+    .map_err(inspect_error)?
+    .iter()
+    .map(|row| {
+        row.try_get::<String>("", "index_name")
+            .map_err(inspect_error)
+    })
+    .collect()
+}
+
+/// The MySQL type a widened column takes: `target`, and for a text column
+/// the character set and collation it already has. Left out, `MODIFY
+/// COLUMN` would take the table's defaults and drop an operator's choice.
+fn mysql_widened_type(target: &str, current: &MysqlColumn) -> crate::Result<String> {
+    let (Some(character_set), Some(collation)) = (&current.character_set, &current.collation)
+    else {
+        return Ok(target.to_owned());
+    };
+    // The names come from the server's catalog; anything but a plain name
+    // is refused rather than written into the statement.
+    let plain = |name: &str| {
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    };
+    if !plain(character_set) || !plain(collation) {
+        return Err(crate::Error::Internal {
+            message: format!(
+                "unexpected character set {character_set:?} or collation {collation:?}"
+            ),
+        });
+    }
+    Ok(format!(
+        "{target} CHARACTER SET {character_set} COLLATE {collation}"
+    ))
+}
+
+/// On MySQL and MariaDB, widen every column [`MYSQL_COLUMN_TYPES`] names
+/// that still has a narrower type, as a database `migrate` created before
+/// those columns carried a type holds them.
+///
+/// Each table changes in one `ALTER TABLE`, so a table with several narrow
+/// columns is rebuilt once, and each column keeps its nullability, its
+/// character set and collation, and its rows. A column that is already as
+/// wide is left alone, so a second run changes nothing. Two processes that
+/// widen one table at once run the same `MODIFY COLUMN` one after the
+/// other, and both succeed. A column an index covers stays as it is, with a
+/// warning: MySQL refuses a `text` or `blob` column in an index without a
+/// key length, and that refusal must not stop boot. Postgres and SQLite are
+/// never touched: their columns hold any length.
+async fn widen_mysql_columns(db: &DatabaseConnection) -> crate::Result<()> {
+    if db.get_database_backend() != DbBackend::MySql {
+        return Ok(());
+    }
+    let mut tables: Vec<&str> = Vec::new();
+    for (table, _, _) in MYSQL_COLUMN_TYPES {
+        if !tables.contains(&table) {
+            tables.push(table);
+        }
+    }
+    for table in tables {
+        let mut alter = sea_orm::sea_query::Table::alter();
+        alter.table(sea_orm::sea_query::Alias::new(table));
+        let mut widened = Vec::new();
+        for (_, column, target) in MYSQL_COLUMN_TYPES
+            .iter()
+            .filter(|(listed_table, _, _)| *listed_table == table)
+        {
+            let Some(current) = mysql_column_definition(db, table, column).await? else {
+                continue;
+            };
+            if !mysql_type_is_narrower(&current.data_type, target) {
+                continue;
+            }
+            let indexes = mysql_column_indexes(db, table, column).await?;
+            if !indexes.is_empty() {
+                let indexes = indexes.join(", ");
+                tracing::warn!(
+                    table = %table,
+                    column = %column,
+                    indexes = %indexes,
+                    "{table}.{column} stays {}: index {indexes} covers it, and MySQL cannot \
+                     index a {target} column without a key length; drop or change the index, \
+                     then run the migration again to widen it",
+                    current.data_type
+                );
+                continue;
+            }
+            let mut definition =
+                sea_orm::sea_query::ColumnDef::new(sea_orm::sea_query::Alias::new(*column));
+            definition.custom(sea_orm::sea_query::Alias::new(mysql_widened_type(
+                target, &current,
+            )?));
+            if current.nullable {
+                definition.null();
+            } else {
+                definition.not_null();
+            }
+            alter.modify_column(definition);
+            widened.push(*column);
+        }
+        if widened.is_empty() {
+            continue;
+        }
+        db.execute(&alter)
+            .await
+            .map_err(|error| crate::Error::Internal {
+                message: format!("widen {table} columns {}: {error}", widened.join(", ")),
+            })?;
+    }
     Ok(())
 }
 
@@ -2464,6 +2851,224 @@ mod tests {
             assert!(sql.contains("identity"));
             assert!(!sql.contains("UNIQUE"));
         }
+    }
+
+    /// The default tables, as `create_table_from_entity` builds them.
+    fn tables_from_entities(backend: DbBackend) -> Vec<String> {
+        use super::*;
+        let schema = Schema::new(backend);
+        macro_rules! from_entities {
+            ($($entity:expr),*) => {
+                vec![$(schema.create_table_from_entity($entity).if_not_exists().to_owned()),*]
+            };
+        }
+        let statements: Vec<sea_orm::sea_query::TableCreateStatement> = from_entities!(
+            users::Entity,
+            sessions::Entity,
+            methods::Entity,
+            accounts::Entity,
+            tokens::Entity,
+            ceremonies::Entity,
+            lockouts::Entity,
+            second_factor_lockouts::Entity,
+            remembers::Entity,
+            two_factor::Entity,
+            lifecycle_deliveries::Entity,
+            migration_runs::Entity,
+            migration_identities::Entity,
+            migration_state::Entity,
+            provider_tokens::Entity
+        );
+        statements
+            .iter()
+            .map(|statement| render(backend, statement))
+            .collect()
+    }
+
+    fn render(backend: DbBackend, statement: &sea_orm::sea_query::TableCreateStatement) -> String {
+        match backend {
+            DbBackend::MySql => statement.to_string(MysqlQueryBuilder),
+            DbBackend::Postgres => statement.to_string(PostgresQueryBuilder),
+            _ => statement.to_string(SqliteQueryBuilder),
+        }
+    }
+
+    #[test]
+    fn default_tables_match_the_entities_except_for_named_mysql_types() {
+        for backend in [DbBackend::Sqlite, DbBackend::Postgres, DbBackend::MySql] {
+            let built = super::default_tables(backend)
+                .iter()
+                .map(|(table, statement)| (*table, render(backend, statement)))
+                .collect::<Vec<_>>();
+            let from_entities = tables_from_entities(backend);
+            assert_eq!(
+                built.len(),
+                from_entities.len(),
+                "every entity has its table and no more"
+            );
+            for ((table, built), from_entity) in built.iter().zip(from_entities) {
+                if backend == DbBackend::MySql && *table == "auth_provider_tokens" {
+                    assert_eq!(
+                        built.replace("longblob", "blob"),
+                        from_entity,
+                        "only the named MySQL types differ"
+                    );
+                } else {
+                    assert_eq!(*built, from_entity, "{backend:?} {table}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mysql_default_tables_hold_long_bytes_and_text() {
+        let built = super::default_tables(DbBackend::MySql)
+            .iter()
+            .map(|(table, statement)| (*table, render(DbBackend::MySql, statement)))
+            .collect::<Vec<_>>();
+        for (table, sql) in &built {
+            assert!(!sql.contains("varbinary"), "{table}: {sql}");
+        }
+        for (table, column, mysql_type) in super::MYSQL_COLUMN_TYPES {
+            let (_, sql) = built
+                .iter()
+                .find(|(built_table, _)| *built_table == table)
+                .expect("every named table is a default table");
+            assert!(
+                sql.contains(&format!("`{column}` {mysql_type}")),
+                "{table}.{column} is {mysql_type}: {sql}"
+            );
+        }
+        for backend in [DbBackend::Sqlite, DbBackend::Postgres] {
+            for (table, statement) in super::default_tables(backend) {
+                let sql = render(backend, &statement);
+                assert!(!sql.contains("longblob"), "{backend:?} {table}: {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn mysql_widening_only_widens_within_one_family() {
+        assert!(super::mysql_type_is_narrower("varbinary", "blob"));
+        assert!(super::mysql_type_is_narrower("VARBINARY", "longblob"));
+        assert!(super::mysql_type_is_narrower("blob", "longblob"));
+        assert!(super::mysql_type_is_narrower("varchar", "text"));
+        assert!(!super::mysql_type_is_narrower("blob", "blob"));
+        assert!(!super::mysql_type_is_narrower("longblob", "blob"));
+        assert!(!super::mysql_type_is_narrower("mediumtext", "text"));
+        assert!(!super::mysql_type_is_narrower("json", "text"));
+        assert!(!super::mysql_type_is_narrower("varchar", "blob"));
+    }
+
+    #[tokio::test]
+    async fn an_index_a_concurrent_migrate_created_counts_as_created() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        super::migrate(&database).await.unwrap();
+        // The index exists, as a concurrent run leaves it between this
+        // run's check and its create; the create fails and is the race.
+        super::create_missing_index(
+            &database,
+            "auth_lockouts",
+            super::LOCKOUT_IDENTITY_INDEX,
+            &super::lockout_identity_index(),
+            "lockout identity index",
+        )
+        .await
+        .expect("an index that exists after a failed create is in place");
+    }
+
+    #[tokio::test]
+    async fn an_index_create_that_leaves_no_index_stays_an_error() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        super::migrate(&database).await.unwrap();
+        let index = sea_orm::sea_query::Index::create()
+            .name("no_such_table_identity")
+            .table(sea_orm::sea_query::Alias::new("no_such_table"))
+            .col(sea_orm::sea_query::Alias::new("identity"))
+            .to_owned();
+        let error = super::create_missing_index(
+            &database,
+            "no_such_table",
+            "no_such_table_identity",
+            &index,
+            "broken index",
+        )
+        .await
+        .expect_err("a create that leaves no index is an error")
+        .to_string();
+        assert!(error.contains("create broken index"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn a_create_table_that_leaves_no_table_stays_an_error() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        // Two columns of one name: SQLite refuses the table.
+        let statement = sea_orm::sea_query::Table::create()
+            .table(sea_orm::sea_query::Alias::new("no_such_table"))
+            .if_not_exists()
+            .col(sea_orm::sea_query::ColumnDef::new(sea_orm::sea_query::Alias::new("id")).integer())
+            .col(sea_orm::sea_query::ColumnDef::new(sea_orm::sea_query::Alias::new("id")).integer())
+            .to_owned();
+        let error = super::create_table_if_missing(&database, "no_such_table", &statement)
+            .await
+            .expect_err("a create that leaves no table is an error")
+            .to_string();
+        assert!(error.contains("create default auth table"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn a_foreign_marker_written_during_the_race_is_a_conflict() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        super::migrate(&database).await.unwrap();
+        database
+            .execute_unprepared("DELETE FROM magnetar_migration_state WHERE key = 'schema_version'")
+            .await
+            .unwrap();
+        // Another writer stores a different value between this run's read
+        // and its insert, and this run's insert writes no row. RAISE(IGNORE)
+        // drops the insert and keeps the other writer's row, as a commit by
+        // another process would.
+        database
+            .execute_unprepared(
+                "CREATE TRIGGER foreign_marker BEFORE INSERT ON magnetar_migration_state \
+                 WHEN NEW.key = 'schema_version' BEGIN \
+                 INSERT INTO magnetar_migration_state (key, value) VALUES ('schema_version', '2'); \
+                 SELECT RAISE(IGNORE); \
+                 END",
+            )
+            .await
+            .unwrap();
+        let error = super::ensure_migration_state(&database, "schema_version", "1")
+            .await
+            .expect_err("a foreign marker is refused");
+        assert!(
+            matches!(&error, crate::Error::Conflict { resource, message }
+                if resource == "Magnetar migration marker"
+                    && message == "marker schema_version has an unsupported value"),
+            "the race answers as the read does: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_add_column_that_leaves_no_column_stays_an_error() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        let mut definition =
+            sea_orm::sea_query::ColumnDef::new(sea_orm::sea_query::Alias::new("auth_epoch"));
+        definition.big_integer().not_null().default(0);
+        let error = super::add_column_if_missing(
+            &database,
+            "no_such_table",
+            "auth_epoch",
+            definition,
+            "add no_such_table.auth_epoch",
+        )
+        .await
+        .expect_err("an add that leaves no column is an error")
+        .to_string();
+        assert!(
+            error.contains("add no_such_table.auth_epoch"),
+            "got: {error}"
+        );
     }
 
     #[tokio::test]

@@ -513,3 +513,27 @@ async fn a_passkey_sign_up_that_loses_the_race_answers_as_the_existing_account()
         "the lost race answers as the existing account: {error:?}"
     );
 }
+
+/// No account can hold an address past RFC 5321's 254 characters, and the
+/// default schema's column holds no more, so sign-up refuses one before it
+/// reaches a store.
+#[tokio::test]
+async fn registration_refuses_an_email_longer_than_any_account_holds() {
+    let world = factor_world().await;
+    let email = format!("{}@example.test", "a".repeat(242));
+    assert_eq!(email.chars().count(), 255);
+    let error = world
+        .passkeys
+        .begin_registration(RegistrationIntent {
+            email,
+            actor: None,
+            reauthenticated_at: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, magnetar::Error::InvalidInput { field, message }
+            if field == "email" && message.contains("254")),
+        "an over-long address is a validation error: {error:?}"
+    );
+}

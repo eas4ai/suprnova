@@ -26,10 +26,32 @@ pub use remember::{
 /// Metadata recorded when a session is established.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionMetadata {
-    /// Host-supplied user-agent, when available.
+    /// Host-supplied user-agent, when available. A session keeps at most
+    /// [`MAX_USER_AGENT_LENGTH`] characters of it.
     pub user_agent: Option<String>,
     /// Host-supplied source address, when available.
     pub ip_address: Option<String>,
+}
+
+/// The most characters of a user agent a session keeps.
+///
+/// Hosts pass on the raw `User-Agent` header, which has no length limit of
+/// its own, and the default schema keeps it in MySQL `text`, which holds
+/// 65,535 bytes. A longer header would fail the session insert, so every
+/// session keeps the first 1,024 characters, cut on a character boundary.
+pub const MAX_USER_AGENT_LENGTH: usize = 1024;
+
+impl SessionMetadata {
+    /// This metadata with its user agent cut to [`MAX_USER_AGENT_LENGTH`]
+    /// characters.
+    pub(crate) fn bounded(mut self) -> Self {
+        if let Some(agent) = self.user_agent.as_mut()
+            && let Some((cut, _)) = agent.char_indices().nth(MAX_USER_AGENT_LENGTH)
+        {
+            agent.truncate(cut);
+        }
+        self
+    }
 }
 
 /// Carrier whose successful verification produced a session principal.

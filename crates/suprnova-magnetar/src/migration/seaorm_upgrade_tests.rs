@@ -4,7 +4,7 @@ use std::panic::AssertUnwindSafe;
 use crate::migration::fingerprint::source_database_fingerprints;
 use crate::{Error, Result, default_schema};
 use futures_util::future::FutureExt;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, DbBackend};
 
 #[cfg(test)]
 #[path = "../../tests/fixtures/seaorm_upgrade.rs"]
@@ -50,8 +50,18 @@ fn assert_expected_source_tables(before: &BTreeMap<String, String>) {
     );
 }
 
+/// The tables the authorization server's migration adds to a database.
+#[cfg(feature = "authorization-server")]
+const AUTHORIZATION_SERVER_TABLES: [&str; 4] = [
+    "auth_oauth_authorizations",
+    "auth_oauth_clients",
+    "auth_oauth_grants",
+    "auth_oauth_tokens",
+];
+
 #[cfg(test)]
 fn assert_expected_upgrade_delta(
+    backend: DbBackend,
     before: &BTreeMap<String, String>,
     after: &BTreeMap<String, String>,
 ) {
@@ -60,10 +70,14 @@ fn assert_expected_upgrade_delta(
     // The second factor's lockout table postdates SeaORM 1.1 catalogs; the
     // first pass adds it and keeps every source table.
     before_tables.insert("auth_second_factor_lockouts");
+    // A build that serves the authorization server adds its four tables too.
+    #[cfg(feature = "authorization-server")]
+    before_tables.extend(AUTHORIZATION_SERVER_TABLES);
     assert_eq!(
         before_tables, after_tables,
         "first migration pass must preserve the source catalog table set and add only \
-         the second-factor lockout table"
+         the second-factor lockout table, plus the authorization server's tables in \
+         builds that serve it"
     );
 
     let changed_tables: BTreeSet<&str> = before
@@ -74,17 +88,30 @@ fn assert_expected_upgrade_delta(
         .collect();
     // app_users gains its email uniqueness index and auth_two_factor its
     // pending-rotation columns, which postdate them too.
+    let mut expected = BTreeSet::from([
+        "app_users",
+        "auth_lockouts",
+        "auth_second_factor_lockouts",
+        "auth_two_factor",
+    ]);
+    // On MySQL a SeaORM 1.1 catalog holds the byte and long-text columns as
+    // `varbinary(255)` and `varchar(255)`, and the first pass widens them.
+    if backend == DbBackend::MySql {
+        expected.extend([
+            "auth_ceremonies",
+            "auth_methods",
+            "auth_provider_tokens",
+            "auth_sessions",
+        ]);
+    }
+    #[cfg(feature = "authorization-server")]
+    expected.extend(AUTHORIZATION_SERVER_TABLES);
     assert_eq!(
-        BTreeSet::from([
-            "app_users",
-            "auth_lockouts",
-            "auth_second_factor_lockouts",
-            "auth_two_factor"
-        ]),
-        changed_tables,
+        expected, changed_tables,
         "first migration pass must only add the current auth_lockouts schema, the \
          second-factor lockout table, the app_users email index and the \
-         pending-rotation columns"
+         pending-rotation columns, and on MySQL widen the narrow byte and \
+         long-text columns"
     );
 }
 
@@ -105,7 +132,7 @@ async fn verify_parity(fixture: SeaOrm11Fixture) {
             })?;
 
         let after = schema_digests(&imported.connection).await?;
-        assert_expected_upgrade_delta(&before, &after);
+        assert_expected_upgrade_delta(imported.connection.get_database_backend(), &before, &after);
 
         default_schema::migrate(&imported.connection)
             .await

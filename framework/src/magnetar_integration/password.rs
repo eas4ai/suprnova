@@ -35,7 +35,7 @@ impl PasswordAuth {
                 password: secrecy::SecretString::from(password.to_owned()),
             })
             .await
-            .map_err(map_magnetar_password_error)
+            .map_err(map_magnetar_registration_error)
     }
 
     /// Verify a password, run the factor gate, and return a fresh session.
@@ -99,6 +99,25 @@ impl PasswordAuth {
                 Ok(SignInOutcome::FactorRequired { challenge_selector })
             }
         }
+    }
+}
+
+/// Map a Magnetar registration failure.
+///
+/// Registration refuses a weak password or an unusable address before any
+/// account exists, so the failure names its field as the framework's own
+/// validation errors do: 422, with the message under the field in `errors`.
+/// It reveals nothing about which addresses have accounts; an address that
+/// has one is accepted like a new one. Every other failure maps as a
+/// sign-in failure does.
+fn map_magnetar_registration_error(error: magnetar::Error) -> FrameworkError {
+    match error {
+        magnetar::Error::InvalidInput { field, message } => {
+            let mut errors = crate::error::ValidationErrors::new();
+            errors.add(field, message);
+            FrameworkError::validation_errors(errors)
+        }
+        error => map_magnetar_password_error(error),
     }
 }
 

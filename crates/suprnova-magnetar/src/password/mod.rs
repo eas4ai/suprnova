@@ -28,6 +28,51 @@ pub fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
 }
 
+/// The longest email address, in characters, that Magnetar stores or
+/// looks up.
+///
+/// RFC 5321 limits a forward path to 256 octets, two of them its angle
+/// brackets, so no deliverable address is longer. The default schema keeps
+/// addresses and email lockout identities in `varchar(255)` on MySQL and
+/// MariaDB, which refuse a longer write. Sign-up refuses a longer address
+/// as invalid input, and a sign-in with one answers as an unknown address
+/// does, without a lookup.
+pub const MAX_EMAIL_LENGTH: usize = 254;
+
+/// Whether a normalized address is short enough for any account to hold.
+pub(crate) fn email_fits(email: &str) -> bool {
+    email.chars().count() <= MAX_EMAIL_LENGTH
+}
+
+/// The validation error for an address longer than [`MAX_EMAIL_LENGTH`].
+pub(crate) fn email_too_long() -> crate::Error {
+    crate::Error::InvalidInput {
+        field: "email".to_owned(),
+        message: format!("must be at most {MAX_EMAIL_LENGTH} characters"),
+    }
+}
+
+/// Refuse a normalized sign-up address that is empty or longer than
+/// [`MAX_EMAIL_LENGTH`], before it reaches any store.
+#[cfg(any(
+    feature = "password",
+    feature = "magic-link",
+    feature = "passkey",
+    feature = "oauth"
+))]
+pub(crate) fn validate_sign_up_email(email: &str) -> crate::Result<()> {
+    if email.is_empty() {
+        return Err(crate::Error::InvalidInput {
+            field: "email".to_owned(),
+            message: "must not be empty".to_owned(),
+        });
+    }
+    if !email_fits(email) {
+        return Err(email_too_long());
+    }
+    Ok(())
+}
+
 /// Validate a candidate password against the ported torii policy:
 /// non-empty, not whitespace-only, and between 8 and 128 bytes.
 pub fn validate_password(password: &str) -> crate::Result<()> {
