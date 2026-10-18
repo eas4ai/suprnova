@@ -23,7 +23,7 @@ use crate::auth::{
     AuthenticationContext, FactorGate, SignInDecision, SignInMethod, VerifiedPrincipal,
 };
 use crate::first_email_proof::{FirstEmailProofMutation, FirstEmailProofStore};
-use crate::password::normalize_email;
+use crate::password::{normalize_email, validate_sign_up_email};
 use crate::plugin::{
     Effect, EffectResponse, LinkGenerator, MailDriver, Method, Plugin, PluginResult,
     RequestContext, RouteDescriptor, WireResponse,
@@ -113,12 +113,7 @@ impl MagicLinkService {
     /// [`MagicLinkIssued::Minted`]; it is never logged or persisted.
     pub async fn issue(&self, email: &str) -> Result<MagicLinkIssued> {
         let normalized = normalize_email(email);
-        if normalized.is_empty() {
-            return Err(Error::InvalidInput {
-                field: "email".to_owned(),
-                message: "must not be empty".to_owned(),
-            });
-        }
+        validate_sign_up_email(&normalized)?;
         let user = match self.users.find_by_email(&normalized).await? {
             Some(user) => user,
             None => match self.policy {

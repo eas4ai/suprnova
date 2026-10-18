@@ -30,6 +30,7 @@ use crate::oauth::{
     },
     identity::{OAUTH_PENDING_IDENTITY_KIND, PendingIdentityPayload},
 };
+use crate::password::{email_fits, email_too_long};
 #[cfg(feature = "magic-link")]
 use crate::plugins::magic_link::MAGIC_LINK_PURPOSE;
 use crate::storage::{AuthTransaction, PASSWORD_RESET_PURPOSE, SeaOrmStorage, TokenStore};
@@ -628,6 +629,9 @@ impl SqlFirstEmailProofStore {
                 field: "verified provider account".to_owned(),
                 message: "provider, provider account id, and email must be non-empty".to_owned(),
             });
+        }
+        if !email_fits(&input.email) {
+            return Err(email_too_long());
         }
         if let Some(winner) = self
             .provider_owner(&input.provider, &input.provider_account_id)

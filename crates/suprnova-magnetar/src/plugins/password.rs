@@ -17,8 +17,8 @@ use serde_json::json;
 use crate::abuse::AbusePolicy;
 use crate::auth::{AuthenticationContext, SignInDecision, SignInMethod, VerifiedPrincipal};
 use crate::password::{
-    AttemptVerdict, LockoutService, PasswordTarget, PasswordVerifier, RehashOutcome,
-    normalize_email, validate_password,
+    AttemptVerdict, LockoutService, PasswordTarget, PasswordVerifier, RehashOutcome, email_fits,
+    email_too_long, normalize_email, validate_password, validate_sign_up_email,
 };
 use crate::plugin::{
     Effect, EffectResponse, Method, Plugin, PluginResult, RequestContext, RouteDescriptor,
@@ -156,17 +156,31 @@ impl PasswordAuthService {
         password: &SecretString,
     ) -> Result<(Option<UserRecord>, AttemptVerdict)> {
         let email = normalize_email(email);
-        let user = self.users.find_by_email(&email).await?;
+        let user = find_account(self.users.as_ref(), &email).await?;
         let stored_hash = user.as_ref().and_then(|user| user.password_hash.clone());
         // Fixed-format work runs for every branch: unknown email,
-        // passwordless account, wrong password, and success all cost one
-        // bcrypt-format and one Argon2-format driver call.
+        // over-long email, passwordless account, wrong password, and
+        // success all cost one bcrypt-format and one Argon2-format driver
+        // call.
         let verdict = self
             .verifier
             .verify_attempt_blocking(stored_hash, password.clone())
             .await?;
         Ok((user, verdict))
     }
+}
+
+/// The account a sign-in address names, if any.
+///
+/// An address longer than [`crate::password::MAX_EMAIL_LENGTH`] names no
+/// account, since sign-up refuses it, so it is answered as an unknown
+/// address without a lookup, whatever the host's user store would make of
+/// it.
+async fn find_account(users: &dyn UserStore, email: &str) -> Result<Option<UserRecord>> {
+    if !email_fits(email) {
+        return Ok(None);
+    }
+    users.find_by_email(email).await
 }
 
 /// The canonical indistinguishable credential failure.
@@ -199,12 +213,7 @@ impl PasswordAuthProvider for PasswordAuthService {
     async fn register(&self, input: RegisterInput) -> Result<RegistrationOutcome> {
         validate_password(input.password.expose_secret())?;
         let email = normalize_email(&input.email);
-        if email.is_empty() {
-            return Err(Error::InvalidInput {
-                field: "email".to_owned(),
-                message: "must not be empty".to_owned(),
-            });
-        }
+        validate_sign_up_email(&email)?;
         let hash = self.verifier.mint_target_blocking(input.password).await?;
         if let Some(existing) = self.users.find_by_email(&email).await? {
             // Anti-enumeration and takeover protection: the equal-cost target
@@ -246,7 +255,7 @@ impl PasswordAuthProvider for PasswordAuthService {
         password: &SecretString,
     ) -> Result<()> {
         let email = normalize_email(email);
-        let user = self.users.find_by_email(&email).await?;
+        let user = find_account(self.users.as_ref(), &email).await?;
         let stored_hash = user.as_ref().and_then(|user| user.password_hash.clone());
         self.verifier
             .verify_work_only_blocking(stored_hash, password.clone())
@@ -461,6 +470,9 @@ impl PasswordPlugin {
         }
         if let Err(error) = validate_password(&password) {
             return Ok(bad_request(&error.to_string()));
+        }
+        if !email_fits(&identity) {
+            return Ok(bad_request(&email_too_long().to_string()));
         }
         let outcome = self
             .provider

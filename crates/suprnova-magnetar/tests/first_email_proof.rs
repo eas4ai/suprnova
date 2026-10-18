@@ -935,6 +935,40 @@ mod sqlite {
     }
 
     #[tokio::test]
+    async fn verified_provider_account_refuses_an_email_longer_than_any_account_holds() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        magnetar::default_schema::migrate(&database).await.unwrap();
+        let store =
+            SqlFirstEmailProofStore::new(database.clone(), Arc::new(AeadEncryptor::new([24; 32])));
+        let email = format!("{}@example.test", "a".repeat(242));
+        assert_eq!(email.chars().count(), 255);
+
+        let error = store
+            .create_verified_provider_account(
+                magnetar::first_email_proof::NewVerifiedProviderAccount {
+                    provider: "google".to_owned(),
+                    provider_account_id: "over-long-email-user".to_owned(),
+                    email,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, magnetar::Error::InvalidInput { field, message }
+                if field == "email" && message.contains("254")),
+            "an over-long address is a validation error: {error:?}"
+        );
+        assert!(
+            users::Entity::find()
+                .one(&database)
+                .await
+                .unwrap()
+                .is_none(),
+            "no account is created"
+        );
+    }
+
+    #[tokio::test]
     async fn verified_provider_account_is_initialized_as_email_verified() {
         let database = Database::connect("sqlite::memory:").await.unwrap();
         magnetar::default_schema::migrate(&database).await.unwrap();

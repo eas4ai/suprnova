@@ -898,3 +898,58 @@ async fn resend_invalidates_the_earlier_completion_token() {
     let stale = completion.consume(&token1).await;
     assert!(stale.is_err());
 }
+
+/// No account can hold an address past RFC 5321's 254 characters, and the
+/// default schema's column holds no more. Email completion refuses one
+/// before it mails a link that would create the account.
+#[tokio::test]
+async fn email_completion_refuses_an_email_longer_than_any_account_holds() {
+    let h = oauth_harness::harness().await;
+    let resolver = resolver(&h, AutoLinkPolicy::ExplicitLinkRequired);
+    let completion = completion(&h);
+    let outcome = resolver
+        .resolve(
+            identity("x", "sub-over-long", None, false),
+            OAuthIntent::SignIn,
+            None,
+            SessionMetadata::default(),
+        )
+        .await
+        .unwrap();
+    let IdentityOutcome::EmailCompletionRequired { pending_id } = outcome else {
+        panic!("expected EmailCompletionRequired");
+    };
+    let email = format!("{}@example.test", "a".repeat(242));
+    assert_eq!(email.chars().count(), 255);
+    let error = completion.request(&pending_id, &email).await.unwrap_err();
+    assert!(
+        matches!(&error, magnetar::Error::InvalidInput { field, message }
+            if field == "email" && message.contains("254")),
+        "an over-long address is a validation error: {error:?}"
+    );
+    assert_eq!(h.mail.count(), 0, "no completion link is sent");
+}
+
+/// A verified provider address past 254 characters creates no account.
+#[tokio::test]
+async fn a_verified_provider_email_longer_than_any_account_holds_is_refused() {
+    let h = oauth_harness::harness().await;
+    let resolver = resolver(&h, AutoLinkPolicy::ExplicitLinkRequired);
+    let email = format!("{}@example.test", "a".repeat(242));
+    let Err(error) = resolver
+        .resolve(
+            identity("google", "sub-over-long-verified", Some(&email), true),
+            OAuthIntent::SignIn,
+            None,
+            SessionMetadata::default(),
+        )
+        .await
+    else {
+        panic!("an over-long verified address must create no account");
+    };
+    assert!(
+        matches!(&error, magnetar::Error::InvalidInput { field, message }
+            if field == "email" && message.contains("254")),
+        "an over-long address is a validation error: {error:?}"
+    );
+}

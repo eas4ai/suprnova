@@ -230,9 +230,28 @@ impl LockoutService {
         &self.config
     }
 
+    /// Whether `identity` is an email address longer than
+    /// [`crate::password::MAX_EMAIL_LENGTH`].
+    ///
+    /// Sign-up refuses such an address, so no account holds it and a
+    /// sign-in with it never succeeds. Counting its attempts would protect
+    /// nothing, and the default schema's MySQL column could not store it,
+    /// so it is always unlocked and never reaches the store. Identities
+    /// that are not addresses ([`Self::without_user_lock`]) keep every
+    /// length.
+    fn over_long_email(&self, identity: &str) -> bool {
+        self.users.is_some() && !crate::password::email_fits(identity)
+    }
+
+    /// Whether attempts against `identity` go uncounted: the lockout is off,
+    /// or the identity is an over-long address.
+    fn uncounted(&self, identity: &str) -> bool {
+        !self.config.enabled || self.over_long_email(identity)
+    }
+
     /// Compute the current status for an identity key.
     pub async fn status(&self, identity: &str) -> Result<LockoutStatus> {
-        if !self.config.enabled {
+        if self.uncounted(identity) {
             return Ok(LockoutStatus::unlocked(identity));
         }
         let window_start = Utc::now() - self.config.lockout_period;
@@ -270,7 +289,7 @@ impl LockoutService {
         identity: &str,
         context: Option<&str>,
     ) -> Result<FailedAttempt> {
-        if !self.config.enabled {
+        if self.uncounted(identity) {
             return Ok(FailedAttempt {
                 status: LockoutStatus::unlocked(identity),
                 locked_event: false,
@@ -308,7 +327,7 @@ impl LockoutService {
         identity: &str,
         context: Option<&str>,
     ) -> Result<AttemptAdmission> {
-        if !self.config.enabled {
+        if self.uncounted(identity) {
             return Ok(AttemptAdmission {
                 admitted: true,
                 status: LockoutStatus::unlocked(identity),
@@ -422,6 +441,9 @@ impl LockoutService {
     /// Success-path bookkeeping: clear the counter and the user lock stamp.
     /// Not an admin unlock; no transition signal is produced.
     pub async fn reset_attempts(&self, identity: &str) -> Result<()> {
+        if self.over_long_email(identity) {
+            return Ok(());
+        }
         self.store.clear_attempts(identity).await?;
         if let Some(users) = &self.users {
             users.set_locked_at_by_email(identity, None).await?;
@@ -433,6 +455,9 @@ impl LockoutService {
     /// so hosts fire their `AccountUnlocked` notification only on a true
     /// transition.
     pub async fn unlock_account(&self, identity: &str) -> Result<bool> {
+        if self.over_long_email(identity) {
+            return Ok(false);
+        }
         let was_locked = self.is_locked(identity).await?;
         self.store.clear_attempts(identity).await?;
         if let Some(users) = &self.users {

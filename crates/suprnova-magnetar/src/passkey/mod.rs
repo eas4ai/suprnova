@@ -29,7 +29,7 @@ use crate::auth::{
     AuthenticationContext, FactorGate, SignInDecision, SignInMethod, VerifiedPrincipal,
 };
 use crate::crypto::Encryptor;
-use crate::password::normalize_email;
+use crate::password::{normalize_email, validate_sign_up_email};
 use crate::sessions::SessionMetadata;
 use crate::storage::{
     CeremonyStore, CredentialActor, NewUser, PasskeyRow, PasskeyStore, SignUpAccount, UserStore,
@@ -165,12 +165,7 @@ impl PasskeyAuthService {
         intent: RegistrationIntent,
     ) -> Result<BegunRegistration> {
         let email = normalize_email(&intent.email);
-        if email.is_empty() {
-            return Err(Error::InvalidInput {
-                field: "email".to_owned(),
-                message: "must not be empty".to_owned(),
-            });
-        }
+        validate_sign_up_email(&email)?;
         // A sign-up that loses the race for a new address meets the
         // existing-account rule, as if the lookup had found the account the
         // other sign-up created.

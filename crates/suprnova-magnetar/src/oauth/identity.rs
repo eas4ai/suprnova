@@ -32,7 +32,7 @@ use super::authorization::{OAuthIntent, decrypt, encrypt, new_selector};
 use crate::auth::{AuthenticationContext, SignInMethod, VerifiedPrincipal};
 use crate::crypto::Encryptor;
 use crate::first_email_proof::{FirstEmailProofStore, NewVerifiedProviderAccount};
-use crate::password::normalize_email;
+use crate::password::{normalize_email, validate_sign_up_email};
 use crate::sessions::SessionMetadata;
 use crate::storage::{
     CeremonyStore, CredentialActor, LinkedAccountStore, NewCeremony, NewLinkedAccount, UserStore,
@@ -331,6 +331,8 @@ impl IdentityResolver {
             let pending_id = self.create_pending_identity(&identity).await?;
             return Ok(IdentityOutcome::EmailCompletionRequired { pending_id });
         };
+        // A verified address no account can hold creates none.
+        validate_sign_up_email(&normalized)?;
 
         match self.users.find_by_email(&normalized).await? {
             Some(user) if user.email_verified_at.is_none() => {
