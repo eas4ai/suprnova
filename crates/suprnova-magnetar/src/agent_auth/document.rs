@@ -353,7 +353,7 @@ impl Core {
         );
         row(
             "rate_limited (429)",
-            "identity endpoint",
+            "identity, claim and token endpoints",
             "Back off and retry.",
         );
         doc.push('\n');

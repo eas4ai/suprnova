@@ -591,6 +591,34 @@ async fn agent_007_a_previous_key_retires() {
 }
 
 #[tokio::test]
+async fn agent_007_a_failed_grant_issue_leaves_no_unrecorded_grant() {
+    let (options, faults) = faulty();
+    let h = sqlite_harness_with(options).await;
+    let registration = h.anonymous().await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let assertion = registration["identity_assertion"]
+        .as_str()
+        .expect("assertion");
+    faults.fail("create_grant", 1);
+    let failed = h.exchange(assertion).await;
+    assert_eq!(status(&failed), 500, "{:?}", body(&failed));
+    assert!(
+        grants_of(&h, id).await.is_empty(),
+        "no grant exists that the registration does not name"
+    );
+    assert!(
+        h.registration(id).await.grant_id.is_some(),
+        "the grant was recorded before it was issued"
+    );
+    let token = access_token(&h.exchange(assertion).await);
+    assert!(matches!(
+        h.verify(&token).await,
+        AccessVerification::Valid(_)
+    ));
+    assert_eq!(grants_of(&h, id).await.len(), 1);
+}
+
+#[tokio::test]
 async fn agent_007_an_epoch_change_ends_a_bound_agent() {
     let h = sqlite_harness().await;
     let (registration, user_id) = h.claimed_anonymous("epoch@example.test").await;
