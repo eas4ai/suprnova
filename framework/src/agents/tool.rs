@@ -305,6 +305,9 @@ pub struct ToolRegistry {
 impl ToolRegistry {
     /// Check every `#[tool]` linked into the application against `router`.
     ///
+    /// A tool whose handler the router does not serve at all is left out,
+    /// with one warning naming each such tool.
+    ///
     /// # Errors
     ///
     /// The first problem, naming the tool:
@@ -314,7 +317,8 @@ impl ToolRegistry {
     /// - two declarations of one scope disagree on its description, or a
     ///   tool names a scope no `tool_scopes!` declared;
     /// - a tool's handler serves several routes and the tool names none of
-    ///   them with `route = "..."`;
+    ///   them with `route = "..."`, or its `route = "..."` names none of the
+    ///   routes the handler serves;
     /// - a path parameter of the tool's route is not a field of its input;
     /// - a tool's input is not an object.
     pub fn build(router: &Router) -> Result<Self, FrameworkError> {
@@ -430,12 +434,36 @@ fn resolve(
 ) -> Result<Option<RegisteredTool>, FrameworkError> {
     let handler = (record.decl.handler)();
     let mut routes = router.bindings.routes_for(handler);
+    // Only a handler this router does not serve at all is left out. A
+    // `route = "..."` that names none of the routes the handler serves is a
+    // wrong declaration, and leaving the tool out would serve its route
+    // without the tool's caller checks.
+    if routes.is_empty() {
+        return Ok(None);
+    }
     if let Some(name) = record.decl.route {
+        let served = routes
+            .iter()
+            .map(
+                |(method, pattern)| match router.route_name(method, pattern) {
+                    Some(named) => format!("{method} {pattern} (named `{named}`)"),
+                    None => format!("{method} {pattern} (unnamed)"),
+                },
+            )
+            .collect::<Vec<_>>()
+            .join(", ");
         routes.retain(|(method, pattern)| router.route_name(method, pattern) == Some(name));
+        if routes.is_empty() {
+            return Err(FrameworkError::internal(format!(
+                "tool `{}` declares #[tool(route = \"{name}\")], but its handler {} serves no \
+                 route of that name; it serves {served}",
+                record.name(),
+                record.handler_path()
+            )));
+        }
     }
     let (method, pattern) = match routes.len() {
         1 => routes.remove(0),
-        0 => return Ok(None),
         _ => {
             let listed = routes
                 .iter()
