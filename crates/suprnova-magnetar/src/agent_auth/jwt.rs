@@ -34,6 +34,10 @@ pub(crate) struct AssertionClaims {
     pub(crate) registration_type: String,
     /// The registration's assertion version when this was signed.
     pub(crate) ver: u32,
+    /// The bound user's authentication epoch when this was signed; absent
+    /// before a user is bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) auth_epoch: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) email: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

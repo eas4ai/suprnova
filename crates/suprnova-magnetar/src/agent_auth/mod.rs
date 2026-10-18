@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 
 use crate::abuse::{AbuseLimiter, Permit};
 use crate::authorization_server::{
-    AuthorizationServer, ClientGrantSummary, IssueTokens, NewGrant, ScopeDefinition,
+    AuthorizationServer, ClientGrantSummary, IssueTokens, NewGrant, ScopeDefinition, TokenIssuer,
 };
 use crate::plugin::{
     DurableLifecycleDelivery, EffectResponse, LifecycleEvent, LifecycleEventKind, WireResponse,
@@ -471,7 +471,7 @@ impl AgentAuth {
 
     /// Answer the identity endpoint for a parsed JSON body.
     pub async fn identity(&self, body: &Value, client_address: Option<&str>) -> WireResponse {
-        self.core.identity(body, client_address).await
+        self.core.identity(&self.server, body, client_address).await
     }
 
     /// Answer the claim endpoint: start (or restart) a claim attempt.
@@ -574,7 +574,7 @@ impl AgentAuth {
             return Ok(false);
         }
         self.core
-            .end_registration(&self.server, &record, None, &[])
+            .end_registration(&self.server.token_issuer(), &record, None, &[])
             .await
     }
 
@@ -600,7 +600,7 @@ impl AgentAuth {
                 if let Some(record) = self.core.store.find_registration(&id).await?
                     && self
                         .core
-                        .end_registration(&self.server, &record, None, &[])
+                        .end_registration(&self.server.token_issuer(), &record, None, &[])
                         .await?
                 {
                     revoked += 1;
@@ -635,7 +635,9 @@ impl AgentAuth {
                 }
                 expired += 1;
                 let record = self.core.store.find_registration(&id).await?;
-                self.core.revoke_grants(&self.server, &id).await?;
+                self.core
+                    .revoke_grants(&self.server.token_issuer(), &id)
+                    .await?;
                 // No request causes an expiry; the event carries the address
                 // the registration came from.
                 let (kind, address) = record
@@ -769,10 +771,9 @@ impl Core {
     /// Returns how many were live.
     pub(crate) async fn revoke_grants(
         &self,
-        server: &AuthorizationServer,
+        issuer: &TokenIssuer<'_>,
         registration_id: &str,
     ) -> Result<u64> {
-        let issuer = server.token_issuer();
         let mut revoked = 0;
         let mut first_failure = None;
         // Every grant is tried, each twice, before a failure is reported: a
@@ -809,7 +810,7 @@ impl Core {
     /// caught by the issuing path's own recheck.
     pub(crate) async fn end_registration(
         &self,
-        server: &AuthorizationServer,
+        issuer: &TokenIssuer<'_>,
         record: &RegistrationRecord,
         client_address: Option<&str>,
         extra: &[(&str, String)],
@@ -821,7 +822,7 @@ impl Core {
         {
             return Ok(false);
         }
-        self.revoke_grants(server, &record.id).await?;
+        self.revoke_grants(issuer, &record.id).await?;
         let mut attributes = vec![
             ("registration_id", record.id.clone()),
             ("registration_type", record.kind.clone()),
@@ -943,6 +944,14 @@ impl Core {
             .and_then(|issuer| url::Url::parse(issuer).ok())
             .and_then(|url| url.host_str().map(str::to_owned))
             .unwrap_or_default()
+    }
+
+    /// Whether the user's authentication epoch moved on since the
+    /// registration was bound: a password change or signing out everywhere
+    /// ends a bound agent as it ends sessions. A user with no epoch has
+    /// nothing to compare.
+    pub(crate) fn epoch_moved(record: &RegistrationRecord, user: &AgentUser) -> bool {
+        user.auth_epoch.is_some() && user.auth_epoch != record.auth_epoch
     }
 
     /// Whether a registration is bound to a user and holds its full scopes.

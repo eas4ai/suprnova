@@ -82,6 +82,10 @@ pub struct RegistrationRecord {
     /// The version identity assertions must carry. A claim moves it on, so
     /// an assertion signed before the claim stops working.
     pub assertion_version: u32,
+    /// The bound user's authentication epoch when the registration was
+    /// bound. Once the user's epoch moves on (a password change, signing
+    /// out everywhere) the registration is ended, as sessions are.
+    pub auth_epoch: Option<u64>,
     /// The client address the registration came from, for the audit trail
     /// of what happens to it later without a request, such as expiry.
     pub client_address: Option<String>,
@@ -150,17 +154,19 @@ pub trait AgentAuthStore: Send + Sync {
         attempt_token_hash: &str,
         max_failures: u32,
     ) -> Result<bool>;
-    /// Mark the registration claimed by `user_id`, spend the attempt and
-    /// move the assertion version on: only while the attempt token, the
-    /// user code digest and the failure count still allow it and both the
-    /// code and the window are open at `now`. Returns whether this call
-    /// won.
+    /// Mark the registration claimed by `user_id` at the user's
+    /// `auth_epoch`, spend the attempt and move the assertion version on:
+    /// only while the attempt token, the user code digest and the failure
+    /// count still allow it and both the code and the window are open at
+    /// `now`. Returns whether this call won.
+    #[allow(clippy::too_many_arguments)]
     async fn confirm_claim(
         &self,
         id: &str,
         attempt_token_hash: &str,
         user_code_hash: &str,
         user_id: &str,
+        auth_epoch: Option<u64>,
         max_failures: u32,
         now: DateTime<Utc>,
     ) -> Result<bool>;

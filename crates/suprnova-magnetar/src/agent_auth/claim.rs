@@ -252,6 +252,7 @@ impl Core {
                 &attempt_hash,
                 &code_hash,
                 &user.user_id,
+                user.auth_epoch,
                 self.config.max_user_code_failures,
                 now,
             )
@@ -267,7 +268,9 @@ impl Core {
         }
         // The pre-claim tokens end here: the canonical credential is the
         // one the agent's next poll receives.
-        let revoked = self.revoke_grants(server, &record.id).await?;
+        let revoked = self
+            .revoke_grants(&server.token_issuer(), &record.id)
+            .await?;
         if revoked > 0 {
             self.emit(
                 LifecycleEventKind::AgentTokenRevoked,

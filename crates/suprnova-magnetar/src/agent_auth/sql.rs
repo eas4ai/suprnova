@@ -80,6 +80,8 @@ pub mod registrations {
         pub scopes: String,
         #[sea_orm(column_type = "Integer")]
         pub assertion_version: i32,
+        #[sea_orm(column_type = "BigInteger", nullable)]
+        pub auth_epoch: Option<i64>,
         #[sea_orm(column_type = "Text", nullable)]
         pub client_address: Option<String>,
         pub created_at: DateTimeUtc,
@@ -317,11 +319,27 @@ fn record(model: registrations::Model) -> RegistrationRecord {
         scopes: model.scopes.split_whitespace().map(str::to_owned).collect(),
         // Likewise a version no assertion carries.
         assertion_version: u32::try_from(model.assertion_version).unwrap_or(u32::MAX),
+        // A negative epoch was never written; it reads as one no user
+        // holds, which ends the registration rather than skipping the check.
+        auth_epoch: model
+            .auth_epoch
+            .map(|epoch| u64::try_from(epoch).unwrap_or(u64::MAX)),
         client_address: model.client_address,
         created_at: model.created_at,
         claimed_at: model.claimed_at,
         revoked_at: model.revoked_at,
     }
+}
+
+fn epoch_to_db(epoch: Option<u64>) -> Result<Option<i64>> {
+    epoch
+        .map(|value| {
+            i64::try_from(value).map_err(|_| Error::InvalidInput {
+                field: "auth_epoch".to_owned(),
+                message: "exceeds the database integer range".to_owned(),
+            })
+        })
+        .transpose()
 }
 
 fn to_i32(value: u32, field: &str) -> Result<i32> {
@@ -372,6 +390,7 @@ impl AgentAuthStore for SqlAgentAuthStore {
             subject: Set(record.subject),
             scopes: Set(record.scopes.join(" ")),
             assertion_version: Set(to_i32(record.assertion_version, "assertion_version")?),
+            auth_epoch: Set(epoch_to_db(record.auth_epoch)?),
             client_address: Set(record.client_address),
             created_at: Set(record.created_at),
             claimed_at: Set(record.claimed_at),
@@ -534,6 +553,7 @@ impl AgentAuthStore for SqlAgentAuthStore {
         attempt_token_hash: &str,
         user_code_hash: &str,
         user_id: &str,
+        auth_epoch: Option<u64>,
         max_failures: u32,
         now: DateTime<Utc>,
     ) -> Result<bool> {
@@ -543,6 +563,10 @@ impl AgentAuthStore for SqlAgentAuthStore {
             .col_expr(
                 registrations::Column::UserId,
                 Expr::value(user_id.to_owned()),
+            )
+            .col_expr(
+                registrations::Column::AuthEpoch,
+                Expr::value(epoch_to_db(auth_epoch)?),
             )
             .col_expr(registrations::Column::ClaimedAt, Expr::value(now))
             .col_expr(

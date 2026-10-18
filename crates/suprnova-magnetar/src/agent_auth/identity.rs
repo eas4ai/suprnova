@@ -19,6 +19,7 @@ use super::{
     agent_error, digest, failure, later, new_user_code, normalize_email, random_hex, rate_limited,
     respond, timestamp,
 };
+use crate::authorization_server::AuthorizationServer;
 use crate::plugin::{LifecycleEventKind, WireResponse};
 use crate::{Error, Result};
 
@@ -87,6 +88,7 @@ impl Core {
             jti: random_hex(16),
             registration_type: record.kind.clone(),
             ver: record.assertion_version,
+            auth_epoch: user.and_then(|user| user.auth_epoch),
             email: user.map(|user| user.email.clone()),
             email_verified: user.map(|_| true),
         };
@@ -96,6 +98,7 @@ impl Core {
 
     pub(crate) async fn identity(
         &self,
+        server: &AuthorizationServer,
         body: &Value,
         client_address: Option<&str>,
     ) -> WireResponse {
@@ -106,7 +109,7 @@ impl Core {
             Some("anonymous") => self.register_anonymous(client_address).await,
             Some("service_auth") => self.register_service_auth(fields, client_address).await,
             Some("identity_assertion") => {
-                self.register_identity_assertion(fields, client_address)
+                self.register_identity_assertion(server, fields, client_address)
                     .await
             }
             Some(_) => Ok(agent_error(
@@ -156,6 +159,7 @@ impl Core {
             subject: None,
             scopes: self.config.post_claim_scopes.clone(),
             assertion_version: 1,
+            auth_epoch: None,
             client_address: client_address.map(str::to_owned),
             created_at: now,
             claimed_at: None,
@@ -248,6 +252,7 @@ impl Core {
             subject: None,
             scopes: self.config.post_claim_scopes.clone(),
             assertion_version: 1,
+            auth_epoch: None,
             client_address: client_address.map(str::to_owned),
             created_at: now,
             claimed_at: None,
@@ -273,6 +278,7 @@ impl Core {
 
     async fn register_identity_assertion(
         &self,
+        server: &AuthorizationServer,
         fields: &Map<String, Value>,
         client_address: Option<&str>,
     ) -> Result<WireResponse> {
@@ -367,7 +373,7 @@ impl Core {
                 "this ID-JAG's jti was already used",
             ));
         }
-        self.match_delegation(&verified.trusted, checked, client_address, now)
+        self.match_delegation(server, &verified.trusted, checked, client_address, now)
             .await
     }
 
@@ -507,6 +513,7 @@ impl Core {
     /// then the provisioning policy.
     async fn match_delegation(
         &self,
+        server: &AuthorizationServer,
         trusted: &TrustedIssuer,
         checked: CheckedIdJag,
         client_address: Option<&str>,
@@ -517,8 +524,14 @@ impl Core {
         for _ in 0..2 {
             let outcome = match self.store.find_by_delegation(&delegation_key).await? {
                 Some(existing) => {
-                    self.answer_existing_delegation(existing, &correlation, client_address, now)
-                        .await
+                    self.answer_existing_delegation(
+                        server,
+                        existing,
+                        &correlation,
+                        client_address,
+                        now,
+                    )
+                    .await
                 }
                 None => {
                     self.answer_new_delegation(
@@ -590,6 +603,7 @@ impl Core {
 
     async fn answer_existing_delegation(
         &self,
+        server: &AuthorizationServer,
         existing: RegistrationRecord,
         correlation: &[(&'static str, String)],
         client_address: Option<&str>,
@@ -604,6 +618,22 @@ impl Core {
                     "the account this delegation was bound to no longer exists",
                 ));
             };
+            if Core::epoch_moved(&existing, &user) {
+                // The user signed out everywhere or changed their password
+                // since the link: it ends, and this presentation starts
+                // over as a new delegation, which steps up again.
+                self.end_registration(
+                    &server.token_issuer(),
+                    &existing,
+                    client_address,
+                    &[("reason", "epoch_changed".to_owned())],
+                )
+                .await?;
+                return Err(Error::Conflict {
+                    resource: "agent registration".to_owned(),
+                    message: "the delegation ended with the user's epoch".to_owned(),
+                });
+            }
             let (assertion, expires) = self.assertion(&existing, Some(&user), now)?;
             let mut attributes = vec![("registration_id", existing.id.clone())];
             attributes.extend(correlation.iter().cloned());
@@ -693,6 +723,7 @@ impl Core {
             subject: Some(checked.subject.clone()),
             scopes: self.config.post_claim_scopes.clone(),
             assertion_version: 1,
+            auth_epoch: None,
             client_address: client_address.map(str::to_owned),
             created_at: now,
             claimed_at: None,
@@ -735,6 +766,7 @@ impl Core {
             subject: Some(checked.subject.clone()),
             scopes: self.config.post_claim_scopes.clone(),
             assertion_version: 1,
+            auth_epoch: user.auth_epoch,
             client_address: client_address.map(str::to_owned),
             created_at: now,
             claimed_at: None,

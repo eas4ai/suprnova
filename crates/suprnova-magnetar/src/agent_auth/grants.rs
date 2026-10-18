@@ -105,6 +105,12 @@ impl GrantHandler for JwtBearerGrant {
             }
         };
         let user = bound_user(core, &record).await?;
+        if let Some(user) = &user
+            && (Core::epoch_moved(&record, user)
+                || (user.auth_epoch.is_some() && claims.auth_epoch != user.auth_epoch))
+        {
+            return Err(end_for_epoch(core, issuer, &record, request.client_address()).await);
+        }
         let resource = request
             .param("resource")
             .map_or_else(|| core.default_resource.clone(), str::to_owned);
@@ -124,6 +130,32 @@ impl GrantHandler for JwtBearerGrant {
         .await;
         Ok(response)
     }
+}
+
+/// End a bound registration whose user's epoch moved on, and answer for
+/// it. The answer is `invalid_grant` whether or not the revocation was
+/// stored: the assertion must not work, and a failed revocation is retried
+/// by the next presentation, which finds the epoch still moved.
+async fn end_for_epoch(
+    core: &Core,
+    issuer: &TokenIssuer<'_>,
+    record: &RegistrationRecord,
+    client_address: Option<&str>,
+) -> TokenError {
+    if let Err(error) = core
+        .end_registration(
+            issuer,
+            record,
+            client_address,
+            &[("reason", "epoch_changed".to_owned())],
+        )
+        .await
+    {
+        tracing::error!(error = %error, registration_id = %record.id, "ending an agent registration after an epoch change failed");
+    }
+    TokenError::invalid_grant(
+        "the user signed out everywhere or changed their password; claim the agent again",
+    )
 }
 
 /// The user a bound registration acts for; `invalid_grant` when the user
@@ -257,6 +289,11 @@ impl GrantHandler for ClaimGrant {
             return Err(expired_token("The claim ceremony window has closed."));
         }
         let user = bound_user(core, &record).await?;
+        if let Some(user) = &user
+            && Core::epoch_moved(&record, user)
+        {
+            return Err(end_for_epoch(core, issuer, &record, request.client_address()).await);
+        }
         let mut response = core
             .issue_agent_grant(
                 issuer,

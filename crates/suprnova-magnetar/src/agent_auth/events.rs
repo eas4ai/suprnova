@@ -157,7 +157,7 @@ impl Core {
             let delegation = digest(&format!("{issuer}\n{subject}"));
             if let Some(record) = self.store.find_by_delegation(&delegation).await? {
                 self.end_registration(
-                    server,
+                    &server.token_issuer(),
                     &record,
                     client_address,
                     &[("reason", "security_event".to_owned())],

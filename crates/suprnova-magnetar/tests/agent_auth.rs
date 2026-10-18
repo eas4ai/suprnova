@@ -411,6 +411,82 @@ async fn agent_007_assertions_signed_before_a_key_rotation_still_verify() {
 }
 
 #[tokio::test]
+async fn agent_007_an_epoch_change_ends_a_bound_agent() {
+    let h = sqlite_harness().await;
+    let (registration, user_id) = h.claimed_anonymous("epoch@example.test").await;
+    let id = registration["registration_id"].as_str().expect("id");
+    assert!(
+        jwt_claims(registration["identity_assertion"].as_str().expect("v1"))
+            .get("auth_epoch")
+            .is_none(),
+        "a pre-claim assertion has no user and no epoch"
+    );
+    let claimed = body(
+        &h.poll(registration["claim_token"].as_str().expect("claim token"))
+            .await,
+    );
+    let token = claimed["access_token"].as_str().expect("access");
+    let assertion = claimed["identity_assertion"].as_str().expect("v2");
+    assert_eq!(
+        jwt_claims(assertion)["auth_epoch"],
+        0,
+        "a user-bound assertion records the user's epoch"
+    );
+    assert!(matches!(
+        h.verify(token).await,
+        AccessVerification::Valid(_)
+    ));
+
+    magnetar::sessions::JwtEpochStore::bump_auth_epoch(h.storage.as_ref(), &user_id)
+        .await
+        .expect("a password change moves the epoch");
+    assert_eq!(
+        h.verify(token).await,
+        AccessVerification::Invalid(InvalidAccessReason::EpochChanged)
+    );
+    let again = h.exchange(assertion).await;
+    assert_eq!(status(&again), 400, "{:?}", body(&again));
+    assert_eq!(body(&again)["error"], "invalid_grant");
+    assert_eq!(h.registration(id).await.status, "revoked");
+    let revoked_events = h.events.of(LifecycleEventKind::AgentRegistrationRevoked);
+    assert_eq!(revoked_events.len(), 1);
+    assert_eq!(revoked_events[0].attributes["reason"], "epoch_changed");
+    assert_eq!(
+        body(&h.exchange(assertion).await)["error"],
+        "invalid_grant",
+        "the agent must claim again"
+    );
+}
+
+#[tokio::test]
+async fn agent_008_an_epoch_change_makes_a_provider_agent_link_again() {
+    let h = sqlite_harness().await;
+    let email = "linked.provider@example.test";
+    let first = body(&present_subject(&h, "epoch-subject", email).await);
+    let old_assertion = first["identity_assertion"].as_str().expect("assertion");
+    let token = access_token(&h.exchange(old_assertion).await);
+    let (_, _, user, _) = agent_kind(&h.verify(&token).await);
+    let user_id = user.expect("a bound user");
+    magnetar::sessions::JwtEpochStore::bump_auth_epoch(h.storage.as_ref(), &user_id)
+        .await
+        .expect("sign out everywhere moves the epoch");
+    let relinked = present_subject(&h, "epoch-subject", email).await;
+    assert_eq!(status(&relinked), 401, "{:?}", body(&relinked));
+    assert_eq!(body(&relinked)["error"], "interaction_required");
+    assert_ne!(body(&relinked)["registration_id"], first["registration_id"]);
+    assert_eq!(
+        h.registration(first["registration_id"].as_str().expect("id"))
+            .await
+            .status,
+        "revoked"
+    );
+    assert_eq!(
+        body(&h.exchange(old_assertion).await)["error"],
+        "invalid_grant"
+    );
+}
+
+#[tokio::test]
 async fn agent_007_an_expired_or_tampered_service_assertion_is_invalid_grant() {
     let h = sqlite_harness().await;
     let registration = h.anonymous().await;
