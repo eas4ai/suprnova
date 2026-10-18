@@ -316,12 +316,15 @@ impl DurableLifecycleDelivery for RecordingEvents {
     }
 }
 
+/// A pause point: notified when reached, released by the test.
+type Gate = (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+
 /// Failures and lost races to inject into the stores, by method name.
 #[derive(Default)]
 pub struct Faults {
     failures: Mutex<HashMap<&'static str, u32>>,
     losses: Mutex<HashMap<&'static str, u32>>,
-    gates: Mutex<HashMap<&'static str, (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    gates: Mutex<HashMap<&'static str, Gate>>,
 }
 
 impl Faults {
@@ -338,10 +341,7 @@ impl Faults {
 
     /// Pause the next call of `method` right after it commits: the first
     /// notify fires when it is reached, and the call waits for the second.
-    pub fn gate(
-        &self,
-        method: &'static str,
-    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+    pub fn gate(&self, method: &'static str) -> Gate {
         let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         self.gates
