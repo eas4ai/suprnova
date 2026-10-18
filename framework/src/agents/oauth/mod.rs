@@ -1,55 +1,6 @@
 //! The Magnetar authorization server, set up for the MCP endpoint
 //! (AGENT-005, the client half of AGENT-010 and the framework pages of
-//! AGENT-017).
-//!
-//! [`AgentsConfig::oauth_server`] turns it on:
-//!
-//! ```rust,ignore
-//! use suprnova::agents::{AgentsConfig, OAuthServer};
-//!
-//! pub fn register() -> Router {
-//!     Router::new()
-//!         .post("/posts", posts::store)
-//!         .agents(AgentsConfig::new().oauth_server(OAuthServer::new()))
-//! }
-//! ```
-//!
-//! When the router is built, the framework builds the server from the
-//! application's configuration:
-//!
-//! - **issuer**: the application's public URL (`APP_URL`), path prefix
-//!   included, so its metadata is at `<issuer>/.well-known/...` under the
-//!   application's own root;
-//! - **resource**: the MCP endpoint's canonical URL, the one a token is
-//!   bound to;
-//! - **scopes**: every scope `tool_scopes!` declared, with its description;
-//! - **sign-in**: the application's login route (`/login` with
-//!   `return_to`, unless set);
-//! - **client metadata documents**: fetched through Magnetar's fenced
-//!   [`ReqwestPinnedClient`](magnetar::authorization_server::ReqwestPinnedClient);
-//! - **budgets**: the framework's rate limiter;
-//! - **storage**: the application's database connection.
-//!
-//! It mounts the authorization server's routes under `/oauth`, the default
-//! approval page at `/oauth/approve` and the default connected-agents page at
-//! `/oauth/connected`, registers the resolver that turns its access tokens
-//! into user callers, and serves its metadata at the well-known locations.
-//! Its four tables come from [`OAuthServer::migrate`], or from the Magnetar
-//! default engine's migrations when [`init_magnetar`](crate::init_magnetar)
-//! applies them.
-//!
-//! # Replacing the pages
-//!
-//! The default pages are plain server-rendered HTML. An application that
-//! renders its own approval page names it with
-//! [`OAuthServer::custom_approval_page`]; the authorization endpoint then
-//! sends the user to that path with the pending authorization's id in the
-//! `authorization` query parameter. The page reads the pending
-//! authorization as JSON from `GET /oauth/authorizations/{id}` and posts
-//! the user's choice to `POST /oauth/authorizations/{id}` as the form field
-//! `decision` (`approve` or `deny`) with the CSRF token. An application that
-//! lists grants itself calls [`OAuthServer::custom_connected_agents_page`]
-//! and reads and revokes them through [`ConnectedAgents`].
+//! AGENT-017). [`OAuthServer`] documents what it builds and mounts.
 
 mod grants;
 mod pages;
@@ -82,11 +33,59 @@ const CLIENT_ROUTES: [&str; 3] = [
 ];
 
 /// How an MCP client signs a user in: the Magnetar authorization server,
-/// set up from the application's configuration (see the
-/// [module documentation](self)).
+/// set up from the application's configuration.
 ///
-/// Every setting has a default, so `OAuthServer::new()` is a working
-/// server.
+/// [`AgentsConfig::oauth_server`] turns it on, and every setting has a
+/// default, so `OAuthServer::new()` is a working server:
+///
+/// ```rust,ignore
+/// use suprnova::agents::{AgentsConfig, OAuthServer};
+///
+/// pub fn register() -> Router {
+///     Router::new()
+///         .post("/posts", posts::store)
+///         .agents(AgentsConfig::new().oauth_server(OAuthServer::new()))
+/// }
+/// ```
+///
+/// When the router is built, the framework builds the server from the
+/// application's configuration:
+///
+/// - **issuer**: the application's public URL (`APP_URL`), path prefix
+///   included, so its metadata is at `<issuer>/.well-known/...` under the
+///   application's own root;
+/// - **resource**: the MCP endpoint's canonical URL, the one a token is
+///   bound to;
+/// - **scopes**: every scope `tool_scopes!` declared, with its description;
+/// - **sign-in**: the application's login route (`/login` with
+///   `return_to`, unless set);
+/// - **client metadata documents**: fetched through Magnetar's fenced
+///   [`ReqwestPinnedClient`](magnetar::authorization_server::ReqwestPinnedClient);
+/// - **budgets**: the framework's rate limiter;
+/// - **storage**: the application's database connection.
+///
+/// It mounts the authorization server's routes under `/oauth`, the default
+/// approval page at `/oauth/approve` and the default connected-agents page
+/// at `/oauth/connected`, registers the resolver that turns its access
+/// tokens into user callers, and serves its metadata at the well-known
+/// locations. Its four tables come from [`OAuthServer::migrate`], or from the
+/// Magnetar default engine's migrations when
+/// [`init_magnetar`](crate::init_magnetar) applies them.
+///
+/// # Replacing the pages
+///
+/// The default pages are plain server-rendered HTML. An application that
+/// renders its own approval page names it with
+/// [`custom_approval_page`](Self::custom_approval_page); the authorization
+/// endpoint then sends the user to that path with the pending
+/// authorization's id in the `authorization` query parameter. The page
+/// reads the pending authorization as JSON from
+/// `GET /oauth/authorizations/{id}` and posts the user's choice to
+/// `POST /oauth/authorizations/{id}` as the form field `decision`
+/// (`approve` or `deny`) with the CSRF token. An application that lists
+/// grants itself calls
+/// [`custom_connected_agents_page`](Self::custom_connected_agents_page) and
+/// reads and revokes them through [`ConnectedAgents`].
 #[derive(Clone)]
 pub struct OAuthServer {
     connection: Option<DatabaseConnection>,
@@ -188,7 +187,8 @@ impl OAuthServer {
     /// serve no default page. The page must require the signed-in user,
     /// name the client, its host and every requested scope, post the
     /// decision with the CSRF token and refuse to be framed (AGENT-005);
-    /// see the module documentation for the two routes it uses.
+    /// the type's "Replacing the pages" section names the two routes it
+    /// uses.
     pub fn custom_approval_page(mut self, path: impl Into<String>) -> Self {
         self.approval_path = leading_slash(path.into());
         self.default_approval_page = false;

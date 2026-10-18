@@ -157,7 +157,7 @@ pub(super) async fn list(
         .filter(|grant| grant.kind == magnetar::authorization_server::USER_GRANT_KIND)
         .map(ClientGrant::from)
         .collect();
-    grants.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    grants.sort_by_key(|grant| std::cmp::Reverse(grant.created_at));
     Ok(grants)
 }
 
