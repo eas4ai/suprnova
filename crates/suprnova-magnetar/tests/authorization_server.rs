@@ -1,0 +1,1337 @@
+//! AGENT-005: the authorization server plugin on SQLite.
+//!
+//! Every test drives the mounted plugin routes the way a browser and an MCP
+//! client would, and checks tokens through the verification API a resource
+//! server calls. The live PostgreSQL and MySQL runs of the concurrency
+//! property are in `authorization_server_live.rs`.
+
+#![cfg(all(feature = "authorization-server", feature = "seaorm-sqlite"))]
+
+#[path = "fixtures/authorization_server_harness.rs"]
+mod harness;
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use harness::*;
+use magnetar::authorization_server::{
+    AccessVerification, ClientMetadataError, ClientMetadataPolicy, GrantHandler,
+    InvalidAccessReason, IssueTokens, NewGrant, TokenError, TokenIssuer, TokenRequest,
+    TokenResponse,
+};
+use magnetar::plugin::{Method, WireBody, WireRequest};
+use magnetar::sessions::JwtEpochStore;
+use sea_orm::EntityTrait;
+use serde_json::json;
+use sha2::{Digest, Sha256};
+
+fn invalid(reason: InvalidAccessReason) -> AccessVerification {
+    AccessVerification::Invalid(reason)
+}
+
+fn document(client_id: &str, redirect_uri: &str) -> serde_json::Value {
+    json!({
+        "client_id": client_id,
+        "client_name": "Tools Client",
+        "client_uri": "https://tools.client.test/",
+        "logo_uri": "javascript:alert(document.cookie)",
+        "redirect_uris": [redirect_uri],
+        "token_endpoint_auth_method": "none",
+    })
+}
+
+#[tokio::test]
+async fn agent_005_code_flow_with_pkce_issues_tokens_bound_to_resource_and_scopes() {
+    let h = sqlite_harness().await;
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let client_id = h.register(&[REDIRECT]).await;
+    let (verifier, challenge) = pkce();
+
+    let authorized = h
+        .authorize(
+            &client_id,
+            REDIRECT,
+            &challenge,
+            "tools:read",
+            Some(&bearer),
+        )
+        .await;
+    assert_eq!(status(&authorized), 302);
+    let approval = location(&authorized).expect("the approval page");
+    assert!(
+        approval.starts_with("/oauth/approve?authorization="),
+        "{approval}"
+    );
+    let id = query_param(&approval, "authorization").expect("a pending id");
+
+    let view = h
+        .get(&format!("/oauth/authorizations/{id}"), &[], Some(&bearer))
+        .await;
+    assert_eq!(status(&view), 200, "{:?}", body(&view));
+    assert_no_framing(&view);
+    let view = body(&view);
+    assert_eq!(view["client"]["name"], "Example Tool");
+    assert_eq!(view["client"]["host"], "client.example.test");
+    assert_eq!(view["scopes"][0]["name"], "tools:read");
+    assert_eq!(view["scopes"][0]["description"], "Read your tools");
+    assert_eq!(view["resource"], RESOURCE);
+
+    let decided = h
+        .post_form(
+            &format!("/oauth/authorizations/{id}"),
+            &[("decision", "approve")],
+            Some(&bearer),
+        )
+        .await;
+    assert_eq!(status(&decided), 303);
+    assert_no_framing(&decided);
+    let back = location(&decided).expect("a redirect to the client");
+    assert!(back.starts_with(REDIRECT), "{back}");
+    assert_eq!(query_param(&back, "state").as_deref(), Some("state-123"));
+    assert_eq!(query_param(&back, "iss").as_deref(), Some(ISSUER));
+    let code = query_param(&back, "code").expect("a code");
+
+    let tokens = h.exchange(&client_id, REDIRECT, &code, &verifier).await;
+    assert_eq!(status(&tokens), 200, "{:?}", body(&tokens));
+    assert_eq!(
+        header(&tokens, "cache-control").as_deref(),
+        Some("no-store")
+    );
+    let tokens = body(&tokens);
+    assert_eq!(tokens["token_type"], "Bearer");
+    assert_eq!(tokens["expires_in"], 3600);
+    assert_eq!(tokens["scope"], "tools:read");
+    let access = tokens["access_token"].as_str().expect("an access token");
+    assert!(tokens["refresh_token"].as_str().is_some());
+
+    match h.verify(access).await {
+        AccessVerification::Valid(grant) => {
+            assert_eq!(grant.user_id.as_deref(), Some(user_id.as_str()));
+            assert_eq!(grant.client_id, client_id);
+            assert_eq!(grant.scopes, vec!["tools:read".to_owned()]);
+            assert_eq!(grant.token_kind, "access");
+            assert_eq!(grant.grant_kind, "authorization_code");
+            assert_eq!(grant.resource, RESOURCE);
+        }
+        other => panic!("the access token must verify, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn agent_005_plain_and_missing_pkce_are_refused() {
+    let h = sqlite_harness().await;
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let client_id = h.register(&[REDIRECT]).await;
+    let (verifier, challenge) = pkce();
+
+    for (method, challenge) in [
+        (Some("plain"), verifier.as_str()),
+        (None, challenge.as_str()),
+        (Some("S256"), ""),
+    ] {
+        let mut query = vec![
+            ("response_type", "code"),
+            ("client_id", client_id.as_str()),
+            ("redirect_uri", REDIRECT),
+            ("resource", RESOURCE),
+            ("state", "s"),
+        ];
+        if !challenge.is_empty() {
+            query.push(("code_challenge", challenge));
+        }
+        if let Some(method) = method {
+            query.push(("code_challenge_method", method));
+        }
+        let response = h.get("/oauth/authorize", &query, Some(&bearer)).await;
+        let back = location(&response).expect("an error redirect to the client");
+        assert!(back.starts_with(REDIRECT), "{back}");
+        assert_eq!(
+            query_param(&back, "error").as_deref(),
+            Some("invalid_request"),
+            "method {method:?}"
+        );
+        assert_eq!(query_param(&back, "state").as_deref(), Some("s"));
+        assert_eq!(query_param(&back, "iss").as_deref(), Some(ISSUER));
+        assert!(query_param(&back, "code").is_none());
+    }
+
+    // A code minted with S256 cannot be exchanged without the verifier or
+    // with the challenge sent back as a plain verifier.
+    let code = h
+        .approve(&client_id, REDIRECT, &challenge, "tools:read", &bearer)
+        .await;
+    let missing = h
+        .post_form(
+            "/oauth/token",
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", REDIRECT),
+                ("client_id", &client_id),
+                ("resource", RESOURCE),
+            ],
+            None,
+        )
+        .await;
+    assert_eq!(status(&missing), 400);
+    assert_eq!(body(&missing)["error"], "invalid_request");
+    let plain = h.exchange(&client_id, REDIRECT, &code, &challenge).await;
+    assert_eq!(status(&plain), 400);
+    assert_eq!(body(&plain)["error"], "invalid_grant");
+    let right = h.exchange(&client_id, REDIRECT, &code, &verifier).await;
+    assert_eq!(status(&right), 200, "{:?}", body(&right));
+}
+
+#[tokio::test]
+async fn agent_005_redirect_uris_match_exactly_with_any_port_on_loopback() {
+    let h = sqlite_harness().await;
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let client_id = h
+        .register(&[
+            REDIRECT,
+            "http://127.0.0.1:3000/callback",
+            "http://[::1]:3000/callback",
+            "http://localhost:3000/callback",
+        ])
+        .await;
+    let (_, challenge) = pkce();
+
+    for refused in [
+        "https://client.example.test/callback/extra",
+        "https://client.example.test/callback?x=1",
+        "https://client.example.test:8443/callback",
+        "https://evil.example.test/callback",
+        "http://127.0.0.1:54321/other",
+        "http://localhost:4000/callback",
+    ] {
+        let response = h
+            .authorize(&client_id, refused, &challenge, "", Some(&bearer))
+            .await;
+        assert_eq!(status(&response), 400, "{refused}");
+        assert!(location(&response).is_none(), "{refused} must not redirect");
+        assert_eq!(body(&response)["error"], "invalid_request");
+    }
+    for accepted in [
+        REDIRECT,
+        "http://127.0.0.1:54321/callback",
+        "http://[::1]:61000/callback",
+        "http://localhost:3000/callback",
+    ] {
+        let response = h
+            .authorize(&client_id, accepted, &challenge, "", Some(&bearer))
+            .await;
+        let approval = location(&response).expect("the approval page");
+        assert!(
+            approval.starts_with("/oauth/approve"),
+            "{accepted}: {approval}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn agent_005_unknown_client_is_refused_without_a_redirect() {
+    let h = sqlite_harness().await;
+    let (_, challenge) = pkce();
+    let response = h
+        .authorize("mcl_unknown", REDIRECT, &challenge, "", None)
+        .await;
+    assert_eq!(status(&response), 400);
+    assert!(location(&response).is_none());
+    assert_eq!(body(&response)["error"], "invalid_client");
+    assert_no_framing(&response);
+}
+
+#[tokio::test]
+async fn agent_005_a_user_who_is_not_signed_in_is_sent_to_sign_in() {
+    let h = sqlite_harness().await;
+    let client_id = h.register(&[REDIRECT]).await;
+    let (_, challenge) = pkce();
+    let response = h
+        .authorize(&client_id, REDIRECT, &challenge, "tools:read", None)
+        .await;
+    let sign_in = location(&response).expect("a redirect to sign in");
+    assert!(sign_in.starts_with("/login?return_to="), "{sign_in}");
+    let return_to = query_param(&sign_in, "return_to").expect("a return address");
+    assert!(return_to.starts_with("/oauth/authorize?"), "{return_to}");
+    assert_eq!(
+        query_param(&return_to, "client_id").as_deref(),
+        Some(client_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn agent_005_client_metadata_document_identifies_a_client() {
+    let h = sqlite_harness().await;
+    h.resolver.answer(DOCUMENT_HOST, &[PUBLIC_ADDRESS]);
+    h.documents.serve(
+        DOCUMENT_CLIENT,
+        Script::json(document(DOCUMENT_CLIENT, DOCUMENT_REDIRECT)),
+    );
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let (verifier, challenge) = pkce();
+
+    let response = h
+        .authorize(
+            DOCUMENT_CLIENT,
+            DOCUMENT_REDIRECT,
+            &challenge,
+            "tools:read",
+            Some(&bearer),
+        )
+        .await;
+    let approval = location(&response).expect("the approval page");
+    let id = query_param(&approval, "authorization").expect("a pending id");
+    let view = body(
+        &h.get(&format!("/oauth/authorizations/{id}"), &[], Some(&bearer))
+            .await,
+    );
+    assert_eq!(view["client"]["name"], "Tools Client");
+    assert_eq!(view["client"]["host"], DOCUMENT_HOST);
+    assert_eq!(view["client"]["client_uri"], "https://tools.client.test/");
+    assert!(
+        view["client"]["logo_uri"].is_null(),
+        "a non-https link never reaches the approval page"
+    );
+
+    let requests = h.documents.requests.lock().clone();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, DOCUMENT_CLIENT);
+    assert_eq!(
+        requests[0].1,
+        format!("{PUBLIC_ADDRESS}:443").parse().unwrap(),
+        "the fetch connects to the address that was checked"
+    );
+
+    let code = h
+        .approve(
+            DOCUMENT_CLIENT,
+            DOCUMENT_REDIRECT,
+            &challenge,
+            "tools:read",
+            &bearer,
+        )
+        .await;
+    let tokens = h
+        .exchange(DOCUMENT_CLIENT, DOCUMENT_REDIRECT, &code, &verifier)
+        .await;
+    assert_eq!(status(&tokens), 200, "{:?}", body(&tokens));
+    assert_eq!(
+        h.documents.request_count(),
+        1,
+        "the second authorization reads the cached document"
+    );
+    assert!(
+        h.limiter
+            .keys()
+            .iter()
+            .any(|key| key.starts_with("authorization-server.client-metadata:")),
+        "an uncached fetch spends the metadata-fetch budget"
+    );
+}
+
+#[tokio::test]
+async fn agent_005_client_metadata_fetch_refuses_non_https_and_bad_urls() {
+    let h = sqlite_harness().await;
+    assert_eq!(
+        h.fetcher
+            .fetch("http://tools.client.test/oauth/client.json")
+            .await,
+        Err(ClientMetadataError::NotHttps)
+    );
+    for bad in [
+        "https://tools.client.test/",
+        "https://tools.client.test/a/../client.json",
+        "https://user:pass@tools.client.test/client.json",
+        "https://tools.client.test/client.json#fragment",
+    ] {
+        assert!(
+            matches!(
+                h.fetcher.fetch(bad).await,
+                Err(ClientMetadataError::InvalidUrl(_))
+            ),
+            "{bad}"
+        );
+    }
+    assert_eq!(h.resolver.lookup_count(), 0);
+    assert_eq!(h.documents.request_count(), 0);
+
+    // Through the authorization endpoint the refusal is an error page.
+    let (_, challenge) = pkce();
+    let response = h
+        .authorize(
+            "http://tools.client.test/oauth/client.json",
+            DOCUMENT_REDIRECT,
+            &challenge,
+            "",
+            None,
+        )
+        .await;
+    assert_eq!(status(&response), 400);
+    assert!(location(&response).is_none());
+}
+
+#[tokio::test]
+async fn agent_005_client_metadata_fetch_refuses_private_addresses() {
+    let h = sqlite_harness().await;
+    for (index, answer) in [
+        vec!["10.0.0.7"],
+        vec!["127.0.0.1"],
+        vec!["169.254.169.254"],
+        vec!["0.0.0.0"],
+        vec!["192.168.1.20"],
+        vec!["::1"],
+        vec!["fe80::1"],
+        vec!["fd00::5"],
+        vec!["::ffff:127.0.0.1"],
+        vec![PUBLIC_ADDRESS, "10.0.0.7"],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let host = format!("private{index}.client.test");
+        let client_id = format!("https://{host}/client.json");
+        h.resolver.answer(&host, &answer);
+        h.documents.serve(
+            &client_id,
+            Script::json(document(&client_id, DOCUMENT_REDIRECT)),
+        );
+        assert!(
+            matches!(
+                h.fetcher.fetch(&client_id).await,
+                Err(ClientMetadataError::ForbiddenAddress(_))
+            ),
+            "{answer:?} must be refused"
+        );
+    }
+    // The error page names no address: it would report where an internal
+    // name points.
+    let (_, challenge) = pkce();
+    let page = h
+        .authorize(
+            "https://private0.client.test/client.json",
+            DOCUMENT_REDIRECT,
+            &challenge,
+            "",
+            None,
+        )
+        .await;
+    assert_eq!(status(&page), 400);
+    assert!(location(&page).is_none());
+    let description = body(&page)["error_description"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!description.contains("10.0.0.7"), "{description}");
+
+    for literal in ["https://127.0.0.1/client.json", "https://[::1]/client.json"] {
+        assert!(matches!(
+            h.fetcher.fetch(literal).await,
+            Err(ClientMetadataError::ForbiddenAddress(_))
+        ));
+    }
+    assert_eq!(h.documents.request_count(), 0, "nothing connects");
+}
+
+#[tokio::test]
+async fn agent_005_client_metadata_fetch_follows_no_redirect() {
+    let h = sqlite_harness().await;
+    h.resolver.answer(DOCUMENT_HOST, &[PUBLIC_ADDRESS]);
+    h.documents.serve(
+        DOCUMENT_CLIENT,
+        Script {
+            status: 302,
+            ..Script::json(json!({}))
+        },
+    );
+    assert_eq!(
+        h.fetcher.fetch(DOCUMENT_CLIENT).await,
+        Err(ClientMetadataError::Redirected(302))
+    );
+    assert_eq!(h.documents.request_count(), 1);
+}
+
+#[tokio::test]
+async fn agent_005_client_metadata_fetch_bounds_the_body() {
+    let h = sqlite_harness().await;
+    h.resolver.answer(DOCUMENT_HOST, &[PUBLIC_ADDRESS]);
+    let mut oversized = document(DOCUMENT_CLIENT, DOCUMENT_REDIRECT);
+    oversized["padding"] = json!("x".repeat(64 * 1024));
+    h.documents.serve(DOCUMENT_CLIENT, Script::json(oversized));
+    assert_eq!(
+        h.fetcher.fetch(DOCUMENT_CLIENT).await,
+        Err(ClientMetadataError::TooLarge)
+    );
+
+    let endless = "https://endless.client.test/client.json";
+    h.resolver.answer("endless.client.test", &[PUBLIC_ADDRESS]);
+    h.documents.serve(
+        endless,
+        Script {
+            endless: true,
+            ..Script::json(json!({}))
+        },
+    );
+    assert_eq!(
+        h.fetcher.fetch(endless).await,
+        Err(ClientMetadataError::TooLarge)
+    );
+}
+
+#[tokio::test]
+async fn agent_005_client_metadata_fetch_bounds_the_time() {
+    let policy = ClientMetadataPolicy {
+        timeout: Duration::from_millis(200),
+        ..ClientMetadataPolicy::default()
+    };
+    let h = build(
+        magnetar::default_schema::database().await,
+        config(),
+        policy,
+        Vec::new(),
+    )
+    .await;
+    h.resolver.answer(DOCUMENT_HOST, &[PUBLIC_ADDRESS]);
+    h.documents.serve(
+        DOCUMENT_CLIENT,
+        Script {
+            delay: Duration::from_secs(30),
+            ..Script::json(document(DOCUMENT_CLIENT, DOCUMENT_REDIRECT))
+        },
+    );
+    let started = Instant::now();
+    assert_eq!(
+        h.fetcher.fetch(DOCUMENT_CLIENT).await,
+        Err(ClientMetadataError::TimedOut)
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn agent_005_client_metadata_document_must_name_its_own_url() {
+    let h = sqlite_harness().await;
+    h.resolver.answer(DOCUMENT_HOST, &[PUBLIC_ADDRESS]);
+    h.documents.serve(
+        DOCUMENT_CLIENT,
+        Script::json(document(
+            "https://tools.client.test/oauth/other.json",
+            DOCUMENT_REDIRECT,
+        )),
+    );
+    assert_eq!(
+        h.fetcher.fetch(DOCUMENT_CLIENT).await,
+        Err(ClientMetadataError::ClientIdMismatch)
+    );
+}
+
+#[tokio::test]
+async fn agent_005_dynamic_registration_accepts_only_public_clients() {
+    let h = sqlite_harness().await;
+    let registered = h
+        .post_json(
+            "/oauth/register",
+            json!({
+                "client_name": "Tool",
+                "redirect_uris": [REDIRECT, "http://127.0.0.1:8080/cb"],
+            }),
+        )
+        .await;
+    assert_eq!(status(&registered), 201, "{:?}", body(&registered));
+    let registered = body(&registered);
+    assert!(
+        registered["client_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("mcl_")
+    );
+    assert_eq!(registered["token_endpoint_auth_method"], "none");
+    assert_eq!(registered["client_name"], "Tool");
+    assert!(
+        h.limiter
+            .keys()
+            .iter()
+            .any(|key| key.starts_with("authorization-server.register:"))
+    );
+
+    for (metadata, error) in [
+        (
+            json!({"redirect_uris": [REDIRECT], "token_endpoint_auth_method": "client_secret_basic"}),
+            "invalid_client_metadata",
+        ),
+        (
+            json!({"redirect_uris": [REDIRECT], "client_secret": "s3cret"}),
+            "invalid_client_metadata",
+        ),
+        (
+            json!({"redirect_uris": [REDIRECT], "grant_types": ["client_credentials"]}),
+            "invalid_client_metadata",
+        ),
+        (
+            json!({"redirect_uris": [REDIRECT], "scope": "admin"}),
+            "invalid_client_metadata",
+        ),
+        (json!({"redirect_uris": []}), "invalid_redirect_uri"),
+        (
+            json!({"redirect_uris": ["http://client.example.test/cb"]}),
+            "invalid_redirect_uri",
+        ),
+        (
+            json!({"redirect_uris": ["javascript:alert(1)"]}),
+            "invalid_redirect_uri",
+        ),
+        (
+            json!({"redirect_uris": ["https://client.example.test/cb#x"]}),
+            "invalid_redirect_uri",
+        ),
+    ] {
+        let response = h.post_json("/oauth/register", metadata.clone()).await;
+        assert_eq!(status(&response), 400, "{metadata}");
+        assert_eq!(body(&response)["error"], error, "{metadata}");
+    }
+
+    let oversized = h
+        .post_json(
+            "/oauth/register",
+            json!({"redirect_uris": [REDIRECT], "client_name": "x".repeat(20 * 1024)}),
+        )
+        .await;
+    assert_eq!(status(&oversized), 413);
+
+    h.limiter.set_mode(LimiterMode::Reject);
+    let limited = h
+        .post_json("/oauth/register", json!({"redirect_uris": [REDIRECT]}))
+        .await;
+    assert_eq!(status(&limited), 429);
+    assert!(header(&limited, "retry-after").is_some());
+}
+
+#[tokio::test]
+async fn agent_005_refresh_rotates_on_every_use() {
+    let h = sqlite_harness().await;
+    let issued = h.issue("tools:read tools:write").await;
+
+    let first = h.refresh(&issued.client_id, &issued.refresh_token).await;
+    assert_eq!(status(&first), 200, "{:?}", body(&first));
+    let first = body(&first);
+    let rotated = first["refresh_token"].as_str().unwrap().to_owned();
+    assert_ne!(rotated, issued.refresh_token);
+    assert!(matches!(
+        h.verify(first["access_token"].as_str().unwrap()).await,
+        AccessVerification::Valid(_)
+    ));
+
+    // A narrower scope on refresh narrows the access token only.
+    let second = h
+        .post_form(
+            "/oauth/token",
+            &[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", &rotated),
+                ("client_id", &issued.client_id),
+                ("scope", "tools:read"),
+            ],
+            None,
+        )
+        .await;
+    assert_eq!(status(&second), 200, "{:?}", body(&second));
+    let second = body(&second);
+    assert_eq!(second["scope"], "tools:read");
+    let third = h
+        .refresh(&issued.client_id, second["refresh_token"].as_str().unwrap())
+        .await;
+    assert_eq!(body(&third)["scope"], "tools:read tools:write");
+
+    let wider = h
+        .post_form(
+            "/oauth/token",
+            &[
+                ("grant_type", "refresh_token"),
+                (
+                    "refresh_token",
+                    body(&third)["refresh_token"].as_str().unwrap(),
+                ),
+                ("client_id", &issued.client_id),
+                ("scope", "tools:admin"),
+            ],
+            None,
+        )
+        .await;
+    assert_eq!(body(&wider)["error"], "invalid_scope");
+}
+
+#[tokio::test]
+async fn agent_005_refresh_token_reuse_revokes_the_grant() {
+    let h = sqlite_harness().await;
+    let issued = h.issue("tools:read").await;
+    let rotated = h.refresh(&issued.client_id, &issued.refresh_token).await;
+    let rotated = body(&rotated);
+    let new_access = rotated["access_token"].as_str().unwrap().to_owned();
+    let new_refresh = rotated["refresh_token"].as_str().unwrap().to_owned();
+
+    let reused = h.refresh(&issued.client_id, &issued.refresh_token).await;
+    assert_eq!(status(&reused), 400);
+    assert_eq!(body(&reused)["error"], "invalid_grant");
+
+    assert_eq!(
+        h.verify(&issued.access_token).await,
+        invalid(InvalidAccessReason::Revoked)
+    );
+    assert_eq!(
+        h.verify(&new_access).await,
+        invalid(InvalidAccessReason::Revoked)
+    );
+    let after = h.refresh(&issued.client_id, &new_refresh).await;
+    assert_eq!(body(&after)["error"], "invalid_grant");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_005_concurrent_refresh_token_reuse_revokes_the_grant() {
+    concurrent_refresh_reuse(Arc::new(sqlite_harness().await)).await;
+}
+
+#[tokio::test]
+async fn agent_005_refresh_rotation_is_guarded_in_the_database() {
+    guarded_rotation(&sqlite_harness().await).await;
+}
+
+#[tokio::test]
+async fn agent_005_an_authorization_code_works_once() {
+    let h = sqlite_harness().await;
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let client_id = h.register(&[REDIRECT]).await;
+    let (verifier, challenge) = pkce();
+    let code = h
+        .approve(&client_id, REDIRECT, &challenge, "tools:read", &bearer)
+        .await;
+    let first = h.exchange(&client_id, REDIRECT, &code, &verifier).await;
+    assert_eq!(status(&first), 200);
+    let access = body(&first)["access_token"].as_str().unwrap().to_owned();
+
+    let second = h.exchange(&client_id, REDIRECT, &code, &verifier).await;
+    assert_eq!(status(&second), 400);
+    assert_eq!(body(&second)["error"], "invalid_grant");
+    assert_eq!(
+        h.verify(&access).await,
+        invalid(InvalidAccessReason::Revoked),
+        "a replayed code revokes what its first exchange issued"
+    );
+}
+
+#[tokio::test]
+async fn agent_005_the_code_is_bound_to_its_client_and_redirect_uri() {
+    let h = sqlite_harness().await;
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let client_id = h
+        .register(&[REDIRECT, "https://client.example.test/other"])
+        .await;
+    let other_client = h.register(&[REDIRECT]).await;
+    let (verifier, challenge) = pkce();
+    let code = h
+        .approve(&client_id, REDIRECT, &challenge, "tools:read", &bearer)
+        .await;
+    let wrong_client = h.exchange(&other_client, REDIRECT, &code, &verifier).await;
+    assert_eq!(body(&wrong_client)["error"], "invalid_grant");
+    let wrong_redirect = h
+        .exchange(
+            &client_id,
+            "https://client.example.test/other",
+            &code,
+            &verifier,
+        )
+        .await;
+    assert_eq!(body(&wrong_redirect)["error"], "invalid_grant");
+    let right = h.exchange(&client_id, REDIRECT, &code, &verifier).await;
+    assert_eq!(status(&right), 200);
+}
+
+#[tokio::test]
+async fn agent_005_tokens_are_bound_to_their_resource() {
+    let h = sqlite_harness().await;
+    let issued = h.issue("tools:read").await;
+    assert_eq!(
+        h.server
+            .verify_access_token(&issued.access_token, "https://other.example.test/mcp")
+            .await
+            .unwrap(),
+        invalid(InvalidAccessReason::WrongResource)
+    );
+    // Scheme and host compare without case, the way RFC 3986 defines them.
+    assert!(matches!(
+        h.server
+            .verify_access_token(&issued.access_token, "HTTPS://APP.EXAMPLE.TEST/mcp")
+            .await
+            .unwrap(),
+        AccessVerification::Valid(_)
+    ));
+
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let (verifier, challenge) = pkce();
+    let unknown = h
+        .get(
+            "/oauth/authorize",
+            &[
+                ("response_type", "code"),
+                ("client_id", &issued.client_id),
+                ("redirect_uri", REDIRECT),
+                ("code_challenge", &challenge),
+                ("code_challenge_method", "S256"),
+                ("resource", "https://other.example.test/mcp"),
+            ],
+            Some(&bearer),
+        )
+        .await;
+    let back = location(&unknown).expect("an error redirect");
+    assert_eq!(
+        query_param(&back, "error").as_deref(),
+        Some("invalid_target")
+    );
+
+    let code = h
+        .approve(
+            &issued.client_id,
+            REDIRECT,
+            &challenge,
+            "tools:read",
+            &bearer,
+        )
+        .await;
+    let other_resource = h
+        .post_form(
+            "/oauth/token",
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", REDIRECT),
+                ("client_id", &issued.client_id),
+                ("code_verifier", &verifier),
+                ("resource", "https://other.example.test/mcp"),
+            ],
+            None,
+        )
+        .await;
+    assert_eq!(body(&other_resource)["error"], "invalid_target");
+}
+
+#[tokio::test]
+async fn agent_005_an_epoch_change_ends_the_users_grants() {
+    let h = sqlite_harness().await;
+    let issued = h.issue("tools:read").await;
+    assert_eq!(
+        h.server.list_grants(&issued.user_id).await.unwrap().len(),
+        1
+    );
+    let (_, challenge) = pkce();
+    let pending = h
+        .authorize(
+            &issued.client_id,
+            REDIRECT,
+            &challenge,
+            "",
+            Some(&issued.bearer),
+        )
+        .await;
+    let id = query_param(&location(&pending).unwrap(), "authorization").unwrap();
+
+    JwtEpochStore::bump_auth_epoch(h.storage.as_ref(), &issued.user_id)
+        .await
+        .expect("a password change moves the epoch");
+
+    assert_eq!(
+        h.verify(&issued.access_token).await,
+        invalid(InvalidAccessReason::EpochChanged)
+    );
+    let refreshed = h.refresh(&issued.client_id, &issued.refresh_token).await;
+    assert_eq!(body(&refreshed)["error"], "invalid_grant");
+    assert!(
+        h.server
+            .list_grants(&issued.user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // The session is from the old epoch: a decision it posts is refused,
+    // and a new authorization sends it to sign in.
+    let decided = h
+        .post_form(
+            &format!("/oauth/authorizations/{id}"),
+            &[("decision", "approve")],
+            Some(&issued.bearer),
+        )
+        .await;
+    assert_eq!(status(&decided), 401);
+    assert!(location(&decided).is_none());
+    let response = h
+        .authorize(
+            &issued.client_id,
+            REDIRECT,
+            &challenge,
+            "",
+            Some(&issued.bearer),
+        )
+        .await;
+    assert!(location(&response).unwrap().starts_with("/login"));
+}
+
+#[tokio::test]
+async fn agent_005_revocation_answers_200_and_revokes() {
+    let h = sqlite_harness().await;
+    let issued = h.issue("tools:read").await;
+
+    let revoked = h
+        .post_form(
+            "/oauth/revoke",
+            &[
+                ("token", &issued.access_token),
+                ("client_id", &issued.client_id),
+            ],
+            None,
+        )
+        .await;
+    assert_eq!(status(&revoked), 200);
+    assert_eq!(
+        h.verify(&issued.access_token).await,
+        invalid(InvalidAccessReason::Revoked)
+    );
+
+    // Revoking an access token leaves the grant; the refresh token works.
+    let refreshed = h.refresh(&issued.client_id, &issued.refresh_token).await;
+    assert_eq!(status(&refreshed), 200);
+    let refreshed = body(&refreshed);
+    let access = refreshed["access_token"].as_str().unwrap().to_owned();
+    let refresh = refreshed["refresh_token"].as_str().unwrap().to_owned();
+
+    // Revoking the refresh token ends the grant.
+    let revoked = h
+        .post_form("/oauth/revoke", &[("token", &refresh)], None)
+        .await;
+    assert_eq!(status(&revoked), 200);
+    assert_eq!(
+        h.verify(&access).await,
+        invalid(InvalidAccessReason::Revoked)
+    );
+    assert_eq!(
+        body(&h.refresh(&issued.client_id, &refresh).await)["error"],
+        "invalid_grant"
+    );
+
+    for token in ["mat_unknown", refresh.as_str()] {
+        let again = h
+            .post_form("/oauth/revoke", &[("token", token)], None)
+            .await;
+        assert_eq!(status(&again), 200, "{token}");
+    }
+    let missing = h.post_form("/oauth/revoke", &[], None).await;
+    assert_eq!(status(&missing), 400);
+    assert_eq!(body(&missing)["error"], "invalid_request");
+}
+
+#[tokio::test]
+async fn agent_005_tokens_and_codes_are_stored_only_as_hashes() {
+    let h = sqlite_harness().await;
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let client_id = h.register(&[REDIRECT]).await;
+    let (verifier, challenge) = pkce();
+    let code = h
+        .approve(&client_id, REDIRECT, &challenge, "tools:read", &bearer)
+        .await;
+    let tokens = body(&h.exchange(&client_id, REDIRECT, &code, &verifier).await);
+    let access = tokens["access_token"].as_str().unwrap();
+    let refresh = tokens["refresh_token"].as_str().unwrap();
+
+    let rows = magnetar::authorization_server::sql::tokens::Entity::find()
+        .all(&h.db)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    let stored = format!("{rows:?}");
+    let steps = format!(
+        "{:?}",
+        magnetar::authorization_server::sql::authorizations::Entity::find()
+            .all(&h.db)
+            .await
+            .unwrap()
+    );
+    for secret in [access, refresh, code.as_str()] {
+        assert!(!stored.contains(secret), "a token is stored in plain text");
+        assert!(!steps.contains(secret), "a code is stored in plain text");
+    }
+    let digest = |token: &str| format!("{:x}", Sha256::digest(token.as_bytes()));
+    assert!(rows.iter().any(|row| row.token_hash == digest(access)));
+    assert!(rows.iter().any(|row| row.token_hash == digest(refresh)));
+}
+
+#[tokio::test]
+async fn agent_005_the_metadata_document_describes_the_server() {
+    let h = build(
+        magnetar::default_schema::database().await,
+        config(),
+        ClientMetadataPolicy::default(),
+        vec![Arc::new(TestAgentGrant)],
+    )
+    .await;
+    let document = h.server.metadata_document();
+    assert_eq!(document["issuer"], ISSUER);
+    assert_eq!(
+        document["authorization_endpoint"],
+        format!("{ISSUER}/oauth/authorize")
+    );
+    assert_eq!(document["token_endpoint"], format!("{ISSUER}/oauth/token"));
+    assert_eq!(
+        document["registration_endpoint"],
+        format!("{ISSUER}/oauth/register")
+    );
+    assert_eq!(
+        document["revocation_endpoint"],
+        format!("{ISSUER}/oauth/revoke")
+    );
+    assert_eq!(document["response_types_supported"], json!(["code"]));
+    assert_eq!(
+        document["grant_types_supported"],
+        json!([
+            "authorization_code",
+            "refresh_token",
+            "urn:example:test-grant"
+        ])
+    );
+    assert_eq!(
+        document["code_challenge_methods_supported"],
+        json!(["S256"])
+    );
+    assert_eq!(
+        document["token_endpoint_auth_methods_supported"],
+        json!(["none"])
+    );
+    assert_eq!(
+        document["scopes_supported"],
+        json!(["tools:read", "tools:write"])
+    );
+    assert_eq!(document["client_id_metadata_document_supported"], true);
+    assert_eq!(
+        document["authorization_response_iss_parameter_supported"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn agent_005_approval_routes_need_a_signed_in_user_and_refuse_framing() {
+    let h = sqlite_harness().await;
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let client_id = h.register(&[REDIRECT]).await;
+    let (_, challenge) = pkce();
+    let response = h
+        .authorize(
+            &client_id,
+            REDIRECT,
+            &challenge,
+            "tools:read",
+            Some(&bearer),
+        )
+        .await;
+    let id = query_param(&location(&response).unwrap(), "authorization").unwrap();
+    let path = format!("/oauth/authorizations/{id}");
+
+    let view = h.get(&path, &[], None).await;
+    assert_eq!(status(&view), 401);
+    assert_no_framing(&view);
+    let decided = h.post_form(&path, &[("decision", "approve")], None).await;
+    assert_eq!(status(&decided), 401);
+    assert_no_framing(&decided);
+    assert!(location(&decided).is_none());
+
+    let stranger = h.create_user().await;
+    let stranger_bearer = h.sign_in(&stranger).await;
+    assert_eq!(
+        status(&h.get(&path, &[], Some(&stranger_bearer)).await),
+        404
+    );
+    let hijack = h
+        .post_form(&path, &[("decision", "approve")], Some(&stranger_bearer))
+        .await;
+    assert_eq!(status(&hijack), 404);
+    assert!(location(&hijack).is_none());
+
+    // The owner can still decide: the stranger's attempts spent nothing.
+    let owner = h
+        .post_form(&path, &[("decision", "approve")], Some(&bearer))
+        .await;
+    assert_eq!(status(&owner), 303);
+}
+
+#[tokio::test]
+async fn agent_005_a_denial_redirects_with_access_denied() {
+    let h = sqlite_harness().await;
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let client_id = h.register(&[REDIRECT]).await;
+    let (_, challenge) = pkce();
+    let response = h
+        .authorize(
+            &client_id,
+            REDIRECT,
+            &challenge,
+            "tools:read",
+            Some(&bearer),
+        )
+        .await;
+    let id = query_param(&location(&response).unwrap(), "authorization").unwrap();
+    let denied = h
+        .post_form(
+            &format!("/oauth/authorizations/{id}"),
+            &[("decision", "deny")],
+            Some(&bearer),
+        )
+        .await;
+    let back = location(&denied).expect("a redirect to the client");
+    assert_eq!(
+        query_param(&back, "error").as_deref(),
+        Some("access_denied")
+    );
+    assert_eq!(query_param(&back, "state").as_deref(), Some("state-123"));
+    assert_eq!(query_param(&back, "iss").as_deref(), Some(ISSUER));
+    assert!(query_param(&back, "code").is_none());
+}
+
+struct TestAgentGrant;
+
+#[async_trait]
+impl GrantHandler for TestAgentGrant {
+    fn grant_type(&self) -> &str {
+        "urn:example:test-grant"
+    }
+
+    async fn exchange(
+        &self,
+        request: &TokenRequest,
+        issuer: &TokenIssuer<'_>,
+    ) -> Result<TokenResponse, TokenError> {
+        if request.param("assertion") != Some("trusted") {
+            return Err(TokenError::invalid_grant("the assertion is not trusted"));
+        }
+        issuer
+            .issue(
+                NewGrant {
+                    kind: "agent".to_owned(),
+                    user_id: None,
+                    client_id: "agent-registration-1".to_owned(),
+                    client_name: "Test agent".to_owned(),
+                    client_host: "agent.example.test".to_owned(),
+                    scopes: vec!["tools:read".to_owned()],
+                    resource: RESOURCE.to_owned(),
+                    auth_epoch: None,
+                },
+                IssueTokens {
+                    access_kind: "agent_access".to_owned(),
+                    refresh: false,
+                    access_lifetime: Some(Duration::from_secs(600)),
+                },
+            )
+            .await
+    }
+}
+
+#[tokio::test]
+async fn agent_005_the_token_endpoint_dispatches_extension_grants() {
+    let h = build(
+        magnetar::default_schema::database().await,
+        config(),
+        ClientMetadataPolicy::default(),
+        vec![Arc::new(TestAgentGrant)],
+    )
+    .await;
+    let issued = h
+        .post_form(
+            "/oauth/token",
+            &[
+                ("grant_type", "urn:example:test-grant"),
+                ("assertion", "trusted"),
+            ],
+            None,
+        )
+        .await;
+    assert_eq!(status(&issued), 200, "{:?}", body(&issued));
+    let issued = body(&issued);
+    assert!(issued.get("refresh_token").is_none());
+    assert_eq!(issued["expires_in"], 600);
+    match h.verify(issued["access_token"].as_str().unwrap()).await {
+        AccessVerification::Valid(grant) => {
+            assert_eq!(grant.token_kind, "agent_access");
+            assert_eq!(grant.grant_kind, "agent");
+            assert_eq!(grant.user_id, None);
+            assert_eq!(grant.client_id, "agent-registration-1");
+        }
+        other => panic!("the extension's token must verify, got {other:?}"),
+    }
+    let refused = h
+        .post_form(
+            "/oauth/token",
+            &[
+                ("grant_type", "urn:example:test-grant"),
+                ("assertion", "forged"),
+            ],
+            None,
+        )
+        .await;
+    assert_eq!(body(&refused)["error"], "invalid_grant");
+
+    let unknown = h
+        .post_form("/oauth/token", &[("grant_type", "urn:example:nope")], None)
+        .await;
+    assert_eq!(status(&unknown), 400);
+    assert_eq!(body(&unknown)["error"], "unsupported_grant_type");
+
+    // A built-in grant type cannot be replaced.
+    let server = magnetar::authorization_server::AuthorizationServer::new(
+        config(),
+        Arc::new(magnetar::authorization_server::SqlAuthorizationStore::new(
+            h.db.clone(),
+        )),
+        h.storage.clone(),
+        h.limiter.clone(),
+        h.fetcher.clone(),
+    )
+    .unwrap();
+    struct Hijack;
+    #[async_trait]
+    impl GrantHandler for Hijack {
+        fn grant_type(&self) -> &str {
+            "refresh_token"
+        }
+        async fn exchange(
+            &self,
+            _request: &TokenRequest,
+            _issuer: &TokenIssuer<'_>,
+        ) -> Result<TokenResponse, TokenError> {
+            Err(TokenError::server_error())
+        }
+    }
+    assert!(server.with_grant_handler(Arc::new(Hijack)).is_err());
+}
+
+#[tokio::test]
+async fn agent_005_users_list_and_revoke_their_grants() {
+    let h = sqlite_harness().await;
+    let issued = h.issue("tools:read").await;
+    assert!(matches!(
+        h.verify(&issued.access_token).await,
+        AccessVerification::Valid(_)
+    ));
+
+    let grants = h.server.list_grants(&issued.user_id).await.unwrap();
+    assert_eq!(grants.len(), 1);
+    let grant = &grants[0];
+    assert_eq!(grant.client_id, issued.client_id);
+    assert_eq!(grant.client_name, "Example Tool");
+    assert_eq!(grant.client_host, "client.example.test");
+    assert_eq!(grant.scopes[0].name, "tools:read");
+    assert_eq!(grant.scopes[0].description, "Read your tools");
+    assert!(
+        grant.last_used_at.is_some(),
+        "a verification records the last use"
+    );
+
+    let stranger = h.create_user().await;
+    assert!(
+        !h.server
+            .revoke_grant(&stranger, &grant.grant_id)
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        h.verify(&issued.access_token).await,
+        AccessVerification::Valid(_)
+    ));
+
+    assert!(
+        h.server
+            .revoke_grant(&issued.user_id, &grant.grant_id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        h.verify(&issued.access_token).await,
+        invalid(InvalidAccessReason::Revoked)
+    );
+    assert!(
+        h.server
+            .list_grants(&issued.user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let second = h.issue("tools:read").await;
+    assert_eq!(
+        h.server.revoke_all_grants(&second.user_id).await.unwrap(),
+        1
+    );
+    assert_eq!(
+        h.verify(&second.access_token).await,
+        invalid(InvalidAccessReason::Revoked)
+    );
+}
+
+#[tokio::test]
+async fn agent_005_every_endpoint_bounds_its_request() {
+    let h = sqlite_harness().await;
+    let large = "x".repeat(20 * 1024);
+    for path in ["/oauth/token", "/oauth/revoke", "/oauth/authorizations/abc"] {
+        let response = h.post_form(path, &[("token", &large)], None).await;
+        assert_eq!(status(&response), 413, "{path}");
+    }
+    let authorize = h.get("/oauth/authorize", &[("state", &large)], None).await;
+    assert_eq!(status(&authorize), 413);
+
+    let mut bytes = WireRequest::new(Method::Post, "/oauth/token");
+    bytes.body = WireBody::Bytes {
+        content_type: Some("application/x-www-form-urlencoded".to_owned()),
+        bytes: format!("grant_type=refresh_token&refresh_token={large}").into_bytes(),
+    };
+    assert_eq!(status(&h.send(bytes, None).await), 413);
+
+    // A repeated parameter is refused (RFC 6749 section 3.2).
+    let mut repeated = WireRequest::new(Method::Post, "/oauth/token");
+    repeated.body = WireBody::Bytes {
+        content_type: Some("application/x-www-form-urlencoded".to_owned()),
+        bytes: b"grant_type=refresh_token&grant_type=authorization_code".to_vec(),
+    };
+    let response = h.send(repeated, None).await;
+    assert_eq!(status(&response), 400);
+    assert_eq!(body(&response)["error"], "invalid_request");
+}
+
+#[tokio::test]
+async fn agent_005_expired_tokens_and_lapsed_steps_are_pruned() {
+    let mut short = config();
+    short.access_token_lifetime = Duration::from_secs(1);
+    let h = build(
+        magnetar::default_schema::database().await,
+        short,
+        ClientMetadataPolicy::default(),
+        Vec::new(),
+    )
+    .await;
+    let issued = h.issue("tools:read").await;
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(
+        h.verify(&issued.access_token).await,
+        invalid(InvalidAccessReason::Expired)
+    );
+    assert!(h.server.prune_expired().await.unwrap() >= 1);
+    assert_eq!(
+        h.verify(&issued.access_token).await,
+        invalid(InvalidAccessReason::Unknown)
+    );
+    // The refresh token has not expired, so it survives and still rotates.
+    let refreshed = h.refresh(&issued.client_id, &issued.refresh_token).await;
+    assert_eq!(status(&refreshed), 200, "{:?}", body(&refreshed));
+}
