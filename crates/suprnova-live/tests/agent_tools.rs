@@ -749,3 +749,172 @@ mod root {
         }
     }
 }
+
+mod checker {
+    use suprnova_live::action::{
+        ActionArgumentSchema, AuthorizationRequirement, TransactionPolicy,
+    };
+    use suprnova_live::checker::{
+        CheckReport, CheckerLimits, DiagnosticCode, TemplateCatalog, TemplateChecker,
+    };
+    use suprnova_live::identity::{ActionName, ComponentName, ViewName};
+    use suprnova_live::metadata::{
+        ActionMetadata, ActionToolMetadata, ComponentMetadata, ContractVersions,
+    };
+    use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
+    use suprnova_live::validation::ValidationSelection;
+
+    fn metadata(name: &str, view: &str, tool: Option<ActionToolMetadata>) -> ComponentMetadata {
+        let mut action = ActionMetadata::new_with_contract(
+            ActionName::parse("select").expect("action"),
+            1,
+            ActionArgumentSchema::empty(),
+            AuthorizationRequirement::Current,
+            ValidationSelection::None,
+            TransactionPolicy::None,
+        )
+        .expect("action metadata");
+        if let Some(tool) = tool {
+            action = action.with_tool(tool).expect("tool");
+        }
+        ComponentMetadata::new(
+            ComponentName::parse(name).expect("component"),
+            ViewName::parse(view).expect("view"),
+            ContractVersions::new(1, 1, 1, 2, 1).expect("versions"),
+            vec![],
+            vec![action],
+        )
+        .expect("component metadata")
+    }
+
+    fn check(source: &str) -> CheckReport {
+        let browser = ActionToolMetadata::new("picker.select", "Select an item.")
+            .expect("tool")
+            .for_browser(true);
+        let headless = ActionToolMetadata::new("agent.select", "Select an item.")
+            .expect("tool")
+            .headless(true);
+        let registry = ComponentRegistryBuilder::new()
+            .register(ComponentDescriptor::new(metadata(
+                "tests.root",
+                "tests/root.html",
+                None,
+            )))
+            .expect("root")
+            .register(ComponentDescriptor::new(metadata(
+                "tests.picker",
+                "tests/picker.html",
+                Some(browser),
+            )))
+            .expect("tool component")
+            .register(ComponentDescriptor::new(metadata(
+                "tests.agent",
+                "tests/agent.html",
+                Some(headless),
+            )))
+            .expect("agent-only component")
+            .register(ComponentDescriptor::new(metadata(
+                "tests.plain",
+                "tests/plain.html",
+                None,
+            )))
+            .expect("plain component")
+            .build();
+        let catalog = TemplateCatalog::new(vec![
+            (
+                ViewName::parse("tests/root.html").expect("view"),
+                source.to_owned(),
+            ),
+            (
+                ViewName::parse("tests/picker.html").expect("view"),
+                "<p>picker</p>".to_owned(),
+            ),
+            (
+                ViewName::parse("tests/agent.html").expect("view"),
+                "<p>agent</p>".to_owned(),
+            ),
+            (
+                ViewName::parse("tests/plain.html").expect("view"),
+                "<p>plain</p>".to_owned(),
+            ),
+        ])
+        .expect("template catalog");
+        TemplateChecker::new(&registry, &catalog, CheckerLimits::default())
+            .check_component(&ComponentName::parse("tests.root").expect("root"))
+    }
+
+    fn codes(source: &str) -> Vec<DiagnosticCode> {
+        check(source)
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.code())
+            .collect()
+    }
+
+    #[test]
+    fn agent_012_checker_refuses_unkeyed_tool_components() {
+        let found = codes(
+            r#"<section live:component="tests.picker"></section>
+               <section live:component="tests.picker"></section>"#,
+        );
+        assert!(found.contains(&DiagnosticCode::InvalidKey), "{found:?}");
+    }
+
+    #[test]
+    fn agent_012_checker_refuses_duplicate_tool_component_keys() {
+        let found = codes(
+            r#"<section live:component="tests.picker" live:key="main"></section>
+               <section live:component="tests.picker" live:key="main"></section>"#,
+        );
+        assert!(found.contains(&DiagnosticCode::DuplicateKey), "{found:?}");
+    }
+
+    #[test]
+    fn agent_012_checker_refuses_loop_or_dynamic_tool_component_keys() {
+        for source in [
+            // A checked loop key is fine for an ordinary component, but data
+            // must never reach a tool name.
+            r#"<ul>{% for item in items %}<li live:component="tests.picker" live:key="{{ item.id|live_key }}"></li>{% endfor %}</ul>"#,
+            r#"<section live:component="tests.picker" live:key="{{ key }}"></section>"#,
+            // Outside the tool instance grammar: a tool name allows no `:`,
+            // and a second `.` would make it ambiguous.
+            r#"<section live:component="tests.picker" live:key="main.left"></section>"#,
+            r#"<section live:component="tests.picker" live:key="main:left"></section>"#,
+        ] {
+            let found = codes(source);
+            assert!(
+                found.contains(&DiagnosticCode::ToolComponentKey),
+                "{source}: {found:?}"
+            );
+        }
+        // The same keys on components the browser offers no tool of are
+        // judged by the ordinary rules alone.
+        for component in ["tests.plain", "tests.agent"] {
+            let found = codes(&format!(
+                r#"<ul>{{% for item in items %}}<li live:component="{component}" live:key="{{{{ item.id|live_key }}}}"></li>{{% endfor %}}</ul>
+                   <section live:component="{component}" live:key="main.left"></section>"#
+            ));
+            assert!(
+                !found.contains(&DiagnosticCode::ToolComponentKey),
+                "{component}: {found:?}"
+            );
+        }
+        assert_eq!(
+            DiagnosticCode::ToolComponentKey.as_str(),
+            "tool_component_key"
+        );
+    }
+
+    #[test]
+    fn agent_012_checker_accepts_distinctly_keyed_tool_components() {
+        let report = check(
+            r#"<section live:component="tests.picker" live:key="left"></section>
+               <section live:component="tests.picker" live:key="right"></section>"#,
+        );
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+    }
+}
