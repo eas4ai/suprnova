@@ -802,6 +802,29 @@ async fn agent_008_a_repeated_presentation_during_step_up_reuses_the_row() {
 }
 
 #[tokio::test]
+async fn agent_008_a_case_variant_of_a_verified_email_steps_up() {
+    let h = sqlite_harness().await;
+    let stored = magnetar::password::normalize_email("Émile.Zola@Example.test");
+    let user_id = h.create_user(&stored, true).await;
+    let response = present_subject(&h, "case-variant", "ÉMILE.ZOLA@EXAMPLE.TEST").await;
+    assert_eq!(status(&response), 401, "{:?}", body(&response));
+    assert_eq!(body(&response)["error"], "interaction_required");
+    let row = h
+        .registration(body(&response)["registration_id"].as_str().expect("id"))
+        .await;
+    assert_eq!(row.claim_user_id.as_deref(), Some(user_id.as_str()));
+    use magnetar::storage::UserStore;
+    assert!(
+        h.storage
+            .find_by_email("ÉMILE.ZOLA@EXAMPLE.TEST")
+            .await
+            .expect("read")
+            .is_none(),
+        "no second account was provisioned"
+    );
+}
+
+#[tokio::test]
 async fn agent_008_the_provisioning_policy_decides_when_nothing_matches() {
     let mut options = Options::new();
     options.provisioning = Some(Arc::new(RefuseProvisioning));
@@ -1250,6 +1273,46 @@ async fn agent_009_claiming_revokes_pre_claim_tokens_and_answers_a_second_assert
     assert_eq!(events[0].user_id, user_id);
     assert_eq!(events[0].attributes["registration_id"], id);
     assert_eq!(events[0].attributes["claimed_by_user_id"], user_id);
+}
+
+#[tokio::test]
+async fn agent_009_a_user_whose_email_is_not_verified_cannot_claim() {
+    let h = sqlite_harness().await;
+    let registration = h.service_auth("unverified.claimer@example.test").await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let attempt = attempt_token(
+        registration["claim"]["verification_uri"]
+            .as_str()
+            .expect("uri"),
+    );
+    let code = registration["claim"]["user_code"].as_str().expect("code");
+    let user_id = h
+        .create_user("unverified.claimer@example.test", false)
+        .await;
+    let bearer = h.sign_in(&user_id).await;
+    let view = h.pending(&attempt, Some(&bearer)).await;
+    assert_eq!(status(&view), 403, "{:?}", body(&view));
+    assert_eq!(body(&view)["error"], "access_denied");
+    let confirm = h.confirm(&attempt, code, Some(&bearer)).await;
+    assert_eq!(status(&confirm), 403, "{:?}", body(&confirm));
+    assert_eq!(body(&confirm)["error"], "access_denied");
+    assert_eq!(h.registration(id).await.status, "pending");
+}
+
+#[tokio::test]
+async fn agent_009_emails_compare_the_way_magnetar_normalizes_them() {
+    let h = sqlite_harness().await;
+    let stored = magnetar::password::normalize_email("Ana.Muñoz@Example.test");
+    let registration = h.service_auth("ANA.MUÑOZ@EXAMPLE.TEST").await;
+    let attempt = attempt_token(
+        registration["claim"]["verification_uri"]
+            .as_str()
+            .expect("uri"),
+    );
+    let user_id = h.create_user(&stored, true).await;
+    let bearer = h.sign_in(&user_id).await;
+    let view = h.pending(&attempt, Some(&bearer)).await;
+    assert_eq!(status(&view), 200, "{:?}", body(&view));
 }
 
 // AGENT-010 -----------------------------------------------------------------

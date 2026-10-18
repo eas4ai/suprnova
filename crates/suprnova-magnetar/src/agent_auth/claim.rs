@@ -9,7 +9,8 @@ use subtle::ConstantTimeEq;
 
 use super::store::{IDENTITY_ASSERTION, RegistrationRecord, STATUS_PENDING, STATUS_UNCLAIMED};
 use super::{
-    AgentUser, Core, NO_FRAMING, NO_STORE, SignedInUser, digest, failure, respond, timestamp,
+    AgentUser, Core, NO_FRAMING, NO_STORE, SignedInUser, digest, failure, respond, same_email,
+    timestamp,
 };
 use crate::Result;
 use crate::authorization_server::AuthorizationServer;
@@ -90,10 +91,13 @@ impl Core {
             .claim_user_id
             .as_deref()
             .is_some_and(|bound| bound != user.user_id);
-        let wrong_email = record
-            .claim_email
-            .as_deref()
-            .is_none_or(|bound| !bound.eq_ignore_ascii_case(&user.email));
+        // The claim is bound to an email, so the user must hold it: the
+        // same address, verified by the application.
+        let wrong_email = !user.email_verified
+            || record
+                .claim_email
+                .as_deref()
+                .is_none_or(|bound| !same_email(bound, &user.email));
         if wrong_user || wrong_email {
             return Ok(Lookup::Refused(page_error(
                 403,

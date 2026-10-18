@@ -678,7 +678,7 @@ impl Core {
             kind: IDENTITY_ASSERTION.to_owned(),
             status: STATUS_PENDING.to_owned(),
             user_id: None,
-            claim_email: Some(user.email.to_ascii_lowercase()),
+            claim_email: Some(crate::password::normalize_email(&user.email)),
             claim_user_id: Some(user.user_id.clone()),
             claim_token_hash: Some(digest(&claim_token)),
             claim_expires_at: Some(window),
@@ -901,7 +901,7 @@ impl Core {
             && record
                 .claim_email
                 .as_deref()
-                .is_some_and(|bound| !bound.eq_ignore_ascii_case(&email))
+                .is_some_and(|bound| !super::same_email(bound, &email))
         {
             return Ok(agent_error(
                 400,

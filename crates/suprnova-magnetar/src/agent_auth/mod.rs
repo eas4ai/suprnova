@@ -87,6 +87,9 @@ pub struct AgentUser {
     /// The user's email, which a claim is bound to and the second identity
     /// assertion carries.
     pub email: String,
+    /// Whether the application verified that email. A claim is bound to an
+    /// email, so only a user who proved they hold it can complete one.
+    pub email_verified: bool,
     /// The user's authentication epoch, so the user's password change ends
     /// the agent's tokens as it ends sessions.
     pub auth_epoch: Option<u64>,
@@ -113,6 +116,7 @@ impl<T: UserStore + ?Sized> AgentUserDirectory for T {
         Ok(UserStore::find_by_id(self, user_id)
             .await?
             .map(|user| AgentUser {
+                email_verified: user.email_verified_at.is_some(),
                 user_id: user.user_id,
                 email: user.email,
                 auth_epoch: Some(user.auth_epoch),
@@ -123,13 +127,16 @@ impl<T: UserStore + ?Sized> AgentUserDirectory for T {
         // An account whose email the application never verified is not a
         // match: binding a provider identity to it would hand the agent to
         // whoever registered the address first.
+        // Looked up in the form Magnetar stores addresses in, as the
+        // password plugin does.
         Ok(self
-            .find_by_email(email)
+            .find_by_email(&crate::password::normalize_email(email))
             .await?
             .filter(|user| user.email_verified_at.is_some())
             .map(|user| AgentUser {
                 user_id: user.user_id,
                 email: user.email,
+                email_verified: true,
                 auth_epoch: Some(user.auth_epoch),
             }))
     }
@@ -232,6 +239,7 @@ impl ProvisioningPolicy for ProvisionUsers {
                 Ok(ProvisioningDecision::Provisioned(AgentUser {
                     user_id: user.user_id,
                     email: user.email,
+                    email_verified: true,
                     auth_epoch: Some(user.auth_epoch),
                 }))
             }
@@ -1003,7 +1011,15 @@ pub(crate) fn normalize_email(value: &str) -> Option<String> {
     if domain.starts_with('.') || domain.ends_with('.') {
         return None;
     }
-    Some(value.to_ascii_lowercase())
+    // The fold every other Magnetar lookup uses, so an address matches the
+    // account the password plugin stored for it whatever its case.
+    Some(crate::password::normalize_email(value))
+}
+
+/// Whether two addresses are the same once normalized as Magnetar stores
+/// them.
+pub(crate) fn same_email(left: &str, right: &str) -> bool {
+    crate::password::normalize_email(left) == crate::password::normalize_email(right)
 }
 
 /// Headers that keep protocol answers out of caches (RFC 6749 section 5.1).
