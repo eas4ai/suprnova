@@ -1897,32 +1897,26 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
     add_remember_auth_epoch_column(db).await?;
     add_two_factor_enrollment_snapshot_columns(db).await?;
     widen_mysql_columns(db).await?;
-    if !column_exists(db, "auth_lockouts", "ip_address").await? {
-        let mut ip_address = sea_orm::sea_query::ColumnDef::new(lockouts::Column::IpAddress);
-        ip_address.string().null();
-        let alter = sea_orm::sea_query::Table::alter()
-            .table(lockouts::Entity)
-            .add_column(ip_address)
-            .to_owned();
-        db.execute(&alter)
-            .await
-            .map_err(|error| crate::Error::Internal {
-                message: format!("add lockout IP-address column: {error}"),
-            })?;
-    }
-    if !column_exists(db, "auth_lockouts", "migration_source_id").await? {
-        let mut source_id = sea_orm::sea_query::ColumnDef::new(lockouts::Column::MigrationSourceId);
-        source_id.string().null();
-        let alter = sea_orm::sea_query::Table::alter()
-            .table(lockouts::Entity)
-            .add_column(source_id)
-            .to_owned();
-        db.execute(&alter)
-            .await
-            .map_err(|error| crate::Error::Internal {
-                message: format!("add lockout migration source column: {error}"),
-            })?;
-    }
+    let mut ip_address = sea_orm::sea_query::ColumnDef::new(lockouts::Column::IpAddress);
+    ip_address.string().null();
+    add_column_if_missing(
+        db,
+        "auth_lockouts",
+        "ip_address",
+        ip_address,
+        "add lockout IP-address column",
+    )
+    .await?;
+    let mut source_id = sea_orm::sea_query::ColumnDef::new(lockouts::Column::MigrationSourceId);
+    source_id.string().null();
+    add_column_if_missing(
+        db,
+        "auth_lockouts",
+        "migration_source_id",
+        source_id,
+        "add lockout migration source column",
+    )
+    .await?;
     add_optional_string_column(db, "app_users", "name", users::Column::Name).await?;
     add_optional_string_column(
         db,
@@ -2184,6 +2178,38 @@ async fn column_exists(db: &DatabaseConnection, table: &str, column: &str) -> cr
         })
 }
 
+/// Add one column to `table` unless it is there.
+///
+/// Two processes that upgrade one database both find the column missing and
+/// both add it, and the second add fails: MySQL and MariaDB report a
+/// duplicate column, Postgres and SQLite an existing one. A failure after
+/// which the column exists is that race, and the column this run wanted is
+/// in place. A failure that leaves no column is an error.
+async fn add_column_if_missing(
+    db: &DatabaseConnection,
+    table: &str,
+    column_name: &str,
+    definition: sea_orm::sea_query::ColumnDef,
+    description: &str,
+) -> crate::Result<()> {
+    if column_exists(db, table, column_name).await? {
+        return Ok(());
+    }
+    let alter = sea_orm::sea_query::Table::alter()
+        .table(sea_orm::sea_query::Alias::new(table))
+        .add_column(definition)
+        .to_owned();
+    let Err(error) = db.execute(&alter).await else {
+        return Ok(());
+    };
+    if column_exists(db, table, column_name).await? {
+        return Ok(());
+    }
+    Err(crate::Error::Internal {
+        message: format!("{description}: {error}"),
+    })
+}
+
 async fn add_optional_timestamp_column<I>(
     db: &DatabaseConnection,
     table: &str,
@@ -2193,21 +2219,16 @@ async fn add_optional_timestamp_column<I>(
 where
     I: sea_orm::sea_query::IntoIden,
 {
-    if column_exists(db, table, column_name).await? {
-        return Ok(());
-    }
     let mut definition = sea_orm::sea_query::ColumnDef::new(column);
     definition.timestamp_with_time_zone().null();
-    let alter = sea_orm::sea_query::Table::alter()
-        .table(sea_orm::sea_query::Alias::new(table))
-        .add_column(definition)
-        .to_owned();
-    db.execute(&alter)
-        .await
-        .map_err(|error| crate::Error::Internal {
-            message: format!("add {table}.{column_name}: {error}"),
-        })?;
-    Ok(())
+    add_column_if_missing(
+        db,
+        table,
+        column_name,
+        definition,
+        &format!("add {table}.{column_name}"),
+    )
+    .await
 }
 
 async fn add_optional_string_column<I>(
@@ -2219,38 +2240,30 @@ async fn add_optional_string_column<I>(
 where
     I: sea_orm::sea_query::IntoIden,
 {
-    if column_exists(db, table, column_name).await? {
-        return Ok(());
-    }
     let mut definition = sea_orm::sea_query::ColumnDef::new(column);
     definition.string().null();
-    let alter = sea_orm::sea_query::Table::alter()
-        .table(sea_orm::sea_query::Alias::new(table))
-        .add_column(definition)
-        .to_owned();
-    db.execute(&alter)
-        .await
-        .map_err(|error| crate::Error::Internal {
-            message: format!("add {table}.{column_name}: {error}"),
-        })?;
-    Ok(())
+    add_column_if_missing(
+        db,
+        table,
+        column_name,
+        definition,
+        &format!("add {table}.{column_name}"),
+    )
+    .await
 }
 
 async fn add_two_factor_enrollment_snapshot_columns(db: &DatabaseConnection) -> crate::Result<()> {
-    if !column_exists(db, "auth_two_factor", "enrollment_auth_epoch").await? {
-        let mut definition =
-            sea_orm::sea_query::ColumnDef::new(two_factor::Column::EnrollmentAuthEpoch);
-        definition.big_integer().not_null().default(0);
-        let alter = sea_orm::sea_query::Table::alter()
-            .table(two_factor::Entity)
-            .add_column(definition)
-            .to_owned();
-        db.execute(&alter)
-            .await
-            .map_err(|error| crate::Error::Internal {
-                message: format!("add auth_two_factor.enrollment_auth_epoch: {error}"),
-            })?;
-    }
+    let mut enrollment_epoch =
+        sea_orm::sea_query::ColumnDef::new(two_factor::Column::EnrollmentAuthEpoch);
+    enrollment_epoch.big_integer().not_null().default(0);
+    add_column_if_missing(
+        db,
+        "auth_two_factor",
+        "enrollment_auth_epoch",
+        enrollment_epoch,
+        "add auth_two_factor.enrollment_auth_epoch",
+    )
+    .await?;
     add_optional_string_column(
         db,
         "auth_two_factor",
@@ -2265,20 +2278,17 @@ async fn add_two_factor_enrollment_snapshot_columns(db: &DatabaseConnection) -> 
         two_factor::Column::EnrollmentExpiresAt,
     )
     .await?;
-    if !column_exists(db, "auth_two_factor", "rotation_pending").await? {
-        let mut definition =
-            sea_orm::sea_query::ColumnDef::new(two_factor::Column::RotationPending);
-        definition.boolean().not_null().default(false);
-        let alter = sea_orm::sea_query::Table::alter()
-            .table(two_factor::Entity)
-            .add_column(definition)
-            .to_owned();
-        db.execute(&alter)
-            .await
-            .map_err(|error| crate::Error::Internal {
-                message: format!("add auth_two_factor.rotation_pending: {error}"),
-            })?;
-    }
+    let mut rotation_pending =
+        sea_orm::sea_query::ColumnDef::new(two_factor::Column::RotationPending);
+    rotation_pending.boolean().not_null().default(false);
+    add_column_if_missing(
+        db,
+        "auth_two_factor",
+        "rotation_pending",
+        rotation_pending,
+        "add auth_two_factor.rotation_pending",
+    )
+    .await?;
     // A rotation waits beside the confirmed secret in these two columns.
     // Before they existed a rotation overwrote the confirmed secret.
     for (name, column) in [
@@ -2288,76 +2298,57 @@ async fn add_two_factor_enrollment_snapshot_columns(db: &DatabaseConnection) -> 
             two_factor::Column::PendingRecoveryCodes,
         ),
     ] {
-        if column_exists(db, "auth_two_factor", name).await? {
-            continue;
-        }
         let definition =
             Schema::new(db.get_database_backend()).get_column_def::<two_factor::Entity>(column);
-        let alter = sea_orm::sea_query::Table::alter()
-            .table(two_factor::Entity)
-            .add_column(definition)
-            .to_owned();
-        db.execute(&alter)
-            .await
-            .map_err(|error| crate::Error::Internal {
-                message: format!("add auth_two_factor.{name}: {error}"),
-            })?;
+        add_column_if_missing(
+            db,
+            "auth_two_factor",
+            name,
+            definition,
+            &format!("add auth_two_factor.{name}"),
+        )
+        .await?;
     }
     Ok(())
 }
 
 async fn add_auth_epoch_column(db: &DatabaseConnection) -> crate::Result<()> {
-    if column_exists(db, "app_users", "auth_epoch").await? {
-        return Ok(());
-    }
     let mut definition = sea_orm::sea_query::ColumnDef::new(users::Column::AuthEpoch);
     definition.big_integer().not_null().default(0);
-    let alter = sea_orm::sea_query::Table::alter()
-        .table(users::Entity)
-        .add_column(definition)
-        .to_owned();
-    db.execute(&alter)
-        .await
-        .map_err(|error| crate::Error::Internal {
-            message: format!("add app_users.auth_epoch: {error}"),
-        })?;
-    Ok(())
+    add_column_if_missing(
+        db,
+        "app_users",
+        "auth_epoch",
+        definition,
+        "add app_users.auth_epoch",
+    )
+    .await
 }
 
 async fn add_session_auth_epoch_column(db: &DatabaseConnection) -> crate::Result<()> {
-    if column_exists(db, "auth_sessions", "auth_epoch").await? {
-        return Ok(());
-    }
     let mut definition = sea_orm::sea_query::ColumnDef::new(sessions::Column::AuthEpoch);
     definition.big_integer().not_null().default(-1);
-    let alter = sea_orm::sea_query::Table::alter()
-        .table(sessions::Entity)
-        .add_column(definition)
-        .to_owned();
-    db.execute(&alter)
-        .await
-        .map_err(|error| crate::Error::Internal {
-            message: format!("add auth_sessions.auth_epoch: {error}"),
-        })?;
-    Ok(())
+    add_column_if_missing(
+        db,
+        "auth_sessions",
+        "auth_epoch",
+        definition,
+        "add auth_sessions.auth_epoch",
+    )
+    .await
 }
 
 async fn add_remember_auth_epoch_column(db: &DatabaseConnection) -> crate::Result<()> {
-    if column_exists(db, "auth_remember_tokens", "auth_epoch").await? {
-        return Ok(());
-    }
     let mut definition = sea_orm::sea_query::ColumnDef::new(remembers::Column::AuthEpoch);
     definition.big_integer().not_null().default(-1);
-    let alter = sea_orm::sea_query::Table::alter()
-        .table(remembers::Entity)
-        .add_column(definition)
-        .to_owned();
-    db.execute(&alter)
-        .await
-        .map_err(|error| crate::Error::Internal {
-            message: format!("add auth_remember_tokens.auth_epoch: {error}"),
-        })?;
-    Ok(())
+    add_column_if_missing(
+        db,
+        "auth_remember_tokens",
+        "auth_epoch",
+        definition,
+        "add auth_remember_tokens.auth_epoch",
+    )
+    .await
 }
 
 /// Run the `CREATE INDEX` for an index [`index_exists`] found missing.
@@ -2819,6 +2810,28 @@ mod tests {
         .expect_err("a create that leaves no index is an error")
         .to_string();
         assert!(error.contains("create broken index"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn an_add_column_that_leaves_no_column_stays_an_error() {
+        let database = Database::connect("sqlite::memory:").await.unwrap();
+        let mut definition =
+            sea_orm::sea_query::ColumnDef::new(sea_orm::sea_query::Alias::new("auth_epoch"));
+        definition.big_integer().not_null().default(0);
+        let error = super::add_column_if_missing(
+            &database,
+            "no_such_table",
+            "auth_epoch",
+            definition,
+            "add no_such_table.auth_epoch",
+        )
+        .await
+        .expect_err("an add that leaves no column is an error")
+        .to_string();
+        assert!(
+            error.contains("add no_such_table.auth_epoch"),
+            "got: {error}"
+        );
     }
 
     #[tokio::test]

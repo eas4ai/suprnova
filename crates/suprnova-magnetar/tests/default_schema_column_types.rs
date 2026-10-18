@@ -45,25 +45,33 @@ use sea_orm::{
 };
 use sha2::{Digest, Sha256};
 
+#[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
+#[path = "fixtures/live_database.rs"]
+mod live_database;
+
+#[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
+use live_database::LiveDatabase;
+
+/// One table as an earlier release of `migrate` declared it.
+macro_rules! narrow_entity {
+    ($module:ident, $table:literal, { $($field:tt)* }) => {
+        pub mod $module {
+            use sea_orm::entity::prelude::*;
+            #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+            #[sea_orm(table_name = $table)]
+            pub struct Model { $($field)* }
+            #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+            pub enum Relation {}
+            impl ActiveModelBehavior for ActiveModel {}
+        }
+    };
+}
+
 /// The tables as `migrate` declared them before their byte and long-text
 /// columns carried a column type. On MySQL and MariaDB they render the
 /// narrow `varbinary(255)` and `varchar(255)` columns an existing
 /// application database holds.
 mod narrow_layout {
-    macro_rules! narrow_entity {
-        ($module:ident, $table:literal, { $($field:tt)* }) => {
-            pub mod $module {
-                use sea_orm::entity::prelude::*;
-                #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-                #[sea_orm(table_name = $table)]
-                pub struct Model { $($field)* }
-                #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-                pub enum Relation {}
-                impl ActiveModelBehavior for ActiveModel {}
-            }
-        };
-    }
-
     narrow_entity!(sessions, "auth_sessions", {
         #[sea_orm(primary_key, auto_increment = false)] pub id: String,
         pub user_id: i64,
@@ -123,6 +131,76 @@ mod narrow_layout {
         pub created_at: ChronoDateTimeUtc,
     });
 }
+
+/// Six tables as an earlier release created them, before `migrate` added
+/// the authentication-epoch, enrolment-snapshot, pending-rotation, lockout
+/// audit and timestamp columns. Upgrading them runs every add-column step.
+mod older_layout {
+    narrow_entity!(sessions, "auth_sessions", {
+        #[sea_orm(primary_key, auto_increment = false)] pub id: String,
+        pub user_id: i64,
+        pub token_digest: String,
+        pub token_hash: Option<String>,
+        pub user_agent: Option<String>,
+        pub ip_address: Option<String>,
+        pub expires_at: ChronoDateTimeUtc,
+        pub revoked_at: Option<ChronoDateTimeUtc>,
+    });
+    narrow_entity!(remembers, "auth_remember_tokens", {
+        #[sea_orm(primary_key, auto_increment = false)] pub id: String,
+        pub selector: String,
+        pub user_id: String,
+        pub verifier_hash: String,
+        pub expires_at: ChronoDateTimeUtc,
+    });
+    narrow_entity!(two_factor, "auth_two_factor", {
+        #[sea_orm(primary_key, auto_increment = false)] pub user_id: String,
+        pub secret: Vec<u8>,
+        pub recovery_codes: Option<Vec<u8>>,
+        pub confirmed_at: Option<ChronoDateTimeUtc>,
+        pub last_used_timestep: Option<i64>,
+    });
+    narrow_entity!(lockouts, "auth_lockouts", {
+        #[sea_orm(primary_key)] pub id: i64,
+        pub identity: String,
+        pub attempted_at: ChronoDateTimeUtc,
+        pub locked_at: Option<ChronoDateTimeUtc>,
+        pub reason: Option<String>,
+    });
+    narrow_entity!(tokens, "auth_tokens", {
+        #[sea_orm(primary_key)] pub id: i64,
+        pub user_id: Option<i64>,
+        pub purpose: String,
+        pub digest: String,
+        pub expires_at: ChronoDateTimeUtc,
+        pub used_at: Option<ChronoDateTimeUtc>,
+    });
+    narrow_entity!(accounts, "auth_linked_accounts", {
+        #[sea_orm(primary_key)] pub id: i64,
+        pub user_id: i64,
+        pub provider: String,
+        pub provider_account_id: String,
+    });
+}
+
+/// The columns `migrate` adds to the older layout, which every upgrade
+/// must leave in place.
+const ADDED_COLUMNS: [(&str, &str); 14] = [
+    ("auth_sessions", "auth_epoch"),
+    ("auth_remember_tokens", "auth_epoch"),
+    ("auth_two_factor", "enrollment_auth_epoch"),
+    ("auth_two_factor", "enrollment_session_id"),
+    ("auth_two_factor", "enrollment_expires_at"),
+    ("auth_two_factor", "rotation_pending"),
+    ("auth_two_factor", "pending_secret"),
+    ("auth_two_factor", "pending_recovery_codes"),
+    ("auth_lockouts", "ip_address"),
+    ("auth_lockouts", "migration_source_id"),
+    ("auth_tokens", "created_at"),
+    ("auth_tokens", "updated_at"),
+    ("auth_linked_accounts", "created_at"),
+    ("auth_linked_accounts", "updated_at"),
+];
 
 /// The index names `migrate` creates; a concurrent run must leave each one.
 const DEFAULT_INDEXES: [&str; 5] = [
@@ -618,6 +696,72 @@ async fn verify_concurrent_fresh_migrations(first: DatabaseConnection, second: D
     assert_long_values_round_trip(&first, "concurrent").await;
 }
 
+/// Two `migrate` calls that upgrade one database holding the older layout,
+/// each over its own connection pool as two processes would run them, both
+/// succeed. Every add-column step and every widening runs in both, and the
+/// upgraded database keeps its row and accepts long values.
+async fn verify_concurrent_older_layout_upgrades(
+    first: DatabaseConnection,
+    second: DatabaseConnection,
+) {
+    let backend = first.get_database_backend();
+    let schema = Schema::new(backend);
+    for statement in [
+        schema.create_table_from_entity(older_layout::sessions::Entity),
+        schema.create_table_from_entity(older_layout::remembers::Entity),
+        schema.create_table_from_entity(older_layout::two_factor::Entity),
+        schema.create_table_from_entity(older_layout::lockouts::Entity),
+        schema.create_table_from_entity(older_layout::tokens::Entity),
+        schema.create_table_from_entity(older_layout::accounts::Entity),
+    ] {
+        first
+            .execute(&statement)
+            .await
+            .expect("create an older-layout table");
+    }
+    older_layout::sessions::ActiveModel {
+        id: Set("older-session".to_owned()),
+        user_id: Set(1),
+        token_digest: Set("cd".repeat(32)),
+        token_hash: Set(Some("cd".repeat(32))),
+        user_agent: Set(None),
+        ip_address: Set(None),
+        expires_at: Set(whole_second(Utc::now()) + Duration::days(1)),
+        revoked_at: Set(None),
+    }
+    .insert(&first)
+    .await
+    .expect("store an older-layout session");
+
+    let (left, right) = tokio::join!(
+        magnetar::default_schema::migrate(&first),
+        magnetar::default_schema::migrate(&second)
+    );
+    assert!(left.is_ok(), "first concurrent upgrade: {left:?}");
+    assert!(right.is_ok(), "second concurrent upgrade: {right:?}");
+
+    let layout = column_layout(&first).await;
+    for (table, column) in ADDED_COLUMNS {
+        assert!(
+            layout
+                .iter()
+                .any(|(listed_table, listed_column, _, _)| listed_table == table
+                    && listed_column == column),
+            "{table}.{column} exists after two concurrent upgrades"
+        );
+    }
+    let session = sessions::Entity::find_by_id("older-session".to_owned())
+        .one(&first)
+        .await
+        .expect("read the upgraded session")
+        .expect("the session survives the upgrade");
+    assert_eq!(
+        session.auth_epoch, -1,
+        "the added epoch invalidates the session that predates it"
+    );
+    assert_long_values_round_trip(&first, "older-concurrent").await;
+}
+
 #[cfg(feature = "seaorm-sqlite")]
 async fn sqlite_memory() -> DatabaseConnection {
     Database::connect("sqlite::memory:")
@@ -656,68 +800,29 @@ async fn sqlite_concurrent_fresh_migrations_both_succeed() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// A database of its own on the server a live test URL names.
-#[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
-struct LiveDatabase {
-    admin: DatabaseConnection,
-    name: String,
-    url: String,
+#[cfg(feature = "seaorm-sqlite")]
+#[tokio::test]
+async fn sqlite_concurrent_upgrades_of_an_older_layout_both_succeed() {
+    let path = std::env::temp_dir().join(format!(
+        "magnetar-concurrent-upgrade-{}.sqlite",
+        unique_suffix()
+    ));
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let first = Database::connect(&url).await.expect("connect SQLite file");
+    let second = Database::connect(&url).await.expect("connect SQLite file");
+    verify_concurrent_older_layout_upgrades(first, second).await;
+    let _ = std::fs::remove_file(&path);
 }
 
 #[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
-impl LiveDatabase {
-    async fn create(server_url: &str, label: &str) -> Self {
-        let admin = Database::connect(server_url)
-            .await
-            .expect("connect the live server");
-        let name = format!("magnetar_columns_{label}_{:016x}", rand::random::<u64>());
-        let create = match admin.get_database_backend() {
-            DbBackend::Postgres => format!("CREATE DATABASE \"{name}\""),
-            _ => format!("CREATE DATABASE `{name}`"),
-        };
-        admin
-            .execute_unprepared(&create)
-            .await
-            .expect("create an isolated database");
-        let url = database_url(server_url, &name);
-        Self { admin, name, url }
-    }
-
-    async fn connect(&self) -> DatabaseConnection {
-        Database::connect(&self.url)
-            .await
-            .expect("connect the isolated database")
-    }
-
-    async fn drop_database(self) {
-        let drop = match self.admin.get_database_backend() {
-            DbBackend::Postgres => format!("DROP DATABASE \"{}\" WITH (FORCE)", self.name),
-            _ => format!("DROP DATABASE `{}`", self.name),
-        };
-        self.admin
-            .execute_unprepared(&drop)
-            .await
-            .expect("drop the isolated database");
-    }
-}
-
-/// The server URL with its database path replaced by `database`; any query
-/// string is kept.
-#[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
-fn database_url(server_url: &str, database: &str) -> String {
-    let (base, query) = server_url
-        .split_once('?')
-        .map_or((server_url, None), |(base, query)| (base, Some(query)));
-    let authority_start = base.find("://").map_or(0, |index| index + 3);
-    let authority_end = base[authority_start..]
-        .find('/')
-        .map_or(base.len(), |index| authority_start + index);
-    let mut url = format!("{}/{database}", &base[..authority_end]);
-    if let Some(query) = query {
-        url.push('?');
-        url.push_str(query);
-    }
-    url
+async fn live_concurrent_older_layout_upgrades(server_url: &str, label: &str) {
+    let live = LiveDatabase::create(server_url, label).await;
+    let first = live.connect().await;
+    let second = live.connect().await;
+    verify_concurrent_older_layout_upgrades(first.clone(), second.clone()).await;
+    first.close().await.expect("close the first pool");
+    second.close().await.expect("close the second pool");
+    live.drop_database().await;
 }
 
 #[cfg(any(feature = "seaorm-postgres", feature = "seaorm-mysql"))]
@@ -779,6 +884,15 @@ async fn postgres_concurrent_fresh_migrations_both_succeed() {
     live_concurrent_fresh_migrations(&url, "pg_concurrent").await;
 }
 
+#[cfg(feature = "seaorm-postgres")]
+#[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn postgres_concurrent_upgrades_of_an_older_layout_both_succeed() {
+    let url = std::env::var("MAGNETAR_POSTGRES_TEST_URL")
+        .expect("MAGNETAR_POSTGRES_TEST_URL is required");
+    live_concurrent_older_layout_upgrades(&url, "pg_older").await;
+}
+
 #[cfg(feature = "seaorm-mysql")]
 #[tokio::test]
 #[ignore = "requires T2 live Postgres/MySQL database"]
@@ -804,4 +918,13 @@ async fn mysql_concurrent_fresh_migrations_both_succeed() {
     let url =
         std::env::var("MAGNETAR_MYSQL_TEST_URL").expect("MAGNETAR_MYSQL_TEST_URL is required");
     live_concurrent_fresh_migrations(&url, "my_concurrent").await;
+}
+
+#[cfg(feature = "seaorm-mysql")]
+#[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn mysql_concurrent_upgrades_of_an_older_layout_both_succeed() {
+    let url =
+        std::env::var("MAGNETAR_MYSQL_TEST_URL").expect("MAGNETAR_MYSQL_TEST_URL is required");
+    live_concurrent_older_layout_upgrades(&url, "my_older").await;
 }
