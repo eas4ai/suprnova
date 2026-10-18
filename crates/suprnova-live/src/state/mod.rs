@@ -7,10 +7,10 @@ mod session;
 mod timing;
 mod url;
 
+pub(crate) use codec::object_schema;
 pub use codec::{
     BindingIssue, BindingIssueKind, FieldIssue, FieldIssueKind, JSON_SCHEMA_DIALECT, ModelCodec,
 };
-pub(crate) use codec::object_schema;
 pub use path::{ModelPath, PathError, PathErrorKind};
 pub use proposal::{
     ModelBindingSchema, ModelFieldBinding, ProposalApplication, ProposalBatch, ProposalError,

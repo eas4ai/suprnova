@@ -104,7 +104,9 @@ fn start_host(work: &Path) -> Result<(Host, String), String> {
     loop {
         if let Some(status) = host.0.try_wait().map_err(|error| error.to_string())? {
             let output = fs::read_to_string(work.join("host.log")).unwrap_or_default();
-            return Err(format!("the host exited before it was ready: {status}\n{output}"));
+            return Err(format!(
+                "the host exited before it was ready: {status}\n{output}"
+            ));
         }
         if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
             return Ok((host, url));
@@ -159,7 +161,11 @@ fn spec(name: &str) {
             .current_dir(&suite)
             .env("AGENTS_BASE_URL", &url)
             .env("AGENTS_BROWSER_RESULTS", work.join("results"));
-        run(playwright, &work.join("playwright.log"), Duration::from_secs(600))
+        run(
+            playwright,
+            &work.join("playwright.log"),
+            Duration::from_secs(600),
+        )
     })();
     if let Err(error) = result {
         let host = fs::read_to_string(work.join("host.log")).unwrap_or_default();
