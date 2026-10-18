@@ -32,7 +32,7 @@ use super::TOOL_CALL_HEADER;
 use super::caller::{CallerKind, ToolCaller};
 use super::limit::{self, Refusal};
 use super::scope::Scope;
-use super::tool::RegisteredTool;
+use super::tool::{RegisteredTool, ToolRegistry};
 use crate::error::FrameworkError;
 use crate::http::{HttpResponse, Request, Response};
 use crate::middleware::{BoxedMiddleware, Middleware, Next, into_boxed};
@@ -43,6 +43,22 @@ struct ToolAccess {
     callers: &'static [CallerKind],
     scopes: &'static [Scope],
     config: Arc<AgentsConfig>,
+}
+
+/// The access check of the Live action route for browser tool calls
+/// (AGENT-012).
+struct LiveToolAccess {
+    registry: Arc<ToolRegistry>,
+    config: Arc<AgentsConfig>,
+}
+
+/// The access check the Live action route runs for a request that carries
+/// the [`TOOL_CALL_HEADER`](super::TOOL_CALL_HEADER).
+pub(crate) fn live_access(
+    registry: Arc<ToolRegistry>,
+    config: Arc<AgentsConfig>,
+) -> BoxedMiddleware {
+    into_boxed(LiveToolAccess { registry, config })
 }
 
 /// The access check for `tool`'s route.
@@ -144,6 +160,84 @@ impl Middleware for ToolAccess {
                 }
             }
         }
+        caller.scope(next(request)).await
+    }
+}
+
+/// A browser's call of a Live tool reaches the ordinary Live action route,
+/// with the island's snapshot, the session and the CSRF proof a click
+/// carries. An ordinary action request passes straight through, uncounted.
+/// One that carries the tool-call header is the call of the tool it names:
+/// the tool must accept the browser's caller, a browser caller is never an
+/// agent account, and the call counts against the caller's tool budget, per
+/// user or per address for a guest. The Live kernel then requires the
+/// request to invoke that tool's action on that tool's island.
+#[async_trait]
+impl Middleware for LiveToolAccess {
+    async fn handle(&self, mut request: Request, next: Next) -> Response {
+        let Some(name) = request.header(TOOL_CALL_HEADER).map(str::to_string) else {
+            return next(request).await;
+        };
+        let Some((tool, instance)) = self.registry.browser_tool(&name) else {
+            return Err(
+                FrameworkError::domain(format!("No Live tool is named `{name}`."), 400).into(),
+            );
+        };
+        let Some(target) = tool.live_target() else {
+            return Err(
+                FrameworkError::domain(format!("No Live tool is named `{name}`."), 400).into(),
+            );
+        };
+        let claim = crate::live::action::LiveToolClaim {
+            component: target.component.clone(),
+            action: target.action,
+            instance: instance.to_string(),
+        };
+        let caller = ToolAccess::caller_of(&request).await?;
+        if !tool.accepts(caller.kind()) {
+            return Err(match caller.kind() {
+                CallerKind::Public => FrameworkError::domain("Unauthenticated.", 401),
+                _ => FrameworkError::domain(
+                    format!("The tool `{name}` does not accept signed-in users."),
+                    403,
+                ),
+            }
+            .into());
+        }
+        if !tool.missing_scopes(&caller).is_empty() {
+            let scope = tool
+                .scopes()
+                .iter()
+                .map(Scope::name)
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Err(HttpResponse::from(FrameworkError::domain(
+                format!("The tool `{name}` needs a browser session or a token with its scopes."),
+                403,
+            ))
+            .header(
+                "WWW-Authenticate",
+                format!("Bearer error=\"insufficient_scope\", scope=\"{scope}\""),
+            ));
+        }
+        match limit::admit(&self.config, &caller).await {
+            Ok(()) => {}
+            Err(Refusal::Limited(retry_after)) => {
+                return Err(FrameworkError::rate_limited(
+                    Some(std::time::Duration::from_secs(retry_after)),
+                    "Too many tool calls.",
+                )
+                .into());
+            }
+            Err(Refusal::Unavailable(error)) => {
+                return Err(FrameworkError::domain(
+                    format!("The tool call limit cannot be checked: {error}"),
+                    503,
+                )
+                .into());
+            }
+        }
+        request.set_live_tool_claim(claim);
         caller.scope(next(request)).await
     }
 }

@@ -180,6 +180,140 @@ impl TestClient {
     }
 }
 
+impl TestClient {
+    /// Call the Live tool `name` from the browser, as the Live runtime's
+    /// WebMCP registration does: a Live action request to `/__live/action`
+    /// carrying the island's snapshot from `page`, a page this client
+    /// rendered, invoking the tool's action with `arguments`, with the
+    /// [`TOOL_CALL_HEADER`](super::TOOL_CALL_HEADER), `Sec-Fetch-Site:
+    /// same-origin`, this client's cookies and its `XSRF-TOKEN` as
+    /// `X-XSRF-TOKEN` (AGENT-012, AGENT-018).
+    ///
+    /// The request takes the path a click takes: the session, CSRF and
+    /// origin checks, the snapshot verification, the
+    /// `live:{component}.{action}` authorization and the transaction, plus
+    /// the tool's caller check and budget.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no island of `page` registers a tool named `name`: the
+    /// test asked for a call the page does not offer.
+    pub fn live_tool(&self, name: &str, page: &str, arguments: Value) -> TestRequest {
+        let island = LiveIsland::offering(page, name).unwrap_or_else(|| {
+            panic!("TestClient::live_tool(): no island of the page offers the tool `{name}`")
+        });
+        let snapshot = if island.seed {
+            json!({
+                "kind": "seed_promotion",
+                "envelope": island.snapshot,
+                "browser_nonce": random_identity(),
+            })
+        } else {
+            json!({ "kind": "instance", "envelope": island.snapshot })
+        };
+        let body = json!({
+            "protocol_version": 2,
+            "runtime_contract_version": 2,
+            "snapshot_schema_version": 1,
+            "correlation_id": random_identity(),
+            "idempotency_key": random_identity(),
+            "component": island.component,
+            "base_revision": island.revision,
+            "snapshot": snapshot,
+            "child_parameters": null,
+            "model_proposals": {},
+            "operations": [{
+                "kind": "invoke_action",
+                "name": island.action,
+                "arguments": arguments,
+            }],
+            "extensions": { "x_suprnova_live_document_key_v1": island.document_key },
+        });
+        let mut request = self
+            .post("/__live/action")
+            .json(&body)
+            .header(
+                "Content-Type",
+                "application/vnd.suprnova.live+json; charset=utf-8; version=2",
+            )
+            .header("Sec-Fetch-Site", "same-origin")
+            .header(super::TOOL_CALL_HEADER, name);
+        if let Some(token) = self.cookie("XSRF-TOKEN") {
+            request = request.header("X-XSRF-TOKEN", token);
+        }
+        request
+    }
+}
+
+/// The island of a rendered page that registers a tool, as the browser
+/// runtime reads it from the island root.
+struct LiveIsland {
+    component: String,
+    document_key: String,
+    revision: String,
+    seed: bool,
+    snapshot: Value,
+    action: String,
+}
+
+impl LiveIsland {
+    /// The island of `page` whose root lists the tool `name`.
+    fn offering(page: &str, name: &str) -> Option<Self> {
+        use base64::Engine as _;
+
+        for root in page.split("<div").skip(1) {
+            let attributes = root.split('>').next().unwrap_or_default();
+            let Some(tools) = attribute(attributes, "data-suprnova-live-tools") else {
+                continue;
+            };
+            let tools: Value = serde_json::from_str(&tools).ok()?;
+            let Some(action) = tools["tools"]
+                .as_array()
+                .and_then(|tools| tools.iter().find(|tool| tool["name"] == name))
+                .and_then(|tool| tool["action"].as_str())
+            else {
+                continue;
+            };
+            let snapshot = attribute(attributes, "data-suprnova-live-snapshot")?;
+            let snapshot = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(snapshot)
+                .ok()?;
+            return Some(Self {
+                component: attribute(attributes, "data-suprnova-live-component")?,
+                document_key: attribute(attributes, "data-suprnova-live-document-key")?,
+                revision: attribute(attributes, "data-suprnova-live-revision")?,
+                seed: attribute(attributes, "data-suprnova-live-snapshot-kind")?.as_str() == "seed",
+                snapshot: serde_json::from_slice(&snapshot).ok()?,
+                action: action.to_string(),
+            });
+        }
+        None
+    }
+}
+
+/// The value of the attribute `name` among an element's `attributes`, with
+/// the escapes the island root writes undone.
+fn attribute(attributes: &str, name: &str) -> Option<String> {
+    let prefix = format!(" {name}=\"");
+    let start = attributes.find(&prefix)? + prefix.len();
+    let end = start + attributes[start..].find('"')?;
+    Some(
+        attributes[start..end]
+            .replace("&quot;", "\"")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&#39;", "'")
+            .replace("&amp;", "&"),
+    )
+}
+
+/// 16 random bytes as unpadded base64url, the form of a Live correlation
+/// id, idempotency key and browser nonce.
+fn random_identity() -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(uuid::Uuid::new_v4().as_bytes())
+}
+
 /// A test client of the MCP endpoint. See [`TestClient::mcp`].
 #[derive(Clone)]
 pub struct McpTestClient {
@@ -472,6 +606,14 @@ impl McpToolResult {
         self.inner
             .result()
             .and_then(|result| result.get("structuredContent"))
+    }
+
+    /// The state handle a headless Live tool returned, to pass as the
+    /// `handle` argument of a later call (AGENT-013).
+    pub fn handle(&self) -> Option<&str> {
+        self.structured()
+            .and_then(|structured| structured.get("handle"))
+            .and_then(Value::as_str)
     }
 
     /// The text of every text content item, joined by newlines.

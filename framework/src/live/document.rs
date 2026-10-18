@@ -954,7 +954,7 @@ fn validate_stitch_failure_policy(policy: &StitchFailurePolicy) -> Result<(), Li
     Ok(())
 }
 
-fn route_identity(pattern: &str) -> Result<RouteIdentity, LiveDocumentError> {
+pub(crate) fn route_identity(pattern: &str) -> Result<RouteIdentity, LiveDocumentError> {
     let mut digest = Sha256::new();
     digest.update(b"suprnova-live/route-identity/v1\0");
     digest.update(pattern.as_bytes());

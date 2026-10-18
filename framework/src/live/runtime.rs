@@ -127,6 +127,20 @@ pub(crate) struct StitchRegistration {
     pub(crate) kind: super::document::LiveMountKind,
 }
 
+/// What a registered catalog entry serves: a document's island, or the
+/// headless Live tool calls of one component (AGENT-013). Kept apart from
+/// the public [`LiveMountKind`](super::document::LiveMountKind), which only
+/// names a document's publication forms.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RegisteredMountKind {
+    /// An island a document mounts, in its declared publication form.
+    Document(super::document::LiveMountKind),
+    /// A component mounted on the server for headless tool calls, reached
+    /// only through `/__live/agent` by a call the MCP endpoint dispatched.
+    #[cfg(feature = "agents")]
+    Agent,
+}
+
 /// Framework-side record of one registered mount's declared kind.
 ///
 /// The engine catalog owns the scope requirements; this record lets the
@@ -136,13 +150,13 @@ pub(crate) struct StitchRegistration {
 struct MountKindRecord {
     route: RouteIdentity,
     slot: IslandSlot,
-    kind: super::document::LiveMountKind,
+    kind: RegisteredMountKind,
 }
 
 pub(crate) struct LiveMountRegistration {
     entry: MountCatalogEntry,
     upload_selector: UploadMountSelector,
-    kind: super::document::LiveMountKind,
+    kind: RegisteredMountKind,
 }
 
 impl LiveMountRegistration {
@@ -160,7 +174,26 @@ impl LiveMountRegistration {
                 document_key,
                 build,
             },
-            kind,
+            kind: RegisteredMountKind::Document(kind),
+        }
+    }
+
+    /// The catalog entry of a component's headless tool calls (AGENT-013).
+    #[cfg(feature = "agents")]
+    pub(crate) const fn agent(
+        entry: MountCatalogEntry,
+        selection: MountSelection,
+        document_key: DocumentMountKey,
+        build: BuildId,
+    ) -> Self {
+        Self {
+            entry,
+            upload_selector: UploadMountSelector {
+                selection,
+                document_key,
+                build,
+            },
+            kind: RegisteredMountKind::Agent,
         }
     }
 }
@@ -1019,13 +1052,17 @@ impl LiveRuntime {
             .register(self.graph.registry.engine(), entry)
             .map_err(|_| FrameworkError::internal("Live mount catalog was rejected"))?;
         *builder = Some(next);
-        self.graph
-            .upload_mount_builder
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_mut()
-            .ok_or_else(live_boot_error)?
-            .push(upload_selector);
+        // A headless tool entry finishes no upload and serves no document:
+        // it stays out of the upload and stitch selectors.
+        if matches!(kind, RegisteredMountKind::Document(_)) {
+            self.graph
+                .upload_mount_builder
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_mut()
+                .ok_or_else(live_boot_error)?
+                .push(upload_selector);
+        }
         self.graph
             .mount_kind_builder
             .lock()
@@ -1060,12 +1097,20 @@ impl LiveRuntime {
             .find(|record| &record.route == selection.route() && &record.slot == selection.slot())
             .ok_or_else(|| FrameworkError::internal("Live request context was rejected"))?;
         let closable: &[(SecurityCheck, PolicyReason)] = match record.kind {
-            LiveMountKind::PublicSeed => &[
+            // A headless tool entry is reached only through `/__live/agent`;
+            // a browser request naming it is refused before anything runs.
+            #[cfg(feature = "agents")]
+            RegisteredMountKind::Agent => {
+                return Err(FrameworkError::internal(
+                    "Live request context was rejected",
+                ));
+            }
+            RegisteredMountKind::Document(LiveMountKind::PublicSeed) => &[
                 (SecurityCheck::Session, PolicyReason::StatelessRequest),
                 (SecurityCheck::Principal, PolicyReason::AnonymousPrincipal),
                 (SecurityCheck::Tenant, PolicyReason::TenantlessRoute),
             ],
-            LiveMountKind::IdentityBound => {
+            RegisteredMountKind::Document(LiveMountKind::IdentityBound) => {
                 &[(SecurityCheck::Tenant, PolicyReason::TenantlessRoute)]
             }
         };
@@ -1115,10 +1160,14 @@ impl LiveRuntime {
         for selector in &selectors {
             let route = selector.selection.route().clone();
             let slot = selector.selection.slot().clone();
-            let Some(record) = kinds
-                .iter()
-                .find(|record| record.route == route && record.slot == slot)
-            else {
+            let Some(kind) = kinds.iter().find_map(|record| match record.kind {
+                RegisteredMountKind::Document(kind)
+                    if record.route == route && record.slot == slot =>
+                {
+                    Some(kind)
+                }
+                _ => None,
+            }) else {
                 continue;
             };
             stitch_registrations.insert(
@@ -1127,7 +1176,7 @@ impl LiveRuntime {
                     selection: selector.selection.clone(),
                     document_key: selector.document_key.clone(),
                     build: selector.build.clone(),
-                    kind: record.kind,
+                    kind,
                 },
             );
         }
@@ -1223,6 +1272,15 @@ impl LiveRuntime {
             )
             .map_err(|_| AsyncErrorKind::ContextRejected)?;
         Ok((context, parameters))
+    }
+
+    /// Returns the registered descriptor of one component.
+    #[cfg(feature = "agents")]
+    pub(crate) fn component_descriptor(
+        &self,
+        component: &ComponentName,
+    ) -> Option<suprnova_live::registry::ComponentDescriptor> {
+        self.graph.engine_registry.resolve(component).ok().cloned()
     }
 
     /// Returns the generated metadata of one registered component.
@@ -1378,6 +1436,13 @@ impl LiveRuntime {
             field,
             idempotency_key,
         )
+    }
+
+    /// The runtime clock's reading: the time snapshots are signed and
+    /// verified at.
+    #[cfg(feature = "agents")]
+    pub(crate) fn now(&self) -> Result<UnixMillis, FrameworkError> {
+        self.graph.clock.now().map_err(|_| live_boot_error())
     }
 
     pub(crate) fn upload_now(&self) -> Result<UnixMillis, FrameworkError> {
@@ -1552,7 +1617,7 @@ impl LiveRuntime {
         self.validate_request_context_with_scope(request, selection, None, None)
     }
 
-    fn validate_request_context_with_scope(
+    pub(crate) fn validate_request_context_with_scope(
         &self,
         request: &Request,
         selection: MountSelection,
@@ -1586,9 +1651,13 @@ impl LiveRuntime {
         self.graph.endpoint_config.inspect_mount(body, media)
     }
 
-    pub(crate) fn endpoint_service(
+    /// The browser endpoint's service for one request, its kernel given
+    /// `extras`: an observer of refresh causes for a headless tool call, or
+    /// the browser tool the request was admitted as.
+    pub(crate) fn endpoint_service_with(
         &self,
         upload_context: Option<TrustedLiveRequestContext>,
+        extras: super::action::KernelExtras,
     ) -> (
         LiveEndpointService,
         Arc<super::ports::response::PreparedResponseCompletion>,
@@ -1605,6 +1674,7 @@ impl LiveRuntime {
             Arc::clone(&self.graph.uploads.finalization),
             upload_context,
             Arc::clone(&completion),
+            extras,
         );
         let mount_catalog = Arc::clone(
             self.graph

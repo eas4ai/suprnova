@@ -680,6 +680,21 @@ impl Request {
         }
     }
 
+    /// Record the browser tool a Live action request was admitted as. Only
+    /// the tool access check calls this, after the tool's caller check and
+    /// budget passed; nothing parsed from the wire can set it.
+    #[cfg(feature = "agents")]
+    pub(crate) fn set_live_tool_claim(&mut self, claim: crate::live::action::LiveToolClaim) {
+        self.parts.extensions.insert(claim);
+    }
+
+    /// The browser tool a Live action request was admitted as, if any.
+    pub(crate) fn live_tool_claim(&self) -> Option<&crate::live::action::LiveToolClaim> {
+        self.parts
+            .extensions
+            .get::<crate::live::action::LiveToolClaim>()
+    }
+
     pub(crate) fn live_operation(&self) -> Option<LiveOperation> {
         self.live_security_attestation
             .operation(self.live_request_identity)

@@ -172,6 +172,12 @@ pub enum CryptPurpose {
     /// write, at which point the attacker already has access to the
     /// stored ciphertext.
     Cast,
+    /// The state handle a headless Live tool call returns to an agent
+    /// (AGENT-013): the component's signed snapshot, sealed so the agent
+    /// sees none of the state it carries, and bound to the caller's Live
+    /// scope through the context so one caller's handle opens for no
+    /// other.
+    LiveAgentHandle,
 }
 
 impl CryptPurpose {
@@ -194,6 +200,7 @@ impl CryptPurpose {
             CryptPurpose::MagnetarRefreshToken => b"magnetar/crypto/refresh-token/v1",
             CryptPurpose::MagnetarSessionGrant => b"magnetar/crypto/session-grant/v1",
             CryptPurpose::Cast => b"suprnova:cast:v1",
+            CryptPurpose::LiveAgentHandle => b"suprnova:live-agent-handle:v1",
         }
     }
 
@@ -227,6 +234,7 @@ impl CryptPurpose {
             CryptPurpose::MagnetarRefreshToken => "magnetar/crypto/refresh-token/v2:",
             CryptPurpose::MagnetarSessionGrant => "magnetar/crypto/session-grant/v2:",
             CryptPurpose::Cast => "suprnova:cast:v2:",
+            CryptPurpose::LiveAgentHandle => "suprnova:live-agent-handle:v2:",
         };
         let mut aad = Vec::with_capacity(family.len() + context.len());
         aad.extend_from_slice(family.as_bytes());

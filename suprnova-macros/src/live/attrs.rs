@@ -71,6 +71,8 @@ pub(crate) struct FieldArgs {
     pub(crate) timing: Option<ModelTimingArgs>,
     pub(crate) url: Option<UrlArgs>,
     pub(crate) upload: Option<UploadArgs>,
+    /// Whether a tool result shows the field to an agent (AGENT-012).
+    pub(crate) agent_visible: bool,
 }
 
 pub(crate) struct UploadArgs {
@@ -498,6 +500,7 @@ pub(crate) fn parse_field_args(attributes: &[Attribute]) -> syn::Result<FieldArg
     let mut timing = None;
     let mut url = None;
     let mut upload = None;
+    let mut agent_visible = None::<Span>;
 
     for attribute in attributes {
         let Some(name) = attribute
@@ -527,6 +530,21 @@ pub(crate) fn parse_field_args(attributes: &[Attribute]) -> syn::Result<FieldArg
             "url" => {
                 if url.replace(parse_url_args(attribute)?).is_some() {
                     return Err(syn::Error::new(attribute.span(), "duplicate #[url] helper"));
+                }
+                None
+            }
+            "agent_visible" => {
+                if !matches!(attribute.meta, syn::Meta::Path(_)) {
+                    return Err(syn::Error::new(
+                        attribute.span(),
+                        "#[agent_visible] takes no arguments",
+                    ));
+                }
+                if agent_visible.replace(attribute.span()).is_some() {
+                    return Err(syn::Error::new(
+                        attribute.span(),
+                        "duplicate #[agent_visible] helper",
+                    ));
                 }
                 None
             }
@@ -590,11 +608,24 @@ pub(crate) fn parse_field_args(attributes: &[Attribute]) -> syn::Result<FieldArg
             "only model-backed state can declare an upload policy",
         ));
     }
+    if let Some(span) = agent_visible
+        && !matches!(
+            kind,
+            FieldKind::State | FieldKind::Public | FieldKind::Model | FieldKind::Locked
+        )
+    {
+        return Err(syn::Error::new(
+            span,
+            "#[agent_visible] marks state a tool result copies from the instanced snapshot: \
+             ordinary, #[public], #[model] or #[locked] state; this field never leaves the server",
+        ));
+    }
     Ok(FieldArgs {
         kind,
         timing,
         url,
         upload,
+        agent_visible: agent_visible.is_some(),
     })
 }
 
@@ -811,6 +842,7 @@ pub(crate) fn is_field_helper(name: &str) -> bool {
             | "transient"
             | "url"
             | "upload"
+            | "agent_visible"
     )
 }
 

@@ -5,6 +5,10 @@
 //! shipped browser runtime.
 
 pub mod action;
+#[cfg(feature = "agents")]
+mod agent;
+#[cfg(feature = "agents")]
+pub(crate) use agent::RESULT_MEDIA_TYPE as LIVE_TOOL_RESULT_MEDIA_TYPE;
 /// Exact reviewed browser artifacts, their catalog, and document bootstrap markup.
 pub mod assets;
 mod async_transport;
@@ -22,6 +26,7 @@ mod replay;
 mod response;
 pub(crate) mod revocation;
 mod routes;
+pub(crate) use routes::{LIVE_AGENT_PATH, LIVE_UPDATE_PATH};
 mod runtime;
 pub(crate) mod session_state;
 mod ui_assets;

@@ -333,6 +333,55 @@ fn identity_fingerprint(
     }
 }
 
+/// The Live scope of a headless tool call (AGENT-013): a digest of who the
+/// MCP endpoint authenticated, never of a token, so a handle survives the
+/// rotation of the caller's refresh tokens and opens for no other caller.
+///
+/// It binds the caller's kind, the user it acts as, its agent registration,
+/// the client it came through, the tenant the request's tenant check
+/// recorded, and, for a guest, who has nothing else to bind to, the
+/// address bucket the caller is limited under.
+#[cfg(feature = "agents")]
+pub(crate) fn agent_scope(
+    request: &Request,
+    caller: &crate::agents::ToolCaller,
+) -> Result<ScopeFingerprint, FrameworkError> {
+    let identity = request.live_request_identity();
+    let attestation = request.live_security_attestation();
+    if !attestation.order_valid() {
+        return Err(context_error());
+    }
+    let tenant = identity_fingerprint(attestation, identity, SecurityCheck::Tenant)?;
+    let mut digest = Sha256::new();
+    digest.update(b"suprnova-live/agent-scope/v1\0");
+    let address = caller
+        .is_guest()
+        .then(|| crate::agents::address_bucket(caller.address()));
+    let user = caller.user_id();
+    let parts: [Option<&[u8]>; 6] = [
+        Some(caller.kind().as_str().as_bytes()),
+        user.as_deref().map(str::as_bytes),
+        caller
+            .registration()
+            .map(|registration| registration.id().as_bytes()),
+        caller.client_id().map(str::as_bytes),
+        tenant.as_ref().map(<[u8; 32]>::as_slice),
+        address.as_deref().map(str::as_bytes),
+    ];
+    for part in parts {
+        match part {
+            Some(bytes) => {
+                digest.update([1]);
+                digest.update((bytes.len() as u64).to_be_bytes());
+                digest.update(bytes);
+            }
+            None => digest.update([0]),
+        }
+    }
+    let bytes: [u8; 32] = digest.finalize().into();
+    ScopeFingerprint::from_bytes(&bytes).map_err(|_| context_error())
+}
+
 pub(super) fn aggregate_scope(
     session: Option<&[u8]>,
     principal: Option<&[u8]>,

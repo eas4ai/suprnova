@@ -64,11 +64,16 @@ pub use auth::{
     AuthorizationServerMetadata, CallerResolver, MetadataKind, ResolveContext, ResolveError,
 };
 pub use caller::{AgentRegistration, CallerChannel, CallerKind, ToolCaller};
+pub(crate) use limit::address_bucket;
 pub(crate) use mark::AgentMark;
 pub use scope::{Scope, ScopeRecord, declared_scopes};
 #[cfg(feature = "testing")]
 pub use testing::{AgentsFake, McpResponse, McpTestClient, McpToolResult};
-pub use tool::{__ToolDeclaration, RegisteredTool, ToolAnnotations, ToolRecord, ToolRegistry};
+pub(crate) use tool::LiveTarget;
+pub use tool::{
+    __LiveResolver, __LiveToolDeclaration, __ResolverFuture, __ToolDeclaration, __ToolMeta,
+    LiveToolRecord, RegisteredTool, ToolAnnotations, ToolRecord, ToolRegistry,
+};
 
 /// The default path of the MCP endpoint.
 pub const DEFAULT_MCP_PATH: &str = "/mcp";
@@ -458,6 +463,18 @@ impl Router {
         pattern: &str,
     ) -> Option<crate::middleware::BoxedMiddleware> {
         let registry = self.checked_tools().as_ref().ok()?;
+        // The Live action route serves every island's actions; a browser's
+        // call of a Live tool is one of them, marked by the tool-call
+        // header (AGENT-012).
+        if *method == Method::POST
+            && pattern == crate::live::LIVE_UPDATE_PATH
+            && registry.has_browser_tools()
+        {
+            return Some(middleware::live_access(
+                Arc::clone(registry),
+                self.agents_config(),
+            ));
+        }
         if registry.tools().is_empty() {
             return None;
         }
@@ -496,6 +513,74 @@ fn schema_of<T: schemars::JsonSchema>() -> serde_json::Value {
         .into_generator()
         .into_root_schema_for::<T>()
         .to_value()
+}
+
+/// A value a `#[resolve(...)]` resolver returned, encoded with its mount
+/// parameter's codec so the mount reads it as if a page had sent it.
+///
+/// # Errors
+///
+/// A 500 naming the property when the value does not fit the codec: the
+/// resolver and the `#[mount]` parameter disagree, an application defect.
+#[doc(hidden)]
+pub fn __encode_resolved<T: serde::Serialize + 'static>(
+    property: &str,
+    value: &T,
+    codec: &suprnova_live::state::ModelCodec,
+) -> Result<suprnova_live::canonical::CanonicalValue, FrameworkError> {
+    codec
+        .encode(value, &suprnova_live::limits::InputLimits::default())
+        .map_err(|issue| {
+            FrameworkError::internal(format!(
+                "the resolver of the Live mount property `{property}` returned a value its \
+                 codec refuses: {issue}"
+            ))
+        })
+}
+
+/// What a headless Live tool call asks to mount, as the Gate policy of
+/// `live:{component}.mount` reads it (AGENT-013): the component and the
+/// mount properties the agent sent, after their codecs accepted them and
+/// before anything is loaded. Properties the application fills itself with
+/// `#[resolve(...)]` are not among them: they are filled after the policy
+/// allows the mount.
+///
+/// ```rust,ignore
+/// Gate::define::<ToolCaller, LiveMountRequest>("live:app.counter.mount", |caller, mount| {
+///     caller.is_user() && mount.property("start").and_then(|v| v.as_u64()) < Some(100)
+/// });
+/// ```
+#[derive(Debug, Clone)]
+pub struct LiveMountRequest {
+    component: String,
+    properties: serde_json::Map<String, serde_json::Value>,
+}
+
+impl LiveMountRequest {
+    pub(crate) fn new(
+        component: impl Into<String>,
+        properties: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        Self {
+            component: component.into(),
+            properties,
+        }
+    }
+
+    /// The component's registered name, `app.counter`.
+    pub fn component(&self) -> &str {
+        &self.component
+    }
+
+    /// Every mount property the agent sent.
+    pub fn properties(&self) -> &serde_json::Map<String, serde_json::Value> {
+        &self.properties
+    }
+
+    /// The mount property `name`, as the agent sent it.
+    pub fn property(&self, name: &str) -> Option<&serde_json::Value> {
+        self.properties.get(name)
+    }
 }
 
 /// The `Agents` facade: test helpers for tool calls.

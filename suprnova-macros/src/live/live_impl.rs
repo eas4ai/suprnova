@@ -14,8 +14,9 @@ use super::attrs::{
     is_field_helper, is_method_helper, parse_action_args, parse_validation_hook_args,
     validate_registered_name, wire_name,
 };
-use super::component::model_codec_tokens;
+use super::component::{model_codec_has_schema, model_codec_tokens};
 use super::expand::enforce_runtime_path_contract;
+use crate::tool::{ToolSite, ToolSpec, is_tool_attr, marker_macro, meta_tokens, parse_spec};
 
 pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<TokenStream2> {
     if !args.is_empty() {
@@ -51,10 +52,39 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
             reject_helpers_on_non_method(impl_item)?;
             continue;
         };
-        let helper = take_method_helper(method)?;
+        let (helper, tool_attribute) = take_method_helper(method)?;
+        let resolvers = take_resolvers(method)?;
         let Some((helper_name, attribute)) = helper else {
+            if let Some(tool) = tool_attribute {
+                return Err(syn::Error::new(
+                    tool.span(),
+                    "#[tool] inside #[live] marks an action: add #[action] to this method",
+                ));
+            }
+            if let Some((_, path)) = resolvers.into_iter().next() {
+                return Err(syn::Error::new(
+                    path.span(),
+                    "#[resolve] fills a #[mount] parameter",
+                ));
+            }
             continue;
         };
+        if helper_name != "action"
+            && let Some(tool) = &tool_attribute
+        {
+            return Err(syn::Error::new(
+                tool.span(),
+                "#[tool] inside #[live] marks an action: it cannot sit on this method",
+            ));
+        }
+        if helper_name != "mount"
+            && let Some((_, path)) = resolvers.iter().next()
+        {
+            return Err(syn::Error::new(
+                path.span(),
+                "#[resolve] fills a #[mount] parameter",
+            ));
+        }
         validate_common_signature(method)?;
         match helper_name.as_str() {
             "action" => {
@@ -72,6 +102,10 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                     .unwrap_or_else(|| syn::LitStr::new(&name, method.sig.ident.span()));
                 validate_registered_name(&literal)?;
                 let (authorization_parameter, arguments) = extract_action_parameters(method)?;
+                let tool = match &tool_attribute {
+                    Some(tool) => Some(parse_live_tool(tool, &arguments)?),
+                    None => None,
+                };
                 let registered = RegisteredAction {
                     version: args.version,
                     method: method.sig.ident.clone(),
@@ -81,6 +115,7 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                     validation: args.validation,
                     transaction: args.transaction,
                     authorization_parameter,
+                    tool,
                 };
                 if actions.insert(name, registered).is_some() {
                     return Err(syn::Error::new(
@@ -92,10 +127,20 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
             "mount" => {
                 ensure_singleton(&mut singleton_helpers, &helper_name, attribute.span())?;
                 validate_mount_signature(method)?;
+                let parameters = extract_mount_parameters(method)?;
+                for (name, path) in &resolvers {
+                    if !parameters.iter().any(|parameter| &parameter.name == name) {
+                        return Err(syn::Error::new(
+                            path.span(),
+                            "#[resolve] names a parameter this #[mount] does not take",
+                        ));
+                    }
+                }
                 mount = Some(RegisteredMount {
                     method: method.sig.ident.clone(),
-                    parameters: extract_mount_parameters(method)?,
+                    parameters,
                     asynchronous: method.sig.asyncness.is_some(),
+                    resolvers,
                 });
                 ensure_path_helper(&attribute)?;
             }
@@ -181,6 +226,8 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                 ActionTransactionArgs::None => quote!(None),
                 ActionTransactionArgs::Required => quote!(Required),
             };
+            let tool = action.tool.as_ref().map(engine_tool_tokens);
+            let tool = tool.map_or_else(TokenStream2::new, |tool| quote!(.with_tool(#tool)?));
             let argument_fields = action.arguments.iter().map(|argument| {
                 let name = &argument.wire;
                 let codec = model_codec_tokens(&argument.ty);
@@ -205,7 +252,7 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                     ::suprnova::live::__private::action::AuthorizationRequirement::#authorization,
                     ::suprnova::live::__private::validation::ValidationSelection::#validation,
                     ::suprnova::live::__private::action::TransactionPolicy::#transaction,
-                )?
+                )?#tool
             }
         })
         .collect::<Vec<_>>();
@@ -563,12 +610,241 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
             #validation_port
         }
     };
+    let tools = tool_records(self_ty, component_ident, &actions, &mount)?;
+    let generated = quote! {
+        #generated
+
+        #tools
+    };
     enforce_runtime_path_contract(&generated)?;
     Ok(quote! {
         #item
 
         #generated
     })
+}
+
+/// Parse a `#[tool]` on a Live action, refusing an argument an agent could
+/// not be told the shape of.
+fn parse_live_tool(attribute: &Attribute, arguments: &[ActionParameter]) -> syn::Result<ToolSpec> {
+    let tokens = match &attribute.meta {
+        Meta::List(list) => list.tokens.clone(),
+        _ => TokenStream2::new(),
+    };
+    let spec = parse_spec(tokens, ToolSite::Live)?;
+    // `model_codec_tokens` falls back to the Json codec for every type it
+    // does not know, which accepts any JSON its Serde type reads: an agent
+    // would be told less than the action enforces (AGENT-012).
+    for argument in arguments {
+        if !model_codec_has_schema(&argument.ty) {
+            return Err(syn::Error::new(
+                argument.ty.span(),
+                format!(
+                    "the argument `{}` of a tool action has no JSON Schema an agent can read: \
+                     take String, bool, i64, u64, f64, Date, OffsetDateTime or Uuid, or an \
+                     Option, Vec or BTreeMap of them",
+                    argument.wire
+                ),
+            ));
+        }
+    }
+    Ok(spec)
+}
+
+/// The engine's `ActionToolMetadata` for a tool action.
+fn engine_tool_tokens(spec: &ToolSpec) -> TokenStream2 {
+    let name = &spec.name;
+    let description = &spec.description;
+    let title = spec
+        .title
+        .as_ref()
+        .map_or_else(TokenStream2::new, |title| quote!(.with_title(#title)?));
+    let read_only = spec.annotations.read_only.unwrap_or(false);
+    let untrusted = spec.annotations.untrusted_content.unwrap_or(false);
+    // WebMCP's consequential hint is what MCP calls destructive (AGENT-014).
+    let consequential = spec.annotations.destructive.unwrap_or(false);
+    let browser = spec.offered_to_browser();
+    let headless = spec.headless;
+    quote! {
+        ::suprnova::live::__private::metadata::ActionToolMetadata::new(#name, #description)?
+            #title
+            .with_hints(#read_only, #untrusted, #consequential)
+            .for_browser(#browser)
+            .headless(#headless)
+    }
+}
+
+/// The framework records of the component's tool actions: one marker macro
+/// and one `LiveToolRecord` each, with the resolver adapters the headless
+/// ones share. Nothing at all for a component without a tool, so the
+/// standalone macro fixture, which has no `suprnova::agents`, still builds.
+fn tool_records(
+    self_ty: &Type,
+    component_ident: &syn::Ident,
+    actions: &BTreeMap<String, RegisteredAction>,
+    mount: &Option<RegisteredMount>,
+) -> syn::Result<TokenStream2> {
+    let tools: Vec<(&String, &ToolSpec)> = actions
+        .iter()
+        .filter_map(|(name, action)| action.tool.as_ref().map(|tool| (name, tool)))
+        .collect();
+    let resolvers = mount
+        .iter()
+        .flat_map(|mount| mount.resolvers.iter())
+        .collect::<Vec<_>>();
+    if tools.is_empty() {
+        if let Some((_, path)) = resolvers.first() {
+            return Err(syn::Error::new(
+                path.span(),
+                "#[resolve] fills a mount property for headless tools: mark an action \
+                 #[tool(..., headless)], or remove #[resolve]",
+            ));
+        }
+        return Ok(TokenStream2::new());
+    }
+    if !resolvers.is_empty() && !tools.iter().any(|(_, tool)| tool.headless) {
+        let (_, path) = resolvers[0];
+        return Err(syn::Error::new(
+            path.span(),
+            "#[resolve] fills a mount property for headless tools: mark an action \
+             #[tool(..., headless)], or remove #[resolve]",
+        ));
+    }
+    let adapters = resolvers.iter().map(|(name, path)| {
+        let adapter = format_ident!("__snv_live_resolve_{}", name);
+        let parameter = mount.as_ref().and_then(|mount| {
+            mount
+                .parameters
+                .iter()
+                .find(|parameter| &&parameter.name == name)
+        });
+        let Some(parameter) = parameter else {
+            return quote! {};
+        };
+        let ty = &parameter.ty;
+        let encode = match option_inner(ty) {
+            Some(inner) => {
+                let codec = model_codec_tokens(inner);
+                quote! {
+                    match value {
+                        ::std::option::Option::Some(value) => {
+                            ::suprnova::agents::__encode_resolved(#name, &value, &#codec)
+                        }
+                        ::std::option::Option::None => ::std::result::Result::Ok(
+                            ::suprnova::live::__private::canonical::CanonicalValue::Null,
+                        ),
+                    }
+                }
+            }
+            None => {
+                let codec = model_codec_tokens(ty);
+                quote! { ::suprnova::agents::__encode_resolved(#name, &value, &#codec) }
+            }
+        };
+        quote! {
+            fn #adapter<'a>(
+                caller: &'a ::suprnova::agents::ToolCaller,
+            ) -> ::suprnova::agents::__ResolverFuture<'a> {
+                ::std::boxed::Box::pin(async move {
+                    let value: #ty = #path(caller).await?;
+                    #encode
+                })
+            }
+        }
+    });
+    let resolver_entries = resolvers.iter().map(|(name, _)| {
+        let adapter = format_ident!("__snv_live_resolve_{}", name);
+        quote! {
+            ::suprnova::agents::__LiveResolver { property: #name, resolve: #adapter }
+        }
+    });
+    let component_type = component_ident.to_string();
+    let markers = tools.iter().map(|(_, tool)| marker_macro(tool));
+    let submissions = tools.iter().map(|(action, tool)| {
+        let meta = meta_tokens(tool);
+        let headless = tool.headless;
+        // Only a headless tool is mounted from properties, so only it reads
+        // the resolvers.
+        let resolvers = if headless {
+            quote!(__SNV_LIVE_RESOLVERS)
+        } else {
+            quote!(&[])
+        };
+        quote! {
+            ::suprnova::inventory::submit! {
+                ::suprnova::agents::LiveToolRecord::__declare(
+                    ::suprnova::agents::__LiveToolDeclaration {
+                        meta: #meta,
+                        action: #action,
+                        headless: #headless,
+                        registration:
+                            <#self_ty as ::suprnova::live::ComponentContract>::__live_registration,
+                        component_type: #component_type,
+                        module: ::core::module_path!(),
+                        resolvers: #resolvers,
+                    },
+                )
+            }
+        }
+    });
+    Ok(quote! {
+        #(#markers)*
+
+        const _: () = {
+            #(#adapters)*
+
+            #[allow(dead_code)]
+            const __SNV_LIVE_RESOLVERS: &[::suprnova::agents::__LiveResolver] = &[
+                #(#resolver_entries),*
+            ];
+
+            #(#submissions)*
+        };
+    })
+}
+
+/// Take every `#[resolve(path)]` off the method's parameters, so the method
+/// is emitted without them, keyed by the parameter's wire name.
+fn take_resolvers(method: &mut ImplItemFn) -> syn::Result<BTreeMap<String, syn::Path>> {
+    let mut resolvers = BTreeMap::new();
+    for argument in &mut method.sig.inputs {
+        let FnArg::Typed(argument) = argument else {
+            continue;
+        };
+        let mut retained = Vec::with_capacity(argument.attrs.len());
+        for attribute in argument.attrs.drain(..) {
+            let is_resolve = attribute
+                .path()
+                .get_ident()
+                .is_some_and(|ident| ident.unraw() == "resolve");
+            if !is_resolve {
+                retained.push(attribute);
+                continue;
+            }
+            let path: syn::Path = attribute.parse_args().map_err(|_| {
+                syn::Error::new(
+                    attribute.span(),
+                    "expected #[resolve(path::to::resolver)], an `async fn(&ToolCaller) -> \
+                     Result<T, FrameworkError>`",
+                )
+            })?;
+            let Pat::Ident(pattern) = argument.pat.as_ref() else {
+                return Err(syn::Error::new(
+                    argument.pat.span(),
+                    "#[resolve] needs a simply named parameter",
+                ));
+            };
+            let name = wire_name(&pattern.ident, "Live mount parameter")?;
+            if resolvers.insert(name, path).is_some() {
+                return Err(syn::Error::new(
+                    attribute.span(),
+                    "a parameter takes one #[resolve]",
+                ));
+            }
+        }
+        argument.attrs = retained;
+    }
+    Ok(resolvers)
 }
 
 fn generate_mount_runtime(mount: &Option<RegisteredMount>) -> TokenStream2 {
@@ -823,10 +1099,29 @@ fn self_type_ident(self_ty: &Type) -> syn::Result<&syn::Ident> {
         .ok_or_else(|| syn::Error::new(self_ty.span(), "Live component impl target is empty"))
 }
 
-fn take_method_helper(method: &mut ImplItemFn) -> syn::Result<Option<(String, Attribute)>> {
+/// The method's one Live helper and its `#[tool]`, if any, both taken off
+/// the method: the standalone `#[tool]` works only on a `#[handler]`, so one
+/// left on a Live action would fail there.
+#[allow(
+    clippy::type_complexity,
+    reason = "the helper and the tool attribute are two independent optional takes"
+)]
+fn take_method_helper(
+    method: &mut ImplItemFn,
+) -> syn::Result<(Option<(String, Attribute)>, Option<Attribute>)> {
     let mut helper = None;
+    let mut tool = None;
     let mut retained = Vec::with_capacity(method.attrs.len());
     for attribute in method.attrs.drain(..) {
+        if is_tool_attr(&attribute) {
+            if tool.replace(attribute).is_some() {
+                return Err(syn::Error::new(
+                    method.sig.ident.span(),
+                    "a Live action declares one #[tool]",
+                ));
+            }
+            continue;
+        }
         let Some(name) = attribute
             .path()
             .get_ident()
@@ -853,7 +1148,7 @@ fn take_method_helper(method: &mut ImplItemFn) -> syn::Result<Option<(String, At
         }
     }
     method.attrs = retained;
-    Ok(helper)
+    Ok((helper, tool))
 }
 
 fn reject_helpers_on_non_method(item: &ImplItem) -> syn::Result<()> {
@@ -920,6 +1215,8 @@ struct RegisteredAction {
     validation: ActionValidationArgs,
     transaction: ActionTransactionArgs,
     authorization_parameter: Option<syn::Ident>,
+    /// What `#[tool]` declares, when the action is an agent tool.
+    tool: Option<ToolSpec>,
 }
 
 struct ActionParameter {
@@ -947,6 +1244,9 @@ struct RegisteredMount {
     method: syn::Ident,
     parameters: Vec<MountParameter>,
     asynchronous: bool,
+    /// The parameters the application fills for a headless tool call, by
+    /// wire name, with their resolvers.
+    resolvers: BTreeMap<String, syn::Path>,
 }
 
 struct MountParameter {
@@ -1270,5 +1570,207 @@ fn ensure_path_helper(attribute: &Attribute) -> syn::Result<()> {
             attribute.span(),
             "this Live method helper does not accept arguments",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quote::quote;
+    use syn::{DeriveInput, ItemImpl};
+
+    use crate::live::component;
+    use crate::tool::{ToolSite, parse_spec};
+
+    fn expand(implementation: ItemImpl) -> syn::Result<String> {
+        super::expand(proc_macro2::TokenStream::new(), implementation)
+            .map(|tokens| tokens.to_string())
+    }
+
+    #[test]
+    fn agent_001_live_tool_parser_takes_headless_and_refuses_route_schemas() {
+        let spec = parse_spec(
+            quote! { name = "counter.add", description = "Add.", callers = [user], headless },
+            ToolSite::Live,
+        )
+        .expect("a Live tool");
+        assert!(spec.headless);
+        assert!(spec.offered_to_browser());
+        for argument in [
+            quote!(input = Form),
+            quote!(output = View),
+            quote!(route = "x"),
+        ] {
+            let error = parse_spec(
+                quote! { name = "x", description = "d", callers = [user], #argument },
+                ToolSite::Live,
+            )
+            .map(|_| ())
+            .expect_err("a Live tool takes no route schema");
+            assert!(error.to_string().contains("argument codecs"), "{error}");
+        }
+        let long = "a".repeat(65);
+        let error = parse_spec(
+            quote! { name = #long, description = "d", callers = [user] },
+            ToolSite::Live,
+        )
+        .map(|_| ())
+        .expect_err("a Live base name has at most 64 characters");
+        assert!(error.to_string().contains("at most 64"), "{error}");
+        let error = parse_spec(
+            quote! { name = "x", description = "d", callers = [user], headless },
+            ToolSite::Handler,
+        )
+        .map(|_| ())
+        .expect_err("a handler tool takes no `headless`");
+        assert!(error.to_string().contains("Live action tool"), "{error}");
+        let agent_only = parse_spec(
+            quote! { name = "x", description = "d", callers = [agent] },
+            ToolSite::Live,
+        )
+        .expect("an agent-only tool");
+        assert!(!agent_only.offered_to_browser());
+    }
+
+    #[test]
+    fn agent_012_a_tool_action_emits_its_records_and_leaves_no_helper_behind() {
+        let out = expand(syn::parse_quote! {
+            impl Counter {
+                #[mount]
+                pub fn mount(start: u64, #[resolve(crate::owner_of)] owner: String) -> Self {
+                    Self { count: start, owner }
+                }
+
+                #[tool(name = "counter.add", description = "Add.", callers = [user], headless)]
+                #[action(authorize = "current")]
+                pub fn add(&mut self, amount: u64) {}
+
+                #[action]
+                pub fn reset(&mut self) {}
+            }
+        })
+        .expect("impl expansion");
+        assert!(out.contains("ActionToolMetadata :: new"), "{out}");
+        assert!(out.contains("LiveToolRecord :: __declare"), "{out}");
+        assert!(out.contains("__suprnova_tool_counter_2eadd"), "{out}");
+        assert!(out.contains("__snv_live_resolve_owner"), "{out}");
+        // One record: `reset` is no tool.
+        assert_eq!(out.matches("LiveToolRecord :: __declare").count(), 1);
+        // Neither helper reaches the emitted method.
+        assert!(!out.contains("# [tool"), "{out}");
+        assert!(!out.contains("# [resolve"), "{out}");
+    }
+
+    #[test]
+    fn agent_012_a_component_without_tools_emits_no_framework_record() {
+        let out = expand(syn::parse_quote! {
+            impl Plain {
+                #[action]
+                pub fn save(&mut self) {}
+            }
+        })
+        .expect("impl expansion");
+        assert!(!out.contains("agents"), "{out}");
+    }
+
+    #[test]
+    fn agent_012_tool_markings_on_live_methods_fail_where_they_must() {
+        for (implementation, message) in [
+            (
+                quote! {
+                    impl Counter {
+                        #[tool(name = "counter.add", description = "Add.", callers = [user])]
+                        pub fn add(&mut self) {}
+                    }
+                },
+                "add #[action]",
+            ),
+            (
+                quote! {
+                    impl Counter {
+                        #[tool(name = "counter.add", description = "Add.", callers = [user])]
+                        #[action]
+                        pub fn add(&mut self, filter: Filter) {}
+                    }
+                },
+                "no JSON Schema",
+            ),
+            (
+                quote! {
+                    impl Counter {
+                        #[tool(name = "has space", description = "Add.", callers = [user])]
+                        #[action]
+                        pub fn add(&mut self) {}
+                    }
+                },
+                "contains",
+            ),
+            (
+                quote! {
+                    impl Counter {
+                        #[mount]
+                        pub fn mount(#[resolve(crate::owner_of)] owner: String) -> Self {
+                            Self { owner }
+                        }
+
+                        #[action]
+                        pub fn reset(&mut self) {}
+                    }
+                },
+                "for headless tools",
+            ),
+            (
+                quote! {
+                    impl Counter {
+                        #[action]
+                        pub fn add(&mut self, #[resolve(crate::owner_of)] owner: String) {}
+                    }
+                },
+                "fills a #[mount] parameter",
+            ),
+        ] {
+            let implementation: ItemImpl = syn::parse2(implementation).expect("impl syntax");
+            let error = expand(implementation).expect_err("the marking fails");
+            assert!(error.to_string().contains(message), "{message}: {error}");
+        }
+    }
+
+    #[test]
+    fn agent_012_agent_visible_marks_only_snapshot_state() {
+        let visible: DeriveInput = syn::parse_quote! {
+            #[live(name = "macro.visible", view = "live/macro/visible.html")]
+            pub struct Visible {
+                #[agent_visible]
+                count: u64,
+                #[agent_visible]
+                #[public]
+                label: String,
+            }
+        };
+        let out = component::derive(visible)
+            .expect("component expansion")
+            .to_string();
+        assert_eq!(out.matches("with_agent_visible").count(), 2, "{out}");
+        for helper in [
+            quote!(#[secret]),
+            quote!(#[server_only]),
+            quote!(#[session]),
+            quote!(#[model(transient)]),
+        ] {
+            let hidden: DeriveInput = syn::parse_quote! {
+                #[live(name = "macro.hidden", view = "live/macro/hidden.html")]
+                pub struct Hidden {
+                    #[agent_visible]
+                    #helper
+                    value: String,
+                }
+            };
+            let error = component::derive(hidden)
+                .map(|_| ())
+                .expect_err("only snapshot state can be agent-visible");
+            assert!(
+                error.to_string().contains("never leaves the server"),
+                "{error}"
+            );
+        }
     }
 }

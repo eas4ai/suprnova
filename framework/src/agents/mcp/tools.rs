@@ -96,6 +96,38 @@ pub(crate) fn answer_result(answer: &RouteAnswer, max_bytes: usize) -> Value {
     }
 }
 
+/// The answer of a headless Live tool, which marks it with its own media
+/// type: `isError` and the structured content as the handler set them
+/// (AGENT-013). A validation outcome is an error the agent must see and
+/// still carries the new handle, since it consumed a revision. Read only for
+/// a Live tool, whose route is the framework's own, so no application route
+/// can shape a result this way.
+pub(crate) fn live_result(answer: &RouteAnswer) -> Option<Value> {
+    let media = answer
+        .content_type
+        .as_deref()?
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if media != crate::live::LIVE_TOOL_RESULT_MEDIA_TYPE || !(200..=299).contains(&answer.status) {
+        return None;
+    }
+    let body = serde_json::from_slice::<Value>(&answer.body).ok()?;
+    let structured = body.get("structuredContent")?.clone();
+    let is_error = body
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Some(json!({
+        "resultType": "complete",
+        "content": [{ "type": "text", "text": structured.to_string() }],
+        "structuredContent": structured,
+        "isError": is_error,
+    }))
+}
+
 /// A tool result naming each field of the input that breaks the tool's
 /// schema.
 ///
