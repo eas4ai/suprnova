@@ -189,7 +189,9 @@ impl TestClient {
     /// Each request sets `user` on the guard ([`Guard::set_user`](crate::Guard::set_user))
     /// before any middleware runs, so the test writes no middleware and
     /// needs no session or provider lookup. Nothing is written to the
-    /// session. Pass a user by reference, a model or an
+    /// session, but on a session guard the user counts as one a browser
+    /// session signed in, so a tool's route treats the request as a browser
+    /// call. Pass a user by reference, a model or an
     /// `Arc<dyn Authenticatable>` ([`ActingUser`]); a later call replaces
     /// the user.
     ///
@@ -538,7 +540,10 @@ impl ActingAs {
                      App::singleton(AuthManager::new(AuthConfig::from_env()))."
                 ))),
                 _ => {
+                    let id = user.get_auth_identifier();
                     Auth::set_user(user);
+                    // The test's stand-in for a browser session's sign-in.
+                    crate::auth::request_state::mark_session_user(&default, &id);
                     Ok(())
                 }
             };
@@ -553,9 +558,19 @@ impl ActingAs {
                 e,
             )
         })?;
+        let id = user.get_auth_identifier();
         guard.set_user(user).await;
         if self.guard.is_some() {
             crate::auth::request_state::set_used_guard(&name);
+        }
+        // A session guard's user stands for a browser session's sign-in; a
+        // token or custom guard's does not.
+        let session_driven = manager
+            .config()
+            .guard_config(&name)
+            .is_some_and(|config| config.driver == crate::auth::GuardDriver::Session);
+        if session_driven {
+            crate::auth::request_state::mark_session_user(&name, &id);
         }
         Ok(())
     }

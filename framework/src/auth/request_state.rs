@@ -113,6 +113,11 @@ struct AuthRequestState {
     used_guard: Option<String>,
     /// The guard instances the auth manager built this request.
     guard_instances: Vec<GuardInstance>,
+    /// The user each session guard resolved from the session store this
+    /// request, by guard name: a user the browser's own session signed in,
+    /// as opposed to one a token, basic auth or `Auth::set_user` signed in.
+    /// A tool's route treats only such a user as a browser caller.
+    session_users: HashMap<String, String>,
 }
 
 /// One guard instance the auth manager built this request.
@@ -316,6 +321,7 @@ pub(crate) fn clear_guard_user(guard_name: &str) {
         let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
         state.guard_users.remove(guard_name);
         state.guard_user_ids.remove(guard_name);
+        state.session_users.remove(guard_name);
         state.remembered_guards.remove(guard_name);
         state.bearer_users.remove(guard_name);
         if let Some(user) = state.request_guard_users.get_mut(guard_name) {
@@ -330,6 +336,32 @@ pub(crate) fn clear_guard_user(guard_name: &str) {
             forget_request_guard_users(&mut state);
         }
     });
+}
+
+/// Record that the session guard `guard_name` resolved `user_id` from the
+/// session store this request: the browser's session signed the user in.
+///
+/// No-op outside a request scope, matching the other setters.
+pub(crate) fn mark_session_user(guard_name: &str, user_id: &str) {
+    let _ = AUTH_STATE.try_with(|state| {
+        state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .session_users
+            .insert(guard_name.to_owned(), user_id.to_owned());
+    });
+}
+
+/// Whether the session guard `guard_name` resolved `user_id` from the
+/// session store this request.
+pub(crate) fn is_session_user(guard_name: &str, user_id: &str) -> bool {
+    read_state(|state| {
+        state
+            .session_users
+            .get(guard_name)
+            .is_some_and(|id| id == user_id)
+    })
+    .unwrap_or(false)
 }
 
 /// Forget every user a `via_request` resolver bound this request.
