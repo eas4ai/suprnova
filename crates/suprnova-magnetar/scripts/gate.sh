@@ -33,6 +33,12 @@ if [[ "${1-}" == "--live" ]]; then
     run_live_test test default_schema_backends postgres_default_schema_is_replay_safe
     run_live_test test default_schema_backends postgres_api_import_advances_the_default_user_sequence
     run_live_test test default_schema_backends mysql_default_schema_is_replay_safe
+    run_live_test test default_schema_column_types postgres_long_values_round_trip_through_every_store
+    run_live_test test default_schema_column_types postgres_narrow_layout_is_upgraded_in_place
+    run_live_test test default_schema_column_types postgres_concurrent_fresh_migrations_both_succeed
+    run_live_test test default_schema_column_types mysql_long_values_round_trip_through_every_store
+    run_live_test test default_schema_column_types mysql_narrow_layout_is_upgraded_in_place
+    run_live_test test default_schema_column_types mysql_concurrent_fresh_migrations_both_succeed
     run_live_test test foundation_gate postgres_backend_is_reachable
     run_live_test test foundation_gate mysql_backend_is_reachable
     run_live_test test method_ids_live postgres_a_registered_passkey_is_read_back_by_its_id
