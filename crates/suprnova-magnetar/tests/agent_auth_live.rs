@@ -23,6 +23,8 @@
 
 #[path = "fixtures/agent_auth_harness.rs"]
 mod harness;
+#[path = "fixtures/live_database.rs"]
+mod isolated;
 
 use std::sync::Arc;
 
@@ -330,7 +332,16 @@ async fn one_time_steps(url: &str) {
 
 /// A revocation event ends a delegation's tokens, and the operator's
 /// revoke-everything ends the rest.
+/// Revoking every agent credential reaches every registration in the
+/// database, so this test gets a database of its own: on a shared one it
+/// would revoke the registrations other live tests are running against.
 async fn revocation_layers(url: &str) {
+    let own = isolated::LiveDatabase::create(url, "agent_revoke").await;
+    revocation_layers_on(&isolated::database_url(url, own.name())).await;
+    own.drop_database().await;
+}
+
+async fn revocation_layers_on(url: &str) {
     let h = build(live_database(url).await, Options::new()).await;
     let subject = unique("event-subject");
     let registered = body(
