@@ -5,9 +5,11 @@
 //! post-state, conditional durable lock transitions, and an explicit
 //! backend-error policy.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
+use sha2::{Digest, Sha256};
 
 use crate::Result;
 use crate::storage::{LockoutStore, UserStore};
@@ -182,6 +184,22 @@ impl AttemptAdmission {
     }
 }
 
+/// The key attempts against `identity` are stored under.
+///
+/// An identity longer than [`crate::password::MAX_EMAIL_LENGTH`] characters
+/// is stored as `sha256:` and the hex digest of the identity, 71 characters,
+/// so it fits the default schema's identity column (`varchar(255)` on MySQL
+/// and MariaDB) and is still counted and locked. A host that signs users in
+/// through its own provider can hold an account under such an address. The
+/// returned [`LockoutStatus`] keeps the identity as given.
+fn stored_identity(identity: &str) -> Cow<'_, str> {
+    if crate::password::email_fits(identity) {
+        return Cow::Borrowed(identity);
+    }
+    let digest = Sha256::digest(identity.as_bytes());
+    Cow::Owned(format!("sha256:{}", crate::storage::hex_lower(&digest)))
+}
+
 /// Lockout policy service.
 pub struct LockoutService {
     store: Arc<dyn LockoutStore>,
@@ -236,7 +254,10 @@ impl LockoutService {
             return Ok(LockoutStatus::unlocked(identity));
         }
         let window_start = Utc::now() - self.config.lockout_period;
-        let stats = self.store.attempt_stats(identity, window_start).await?;
+        let stats = self
+            .store
+            .attempt_stats(&stored_identity(identity), window_start)
+            .await?;
         Ok(self.compute(identity, stats.count, stats.latest_at))
     }
 
@@ -280,7 +301,7 @@ impl LockoutService {
         let window_start = at - self.config.lockout_period;
         let stats = self
             .store
-            .record_attempt_and_stats(identity, at, context, window_start)
+            .record_attempt_and_stats(&stored_identity(identity), at, context, window_start)
             .await?;
         let status = self.compute(identity, stats.count, stats.latest_at);
         let locked_event = match &self.users {
@@ -321,7 +342,7 @@ impl LockoutService {
         let reservation = self
             .store
             .admit_attempt_and_stats(
-                identity,
+                &stored_identity(identity),
                 at,
                 context,
                 window_start,
@@ -355,7 +376,7 @@ impl LockoutService {
         };
         if self
             .store
-            .cancel_attempt_reservation(identity, &token.id)
+            .cancel_attempt_reservation(&stored_identity(identity), &token.id)
             .await?
         {
             Ok(())
@@ -385,7 +406,7 @@ impl LockoutService {
         let finalized = self
             .store
             .finalize_attempt_reservation(
-                identity,
+                &stored_identity(identity),
                 &token.id,
                 at,
                 token.context.as_deref(),
@@ -414,7 +435,11 @@ impl LockoutService {
             return Ok(());
         };
         self.store
-            .reset_admitted_attempts(identity, &token.id, token.context.as_deref())
+            .reset_admitted_attempts(
+                &stored_identity(identity),
+                &token.id,
+                token.context.as_deref(),
+            )
             .await?;
         Ok(())
     }
@@ -422,7 +447,9 @@ impl LockoutService {
     /// Success-path bookkeeping: clear the counter and the user lock stamp.
     /// Not an admin unlock; no transition signal is produced.
     pub async fn reset_attempts(&self, identity: &str) -> Result<()> {
-        self.store.clear_attempts(identity).await?;
+        self.store
+            .clear_attempts(&stored_identity(identity))
+            .await?;
         if let Some(users) = &self.users {
             users.set_locked_at_by_email(identity, None).await?;
         }
@@ -434,7 +461,9 @@ impl LockoutService {
     /// transition.
     pub async fn unlock_account(&self, identity: &str) -> Result<bool> {
         let was_locked = self.is_locked(identity).await?;
-        self.store.clear_attempts(identity).await?;
+        self.store
+            .clear_attempts(&stored_identity(identity))
+            .await?;
         if let Some(users) = &self.users {
             users.set_locked_at_by_email(identity, None).await?;
         }

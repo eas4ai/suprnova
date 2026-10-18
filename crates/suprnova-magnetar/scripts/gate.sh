@@ -47,6 +47,16 @@ if [[ "${1-}" == "--live" ]]; then
     run_live_test test default_schema_backends postgres_default_schema_is_replay_safe
     run_live_test test default_schema_backends postgres_api_import_advances_the_default_user_sequence
     run_live_test test default_schema_backends mysql_default_schema_is_replay_safe
+    run_live_test test default_schema_column_types postgres_long_values_round_trip_through_every_store
+    run_live_test test default_schema_column_types postgres_narrow_layout_is_upgraded_in_place
+    run_live_test test default_schema_column_types postgres_concurrent_fresh_migrations_both_succeed
+    run_live_test test default_schema_column_types postgres_concurrent_upgrades_of_an_older_layout_both_succeed
+    run_live_test test default_schema_column_types mysql_long_values_round_trip_through_every_store
+    run_live_test test default_schema_column_types mysql_narrow_layout_is_upgraded_in_place
+    run_live_test test default_schema_column_types mysql_concurrent_fresh_migrations_both_succeed
+    run_live_test test default_schema_column_types mysql_concurrent_upgrades_of_an_older_layout_both_succeed
+    run_live_test test default_schema_column_types mysql_widening_keeps_character_sets_and_collations
+    run_live_test test default_schema_column_types mysql_widening_leaves_an_indexed_column_and_widens_the_rest
     run_live_test test foundation_gate postgres_backend_is_reachable
     run_live_test test foundation_gate mysql_backend_is_reachable
     run_live_test test method_ids_live postgres_a_registered_passkey_is_read_back_by_its_id
@@ -55,6 +65,10 @@ if [[ "${1-}" == "--live" ]]; then
     run_live_test test method_ids_live mysql_a_registered_passkey_is_read_back_by_its_id
     run_live_test test method_ids_live mysql_a_passkey_is_removed_by_its_id
     run_live_test test method_ids_live mysql_a_linked_account_is_unlinked_by_its_id
+    run_live_test test over_long_inputs mysql_over_long_emails_never_reach_the_database
+    run_live_test test over_long_inputs mysql_over_long_lockout_identities_are_counted_under_their_digest
+    run_live_test test over_long_inputs mysql_lockout_reasons_keep_only_client_addresses
+    run_live_test test over_long_inputs mysql_session_user_agents_are_bounded
     run_live_test test seaorm_upgrade_compat postgres_upgrade_from_seaorm_1_1_is_replay_safe
     run_live_test test seaorm_upgrade_compat mysql_upgrade_from_seaorm_1_1_is_replay_safe
     run_live_test test storage_tokens configured_postgres_target_is_required

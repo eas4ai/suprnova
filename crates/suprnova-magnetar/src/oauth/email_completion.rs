@@ -38,7 +38,7 @@ use crate::first_email_proof::{
     FirstEmailProofMutation, FirstEmailProofOutcome, FirstEmailProofStore,
 };
 use crate::mail;
-use crate::password::normalize_email;
+use crate::password::{normalize_email, validate_sign_up_email};
 use crate::plugin::{LinkGenerator, MailDriver};
 use crate::storage::{CeremonyStore, IssueToken, NewCeremony, PresentedToken, TokenStore};
 use crate::{Error, Result};
@@ -183,12 +183,7 @@ impl EmailCompletionService {
 
     async fn send(&self, pending_id: &str, email: &str) -> Result<()> {
         let normalized = normalize_email(email);
-        if normalized.is_empty() {
-            return Err(Error::InvalidInput {
-                field: "email".to_owned(),
-                message: "must not be empty".to_owned(),
-            });
-        }
+        validate_sign_up_email(&normalized)?;
         // Anti-enumeration: an unknown/expired pending_id mints and mails
         // nothing but still returns Ok below.
         let Some(pending) = peek_pending_identity(

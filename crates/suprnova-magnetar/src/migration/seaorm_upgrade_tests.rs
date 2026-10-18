@@ -4,7 +4,7 @@ use std::panic::AssertUnwindSafe;
 use crate::migration::fingerprint::source_database_fingerprints;
 use crate::{Error, Result, default_schema};
 use futures_util::future::FutureExt;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, DbBackend};
 
 #[cfg(test)]
 #[path = "../../tests/fixtures/seaorm_upgrade.rs"]
@@ -52,6 +52,7 @@ fn assert_expected_source_tables(before: &BTreeMap<String, String>) {
 
 #[cfg(test)]
 fn assert_expected_upgrade_delta(
+    backend: DbBackend,
     before: &BTreeMap<String, String>,
     after: &BTreeMap<String, String>,
 ) {
@@ -74,17 +75,28 @@ fn assert_expected_upgrade_delta(
         .collect();
     // app_users gains its email uniqueness index and auth_two_factor its
     // pending-rotation columns, which postdate them too.
+    let mut expected = BTreeSet::from([
+        "app_users",
+        "auth_lockouts",
+        "auth_second_factor_lockouts",
+        "auth_two_factor",
+    ]);
+    // On MySQL a SeaORM 1.1 catalog holds the byte and long-text columns as
+    // `varbinary(255)` and `varchar(255)`, and the first pass widens them.
+    if backend == DbBackend::MySql {
+        expected.extend([
+            "auth_ceremonies",
+            "auth_methods",
+            "auth_provider_tokens",
+            "auth_sessions",
+        ]);
+    }
     assert_eq!(
-        BTreeSet::from([
-            "app_users",
-            "auth_lockouts",
-            "auth_second_factor_lockouts",
-            "auth_two_factor"
-        ]),
-        changed_tables,
+        expected, changed_tables,
         "first migration pass must only add the current auth_lockouts schema, the \
          second-factor lockout table, the app_users email index and the \
-         pending-rotation columns"
+         pending-rotation columns, and on MySQL widen the narrow byte and \
+         long-text columns"
     );
 }
 
@@ -105,7 +117,7 @@ async fn verify_parity(fixture: SeaOrm11Fixture) {
             })?;
 
         let after = schema_digests(&imported.connection).await?;
-        assert_expected_upgrade_delta(&before, &after);
+        assert_expected_upgrade_delta(imported.connection.get_database_backend(), &before, &after);
 
         default_schema::migrate(&imported.connection)
             .await

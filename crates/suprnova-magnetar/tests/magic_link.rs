@@ -316,3 +316,19 @@ async fn a_magic_link_sign_up_that_loses_the_race_answers_as_the_existing_accoun
     };
     assert_eq!(grant.user_id(), existing.user_id);
 }
+
+/// No account can hold an address past RFC 5321's 254 characters, and the
+/// default schema's column holds no more, so an open sign-up refuses one
+/// before it reaches a store.
+#[tokio::test]
+async fn sign_up_refuses_an_email_longer_than_any_account_holds() {
+    let world = factor_world().await;
+    let email = format!("{}@example.test", "a".repeat(242));
+    assert_eq!(email.chars().count(), 255);
+    let error = world.magic.issue(&email).await.unwrap_err();
+    assert!(
+        matches!(&error, magnetar::Error::InvalidInput { field, message }
+            if field == "email" && message.contains("254")),
+        "an over-long address is a validation error: {error:?}"
+    );
+}

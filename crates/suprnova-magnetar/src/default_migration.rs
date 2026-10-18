@@ -17,7 +17,7 @@ use crate::default_schema::{
 use crate::migration::{
     AppUser, DurableAuthRecord, ImportedUser, MigrationBindings, MigrationTransaction,
 };
-use crate::password::normalize_email;
+use crate::password::{MAX_EMAIL_LENGTH, email_fits, normalize_email};
 use crate::{Error, Result};
 
 /// Application bindings backed by Magnetar's default application-owned schema.
@@ -287,6 +287,17 @@ impl MigrationTransaction for DefaultMigrationTransaction<'_> {
     }
 
     async fn import_user(&mut self, imported: &ImportedUser) -> Result<AppUser> {
+        // No account holds an address this long: sign-in by email refuses
+        // it, and MySQL's column could not store it.
+        if !email_fits(&imported.email) {
+            return Err(Error::InvalidInput {
+                field: "email".to_owned(),
+                message: format!(
+                    "source user {} has an address longer than {MAX_EMAIL_LENGTH} characters",
+                    imported.source_user_id
+                ),
+            });
+        }
         let existing = self.find_user(imported).await?;
         let transaction = self.connection()?;
         let model = if let Some(existing) = existing {

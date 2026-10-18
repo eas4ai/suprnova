@@ -19,6 +19,7 @@ pub mod binding;
 #[cfg(feature = "testing")]
 pub mod ceremony_store;
 pub mod default_engine;
+pub mod default_engine_inputs;
 pub mod factor_completion;
 pub mod framework_login;
 pub mod host_engine;

@@ -13,6 +13,7 @@ use sea_orm::{ColumnTrait, Condition, EntityTrait, ExprTrait, QueryFilter};
 
 use super::credential_writes::fenced_credential_write;
 use super::{AuthTransaction, CredentialActor, SeaOrmStorage, db_error, random_id};
+use crate::password::{email_fits, email_too_long};
 use crate::schema::{
     AuthSchema, EntityBinding, SessionEpoch, SessionFields, UserFields, UserOptionalFields,
     password_hash_for_verifier,
@@ -176,6 +177,12 @@ where
         if email.is_empty() {
             return Err(empty("email"));
         }
+        // Sign-up refuses an address this long, so no account holds one,
+        // and MySQL's column could not hold it either; the lookup is never
+        // sent.
+        if !email_fits(email) {
+            return Ok(None);
+        }
         let rows = <S::User as EntityBinding>::Entity::find()
             .filter(S::User::email_column().eq(email.to_owned()))
             .all(self.database())
@@ -199,6 +206,9 @@ where
     async fn create_user(&self, input: NewUser) -> Result<UserRecord> {
         if input.email.is_empty() {
             return Err(empty("email"));
+        }
+        if !email_fits(&input.email) {
+            return Err(email_too_long());
         }
         let user_id = random_id();
         let mut model = <S::User as EntityBinding>::ActiveModel::default();
@@ -273,6 +283,10 @@ where
         if email.is_empty() {
             return Err(empty("email"));
         }
+        // No account holds an address this long: an unknown email.
+        if !email_fits(email) {
+            return Ok(false);
+        }
         let mut model = <S::User as EntityBinding>::ActiveModel::default();
         S::User::write_locked_at(&mut model, Some(locked_at));
         let lock_column = S::User::locked_at_column();
@@ -296,6 +310,10 @@ where
     ) -> Result<()> {
         if email.is_empty() {
             return Err(empty("email"));
+        }
+        // No account holds an address this long: an unknown email.
+        if !email_fits(email) {
+            return Ok(());
         }
         let mut model = <S::User as EntityBinding>::ActiveModel::default();
         S::User::write_locked_at(&mut model, locked_at);
