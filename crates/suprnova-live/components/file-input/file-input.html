@@ -1,0 +1,8 @@
+{#
+  suprnova.file-input - a native file input; accept and multiple are
+  declared on the control. Live uploads bind through live:upload on the
+  same control when the component declares the upload field.
+#}
+{% macro file_input(name, accept="", multiple=false, upload=false) %}
+<input class="sn-file-input" id="{{ name }}" name="{{ name }}" type="file" accept="{{ accept }}" aria-describedby="{{ name }}-hint {{ name }}-error"{% if multiple %} multiple{% endif %}{% if upload %} live:upload="{{ name }}"{% endif %}>
+{% endmacro %}
