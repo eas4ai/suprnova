@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { expectResponsive, mountComponents } from "./support.js";
 
 function searchBox(query = "", sequence = 0): string {
-  return `<sn-search-box class="sn-search-box"><label for="query">Search</label><input id="query" type="search" role="combobox" aria-autocomplete="list" aria-controls="query-listbox" aria-expanded="false" value="${query}"><input type="hidden" value="${sequence}" data-sn-search-sequence><input type="hidden" data-sn-search-selection><input type="hidden" data-sn-search-position><button type="button" data-sn-search-select hidden>Select</button><ul id="query-listbox" role="listbox" aria-label="Search results" data-sn-query="${query}" data-sn-sequence="${sequence}" hidden><li id="result-one" role="option" aria-selected="false" data-sn-key="one" data-sn-position="0"><mark>Journal</mark> &lt;script&gt;</li><li id="result-two" role="option" aria-selected="false" data-sn-key="two" data-sn-position="1">Notebook</li></ul></sn-search-box>`;
+  return `<sn-search-box class="sn-search-box"><label for="query">Search</label><input id="query" type="search" role="combobox" aria-autocomplete="list" aria-controls="query-listbox" aria-expanded="false" value="${query}"><input type="hidden" value="${String(sequence)}" data-sn-search-sequence><input type="hidden" data-sn-search-selection><input type="hidden" data-sn-search-position><button type="button" data-sn-search-select hidden>Select</button><ul id="query-listbox" role="listbox" aria-label="Search results" data-sn-query="${query}" data-sn-sequence="${String(sequence)}" hidden><li id="result-one" role="option" aria-selected="false" data-sn-key="one" data-sn-position="0"><mark>Journal</mark> &lt;script&gt;</li><li id="result-two" role="option" aria-selected="false" data-sn-key="two" data-sn-position="1">Notebook</li></ul></sn-search-box>`;
 }
 
 test("keyboard navigation retains input focus and selects through the island", async ({ page }) => {
@@ -44,13 +44,13 @@ test("a late answer cannot replace the latest query, even when text repeats", as
     list.setAttribute("data-sn-sequence", "1");
   });
   await expect(input).toHaveAttribute("aria-expanded", "false");
-  await page
-    .locator("[role=listbox]")
-    .evaluate((list) => list.setAttribute("data-sn-sequence", "2"));
+  await page.locator("[role=listbox]").evaluate((list) => {
+    list.setAttribute("data-sn-sequence", "2");
+  });
   await expect(input).toHaveAttribute("aria-expanded", "true");
-  await page
-    .locator("[role=listbox]")
-    .evaluate((list) => list.setAttribute("data-sn-sequence", "1"));
+  await page.locator("[role=listbox]").evaluate((list) => {
+    list.setAttribute("data-sn-sequence", "1");
+  });
   await expect(input).toHaveAttribute("aria-expanded", "false");
 });
 
@@ -79,7 +79,9 @@ test("an empty answer stays responsive without observer feedback", async ({ page
 
 test("a disconnect releases observers and event listeners", async ({ page }) => {
   await mountComponents(page, { html: searchBox(), components: ["search-box"], instrument: true });
-  await page.locator("sn-search-box").evaluate((element) => element.remove());
+  await page.locator("sn-search-box").evaluate((element) => {
+    element.remove();
+  });
   const bindings: unknown = await page.evaluate("globalThis.__snBindings()");
   expect(bindings).toEqual({ listeners: 0, observers: 0 });
 });
