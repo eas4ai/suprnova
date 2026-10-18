@@ -1,9 +1,9 @@
 //! The application every agents test serves: its scopes, its tools and the
 //! routes they run on.
 //!
-//! Every `#[tool]` of this binary is linked into every test, and a router
-//! must route each of them (`Router::prepare_tools`), so all tools live here
-//! and every test builds its router with [`router`] or [`router_with`].
+//! Every `#[tool]` of this binary is linked into every test. A router that
+//! leaves one unrouted serves without it and warns at boot, so the shared
+//! router, [`router`] or [`router_with`], routes them all.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -20,7 +20,7 @@ use suprnova::container::testing::TestContainer;
 use suprnova::rate_limit::ThrottleRequestsMiddleware;
 use suprnova::{
     Gate, HttpResponse, JsonSchema, Middleware, MiddlewareRegistry, Next, Request, Response,
-    Router, ToolCaller, handler, json_response, tool, tool_input,
+    Router, ToolCaller, Validate, handler, json_response, tool, tool_input,
 };
 
 suprnova::tool_scopes! {
@@ -211,7 +211,7 @@ pub async fn create_post(caller: ToolCaller, form: CreatePost) -> Response {
 #[tool(
     name = "posts.show",
     description = "Show one post.",
-    callers = [public, user, agent],
+    callers = [user, agent],
     scopes = [scope::POSTS_READ],
     input = PostRef,
     annotations(read_only),
@@ -232,8 +232,8 @@ pub async fn show_post(post: String, form: PostRef) -> Response {
 )]
 #[handler]
 #[suprnova::authorize("posts.delete", Post)]
-pub async fn delete_post(post: String) -> Response {
-    json_response!({ "deleted": post })
+pub async fn delete_post(post: String, form: PostRef) -> Response {
+    json_response!({ "deleted": post, "same": post == form.post })
 }
 
 #[tool(
@@ -243,7 +243,7 @@ pub async fn delete_post(post: String) -> Response {
 )]
 #[handler]
 pub async fn profile(caller: ToolCaller) -> Response {
-    json_response!({ "user": caller.user_id() })
+    json_response!({ "user": caller.user_id(), "browser": caller.via_browser() })
 }
 
 #[tool(
@@ -303,6 +303,164 @@ pub async fn page() -> Response {
 /// How many times `page.html` rendered.
 pub static PAGE_RENDERS: AtomicUsize = AtomicUsize::new(0);
 
+#[tool(
+    name = "slow.stream",
+    description = "Answer with an event that arrives late.",
+    callers = [public],
+    input = Wait,
+)]
+#[handler]
+pub async fn slow_stream(form: Wait) -> Response {
+    let flag = DropFlag {
+        key: form.key.clone(),
+        armed: true,
+    };
+    let millis = form.millis;
+    Ok(HttpResponse::sse(futures::stream::once(async move {
+        let mut flag = flag;
+        tokio::time::sleep(Duration::from_millis(millis)).await;
+        flag.armed = false;
+        suprnova::sse::SseEvent::data("late")
+    })))
+}
+
+#[tool(
+    name = "slow.bytes",
+    description = "Answer with a body that arrives late.",
+    callers = [public],
+    input = Wait,
+)]
+#[handler]
+pub async fn slow_bytes(form: Wait) -> Response {
+    let flag = DropFlag {
+        key: form.key.clone(),
+        armed: true,
+    };
+    let millis = form.millis;
+    Ok(
+        HttpResponse::stream_bytes(futures::stream::once(async move {
+            let mut flag = flag;
+            tokio::time::sleep(Duration::from_millis(millis)).await;
+            flag.armed = false;
+            Ok::<_, std::convert::Infallible>(bytes::Bytes::from_static(b"{\"late\":true}"))
+        }))
+        .header("Content-Type", "application/json"),
+    )
+}
+
+/// A postal address, nested in [`UpdateProfile`].
+#[derive(serde::Deserialize, Validate, JsonSchema)]
+#[schemars(crate = "suprnova::__schemars")]
+#[serde(deny_unknown_fields)]
+pub struct Address {
+    /// The street.
+    pub street: String,
+    /// The city.
+    pub city: String,
+}
+
+/// The input of `profile.update`: several required fields, one nested.
+#[tool_input]
+#[serde(deny_unknown_fields)]
+pub struct UpdateProfile {
+    /// The display name.
+    pub name: String,
+    /// The email address.
+    pub email: String,
+    /// The age in years.
+    pub age: u32,
+    /// Where the user lives.
+    #[validate(nested)]
+    pub address: Address,
+}
+
+#[tool(
+    name = "profile.update",
+    description = "Update the signed-in user's profile.",
+    callers = [user],
+    input = UpdateProfile,
+)]
+#[handler]
+pub async fn update_profile(form: UpdateProfile) -> Response {
+    json_response!({
+        "name": form.name,
+        "email": form.email,
+        "age": form.age,
+        "street": form.address.street,
+        "city": form.address.city,
+    })
+}
+
+/// How many times the after-response command ran.
+pub static LATER_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+/// The command `bus.later` queues for after its response.
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+pub struct Later;
+
+impl suprnova::bus::command::Command for Later {
+    type Output = ();
+    fn command_name() -> &'static str {
+        "agents-fixture-later"
+    }
+}
+
+/// Counts the runs of [`Later`].
+pub struct LaterHandler;
+
+#[async_trait]
+impl suprnova::bus::command::Handler<Later> for LaterHandler {
+    async fn handle(&self, _command: Later) -> Result<(), suprnova::FrameworkError> {
+        LATER_RUNS.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tool(
+    name = "bus.later",
+    description = "Queue work for after the response.",
+    callers = [public],
+)]
+#[handler]
+pub async fn later() -> Response {
+    suprnova::Bus::dispatch_after_response(Later).map_err(HttpResponse::from)?;
+    json_response!({ "queued": true })
+}
+
+/// A user an API guard's own provider loads.
+#[derive(Clone, Debug)]
+pub struct ApiUser {
+    pub id: String,
+    pub name: String,
+}
+
+impl Authenticatable for ApiUser {
+    fn get_auth_identifier(&self) -> String {
+        self.id.clone()
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+}
+
+#[tool(
+    name = "users.api",
+    description = "Read the user an API guard signs in.",
+    callers = [user],
+    guard = "api",
+)]
+#[handler]
+pub async fn api_profile() -> Response {
+    let user = suprnova::Auth::user_as_arc::<ApiUser>().await?;
+    json_response!({
+        "user": user.as_ref().map(|user| user.id.clone()),
+        "name": user.as_ref().map(|user| user.name.clone()),
+    })
+}
+
 /// A routed handler that is not a tool.
 #[handler]
 pub async fn plain() -> Response {
@@ -338,6 +496,11 @@ pub fn routes() -> Router {
         .post("/throttled", throttled)
         .middleware(ThrottleRequestsMiddleware::with(2, 1, "agents-fixture"))
         .get("/page", page)
+        .post("/slow-stream", slow_stream)
+        .post("/slow-bytes", slow_bytes)
+        .post("/profile", update_profile)
+        .post("/later", later)
+        .post("/api/me", api_profile)
         .post("/plain", plain)
         .into()
 }

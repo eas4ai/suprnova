@@ -14,14 +14,19 @@ fn agent_001_marked_handlers_are_tools_and_nothing_else_is() {
     assert_eq!(
         names,
         vec![
+            "bus.later",
             "echo",
             "page.html",
             "posts.create",
             "posts.delete",
             "posts.show",
+            "profile.update",
             "request.peek",
+            "slow.bytes",
+            "slow.stream",
             "slow.wait",
             "throttled.ping",
+            "users.api",
             "users.profile",
         ]
     );
@@ -48,23 +53,37 @@ fn routes_without_profile() -> Router {
 }
 
 #[tokio::test]
-async fn agent_001_unrouted_tool_refuses_boot() {
+#[tracing_test::traced_test]
+async fn agent_001_unrouted_tools_are_left_out_with_a_warning() {
     let _container = fixture::setup();
     let router = routes_without_profile().agents(AgentsConfig::new());
-    let error = router
+    router
         .prepare_tools()
-        .expect_err("a tool whose handler is not routed refuses boot");
-    assert!(error.to_string().contains("users.profile"), "{error}");
+        .expect("a router that routes some tools serves");
+    // One boot warning names each tool left out.
+    assert!(logs_contain("users.profile"));
+    assert!(logs_contain("profile.update"));
+    assert!(logs_contain("not routed"));
 
-    // A router whose check fails answers every request with the error, so
-    // the application's own tests fail too.
     let client = suprnova::testing::TestClient::new(router, MiddlewareRegistry::new());
     client
         .post("/echo")
         .json(&serde_json::json!({ "text": "hi" }))
         .send()
         .await
-        .assert_status(500);
+        .assert_ok();
+    let listed = client.mcp().list().await.tool_names();
+    assert!(listed.contains(&"echo".to_string()), "{listed:?}");
+    assert!(!listed.contains(&"slow.stream".to_string()), "{listed:?}");
+    let unrouted = client
+        .mcp()
+        .call("users.profile", serde_json::json!({}))
+        .await;
+    assert_eq!(
+        unrouted.error_code(),
+        Some(-32602),
+        "an unrouted tool is unknown"
+    );
 }
 
 #[test]

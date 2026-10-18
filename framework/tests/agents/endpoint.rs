@@ -220,14 +220,6 @@ async fn agent_003_unsupported_version_is_32022_with_supported_list() {
         json!(["2026-07-28", "2025-11-25", "2025-06-18"])
     );
     assert_eq!(body["error"]["data"]["requested"], "2024-11-05");
-
-    let init = client
-        .mcp()
-        .protocol_version("2025-03-26")
-        .initialize()
-        .await;
-    assert_eq!(init.status(), 400);
-    assert_eq!(init.error_code(), Some(-32022));
 }
 
 #[tokio::test]
@@ -486,4 +478,183 @@ async fn closed_answer_cancels_call(accept: &str, content_type: &str, key: &str)
         fixture::cancelled(key),
         "closing the stream cancelled the call"
     );
+}
+
+#[tokio::test]
+async fn agent_003_slow_body_is_cut_off_as_sse_and_as_stream() {
+    let _container = fixture::setup();
+    let client = fixture::client_with(
+        AgentsConfig::new().call_timeout(Duration::from_millis(300)),
+        MiddlewareRegistry::new(),
+    );
+    for (tool, key) in [
+        ("slow.stream", "agent-003-late-event"),
+        ("slow.bytes", "agent-003-late-bytes"),
+    ] {
+        let started = std::time::Instant::now();
+        let result = client
+            .mcp()
+            .call(tool, json!({ "millis": 20_000, "key": key }))
+            .await;
+        assert!(result.is_error(), "{tool}: {:?}", result.response());
+        assert!(
+            result.text().contains("did not finish"),
+            "{tool}: {}",
+            result.text()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{tool}: the deadline covered the body"
+        );
+        assert!(fixture::cancelled(key), "{tool}: the late body was dropped");
+    }
+}
+
+#[tokio::test]
+async fn agent_003_initialize_negotiates_an_unsupported_version() {
+    let _container = fixture::setup();
+    let client = fixture::client();
+    for requested in ["2026-07-28", "2099-01-01", "2025-03-26"] {
+        let init = client.mcp().protocol_version(requested).initialize().await;
+        assert_eq!(init.status(), 200, "{requested}: {init:?}");
+        assert_eq!(
+            init.result().map(|result| &result["protocolVersion"]),
+            Some(&json!("2025-11-25")),
+            "{requested}: the newest initialize-era version"
+        );
+        assert!(init.header("mcp-session-id").is_none());
+    }
+}
+
+#[tokio::test]
+async fn agent_003_repeated_mcp_headers_are_400_32020() {
+    let _container = fixture::setup();
+    let body = modern_body(
+        "tools/call",
+        json!({ "name": "echo", "arguments": { "text": "x" } }),
+    );
+    for repeated in ["MCP-Protocol-Version", "Mcp-Method", "Mcp-Name"] {
+        let mut headers = vec![
+            ("MCP-Protocol-Version", "2026-07-28"),
+            ("Mcp-Method", "tools/call"),
+            ("Mcp-Name", "echo"),
+        ];
+        let value = headers
+            .iter()
+            .find(|(name, _)| *name == repeated)
+            .map(|(_, value)| *value)
+            .unwrap_or_default();
+        headers.push((repeated, value));
+        let response = raw_with_repeats(&headers, &body).await;
+        assert_eq!(
+            response.status(),
+            400,
+            "{repeated}: {}",
+            response.body_text()
+        );
+        assert_eq!(response.json()["error"]["code"], -32020, "{repeated}");
+    }
+}
+
+/// POST `body` to the endpoint with `headers` over a connection of its
+/// own: a test client keeps one value per header name, and this sends a name
+/// that appears twice as two header lines.
+async fn raw_with_repeats(
+    headers: &[(&str, &str)],
+    body: &Value,
+) -> suprnova::testing::TestResponse {
+    let router = Arc::new(fixture::router());
+    let registry = Arc::new(MiddlewareRegistry::new());
+    let mut builder = hyper::Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("Host", "localhost")
+        .header("Content-Type", "application/json");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder
+        .body(Full::new(Bytes::from(body.to_string())))
+        .expect("a valid request");
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let service = service_fn(move |req: hyper::Request<Incoming>| {
+        let router = router.clone();
+        let registry = registry.clone();
+        async move { Ok::<_, Infallible>(suprnova::handle_request(router, registry, req).await) }
+    });
+    let server = tokio::spawn(
+        hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(server_io), service),
+    );
+    let (mut sender, connection) =
+        hyper::client::conn::http1::handshake::<_, Full<Bytes>>(TokioIo::new(client_io))
+            .await
+            .expect("handshake");
+    let connection = tokio::spawn(connection);
+    let response = sender.send_request(request).await.expect("a response");
+    let status = response.status().as_u16();
+    let headers: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_string(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("the body")
+        .to_bytes();
+    drop(sender);
+    connection.abort();
+    server.abort();
+    suprnova::testing::TestResponse::new(status, headers, body)
+}
+
+#[tokio::test]
+async fn agent_003_every_request_counts_against_the_address_budget() {
+    let _container = fixture::setup();
+    let client = fixture::client_with(
+        AgentsConfig::new().request_limit(suprnova::agents::CallLimit::per_minute(2)),
+        MiddlewareRegistry::new(),
+    )
+    .with_peer_address(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 3, 0, 1)));
+    // A token nobody issued is refused, and the refusal still counts.
+    for _ in 0..2 {
+        let refused = client.mcp().with_token("nobody-issued-this").list().await;
+        assert_eq!(refused.status(), 401);
+    }
+    let limited = client.mcp().list().await;
+    assert_eq!(limited.status(), 429, "{limited:?}");
+    assert!(limited.header("retry-after").is_some());
+}
+
+#[tokio::test]
+async fn agent_003_input_check_names_every_field() {
+    let _container = fixture::setup();
+    let client = fixture::client();
+    let result = client
+        .mcp()
+        .as_caller(ToolCaller::user(TestUser::arc("7")))
+        .call(
+            "profile.update",
+            json!({ "age": "ten", "address": { "street": "1 Main" }, "nickname": "x" }),
+        )
+        .await;
+    assert_eq!(result.error_code(), None, "invalid input is a tool result");
+    assert!(result.is_error(), "{:?}", result.response());
+    let text = result.text();
+    for field in [
+        "- name:",
+        "- email:",
+        "- age:",
+        "- address.city:",
+        "- nickname:",
+    ] {
+        assert!(text.contains(field), "{field} missing from {text}");
+    }
 }

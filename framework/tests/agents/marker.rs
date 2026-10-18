@@ -58,6 +58,17 @@ fn ensure_crypt() {
     INIT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
 }
 
+/// The session middleware alone, with an in-memory store.
+pub(crate) fn session_only() -> MiddlewareRegistry {
+    ensure_crypt();
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    MiddlewareRegistry::new().append(SessionMiddleware::with_store(
+        config,
+        Arc::new(MemoryStore::default()),
+    ))
+}
+
 /// The session and CSRF middleware, as an application registers them.
 fn session_and_csrf() -> MiddlewareRegistry {
     ensure_crypt();

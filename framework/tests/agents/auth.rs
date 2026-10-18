@@ -18,17 +18,34 @@ use crate::fixture::{self, TestUser, scope};
 async fn agent_004_list_shows_only_public_tools_without_token() {
     let _container = fixture::setup();
     let client = fixture::client();
-    assert_eq!(
-        client.mcp().list().await.tool_names(),
-        vec![
-            "echo",
-            "page.html",
-            "posts.show",
-            "request.peek",
-            "slow.wait",
-            "throttled.ping"
-        ]
-    );
+    assert_eq!(client.mcp().list().await.tool_names(), PUBLIC_TOOLS);
+}
+
+/// The fixture's tools that accept `public`, sorted: every caller may call
+/// them.
+const PUBLIC_TOOLS: [&str; 8] = [
+    "bus.later",
+    "echo",
+    "page.html",
+    "request.peek",
+    "slow.bytes",
+    "slow.stream",
+    "slow.wait",
+    "throttled.ping",
+];
+
+/// `names` without the public tools, which every caller sees.
+fn beyond_public(names: Vec<String>) -> Vec<String> {
+    for public in PUBLIC_TOOLS {
+        assert!(
+            names.iter().any(|name| name == public),
+            "{public} missing from {names:?}"
+        );
+    }
+    names
+        .into_iter()
+        .filter(|name| !PUBLIC_TOOLS.contains(&name.as_str()))
+        .collect()
 }
 
 #[tokio::test]
@@ -41,8 +58,8 @@ async fn agent_004_list_filters_by_kind_and_scope() {
         .list()
         .await;
     assert_eq!(
-        reader.tool_names(),
-        vec!["posts.show", "request.peek", "users.profile"],
+        beyond_public(reader.tool_names()),
+        vec!["posts.show", "profile.update", "users.api", "users.profile"],
         "a user sees the tools that accept users and whose scopes the token holds"
     );
     let writer = client
@@ -51,7 +68,7 @@ async fn agent_004_list_filters_by_kind_and_scope() {
         .list()
         .await;
     assert_eq!(
-        writer.tool_names(),
+        beyond_public(writer.tool_names()),
         vec!["posts.create"],
         "an agent sees no tool that does not accept agents"
     );
@@ -387,5 +404,131 @@ async fn agent_004_as_metadata_hook_404_without_provider() {
     assert_eq!(
         resource["authorization_servers"],
         json!(["http://localhost"])
+    );
+}
+
+/// A resolver that never answers.
+struct Hangs;
+
+#[async_trait]
+impl CallerResolver for Hangs {
+    async fn resolve(
+        &self,
+        _token: &str,
+        _ctx: &ResolveContext<'_>,
+    ) -> Result<ToolCaller, ResolveError> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn agent_004_hanging_resolver_is_503() {
+    let _container = fixture::setup();
+    let client = fixture::client_with(
+        AgentsConfig::new()
+            .resolver(Arc::new(Hangs))
+            .resolver_timeout(std::time::Duration::from_millis(100)),
+        MiddlewareRegistry::new(),
+    );
+    let response = client.mcp().with_token("anything").list().await;
+    assert_eq!(response.status(), 503);
+}
+
+/// An authorization server whose issuer is a path of this application.
+struct PathIssuer;
+
+#[async_trait]
+impl AuthorizationServerMetadata for PathIssuer {
+    async fn document(&self, issuer: &str, kind: MetadataKind) -> Option<Value> {
+        Some(json!({ "issuer": self.issuer(issuer), "kind": format!("{kind:?}") }))
+    }
+
+    fn issuer(&self, issuer: &str) -> String {
+        format!("{issuer}/oauth")
+    }
+}
+
+#[tokio::test]
+async fn agent_004_custom_issuer_metadata_at_its_path_inserted_location() {
+    let _container = fixture::setup();
+    let client = fixture::client_with(
+        AgentsConfig::new().authorization_server(Arc::new(PathIssuer)),
+        MiddlewareRegistry::new(),
+    );
+    for (path, kind) in [
+        (
+            "/.well-known/oauth-authorization-server/oauth",
+            "OAuthAuthorizationServer",
+        ),
+        (
+            "/.well-known/openid-configuration/oauth",
+            "OpenIdConfiguration",
+        ),
+    ] {
+        let response = client.get(path).send().await;
+        assert_eq!(response.status(), 200, "{path}");
+        assert_eq!(
+            response.json(),
+            json!({ "issuer": "http://localhost/oauth", "kind": kind })
+        );
+    }
+    let resource = client
+        .get("/.well-known/oauth-protected-resource")
+        .send()
+        .await
+        .json();
+    assert_eq!(
+        resource["authorization_servers"],
+        json!(["http://localhost/oauth"])
+    );
+}
+
+/// The API guard's provider: it knows user `7`, by its own record.
+struct ApiUsers;
+
+#[async_trait]
+impl suprnova::UserProvider for ApiUsers {
+    async fn retrieve_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<Arc<dyn suprnova::auth::Authenticatable>>, FrameworkError> {
+        Ok((id == "7").then(|| {
+            Arc::new(fixture::ApiUser {
+                id: "7".to_string(),
+                name: "from the api provider".to_string(),
+            }) as Arc<dyn suprnova::auth::Authenticatable>
+        }))
+    }
+}
+
+#[tokio::test]
+async fn agent_004_guarded_tool_loads_the_user_through_its_guard() {
+    let _container = fixture::setup();
+    let config = suprnova::AuthConfig::default()
+        .guard("api", suprnova::auth::GuardConfig::session("api-users"));
+    let manager = suprnova::AuthManager::new(config);
+    manager.register_provider("api-users", Arc::new(ApiUsers));
+    suprnova::testing::TestContainer::singleton(manager);
+    let client = fixture::client();
+    let known = client
+        .mcp()
+        .as_caller(ToolCaller::user(TestUser::arc("7")))
+        .call("users.api", json!({}))
+        .await;
+    assert_eq!(known.status(), 200, "{:?}", known.response());
+    assert_eq!(
+        known.structured(),
+        Some(&json!({ "user": "7", "name": "from the api provider" })),
+        "the guard's own provider loaded the user"
+    );
+    let unknown = client
+        .mcp()
+        .as_caller(ToolCaller::user(TestUser::arc("999")))
+        .call("users.api", json!({}))
+        .await;
+    assert_eq!(
+        unknown.status(),
+        401,
+        "the guard's provider does not know the user"
     );
 }

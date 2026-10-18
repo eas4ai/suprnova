@@ -75,7 +75,10 @@ async fn agent_001_tool_call_runs_authorize_policy() {
         .call("posts.delete", json!({ "post": "42" }))
         .await;
     assert!(!result.is_error(), "{:?}", result.response());
-    assert_eq!(result.structured(), Some(&json!({ "deleted": "42" })));
+    assert_eq!(
+        result.structured(),
+        Some(&json!({ "deleted": "42", "same": true }))
+    );
 }
 
 #[tokio::test]
@@ -99,7 +102,9 @@ async fn agent_001_tool_call_runs_route_throttle() {
 async fn agent_001_path_parameter_cannot_inject_a_segment() {
     let _container = fixture::setup();
     let client = fixture::client();
-    let mcp = client.mcp();
+    let mcp = client
+        .mcp()
+        .as_caller(ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_READ]));
     for value in ["a/b", "../admin", "%2F", "x?y=1#z"] {
         let result = mcp.call("posts.show", json!({ "post": value })).await;
         assert!(!result.is_error(), "{value}: {:?}", result.response());
@@ -246,4 +251,92 @@ async fn agent_001_render_cache_does_not_serve_tool_calls() {
         .await
         .expect("probe the cache");
     assert!(stored.is_none(), "no tool call was stored");
+}
+
+#[tokio::test]
+async fn agent_001_dispatch_after_response_runs_after_a_tool_call() {
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    let _container = fixture::setup();
+    suprnova::Bus::register::<fixture::Later, _>(fixture::LaterHandler);
+    let router = Arc::new(fixture::router());
+    let registry = Arc::new(suprnova::MiddlewareRegistry::new());
+    let before = fixture::LATER_RUNS.load(Ordering::SeqCst);
+
+    // A connection with the framework server's write-completion hook, so
+    // the queued command can start once the answer's bytes are out.
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(suprnova::after_response_connection(
+        server_io,
+        move |io| async move {
+            let service = hyper::service::service_fn(move |request| {
+                let router = router.clone();
+                let registry = registry.clone();
+                async move {
+                    Ok::<_, std::convert::Infallible>(
+                        suprnova::handle_request(router, registry, request).await,
+                    )
+                }
+            });
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(hyper_util::rt::TokioIo::new(io), service)
+                .await
+        },
+    ));
+    let (mut sender, connection) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(
+        hyper_util::rt::TokioIo::new(client_io),
+    )
+    .await
+    .expect("handshake");
+    let connection = tokio::spawn(connection);
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "bus.later",
+            "arguments": {},
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+            },
+        },
+    });
+    let request = hyper::Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("Host", "localhost")
+        .header("Content-Type", "application/json")
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "tools/call")
+        .header("Mcp-Name", "bus.later")
+        .body(Full::new(Bytes::from(body.to_string())))
+        .expect("a valid request");
+    let response = sender.send_request(request).await.expect("the answer");
+    let answer: serde_json::Value = serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .expect("the body")
+            .to_bytes(),
+    )
+    .expect("a JSON answer");
+    assert_eq!(answer["result"]["isError"], false, "{answer}");
+    let ran = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while fixture::LATER_RUNS.load(Ordering::SeqCst) == before {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(
+        ran.is_ok(),
+        "the command queued in the tool call ran after its answer"
+    );
+    drop(sender);
+    connection.abort();
+    server.abort();
 }

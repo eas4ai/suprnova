@@ -117,16 +117,6 @@ async fn agent_018_browser_path_refuses_agent() {
         .send()
         .await
         .assert_status(401);
-    // A signed-in user on a tool that accepts only guests is refused too.
-    client
-        .clone()
-        .acting_as(&TestUser {
-            id: "7".to_string(),
-        })
-        .tool("echo", json!({ "text": "x" }))
-        .send()
-        .await
-        .assert_status(403);
 }
 
 #[tokio::test]
