@@ -176,6 +176,9 @@ pub struct RegistrationLimits {
     pub service_auth: RegistrationLimit,
     /// ID-JAG registrations: 60 an hour per address, 1000 per application.
     pub identity_assertion: RegistrationLimit,
+    /// Assertion exchanges at the token endpoint, per registration: 60 an
+    /// hour, one a minute on average, ample for a one-hour access token.
+    pub exchange: AbusePolicy,
 }
 
 impl Default for RegistrationLimits {
@@ -184,6 +187,10 @@ impl Default for RegistrationLimits {
             anonymous: RegistrationLimit::per_hour(5, 100),
             service_auth: RegistrationLimit::per_hour(5, 100),
             identity_assertion: RegistrationLimit::per_hour(60, 1000),
+            exchange: AbusePolicy {
+                max_requests: 60,
+                window: Duration::from_secs(3600),
+            },
         }
     }
 }

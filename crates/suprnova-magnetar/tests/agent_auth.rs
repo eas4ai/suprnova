@@ -410,6 +410,143 @@ async fn agent_007_assertions_signed_before_a_key_rotation_still_verify() {
     assert_eq!(body(&refused)["error"], "invalid_grant");
 }
 
+/// Every authorization server grant issued to a registration, as
+/// `(grant id, revoked)`.
+async fn grants_of(h: &Harness, registration_id: &str) -> Vec<(String, bool)> {
+    use magnetar::authorization_server::sql::grants;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    grants::Entity::find()
+        .filter(grants::Column::ClientId.eq(registration_id.to_owned()))
+        .all(&h.db)
+        .await
+        .expect("read grants")
+        .into_iter()
+        .map(|grant| (grant.id, grant.revoked_at.is_some()))
+        .collect()
+}
+
+#[tokio::test]
+async fn agent_007_many_exchanges_leave_one_live_grant() {
+    let h = sqlite_harness().await;
+    let registration = h.anonymous().await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let assertion = registration["identity_assertion"]
+        .as_str()
+        .expect("assertion");
+    let mut tokens = Vec::new();
+    for _ in 0..5 {
+        tokens.push(access_token(&h.exchange(assertion).await));
+    }
+    assert_eq!(
+        grants_of(&h, id).await.len(),
+        1,
+        "one grant, however many exchanges"
+    );
+    for token in &tokens {
+        assert!(matches!(
+            h.verify(token).await,
+            AccessVerification::Valid(_)
+        ));
+    }
+
+    // The claim ends the pre-claim grant; the poll's grant replaces it.
+    let user_id = h.create_user("one.grant@example.test", true).await;
+    let bearer = h.sign_in(&user_id).await;
+    let claim_token = registration["claim_token"].as_str().expect("claim token");
+    let started = body(&h.initiate(claim_token, "one.grant@example.test").await);
+    let attempt = attempt_token(
+        started["claim_attempt"]["verification_uri"]
+            .as_str()
+            .expect("uri"),
+    );
+    let code = started["claim_attempt"]["user_code"]
+        .as_str()
+        .expect("code");
+    assert_eq!(status(&h.confirm(&attempt, code, Some(&bearer)).await), 200);
+    let claimed = body(&h.poll(claim_token).await);
+    let v2 = claimed["identity_assertion"].as_str().expect("v2");
+    for _ in 0..3 {
+        access_token(&h.exchange(v2).await);
+    }
+    let grants = grants_of(&h, id).await;
+    assert_eq!(grants.len(), 2, "{grants:?}");
+    assert_eq!(
+        grants.iter().filter(|(_, revoked)| !revoked).count(),
+        1,
+        "{grants:?}"
+    );
+}
+
+#[tokio::test]
+async fn agent_007_exchanges_are_rate_limited_per_registration() {
+    let mut options = Options::new();
+    options.config.limits.exchange = magnetar::abuse::AbusePolicy {
+        max_requests: 3,
+        window: std::time::Duration::from_secs(3600),
+    };
+    let h = sqlite_harness_with(options).await;
+    let first = h.anonymous().await;
+    let assertion = first["identity_assertion"].as_str().expect("assertion");
+    for _ in 0..3 {
+        access_token(&h.exchange(assertion).await);
+    }
+    let limited = h.exchange(assertion).await;
+    assert_eq!(status(&limited), 429, "{:?}", body(&limited));
+    assert_eq!(body(&limited)["error"], "rate_limited");
+    let second = h.anonymous().await;
+    access_token(
+        &h.exchange(second["identity_assertion"].as_str().expect("assertion"))
+            .await,
+    );
+
+    let h = sqlite_harness().await;
+    let registration = h.anonymous().await;
+    access_token(
+        &h.exchange(
+            registration["identity_assertion"]
+                .as_str()
+                .expect("assertion"),
+        )
+        .await,
+    );
+    let acquired = h.limiter.acquired.lock().clone();
+    let (_, policy) = acquired
+        .iter()
+        .find(|(key, _)| key.starts_with("agent-auth.exchange:"))
+        .expect("an exchange budget");
+    assert_eq!((policy.max_requests, policy.window.as_secs()), (60, 3600));
+}
+
+#[tokio::test]
+async fn agent_007_a_pruned_grant_is_replaced_on_the_next_exchange() {
+    use magnetar::authorization_server::sql::{grants, tokens};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let h = sqlite_harness().await;
+    let registration = h.anonymous().await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let assertion = registration["identity_assertion"]
+        .as_str()
+        .expect("assertion");
+    access_token(&h.exchange(assertion).await);
+    let (grant_id, _) = grants_of(&h, id).await.remove(0);
+    tokens::Entity::delete_many()
+        .filter(tokens::Column::GrantId.eq(grant_id.clone()))
+        .exec(&h.db)
+        .await
+        .expect("drop the tokens");
+    grants::Entity::delete_many()
+        .filter(grants::Column::Id.eq(grant_id))
+        .exec(&h.db)
+        .await
+        .expect("drop the grant, as pruning does");
+    let token = access_token(&h.exchange(assertion).await);
+    assert!(matches!(
+        h.verify(&token).await,
+        AccessVerification::Valid(_)
+    ));
+    assert_eq!(grants_of(&h, id).await.len(), 1);
+}
+
 #[tokio::test]
 async fn agent_007_an_epoch_change_ends_a_bound_agent() {
     let h = sqlite_harness().await;
@@ -1266,6 +1403,51 @@ async fn agent_009_reinitiation_and_polling_answer_the_protocol_codes() {
     assert_eq!(body(&h.poll(claim_token).await)["error"], "expired_token");
     let unknown = h.initiate("clm_unknown", "poller@example.test").await;
     assert_eq!(body(&unknown)["error"], "invalid_claim_token");
+}
+
+#[tokio::test]
+async fn agent_009_a_failed_poll_keeps_the_claim_token() {
+    let h = sqlite_harness().await;
+    let (registration, _) = h.claimed_anonymous("failed.poll@example.test").await;
+    let claim_token = registration["claim_token"].as_str().expect("claim token");
+    let elsewhere = h
+        .post_form(
+            "/oauth/token",
+            &[
+                ("grant_type", "urn:workos:agent-auth:grant-type:claim"),
+                ("claim_token", claim_token),
+                ("resource", "https://elsewhere.example.test/mcp"),
+            ],
+            None,
+        )
+        .await;
+    assert_eq!(status(&elsewhere), 400, "{:?}", body(&elsewhere));
+    assert_eq!(body(&elsewhere)["error"], "invalid_target");
+    h.forget_polls().await;
+    let claimed = h.poll(claim_token).await;
+    assert_eq!(
+        status(&claimed),
+        200,
+        "the claim token survives a poll that issued nothing: {:?}",
+        body(&claimed)
+    );
+}
+
+#[tokio::test]
+async fn agent_009_a_claimed_token_that_is_never_polled_expires() {
+    let h = sqlite_harness().await;
+    let (registration, _) = h.claimed_anonymous("never.polled@example.test").await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let long_ago = chrono::Utc::now() - chrono::Duration::hours(25);
+    h.set_registration_time(id, registrations::Column::ClaimedAt, long_ago)
+        .await;
+    h.set_registration_time(id, registrations::Column::ClaimExpiresAt, long_ago)
+        .await;
+    let late = h
+        .poll(registration["claim_token"].as_str().expect("claim token"))
+        .await;
+    assert_eq!(status(&late), 400, "{:?}", body(&late));
+    assert_eq!(body(&late)["error"], "expired_token");
 }
 
 #[tokio::test]

@@ -1,11 +1,10 @@
 //! SeaORM tables and store for agent auth on SQLite, PostgreSQL and
 //! MySQL/MariaDB.
 //!
-//! Three tables belong to the plugin: `auth_agent_registrations` holds one
-//! row per registration with its claim ceremony, `auth_agent_grants` links
-//! each authorization server grant issued to a registration, and
-//! `auth_agent_replays` holds the identifiers of ID-JAGs and Security Event
-//! Tokens already seen. [`migrate`] creates them, and
+//! Two tables belong to the plugin: `auth_agent_registrations` holds one
+//! row per registration with its claim ceremony and the one authorization
+//! server grant its tokens are minted under, and `auth_agent_replays` holds
+//! the identifiers of ID-JAGs and Security Event Tokens already seen. [`migrate`] creates them, and
 //! [`crate::default_schema::migrate`] calls it when the `agent-auth`
 //! feature is on.
 //!
@@ -84,36 +83,13 @@ pub mod registrations {
         pub auth_epoch: Option<i64>,
         #[sea_orm(column_type = "Text", nullable)]
         pub client_address: Option<String>,
+        #[sea_orm(column_type = "String(StringLen::N(64))", nullable)]
+        pub grant_id: Option<String>,
         pub created_at: DateTimeUtc,
         #[sea_orm(nullable)]
         pub claimed_at: Option<DateTimeUtc>,
         #[sea_orm(nullable)]
         pub revoked_at: Option<DateTimeUtc>,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-/// SeaORM entity for the `auth_agent_grants` table.
-#[allow(missing_docs)]
-pub mod grant_links {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "auth_agent_grants")]
-    pub struct Model {
-        #[sea_orm(
-            primary_key,
-            auto_increment = false,
-            column_type = "String(StringLen::N(64))"
-        )]
-        pub grant_id: String,
-        #[sea_orm(column_type = "String(StringLen::N(64))")]
-        pub registration_id: String,
-        pub created_at: DateTimeUtc,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -171,10 +147,6 @@ pub async fn migrate(db: &DatabaseConnection) -> Result<()> {
             .if_not_exists()
             .to_owned(),
         schema
-            .create_table_from_entity(grant_links::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
             .create_table_from_entity(replays::Entity)
             .if_not_exists()
             .to_owned(),
@@ -218,14 +190,6 @@ pub async fn migrate(db: &DatabaseConnection) -> Result<()> {
         "auth_agent_registrations",
         "auth_agent_registrations_status",
         &["status", "claim_expires_at"],
-        false,
-    )
-    .await?;
-    ensure_index(
-        db,
-        "auth_agent_grants",
-        "auth_agent_grants_registration_id",
-        &["registration_id"],
         false,
     )
     .await?;
@@ -325,6 +289,7 @@ fn record(model: registrations::Model) -> RegistrationRecord {
             .auth_epoch
             .map(|epoch| u64::try_from(epoch).unwrap_or(u64::MAX)),
         client_address: model.client_address,
+        grant_id: model.grant_id,
         created_at: model.created_at,
         claimed_at: model.claimed_at,
         revoked_at: model.revoked_at,
@@ -392,6 +357,7 @@ impl AgentAuthStore for SqlAgentAuthStore {
             assertion_version: Set(to_i32(record.assertion_version, "assertion_version")?),
             auth_epoch: Set(epoch_to_db(record.auth_epoch)?),
             client_address: Set(record.client_address),
+            grant_id: Set(record.grant_id),
             created_at: Set(record.created_at),
             claimed_at: Set(record.claimed_at),
             revoked_at: Set(record.revoked_at),
@@ -718,32 +684,34 @@ impl AgentAuthStore for SqlAgentAuthStore {
             .collect())
     }
 
-    async fn link_grant(
+    async fn reserve_grant(
         &self,
-        registration_id: &str,
-        grant_id: &str,
-        at: DateTime<Utc>,
-    ) -> Result<()> {
-        grant_links::Entity::insert(grant_links::ActiveModel {
-            grant_id: Set(grant_id.to_owned()),
-            registration_id: Set(registration_id.to_owned()),
-            created_at: Set(at),
-        })
-        .exec(&self.db)
-        .await
-        .map_err(db_error)?;
-        Ok(())
-    }
-
-    async fn grants_of(&self, registration_id: &str) -> Result<Vec<String>> {
-        grant_links::Entity::find()
-            .select_only()
-            .column(grant_links::Column::GrantId)
-            .filter(grant_links::Column::RegistrationId.eq(registration_id.to_owned()))
-            .into_tuple::<String>()
-            .all(&self.db)
+        id: &str,
+        expected: Option<&str>,
+        new_grant: &str,
+        status: &str,
+        assertion_version: u32,
+    ) -> Result<bool> {
+        let current = match expected {
+            Some(grant) => registrations::Column::GrantId.eq(grant.to_owned()),
+            None => registrations::Column::GrantId.is_null(),
+        };
+        let moved = registrations::Entity::update_many()
+            .col_expr(
+                registrations::Column::GrantId,
+                Expr::value(new_grant.to_owned()),
+            )
+            .filter(registrations::Column::Id.eq(id.to_owned()))
+            .filter(current)
+            .filter(registrations::Column::Status.eq(status.to_owned()))
+            .filter(
+                registrations::Column::AssertionVersion
+                    .eq(to_i32(assertion_version, "assertion_version")?),
+            )
+            .exec(&self.db)
             .await
-            .map_err(db_error)
+            .map_err(db_error)?;
+        Ok(moved.rows_affected == 1)
     }
 
     async fn record_replay(&self, key: &str, expires_at: DateTime<Utc>) -> Result<bool> {

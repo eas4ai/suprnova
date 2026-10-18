@@ -89,6 +89,9 @@ pub struct RegistrationRecord {
     /// The client address the registration came from, for the audit trail
     /// of what happens to it later without a request, such as expiry.
     pub client_address: Option<String>,
+    /// The authorization server grant the registration's tokens are minted
+    /// under: at most one, reused by every exchange while it fits.
+    pub grant_id: Option<String>,
     /// When the registration was created.
     pub created_at: DateTime<Utc>,
     /// When a user claimed it.
@@ -195,15 +198,18 @@ pub trait AgentAuthStore: Send + Sync {
     async fn live_registrations(&self, limit: u64) -> Result<Vec<String>>;
     /// The registrations bound to a user that are claimed or active.
     async fn user_registrations(&self, user_id: &str) -> Result<Vec<RegistrationRecord>>;
-    /// Record that `grant_id` was issued to the registration.
-    async fn link_grant(
+    /// Name `new_grant` as the registration's one grant, only while it
+    /// still names `expected` (none when `None`) and still has `status` and
+    /// `assertion_version`. Written before the grant is issued. Returns
+    /// whether this call won.
+    async fn reserve_grant(
         &self,
-        registration_id: &str,
-        grant_id: &str,
-        at: DateTime<Utc>,
-    ) -> Result<()>;
-    /// Every grant issued to the registration.
-    async fn grants_of(&self, registration_id: &str) -> Result<Vec<String>>;
+        id: &str,
+        expected: Option<&str>,
+        new_grant: &str,
+        status: &str,
+        assertion_version: u32,
+    ) -> Result<bool>;
     /// Record a provider token's identifier until `expires_at`. Returns
     /// `false` when the record already exists: the token is a replay.
     async fn record_replay(&self, key: &str, expires_at: DateTime<Utc>) -> Result<bool>;

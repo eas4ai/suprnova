@@ -29,7 +29,8 @@ use serde_json::{Value, json};
 
 use crate::abuse::{AbuseLimiter, Permit};
 use crate::authorization_server::{
-    AuthorizationServer, ClientGrantSummary, IssueTokens, NewGrant, ScopeDefinition, TokenIssuer,
+    AuthorizationServer, ClientGrantSummary, IssueTokens, NewGrant, ScopeDefinition, TokenError,
+    TokenIssuer, TokenResponse,
 };
 use crate::plugin::{
     DurableLifecycleDelivery, EffectResponse, LifecycleEvent, LifecycleEventKind, WireResponse,
@@ -767,40 +768,35 @@ impl Core {
         }
     }
 
-    /// Revoke every authorization server grant issued to a registration.
-    /// Returns how many were live.
+    /// Revoke the authorization server grant a registration names, trying
+    /// twice since a failed write is usually a transient lock or pool
+    /// timeout. Returns how many were live: zero or one.
     pub(crate) async fn revoke_grants(
         &self,
         issuer: &TokenIssuer<'_>,
         registration_id: &str,
     ) -> Result<u64> {
-        let mut revoked = 0;
-        let mut first_failure = None;
-        // Every grant is tried, each twice, before a failure is reported: a
-        // failed write is usually a transient lock or pool timeout, and one
-        // grant's failure must not leave the others working.
-        for grant_id in self.store.grants_of(registration_id).await? {
-            let mut outcome = issuer.revoke_grant(&grant_id).await;
-            if outcome.is_err() {
-                outcome = issuer.revoke_grant(&grant_id).await;
-            }
-            match outcome {
-                Ok(true) => revoked += 1,
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::error!(
-                        error = %error,
-                        grant_id,
-                        registration_id,
-                        "revoking an agent grant failed"
-                    );
-                    first_failure.get_or_insert(error);
-                }
-            }
+        let Some(record) = self.store.find_registration(registration_id).await? else {
+            return Ok(0);
+        };
+        let Some(grant_id) = record.grant_id else {
+            return Ok(0);
+        };
+        let mut outcome = issuer.revoke_grant(&grant_id).await;
+        if outcome.is_err() {
+            outcome = issuer.revoke_grant(&grant_id).await;
         }
-        match first_failure {
-            Some(error) => Err(error),
-            None => Ok(revoked),
+        match outcome {
+            Ok(revoked) => Ok(u64::from(revoked)),
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    grant_id,
+                    registration_id,
+                    "revoking an agent grant failed"
+                );
+                Err(error)
+            }
         }
     }
 
@@ -844,27 +840,80 @@ impl Core {
         Ok(true)
     }
 
-    /// Issue an agent grant to a registration through the authorization
-    /// server, link it, and check the registration once more: a claim or a
-    /// revocation that landed meanwhile revokes the new grant instead of
-    /// letting its token out.
-    pub(crate) async fn issue_agent_grant(
+    /// Mint an access token for a registration under its one grant. The
+    /// registration's grant is reused when it still fits (live, the same
+    /// user, scopes and resource); otherwise it is revoked and replaced, so
+    /// a registration never holds more than one live grant however often
+    /// it exchanges.
+    ///
+    /// A replacement grant's identifier is written to the registration
+    /// before the grant exists, so no live grant is ever left without the
+    /// record that names it, and the registration is read once more after
+    /// the grant is issued: a claim or a revocation that landed meanwhile
+    /// revokes the new grant instead of letting its token out.
+    pub(crate) async fn issue_for_registration(
         &self,
-        issuer: &crate::authorization_server::TokenIssuer<'_>,
+        issuer: &TokenIssuer<'_>,
         record: &RegistrationRecord,
         user: Option<&AgentUser>,
         scopes: Vec<String>,
         resource: String,
-    ) -> std::result::Result<
-        crate::authorization_server::TokenResponse,
-        crate::authorization_server::TokenError,
-    > {
-        use crate::authorization_server::TokenError;
+    ) -> std::result::Result<TokenResponse, TokenError> {
+        let user_id = user.map(|user| user.user_id.as_str());
+        if let Some(grant_id) = &record.grant_id
+            && let Some(response) = issuer
+                .issue_on_grant(grant_id, user_id, &scopes, &resource)
+                .await?
+        {
+            return Ok(response);
+        }
+        // The grant no longer fits: it goes before its replacement is
+        // recorded, so it is never live without a record.
+        if let Some(old) = &record.grant_id {
+            issuer.revoke_grant(old).await.map_err(storage_failure)?;
+        }
+        let new_grant = random_hex(16);
+        if !self
+            .store
+            .reserve_grant(
+                &record.id,
+                record.grant_id.as_deref(),
+                &new_grant,
+                &record.status,
+                record.assertion_version,
+            )
+            .await
+            .map_err(storage_failure)?
+        {
+            // Another exchange replaced the grant first, or the registration
+            // changed: use the winner's grant if the registration still
+            // stands as it was read.
+            let current = self
+                .store
+                .find_registration(&record.id)
+                .await
+                .map_err(storage_failure)?;
+            if let Some(current) = current
+                && current.status == record.status
+                && current.assertion_version == record.assertion_version
+                && current.user_id == record.user_id
+                && let Some(grant_id) = &current.grant_id
+                && let Some(response) = issuer
+                    .issue_on_grant(grant_id, user_id, &scopes, &resource)
+                    .await?
+            {
+                return Ok(response);
+            }
+            return Err(TokenError::invalid_grant(
+                "the registration changed while the token was issued",
+            ));
+        }
         let issued = issuer
-            .issue_grant(
+            .issue_grant_as(
+                new_grant.clone(),
                 NewGrant {
                     kind: AGENT_GRANT_KIND.to_owned(),
-                    user_id: user.map(|user| user.user_id.clone()),
+                    user_id: user_id.map(str::to_owned),
                     client_id: record.id.clone(),
                     client_name: self.client_name(record),
                     client_host: self.client_host(record),
@@ -879,31 +928,20 @@ impl Core {
                 },
             )
             .await?;
-        let grant_id = issued.grant_id.clone();
-        if let Err(error) = self
-            .store
-            .link_grant(&record.id, &grant_id, Utc::now())
-            .await
-        {
-            tracing::error!(error = %error, "linking an agent grant failed");
-            self.revoke_issued(issuer, &grant_id).await;
-            return Err(TokenError::server_error());
-        }
-        let current = match self.store.find_registration(&record.id).await {
-            Ok(current) => current,
+        let still_valid = match self.store.find_registration(&record.id).await {
+            Ok(current) => current.is_some_and(|current| {
+                current.status == record.status
+                    && current.assertion_version == record.assertion_version
+                    && current.user_id == record.user_id
+                    && current.grant_id.as_deref() == Some(new_grant.as_str())
+            }),
             Err(error) => {
                 tracing::error!(error = %error, "rereading an agent registration failed");
-                self.revoke_issued(issuer, &grant_id).await;
-                return Err(TokenError::server_error());
+                false
             }
         };
-        let still_valid = current.is_some_and(|current| {
-            current.status == record.status
-                && current.assertion_version == record.assertion_version
-                && current.user_id == record.user_id
-        });
         if !still_valid {
-            self.revoke_issued(issuer, &grant_id).await;
+            self.revoke_issued(issuer, &new_grant).await;
             return Err(TokenError::invalid_grant(
                 "the registration changed while the token was issued",
             ));
@@ -911,11 +949,7 @@ impl Core {
         Ok(issued.response)
     }
 
-    async fn revoke_issued(
-        &self,
-        issuer: &crate::authorization_server::TokenIssuer<'_>,
-        grant_id: &str,
-    ) {
+    async fn revoke_issued(&self, issuer: &TokenIssuer<'_>, grant_id: &str) {
         for attempt in 1..=2 {
             match issuer.revoke_grant(grant_id).await {
                 Ok(_) => return,
@@ -959,6 +993,12 @@ impl Core {
         (record.status == STATUS_ACTIVE || record.status == STATUS_CLAIMED)
             && record.user_id.is_some()
     }
+}
+
+/// Log a storage failure behind a token endpoint answer and hide it.
+pub(crate) fn storage_failure(error: Error) -> TokenError {
+    tracing::error!(error = %error, "agent auth storage failed");
+    TokenError::server_error()
 }
 
 /// Append one query parameter to an absolute or host-relative address.

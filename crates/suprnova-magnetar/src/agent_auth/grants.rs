@@ -12,6 +12,7 @@ use super::store::{
     RegistrationRecord, STATUS_CLAIMED, STATUS_EXPIRED, STATUS_REVOKED, STATUS_UNCLAIMED,
 };
 use super::{AGENT_GRANT_KIND, AgentUser, CLAIM_GRANT, Core, JWT_BEARER_GRANT, digest, timestamp};
+use crate::abuse::Permit;
 use crate::authorization_server::{
     GrantHandler, RevocationListener, RevokedToken, TokenError, TokenIssuer, TokenRequest,
     TokenResponse,
@@ -114,8 +115,30 @@ impl GrantHandler for JwtBearerGrant {
         let resource = request
             .param("resource")
             .map_or_else(|| core.default_resource.clone(), str::to_owned);
+        // Each exchange mints a token, so each one spends the
+        // registration's own budget, after the assertion and the
+        // registration checked out.
+        let key = crate::plugins::abuse_key("agent-auth.exchange", &record.id);
+        match core
+            .limiter
+            .acquire(&key, core.config.limits.exchange)
+            .await
+        {
+            Ok(Permit::Allowed { .. }) => {}
+            Ok(Permit::Rejected { .. }) => {
+                return Err(TokenError::new(
+                    429,
+                    "rate_limited",
+                    Some("too many exchanges for this registration; back off and retry".to_owned()),
+                ));
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "abuse limiter unavailable; failing closed");
+                return Err(TokenError::new(503, "temporarily_unavailable", None));
+            }
+        }
         let response = core
-            .issue_agent_grant(issuer, &record, user.as_ref(), scopes, resource)
+            .issue_for_registration(issuer, &record, user.as_ref(), scopes, resource)
             .await?;
         core.emit(
             LifecycleEventKind::AgentTokenIssued,
@@ -199,6 +222,32 @@ fn expired_token(description: &str) -> TokenError {
     TokenError::new(400, "expired_token", Some(description.to_owned()))
 }
 
+/// When a claimed registration's claim token stops working: the end of the
+/// registration window, or one user-code lifetime (ten minutes by default)
+/// after the confirmation if that is later, so a claim made late in the
+/// window can still be collected. A claimed token that is never polled
+/// expires either way.
+fn claimed_token_deadline(core: &Core, record: &RegistrationRecord) -> Option<DateTime<Utc>> {
+    let after_claim = record
+        .claimed_at
+        .and_then(|claimed| super::later(claimed, core.config.user_code_lifetime).ok());
+    match (record.claim_expires_at, after_claim) {
+        (Some(window), Some(after)) => Some(window.max(after)),
+        (window, after) => window.or(after),
+    }
+}
+
+/// Take back an access token a poll minted but must not hand out.
+async fn withdraw(issuer: &TokenIssuer<'_>, response: &TokenResponse) {
+    use secrecy::ExposeSecret;
+    if let Err(error) = issuer
+        .revoke_token(response.access_token.expose_secret())
+        .await
+    {
+        tracing::error!(error = %error, "taking back an unclaimed access token failed");
+    }
+}
+
 /// The whole second of `now`: every engine stores the poll time at that
 /// resolution, so the interval is compared in whole seconds everywhere.
 fn whole_second(now: DateTime<Utc>) -> DateTime<Utc> {
@@ -239,6 +288,7 @@ impl GrantHandler for ClaimGrant {
         let claimed = record.status == STATUS_CLAIMED;
         if record.status == STATUS_EXPIRED
             || (!claimed && record.claim_expires_at.is_none_or(|window| window <= now))
+            || (claimed && claimed_token_deadline(core, &record).is_none_or(|end| end <= now))
         {
             return Err(expired_token("The claim ceremony window has closed."));
         }
@@ -277,25 +327,17 @@ impl GrantHandler for ClaimGrant {
             }
             return Err(pending());
         }
-        // The claim token is single use: of two polls that see the claim,
-        // the database lets one spend the token and the other answers as
-        // for a token it does not know.
-        if !core
-            .store
-            .spend_claim_token(&record.id, &token_hash)
-            .await
-            .map_err(|error| storage(&error))?
-        {
-            return Err(expired_token("The claim ceremony window has closed."));
-        }
         let user = bound_user(core, &record).await?;
         if let Some(user) = &user
             && Core::epoch_moved(&record, user)
         {
             return Err(end_for_epoch(core, issuer, &record, request.client_address()).await);
         }
+        // Issue first and spend the claim token last: a poll that issues
+        // nothing (another resource, a storage failure) leaves the token
+        // for the next poll.
         let mut response = core
-            .issue_agent_grant(
+            .issue_for_registration(
                 issuer,
                 &record,
                 user.as_ref(),
@@ -305,9 +347,27 @@ impl GrantHandler for ClaimGrant {
                     .map_or_else(|| core.default_resource.clone(), str::to_owned),
             )
             .await?;
-        let (assertion, expires) = core
-            .assertion(&record, user.as_ref(), now)
-            .map_err(|error| storage(&error))?;
+        let signed = core.assertion(&record, user.as_ref(), now);
+        // The claim token is single use: of two polls that issued, the
+        // database lets one spend it, and the other takes back the access
+        // token it minted.
+        let spent = match &signed {
+            Ok(_) => core.store.spend_claim_token(&record.id, &token_hash).await,
+            Err(_) => Ok(false),
+        };
+        let (assertion, expires) = match (signed, spent) {
+            (Ok(signed), Ok(true)) => signed,
+            (signed, spent) => {
+                withdraw(issuer, &response).await;
+                if let Err(error) = signed {
+                    return Err(storage(&error));
+                }
+                if let Err(error) = spent {
+                    return Err(storage(&error));
+                }
+                return Err(expired_token("The claim ceremony window has closed."));
+            }
+        };
         response
             .extra
             .insert("identity_assertion".to_owned(), Value::String(assertion));
