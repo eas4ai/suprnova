@@ -442,6 +442,97 @@ fn base64_url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
+#[tokio::test]
+async fn agent_007_install_refuses_a_configuration_the_server_cannot_serve() {
+    use magnetar::agent_auth::{
+        AgentAuth, AgentAuthServices, KeySetFetcher, KeySetPolicy, SqlAgentAuthStore,
+    };
+    use magnetar::authorization_server::{
+        AuthorizationServer, ClientMetadataFetcher, ClientMetadataPolicy, SqlAuthorizationStore,
+    };
+    let db = magnetar::default_schema::database().await;
+    let install = |config: magnetar::agent_auth::AgentAuthConfig| {
+        let db = db.clone();
+        async move {
+            let storage = Arc::new(magnetar::storage::SeaOrmStorage::<
+                magnetar::default_schema::DefaultAuthSchema,
+            >::new(db.clone()));
+            let resolver = Arc::new(FakeResolver::default());
+            let key_sets = Arc::new(FakeKeySets::default());
+            let limiter = Arc::new(WindowLimiter::default());
+            let server = AuthorizationServer::new(
+                server_config(),
+                Arc::new(SqlAuthorizationStore::new(db.clone())),
+                storage.clone(),
+                limiter.clone(),
+                Arc::new(ClientMetadataFetcher::new(
+                    resolver.clone(),
+                    key_sets.clone(),
+                    ClientMetadataPolicy::default(),
+                )),
+            )
+            .expect("a server");
+            AgentAuth::install(
+                server,
+                config,
+                AgentAuthServices {
+                    store: Arc::new(SqlAgentAuthStore::new(db)),
+                    users: storage,
+                    provisioning: Arc::new(RefuseProvisioning),
+                    limiter,
+                    key_sets: Arc::new(KeySetFetcher::new(
+                        resolver,
+                        key_sets,
+                        KeySetPolicy::default(),
+                    )),
+                    events: Arc::new(RecordingEvents::default()),
+                },
+            )
+            .map(|_| ())
+        }
+    };
+    let field = |result: magnetar::Result<()>| match result {
+        Err(magnetar::Error::InvalidInput { field, .. }) => field,
+        other => panic!("the configuration must be refused, got {other:?}"),
+    };
+    let base = || agent_config(signing_key("service-key-1").0);
+    assert!(install(base()).await.is_ok());
+
+    let mut config = base();
+    config.trusted_issuers.clear();
+    assert_eq!(field(install(config).await), "trusted_issuers");
+    let mut config = base();
+    config.post_claim_scopes.push("admin:everything".to_owned());
+    assert_eq!(field(install(config).await), "post_claim_scopes");
+    let mut config = base();
+    config.pre_claim_scopes = vec!["tools:write".to_owned()];
+    config.post_claim_scopes = vec!["tools:read".to_owned()];
+    assert_eq!(field(install(config).await), "pre_claim_scopes");
+    let mut config = base();
+    config.identity_types = IdentityTypes {
+        anonymous: false,
+        service_auth: false,
+        identity_assertion: false,
+    };
+    assert_eq!(field(install(config).await), "identity_types");
+    let mut config = base();
+    config.trusted_issuers[0].jwks_uri = "http://provider.example.test/jwks.json".to_owned();
+    assert_eq!(field(install(config).await), "trusted_issuers");
+    let mut config = base();
+    config.claim_page_url = "//evil.example.test/claim".to_owned();
+    assert_eq!(field(install(config).await), "claim_page_url");
+    let mut config = base();
+    config.default_resource = Some("https://elsewhere.example.test/mcp".to_owned());
+    assert_eq!(field(install(config).await), "default_resource");
+    let mut config = base();
+    config.previous_signing_keys = vec![signing_key("service-key-1").0];
+    assert_eq!(field(install(config).await), "previous_signing_keys");
+    assert!(
+        magnetar::agent_auth::SigningKey::from_pem("kid", "not a key").is_err(),
+        "a PEM that is not a P-256 key is refused"
+    );
+}
+
 // AGENT-008 -----------------------------------------------------------------
 
 #[tokio::test]
