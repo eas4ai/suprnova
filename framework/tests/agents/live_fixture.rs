@@ -29,11 +29,12 @@ pub mod filters {
 }
 
 /// A counter an agent can add to: its count and label are shown to the
-/// agent, its owner never is.
-#[derive(LiveComponent)]
+/// agent, its owner never is. A count over 100 does not validate.
+#[derive(LiveComponent, validator::Validate)]
 #[live(name = "tests.agent-counter", view = "live/tests/agent-counter.html")]
 pub struct AgentCounter {
     #[agent_visible]
+    #[validate(range(max = 100))]
     count: u64,
     #[agent_visible]
     label: String,
@@ -75,6 +76,21 @@ impl AgentCounter {
     )]
     #[action]
     pub fn peek(&mut self) {}
+
+    #[tool(
+        name = "counter.check",
+        description = "Check the counter is in range.",
+        callers = [user],
+        headless,
+    )]
+    #[action(validate = "whole")]
+    pub fn check(&mut self) {}
+
+    /// The whole-component validation `check` asks for.
+    #[validate]
+    pub fn validate_component(&self) -> Result<(), validator::ValidationErrors> {
+        validator::Validate::validate(self)
+    }
 
     #[action]
     pub fn reset(&mut self) {

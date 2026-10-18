@@ -666,3 +666,56 @@ async fn agent_018_live_tool_through_mcp_and_the_browser_endpoint() {
         .await;
     assert_ne!(mismatched.status(), 200, "{}", mismatched.body_text());
 }
+
+#[tokio::test]
+async fn agent_013_a_validation_outcome_is_an_error_with_the_new_handle() {
+    let _container = fixture::setup();
+    let client = live_fixture::live_client();
+    let checked = client
+        .mcp()
+        .as_caller(alice())
+        .call(
+            "counter.check",
+            json!({ "mount": { "start": 150, "label": "Main" } }),
+        )
+        .await;
+    assert!(checked.is_error(), "{:?}", checked.response());
+    let structured = checked.structured().expect("structured content");
+    assert_eq!(structured["outcome"], "invalid");
+    assert!(
+        structured["validation"].get("count").is_some(),
+        "{structured}"
+    );
+    // The outcome consumed a revision, and its handle acts on it.
+    let handle = checked.handle().expect("the new handle").to_string();
+    let added = client
+        .mcp()
+        .as_caller(alice())
+        .call(
+            "counter.add",
+            json!({ "handle": handle, "arguments": { "amount": 1 } }),
+        )
+        .await;
+    assert!(!added.is_error(), "{:?}", added.response());
+    assert_eq!(
+        added
+            .structured()
+            .map(|structured| structured["fields"]["count"].clone()),
+        Some(json!("151"))
+    );
+}
+
+#[test]
+fn agent_012_a_tool_component_key_must_fit_the_tool_name_grammar() {
+    use suprnova::live::LiveMount;
+
+    use crate::live_fixture::AgentCounter;
+
+    assert!(LiveMount::<AgentCounter>::public_seed("/counters", "counter", "main").is_ok());
+    for key in ["main.left", "a:b"] {
+        assert!(
+            LiveMount::<AgentCounter>::public_seed("/counters", "counter", key).is_err(),
+            "{key}"
+        );
+    }
+}
