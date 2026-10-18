@@ -53,10 +53,8 @@ impl Pages {
         let pair = url::form_urlencoded::Serializer::new(String::new())
             .append_pair(&self.return_to_parameter, &return_to)
             .finish();
-        guarded(HttpResponse::new().status(302)).header(
-            "Location",
-            format!("{}{separator}{pair}", self.sign_in_url),
-        )
+        guarded(HttpResponse::new().status(302))
+            .header("Location", format!("{}{separator}{pair}", self.sign_in_url))
     }
 }
 
@@ -93,11 +91,14 @@ pub(super) fn mount_connected(
         .into();
     let revoke_path = path.clone();
     Ok(router
-        .try_post(&format!("{path}/{{grant}}/revoke"), move |request: Request| {
-            let pages = Arc::clone(&pages);
-            let path = revoke_path.clone();
-            async move { revoke(pages, path, request).await }
-        })?
+        .try_post(
+            &format!("{path}/{{grant}}/revoke"),
+            move |request: Request| {
+                let pages = Arc::clone(&pages);
+                let path = revoke_path.clone();
+                async move { revoke(pages, path, request).await }
+            },
+        )?
         .middleware(CsrfMiddleware::new().without_xsrf_cookie())
         .into())
 }
@@ -136,7 +137,9 @@ async fn approval(pages: Arc<Pages>, request: Request) -> Response {
         "{}/authorizations/{}",
         pages.route_prefix, pending.id
     ));
-    Ok(guarded(HttpResponse::html(render_approval(&pending, &action, &token))))
+    Ok(guarded(HttpResponse::html(render_approval(
+        &pending, &action, &token,
+    ))))
 }
 
 fn render_approval(pending: &PendingAuthorizationView, action: &str, token: &str) -> String {
@@ -184,7 +187,9 @@ async fn connected(pages: Arc<Pages>, path: String, request: Request) -> Respons
     };
     let grants = grants::list(&pages.server, session.user_id()).await?;
     let token = csrf_token()?;
-    Ok(guarded(HttpResponse::html(render_connected(&grants, &path, &token))))
+    Ok(guarded(HttpResponse::html(render_connected(
+        &grants, &path, &token,
+    ))))
 }
 
 fn render_connected(grants: &[ClientGrant], path: &str, token: &str) -> String {
@@ -243,7 +248,11 @@ fn render_connected(grants: &[ClientGrant], path: &str, token: &str) -> String {
 /// return to the page.
 async fn revoke(pages: Arc<Pages>, path: String, request: Request) -> Response {
     let Some(session) = signed_in_session().await? else {
-        return Ok(notice(401, "Sign in first", "Sign in to manage your connected apps."));
+        return Ok(notice(
+            401,
+            "Sign in first",
+            "Sign in to manage your connected apps.",
+        ));
     };
     let grant = request.param("grant").unwrap_or_default().to_owned();
     if !grants::revoke(&pages.server, session.user_id(), &grant).await? {

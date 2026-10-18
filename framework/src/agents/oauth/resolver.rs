@@ -70,9 +70,7 @@ impl CallerResolver for UserTokens {
                 return Err(match reason {
                     InvalidAccessReason::Unknown => ResolveError::NotMine,
                     InvalidAccessReason::Expired => ResolveError::Invalid("The token expired."),
-                    InvalidAccessReason::Revoked => {
-                        ResolveError::Invalid("The token was revoked.")
-                    }
+                    InvalidAccessReason::Revoked => ResolveError::Invalid("The token was revoked."),
                     InvalidAccessReason::WrongResource => {
                         ResolveError::Invalid("The token was issued for another resource.")
                     }
@@ -110,9 +108,9 @@ pub(crate) async fn load_user(
 ) -> Result<Arc<dyn crate::auth::Authenticatable>, ResolveError> {
     let guard_name = Auth::default_guard_name();
     let Some(provider) = crate::auth::epoch::guard_provider(&guard_name) else {
-        return Err(ResolveError::Unavailable(FrameworkError::internal(format!(
-            "the default guard '{guard_name}' has no user provider to load a token's user"
-        ))));
+        return Err(ResolveError::Unavailable(FrameworkError::internal(
+            format!("the default guard '{guard_name}' has no user provider to load a token's user"),
+        )));
     };
     match provider.retrieve_by_id(user_id).await {
         Ok(Some(user)) => Ok(user),

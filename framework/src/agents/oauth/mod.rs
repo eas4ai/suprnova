@@ -160,7 +160,11 @@ impl OAuthServer {
     /// return to in the query parameter `return_to_parameter`. The address
     /// is a path relative to the application's public root, as the
     /// framework's own redirects take one.
-    pub fn sign_in(mut self, path: impl Into<String>, return_to_parameter: impl Into<String>) -> Self {
+    pub fn sign_in(
+        mut self,
+        path: impl Into<String>,
+        return_to_parameter: impl Into<String>,
+    ) -> Self {
         self.sign_in_path = leading_slash(path.into());
         self.return_to_parameter = return_to_parameter.into();
         self
@@ -261,9 +265,7 @@ impl OAuthServer {
                 .inner()
                 .clone(),
         };
-        let issuer = crate::routing::url::to("")
-            .trim_end_matches('/')
-            .to_owned();
+        let issuer = crate::routing::url::to("").trim_end_matches('/').to_owned();
         let resource = super::metadata::resource_url(config);
         let mut settings = AuthorizationServerConfig::new(issuer, vec![resource]);
         settings.route_prefix = self.route_prefix.clone();
@@ -287,7 +289,9 @@ impl OAuthServer {
             };
         }
         let fetcher = self.fetcher.clone().unwrap_or_else(|| {
-            Arc::new(ClientMetadataFetcher::system(ClientMetadataPolicy::default()))
+            Arc::new(ClientMetadataFetcher::system(
+                ClientMetadataPolicy::default(),
+            ))
         });
         let server = AuthorizationServer::new(
             settings,
@@ -299,7 +303,9 @@ impl OAuthServer {
             fetcher,
         )
         .map_err(|error| {
-            FrameworkError::internal(format!("the OAuth server's configuration is invalid: {error}"))
+            FrameworkError::internal(format!(
+                "the OAuth server's configuration is invalid: {error}"
+            ))
         })?;
         Ok(BuiltOAuthServer {
             server: Arc::new(server),

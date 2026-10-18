@@ -320,7 +320,10 @@ struct Repeated;
 fn single_valued(raw: &[u8]) -> Result<BTreeMap<String, String>, Repeated> {
     let mut pairs = BTreeMap::new();
     for (name, value) in url::form_urlencoded::parse(raw) {
-        if pairs.insert(name.into_owned(), value.into_owned()).is_some() {
+        if pairs
+            .insert(name.into_owned(), value.into_owned())
+            .is_some()
+        {
             return Err(Repeated);
         }
     }
@@ -589,10 +592,8 @@ async fn framework_session(user_id: &str, epoch: u64) -> magnetar::Result<Verifi
         revoked_at: None,
         metadata: SessionMetadata::default(),
     };
-    let provider = OpaqueSessionProvider::new(
-        Arc::new(SignedInView(session)),
-        OpaqueConfig::default(),
-    );
+    let provider =
+        OpaqueSessionProvider::new(Arc::new(SignedInView(session)), OpaqueConfig::default());
     provider
         .resolve_web_binding(
             &WebSessionBinding {
@@ -610,11 +611,17 @@ struct SignedInView(StoredSession);
 
 #[async_trait]
 impl OpaqueSessionStore for SignedInView {
-    async fn insert_session_if_epoch_current(&self, _session: StoredSession) -> magnetar::Result<()> {
+    async fn insert_session_if_epoch_current(
+        &self,
+        _session: StoredSession,
+    ) -> magnetar::Result<()> {
         Err(unoffered("session issuance"))
     }
 
-    async fn find_by_token_hash(&self, _token_hash: [u8; 32]) -> magnetar::Result<Option<StoredSession>> {
+    async fn find_by_token_hash(
+        &self,
+        _token_hash: [u8; 32],
+    ) -> magnetar::Result<Option<StoredSession>> {
         Ok(None)
     }
 
@@ -633,7 +640,11 @@ impl OpaqueSessionStore for SignedInView {
         Ok(0)
     }
 
-    async fn revoke_session(&self, _session_id: &str, _at: chrono::DateTime<Utc>) -> magnetar::Result<bool> {
+    async fn revoke_session(
+        &self,
+        _session_id: &str,
+        _at: chrono::DateTime<Utc>,
+    ) -> magnetar::Result<bool> {
         Ok(false)
     }
 
@@ -737,7 +748,11 @@ impl FactorGate for Unoffered {
         Err(unoffered("sign-in"))
     }
 
-    async fn complete_challenge(&self, _selector: &str, _code: &str) -> magnetar::Result<SessionGrant> {
+    async fn complete_challenge(
+        &self,
+        _selector: &str,
+        _code: &str,
+    ) -> magnetar::Result<SessionGrant> {
         Err(unoffered("sign-in"))
     }
 }
@@ -769,7 +784,11 @@ impl HttpTransport for Unoffered {
 
 #[async_trait]
 impl LinkGenerator for Unoffered {
-    async fn url_for(&self, _route_name: &str, _params: &[(String, String)]) -> magnetar::Result<String> {
+    async fn url_for(
+        &self,
+        _route_name: &str,
+        _params: &[(String, String)],
+    ) -> magnetar::Result<String> {
         Err(unoffered("link generation"))
     }
 }
@@ -831,11 +850,15 @@ mod tests {
         let high = (0..)
             .map(|n| Hashed(format!("$argon2id$hash-{n}")))
             .find(|user| {
-                crate::auth::epoch::credential_epoch(user).is_some_and(|epoch| epoch > GRANT_EPOCH_BITS)
+                crate::auth::epoch::credential_epoch(user)
+                    .is_some_and(|epoch| epoch > GRANT_EPOCH_BITS)
             })
             .unwrap_or_else(|| Hashed(String::new()));
         let epoch = framework_epoch(&high);
-        assert!(i64::try_from(epoch).is_ok(), "{epoch} must fit a signed column");
+        assert!(
+            i64::try_from(epoch).is_ok(),
+            "{epoch} must fit a signed column"
+        );
         let changed = framework_epoch(&Hashed(format!("{}-changed", high.0)));
         assert_ne!(epoch, changed, "a new hash is a new epoch");
     }
