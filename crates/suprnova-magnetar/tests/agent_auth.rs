@@ -284,7 +284,7 @@ async fn agent_007_malformed_requests_answer_the_protocol_codes() {
         (json!({"type": "service_auth"}), "invalid_request"),
         (
             json!({"type": "service_auth", "login_hint": "not an email"}),
-            "invalid_login_hint",
+            "invalid_request",
         ),
         (
             json!({"type": "identity_assertion", "assertion_type": "verified_email", "assertion": "a@example.test"}),
@@ -1581,6 +1581,10 @@ async fn agent_011_auth_md_matches_the_configuration() {
         assert!(document.contains(expected), "missing {expected:?}");
     }
     assert!(!document.contains('\u{2014}') && !document.contains('\u{2013}'));
+    assert!(
+        !document.contains("invalid_login_hint"),
+        "the document names only v0.6.0 codes"
+    );
 
     let mut options = Options::new();
     options.config.identity_types = IdentityTypes {

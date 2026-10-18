@@ -210,7 +210,7 @@ impl Core {
         let Some(email) = normalize_email(hint) else {
             return Ok(agent_error(
                 400,
-                "invalid_login_hint",
+                "invalid_request",
                 "login_hint must be an email address",
             ));
         };

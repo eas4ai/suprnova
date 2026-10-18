@@ -273,13 +273,6 @@ impl Core {
                 "Pick another method.",
             );
         }
-        if types.service_auth {
-            row(
-                "invalid_login_hint",
-                "identity endpoint",
-                "Send the user's email address as `login_hint`.",
-            );
-        }
         if types.identity_assertion {
             row(
                 "invalid_issuer",
@@ -316,7 +309,7 @@ impl Core {
         row(
             "invalid_request",
             "identity and claim endpoints",
-            "Fix the body.",
+            "Fix the body; a `login_hint` must be the user's email address.",
         );
         row(
             "invalid_claim_token",
