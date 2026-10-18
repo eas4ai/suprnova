@@ -4,7 +4,7 @@ Status: Draft. Not normative.
 
 Order lives here. Filenames carry meaning, never sequence.
 
-Current: graph-recommender
+Current: agents
 
 The developer named the work on 2026-09-13 08:52: the Live component
 library, as scoped on 2026-09-12 and reconciled against Live specs 20-25.
@@ -1273,6 +1273,56 @@ Requirements: REC-005, REC-006, REC-007, REC-009, SEARCH-001, MAN-108, BIND-014
    bound to a violating example before the start. Done when every requirement has a current
    pass on a committed tree, the `_memgraph` tests are green on the gate
    container, the hand-run media inference test has passed once, and the
+   review is recorded.
+
+## agents
+
+Requirements: AGENT-001, AGENT-002, AGENT-003, AGENT-004, AGENT-005, AGENT-006, AGENT-007, AGENT-008, AGENT-009, AGENT-010, AGENT-011, AGENT-012, AGENT-013, AGENT-014, AGENT-015, AGENT-016, AGENT-017, AGENT-018, AGENT-019
+
+59. agents - next-feature item c7fb7505 `webmcp-agent-tools`, which the
+   developer named on 2026-10-18 after the graph recommender closed: an
+   application's capabilities offered to agents as tools, in the browser
+   through WebMCP and to clients such as Claude Code through an MCP
+   endpoint ("Not just in the browser"), with public, user and agent
+   callers, agent accounts under auth.md, Magnetar's additions as plugins,
+   and Live working both in the browser and over the endpoint; confirmed
+   the same day at 10:59. In the order the work depends:
+   - tools and callers: `#[tool]` on handlers with schemas from the typed
+     input and output, the caller kinds and scopes, the per-caller rate
+     limit, the testing surface (AGENT-001, AGENT-002, AGENT-018)
+   - the MCP endpoint for revision 2026-07-28 and the initialize-based
+     2025-06-18 and 2025-11-25, without sessions, with public tools first,
+     and the discovery documents and challenges (AGENT-003, AGENT-004)
+   - the authorization server plugin for user callers, and the outside
+     authorization server driver (AGENT-005, AGENT-006)
+   - the agent auth plugin after auth.md v0.6.0: registration, ID-JAG
+     verification and the trust list, the claim ceremony, revocation at
+     both layers, `/auth.md`, rate limits and audit events (AGENT-007 to
+     AGENT-011)
+   - Live: tool markings on actions and fields, registration by the browser
+     runtime, the checker's key rule, and headless calls over the endpoint
+     with declared and authorized mount properties and the snapshot as the
+     state handle (AGENT-012, AGENT-013)
+   - the browser: the per-page server tool set and the refresh after a
+     write in the Live runtime and the three Inertia kits, page tools and
+     form tools in React, Vue and Svelte, and the WebAssembly crate
+     (AGENT-014 to AGENT-016)
+   - the kits' wiring and their approval, claim and connected-agents pages,
+     and the manual (AGENT-017, AGENT-019)
+   Delivery: the agents subsystem under `framework/src/agents/` with
+   crate-root re-exports, `#[tool]` in `suprnova-macros`, the two Magnetar
+   plugins under `crates/suprnova-magnetar/src/plugins/` with their
+   migrations, the Live engine and browser runtime changes, `suprnova
+   generate-types` emitting the JSON Schema of form request types, the kit
+   templates, a WebAssembly crate under `crates/`, the `schemars`
+   dependency, `manual/agents.md` with the parity, security-headers,
+   environment variable, starter kits and upgrade chapter changes, and
+   changelog entries under the open version.
+   Mechanisms: `agents` and `agents-browser`, declared for this commitment
+   and each bound to a violating example before the start. Done when every
+   requirement has a current pass on a committed tree, a hand-run
+   `claude mcp add --transport http` against the dogfood application has
+   signed in and called a user tool and a headless Live tool once, and the
    review is recorded.
 
 Out of every commitment above, by the developer's 2026-09-12 ruling:

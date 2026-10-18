@@ -116,6 +116,7 @@ rather than duplicates.
 | The manual checked against the code, and remediating what the check finds | MAN | manual-check.md | Agreed 2026-09-27 (delegated by the developer); tooling in `feature-map/`, commands in `feature-map/README.md` |
 | Search (searchable models, two settings classes, each engine's native full-text ranking behind one builder over the database and Qdrant engines, query expansion for typos and synonyms, the embedder and its default model with provenance, facets, highlights, scopes, the Live search box and JSON endpoint, analytics and suggestions, the per-engine relevance and latency baseline) | SEARCH | search.md | Agreed 2026-10-14 |
 | Recommendations (the immutable event stream, the starter SQL recommender, the versioned data contract it builds, its manual chapter; the knowledge-graph recommender that follows) | REC | recommendations.md | REC-001 to REC-004 and REC-008 Agreed 2026-10-14; REC-005 to REC-007 Draft until their own commitment |
+| Agents (tools marked on handlers and Live actions, the MCP endpoint, WebMCP in the browser for Live, the Inertia kits and WebAssembly front ends, headless Live tools, public, user and agent callers, the Magnetar authorization server and agent auth plugins after auth.md) | AGENT | agents.md | Agreed 2026-10-18 |
 
 Domains with no spec file yet, and the manual chapters that are their
 published reference:
