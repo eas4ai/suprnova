@@ -16,9 +16,9 @@ use async_trait::async_trait;
 use base64::Engine;
 use magnetar::auth::{AuthenticationContext, FactorGate, SignInDecision, VerifiedPrincipal};
 use magnetar::authorization_server::{
-    AccessVerification, AuthorizationServer, AuthorizationServerConfig, ClientMetadataFetcher,
-    ClientMetadataPolicy, GrantHandler, HostResolver, InvalidAccessReason, PinnedHttpClient,
-    PinnedResponse, ResponseBody, ScopeDefinition, SqlAuthorizationStore,
+    AccessVerification, AuthorizationServer, AuthorizationServerConfig, AuthorizationStore,
+    ClientMetadataFetcher, ClientMetadataPolicy, GrantHandler, HostResolver, InvalidAccessReason,
+    PinnedHttpClient, PinnedResponse, ResponseBody, ScopeDefinition, SqlAuthorizationStore,
 };
 use magnetar::default_schema::DefaultAuthSchema;
 use magnetar::default_schema::sql_stores::SqlSessionStore;
@@ -270,6 +270,19 @@ pub async fn build(
     policy: ClientMetadataPolicy,
     handlers: Vec<Arc<dyn GrantHandler>>,
 ) -> Harness {
+    let store = Arc::new(SqlAuthorizationStore::new(db.clone()));
+    build_with_store(db, config, policy, handlers, store).await
+}
+
+/// [`build`] over a store the test supplies, such as one that fails on
+/// purpose.
+pub async fn build_with_store(
+    db: DatabaseConnection,
+    config: AuthorizationServerConfig,
+    policy: ClientMetadataPolicy,
+    handlers: Vec<Arc<dyn GrantHandler>>,
+    store: Arc<dyn AuthorizationStore>,
+) -> Harness {
     let storage = Arc::new(SeaOrmStorage::<DefaultAuthSchema>::new(db.clone()));
     let resolver = Arc::new(FakeResolver::default());
     let documents = Arc::new(FakeDocuments::default());
@@ -281,7 +294,7 @@ pub async fn build(
     ));
     let mut server = AuthorizationServer::new(
         config,
-        Arc::new(SqlAuthorizationStore::new(db.clone())),
+        store,
         storage.clone(),
         limiter.clone(),
         fetcher.clone(),
@@ -712,4 +725,159 @@ pub async fn guarded_rotation(h: &Harness) {
         None,
         "a losing rotation inserts nothing"
     );
+}
+
+/// The code's single-winner step holds in the database itself: with the
+/// service's own read out of the way, a second redemption of one code
+/// moves nothing.
+pub async fn guarded_redemption(h: &Harness) {
+    use magnetar::authorization_server::{AuthorizationRecord, SqlAuthorizationStore};
+
+    let store = SqlAuthorizationStore::new(h.db.clone());
+    let now = chrono::Utc::now();
+    let id = unique("code-digest");
+    store
+        .create_authorization(AuthorizationRecord {
+            id: id.clone(),
+            kind: "code".to_owned(),
+            state: "issued".to_owned(),
+            user_id: "guard-user".to_owned(),
+            payload: "{}".to_owned(),
+            expires_at: now + chrono::Duration::minutes(5),
+        })
+        .await
+        .expect("store a code");
+    assert!(
+        store
+            .transition_authorization(&id, "code", "issued", "redeeming:first", now)
+            .await
+            .expect("the first redemption")
+    );
+    assert!(
+        !store
+            .transition_authorization(&id, "code", "issued", "redeeming:second", now)
+            .await
+            .expect("the second redemption")
+    );
+    let record = store
+        .find_authorization(&id, "code", now)
+        .await
+        .expect("read the code")
+        .expect("the code is still there");
+    assert_eq!(record.state, "redeeming:first", "the loser moved nothing");
+}
+
+/// A decision spends its pending authorization once, in the database.
+pub async fn guarded_decision(h: &Harness) {
+    use magnetar::authorization_server::{AuthorizationRecord, SqlAuthorizationStore};
+
+    let store = SqlAuthorizationStore::new(h.db.clone());
+    let now = chrono::Utc::now();
+    let id = unique("pending");
+    store
+        .create_authorization(AuthorizationRecord {
+            id: id.clone(),
+            kind: "pending".to_owned(),
+            state: "pending".to_owned(),
+            user_id: "guard-user".to_owned(),
+            payload: "{}".to_owned(),
+            expires_at: now + chrono::Duration::minutes(5),
+        })
+        .await
+        .expect("store a pending authorization");
+    assert!(
+        store
+            .consume_authorization(&id, "pending", now)
+            .await
+            .expect("the first decision")
+    );
+    assert!(
+        !store
+            .consume_authorization(&id, "pending", now)
+            .await
+            .expect("the second decision")
+    );
+}
+
+/// A rotation and a revocation of one grant, queued behind a lock on the
+/// grant row with the revocation first, both finish without a deadlock and
+/// leave no token of the grant working. A rotation that took the token row
+/// before the grant row deadlocks here: the revocation holds the grant and
+/// waits for the token, while the rotation holds the token and waits for
+/// the grant. PostgreSQL and MySQL only; SQLite has no row locks.
+pub async fn revocation_and_rotation_take_locks_in_one_order(h: &Harness) {
+    use magnetar::authorization_server::{
+        NewTokenRecord, REFRESH_TOKEN_KIND, SqlAuthorizationStore,
+    };
+    use sea_orm::{ConnectionTrait, Statement, TransactionTrait};
+
+    let issued = h.issue("tools:read").await;
+    let store = SqlAuthorizationStore::new(h.db.clone());
+    let digest = format!("{:x}", Sha256::digest(issued.refresh_token.as_bytes()));
+    let token = store
+        .find_token(&digest)
+        .await
+        .expect("read the refresh token")
+        .expect("the refresh token is stored");
+
+    let backend = h.db.get_database_backend();
+    let placeholder = if backend == sea_orm::DbBackend::Postgres {
+        "$1"
+    } else {
+        "?"
+    };
+    let holder = h.db.begin().await.expect("a transaction");
+    holder
+        .execute_raw(Statement::from_sql_and_values(
+            backend,
+            format!("SELECT id FROM auth_oauth_grants WHERE id = {placeholder} FOR UPDATE"),
+            [token.grant_id.clone().into()],
+        ))
+        .await
+        .expect("lock the grant row");
+
+    let revocation = tokio::spawn({
+        let store = store.clone();
+        let grant = token.grant_id.clone();
+        async move { store.revoke_grant(&grant, chrono::Utc::now()).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let rotation = tokio::spawn({
+        let store = store.clone();
+        let token = token.clone();
+        async move {
+            let replacement = NewTokenRecord {
+                id: unique("replacement"),
+                kind: REFRESH_TOKEN_KIND.to_owned(),
+                token_hash: format!("{:x}", Sha256::digest(unique("replacement").as_bytes())),
+                scopes: vec!["tools:read".to_owned()],
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            };
+            store
+                .rotate_refresh_token(
+                    &token.id,
+                    &token.grant_id,
+                    chrono::Utc::now(),
+                    vec![replacement],
+                )
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    holder.commit().await.expect("release the grant row");
+
+    let revoked = revocation.await.expect("the revocation task");
+    let rotated = rotation.await.expect("the rotation task");
+    assert!(revoked.is_ok(), "the revocation failed: {revoked:?}");
+    assert!(rotated.is_ok(), "the rotation failed: {rotated:?}");
+    assert!(
+        !rotated.unwrap(),
+        "the rotation must lose to the earlier revocation"
+    );
+    assert_eq!(
+        h.verify(&issued.access_token).await,
+        AccessVerification::Invalid(InvalidAccessReason::Revoked)
+    );
+    let refreshed = h.refresh(&issued.client_id, &issued.refresh_token).await;
+    assert_eq!(body(&refreshed)["error"], "invalid_grant");
 }

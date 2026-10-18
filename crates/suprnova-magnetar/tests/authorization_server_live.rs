@@ -2,8 +2,9 @@
 //!
 //! The SQLite suite serializes every statement on one connection, so it
 //! cannot show two refreshes racing in the database. These run the code
-//! flow, the guarded rotation and eight concurrent uses of one refresh
-//! token against real engines, each request on a connection of its own.
+//! flow, the store guards, eight concurrent uses of one refresh token and
+//! a rotation racing a revocation against real engines, each request on a
+//! connection of its own.
 //!
 //! PostgreSQL and MySQL are manual, ignored qualification tests against the
 //! live backends named by `MAGNETAR_POSTGRES_TEST_URL` and
@@ -107,4 +108,38 @@ async fn agent_005_mysql_refresh_rotation_is_guarded_in_the_database() {
 #[ignore = "requires T2 live Postgres/MySQL database"]
 async fn agent_005_mysql_concurrent_refresh_token_reuse_revokes_the_grant() {
     concurrent_refresh_reuse(Arc::new(live_harness(&mysql_url()).await)).await;
+}
+
+async fn store_guards(url: &str) {
+    let h = live_harness(url).await;
+    guarded_redemption(&h).await;
+    guarded_decision(&h).await;
+}
+
+#[cfg(feature = "seaorm-postgres")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn agent_005_postgres_code_redemption_and_decisions_are_guarded_in_the_database() {
+    store_guards(&postgres_url()).await;
+}
+
+#[cfg(feature = "seaorm-postgres")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn agent_005_postgres_revocation_and_rotation_take_locks_in_one_order() {
+    revocation_and_rotation_take_locks_in_one_order(&live_harness(&postgres_url()).await).await;
+}
+
+#[cfg(feature = "seaorm-mysql")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn agent_005_mysql_code_redemption_and_decisions_are_guarded_in_the_database() {
+    store_guards(&mysql_url()).await;
+}
+
+#[cfg(feature = "seaorm-mysql")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn agent_005_mysql_revocation_and_rotation_take_locks_in_one_order() {
+    revocation_and_rotation_take_locks_in_one_order(&live_harness(&mysql_url()).await).await;
 }

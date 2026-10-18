@@ -26,6 +26,10 @@ use sea_orm::EntityTrait;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+const EVIL: &str = "https://evil.example.test/phish";
+const LOOPBACK_REDIRECT: &str = "http://127.0.0.1:3000/callback";
+const LOOPBACK_REQUEST: &str = "http://127.0.0.1:51000/callback";
+
 fn invalid(reason: InvalidAccessReason) -> AccessVerification {
     AccessVerification::Invalid(reason)
 }
@@ -124,7 +128,7 @@ async fn agent_005_plain_and_missing_pkce_are_refused() {
     let h = sqlite_harness().await;
     let user_id = h.create_user().await;
     let bearer = h.sign_in(&user_id).await;
-    let client_id = h.register(&[REDIRECT]).await;
+    let client_id = h.register(&[REDIRECT, LOOPBACK_REDIRECT]).await;
     let (verifier, challenge) = pkce();
 
     for (method, challenge) in [
@@ -132,30 +136,42 @@ async fn agent_005_plain_and_missing_pkce_are_refused() {
         (None, challenge.as_str()),
         (Some("S256"), ""),
     ] {
-        let mut query = vec![
-            ("response_type", "code"),
-            ("client_id", client_id.as_str()),
-            ("redirect_uri", REDIRECT),
-            ("resource", RESOURCE),
-            ("state", "s"),
-        ];
-        if !challenge.is_empty() {
-            query.push(("code_challenge", challenge));
+        for redirect_uri in [REDIRECT, LOOPBACK_REQUEST] {
+            let mut query = vec![
+                ("response_type", "code"),
+                ("client_id", client_id.as_str()),
+                ("redirect_uri", redirect_uri),
+                ("resource", RESOURCE),
+                ("state", "s"),
+            ];
+            if !challenge.is_empty() {
+                query.push(("code_challenge", challenge));
+            }
+            if let Some(method) = method {
+                query.push(("code_challenge_method", method));
+            }
+            let response = h.get("/oauth/authorize", &query, Some(&bearer)).await;
+            if redirect_uri == REDIRECT {
+                // Not a loopback redirect URI: the error page, no redirect.
+                assert_eq!(status(&response), 400, "method {method:?}");
+                assert!(location(&response).is_none(), "method {method:?}");
+                assert_eq!(body(&response)["error"], "invalid_request");
+                continue;
+            }
+            let back = location(&response).expect("an error redirect to the loopback client");
+            assert!(
+                back.starts_with("http://127.0.0.1:51000/callback"),
+                "{back}"
+            );
+            assert_eq!(
+                query_param(&back, "error").as_deref(),
+                Some("invalid_request"),
+                "method {method:?}"
+            );
+            assert_eq!(query_param(&back, "state").as_deref(), Some("s"));
+            assert_eq!(query_param(&back, "iss").as_deref(), Some(ISSUER));
+            assert!(query_param(&back, "code").is_none());
         }
-        if let Some(method) = method {
-            query.push(("code_challenge_method", method));
-        }
-        let response = h.get("/oauth/authorize", &query, Some(&bearer)).await;
-        let back = location(&response).expect("an error redirect to the client");
-        assert!(back.starts_with(REDIRECT), "{back}");
-        assert_eq!(
-            query_param(&back, "error").as_deref(),
-            Some("invalid_request"),
-            "method {method:?}"
-        );
-        assert_eq!(query_param(&back, "state").as_deref(), Some("s"));
-        assert_eq!(query_param(&back, "iss").as_deref(), Some(ISSUER));
-        assert!(query_param(&back, "code").is_none());
     }
 
     // A code minted with S256 cannot be exchanged without the verifier or
@@ -787,11 +803,9 @@ async fn agent_005_tokens_are_bound_to_their_resource() {
             Some(&bearer),
         )
         .await;
-    let back = location(&unknown).expect("an error redirect");
-    assert_eq!(
-        query_param(&back, "error").as_deref(),
-        Some("invalid_target")
-    );
+    assert_eq!(status(&unknown), 400);
+    assert!(location(&unknown).is_none());
+    assert_eq!(body(&unknown)["error"], "invalid_target");
 
     let code = h
         .approve(
@@ -1334,4 +1348,616 @@ async fn agent_005_expired_tokens_and_lapsed_steps_are_pruned() {
     // The refresh token has not expired, so it survives and still rotates.
     let refreshed = h.refresh(&issued.client_id, &issued.refresh_token).await;
     assert_eq!(status(&refreshed), 200, "{:?}", body(&refreshed));
+}
+
+#[tokio::test]
+async fn agent_005_an_error_before_sign_in_never_redirects_to_the_client() {
+    let h = sqlite_harness().await;
+    let registered = h.register(&[EVIL]).await;
+    let document_client = "https://evil.example.test/client.json";
+    h.resolver.answer("evil.example.test", &[PUBLIC_ADDRESS]);
+    h.documents.serve(
+        document_client,
+        Script::json(json!({
+            "client_id": document_client,
+            "client_name": "Anything",
+            "redirect_uris": [EVIL],
+        })),
+    );
+    // The document client twice: the second lookup is served from cache.
+    for client_id in [registered.as_str(), document_client, document_client] {
+        let response = h
+            .get(
+                "/oauth/authorize",
+                &[
+                    ("client_id", client_id),
+                    ("redirect_uri", EVIL),
+                    ("response_type", "token"),
+                ],
+                None,
+            )
+            .await;
+        let target = location(&response).expect("a redirect to sign in");
+        assert!(target.starts_with("/login?return_to="), "{target}");
+    }
+}
+
+#[tokio::test]
+async fn agent_005_a_signed_in_users_error_redirects_only_to_a_loopback_client() {
+    let h = sqlite_harness().await;
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let client_id = h.register(&[EVIL, LOOPBACK_REDIRECT]).await;
+    let (_, challenge) = pkce();
+    for (name, value, error) in [
+        ("response_type", "token", "unsupported_response_type"),
+        (
+            "resource",
+            "https://other.example.test/mcp",
+            "invalid_target",
+        ),
+        ("scope", "tools:admin", "invalid_scope"),
+    ] {
+        for redirect_uri in [EVIL, LOOPBACK_REQUEST] {
+            let mut query = vec![
+                ("response_type", "code"),
+                ("client_id", client_id.as_str()),
+                ("redirect_uri", redirect_uri),
+                ("code_challenge", challenge.as_str()),
+                ("code_challenge_method", "S256"),
+                ("resource", RESOURCE),
+                ("state", "s"),
+            ];
+            query.retain(|(key, _)| *key != name);
+            query.push((name, value));
+            let response = h.get("/oauth/authorize", &query, Some(&bearer)).await;
+            if redirect_uri == EVIL {
+                assert_eq!(status(&response), 400, "{name}");
+                assert!(location(&response).is_none(), "{name} must not redirect");
+                assert_eq!(body(&response)["error"], error);
+                assert_no_framing(&response);
+            } else {
+                let back = location(&response).expect("an error redirect to loopback");
+                assert!(
+                    back.starts_with("http://127.0.0.1:51000/callback"),
+                    "{back}"
+                );
+                assert_eq!(query_param(&back, "error").as_deref(), Some(error));
+                assert_eq!(query_param(&back, "state").as_deref(), Some("s"));
+                assert_eq!(query_param(&back, "iss").as_deref(), Some(ISSUER));
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_005_a_concurrently_replayed_code_revokes_its_tokens() {
+    let h = Arc::new(sqlite_harness().await);
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let client_id = h.register(&[REDIRECT]).await;
+    let (verifier, challenge) = pkce();
+    let code = h
+        .approve(&client_id, REDIRECT, &challenge, "tools:read", &bearer)
+        .await;
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let h = h.clone();
+        let (client_id, code, verifier) = (client_id.clone(), code.clone(), verifier.clone());
+        tasks.push(tokio::spawn(async move {
+            let response = h.exchange(&client_id, REDIRECT, &code, &verifier).await;
+            (status(&response), body(&response))
+        }));
+    }
+    let mut winners = Vec::new();
+    for task in tasks {
+        let (code, answer) = task.await.expect("an exchange task");
+        if code == 200 {
+            winners.push(answer);
+        } else {
+            assert_eq!(answer["error"], "invalid_grant", "{answer:?}");
+        }
+    }
+    assert!(winners.len() <= 1, "{} exchanges won", winners.len());
+    for winner in winners {
+        assert_eq!(
+            h.verify(winner["access_token"].as_str().unwrap()).await,
+            invalid(InvalidAccessReason::Revoked),
+            "a replayed code revokes what was issued from it"
+        );
+    }
+}
+
+#[tokio::test]
+async fn agent_005_a_code_replayed_while_redeeming_revokes_its_tokens() {
+    use magnetar::authorization_server::{AuthorizationStore, SqlAuthorizationStore};
+
+    let h = sqlite_harness().await;
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let client_id = h.register(&[REDIRECT]).await;
+    let (verifier, challenge) = pkce();
+    let code = h
+        .approve(&client_id, REDIRECT, &challenge, "tools:read", &bearer)
+        .await;
+    let first = h.exchange(&client_id, REDIRECT, &code, &verifier).await;
+    assert_eq!(status(&first), 200);
+    let access = body(&first)["access_token"].as_str().unwrap().to_owned();
+
+    // Put the code back in the state a replay sees while the first exchange
+    // is still writing its grant.
+    let store = SqlAuthorizationStore::new(h.db.clone());
+    let digest = format!("{:x}", Sha256::digest(code.as_bytes()));
+    let now = chrono::Utc::now();
+    let record = store
+        .find_authorization(&digest, "code", now)
+        .await
+        .unwrap()
+        .expect("the redeemed code is remembered");
+    let grant_id = record
+        .state
+        .split_once(':')
+        .map(|(_, grant)| grant.to_owned())
+        .expect("the state names the grant");
+    assert!(
+        store
+            .transition_authorization(
+                &digest,
+                "code",
+                &record.state,
+                &format!("redeeming:{grant_id}"),
+                now
+            )
+            .await
+            .unwrap()
+    );
+
+    let replay = h.exchange(&client_id, REDIRECT, &code, &verifier).await;
+    assert_eq!(body(&replay)["error"], "invalid_grant");
+    assert_eq!(
+        h.verify(&access).await,
+        invalid(InvalidAccessReason::Revoked)
+    );
+}
+
+struct RefreshingAgentGrant {
+    lifetime: Duration,
+}
+
+#[async_trait]
+impl GrantHandler for RefreshingAgentGrant {
+    fn grant_type(&self) -> &str {
+        "urn:example:refreshing-agent"
+    }
+
+    async fn exchange(
+        &self,
+        _request: &TokenRequest,
+        issuer: &TokenIssuer<'_>,
+    ) -> Result<TokenResponse, TokenError> {
+        issuer
+            .issue(
+                NewGrant {
+                    kind: "agent".to_owned(),
+                    user_id: None,
+                    client_id: "agent-registration-1".to_owned(),
+                    client_name: "Agent".to_owned(),
+                    client_host: "agent.example.test".to_owned(),
+                    scopes: vec!["tools:read".to_owned()],
+                    resource: RESOURCE.to_owned(),
+                    auth_epoch: None,
+                },
+                IssueTokens {
+                    access_kind: "agent_access".to_owned(),
+                    refresh: true,
+                    access_lifetime: Some(self.lifetime),
+                },
+            )
+            .await
+    }
+}
+
+async fn refreshing_agent_harness(lifetime: Duration) -> Harness {
+    build(
+        magnetar::default_schema::database().await,
+        config(),
+        ClientMetadataPolicy::default(),
+        vec![Arc::new(RefreshingAgentGrant { lifetime })],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn agent_005_refresh_keeps_an_extension_grants_token_kind_and_lifetime() {
+    let h = refreshing_agent_harness(Duration::from_secs(600)).await;
+    let issued = body(
+        &h.post_form(
+            "/oauth/token",
+            &[("grant_type", "urn:example:refreshing-agent")],
+            None,
+        )
+        .await,
+    );
+    let refresh = issued["refresh_token"].as_str().expect("a refresh token");
+    let refreshed = h.refresh("agent-registration-1", refresh).await;
+    assert_eq!(status(&refreshed), 200, "{:?}", body(&refreshed));
+    let refreshed = body(&refreshed);
+    assert_eq!(refreshed["expires_in"], 600);
+    match h.verify(refreshed["access_token"].as_str().unwrap()).await {
+        AccessVerification::Valid(grant) => {
+            assert_eq!(grant.grant_kind, "agent");
+            assert_eq!(grant.token_kind, "agent_access");
+        }
+        other => panic!("the refreshed token must verify, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn agent_005_an_unrepresentable_lifetime_is_refused_not_a_panic() {
+    let h = sqlite_harness().await;
+    let mut huge = config();
+    huge.refresh_token_lifetime = Duration::from_secs(10_000_000_000_000);
+    assert!(
+        magnetar::authorization_server::AuthorizationServer::new(
+            huge,
+            Arc::new(magnetar::authorization_server::SqlAuthorizationStore::new(
+                h.db.clone()
+            )),
+            h.storage.clone(),
+            h.limiter.clone(),
+            h.fetcher.clone(),
+        )
+        .is_err(),
+        "the configuration check refuses a lifetime no timestamp can hold"
+    );
+
+    for lifetime in [Duration::from_secs(10_000_000_000_000), Duration::ZERO] {
+        let agent = refreshing_agent_harness(lifetime).await;
+        let response = agent
+            .post_form(
+                "/oauth/token",
+                &[("grant_type", "urn:example:refreshing-agent")],
+                None,
+            )
+            .await;
+        assert_eq!(status(&response), 400, "{lifetime:?}");
+        assert_eq!(body(&response)["error"], "invalid_request");
+    }
+}
+
+#[tokio::test]
+async fn agent_005_a_client_without_the_refresh_grant_gets_no_refresh_token() {
+    let h = sqlite_harness().await;
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let registered = h
+        .post_json(
+            "/oauth/register",
+            json!({"redirect_uris": [REDIRECT], "grant_types": ["authorization_code"]}),
+        )
+        .await;
+    let client_id = body(&registered)["client_id"].as_str().unwrap().to_owned();
+    let (verifier, challenge) = pkce();
+    let code = h
+        .approve(&client_id, REDIRECT, &challenge, "tools:read", &bearer)
+        .await;
+    let tokens = h.exchange(&client_id, REDIRECT, &code, &verifier).await;
+    assert_eq!(status(&tokens), 200, "{:?}", body(&tokens));
+    assert!(body(&tokens).get("refresh_token").is_none());
+}
+
+#[tokio::test]
+async fn agent_005_pending_authorizations_are_capped_per_user() {
+    let h = sqlite_harness().await;
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let client_id = h.register(&[REDIRECT]).await;
+    let (_, challenge) = pkce();
+    let mut ids = Vec::new();
+    for _ in 0..25 {
+        let response = h
+            .authorize(
+                &client_id,
+                REDIRECT,
+                &challenge,
+                "tools:read",
+                Some(&bearer),
+            )
+            .await;
+        ids.push(query_param(&location(&response).unwrap(), "authorization").unwrap());
+    }
+    for (index, id) in ids.iter().enumerate() {
+        let view = h
+            .get(&format!("/oauth/authorizations/{id}"), &[], Some(&bearer))
+            .await;
+        let expected = if index < 5 { 404 } else { 200 };
+        assert_eq!(status(&view), expected, "pending authorization {index}");
+    }
+}
+
+#[tokio::test]
+async fn agent_005_code_redemption_is_guarded_in_the_database() {
+    guarded_redemption(&sqlite_harness().await).await;
+}
+
+#[tokio::test]
+async fn agent_005_a_decision_is_guarded_in_the_database() {
+    guarded_decision(&sqlite_harness().await).await;
+}
+
+/// A store whose refresh-token rotation always fails, the way a deadlock
+/// victim's does; everything else is the SQL store.
+struct FailingRotation(magnetar::authorization_server::SqlAuthorizationStore);
+
+#[async_trait]
+impl magnetar::authorization_server::AuthorizationStore for FailingRotation {
+    async fn insert_client(
+        &self,
+        client: magnetar::authorization_server::RegisteredClient,
+    ) -> magnetar::Result<()> {
+        self.0.insert_client(client).await
+    }
+    async fn find_client(
+        &self,
+        client_id: &str,
+    ) -> magnetar::Result<Option<magnetar::authorization_server::RegisteredClient>> {
+        self.0.find_client(client_id).await
+    }
+    async fn create_grant(
+        &self,
+        grant: magnetar::authorization_server::GrantRecord,
+        tokens: Vec<magnetar::authorization_server::NewTokenRecord>,
+    ) -> magnetar::Result<()> {
+        self.0.create_grant(grant, tokens).await
+    }
+    async fn find_token(
+        &self,
+        token_hash: &str,
+    ) -> magnetar::Result<Option<magnetar::authorization_server::TokenRecord>> {
+        self.0.find_token(token_hash).await
+    }
+    async fn find_grant(
+        &self,
+        grant_id: &str,
+    ) -> magnetar::Result<Option<magnetar::authorization_server::GrantRecord>> {
+        self.0.find_grant(grant_id).await
+    }
+    async fn rotate_refresh_token(
+        &self,
+        _refresh_token_id: &str,
+        _grant_id: &str,
+        _at: chrono::DateTime<chrono::Utc>,
+        _replacements: Vec<magnetar::authorization_server::NewTokenRecord>,
+    ) -> magnetar::Result<bool> {
+        Err(magnetar::Error::Internal {
+            message: "deadlock detected".to_owned(),
+        })
+    }
+    async fn revoke_token(
+        &self,
+        token_id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<bool> {
+        self.0.revoke_token(token_id, at).await
+    }
+    async fn revoke_grant(
+        &self,
+        grant_id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<bool> {
+        self.0.revoke_grant(grant_id, at).await
+    }
+    async fn revoke_user_grants(
+        &self,
+        user_id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<u64> {
+        self.0.revoke_user_grants(user_id, at).await
+    }
+    async fn touch_grant(
+        &self,
+        grant_id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<()> {
+        self.0.touch_grant(grant_id, at).await
+    }
+    async fn list_user_grants(
+        &self,
+        user_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<Vec<magnetar::authorization_server::GrantRecord>> {
+        self.0.list_user_grants(user_id, now).await
+    }
+    async fn create_authorization(
+        &self,
+        record: magnetar::authorization_server::AuthorizationRecord,
+    ) -> magnetar::Result<()> {
+        self.0.create_authorization(record).await
+    }
+    async fn find_authorization(
+        &self,
+        id: &str,
+        kind: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<Option<magnetar::authorization_server::AuthorizationRecord>> {
+        self.0.find_authorization(id, kind, now).await
+    }
+    async fn transition_authorization(
+        &self,
+        id: &str,
+        kind: &str,
+        expected: &str,
+        next: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<bool> {
+        self.0
+            .transition_authorization(id, kind, expected, next, now)
+            .await
+    }
+    async fn consume_authorization(
+        &self,
+        id: &str,
+        kind: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<bool> {
+        self.0.consume_authorization(id, kind, now).await
+    }
+    async fn trim_authorizations(
+        &self,
+        user_id: &str,
+        kind: &str,
+        keep: u64,
+    ) -> magnetar::Result<u64> {
+        self.0.trim_authorizations(user_id, kind, keep).await
+    }
+    async fn prune_expired(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        grant_cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<u64> {
+        self.0.prune_expired(now, grant_cutoff).await
+    }
+}
+
+#[tokio::test]
+async fn agent_005_a_failed_rotation_still_revokes_the_grant() {
+    let db = magnetar::default_schema::database().await;
+    let store = Arc::new(FailingRotation(
+        magnetar::authorization_server::SqlAuthorizationStore::new(db.clone()),
+    ));
+    let h = build_with_store(
+        db,
+        config(),
+        ClientMetadataPolicy::default(),
+        Vec::new(),
+        store,
+    )
+    .await;
+    let issued = h.issue("tools:read").await;
+    let refreshed = h.refresh(&issued.client_id, &issued.refresh_token).await;
+    assert_eq!(status(&refreshed), 500);
+    assert_eq!(body(&refreshed)["error"], "server_error");
+    assert_eq!(
+        h.verify(&issued.access_token).await,
+        invalid(InvalidAccessReason::Revoked),
+        "a rotation that failed leaves no token of the grant working"
+    );
+}
+
+#[tokio::test]
+async fn agent_005_listing_drops_grants_with_no_live_token() {
+    let mut short = config();
+    short.access_token_lifetime = Duration::from_secs(1);
+    let h = build(
+        magnetar::default_schema::database().await,
+        short,
+        ClientMetadataPolicy::default(),
+        Vec::new(),
+    )
+    .await;
+    let user_id = h.create_user().await;
+    let bearer = h.sign_in(&user_id).await;
+    let registered = h
+        .post_json(
+            "/oauth/register",
+            json!({"redirect_uris": [REDIRECT], "grant_types": ["authorization_code"]}),
+        )
+        .await;
+    let client_id = body(&registered)["client_id"].as_str().unwrap().to_owned();
+    let (verifier, challenge) = pkce();
+    let code = h
+        .approve(&client_id, REDIRECT, &challenge, "tools:read", &bearer)
+        .await;
+    assert_eq!(
+        status(&h.exchange(&client_id, REDIRECT, &code, &verifier).await),
+        200
+    );
+    assert_eq!(h.server.list_grants(&user_id).await.unwrap().len(), 1);
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(
+        h.server.list_grants(&user_id).await.unwrap().is_empty(),
+        "a grant whose only token expired is not listed"
+    );
+}
+
+#[tokio::test]
+async fn agent_005_pruning_deletes_grants_past_their_retention() {
+    use magnetar::authorization_server::sql::{grants, tokens};
+    use sea_orm::{ColumnTrait, QueryFilter};
+
+    let h = sqlite_harness().await;
+    let revoked = h.issue("tools:read").await;
+    let idle = h.issue("tools:read").await;
+    let live = h.issue("tools:read").await;
+    let grant_of = |user: String| {
+        let server = h.server.clone();
+        async move { server.list_grants(&user).await.unwrap()[0].grant_id.clone() }
+    };
+    let revoked_grant = grant_of(revoked.user_id.clone()).await;
+    let idle_grant = grant_of(idle.user_id.clone()).await;
+    let live_grant = grant_of(live.user_id.clone()).await;
+    let long_ago = chrono::Utc::now() - chrono::Duration::days(31);
+
+    // One grant revoked 31 days ago; one 31 days old whose tokens are gone.
+    assert!(
+        h.server
+            .revoke_grant(&revoked.user_id, &revoked_grant)
+            .await
+            .unwrap()
+    );
+    grants::Entity::update_many()
+        .col_expr(
+            grants::Column::RevokedAt,
+            sea_orm::sea_query::Expr::value(long_ago),
+        )
+        .filter(grants::Column::Id.eq(revoked_grant.clone()))
+        .exec(&h.db)
+        .await
+        .unwrap();
+    tokens::Entity::delete_many()
+        .filter(tokens::Column::GrantId.eq(idle_grant.clone()))
+        .exec(&h.db)
+        .await
+        .unwrap();
+    grants::Entity::update_many()
+        .col_expr(
+            grants::Column::CreatedAt,
+            sea_orm::sea_query::Expr::value(long_ago),
+        )
+        .col_expr(
+            grants::Column::LastUsedAt,
+            sea_orm::sea_query::Expr::value(long_ago),
+        )
+        .filter(grants::Column::Id.eq(idle_grant.clone()))
+        .exec(&h.db)
+        .await
+        .unwrap();
+
+    assert!(h.server.prune_expired().await.unwrap() >= 2);
+    let remaining: Vec<String> = grants::Entity::find()
+        .all(&h.db)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|grant| grant.id)
+        .collect();
+    assert!(
+        !remaining.contains(&revoked_grant),
+        "a long-revoked grant is deleted"
+    );
+    assert!(
+        !remaining.contains(&idle_grant),
+        "a long-idle grant without tokens is deleted"
+    );
+    assert!(remaining.contains(&live_grant), "a live grant stays");
+    let orphans = tokens::Entity::find()
+        .filter(tokens::Column::GrantId.eq(revoked_grant))
+        .all(&h.db)
+        .await
+        .unwrap();
+    assert!(orphans.is_empty(), "a deleted grant's tokens go with it");
+    assert!(matches!(
+        h.verify(&live.access_token).await,
+        AccessVerification::Valid(_)
+    ));
 }
