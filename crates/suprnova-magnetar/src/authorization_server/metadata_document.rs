@@ -91,6 +91,9 @@ pub trait ResponseBody: Send {
 pub struct PinnedResponse {
     /// The HTTP status code.
     pub status: u16,
+    /// The `Cache-Control` header, when the response carried one. A key set
+    /// fetch honours it within its cache bounds.
+    pub cache_control: Option<String>,
     /// The body, read lazily.
     pub body: Box<dyn ResponseBody>,
 }
@@ -100,6 +103,7 @@ impl fmt::Debug for PinnedResponse {
         formatter
             .debug_struct("PinnedResponse")
             .field("status", &self.status)
+            .field("cache_control", &self.cache_control)
             .finish_non_exhaustive()
     }
 }
@@ -191,8 +195,14 @@ impl PinnedHttpClient for ReqwestPinnedClient {
             .send()
             .await
             .map_err(|error| transport(format!("send: {error}")))?;
+        let cache_control = response
+            .headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         Ok(PinnedResponse {
             status: response.status().as_u16(),
+            cache_control,
             body: Box::new(ReqwestBody(response)),
         })
     }
@@ -350,55 +360,15 @@ impl ClientMetadataFetcher {
         &self,
         url: &Url,
     ) -> std::result::Result<ClientMetadata, ClientMetadataError> {
-        let port = url.port_or_known_default().unwrap_or(443);
-        let addresses: Vec<IpAddr> = match url.host() {
-            Some(Host::Ipv4(address)) => vec![IpAddr::V4(address)],
-            Some(Host::Ipv6(address)) => vec![IpAddr::V6(address)],
-            Some(Host::Domain(domain)) => self
-                .resolver
-                .resolve(domain, port)
-                .await
-                .map_err(|error| ClientMetadataError::Unresolvable(error.to_string()))?,
-            None => return Err(ClientMetadataError::InvalidUrl("no host".to_owned())),
-        };
-        let Some(first) = addresses.first().copied() else {
-            return Err(ClientMetadataError::Unresolvable(
-                "no address returned".to_owned(),
-            ));
-        };
-        // Every address is checked, not only the one used: a resolver that
-        // mixes a public and a private answer is refused outright.
-        if let Some(forbidden) = addresses
-            .iter()
-            .copied()
-            .find(|address| !(self.address_allowed)(*address))
-        {
-            return Err(ClientMetadataError::ForbiddenAddress(forbidden));
-        }
-        let mut response = self
-            .client
-            .get(url, SocketAddr::new(first, port))
-            .await
-            .map_err(|error| ClientMetadataError::Transport(error.to_string()))?;
-        if (300..400).contains(&response.status) {
-            return Err(ClientMetadataError::Redirected(response.status));
-        }
-        if response.status != 200 {
-            return Err(ClientMetadataError::Status(response.status));
-        }
-        let mut body = Vec::new();
-        while let Some(chunk) = response
-            .body
-            .next_chunk()
-            .await
-            .map_err(|error| ClientMetadataError::Transport(error.to_string()))?
-        {
-            if body.len().saturating_add(chunk.len()) > self.policy.max_bytes {
-                return Err(ClientMetadataError::TooLarge);
-            }
-            body.extend_from_slice(&chunk);
-        }
-        serde_json::from_slice(&body).map_err(|error| {
+        let fetched = pinned_fetch(
+            self.resolver.as_ref(),
+            self.client.as_ref(),
+            self.address_allowed,
+            url,
+            self.policy.max_bytes,
+        )
+        .await?;
+        serde_json::from_slice(&fetched.body).map_err(|error| {
             ClientMetadataError::InvalidDocument(crate::crypto::decode_failure(&error))
         })
     }
@@ -478,6 +448,79 @@ fn document_url(client_id: &str) -> std::result::Result<Url, ClientMetadataError
         ));
     }
     Ok(url)
+}
+
+/// A body read through [`pinned_fetch`], with the response's
+/// `Cache-Control` header.
+pub(crate) struct FetchedBody {
+    /// The body, at most the size bound.
+    pub(crate) body: Vec<u8>,
+    /// The `Cache-Control` header, if any.
+    pub(crate) cache_control: Option<String>,
+}
+
+/// One fenced GET: the host resolved here and every address it names
+/// checked with `address_allowed`, the connection made to the checked
+/// address, a redirect or any status but 200 refused, and the body read no
+/// further than `max_bytes`. The caller bounds the time. Client metadata
+/// documents and agent auth's key sets both go through it.
+pub(crate) async fn pinned_fetch(
+    resolver: &dyn HostResolver,
+    client: &dyn PinnedHttpClient,
+    address_allowed: fn(IpAddr) -> bool,
+    url: &Url,
+    max_bytes: usize,
+) -> std::result::Result<FetchedBody, ClientMetadataError> {
+    let port = url.port_or_known_default().unwrap_or(443);
+    let addresses: Vec<IpAddr> = match url.host() {
+        Some(Host::Ipv4(address)) => vec![IpAddr::V4(address)],
+        Some(Host::Ipv6(address)) => vec![IpAddr::V6(address)],
+        Some(Host::Domain(domain)) => resolver
+            .resolve(domain, port)
+            .await
+            .map_err(|error| ClientMetadataError::Unresolvable(error.to_string()))?,
+        None => return Err(ClientMetadataError::InvalidUrl("no host".to_owned())),
+    };
+    let Some(first) = addresses.first().copied() else {
+        return Err(ClientMetadataError::Unresolvable(
+            "no address returned".to_owned(),
+        ));
+    };
+    // Every address is checked, not only the one used: a resolver that
+    // mixes a public and a private answer is refused outright.
+    if let Some(forbidden) = addresses
+        .iter()
+        .copied()
+        .find(|address| !address_allowed(*address))
+    {
+        return Err(ClientMetadataError::ForbiddenAddress(forbidden));
+    }
+    let mut response = client
+        .get(url, SocketAddr::new(first, port))
+        .await
+        .map_err(|error| ClientMetadataError::Transport(error.to_string()))?;
+    if (300..400).contains(&response.status) {
+        return Err(ClientMetadataError::Redirected(response.status));
+    }
+    if response.status != 200 {
+        return Err(ClientMetadataError::Status(response.status));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .body
+        .next_chunk()
+        .await
+        .map_err(|error| ClientMetadataError::Transport(error.to_string()))?
+    {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(ClientMetadataError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(FetchedBody {
+        body,
+        cache_control: response.cache_control,
+    })
 }
 
 #[cfg(test)]
