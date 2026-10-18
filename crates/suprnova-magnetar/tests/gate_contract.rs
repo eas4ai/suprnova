@@ -245,7 +245,21 @@ fn assert_executable(relative: &str) {
 #[cfg(not(unix))]
 fn assert_executable(_relative: &str) {}
 
-const LIVE_TEST_INVOCATIONS: [&str; 28] = [
+const LIVE_TEST_INVOCATIONS: [&str; 42] = [
+    "run_live_test test authorization_server_live agent_005_postgres_code_flow_rotation_and_revocation",
+    "run_live_test test authorization_server_live agent_005_postgres_refresh_rotation_is_guarded_in_the_database",
+    "run_live_test test authorization_server_live agent_005_postgres_concurrent_refresh_token_reuse_revokes_the_grant",
+    "run_live_test test authorization_server_live agent_005_postgres_code_redemption_and_decisions_are_guarded_in_the_database",
+    "run_live_test test authorization_server_live agent_005_postgres_revocation_and_rotation_take_locks_in_one_order",
+    "run_live_test test authorization_server_live agent_005_postgres_a_concurrently_replayed_code_revokes_its_tokens",
+    "run_live_test test authorization_server_live agent_005_postgres_pruning_and_trimming_hold_their_boundaries",
+    "run_live_test test authorization_server_live agent_005_mysql_code_flow_rotation_and_revocation",
+    "run_live_test test authorization_server_live agent_005_mysql_refresh_rotation_is_guarded_in_the_database",
+    "run_live_test test authorization_server_live agent_005_mysql_concurrent_refresh_token_reuse_revokes_the_grant",
+    "run_live_test test authorization_server_live agent_005_mysql_code_redemption_and_decisions_are_guarded_in_the_database",
+    "run_live_test test authorization_server_live agent_005_mysql_revocation_and_rotation_take_locks_in_one_order",
+    "run_live_test test authorization_server_live agent_005_mysql_a_concurrently_replayed_code_revokes_its_tokens",
+    "run_live_test test authorization_server_live agent_005_mysql_pruning_and_trimming_hold_their_boundaries",
     "run_live_test test default_schema_backends postgres_default_schema_is_replay_safe",
     "run_live_test test default_schema_backends postgres_api_import_advances_the_default_user_sequence",
     "run_live_test test default_schema_backends mysql_default_schema_is_replay_safe",
@@ -276,7 +290,21 @@ const LIVE_TEST_INVOCATIONS: [&str; 28] = [
     "run_live_test lib _ migration::seaorm_upgrade_tests::mysql_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1",
 ];
 
-const LIVE_TEST_LIVE_COMMANDS: [&str; 28] = [
+const LIVE_TEST_LIVE_COMMANDS: [&str; 42] = [
+    "cargo test --test authorization_server_live --all-features agent_005_postgres_code_flow_rotation_and_revocation -- --ignored --exact",
+    "cargo test --test authorization_server_live --all-features agent_005_postgres_refresh_rotation_is_guarded_in_the_database -- --ignored --exact",
+    "cargo test --test authorization_server_live --all-features agent_005_postgres_concurrent_refresh_token_reuse_revokes_the_grant -- --ignored --exact",
+    "cargo test --test authorization_server_live --all-features agent_005_postgres_code_redemption_and_decisions_are_guarded_in_the_database -- --ignored --exact",
+    "cargo test --test authorization_server_live --all-features agent_005_postgres_revocation_and_rotation_take_locks_in_one_order -- --ignored --exact",
+    "cargo test --test authorization_server_live --all-features agent_005_postgres_a_concurrently_replayed_code_revokes_its_tokens -- --ignored --exact",
+    "cargo test --test authorization_server_live --all-features agent_005_postgres_pruning_and_trimming_hold_their_boundaries -- --ignored --exact",
+    "cargo test --test authorization_server_live --all-features agent_005_mysql_code_flow_rotation_and_revocation -- --ignored --exact",
+    "cargo test --test authorization_server_live --all-features agent_005_mysql_refresh_rotation_is_guarded_in_the_database -- --ignored --exact",
+    "cargo test --test authorization_server_live --all-features agent_005_mysql_concurrent_refresh_token_reuse_revokes_the_grant -- --ignored --exact",
+    "cargo test --test authorization_server_live --all-features agent_005_mysql_code_redemption_and_decisions_are_guarded_in_the_database -- --ignored --exact",
+    "cargo test --test authorization_server_live --all-features agent_005_mysql_revocation_and_rotation_take_locks_in_one_order -- --ignored --exact",
+    "cargo test --test authorization_server_live --all-features agent_005_mysql_a_concurrently_replayed_code_revokes_its_tokens -- --ignored --exact",
+    "cargo test --test authorization_server_live --all-features agent_005_mysql_pruning_and_trimming_hold_their_boundaries -- --ignored --exact",
     "cargo test --test default_schema_backends --all-features postgres_default_schema_is_replay_safe -- --ignored --exact",
     "cargo test --test default_schema_backends --all-features postgres_api_import_advances_the_default_user_sequence -- --ignored --exact",
     "cargo test --test default_schema_backends --all-features mysql_default_schema_is_replay_safe -- --ignored --exact",
@@ -307,7 +335,63 @@ const LIVE_TEST_LIVE_COMMANDS: [&str; 28] = [
     "cargo test --lib --all-features migration::seaorm_upgrade_tests::mysql_source_catalog_is_idempotent_when_upgrading_from_seaorm_1_1 -- --ignored --exact",
 ];
 
-const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 28] = [
+const LIVE_DATABASE_QUALIFICATION_TESTS: [(&str, &str); 42] = [
+    (
+        "tests/authorization_server_live.rs",
+        "agent_005_postgres_code_flow_rotation_and_revocation",
+    ),
+    (
+        "tests/authorization_server_live.rs",
+        "agent_005_postgres_refresh_rotation_is_guarded_in_the_database",
+    ),
+    (
+        "tests/authorization_server_live.rs",
+        "agent_005_postgres_concurrent_refresh_token_reuse_revokes_the_grant",
+    ),
+    (
+        "tests/authorization_server_live.rs",
+        "agent_005_postgres_code_redemption_and_decisions_are_guarded_in_the_database",
+    ),
+    (
+        "tests/authorization_server_live.rs",
+        "agent_005_postgres_revocation_and_rotation_take_locks_in_one_order",
+    ),
+    (
+        "tests/authorization_server_live.rs",
+        "agent_005_postgres_a_concurrently_replayed_code_revokes_its_tokens",
+    ),
+    (
+        "tests/authorization_server_live.rs",
+        "agent_005_postgres_pruning_and_trimming_hold_their_boundaries",
+    ),
+    (
+        "tests/authorization_server_live.rs",
+        "agent_005_mysql_code_flow_rotation_and_revocation",
+    ),
+    (
+        "tests/authorization_server_live.rs",
+        "agent_005_mysql_refresh_rotation_is_guarded_in_the_database",
+    ),
+    (
+        "tests/authorization_server_live.rs",
+        "agent_005_mysql_concurrent_refresh_token_reuse_revokes_the_grant",
+    ),
+    (
+        "tests/authorization_server_live.rs",
+        "agent_005_mysql_code_redemption_and_decisions_are_guarded_in_the_database",
+    ),
+    (
+        "tests/authorization_server_live.rs",
+        "agent_005_mysql_revocation_and_rotation_take_locks_in_one_order",
+    ),
+    (
+        "tests/authorization_server_live.rs",
+        "agent_005_mysql_a_concurrently_replayed_code_revokes_its_tokens",
+    ),
+    (
+        "tests/authorization_server_live.rs",
+        "agent_005_mysql_pruning_and_trimming_hold_their_boundaries",
+    ),
     (
         "tests/default_schema_backends.rs",
         "postgres_default_schema_is_replay_safe",
@@ -547,7 +631,7 @@ fn every_live_database_test_is_ignored_and_registered() {
         .collect::<Vec<_>>();
     assert_eq!(
         inventory, expected,
-        "source-discovered live database test inventory must remain the expected twenty-eight"
+        "source-discovered live database test inventory must remain the expected forty-two"
     );
 
     let (output, invocations, directory) = run_live_gate_with_metadata(

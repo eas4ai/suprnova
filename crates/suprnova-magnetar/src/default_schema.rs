@@ -1949,6 +1949,11 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
                 message: format!("create default auth table: {error}"),
             })?;
     }
+    // The authorization server's tables exist only in builds that serve
+    // it; a later build with the feature on adds them to an existing
+    // database.
+    #[cfg(feature = "authorization-server")]
+    crate::authorization_server::migrate(db).await?;
     add_session_auth_epoch_column(db).await?;
     add_remember_auth_epoch_column(db).await?;
     add_two_factor_enrollment_snapshot_columns(db).await?;

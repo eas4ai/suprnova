@@ -4,7 +4,7 @@ use std::path::Path;
 
 use magnetar::{Error, Result};
 
-const REQUIRED_FEATURES: [&str; 19] = [
+const REQUIRED_FEATURES: [&str; 20] = [
     "password",
     "email-verification",
     "password-management",
@@ -19,6 +19,7 @@ const REQUIRED_FEATURES: [&str; 19] = [
     "oauth-x",
     "oauth-tiktok",
     "device-authorization",
+    "authorization-server",
     "seaorm-sqlite",
     "seaorm-postgres",
     "seaorm-mysql",
