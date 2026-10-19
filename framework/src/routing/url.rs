@@ -871,7 +871,7 @@ mod tests {
         ];
         // A fixed linear congruential sequence: the same candidates on
         // every run, with no dependency.
-        let mut state: u64 = 0x5eed_0f_a6e7_017;
+        let mut state: u64 = 0x0005_eed0_fa6e_7017;
         let mut next = |bound: usize| {
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)

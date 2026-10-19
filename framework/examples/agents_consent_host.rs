@@ -158,7 +158,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         })
         .get("/test/global-policy-approval", global_policy_approval)
         .into();
-    let router = router.try_agents(AgentsConfig::new().oauth_server(OAuthServer::new().connection(db)))?;
+    let router =
+        router.try_agents(AgentsConfig::new().oauth_server(OAuthServer::new().connection(db)))?;
     let mut session = SessionConfig::default();
     session.cookie_secure = false;
     Server::new(router)
