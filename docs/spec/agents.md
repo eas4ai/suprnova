@@ -141,12 +141,15 @@ Falsifier: a 2026-07-28 client or an initialize-based 2025-06-18 or 2025-11-25 c
 Mechanism: `agents`.
 Status: Agreed 2026-10-18
 
-[AGENT-004] `tools/list` MUST return exactly the tools the presented
-credentials may call: the public tools with no token, and with a token the
-tools that accept its caller kind and whose scopes it carries. A request without a needed
-token MUST get 401 with `WWW-Authenticate: Bearer resource_metadata="..."`
-and the tool's scopes; a token without a needed scope MUST get 403 with
-`error="insufficient_scope"` and every scope the operation needs. The
+[AGENT-004] When any declared tool needs a token, every MCP request
+without a token MUST get 401 with `WWW-Authenticate: Bearer
+resource_metadata="..."`, whatever its method, so a client is sent to sign
+in before it initializes; a 401 for `tools/call` also names the called
+tool's scopes when it has any. When every declared tool is public, a request
+without a token MUST be served and `tools/list` MUST return every tool. With
+a token, `tools/list` MUST return exactly the tools that accept its caller
+kind and whose scopes it carries. A token without a needed scope MUST get
+403 with `error="insufficient_scope"` and every scope the operation needs. The
 framework MUST serve OAuth protected resource metadata (RFC 9728) at
 `/.well-known/oauth-protected-resource` and its path-inserted form for the
 MCP endpoint, and authorization server metadata (RFC 8414) at the
@@ -154,8 +157,9 @@ path-inserted well-known location, at `<issuer>/.well-known/oauth-authorization-
 and at `<issuer>/.well-known/openid-configuration`, so an application
 served under a path prefix (PFX) is discoverable without owning the host
 root.
-Falsifier: a token-less list shows a non-public tool, a token sees a tool that does not accept its caller kind, or a scoped token sees a tool outside its scopes; a 401 lacks the metadata URL or the scopes; a 403 for a missing scope lacks `insufficient_scope` or names scopes one at a time; or a client cannot find the metadata of an application served under a prefix.
+Falsifier: on an application with a non-public tool, a token-less `initialize`, `tools/list` or `tools/call` that AGENT-003 would serve gets anything but 401 with the metadata URL, or a token-less `tools/call` of a scoped tool gets a 401 without its scopes; on an all-public application a token-less request is refused or its list misses a tool; a token sees a tool that does not accept its caller kind, or a scoped token sees a tool outside its scopes; a 403 for a missing scope lacks `insufficient_scope` or names scopes one at a time; or a client cannot find the metadata of an application served under a prefix.
 Mechanism: `agents`.
+Rationale: Claude Code connected without a token to a new Live kit, listed no tools and never offered sign-in, because only `tools/call` answered 401 (Shawn, 2026-10-18: "yes").
 Status: Agreed 2026-10-18
 
 [AGENT-005] A Magnetar plugin, the authorization server, MUST let a user
