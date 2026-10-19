@@ -1096,6 +1096,22 @@ impl Redirect {
         Self::to(dest)
     }
 
+    /// The "intended" URL [`Self::intended`] would follow now, without
+    /// spending it. Mirrors Laravel's `Redirector::getIntendedUrl()`.
+    ///
+    /// A sign-in that ends where the user was going reads it to choose how
+    /// to leave: an Inertia visit cannot follow a redirect to a page the
+    /// SPA does not render, such as a plugin route or a client's redirect
+    /// URI, so it leaves by a location visit when an address is waiting.
+    /// The value is checked as [`Self::intended`] checks it, so a path a
+    /// browser would read as another host reads as `None`. Outside a
+    /// session it is `None`.
+    pub fn intended_url() -> Option<String> {
+        crate::session::session()
+            .and_then(|session| session.get::<String>("url.intended"))
+            .and_then(|stored| crate::routing::url::stored_destination_or_none(&stored))
+    }
+
     /// Record the current URL as the session's "intended" target.
     /// Subsequent calls to [`Redirect::intended`] use it. Mirrors
     /// Laravel's `Redirector::setIntendedUrl($url)`. No-op outside a
@@ -2329,5 +2345,72 @@ mod rate_limited_retry_after_tests {
         let err = FrameworkError::param("user_id");
         let resp: HttpResponse = err.into();
         assert_eq!(resp.header_value("Retry-After"), None);
+    }
+}
+
+#[cfg(test)]
+mod intended_url_tests {
+    use super::*;
+    use crate::session::{new_session_slot_for_test, session, session_mut, session_scope_for_test};
+
+    /// What the session holds under Laravel's intended-URL key.
+    fn stored() -> Option<String> {
+        session().and_then(|session| session.get::<String>("url.intended"))
+    }
+
+    #[tokio::test]
+    async fn agent_017_intended_url_reads_without_pulling() {
+        session_scope_for_test(new_session_slot_for_test(), async {
+            assert_eq!(Redirect::intended_url(), None, "nothing stored yet");
+            Redirect::set_intended_url("/agent/claim?claim_attempt_token=cat_1");
+            // Read twice: the address stays for the redirect that follows.
+            for _ in 0..2 {
+                assert_eq!(
+                    Redirect::intended_url().as_deref(),
+                    Some("/agent/claim?claim_attempt_token=cat_1")
+                );
+            }
+            assert_eq!(
+                stored().as_deref(),
+                Some("/agent/claim?claim_attempt_token=cat_1")
+            );
+            // `intended` then follows it and spends it.
+            assert_eq!(
+                Redirect::intended("/dashboard").location,
+                "/agent/claim?claim_attempt_token=cat_1"
+            );
+            assert_eq!(Redirect::intended_url(), None);
+            assert_eq!(stored(), None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn agent_017_intended_url_refuses_what_intended_would_not_follow() {
+        session_scope_for_test(new_session_slot_for_test(), async {
+            // A value an earlier release, or another writer, stored.
+            for foreign in ["//evil.test/x", "/\\evil.test", "/\t/evil.test", "\\evil"] {
+                session_mut(|session| session.put("url.intended", foreign));
+                assert_eq!(Redirect::intended_url(), None, "{foreign:?}");
+                assert_eq!(
+                    Redirect::intended("/dashboard").location,
+                    "/dashboard",
+                    "{foreign:?}"
+                );
+            }
+            // An absolute URL the application stored passes, as `intended`
+            // follows it.
+            session_mut(|session| session.put("url.intended", "https://app.test/billing"));
+            assert_eq!(
+                Redirect::intended_url().as_deref(),
+                Some("https://app.test/billing")
+            );
+        })
+        .await;
+    }
+
+    #[test]
+    fn agent_017_intended_url_is_none_outside_a_session() {
+        assert_eq!(Redirect::intended_url(), None);
     }
 }

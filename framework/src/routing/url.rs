@@ -489,6 +489,40 @@ pub(crate) fn root_relative_or_none(candidate: &str) -> Option<String> {
     }
 }
 
+/// `candidate` when it is a path on this application, or `None` when a
+/// browser could read it as an address on another host.
+///
+/// A sign-in page that takes a `return_to` address from its query, and
+/// stores it with [`crate::Redirect::set_intended_url`], checks it here
+/// first: `set_intended_url` stores any address, and an unchecked one is an
+/// open redirect that sends the user, freshly signed in, wherever a link
+/// chose. The check is the one the framework holds its own redirects to.
+/// A path is accepted only when it starts with a single `/` and holds no
+/// control byte, so these are all refused:
+///
+/// - `//evil.example/x`, which a browser reads as another host;
+/// - `/\evil.example`, the same once a browser reads `\` as `/`;
+/// - `/<TAB>/evil.example`, the same once a browser strips the tab;
+/// - `https://evil.example/x`, `javascript:...` and anything else that
+///   does not start with `/`.
+///
+/// The path keeps its query. It is relative to the host, so it carries the
+/// application's public root when the page received one.
+///
+/// ```rust
+/// use suprnova::url;
+///
+/// assert_eq!(
+///     url::same_origin_path("/oauth/authorize?client_id=a").as_deref(),
+///     Some("/oauth/authorize?client_id=a")
+/// );
+/// assert_eq!(url::same_origin_path("//evil.example/x"), None);
+/// assert_eq!(url::same_origin_path("https://evil.example/x"), None);
+/// ```
+pub fn same_origin_path(candidate: &str) -> Option<String> {
+    root_relative_or_none(candidate)
+}
+
 /// Accept a redirect destination read back from the session, or reject
 /// one a browser would read as another host while it looks like a path on
 /// this one.
@@ -749,6 +783,135 @@ mod tests {
         // Not just right after the leading slash.
         assert_eq!(root_relative_or_none("/register/step\x0b2"), None);
         assert_eq!(root_relative_or_none(""), None);
+    }
+
+    // ---- same_origin_path: the public form of root_relative_or_none ----
+
+    /// The origin every accepted path is resolved against below.
+    const ORIGIN: &str = "https://app.test";
+
+    /// Where a browser on [`ORIGIN`] goes for `candidate`, by the WHATWG URL
+    /// parser the `url` crate implements: it strips tab and newline, reads
+    /// `\` as `/` and resolves a network-path reference to another host.
+    fn resolved_host(candidate: &str) -> Option<String> {
+        url::Url::parse(&format!("{ORIGIN}/base/page"))
+            .ok()?
+            .join(candidate)
+            .ok()?
+            .host_str()
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn agent_017_same_origin_path_refuses_other_hosts() {
+        for candidate in [
+            "//evil.test/x",
+            "/\\evil.test",
+            "https://evil.test/x",
+            "/\t/evil.test",
+            "/\n/evil.test",
+            "javascript:alert(1)",
+            "x",
+            "evil.test/x",
+            "",
+            "\\\\evil.test",
+            "/ok\x00",
+            "/ok\x7f",
+        ] {
+            assert_eq!(same_origin_path(candidate), None, "{candidate:?}");
+        }
+    }
+
+    #[test]
+    fn agent_017_same_origin_path_keeps_a_path_and_query() {
+        for candidate in [
+            "/",
+            "/dashboard",
+            "/oauth/authorize?client_id=a&redirect_uri=http%3A%2F%2F127.0.0.1%3A7777%2Fcb",
+            "/agent/claim?claim_attempt_token=cat_1",
+            "/a/b/../c?x=//y#z",
+            "/caf\u{e9}",
+        ] {
+            assert_eq!(
+                same_origin_path(candidate).as_deref(),
+                Some(candidate),
+                "{candidate:?}"
+            );
+            assert_eq!(resolved_host(candidate).as_deref(), Some("app.test"));
+        }
+    }
+
+    /// Every C0 control byte and DEL, at every position of every path
+    /// shape, is refused: the URL parser strips some of them from anywhere
+    /// in its input, so none may pass.
+    #[test]
+    fn agent_017_same_origin_path_refuses_a_control_byte_at_every_position() {
+        let controls = (0x00_u8..=0x1f).chain(std::iter::once(0x7f));
+        let shapes = ["/", "//evil.test", "/a/b?c=d", "/\\x", "/x#y"];
+        for control in controls {
+            for shape in shapes {
+                for at in 0..=shape.len() {
+                    let mut candidate = shape.to_owned();
+                    candidate.insert(at, char::from(control));
+                    assert_eq!(same_origin_path(&candidate), None, "{candidate:?}");
+                }
+            }
+        }
+    }
+
+    /// Generated candidates over an alphabet of the characters that decide
+    /// a URL's host: `same_origin_path` answers exactly as
+    /// `root_relative_or_none` does, and every path it accepts resolves on
+    /// the application's own host when a browser follows it.
+    #[test]
+    fn agent_017_same_origin_path_accepts_only_what_stays_on_the_origin() {
+        const ALPHABET: &[char] = &[
+            '/', '\\', ':', '.', '?', '#', '%', '@', 'a', 'e', '0', '\t', '\n', '\r', ' ', '\u{0}',
+            '\u{7f}', '\u{3000}',
+        ];
+        // A fixed linear congruential sequence: the same candidates on
+        // every run, with no dependency.
+        let mut state: u64 = 0x5eed_0f_a6e7_017;
+        let mut next = |bound: usize| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(state >> 33).unwrap_or(0) % bound
+        };
+        let mut accepted = 0;
+        for _ in 0..50_000 {
+            let length = next(9);
+            // Half the candidates start with `/`, so the accepted side is
+            // reached as often as the refused one.
+            let rooted = next(2) == 0;
+            let candidate: String = (0..length)
+                .map(|at| {
+                    if at == 0 && rooted {
+                        '/'
+                    } else {
+                        ALPHABET[next(ALPHABET.len())]
+                    }
+                })
+                .collect();
+            let answer = same_origin_path(&candidate);
+            assert_eq!(answer, root_relative_or_none(&candidate), "{candidate:?}");
+            if let Some(path) = answer {
+                accepted += 1;
+                assert_eq!(path, candidate);
+                assert!(path.starts_with('/'), "{candidate:?}");
+                assert!(!path.starts_with("//") && !path.starts_with("/\\"));
+                assert!(!has_control_byte(&path), "{candidate:?}");
+                assert_eq!(
+                    resolved_host(&path).as_deref(),
+                    Some("app.test"),
+                    "{candidate:?} leaves the origin"
+                );
+            }
+        }
+        assert!(
+            accepted > 1_000,
+            "the alphabet reaches the accepted set: {accepted} accepted"
+        );
     }
 
     #[test]
