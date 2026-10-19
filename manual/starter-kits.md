@@ -269,6 +269,48 @@ that doesn't copy `.env`, such as the production image, sets both
 variables. `cargo run -- agents:key` prints a new pair. For rotation, see
 [Keys and operations](agents.md#keys-and-operations).
 
+The kit ships two [tools](agents.md#tools) on the signed-in user's own
+notes, so the MCP endpoint has something to list from the first run.
+`src/controllers/note_tools.rs` defines them, and `src/agents.rs` declares
+their scopes with [`tool_scopes!`](agents.md#declare-scopes), in
+`agents::scope`:
+
+| Tool | Route | Scope | What it does |
+|---|---|---|---|
+| `notes.search` | `GET /notes/search` | `notes:read`, "Read your notes" | Finds the user's notes by the words in their titles and text, best match first, or lists the newest. It takes `query`, up to 200 characters, and `limit`, 1 to 50 and 10 when left out. |
+| `notes.create` | `POST /notes/tools` | `notes:write`, "Write notes for you" | Writes a note for the user, with the notes form's rules: a `title` of 1 to 255 characters and an optional `body` of up to 10000. It answers the note. |
+
+Both tools accept users and agents, and each call acts for one user: the
+one signed in, the one who approved the client, or the one who claimed the
+agent. A client's token holds the scopes the user allowed on the approval
+page, which shows each scope by its description. An agent holds both scopes
+once a user claims it, and none before: an agent no user has claimed gets a
+403 with `insufficient_scope`. `notes.search` is marked `read_only` and
+`untrusted_content`, because it hands back note text, which the user wrote
+and an agent must not take as instructions.
+
+The notes page offers both tools to an agent in the user's browser, through
+`.with_tools(["notes.search", "notes.create"])` on its route. It is the only
+page that offers a tool, and a guest is never offered either. After
+`notes.create`,
+the page reloads its props, so the list shows the new note.
+`frontend/src/types/tool-schemas.ts` carries both inputs, as
+`SearchNotesInput` and `CreateNoteInput`.
+
+To call the tools from Claude Code, run the project with `suprnova serve`
+and add its endpoint, over the Streamable HTTP transport, at the URL
+`APP_URL` names in `.env`:
+
+```bash
+claude mcp add my-app --transport http http://localhost:8765/mcp
+```
+
+The client gets its token from the kit's OAuth server: it registers, sends
+you to the approval page to allow the scopes it asks for, and then lists
+the tools those scopes reach. A token with `notes:read` alone sees
+`notes.search` and not `notes.create`. See
+[Users who approve a client](agents.md#users-who-approve-a-client).
+
 ### Why Suprnova diverges
 
 Laravel's starter kits ship a dashboard with placeholder content and no list
@@ -439,6 +481,44 @@ page's refusal. A test process loads no `.env`, so the test calls
 `suprnova::testing::install_test_agent_auth_key()` for a key made for the
 process, and registers an `AppConfig` with a URL of its own. See
 [Agents](agents.md#keys-and-operations) for rotating the key.
+
+Like the Inertia kits, the kit ships two [tools](agents.md#tools) on the
+signed-in user's own notes, from the same `src/controllers/note_tools.rs`,
+with their scopes declared by [`tool_scopes!`](agents.md#declare-scopes) in
+`src/agents.rs`:
+
+| Tool | Route | Scope | What it does |
+|---|---|---|---|
+| `notes.search` | `GET /notes/search` | `notes:read`, "Read your notes" | Finds the user's notes by the words in their titles and text, best match first, or lists the newest. It takes `query`, up to 200 characters, and `limit`, 1 to 50 and 10 when left out. |
+| `notes.create` | `POST /notes/tools` | `notes:write`, "Write notes for you" | Writes a note for the user, with the note form's rules: a `title` of 1 to 255 characters and an optional `body` of up to 10000. It answers the note. |
+
+Each call acts for one user: the one signed in, the one who approved the
+client, or the one who claimed the agent. A client's token holds the scopes
+the user allowed on the approval page, and an agent holds both once a user
+claims it and none before, so an agent no user has claimed gets a 403 with
+`insufficient_scope`. `notes.search` is marked `read_only` and
+`untrusted_content`, because the note text it hands back is the user's, not
+instructions for an agent.
+
+The notes page is the one page that offers tools: its route names both with
+`.with_tools(["notes.search", "notes.create"])`, and the document's head
+carries them in its `suprnova-agent-tools` element, which the Live runtime
+registers with WebMCP. A guest is never offered either. After
+`notes.create`, the runtime renders the page's islands again, so the list
+shows the new note.
+
+To call the tools from Claude Code, run the project with `suprnova serve`
+and add its endpoint, over the Streamable HTTP transport, at the URL
+`APP_URL` names in `.env`:
+
+```bash
+claude mcp add my-app --transport http http://localhost:8765/mcp
+```
+
+The client gets its token from the kit's OAuth server: it registers, sends
+you to the approval page to allow the scopes it asks for, and then lists
+the tools those scopes reach. See
+[Users who approve a client](agents.md#users-who-approve-a-client).
 
 ### Add a page
 
