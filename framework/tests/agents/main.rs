@@ -2,7 +2,8 @@
 //! callers and the testing surface (AGENT-001 to AGENT-004, AGENT-018), and
 //! the ways a client signs a user in: the Magnetar authorization server
 //! (AGENT-005, AGENT-010, AGENT-017) and an outside issuer (AGENT-006). The
-//! `agents` mechanism runs this binary.
+//! `agents` mechanism runs this binary. Agent accounts under auth.md
+//! (AGENT-007 to AGENT-011) are `agent_auth` and `agent_auth_magnetar`.
 
 #[path = "../support/env_lock.rs"]
 mod env_lock;
@@ -13,12 +14,17 @@ mod own_process;
 mod own_process_async;
 
 mod fixture;
+mod live_fixture;
 
+mod agent_auth;
+mod agent_auth_magnetar;
 mod auth;
 mod build;
 mod callers;
 mod dispatch;
 mod endpoint;
+mod live_browser;
+mod live_headless;
 mod marker;
 mod oauth;
 mod oauth_magnetar;

@@ -19,6 +19,7 @@ pub struct FieldMetadata {
     binding_timing: Option<BindingTiming>,
     url_binding: Option<UrlBinding>,
     upload_policy: Option<UploadFieldPolicy>,
+    agent_visible: bool,
 }
 
 impl FieldMetadata {
@@ -40,7 +41,33 @@ impl FieldMetadata {
             binding_timing: None,
             url_binding: None,
             upload_policy: None,
+            agent_visible: false,
         }
+    }
+
+    /// The same field, shown to an agent in a tool result (AGENT-012).
+    ///
+    /// # Errors
+    ///
+    /// [`MetadataErrorKind::InvalidBindingMetadata`] unless the field is
+    /// ordinary, public, model or locked state: the categories the
+    /// instanced snapshot signs, which a tool result copies from. Every
+    /// other category never leaves the server, and marking it would promise
+    /// an agent a value it never gets.
+    pub fn with_agent_visible(mut self) -> Result<Self, MetadataError> {
+        if !matches!(
+            self.category,
+            FieldCategory::State
+                | FieldCategory::Public
+                | FieldCategory::Model
+                | FieldCategory::Locked
+        ) {
+            return Err(MetadataError::new(
+                MetadataErrorKind::InvalidBindingMetadata,
+            ));
+        }
+        self.agent_visible = true;
+        Ok(self)
     }
 
     /// Attaches an explicit typed model codec and synchronization timing.
@@ -164,5 +191,11 @@ impl FieldMetadata {
     #[must_use]
     pub const fn upload_policy(&self) -> Option<&UploadFieldPolicy> {
         self.upload_policy.as_ref()
+    }
+
+    /// Whether a tool result shows the field to an agent.
+    #[must_use]
+    pub const fn agent_visible(&self) -> bool {
+        self.agent_visible
     }
 }

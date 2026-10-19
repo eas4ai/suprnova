@@ -158,10 +158,10 @@ type AgentMarkSlot = Option<std::sync::Arc<crate::agents::AgentMark>>;
 #[cfg(not(feature = "agents"))]
 type AgentMarkSlot = ();
 
-/// The slot [`Request`] keeps its router's OAuth server in, as
-/// [`AgentMarkSlot`] keeps the agent mark.
+/// The slot [`Request`] keeps its router's OAuth server, and agent auth
+/// with it, in, as [`AgentMarkSlot`] keeps the agent mark.
 #[cfg(feature = "agents")]
-type OAuthServerSlot = Option<std::sync::Arc<magnetar::authorization_server::AuthorizationServer>>;
+type OAuthServerSlot = Option<std::sync::Arc<crate::agents::MountedOAuth>>;
 #[cfg(not(feature = "agents"))]
 type OAuthServerSlot = ();
 
@@ -664,21 +664,18 @@ impl Request {
         self.agent = Some(std::sync::Arc::new(mark));
     }
 
-    /// Hand the request the OAuth server its router mounted. Only the
-    /// server calls this, from the router that matched the request.
+    /// Hand the request the OAuth server its router mounted, with agent
+    /// auth when it is on. Only the server calls this, from the router that
+    /// matched the request.
     #[cfg(feature = "agents")]
-    pub(crate) fn set_oauth_server(
-        &mut self,
-        server: std::sync::Arc<magnetar::authorization_server::AuthorizationServer>,
-    ) {
+    pub(crate) fn set_oauth_server(&mut self, server: std::sync::Arc<crate::agents::MountedOAuth>) {
         self.oauth = Some(server);
     }
 
-    /// The OAuth server the router that matched this request mounted.
+    /// The OAuth server, and agent auth with it, the router that matched
+    /// this request mounted.
     #[cfg(feature = "agents")]
-    pub(crate) fn oauth_server(
-        &self,
-    ) -> Option<&std::sync::Arc<magnetar::authorization_server::AuthorizationServer>> {
+    pub(crate) fn oauth_server(&self) -> Option<&std::sync::Arc<crate::agents::MountedOAuth>> {
         self.oauth.as_ref()
     }
 
@@ -712,6 +709,37 @@ impl Request {
             agent: Some(std::sync::Arc::new(mark)),
             oauth: Default::default(),
         }
+    }
+
+    /// Record the browser tool a Live action request was admitted as. Only
+    /// the tool access check calls this, after the tool's caller check and
+    /// budget passed; nothing parsed from the wire can set it.
+    #[cfg(feature = "agents")]
+    pub(crate) fn set_live_tool_claim(&mut self, claim: crate::live::action::LiveToolClaim) {
+        self.parts.extensions.insert(claim);
+    }
+
+    /// Give a Live action request the check its action kernel runs on a
+    /// tool action invoked without the tool-call header. Only the Live
+    /// action route's tool access calls this.
+    #[cfg(feature = "agents")]
+    pub(crate) fn set_live_tool_gate(&mut self, gate: crate::agents::LiveToolGate) {
+        self.parts.extensions.insert(gate);
+    }
+
+    /// The check a Live action request's kernel runs on a tool action
+    /// invoked without the tool-call header, when the application serves
+    /// agents.
+    #[cfg(feature = "agents")]
+    pub(crate) fn live_tool_gate(&self) -> Option<&crate::agents::LiveToolGate> {
+        self.parts.extensions.get::<crate::agents::LiveToolGate>()
+    }
+
+    /// The browser tool a Live action request was admitted as, if any.
+    pub(crate) fn live_tool_claim(&self) -> Option<&crate::live::action::LiveToolClaim> {
+        self.parts
+            .extensions
+            .get::<crate::live::action::LiveToolClaim>()
     }
 
     pub(crate) fn live_operation(&self) -> Option<LiveOperation> {

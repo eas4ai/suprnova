@@ -707,6 +707,14 @@ impl TestRequest {
         self.header("Content-Type", "application/x-www-form-urlencoded")
     }
 
+    /// Send `body` as it is, with `Content-Type: content_type`, for a body
+    /// that is neither JSON nor a form, such as a Security Event Token a
+    /// provider pushes as `application/secevent+jwt`.
+    pub fn body(mut self, content_type: impl Into<String>, body: impl Into<Bytes>) -> Self {
+        self.body = body.into();
+        self.header("Content-Type", content_type)
+    }
+
     /// Send the headers the Inertia client sends on a visit after the first:
     /// `X-Inertia: true`, its `Accept`, and `X-Inertia-Version` set to the
     /// installed configuration's asset version (the empty string when no

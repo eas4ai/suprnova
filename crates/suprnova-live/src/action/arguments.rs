@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use crate::canonical::{CanonicalValue, check_canonical};
 use crate::identity::ModelField;
 use crate::limits::InputLimits;
-use crate::state::ModelCodec;
+use crate::state::{FieldIssue, FieldIssueKind, ModelCodec, object_schema};
 
 use super::ActionError;
 
@@ -108,6 +108,76 @@ impl ActionArgumentSchema {
 
     pub(crate) fn field(&self, name: &ModelField) -> Option<&ActionArgumentField> {
         self.fields.get(name)
+    }
+
+    /// The JSON Schema (draft 2020-12) an agent tool takes for these
+    /// arguments, or `None` when an argument's codec has none
+    /// ([`ModelCodec::json_schema`]).
+    ///
+    /// The object follows what preparation enforces: every declared field in
+    /// declared order, the required ones listed, an optional one also
+    /// accepting `null`, and no other field, since preparation refuses an
+    /// unknown name.
+    #[must_use]
+    pub fn json_schema(&self) -> Option<serde_json::Value> {
+        let mut properties = serde_json::Map::new();
+        let mut required = Vec::new();
+        for field in self.declared() {
+            let schema = field.codec.json_schema()?;
+            let schema = if field.required {
+                required.push(serde_json::Value::String(field.name.as_str().to_owned()));
+                schema
+            } else {
+                serde_json::json!({ "anyOf": [schema, { "type": "null" }] })
+            };
+            properties.insert(field.name.as_str().to_owned(), schema);
+        }
+        Some(object_schema(properties, required))
+    }
+
+    /// Every field of `value` that preparation would refuse, and why, in
+    /// field-name order: an unknown name, a missing or `null` required
+    /// field, or a value its codec refuses.
+    ///
+    /// Preparation answers a whole request with one closed error, which is
+    /// what the browser runtime needs. An agent writes its arguments by
+    /// hand, and naming every field lets it correct them in one call;
+    /// preparation still runs and decides.
+    #[must_use]
+    pub fn field_issues(&self, value: &CanonicalValue, limits: &InputLimits) -> Vec<FieldIssue> {
+        let CanonicalValue::Object(values) = value else {
+            return vec![FieldIssue::new("", FieldIssueKind::NotAnObject)];
+        };
+        let mut issues = Vec::new();
+        for (name, value) in values {
+            let Some(field) = ModelField::parse(name)
+                .ok()
+                .and_then(|parsed| self.fields.get(&parsed))
+            else {
+                issues.push(FieldIssue::new(name.clone(), FieldIssueKind::Unknown));
+                continue;
+            };
+            if matches!(value, CanonicalValue::Null) {
+                if field.required {
+                    issues.push(FieldIssue::new(name.clone(), FieldIssueKind::Null));
+                }
+            } else if let Err(issue) = field.codec.validate(value, limits) {
+                issues.push(FieldIssue::new(
+                    name.clone(),
+                    FieldIssueKind::Invalid(issue.kind()),
+                ));
+            }
+        }
+        for field in self.fields.values() {
+            if field.required && !values.contains_key(field.name.as_str()) {
+                issues.push(FieldIssue::new(
+                    field.name.as_str(),
+                    FieldIssueKind::Missing,
+                ));
+            }
+        }
+        issues.sort_by(|left, right| left.field().cmp(right.field()));
+        issues
     }
 }
 

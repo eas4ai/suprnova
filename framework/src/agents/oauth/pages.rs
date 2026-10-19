@@ -1,6 +1,7 @@
 //! The framework's default approval and connected-agents pages
 //! (AGENT-017): plain server-rendered HTML with no script, style or asset,
-//! for an application without a kit.
+//! for an application without a kit. With agent auth on, the
+//! connected-agents page lists the user's agent registrations too.
 //!
 //! Both pages require the signed-in user, refuse to be framed, are never
 //! cached and send no referrer. Every form they render posts with the
@@ -15,6 +16,9 @@ use magnetar::authorization_server::{AuthorizationServer, PendingAuthorizationVi
 
 use super::OAuthServer;
 use super::grants::{self, ClientGrant};
+use crate::agents::AgentAccount;
+use crate::agents::agent_auth::MountedAgentAuth;
+use crate::agents::page::{Html, csrf_token, guard_errors, guarded, notice, sign_in_redirect};
 use crate::csrf::CsrfMiddleware;
 use crate::error::FrameworkError;
 use crate::http::{HttpResponse, Request, Response};
@@ -24,15 +28,21 @@ use crate::routing::Router;
 /// What both pages need from the server's setup.
 pub(super) struct Pages {
     server: Arc<AuthorizationServer>,
+    agent: Option<Arc<MountedAgentAuth>>,
     route_prefix: String,
     sign_in_url: String,
     return_to_parameter: String,
 }
 
 impl Pages {
-    pub(super) fn new(server: Arc<AuthorizationServer>, setup: &OAuthServer) -> Self {
+    pub(super) fn new(
+        server: Arc<AuthorizationServer>,
+        agent: Option<Arc<MountedAgentAuth>>,
+        setup: &OAuthServer,
+    ) -> Self {
         Self {
             server,
+            agent,
             route_prefix: setup.route_prefix.trim_end_matches('/').to_owned(),
             sign_in_url: crate::routing::url::to(&setup.sign_in_path),
             return_to_parameter: setup.return_to_parameter.clone(),
@@ -41,20 +51,7 @@ impl Pages {
 
     /// Send a guest to sign in, to come back to this page after.
     fn sign_in(&self, request: &Request) -> HttpResponse {
-        let return_to = match request.query() {
-            Some(query) if !query.is_empty() => format!("{}?{query}", request.path()),
-            _ => request.path().to_owned(),
-        };
-        let separator = if self.sign_in_url.contains('?') {
-            '&'
-        } else {
-            '?'
-        };
-        let pair = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair(&self.return_to_parameter, &return_to)
-            .finish();
-        guarded(HttpResponse::new().status(302))
-            .header("Location", format!("{}{separator}{pair}", self.sign_in_url))
+        sign_in_redirect(&self.sign_in_url, &self.return_to_parameter, request)
     }
 }
 
@@ -67,13 +64,14 @@ pub(super) fn mount_approval(
     Ok(router
         .try_get(path, move |request: Request| {
             let pages = Arc::clone(&pages);
-            async move { approval(pages, request).await }
+            async move { guard_errors(approval(pages, request).await) }
         })?
         .into())
 }
 
-/// Serve the connected-agents page at `path` and its revoke form at
-/// `{path}/{grant}/revoke`.
+/// Serve the connected-agents page at `path`, its revoke form at
+/// `{path}/{grant}/revoke` and, with agent auth on, the agent revoke form
+/// at `{path}/agents/{registration}/revoke`.
 pub(super) fn mount_connected(
     router: Router,
     pages: Arc<Pages>,
@@ -86,17 +84,33 @@ pub(super) fn mount_connected(
         .try_get(&path, move |request: Request| {
             let pages = Arc::clone(&list_pages);
             let path = list_path.clone();
-            async move { connected(pages, path, request).await }
+            async move { guard_errors(connected(pages, path, request).await) }
         })?
         .into();
     let revoke_path = path.clone();
-    Ok(router
+    let revoke_pages = Arc::clone(&pages);
+    let router: Router = router
         .try_post(
             &format!("{path}/{{grant}}/revoke"),
             move |request: Request| {
-                let pages = Arc::clone(&pages);
+                let pages = Arc::clone(&revoke_pages);
                 let path = revoke_path.clone();
-                async move { revoke(pages, path, request).await }
+                async move { guard_errors(revoke(pages, path, request).await) }
+            },
+        )?
+        .middleware(CsrfMiddleware::new().without_xsrf_cookie())
+        .into();
+    if pages.agent.is_none() {
+        return Ok(router);
+    }
+    let agent_path = path.clone();
+    Ok(router
+        .try_post(
+            &format!("{path}/agents/{{registration}}/revoke"),
+            move |request: Request| {
+                let pages = Arc::clone(&pages);
+                let path = agent_path.clone();
+                async move { guard_errors(revoke_agent(pages, path, request).await) }
             },
         )?
         .middleware(CsrfMiddleware::new().without_xsrf_cookie())
@@ -176,7 +190,7 @@ fn render_approval(pending: &PendingAuthorizationView, action: &str, token: &str
         .raw("\">\n<button type=\"submit\" name=\"decision\" value=\"approve\">Allow</button>\n")
         .raw("<button type=\"submit\" name=\"decision\" value=\"deny\">Deny</button>\n")
         .raw("</form>\n</main>\n</body>\n</html>\n");
-    html.0
+    html.into_string()
 }
 
 /// The connected-agents page: every client grant of the signed-in user,
@@ -186,13 +200,25 @@ async fn connected(pages: Arc<Pages>, path: String, request: Request) -> Respons
         return Ok(pages.sign_in(&request));
     };
     let grants = grants::list(&pages.server, session.user_id()).await?;
+    let agents = match &pages.agent {
+        Some(agent) => Some(grants::list_agent_accounts(&agent.engine, session.user_id()).await?),
+        None => None,
+    };
     let token = csrf_token()?;
     Ok(guarded(HttpResponse::html(render_connected(
-        &grants, &path, &token,
+        &grants,
+        agents.as_deref(),
+        &path,
+        &token,
     ))))
 }
 
-fn render_connected(grants: &[ClientGrant], path: &str, token: &str) -> String {
+fn render_connected(
+    grants: &[ClientGrant],
+    agents: Option<&[AgentAccount]>,
+    path: &str,
+    token: &str,
+) -> String {
     let mut html = Html::default();
     html.raw("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n")
         .raw("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n")
@@ -240,8 +266,104 @@ fn render_connected(grants: &[ClientGrant], path: &str, token: &str) -> String {
         }
         html.raw("</ul>\n");
     }
+    if let Some(agents) = agents {
+        render_agents(&mut html, agents, path, token);
+    }
     html.raw("</main>\n</body>\n</html>\n");
-    html.0
+    html.into_string()
+}
+
+/// The page's "Agents" section: every agent registration bound to the
+/// user, each with a revoke button.
+fn render_agents(html: &mut Html, agents: &[AgentAccount], path: &str, token: &str) {
+    html.raw("<h2>Agents</h2>\n");
+    if agents.is_empty() {
+        html.raw("<p>No agents can act for you.</p>\n");
+        return;
+    }
+    html.raw("<p>These agents can use this application as you. Revoking one ends its access at once.</p>\n<ul>\n");
+    for agent in agents {
+        let action = crate::routing::url::to(&format!("{path}/agents/{}/revoke", agent.id));
+        let created = agent.created_at.format("%Y-%m-%d %H:%M UTC").to_string();
+        // The provider's name is the application's trust list entry, never
+        // one the provider sent.
+        html.raw("<li>\n<h3>");
+        match &agent.provider {
+            Some(provider) => {
+                html.raw("Agent through ").text(provider);
+            }
+            None => {
+                html.raw("Agent");
+            }
+        }
+        html.raw("</h3>\n<p>")
+            .raw(registration_type_words(&agent.registration_type))
+            .raw(". Registered ")
+            .text(&created);
+        if let Some(claimed) = agent.claimed_at {
+            html.raw(", claimed ")
+                .text(&claimed.format("%Y-%m-%d %H:%M UTC").to_string());
+        }
+        html.raw(".</p>\n");
+        if agent.scopes.is_empty() {
+            html.raw("<p>No permissions.</p>\n");
+        } else {
+            html.raw("<ul>\n");
+            for scope in &agent.scopes {
+                html.raw("<li>")
+                    .text(&scope.description)
+                    .raw(" (<code>")
+                    .text(&scope.name)
+                    .raw("</code>)</li>\n");
+            }
+            html.raw("</ul>\n");
+        }
+        html.raw("<form method=\"post\" action=\"")
+            .text(&action)
+            .raw("\">\n<input type=\"hidden\" name=\"_token\" value=\"")
+            .text(token)
+            .raw("\">\n<button type=\"submit\">Revoke this agent</button>\n</form>\n</li>\n");
+    }
+    html.raw("</ul>\n");
+}
+
+/// How an agent registered, in words.
+pub(crate) fn registration_type_words(registration_type: &str) -> &'static str {
+    match registration_type {
+        "anonymous" => "Registered on its own and claimed by you",
+        "service_auth" => "Registered with your email address",
+        "identity_assertion" => "Signed in through a provider you use",
+        _ => "An agent account",
+    }
+}
+
+/// The agent revoke form's action: end one of the signed-in user's agent
+/// registrations and return to the page.
+async fn revoke_agent(pages: Arc<Pages>, path: String, request: Request) -> Response {
+    let Some(session) = signed_in_session().await? else {
+        return Ok(notice(
+            401,
+            "Sign in first",
+            "Sign in to manage your connected agents.",
+        ));
+    };
+    let Some(agent) = &pages.agent else {
+        return Ok(notice(404, "No such agent", "Agent accounts are not on."));
+    };
+    let registration = request.param("registration").unwrap_or_default().to_owned();
+    let revoked = agent
+        .engine
+        .revoke_registration(session.user_id(), &registration, request.ip().as_deref())
+        .await
+        .map_err(unavailable)?;
+    if !revoked {
+        return Ok(notice(
+            404,
+            "No such agent",
+            "You have no connected agent by that name. It may already be revoked.",
+        ));
+    }
+    Ok(guarded(HttpResponse::new().status(303)).header("Location", crate::routing::url::to(&path)))
 }
 
 /// The revoke form's action: end one of the signed-in user's grants and
@@ -265,96 +387,7 @@ async fn revoke(pages: Arc<Pages>, path: String, request: Request) -> Response {
     Ok(guarded(HttpResponse::new().status(303)).header("Location", crate::routing::url::to(&path)))
 }
 
-/// A short page that says one thing.
-fn notice(status: u16, title: &'static str, message: &'static str) -> HttpResponse {
-    let mut html = Html::default();
-    html.raw("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n")
-        .raw("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>")
-        .raw(title)
-        .raw("</title>\n</head>\n<body>\n<main>\n<h1>")
-        .raw(title)
-        .raw("</h1>\n<p>")
-        .raw(message)
-        .raw("</p>\n</main>\n</body>\n</html>\n");
-    guarded(HttpResponse::html(html.0).status(status))
-}
-
-/// The headers every answer of these pages carries: never framed, so no
-/// page can overlay a button and trick the user into pressing it; never
-/// cached; and no referrer, since the address names a pending request.
-fn guarded(response: HttpResponse) -> HttpResponse {
-    response
-        .header("Cache-Control", "no-store")
-        .header("X-Frame-Options", "DENY")
-        .header("Content-Security-Policy", "frame-ancestors 'none'")
-        .header("Referrer-Policy", "no-referrer")
-}
-
-/// The session's CSRF token for the page's forms.
-fn csrf_token() -> Result<String, FrameworkError> {
-    crate::session::get_csrf_token().ok_or_else(|| {
-        FrameworkError::internal(
-            "the OAuth server's pages post their forms with the session's CSRF token; install \
-             the session middleware",
-        )
-    })
-}
-
 fn unavailable(error: magnetar::Error) -> FrameworkError {
     tracing::error!(%error, "the authorization server's store failed");
     FrameworkError::domain("the authorization server is unavailable", 503)
-}
-
-/// An HTML document under construction. Markup only comes in as
-/// `&'static str`, through [`Self::raw`]; every value the page shows goes
-/// through [`Self::text`], which escapes it for both text and quoted
-/// attributes. So no client-supplied name, host or address can become
-/// markup. A value the client chose goes through [`Self::client`], which
-/// also isolates its direction, so whatever reordering it carries stays
-/// inside it.
-#[derive(Default)]
-struct Html(String);
-
-impl Html {
-    /// Append fixed markup.
-    fn raw(&mut self, markup: &'static str) -> &mut Self {
-        self.0.push_str(markup);
-        self
-    }
-
-    /// Append `value`, a text the client chose, escaped and inside
-    /// `<bdi>`. Magnetar already removes the control and format characters
-    /// from a client's text; the isolation holds for any it still carries,
-    /// such as right-to-left letters, so they cannot reorder the page
-    /// around them.
-    fn client(&mut self, value: &str) -> &mut Self {
-        self.raw("<bdi>").text(value).raw("</bdi>")
-    }
-
-    /// Append `value` as text, escaped.
-    fn text(&mut self, value: &str) -> &mut Self {
-        for ch in value.chars() {
-            match ch {
-                '&' => self.0.push_str("&amp;"),
-                '<' => self.0.push_str("&lt;"),
-                '>' => self.0.push_str("&gt;"),
-                '"' => self.0.push_str("&quot;"),
-                '\'' => self.0.push_str("&#39;"),
-                _ => self.0.push(ch),
-            }
-        }
-        self
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn agent_017_html_escapes_every_value() {
-        let mut html = Html::default();
-        html.raw("<p title=\"").text("\"><script>'&").raw("\">");
-        assert_eq!(html.0, "<p title=\"&quot;&gt;&lt;script&gt;&#39;&amp;\">");
-    }
 }

@@ -896,7 +896,8 @@ pub use validator::Validate;
 // is pointed at this path, so an application needs no `schemars` of its own.
 #[cfg(feature = "agents")]
 pub use agents::{
-    AgentsConfig, CallerKind, ConnectedAgents, OAuthServer, OutsideIssuer, ToolCaller,
+    AgentAuth, AgentClaimed, AgentsConfig, CallerKind, ConnectedAgents, LiveMountRequest,
+    OAuthServer, OutsideIssuer, ToolCaller,
 };
 #[cfg(feature = "agents")]
 #[doc(hidden)]

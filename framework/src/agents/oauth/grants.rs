@@ -46,8 +46,11 @@ pub struct GrantScope {
     pub description: String,
 }
 
-impl From<ClientGrantSummary> for ClientGrant {
-    fn from(summary: ClientGrantSummary) -> Self {
+impl ClientGrant {
+    /// The grant as the authorization server's store summarizes it. Kept
+    /// off the public surface: Magnetar's summary type is not one an
+    /// application can name.
+    pub(crate) fn from_summary(summary: ClientGrantSummary) -> Self {
         Self {
             id: summary.grant_id,
             client_id: summary.client_id,
@@ -115,16 +118,88 @@ impl ConnectedAgents {
         let user_id = signed_in_user_id().await?;
         revoke(&server, &user_id, grant_id).await
     }
+
+    /// The agent registrations bound to the signed-in user that still
+    /// work, newest first (AGENT-010). An application keeps the
+    /// registration id on what an agent creates, and reconciles here what
+    /// an [`AgentClaimed`](crate::agents::AgentClaimed) listener missed.
+    ///
+    /// # Errors
+    ///
+    /// 401 for a guest, 500 when the request's router mounts no agent auth,
+    /// and 503 when agent auth's store cannot answer.
+    pub async fn agent_accounts(
+        request: &Request,
+    ) -> Result<Vec<crate::agents::AgentAccount>, FrameworkError> {
+        let agent = mounted_agent_auth(request)?;
+        let user_id = signed_in_user_id().await?;
+        list_agent_accounts(&agent.engine, &user_id).await
+    }
+
+    /// Revoke the signed-in user's agent registration `registration_id`
+    /// and every token issued from it. Returns `false` when the user has no
+    /// such live registration, including one that belongs to another user.
+    ///
+    /// # Errors
+    ///
+    /// As [`agent_accounts`](Self::agent_accounts).
+    pub async fn revoke_agent_account(
+        request: &Request,
+        registration_id: &str,
+    ) -> Result<bool, FrameworkError> {
+        let agent = mounted_agent_auth(request)?;
+        let user_id = signed_in_user_id().await?;
+        agent
+            .engine
+            .revoke_registration(&user_id, registration_id, request.ip().as_deref())
+            .await
+            .map_err(store_unavailable)
+    }
 }
 
 /// The OAuth server the request's router mounted.
 fn mounted(request: &Request) -> Result<Arc<AuthorizationServer>, FrameworkError> {
-    request.oauth_server().cloned().ok_or_else(|| {
-        FrameworkError::internal(
-            "the router that served this request mounts no OAuth server: serve agents with \
-             AgentsConfig::oauth_server",
-        )
-    })
+    request
+        .oauth_server()
+        .map(|mounted| Arc::clone(&mounted.server))
+        .ok_or_else(|| {
+            FrameworkError::internal(
+                "the router that served this request mounts no OAuth server: serve agents with \
+                 AgentsConfig::oauth_server",
+            )
+        })
+}
+
+/// The agent auth the request's router mounted.
+fn mounted_agent_auth(
+    request: &Request,
+) -> Result<Arc<crate::agents::agent_auth::MountedAgentAuth>, FrameworkError> {
+    request
+        .oauth_server()
+        .and_then(|mounted| mounted.agent.clone())
+        .ok_or_else(|| {
+            FrameworkError::internal(
+                "the router that served this request mounts no agent auth: serve agents with \
+                 AgentsConfig::agent_auth",
+            )
+        })
+}
+
+/// `user_id`'s live agent registrations, newest first.
+pub(crate) async fn list_agent_accounts(
+    engine: &magnetar::agent_auth::AgentAuth,
+    user_id: &str,
+) -> Result<Vec<crate::agents::AgentAccount>, FrameworkError> {
+    let mut accounts: Vec<crate::agents::AgentAccount> = engine
+        .list_connections(user_id)
+        .await
+        .map_err(store_unavailable)?
+        .agent_registrations
+        .into_iter()
+        .map(crate::agents::AgentAccount::from_summary)
+        .collect();
+    accounts.sort_by_key(|account| std::cmp::Reverse(account.created_at));
+    Ok(accounts)
 }
 
 /// The default guard's signed-in user, or 401.
@@ -151,7 +226,7 @@ pub(super) async fn list(
         // Agent auth keeps its grants on this server too; it lists them
         // with the registrations they belong to.
         .filter(|grant| grant.kind == magnetar::authorization_server::USER_GRANT_KIND)
-        .map(ClientGrant::from)
+        .map(ClientGrant::from_summary)
         .collect();
     grants.sort_by_key(|grant| std::cmp::Reverse(grant.created_at));
     Ok(grants)

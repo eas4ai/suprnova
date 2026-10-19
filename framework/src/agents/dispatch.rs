@@ -191,7 +191,10 @@ fn build_request(
     Ok(Request::for_tool_call(
         parts,
         body,
-        AgentMark::Call(CallContext { tool: tool.name() }),
+        AgentMark::Call(CallContext {
+            tool: tool.name(),
+            live: tool.live_target().cloned(),
+        }),
     ))
 }
 

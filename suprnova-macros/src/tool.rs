@@ -48,26 +48,53 @@ const CALLER_KINDS: [&str; 3] = ["public", "user", "agent"];
 
 /// The hints `annotations(...)` may set.
 #[derive(Default)]
-struct Annotations {
-    read_only: Option<bool>,
-    destructive: Option<bool>,
+pub(crate) struct Annotations {
+    pub(crate) read_only: Option<bool>,
+    pub(crate) destructive: Option<bool>,
     idempotent: Option<bool>,
     open_world: Option<bool>,
-    untrusted_content: Option<bool>,
+    pub(crate) untrusted_content: Option<bool>,
 }
 
 /// One parsed `#[tool(...)]`.
-struct ToolSpec {
-    name: LitStr,
-    description: LitStr,
-    title: Option<LitStr>,
-    callers: Vec<Ident>,
-    scopes: Vec<Path>,
+pub(crate) struct ToolSpec {
+    pub(crate) name: LitStr,
+    pub(crate) description: LitStr,
+    pub(crate) title: Option<LitStr>,
+    pub(crate) callers: Vec<Ident>,
+    pub(crate) scopes: Vec<Path>,
     input: Option<Type>,
     output: Option<Type>,
-    annotations: Annotations,
+    pub(crate) annotations: Annotations,
     route: Option<LitStr>,
     guard: Option<LitStr>,
+    /// For a Live action: whether the MCP endpoint offers it with no
+    /// browser (AGENT-013).
+    pub(crate) headless: bool,
+}
+
+/// Where a `#[tool]` sits, which decides what it may declare.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolSite {
+    /// On a routed `#[handler]`.
+    Handler,
+    /// On an `#[action]` inside a `#[live]` impl.
+    Live,
+}
+
+/// The longest base name a Live tool may have: a browser registers it as
+/// `{base}.{instance}` with an instance key of at most 63 bytes, inside the
+/// 128 characters of a tool name.
+const MAX_LIVE_NAME_LEN: usize = 64;
+
+impl ToolSpec {
+    /// Whether a browser registers the tool: it accepts a public or a
+    /// signed-in caller, the callers a page has.
+    pub(crate) fn offered_to_browser(&self) -> bool {
+        self.callers
+            .iter()
+            .any(|caller| caller == "public" || caller == "user")
+    }
 }
 
 /// Entry point for the attribute; see the module docs.
@@ -98,7 +125,7 @@ pub(crate) fn tool_impl_inner(attr: TokenStream, item: TokenStream) -> TokenStre
             return quote! { #error #item_fn };
         }
     };
-    let spec = match parse_spec(attr) {
+    let spec = match parse_spec(attr, ToolSite::Handler) {
         Ok(spec) => spec,
         Err(error) => {
             let error = error.to_compile_error();
@@ -184,13 +211,8 @@ fn record_items(
     spec: &ToolSpec,
     input_arg: Option<&Type>,
 ) -> TokenStream {
-    let name = &spec.name;
-    let description = &spec.description;
-    let marker = format_ident!(
-        "__suprnova_tool_{}",
-        escape(&name.value()),
-        span = name.span()
-    );
+    let marker = marker_macro(spec);
+    let meta = meta_tokens(spec);
     let mut fn_ref = item_fn.sig.ident.clone();
     fn_ref.set_span(Span::call_site());
     let handler = match self_ty {
@@ -205,15 +227,6 @@ fn record_items(
         ),
         None => fn_ref.to_string(),
     };
-    let callers = spec.callers.iter().map(|caller| {
-        let variant = match caller.to_string().as_str() {
-            "public" => quote! { Public },
-            "user" => quote! { User },
-            _ => quote! { Agent },
-        };
-        quote! { ::suprnova::agents::CallerKind::#variant }
-    });
-    let scopes = &spec.scopes;
     let input_schema = match &spec.input {
         Some(ty) => quote! { ::suprnova::agents::__input_schema::<#ty> },
         None => quote! { ::suprnova::agents::__empty_input_schema },
@@ -224,22 +237,7 @@ fn record_items(
         },
         None => quote! { ::core::option::Option::None },
     };
-    let optional = |value: &Option<LitStr>| match value {
-        Some(value) => quote! { ::core::option::Option::Some(#value) },
-        None => quote! { ::core::option::Option::None },
-    };
-    let title = optional(&spec.title);
-    let route = optional(&spec.route);
-    let guard = optional(&spec.guard);
-    let hint = |value: Option<bool>| match value {
-        Some(value) => quote! { ::core::option::Option::Some(#value) },
-        None => quote! { ::core::option::Option::None },
-    };
-    let read_only = hint(spec.annotations.read_only);
-    let destructive = hint(spec.annotations.destructive);
-    let idempotent = hint(spec.annotations.idempotent);
-    let open_world = hint(spec.annotations.open_world);
-    let untrusted_content = hint(spec.annotations.untrusted_content);
+    let route = optional_literal(&spec.route);
     // The declared input is the very type of the handler's argument: a
     // look-alike of the same name elsewhere is a type mismatch here.
     let input_check = match (input_arg, &spec.input) {
@@ -257,13 +255,7 @@ fn record_items(
         _ => TokenStream::new(),
     };
     quote! {
-        // A second tool of this name in the crate exports a second macro of
-        // this name, which the compiler refuses (AGENT-001).
-        #[doc(hidden)]
-        #[macro_export]
-        macro_rules! #marker {
-            () => {};
-        }
+        #marker
 
         const _: () = {
             #input_check
@@ -272,28 +264,88 @@ fn record_items(
             }
             ::suprnova::inventory::submit! {
                 ::suprnova::agents::ToolRecord::__declare(::suprnova::agents::__ToolDeclaration {
-                    name: #name,
-                    description: #description,
-                    title: #title,
-                    callers: &[#(#callers),*],
-                    scopes: &[#(#scopes),*],
-                    annotations: ::suprnova::agents::ToolAnnotations::__declare(
-                        #read_only,
-                        #destructive,
-                        #idempotent,
-                        #open_world,
-                        #untrusted_content,
-                    ),
+                    meta: #meta,
                     input_schema: #input_schema,
                     output_schema: #output_schema,
                     handler: __suprnova_tool_handler,
                     handler_name: #display,
                     module: ::core::module_path!(),
                     route: #route,
-                    guard: #guard,
                 })
             }
         };
+    }
+}
+
+/// The `#[macro_export]` marker every tool emits under its name: a second
+/// tool of one name in a crate exports a second macro of that name, which the
+/// compiler refuses (AGENT-001). A Live tool emits the same marker, so a Live
+/// tool and a handler tool cannot share a name either.
+pub(crate) fn marker_macro(spec: &ToolSpec) -> TokenStream {
+    let name = &spec.name;
+    let marker = format_ident!(
+        "__suprnova_tool_{}",
+        escape(&name.value()),
+        span = name.span()
+    );
+    quote! {
+        #[doc(hidden)]
+        #[macro_export]
+        macro_rules! #marker {
+            () => {};
+        }
+    }
+}
+
+/// The `__ToolMeta` every tool record carries: the facts a tool declares,
+/// whatever it runs.
+pub(crate) fn meta_tokens(spec: &ToolSpec) -> TokenStream {
+    let name = &spec.name;
+    let description = &spec.description;
+    let callers = spec.callers.iter().map(|caller| {
+        let variant = match caller.to_string().as_str() {
+            "public" => quote! { Public },
+            "user" => quote! { User },
+            _ => quote! { Agent },
+        };
+        quote! { ::suprnova::agents::CallerKind::#variant }
+    });
+    let scopes = &spec.scopes;
+    let title = optional_literal(&spec.title);
+    let guard = optional_literal(&spec.guard);
+    let hint = |value: Option<bool>| match value {
+        Some(value) => quote! { ::core::option::Option::Some(#value) },
+        None => quote! { ::core::option::Option::None },
+    };
+    let read_only = hint(spec.annotations.read_only);
+    let destructive = hint(spec.annotations.destructive);
+    let idempotent = hint(spec.annotations.idempotent);
+    let open_world = hint(spec.annotations.open_world);
+    let untrusted_content = hint(spec.annotations.untrusted_content);
+    quote! {
+        ::suprnova::agents::__ToolMeta {
+            name: #name,
+            description: #description,
+            title: #title,
+            callers: &[#(#callers),*],
+            scopes: &[#(#scopes),*],
+            annotations: ::suprnova::agents::ToolAnnotations::__declare(
+                #read_only,
+                #destructive,
+                #idempotent,
+                #open_world,
+                #untrusted_content,
+            ),
+            guard: #guard,
+        }
+    }
+}
+
+/// `Some(literal)` or `None`, as generated code spells an optional literal.
+fn optional_literal(value: &Option<LitStr>) -> TokenStream {
+    match value {
+        Some(value) => quote! { ::core::option::Option::Some(#value) },
+        None => quote! { ::core::option::Option::None },
     }
 }
 
@@ -337,7 +389,11 @@ fn escape(name: &str) -> String {
 }
 
 /// Parse the attribute's arguments and check every rule the build enforces.
-fn parse_spec(attr: TokenStream) -> syn::Result<ToolSpec> {
+///
+/// A Live action tool takes `headless`, and no `input`, `output` or `route`:
+/// its schema comes from its action's argument codecs and it runs its
+/// action, not a route.
+pub(crate) fn parse_spec(attr: TokenStream, site: ToolSite) -> syn::Result<ToolSpec> {
     let span = attr.span();
     let mut name: Option<LitStr> = None;
     let mut description: Option<LitStr> = None;
@@ -349,6 +405,7 @@ fn parse_spec(attr: TokenStream) -> syn::Result<ToolSpec> {
     let mut annotations = Annotations::default();
     let mut route: Option<LitStr> = None;
     let mut guard: Option<LitStr> = None;
+    let mut headless = false;
 
     let parser = syn::meta::parser(|meta| {
         let key = meta
@@ -357,6 +414,10 @@ fn parse_spec(attr: TokenStream) -> syn::Result<ToolSpec> {
             .map(ToString::to_string)
             .unwrap_or_default();
         match key.as_str() {
+            "input" | "output" | "route" if site == ToolSite::Live => Err(meta.error(format!(
+                "a Live action tool takes no `{key}`: its input schema comes from the action's \
+                 argument codecs, and it runs its action"
+            ))),
             "name" => {
                 name = Some(literal(meta.value()?, "name")?);
                 Ok(())
@@ -369,6 +430,16 @@ fn parse_spec(attr: TokenStream) -> syn::Result<ToolSpec> {
                 title = Some(literal(meta.value()?, "title")?);
                 Ok(())
             }
+            "headless" if site == ToolSite::Live => {
+                if meta.input.peek(Token![=]) {
+                    return Err(meta.error("`headless` is a flag: write `headless`"));
+                }
+                headless = true;
+                Ok(())
+            }
+            "headless" => Err(meta.error(
+                "`headless` marks a Live action tool; a handler tool is always callable over MCP",
+            )),
             "route" => {
                 route = Some(literal(meta.value()?, "route")?);
                 Ok(())
@@ -428,6 +499,10 @@ fn parse_spec(attr: TokenStream) -> syn::Result<ToolSpec> {
                 *slot = Some(value);
                 Ok(())
             }),
+            _ if site == ToolSite::Live => Err(meta.error(
+                "unknown #[tool] argument on a Live action; expected `name`, `description`, \
+                 `title`, `callers`, `scopes`, `annotations`, `guard` or `headless`",
+            )),
             _ => Err(meta.error(
                 "unknown #[tool] argument; expected `name`, `description`, `title`, \
                  `callers`, `scopes`, `input`, `output`, `annotations`, `route` or `guard`",
@@ -443,6 +518,16 @@ fn parse_spec(attr: TokenStream) -> syn::Result<ToolSpec> {
         )
     })?;
     check_name(&name)?;
+    if site == ToolSite::Live && name.value().len() > MAX_LIVE_NAME_LEN {
+        return Err(syn::Error::new(
+            name.span(),
+            format!(
+                "a Live tool name has at most {MAX_LIVE_NAME_LEN} characters: a browser \
+                 registers it with a `.` and the island's key, inside a tool name's \
+                 {MAX_NAME_LEN}"
+            ),
+        ));
+    }
     let description = description.ok_or_else(|| {
         syn::Error::new(
             span,
@@ -506,6 +591,7 @@ fn parse_spec(attr: TokenStream) -> syn::Result<ToolSpec> {
         annotations,
         route,
         guard,
+        headless,
     })
 }
 

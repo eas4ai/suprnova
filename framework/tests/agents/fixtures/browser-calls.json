@@ -1,5 +1,5 @@
 {
-  "about": "Shared cases for every browser implementation of a server tool call (AGENT-014, AGENT-015, AGENT-016): the Live runtime, the three kits and the WebAssembly crate. They mirror the MCP dispatcher's path and query rules (framework/src/agents/dispatch.rs) and its result mapping (framework/src/agents/mcp/tools.rs), without resultType, plus the browser-only rows. Read it; do not edit it in a lane.",
+  "about": "Shared cases for every browser implementation of a server tool call (AGENT-014, AGENT-015, AGENT-016): the Live runtime, the three kits and the WebAssembly crate. They mirror the MCP dispatcher's path and query rules (framework/src/agents/dispatch.rs), except that a browser refuses a `.` or `..` path value, which its URL parser would resolve before the request leaves and its result mapping (framework/src/agents/mcp/tools.rs), without resultType, plus the browser-only rows. Read it; do not edit it in a lane.",
   "paths": [
     {
       "name": "a number fills its segment",
@@ -186,7 +186,7 @@
       }
     },
     {
-      "name": "a segment of two dots cannot climb",
+      "name": "a segment of two dots is refused",
       "method": "POST",
       "path": [
         {
@@ -202,14 +202,19 @@
         "post": ".."
       },
       "expected": {
-        "url": "/posts/%2E%2E",
-        "body": {
-          "post": ".."
+        "error": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Invalid input: the path parameter `post` cannot be `.` or `..`, or hold one as a part, because a browser resolves it as a step of the path."
+            }
+          ],
+          "isError": true
         }
       }
     },
     {
-      "name": "a segment of one dot cannot stay",
+      "name": "a segment of one dot is refused",
       "method": "POST",
       "path": [
         {
@@ -225,9 +230,37 @@
         "post": "."
       },
       "expected": {
-        "url": "/posts/%2E",
+        "error": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Invalid input: the path parameter `post` cannot be `.` or `..`, or hold one as a part, because a browser resolves it as a step of the path."
+            }
+          ],
+          "isError": true
+        }
+      }
+    },
+    {
+      "name": "a segment of three dots is encoded",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "post": "..."
+      },
+      "expected": {
+        "url": "/posts/%2E%2E%2E",
         "body": {
-          "post": "."
+          "post": "..."
         }
       }
     },
@@ -268,12 +301,40 @@
         }
       ],
       "arguments": {
-        "path": "docs/a b/../c"
+        "path": "docs/a b/c.d"
       },
       "expected": {
-        "url": "/files/docs/a%20b/%2E%2E/c",
+        "url": "/files/docs/a%20b/c.d",
         "body": {
-          "path": "docs/a b/../c"
+          "path": "docs/a b/c.d"
+        }
+      }
+    },
+    {
+      "name": "a catch-all with a dot part is refused",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/files/"
+        },
+        {
+          "param": "path",
+          "optional": false,
+          "catchAll": true
+        }
+      ],
+      "arguments": {
+        "path": "docs/../c"
+      },
+      "expected": {
+        "error": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Invalid input: the path parameter `path` cannot be `.` or `..`, or hold one as a part, because a browser resolves it as a step of the path."
+            }
+          ],
+          "isError": true
         }
       }
     },

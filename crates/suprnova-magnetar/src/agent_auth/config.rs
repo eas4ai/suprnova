@@ -124,6 +124,24 @@ impl SigningKey {
         })
     }
 
+    /// A new P-256 private key from the operating system's random source,
+    /// in PKCS#8 PEM form, for an operator to store as the configured
+    /// signing key. It is returned as a secret, so it prints only where
+    /// the caller exposes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Internal`] when the key cannot be encoded.
+    pub fn generate_pem() -> Result<secrecy::SecretString> {
+        let secret = p256::SecretKey::random(&mut rand::rngs::OsRng);
+        let pem = secret
+            .to_pkcs8_pem(p256::pkcs8::LineEnding::LF)
+            .map_err(|_| Error::Internal {
+                message: "a new signing key could not be encoded as PKCS#8".to_owned(),
+            })?;
+        Ok(secrecy::SecretString::from(pem.as_str()))
+    }
+
     /// The key identifier.
     #[must_use]
     pub fn kid(&self) -> &str {
@@ -298,6 +316,17 @@ pub struct AgentAuthConfig {
     /// The host's claim page. It receives the claim attempt in the
     /// `claim_attempt_token` query parameter after the user signs in.
     pub claim_page_url: String,
+    /// Send the user straight to the claim page: the `verification_uri`
+    /// is the claim page's absolute URL, the issuer followed by
+    /// [`claim_page_url`](Self::claim_page_url), with the attempt token.
+    /// Off by default, which sends the user through the sign-in page with
+    /// the claim page as its return address.
+    ///
+    /// A sign-in page that sends an already signed-in user home loses the
+    /// claim on the default route. With this on, the host's claim page must
+    /// itself send a guest to sign in and back, with its own address and
+    /// query as the return address.
+    pub direct_claim_page: bool,
     /// The name `/auth.md` gives the service.
     pub service_name: String,
     /// Which identity types are on.
@@ -364,6 +393,7 @@ impl AgentAuthConfig {
             route_prefix: "/agent".to_owned(),
             skill_path: "/auth.md".to_owned(),
             claim_page_url: "/agent/claim".to_owned(),
+            direct_claim_page: false,
             service_name: "this service".to_owned(),
             identity_types: IdentityTypes::default(),
             trusted_issuers: Vec::new(),
