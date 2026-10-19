@@ -25,6 +25,7 @@ import {
   RuntimeDocument,
   RuntimeElement,
   RuntimeMutationObserver,
+  RuntimeNode,
   stubDomGlobals,
 } from "./support/runtime-dom.js";
 
@@ -212,8 +213,9 @@ class FakeTransport {
   async request(key: string, action: string): Promise<SentRequest> {
     const find = (): SentRequest | undefined =>
       this.sent.find((request) => {
-        const extensions = request.body["extensions"] as Record<string, unknown>;
-        const operations = request.body["operations"] as { name?: string }[];
+        const extensions = request.body["extensions"] as Record<string, unknown> | undefined;
+        const operations = request.body["operations"] as { name?: string }[] | undefined;
+        if (extensions === undefined || operations === undefined) return false;
         return (
           extensions["x_suprnova_live_document_key_v1"] === key &&
           operations.some((operation) => operation.name === action)
@@ -291,10 +293,18 @@ interface Page {
   readonly diagnostics: RuntimeDiagnosticInput[];
 }
 
-function page(keys: readonly string[] = ["main", "side"]): Page {
+function page(keys: readonly string[] = ["main", "side"], serverTools?: string): Page {
   const document = new RuntimeDocument();
   const context = new FakeModelContext();
   document.modelContext = context;
+  if (serverTools !== undefined) {
+    const script = new RuntimeElement(document, "script", {
+      id: "suprnova-agent-tools",
+      type: "application/json",
+    });
+    script.append(new RuntimeNode(3, document, serverTools));
+    document.head.append(script);
+  }
   keys.forEach((key, index) => {
     document.body.append(island(document, key, 16 * (index + 1)));
   });
@@ -454,6 +464,45 @@ describe("the page's WebMCP tool calls through the runtime", () => {
     expect(call.value?.isError).toBe(true);
     expect(context.live()).toEqual([]);
     expect(scheduler.delays()).toContain(AGENT_RESULT_HOLD_MS);
+    scheduler.run(AGENT_RESULT_HOLD_MS);
+    await until(() => navigation.reloads === 1, "the reload");
+  });
+
+  it("agent_014 a reload answers a pending server tool call first", async () => {
+    const tools = JSON.stringify({
+      v: 1,
+      limits: { maxResultBytes: 1024, callTimeoutMs: 30_000 },
+      tools: [
+        {
+          name: "posts.create",
+          description: "Create a post.",
+          inputSchema: { type: "object" },
+          annotations: {
+            readOnlyHint: false,
+            untrustedContentHint: false,
+            consequentialHint: false,
+          },
+          method: "POST",
+          path: [{ text: "/posts" }],
+        },
+      ],
+    });
+    const { document, context, transport, scheduler, navigation } = page(["main", "side"], tools);
+    expect(context.live()).toEqual(["counter.add.main", "counter.add.side", "posts.create"]);
+    const call = settledState(context.call("posts.create", { title: "Hello" }));
+    // The server tool's call is in flight, its answer held back.
+    await until(
+      () => transport.sent.some((request) => request.tool === "posts.create"),
+      "the server tool's request",
+    );
+    click(document, "side");
+    (await transport.request("side", "touch")).respond(409, refreshRequired());
+    // The page reloads to recover `side`: the server tool's call hears first,
+    // and every tool, the server tool's too, has left.
+    await until(() => call.settled, "the server tool's call to settle");
+    expect(navigation.reloads).toBe(0);
+    expect(call.value?.isError).toBe(true);
+    expect(context.live()).toEqual([]);
     scheduler.run(AGENT_RESULT_HOLD_MS);
     await until(() => navigation.reloads === 1, "the reload");
   });

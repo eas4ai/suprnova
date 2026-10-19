@@ -389,7 +389,8 @@ async fn mount_component(
     let selection = agent_selection(descriptor).map_err(|error| failed(&error))?;
     let context = runtime
         .validate_request_context_with_scope(request, selection, Some(scope), None)
-        .map_err(|error| failed(&error))?;
+        .map_err(|error| failed(&error))?
+        .with_agent_tool_filter(no_browser_tools());
     let key = DocumentMountKey::parse(AGENT_DOCUMENT_KEY).map_err(|_| {
         failed(&FrameworkError::internal(
             "the agent document key was refused",
@@ -480,6 +481,7 @@ async fn run_action(
     else {
         return refused(500, "The tool failed.");
     };
+    let context = context.with_agent_tool_filter(no_browser_tools());
     let endpoint_request = match LiveEndpointRequest::try_new(
         hyper::Method::POST,
         media,
@@ -784,6 +786,13 @@ fn agent_selection(descriptor: &ComponentDescriptor) -> Result<MountSelection, F
         descriptor.contract_digest().clone(),
         metadata.versions().minimum_protocol(),
     ))
+}
+
+/// The browser tools the island root of a headless call lists: none. No
+/// browser registers that root's tools, so it offers none to anyone, the
+/// strictest form of the viewer filter every other root applies (AGENT-014).
+fn no_browser_tools() -> suprnova_live::host::AgentToolFilter {
+    suprnova_live::host::AgentToolFilter::Only(BTreeSet::new())
 }
 
 /// The route identity of `/__live/agent`, derived as a document route's.

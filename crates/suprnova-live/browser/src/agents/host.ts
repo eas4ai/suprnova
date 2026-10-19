@@ -1,8 +1,10 @@
 /**
- * The WebMCP lifecycle of a page's tool islands (AGENT-012): when each
- * island's tools are registered, the calls each island has pending, and
- * the hold a refusal puts on an island's recovery until those calls have
- * their results.
+ * The WebMCP lifecycle of a page's tools (AGENT-012, AGENT-014): when each
+ * island's tools, and the page's server tools, are registered, the calls
+ * each has pending, and the hold a refusal puts on an island's recovery
+ * until those calls have their results. The page's server tools are one
+ * more entry, keyed by an object of the document's own, so suspend,
+ * resume and a page-level release cover them as they cover islands.
  *
  * A refusal or a navigation can end the page: the island reloads to
  * recover, or the document navigates away. A pending call whose page goes
@@ -18,6 +20,7 @@ import type {
   ModelContextLike,
   ModelContextToolResult,
   RegistrationFailure,
+  WebMcpToolDefinition,
 } from "./model-context.js";
 import { registerAgentTools } from "./model-context.js";
 import { agentToolError } from "./result.js";
@@ -37,17 +40,23 @@ export const AGENT_RESULT_HOLD_MS = 250;
 /** What a call through a registration that has left the page resolves to. */
 const LEFT = "The component's tools have left the page: call again once the page lists them.";
 
-/** What the host registers for one island. */
-export interface AgentToolRegistration {
+/** What the host registers for one island, or for the page's server tools. */
+export interface AgentToolRegistration<Tool extends WebMcpToolDefinition = AgentToolDefinition> {
   readonly context: ModelContextLike;
-  readonly tools: readonly AgentToolDefinition[];
+  readonly tools: readonly Tool[];
   readonly execute: (
-    tool: AgentToolDefinition,
+    tool: Tool,
     input: unknown,
     client?: ModelContextClient,
   ) => Promise<ModelContextToolResult>;
   readonly onFailure: (failure: RegistrationFailure) => void;
 }
+
+/**
+ * A registration with its tool type put away: it registers its tools,
+ * answering a call only while `current` holds, and returns the abort.
+ */
+type ErasedRegistration = (current: () => boolean) => VoidFunction;
 
 /** The timer the hold waits on. */
 export interface AgentHostScheduler {
@@ -84,7 +93,7 @@ export class PendingAgentCall {
 
 interface Entry {
   /** The island's registration now, or `null` when it cannot register. */
-  readonly registrar: () => AgentToolRegistration | null;
+  readonly registrar: () => ErasedRegistration | null;
   /** Aborts the current registration; `null` while none is live. */
   abort: VoidFunction | null;
   /** The current registration; a call through any other is refused. */
@@ -106,9 +115,26 @@ export class AgentToolHost<Island extends object> {
    * each resume or restore. `registrar` builds the registration each time,
    * so every call it accepts is bound to the island's current connection.
    */
-  connect(island: Island, registrar: () => AgentToolRegistration | null): void {
+  connect<Tool extends WebMcpToolDefinition>(
+    island: Island,
+    registrar: () => AgentToolRegistration<Tool> | null,
+  ): void {
     if (this.#entries.has(island)) return;
-    const entry: Entry = { registrar, abort: null, token: null, pending: new Set() };
+    const erased = (): ErasedRegistration | null => {
+      const registration = registrar();
+      if (registration === null) return null;
+      return (current) =>
+        registerAgentTools(
+          registration.context,
+          registration.tools,
+          (tool, input, client) =>
+            current()
+              ? registration.execute(tool, input, client)
+              : Promise.resolve(agentToolError(LEFT)),
+          registration.onFailure,
+        );
+    };
+    const entry: Entry = { registrar: erased, abort: null, token: null, pending: new Set() };
     this.#entries.set(island, entry);
     if (!this.#suspended) this.#register(entry);
   }
@@ -213,19 +239,11 @@ export class AgentToolHost<Island extends object> {
 
   #register(entry: Entry): void {
     if (entry.abort !== null) return;
-    const registration = entry.registrar();
-    if (registration === null) return;
+    const register = entry.registrar();
+    if (register === null) return;
     const token = {};
     entry.token = token;
-    entry.abort = registerAgentTools(
-      registration.context,
-      registration.tools,
-      (tool, input, client) =>
-        entry.token === token
-          ? registration.execute(tool, input, client)
-          : Promise.resolve(agentToolError(LEFT)),
-      registration.onFailure,
-    );
+    entry.abort = register(() => entry.token === token);
   }
 
   #unregister(entry: Entry): void {

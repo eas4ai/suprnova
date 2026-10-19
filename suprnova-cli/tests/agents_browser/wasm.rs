@@ -150,17 +150,12 @@ fn prepare_wasm_suite(work: &Path) -> Result<PathBuf, String> {
     let suite = work.join("suite");
     fs::create_dir_all(&suite).map_err(|error| error.to_string())?;
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents_browser");
-    for file in ["package.json", "wasm.spec.ts"] {
+    // The shared config matches every spec; this run holds only the
+    // WebAssembly one.
+    for file in ["package.json", "playwright.config.ts", "wasm.spec.ts"] {
         fs::copy(source.join(file), suite.join(file))
             .map_err(|error| format!("copy {file}: {error}"))?;
     }
-    // The shared config names its specs; this run holds only the
-    // WebAssembly one, so the copy matches it too.
-    let config = fs::read_to_string(source.join("playwright.config.ts"))
-        .map_err(|error| format!("read playwright.config.ts: {error}"))?
-        .replace("testMatch: 'agents.spec.ts'", "testMatch: '*.spec.ts'");
-    fs::write(suite.join("playwright.config.ts"), config)
-        .map_err(|error| format!("write playwright.config.ts: {error}"))?;
     let modules = workspace().join("crates/suprnova-live/browser/node_modules");
     if !modules.join("@playwright/test/cli.js").exists() {
         return Err(format!(
