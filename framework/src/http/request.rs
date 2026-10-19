@@ -1646,7 +1646,11 @@ impl Request {
     /// it, so `?filters[status]=x` fills a `filters` struct's `status`,
     /// `?tags[]=a&tags[]=b` fills a `tags: Vec<String>` field, and
     /// `?ids[1]=b&ids[0]=a` is a list in index order. This is how the
-    /// Inertia client sends a `GET` visit's data.
+    /// Inertia client sends a `GET` visit's data. A value that holds a JSON
+    /// object, as the official Precognition client sends one, reads as that
+    /// object where a struct or a map belongs, and stays text everywhere
+    /// else. A form request on a `GET` and Precognition read a query the
+    /// same way.
     ///
     /// A field that is missing or does not parse answers as a form
     /// request's does: a validation failure whose `errors` names each such
