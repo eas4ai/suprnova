@@ -280,6 +280,10 @@ fn request_derived_router() -> Router {
             Redirect::set_intended_url("https://sso.example/x");
             Ok(HttpResponse::text("noted"))
         })
+        .get("/want-absolute", |_request: Request| async {
+            Redirect::set_intended_url("http://localhost/elsewhere");
+            Ok(HttpResponse::text("noted"))
+        })
         .into();
     suprnova::fallback!(|request: Request| async move {
         match request.header("x-case").unwrap_or_default() {
@@ -373,13 +377,20 @@ async fn pfx_004_a_request_target_naming_another_host_never_leaves_the_origin() 
     let signed_in = support::get_raw(address, "/signed-in", &[("cookie", cookie.as_str())]).await;
     assert_eq!(signed_in.header("location").as_deref(), Some("/home"));
 
-    // An external intended URL the application sets itself is kept (PFX-010).
-    support::get_raw(address, "/want-external", &[("cookie", cookie.as_str())]).await;
+    // An absolute intended URL on the application's own origin is left as
+    // it is (PFX-010).
+    support::get_raw(address, "/want-absolute", &[("cookie", cookie.as_str())]).await;
     let signed_in = support::get_raw(address, "/signed-in", &[("cookie", cookie.as_str())]).await;
     assert_eq!(
         signed_in.header("location").as_deref(),
-        Some("https://sso.example/x")
+        Some("http://localhost/elsewhere")
     );
+    // One on another origin is never followed, whoever stored it: the
+    // intended URL comes back from the session, which outlives the code
+    // that wrote it.
+    support::get_raw(address, "/want-external", &[("cookie", cookie.as_str())]).await;
+    let signed_in = support::get_raw(address, "/signed-in", &[("cookie", cookie.as_str())]).await;
+    assert_eq!(signed_in.header("location").as_deref(), Some("/home"));
 }
 
 /// The user type the RBAC middleware checks; no request here signs one in.
