@@ -129,6 +129,15 @@ pub const DEFAULT_MCP_PATH: &str = "/mcp";
 /// budget; the caller checks apply to every request to the route.
 pub const TOOL_CALL_HEADER: &str = "Suprnova-Tool-Call";
 
+/// The header a kit's form tool submits its form with: an agent filling
+/// and sending one of the page's own forms through an ordinary visit. It
+/// is not [`TOOL_CALL_HEADER`], which the server refuses on a route that
+/// serves no tool, because the route the form posts to is an ordinary one.
+/// A consent page refuses it ([`AgentApprovals`], [`AgentClaims`]): consent
+/// comes from the person, so a form tool an application adds to its
+/// approval or claim page still cannot approve or claim.
+pub const FORM_TOOL_HEADER: &str = "Suprnova-Form-Tool";
+
 /// How the application serves agents: the MCP endpoint's path and limits,
 /// the origins it accepts, and the resolvers that verify tokens.
 ///

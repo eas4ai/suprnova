@@ -30,6 +30,7 @@
       <div class="flex items-center gap-6 text-sm font-medium">
         <Link href={`${root}/dashboard`} class="text-gray-700 hover:text-gray-900">Dashboard</Link>
         <Link href={`${root}/notes`} class="text-gray-700 hover:text-gray-900">Notes</Link>
+        <Link href={`${root}/connected-agents`} class="text-gray-700 hover:text-gray-900">Agents</Link>
       </div>
       <div class="flex items-center gap-4 text-sm">
         <AccountLinks />

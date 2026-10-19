@@ -1,4 +1,7 @@
-import { expect, test, type Page } from '@playwright/test';
+import { createHash, randomBytes } from 'node:crypto';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 
 // AGENT-014 and AGENT-015 in a scaffolded Inertia kit, in Chromium with
 // WebMCP enabled, observed as a built-in agent observes them: through the
@@ -6,6 +9,9 @@ import { expect, test, type Page } from '@playwright/test';
 // `WebMCP.invokeTool`. `kits.rs` scaffolds the kit, adds the fixture pages
 // and routes of `kit_fixtures/app`, starts the application and sets
 // KIT_NAME and KIT_BASE_URL.
+//
+// AGENT-017: the kit's own approval and claim pages, under the security
+// headers the scaffold's `.env` names.
 
 const kit = process.env.KIT_NAME ?? '';
 const password = 'agents-kit-password-42';
@@ -362,4 +368,270 @@ test(`agent_015_${kit}_form_tool_answers_when_its_submit_leaves_the_page`, async
     await expect(page.getByRole('heading', { name: 'First' })).toBeVisible();
     await expect.poll(() => registered(page)).not.toContain('fixture.notes.create_and_leave');
   }
+});
+
+// ------------------------------------------------------------ AGENT-017 ----
+
+/** Register a new account through the kit's form; its address. The browser is signed in afterwards. */
+async function signUp(page: Page): Promise<string> {
+  const stamp = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  const email = `consent-${stamp}@example.test`;
+  await page.goto('/register');
+  await page.locator('#name').fill(`Consent ${stamp}`);
+  await page.locator('#email').fill(email);
+  await page.locator('#password').fill(password);
+  await page.locator('#password_confirmation').fill(password);
+  await page.getByRole('button', { name: 'Register', exact: true }).click();
+  await expect(page).toHaveURL(/\/(verify-email|dashboard)$/);
+  return email;
+}
+
+/** Every tool the browser holds for the page, sorted: a consent page offers none. */
+async function everyTool(page: Page): Promise<string[]> {
+  return page.evaluate(async () => {
+    const context = (document as unknown as { modelContext: { getTools(): Promise<{ name: string }[]> } })
+      .modelContext;
+    return (await context.getTools()).map((tool) => tool.name).sort();
+  });
+}
+
+/** Record the signed-in user's address as verified, as the mailed link would. */
+async function verifyMe(page: Page) {
+  const xsrf = (await page.context().cookies()).find((cookie) => cookie.name === 'XSRF-TOKEN')?.value ?? '';
+  const verified = await page.request.post('/agent-fixture/verify-me', {
+    headers: { 'X-XSRF-TOKEN': decodeURIComponent(xsrf) },
+  });
+  expect(verified.status(), await verified.text()).toBe(200);
+}
+
+/** A loopback MCP client: the redirect URI it registers, on another origin than the application's, and every request that reached it. */
+interface LoopbackClient {
+  redirectUri: string;
+  hits: URL[];
+  close: () => Promise<void>;
+}
+
+async function startLoopbackClient(): Promise<LoopbackClient> {
+  const hits: URL[] = [];
+  const server = createServer((request, response) => {
+    hits.push(new URL(request.url ?? '/', 'http://127.0.0.1'));
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('the client got the answer');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    redirectUri: `http://127.0.0.1:${port}/callback`,
+    hits,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+/** Register the client dynamically (RFC 7591), with no cookie, as a client does; its id. */
+async function registerClient(request: APIRequestContext, redirectUri: string): Promise<string> {
+  const response = await request.post('/oauth/register', {
+    data: {
+      client_name: 'Kit Browser Tool',
+      redirect_uris: [redirectUri],
+      token_endpoint_auth_method: 'none',
+      grant_types: ['authorization_code'],
+      response_types: ['code'],
+    },
+  });
+  expect(response.status(), await response.text()).toBe(201);
+  return (await response.json()).client_id as string;
+}
+
+/** Register an agent by `service_auth` for `email`, with no cookie, as an agent does. */
+async function serviceAuth(request: APIRequestContext, email: string) {
+  const response = await request.post('/agent/identity', { data: { type: 'service_auth', login_hint: email } });
+  expect(response.status(), await response.text()).toBe(200);
+  return (await response.json()) as {
+    claim_token: string;
+    claim: { verification_uri: string; user_code: string };
+  };
+}
+
+test(`agent_017_${kit}_approval_page_round_trip`, async ({ page, request, baseURL }) => {
+  const client = await startLoopbackClient();
+  try {
+    const clientId = await registerClient(request, client.redirectUri);
+    const email = await signUp(page);
+    // A guest from here on: the authorization request sends them to sign in.
+    await page.context().clearCookies();
+    const verifier = randomBytes(32).toString('base64url');
+    const query = new URLSearchParams({
+      response_type: 'code',
+      client_id: clientId,
+      redirect_uri: client.redirectUri,
+      code_challenge: createHash('sha256').update(verifier).digest('base64url'),
+      code_challenge_method: 'S256',
+      resource: `${baseURL}/mcp`,
+      state: 'state-123',
+    });
+    await page.goto(`/oauth/authorize?${query}`);
+    await expect(page).toHaveURL(/\/login\?return_to=/);
+    await page.locator('#email').fill(email);
+    await page.locator('#password').fill(password);
+    // The sign-in continues to the authorization request by a location
+    // visit, which sends the browser to the kit's approval page.
+    const approval = page.waitForResponse((response) => response.url().includes('/oauth/approve?authorization='));
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    const document = await approval;
+    expect(document.status()).toBe(200);
+    // The default preset's policy, with framing refused: its `form-action
+    // 'self'` stays, and the decision still reaches the client.
+    const csp = document.headers()['content-security-policy'] ?? '';
+    expect(csp).toContain("form-action 'self'");
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(document.headers()['x-frame-options']).toBe('DENY');
+    expect(document.headers()['referrer-policy']).toBe('no-referrer');
+    expect(document.headers()['cache-control']).toContain('no-store');
+    await expect(page.getByRole('heading', { name: 'Allow Kit Browser Tool to act for you?' })).toBeVisible();
+    await expect(page.getByText(client.redirectUri)).toBeVisible();
+    expect(await everyTool(page)).toEqual([]);
+
+    await Promise.all([
+      page.waitForURL((url) => url.href.startsWith(`${client.redirectUri}?`)),
+      page.getByRole('button', { name: 'Allow', exact: true }).click(),
+    ]);
+    expect(client.hits).toHaveLength(1);
+    const reached = client.hits[0];
+    expect(reached.pathname).toBe('/callback');
+    expect(reached.searchParams.get('code')).toBeTruthy();
+    expect(reached.searchParams.get('state')).toBe('state-123');
+    expect(reached.searchParams.get('iss')).toBe(baseURL);
+
+    // The client exchanges the code, and its grant is live.
+    const tokens = await request.post('/oauth/token', {
+      form: {
+        grant_type: 'authorization_code',
+        code: reached.searchParams.get('code') ?? '',
+        redirect_uri: client.redirectUri,
+        client_id: clientId,
+        code_verifier: verifier,
+        resource: `${baseURL}/mcp`,
+      },
+    });
+    expect(tokens.status(), await tokens.text()).toBe(200);
+
+    // The connected-agents page lists the client and revokes it.
+    await page.goto('/connected-agents');
+    await expect(page.getByText('Kit Browser Tool')).toBeVisible();
+    await page.getByRole('button', { name: 'Revoke', exact: true }).click();
+    await expect(page.getByText('No apps can act for you.')).toBeVisible();
+    await expect(page.getByText('Kit Browser Tool')).toHaveCount(0);
+  } finally {
+    await client.close();
+  }
+});
+
+test(`agent_017_${kit}_claim_page_round_trip`, async ({ page, request, baseURL }) => {
+  const email = await signUp(page);
+  await verifyMe(page);
+  const registration = await serviceAuth(request, email);
+  await page.goto(registration.claim.verification_uri);
+  await expect(page.getByRole('heading', { name: 'Let an agent act for you?' })).toBeVisible();
+  await expect(page.getByText('An agent that named your email address asks to act as you.')).toBeVisible();
+  expect(await everyTool(page)).toEqual([]);
+  await page.locator('#user_code').fill(registration.claim.user_code);
+  await page.getByRole('button', { name: 'Allow', exact: true }).click();
+  await expect(page).toHaveURL(/\/connected-agents$/);
+  await expect(page.getByText('The agent is connected.')).toBeVisible();
+  await expect(page.getByText('Registered with your email address')).toBeVisible();
+
+  // The agent's poll gets its tokens.
+  const tokens = await request.post('/oauth/token', {
+    form: {
+      grant_type: 'urn:workos:agent-auth:grant-type:claim',
+      claim_token: registration.claim_token,
+      resource: `${baseURL}/mcp`,
+    },
+  });
+  expect(tokens.status(), await tokens.text()).toBe(200);
+  expect((await tokens.json()).access_token).toBeTruthy();
+});
+
+test(`agent_017_${kit}_wrong_claim_code_shows_the_attempts_left`, async ({ page, request }) => {
+  const email = await signUp(page);
+  await verifyMe(page);
+  const registration = await serviceAuth(request, email);
+  await page.goto(registration.claim.verification_uri);
+  const allowed = (await page.getByText(/wrong entries allowed/).textContent()) ?? '';
+  const attempts = Number(/(\d+) wrong entries allowed/.exec(allowed)?.[1]);
+  expect(attempts).toBeGreaterThan(1);
+  const wrong = registration.claim.user_code === '000000' ? '111111' : '000000';
+  await page.locator('#user_code').fill(wrong);
+  await page.getByRole('button', { name: 'Allow', exact: true }).click();
+  await expect(page.getByText(`That code is wrong. ${attempts - 1} attempts left.`)).toBeVisible();
+  await expect(page).toHaveURL(/\/agent\/claim\?claim_attempt_token=/);
+  await expect(page.getByText(`${attempts - 1} wrong entries allowed`)).toBeVisible();
+});
+
+test(`agent_017_${kit}_form_tool_cannot_approve`, async ({ page, request, baseURL }) => {
+  const client = await startLoopbackClient();
+  try {
+    const clientId = await registerClient(request, client.redirectUri);
+    await signUp(page);
+    const query = new URLSearchParams({
+      response_type: 'code',
+      client_id: clientId,
+      redirect_uri: client.redirectUri,
+      code_challenge: createHash('sha256').update(randomBytes(32).toString('base64url')).digest('base64url'),
+      code_challenge_method: 'S256',
+      resource: `${baseURL}/mcp`,
+      state: 'state-123',
+    });
+    await page.goto(`/oauth/authorize?${query}`);
+    await expect(page).toHaveURL(/\/oauth\/approve\?authorization=/);
+    const approval = new URL(page.url());
+    const id = approval.searchParams.get('authorization') ?? '';
+
+    // An application's page with a form tool that posts the approval form,
+    // with the user's own session and CSRF token.
+    const agent = await webmcp(page);
+    await page.goto('/agent-fixture/consent');
+    await expect.poll(() => registered(page)).toContain('fixture.consent.approve');
+    const posted = page.waitForResponse(
+      (response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/oauth/approve',
+    );
+    await agent.invoke('fixture.consent.approve', { authorization: id, decision: 'approve' });
+    const refused = await posted;
+    expect(refused.request().headers()['suprnova-form-tool']).toBe('1');
+    expect(refused.status()).toBe(403);
+
+    // The authorization is still the user's to decide, and the client got
+    // nothing.
+    expect(client.hits).toHaveLength(0);
+    const pending = await page.request.get(`${approval.pathname}${approval.search}`, { headers: { Accept: 'text/html' } });
+    expect(pending.status(), await pending.text()).toBe(200);
+  } finally {
+    await client.close();
+  }
+});
+
+test(`agent_017_${kit}_notes_after_a_claim_keep_their_form_errors`, async ({ page, request }) => {
+  const email = await signUp(page);
+  await verifyMe(page);
+  const registration = await serviceAuth(request, email);
+  await page.goto(registration.claim.verification_uri);
+  await page.locator('#user_code').fill(registration.claim.user_code);
+  await page.getByRole('button', { name: 'Allow', exact: true }).click();
+  await expect(page).toHaveURL(/\/connected-agents$/);
+
+  // The document came from the claim page, which sends no referrer, so the
+  // notes form posts with none: a failed rule must still return to it, not
+  // to the last script the page loaded.
+  await page.getByRole('link', { name: 'Notes', exact: true }).click();
+  await expect(page).toHaveURL(/\/notes$/);
+  await page.locator('#title').fill('   ');
+  const posted = page.waitForResponse(
+    (response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/notes',
+  );
+  await page.getByRole('button', { name: 'Save note' }).click();
+  const refused = await posted;
+  expect(refused.status()).toBe(303);
+  expect(new URL(refused.headers()['location'] ?? '', 'http://kit.test').pathname).toBe('/notes');
+  await expect(page.getByText('Give the note a title of 1 to 255 characters.')).toBeVisible();
+  await expect(page).toHaveURL(/\/notes$/);
 });

@@ -1021,6 +1021,21 @@ pub mod react {
     pub fn notes_show_page() -> &'static str {
         include_str!("files/frontend/react/src/pages/Notes/Show.tsx.tpl")
     }
+    /// The approval page an MCP client sends the user to, rendered by
+    /// `controllers::agents::approval`.
+    pub fn agents_approve_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/Agents/Approve.tsx.tpl")
+    }
+    /// The claim page an agent sends the user to, rendered by
+    /// `controllers::agents::claim`.
+    pub fn agents_claim_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/Agents/Claim.tsx.tpl")
+    }
+    /// The clients and agents that act for the user, rendered by
+    /// `controllers::agents::connected`.
+    pub fn agents_connected_page() -> &'static str {
+        include_str!("files/frontend/react/src/pages/Agents/Connected.tsx.tpl")
+    }
 }
 
 pub mod svelte {
@@ -1136,6 +1151,23 @@ pub mod svelte {
     pub fn notes_show_page() -> &'static str {
         include_str!("files/frontend/svelte/src/pages/Notes/Show.svelte.tpl")
     }
+    /// `src/pages/Agents/Approve.svelte`: the approval page an MCP client
+    /// sends the user to, the page the `agents` controller's `approval`
+    /// renders.
+    pub fn agents_approve_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/Agents/Approve.svelte.tpl")
+    }
+    /// `src/pages/Agents/Claim.svelte`: the claim page an agent sends the
+    /// user to, the page the `agents` controller's `claim` renders.
+    pub fn agents_claim_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/Agents/Claim.svelte.tpl")
+    }
+    /// `src/pages/Agents/Connected.svelte`: the clients and agents that act
+    /// for the user, the page the `agents` controller's `connected`
+    /// renders.
+    pub fn agents_connected_page() -> &'static str {
+        include_str!("files/frontend/svelte/src/pages/Agents/Connected.svelte.tpl")
+    }
 }
 
 pub mod vue {
@@ -1182,6 +1214,21 @@ pub mod vue {
     /// instant visit.
     pub fn notes_show_page() -> &'static str {
         include_str!("files/frontend/vue/src/pages/Notes/Show.vue.tpl")
+    }
+    /// The approval page an MCP client sends the user to, rendered by
+    /// `controllers::agents::approval`.
+    pub fn agents_approve_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/Agents/Approve.vue.tpl")
+    }
+    /// The claim page an agent sends the user to, rendered by
+    /// `controllers::agents::claim`.
+    pub fn agents_claim_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/Agents/Claim.vue.tpl")
+    }
+    /// The clients and agents that act for the user, rendered by
+    /// `controllers::agents::connected`.
+    pub fn agents_connected_page() -> &'static str {
+        include_str!("files/frontend/vue/src/pages/Agents/Connected.vue.tpl")
     }
     /// The layout `main.ts` gives every page outside `auth/`.
     pub fn app_layout() -> &'static str {
@@ -1393,6 +1440,38 @@ pub fn scaffold_frontend(
         (agents.join("index.ts"), agent_hooks),
         (types.join("tool-schemas.ts"), tool_schemas_types()),
     ] {
+        fs::write(&path, content)
+            .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    }
+
+    // The approval, claim and connected-agents pages the `agents`
+    // controller renders (AGENT-017).
+    let agent_pages = pages.join("Agents");
+    fs::create_dir_all(&agent_pages)
+        .map_err(|e| format!("Failed to create {}: {}", agent_pages.display(), e))?;
+    let (approve_page, claim_page, connected_page) = match kit {
+        InertiaKit::React => (
+            react::agents_approve_page(),
+            react::agents_claim_page(),
+            react::agents_connected_page(),
+        ),
+        InertiaKit::Svelte => (
+            svelte::agents_approve_page(),
+            svelte::agents_claim_page(),
+            svelte::agents_connected_page(),
+        ),
+        InertiaKit::Vue => (
+            vue::agents_approve_page(),
+            vue::agents_claim_page(),
+            vue::agents_connected_page(),
+        ),
+    };
+    for (name, content) in [
+        ("Approve", approve_page),
+        ("Claim", claim_page),
+        ("Connected", connected_page),
+    ] {
+        let path = agent_pages.join(format!("{name}.{ext}"));
         fs::write(&path, content)
             .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
     }
@@ -1708,6 +1787,13 @@ pub fn scaffold_api(
 
 pub fn auth_controller() -> &'static str {
     include_str!("files/backend/controllers/auth.rs.tpl")
+}
+
+/// The scaffolded `src/controllers/agents.rs`: the approval, claim and
+/// connected-agents pages `src/agents.rs` serves in place of the
+/// framework's defaults (AGENT-017).
+pub fn agents_controller() -> &'static str {
+    include_str!("files/backend/controllers/agents.rs.tpl")
 }
 
 pub fn dashboard_controller() -> &'static str {

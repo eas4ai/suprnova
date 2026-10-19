@@ -1,4 +1,4 @@
-use suprnova::{StaticFiles, fallback, get, group, post, routes};
+use suprnova::{ConsentPageHeaders, StaticFiles, fallback, get, group, post, routes};
 
 use crate::controllers;
 use crate::middleware;
@@ -46,6 +46,26 @@ routes! {
         get!("/verify-email/verify", controllers::email_verification::verify)
             .name("verification.verify"),
     }).middleware(middleware::authenticate::auth()),
+
+    // Agents: the approval page an MCP client sends the user to, the claim
+    // page an agent sends the user to, and the user's connected agents
+    // (`controllers::agents`, served with `src/agents.rs`). A guest who
+    // opens the first two signs in and comes back. `ConsentPageHeaders`
+    // keeps every answer here out of frames, caches and referrers. No route
+    // here offers a tool: consent comes from the person.
+    group!("/", {
+        get!("/oauth/approve", controllers::agents::approval).name("agents.approval"),
+        post!("/oauth/approve", controllers::agents::decide).name("agents.decide"),
+        get!("/agent/claim", controllers::agents::claim).name("agents.claim"),
+        post!("/agent/claim", controllers::agents::confirm).name("agents.confirm"),
+    }).middleware(ConsentPageHeaders),
+    group!("/", {
+        get!("/connected-agents", controllers::agents::connected).name("agents.connected"),
+        post!("/connected-agents/clients/{grant}/revoke", controllers::agents::revoke_client)
+            .name("agents.clients.revoke"),
+        post!("/connected-agents/agents/{registration}/revoke", controllers::agents::revoke_agent)
+            .name("agents.accounts.revoke"),
+    }).middleware(middleware::authenticate::auth()).middleware(ConsentPageHeaders),
 
     // Static files. Every route above wins first; a `GET` or `HEAD` that
     // none of them matched is looked up under `public/`. That is where

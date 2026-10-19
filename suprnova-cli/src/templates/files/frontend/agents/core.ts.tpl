@@ -66,6 +66,13 @@ export const DEFAULT_MAX_RESULT_BYTES = 8 * 1024 * 1024
 /** The header that marks a request as an agent's call of the route's tool. */
 export const TOOL_CALL_HEADER = 'Suprnova-Tool-Call'
 
+/**
+ * The header that marks a form a form tool submits: the server's
+ * `suprnova::agents::FORM_TOOL_HEADER`. A consent page refuses it, so an
+ * agent filling the approval or claim form can neither approve nor claim.
+ */
+export const FORM_TOOL_HEADER = 'Suprnova-Form-Tool'
+
 /** A tool name the framework accepts (AGENT-001). */
 const TOOL_NAME = /^[A-Za-z0-9_.-]{1,128}$/u
 
@@ -919,7 +926,7 @@ export type FormToolOptions = {
   /**
    * The form's server request type's schema, from `suprnova
    * generate-types`: `toolSchemas.StoreNoteRequest` in
-   * `@/types/tool-schemas`.
+   * `src/types/tool-schemas.ts`.
    */
   schema: ToolInputSchema
   action: FormAction
@@ -932,9 +939,11 @@ export type FormToolOptions = {
   debugging?: boolean
 }
 
-/** The callbacks of the Inertia visit a form tool submits with. */
+/** The options of the Inertia visit a form tool submits with. */
 export type FormVisit = {
   preserveScroll: boolean
+  /** The form-tool header, which a consent page refuses. */
+  headers: Record<string, string>
   onSuccess: (page: { component: string; url: string }) => void
   onError: (errors: Record<string, unknown>) => void
   onFinish: () => void
@@ -965,7 +974,9 @@ function list(names: string[]): string {
  *
  * A form tool sends no tool-call header: the form is the page's own, sent
  * through the ordinary Inertia visit, so the route's own throttle and
- * checks apply and the server tool budget does not.
+ * checks apply and the server tool budget does not. It marks the visit
+ * with the form-tool header instead, which a consent page refuses, so a
+ * form tool on the approval or claim page cannot approve or claim.
  */
 export function formTool(options: FormToolOptions, driver: () => FormDriver): ToolDefinition {
   const method = formMethod(options.action.method)
@@ -1030,6 +1041,7 @@ export function formTool(options: FormToolOptions, driver: () => FormDriver): To
         try {
           form.submit(method, options.action.url, {
             preserveScroll: true,
+            headers: { [FORM_TOOL_HEADER]: '1' },
             onSuccess: (page) => {
               const outcome = { outcome: 'submitted', component: page.component, url: page.url }
               settle({

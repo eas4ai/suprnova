@@ -731,6 +731,14 @@ fn write_inertia_kit(
     )
     .map_err(|e| format!("Failed to write src/controllers/auth.rs: {}", e))?;
 
+    // Write src/controllers/agents.rs: the approval, claim and
+    // connected-agents pages src/agents.rs serves (AGENT-017)
+    fs::write(
+        project_path.join("src/controllers/agents.rs"),
+        templates::agents_controller(),
+    )
+    .map_err(|e| format!("Failed to write src/controllers/agents.rs: {}", e))?;
+
     // Write src/controllers/dashboard.rs
     fs::write(
         project_path.join("src/controllers/dashboard.rs"),
