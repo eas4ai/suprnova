@@ -599,7 +599,7 @@ async fn framework_session(user_id: &str, epoch: u64) -> magnetar::Result<Verifi
         auth_epoch: epoch,
         token_hash: digest,
         token_digest: digest,
-        expires_at: Utc::now() + HOST_SESSION_LIFETIME,
+        expires_at: crate::clock::now() + HOST_SESSION_LIFETIME,
         revoked_at: None,
         metadata: SessionMetadata::default(),
     };

@@ -434,7 +434,7 @@ impl CallerResolver for OutsideIssuer {
                 "The token was issued by another server.",
             ));
         }
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::clock::now().timestamp();
         let leeway = i64::try_from(self.leeway.as_secs()).unwrap_or(i64::MAX);
         let Some(expires) = numeric_date(&claims, "exp") else {
             return Err(ResolveError::Invalid("The token has no expiry."));
