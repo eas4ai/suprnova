@@ -30,10 +30,13 @@ async fn setup() -> suprnova::mail::MailFake {
     );
     __PACKAGE__::config::register_all();
     suprnova::Crypt::init(suprnova::EncryptionKey::from_env().expect("APP_KEY is set"));
-    __PACKAGE__::bootstrap::register().await;
+    // `serve` migrates before its bootstrap runs, and the bootstrap reads
+    // the notes' search tables, so the migrations go first here too.
+    suprnova::DB::init().await.expect("connect to the database");
     __PACKAGE__::migrations::Migrator::up(suprnova::DB::connection().unwrap().inner(), None)
         .await
         .expect("migrations apply");
+    __PACKAGE__::bootstrap::register().await;
     suprnova::rate_limit::bootstrap_default().await;
     __PACKAGE__::bootstrap::register_http_stack();
     suprnova::Mail::fake()
@@ -82,23 +85,28 @@ impl Client {
     }
 
     async fn get(&mut self, path: &str) -> Response {
-        self.exchange("GET", path, None, false).await
+        self.exchange("GET", path, None, false, "text/html").await
     }
 
     async fn head(&mut self, path: &str) -> Response {
-        self.exchange("HEAD", path, None, false).await
+        self.exchange("HEAD", path, None, false, "text/html").await
     }
 
     async fn post(&mut self, path: &str, body: Value) -> Response {
-        self.exchange("POST", path, Some(body), false).await
+        self.exchange("POST", path, Some(body), false, "text/html").await
+    }
+
+    /// A POST from a client that asks for JSON, as an API client does.
+    async fn json_post(&mut self, path: &str, body: Value) -> Response {
+        self.exchange("POST", path, Some(body), false, "application/json").await
     }
 
     async fn inertia_get(&mut self, path: &str) -> Response {
-        self.exchange("GET", path, None, true).await
+        self.exchange("GET", path, None, true, "text/html").await
     }
 
     async fn inertia_post(&mut self, path: &str, body: Value) -> Response {
-        self.exchange("POST", path, Some(body), true).await
+        self.exchange("POST", path, Some(body), true, "text/html").await
     }
 
     async fn exchange(
@@ -107,6 +115,7 @@ impl Client {
         path: &str,
         body: Option<Value>,
         inertia: bool,
+        accept: &str,
     ) -> Response {
         // One real Hyper connection per exchange; both tasks are aborted on
         // timeout or panic as well as on normal completion.
@@ -135,7 +144,7 @@ impl Client {
                 .method(method)
                 .uri(path)
                 .header("Host", "app.test")
-                .header("Accept", "text/html");
+                .header("Accept", accept);
             if !payload.is_empty() {
                 request = request.header("Content-Type", "application/json");
             }
@@ -287,16 +296,28 @@ async fn account_flows_validation_errors_and_static_files() {
             "the register page must show the flashed `{field}` error; got {errors}"
         );
     }
+    // A browser's own form post goes back to the form with its errors, as
+    // Laravel redirects a request that does not expect JSON; a client that
+    // asks for JSON gets the 422 envelope.
+    assert_redirects_to(
+        &client
+            .post(
+                "/register",
+                json!({"name": "A", "email": "invalid", "password": "short", "password_confirmation": "different"}),
+            )
+            .await,
+        "/register",
+    );
     assert_eq!(
         client
-            .post(
+            .json_post(
                 "/register",
                 json!({"name": "A", "email": "invalid", "password": "short", "password_confirmation": "different"}),
             )
             .await
             .status,
         422,
-        "a plain client still gets the 422 envelope"
+        "a JSON client still gets the 422 envelope"
     );
 
     // ---- Registration mails a verification link (#8) ----
@@ -347,8 +368,8 @@ async fn account_flows_validation_errors_and_static_files() {
             .get(&format!("/verify-email/verify?token={token}"))
             .await
             .status,
-        400,
-        "a foreign token is refused"
+        403,
+        "a foreign token is refused, as Laravel refuses another account's link"
     );
     assert!(
         User::find_by_email(&other.email)
