@@ -185,10 +185,11 @@ async fn build_agent_auth(kid: &str, pem: &str) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-/// AGENT-007: `suprnova new` gives every kit's `.env` a signing key of its
-/// own, in the two lines `agents:key` prints.
+/// AGENT-017: `suprnova new` gives every kit's `.env` a signing key of its
+/// own, which agent auth needs to start (AGENT-007), in the two lines
+/// `agents:key` prints.
 #[test]
-fn agent_007_new_project_env_carries_a_fresh_signing_key() {
+fn agent_017_new_project_env_carries_a_fresh_signing_key() {
     let kid_shape = regex::Regex::new(r"^agent-(\d{8})-[0-9a-f]{8}$").expect("a pattern");
     for kit in ["svelte", "live", "api"] {
         let project = Project::new(kit);
@@ -232,11 +233,11 @@ fn agent_007_new_project_env_carries_a_fresh_signing_key() {
     }
 }
 
-/// AGENT-007: the key `suprnova new` writes is one the framework's agent
+/// AGENT-017: the key `suprnova new` writes is one the framework's agent
 /// auth accepts. Read from `.env` as the application reads it, it builds
 /// agent auth; a key that is not P-256 PEM does not.
 #[tokio::test]
-async fn agent_007_the_written_signing_key_builds_agent_auth() {
+async fn agent_017_the_written_signing_key_builds_agent_auth() {
     for kit in ["svelte", "api"] {
         let project = Project::new(kit);
         let mut kid = None;
@@ -266,9 +267,9 @@ async fn agent_007_the_written_signing_key_builds_agent_auth() {
     }
 }
 
-/// AGENT-007: every project gets its own key, never a shared one.
+/// AGENT-017: every project gets its own key, never a shared one.
 #[test]
-fn agent_007_two_new_projects_get_different_signing_keys() {
+fn agent_017_two_new_projects_get_different_signing_keys() {
     let first = WrittenKey::of(&Project::new("svelte"));
     let second = WrittenKey::of(&Project::new("svelte"));
     assert_ne!(
@@ -281,10 +282,10 @@ fn agent_007_two_new_projects_get_different_signing_keys() {
     );
 }
 
-/// AGENT-007: the key stays in `.env`, which only its owner reads, and
+/// AGENT-017: the key stays in `.env`, which only its owner reads, and
 /// `.env.example` names both variables with no value.
 #[test]
-fn agent_007_env_is_private_and_the_example_documents_the_key_without_a_value() {
+fn agent_017_env_is_private_and_the_example_documents_the_key_without_a_value() {
     for kit in ["svelte", "live", "api"] {
         let project = Project::new(kit);
         WrittenKey::of(&project);
@@ -317,9 +318,9 @@ fn agent_007_env_is_private_and_the_example_documents_the_key_without_a_value() 
     }
 }
 
-/// AGENT-007: `suprnova new` prints no key material.
+/// AGENT-017: `suprnova new` prints no key material.
 #[test]
-fn agent_007_new_prints_no_key_material() {
+fn agent_017_new_prints_no_key_material() {
     for kit in ["svelte", "live", "api"] {
         let project = Project::new(kit);
         let key = WrittenKey::of(&project);
@@ -337,10 +338,10 @@ fn agent_007_new_prints_no_key_material() {
     }
 }
 
-/// AGENT-007: no template carries a private key. Every key is minted when a
+/// AGENT-017: no template carries a private key. Every key is minted when a
 /// project is made, and a key in a template would be every project's key.
 #[test]
-fn agent_007_no_template_holds_a_private_key() {
+fn agent_017_no_template_holds_a_private_key() {
     let files = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/templates/files");
     let mut read = 0;
     for entry in walkdir::WalkDir::new(&files) {
@@ -591,12 +592,12 @@ fn agent_017_sign_in_and_registration_continue_to_the_intended_address() {
     );
 }
 
-/// AGENT-008: an address is one account whatever its case. Sign-in,
+/// AGENT-017: an address is one account whatever its case. Sign-in,
 /// registration and the reset form fold the address to lowercase, and
 /// registration's duplicate check ignores case, as agent auth's email match
 /// does.
 #[test]
-fn agent_008_kits_fold_the_email_to_lowercase() {
+fn agent_017_kits_fold_the_email_to_lowercase() {
     for kit in INERTIA_KITS {
         let project = Project::new(kit);
         let auth = project.read("src/controllers/auth.rs");
@@ -648,11 +649,11 @@ fn agent_008_kits_fold_the_email_to_lowercase() {
     }
 }
 
-/// A name is at most 255 characters and an address at most 254 wherever a
-/// kit takes one: the columns are `varchar(255)`, and RFC 5321 bounds a
-/// deliverable address at 254.
+/// AGENT-017: a name is at most 255 characters and an address at most 254
+/// wherever a kit takes one: the columns are `varchar(255)`, and RFC 5321
+/// bounds a deliverable address at 254.
 #[test]
-fn kit_forms_bound_the_name_to_255_and_the_email_to_254() {
+fn agent_017_kit_forms_bound_the_name_to_255_and_the_email_to_254() {
     const NAME: &str = "max = 255";
     const EMAIL: &str = "length(max = 254";
     let email_and_name = |source: &str, input: &str, kit: &str, file: &str| {
