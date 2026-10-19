@@ -373,7 +373,7 @@ additions:
 |---|---|
 | `src/jobs/` | First time you `Queue::push(SomeJob)`. See [Queues](queues.md). |
 | `src/listeners/` | First time you `Event::listen`. See [Events](events.md). |
-| `src/observers/` | First time you implement `Observer<MyModel>`. See [Eloquent](eloquent.md#observers). |
+| `src/observers/` | First time you implement `Observer<MyModel>`. See [Eloquent](eloquent.md#observers-and-lifecycle-events). |
 | `src/notifications/` | First time you implement a `Notification`. See [Notifications](notifications.md). |
 | `src/mail/` | First time you implement a `Mailable`. See [Mail](mail.md). |
 | `src/policies/` | First time you write a `#[policy]`. See [Authorization](authorization.md). |

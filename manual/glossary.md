@@ -120,7 +120,7 @@ The trait that names "the thing that fans out a message to all
 WebSocket subscribers of a channel" - the in-memory implementation
 (`InMemoryBroadcastHub`) is the default; the Redis stream
 implementation (`SeaStreamerBroadcastHub`) is the multi-process
-production deployment. See [Broadcasting - Multi-Process Fanout](broadcasting.md#multi-process-fanout).
+production deployment. See [Broadcasting - Multi-Process Fanout](broadcasting.md#cross-process-fanout).
 
 ### Builder (Eloquent)
 
@@ -129,7 +129,7 @@ surface where you build `where`, `order_by`, `with`, `limit`, etc.
 before `.get()`, `.first()`, or `.paginate(...)`. Dual-named: every
 filter method exists under both its Laravel name (`db_where`,
 `db_or_where`) and its Rust-native synonym (`filter`, `or_filter`).
-See [Eloquent - Query builder](eloquent.md#query-builder--dual-api).
+See [Eloquent - Query builder](eloquent.md#query-builder---dual-api).
 
 ### Bus command
 
@@ -219,7 +219,7 @@ token on every state-changing request. See [CSRF Protection](csrf.md).
 The model-less entry point to the database - `DB::table(...)`,
 `DB::transaction(...)`, `DB::raw(...)`. For queries that don't fit
 the Eloquent shape (dynamic columns, joined aggregates, raw SQL). See
-[Eloquent - DB facade](eloquent.md#db-facade--model-less-queries).
+[Eloquent - DB facade](eloquent.md#db-facade---model-less-queries).
 
 ### Disk
 
@@ -459,7 +459,7 @@ through job lifecycle events and the queue metrics counter. See
 
 ### Lazy collection
 
-The streaming counterpart to [Collection](#collection-eloquent) -
+The streaming counterpart to [Collection](eloquent-collections.md) -
 `Model::query().lazy().await` returns a `LazyCollection<M>` that pulls
 rows from the database in chunks rather than loading every row into
 memory. See
@@ -549,7 +549,7 @@ The trait a user (or any object that can receive notifications)
 implements - `route_for(channel)` returns the address for the named
 channel (mail address, push subscription, broadcast user id, etc.) or
 `None` to skip. See
-[Notifications - The Notifiable Trait](notifications.md#the-notifiable-trait).
+[Notifications - The Notifiable Trait](notifications.md#notifiable).
 
 ### Notification
 
@@ -594,7 +594,7 @@ The `AssertUnwindSafe(...).catch_unwind()` wrapper around the
 middleware chain (and around each background-worker handler) that
 converts an unhandled panic into a sanitised 500 plus a logged
 `ErrorOccurred` event. A safety net, not a contract - public APIs
-should still return `Result`. See [Request Lifecycle - Panic boundary](lifecycle.md#5-panic-boundary--execute_chain_safely).
+should still return `Result`. See [Request Lifecycle - Panic boundary](lifecycle.md#5-panic-boundary---execute_chain_safely).
 
 ### Payment provider
 
