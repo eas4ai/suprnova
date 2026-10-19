@@ -47,7 +47,7 @@ pub use provider_tokens::{
 pub use seaorm::SeaOrmStorage;
 pub use tokens::{
     ConsumedToken, IssueToken, IssuedToken, PASSWORD_RESET_PURPOSE, PasswordResetCommit,
-    PasswordResetInput, PasswordResetStore, PresentedToken, TokenStore,
+    PasswordResetInput, PasswordResetStore, PresentedToken, TokenState, TokenStore,
 };
 pub use users::{NewUser, UserRecord, UserStore};
 pub(crate) use users::{SignUpAccount, create_or_find_existing};

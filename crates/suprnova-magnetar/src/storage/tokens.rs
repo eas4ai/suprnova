@@ -66,6 +66,18 @@ pub struct ConsumedToken {
     pub expires_at: DateTime<Utc>,
 }
 
+/// What a token of one purpose is, read without consuming it: whose it is,
+/// and whether it was used or has expired.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenState {
+    /// Owning user identifier, if the binding stores one.
+    pub user_id: Option<String>,
+    /// Whether the token was consumed, or invalidated by a sibling's consume.
+    pub used: bool,
+    /// Whether the token's lifetime has ended.
+    pub expired: bool,
+}
+
 /// Password-reset composite input.
 ///
 /// The reset user is derived from the consumed token row, mirroring the
@@ -128,6 +140,21 @@ pub trait TokenStore: Send + Sync {
         token: PresentedToken,
         purpose: &str,
     ) -> Result<ConsumedToken>;
+    /// The state of the token of `purpose` that `token` presents, read
+    /// without consuming it; `None` when no token of that purpose has this
+    /// value. A flow reads it to tell an expired token from an unknown one,
+    /// and to refuse another user's token without spending it.
+    ///
+    /// The default reports the state unavailable, which keeps existing
+    /// stores source-compatible; a flow that needs the state then fails
+    /// closed.
+    async fn inspect(&self, token: PresentedToken, purpose: &str) -> Result<Option<TokenState>> {
+        let _ = (token, purpose);
+        Err(Error::DependencyUnavailable {
+            dependency: "token store".to_owned(),
+            message: "this token store does not report a token's state".to_owned(),
+        })
+    }
 }
 
 /// Storage API for the all-mutations-in-one-transaction password reset flow.
@@ -214,6 +241,24 @@ where
             .await
             .map_err(db_error)?;
         Ok(!rows.is_empty())
+    }
+
+    async fn inspect(&self, token: PresentedToken, purpose: &str) -> Result<Option<TokenState>> {
+        if purpose.is_empty() {
+            return Err(invalid_id("purpose"));
+        }
+        let presented_digest = digest(expose_secret(&token.0));
+        let row = <S::Token as EntityBinding>::Entity::find()
+            .filter(S::Token::digest_column().eq(presented_digest))
+            .filter(S::Token::purpose_column().eq(purpose.to_owned()))
+            .one(self.database())
+            .await
+            .map_err(db_error)?;
+        Ok(row.map(|row| TokenState {
+            user_id: S::Token::read_user_id(&row),
+            used: S::Token::read_used_at(&row).is_some(),
+            expired: S::Token::read_expires_at(&row) <= Utc::now(),
+        }))
     }
 
     async fn consume(&self, token: PresentedToken, purpose: &str) -> Result<ConsumedToken> {
