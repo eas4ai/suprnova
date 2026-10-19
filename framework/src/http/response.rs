@@ -1084,11 +1084,11 @@ impl Redirect {
     /// subsequent call falls back to `default`.
     ///
     /// The stored value is checked when it is read, as
-    /// [`Self::intended_url`] says: only a path on this application or an
-    /// absolute `http`/`https` URL is followed, and anything else counts as
-    /// no intended URL, so `default` applies. A session written by an
-    /// earlier release, or by a handler that stored an unchecked address,
-    /// can hold one.
+    /// [`Self::intended_url`] says: only a path on this application, an
+    /// absolute `http`/`https` URL or a relative reference with no scheme
+    /// is followed, and anything else counts as no intended URL, so
+    /// `default` applies. A session written by an earlier release, or by a
+    /// handler that stored an unchecked address, can hold one.
     pub fn intended(default: impl Into<String>) -> Self {
         let dest = crate::session::session_mut(|s| s.pull::<String>("url.intended"))
             .flatten()
@@ -1104,22 +1104,25 @@ impl Redirect {
     /// to leave: an Inertia visit cannot follow a redirect to a page the
     /// SPA does not render, such as a plugin route or a client's redirect
     /// URI, so it leaves by a location visit when an address is waiting.
-    /// Only two kinds of stored value are read, and [`Self::intended`]
-    /// follows the same two:
+    /// Only three kinds of stored value are read, and [`Self::intended`]
+    /// follows the same three:
     ///
     /// - a path on this application, as
     ///   [`url::same_origin_path`](crate::url::same_origin_path) accepts
     ///   it: rooted at a single `/`, with no control byte, so neither
     ///   `//evil.example/x` nor `/\evil.example` passes;
-    /// - an absolute `http` or `https` URL, on any origin, with no
-    ///   surrounding whitespace, no control byte and no backslash, for an
+    /// - an absolute `http` or `https` URL, on any origin, for an
     ///   application that sends a user to another site after sign-in, as
-    ///   Laravel's `intended` does.
+    ///   Laravel's `intended` does;
+    /// - a relative reference with no scheme, such as `?tab=2`, `#top` or
+    ///   `page?x=1`, which the browser resolves against the page it is on,
+    ///   as Laravel follows one.
     ///
-    /// Anything else, another scheme such as `javascript:` or `data:`, a
-    /// relative reference (`x`, `?q`, `#f`) or a network-path reference
-    /// (`//host`, with or without leading whitespace), reads as `None`.
-    /// Outside a session it is `None`.
+    /// The last two take no surrounding whitespace, control byte or
+    /// backslash. Anything else, another scheme such as `javascript:`,
+    /// `data:` or `mailto:`, or a network-path reference (`//host`, with or
+    /// without leading whitespace), reads as `None`. Outside a session it is
+    /// `None`.
     pub fn intended_url() -> Option<String> {
         crate::session::session()
             .and_then(|session| session.get::<String>("url.intended"))
@@ -1132,10 +1135,11 @@ impl Redirect {
     /// `SessionMiddleware` scope.
     ///
     /// Any value is stored, and checked when it is read
-    /// ([`Self::intended_url`]): only a path on this application or an
-    /// absolute `http`/`https` URL is followed. An absolute URL on another
-    /// site is followed, so a `return_to` from a query, which anyone can
-    /// write into a link, is an open redirect unless it is checked with
+    /// ([`Self::intended_url`]): only a path on this application, an
+    /// absolute `http`/`https` URL or a relative reference with no scheme
+    /// is followed. An absolute URL on another site is followed, so a
+    /// `return_to` from a query, which anyone can write into a link, is an
+    /// open redirect unless it is checked with
     /// [`url::same_origin_path`](crate::url::same_origin_path) before it is
     /// stored.
     pub fn set_intended_url(url: impl Into<String>) {
@@ -2418,7 +2422,7 @@ mod intended_url_tests {
                 "/\t/evil.test",
                 "\\evil",
                 "javascript:alert(1)",
-                "?page=2",
+                "x:y",
             ] {
                 session_mut(|session| session.put("url.intended", foreign));
                 assert_eq!(Redirect::intended_url(), None, "{foreign:?}");
@@ -2440,6 +2444,11 @@ mod intended_url_tests {
             }
             session_mut(|session| session.put("url.intended", "/billing?tab=2"));
             assert_eq!(Redirect::intended_url().as_deref(), Some("/billing?tab=2"));
+            // A relative reference resolves on the page's own origin, and is
+            // followed as Laravel follows one.
+            session_mut(|session| session.put("url.intended", "?tab=2"));
+            assert_eq!(Redirect::intended_url().as_deref(), Some("?tab=2"));
+            assert_eq!(Redirect::intended("/dashboard").location, "?tab=2");
         })
         .await;
     }
