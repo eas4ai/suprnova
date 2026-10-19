@@ -735,13 +735,20 @@ impl Core {
     }
 
     /// The address the user opens: the application's sign-in page, which
-    /// returns to the claim page with the attempt token.
+    /// returns to the claim page with the attempt token; or, with
+    /// [`direct_claim_page`](AgentAuthConfig::direct_claim_page), the claim
+    /// page itself, which sends a guest to sign in.
     pub(crate) fn verification_uri(&self, attempt_token: &str) -> String {
         let claim_page = append_parameter(
             &self.config.claim_page_url,
             "claim_attempt_token",
             attempt_token,
         );
+        if self.config.direct_claim_page {
+            // The claim page is a path of this application, as every route
+            // of the plugin is a path under the issuer.
+            return format!("{}{claim_page}", self.issuer);
+        }
         let sign_in = if self.sign_in_url.starts_with("https://")
             || self.sign_in_url.starts_with("http://")
         {

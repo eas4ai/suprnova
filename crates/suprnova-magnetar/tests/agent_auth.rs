@@ -168,6 +168,63 @@ async fn agent_007_service_auth_answers_the_claim_block_and_no_assertion() {
 }
 
 #[tokio::test]
+async fn agent_009_verification_uri_is_the_claim_page_when_the_host_asks() {
+    let mut options = Options::new();
+    options.config.direct_claim_page = true;
+    let h = sqlite_harness_with(options).await;
+    let registration = h.service_auth("Person@Example.test").await;
+    let uri = registration["claim"]["verification_uri"]
+        .as_str()
+        .expect("a uri");
+    assert!(
+        uri.starts_with("https://auth.example.test/agent/claim?claim_attempt_token=cat_"),
+        "the user opens the claim page itself: {uri}"
+    );
+    assert!(query_param(uri, "return_to").is_none(), "{uri}");
+    let attempt = query_param(uri, "claim_attempt_token").expect("the attempt token");
+    let user = h.create_user("person@example.test", true).await;
+    let session = h.sign_in(&user).await;
+    let pending = h.pending(&attempt, Some(&session)).await;
+    assert_eq!(status(&pending), 200, "{:?}", body(&pending));
+
+    // A restarted attempt points at the claim page as well.
+    let claim_token = registration["claim_token"].as_str().expect("a claim token");
+    let started = h.initiate(claim_token, "person@example.test").await;
+    let restarted = body(&started)["claim_attempt"]["verification_uri"]
+        .as_str()
+        .expect("a uri")
+        .to_owned();
+    assert!(
+        restarted.starts_with("https://auth.example.test/agent/claim?claim_attempt_token=cat_"),
+        "{restarted}"
+    );
+}
+
+#[test]
+fn agent_007_generated_signing_key_reads_back_from_its_pem() {
+    use secrecy::ExposeSecret;
+    let pem = magnetar::agent_auth::SigningKey::generate_pem().expect("a new key");
+    assert!(
+        pem.expose_secret()
+            .starts_with("-----BEGIN PRIVATE KEY-----"),
+        "PKCS#8 PEM"
+    );
+    let key = magnetar::agent_auth::SigningKey::from_pem("generated-1", pem.expose_secret())
+        .expect("the PEM reads back as a P-256 signing key");
+    assert_eq!(key.kid(), "generated-1");
+    let other = magnetar::agent_auth::SigningKey::generate_pem().expect("a second key");
+    assert_ne!(
+        pem.expose_secret(),
+        other.expose_secret(),
+        "every call draws a new key"
+    );
+    assert!(
+        !format!("{pem:?}").contains("PRIVATE"),
+        "the PEM never prints"
+    );
+}
+
+#[tokio::test]
 async fn agent_007_identity_assertion_registers_and_its_token_carries_the_agent_kind() {
     let h = sqlite_harness().await;
     let response = present_subject(&h, "provider-user-1", "new.person@example.test").await;
