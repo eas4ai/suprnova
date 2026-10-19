@@ -85,6 +85,12 @@ export interface AgentToolDefinition {
 /** What the island root says the page registers for agents. */
 export interface AgentToolContract {
   readonly fields: readonly string[];
+  /**
+   * The agent-visible fields with a 64-bit integer codec: a tool result
+   * shows their lossless tags as decimal strings, and every other field as
+   * the snapshot carries it.
+   */
+  readonly integers: readonly string[];
   readonly tools: readonly AgentToolDefinition[];
 }
 
@@ -185,13 +191,17 @@ export function parseAgentTools(value: string, documentKey: string): AgentToolCo
   }
   const keys = Object.keys(parsed).sort().join(",");
   const fields = parsed["fields"];
+  const integers = parsed["integers"];
   const tools = parsed["tools"];
   if (
-    keys !== "fields,tools,v" ||
+    keys !== "fields,integers,tools,v" ||
     !Array.isArray(fields) ||
     fields.length > MAX_AGENT_FIELDS ||
     !fields.every((field) => typeof field === "string" && AGENT_FIELD_NAME.test(field)) ||
     new Set(fields).size !== fields.length ||
+    !Array.isArray(integers) ||
+    !integers.every((field) => typeof field === "string" && fields.includes(field)) ||
+    new Set(integers).size !== integers.length ||
     !Array.isArray(tools) ||
     tools.length === 0 ||
     tools.length > MAX_AGENT_TOOLS
@@ -246,6 +256,7 @@ export function parseAgentTools(value: string, documentKey: string): AgentToolCo
   });
   return Object.freeze({
     fields: Object.freeze([...(fields as string[])]),
+    integers: Object.freeze([...(integers as string[])]),
     tools: Object.freeze(definitions),
   });
 }

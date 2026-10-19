@@ -136,6 +136,10 @@ pub struct AgentQuota {
     note: Option<String>,
     #[agent_visible]
     reads: u64,
+    /// A Json field holding a value shaped like a 64-bit integer tag: an
+    /// agent reads it as it is.
+    #[agent_visible]
+    shape: serde_json::Value,
 }
 
 #[live]
@@ -149,6 +153,7 @@ impl AgentQuota {
             limit,
             note,
             reads: 0,
+            shape: serde_json::json!({ "$live": "u64", "value": "5" }),
         }
     }
 

@@ -245,6 +245,7 @@ tool, and no such attribute otherwise. Its value is canonical JSON:
 
 ```json
 {"fields":["count"],
+ "integers":["count"],
  "tools":[{"action":"increment","annotations":{"consequentialHint":false,
    "readOnlyHint":false,"untrustedContentHint":false},
    "description":"Add one to the counter.","inputSchema":{},
@@ -252,7 +253,9 @@ tool, and no such attribute otherwise. Its value is canonical JSON:
  "v":1}
 ```
 
-`fields` names the agent-visible fields (spec 03); each tool names its
+`fields` names the agent-visible fields (spec 03), and `integers` those of
+them with a 64-bit integer codec, the only fields whose lossless tags a tool
+result unwraps (spec 05); each tool names its
 action, its full name `{base}.{documentKey}`, its optional title, its
 description, its input schema (spec 04) and the three WebMCP hints. The
 attribute is built from the generated metadata alone, so it is the same for
@@ -267,8 +270,9 @@ Acceptance criteria:
   such a key when it is declared, root assembly refuses it at render, and
   the runtime refuses it in the attribute.
 - `data-suprnova-live-tools` is a known root attribute. The runtime accepts
-  it only with exactly the keys `v`, `fields` and `tools`; `v` is 1; `fields`
-  holds at most 512 unique field names; `tools` holds 1 to 64 tools of
+  it only with exactly the keys `v`, `fields`, `integers` and `tools`; `v` is
+  1; `fields` holds at most 512 unique field names; `integers` holds unique
+  names each also in `fields`; `tools` holds 1 to 64 tools of
   exactly the keys above, each with a unique name of 1 to 128 ASCII letters,
   digits, `_`, `-` and `.` that ends in a `.` and the island's document key
   and is longer than it, an action identity, a non-blank description, an
@@ -299,8 +303,8 @@ Acceptance criteria:
   response gives the outcome, `accepted`, `no_render` or `invalid` with the
   validation issues the agent may read (spec 05), the tool's arguments being
   the properties its input schema lists, and the agent-visible fields of the
-  committed snapshot, with a 64-bit integer field as its decimal string; a
-  navigation gives
+  committed snapshot, with a field `integers` lists as its decimal string and
+  every other field as the snapshot carries it; a navigation gives
   `redirect`. A refused response gives an error. The result carries nothing
   else of the island's state, HTML, events or effects.
 - A refused call delivers its `isError` result to the agent before the island
@@ -329,6 +333,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-18 -- The tools attribute gained `integers`. The runtime unwrapped
+  any value shaped like a 64-bit integer tag, in any field, while the
+  server unwraps only fields with a 64-bit integer codec, so a Json field
+  holding that shape read differently on the two paths. The browser now
+  unwraps only the fields the server lists.
 - 2026-10-18 -- Added WebMCP tool registration (AGENT-012). Island roots of
   components with browser tools carry `data-suprnova-live-tools`, the
   island key of such a component fits `[A-Za-z0-9_-]{1,63}`, and the runtime

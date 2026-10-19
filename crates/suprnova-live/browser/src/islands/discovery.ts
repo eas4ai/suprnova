@@ -926,6 +926,7 @@ export class DocumentRuntime {
     client?: ModelContextClient,
   ): Promise<ModelContextToolResult> {
     const fields = record.metadata.agentTools?.fields ?? [];
+    const integers = record.metadata.agentTools?.integers ?? [];
     const signal = client?.signal;
     if (signal?.aborted === true) {
       return Promise.reject(new DOMException("The tool call was aborted.", "AbortError"));
@@ -963,7 +964,7 @@ export class DocumentRuntime {
       this.#agentWaiters.set(scheduled.intent, (response, applied) => {
         settle(
           applied
-            ? agentToolResult(response, { fields, arguments: argumentNames(tool) })
+            ? agentToolResult(response, { fields, integers, arguments: argumentNames(tool) })
             : agentToolError("The island did not apply the call's response."),
         );
       });

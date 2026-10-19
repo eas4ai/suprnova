@@ -39,8 +39,12 @@ const TOOL = {
   annotations: { readOnlyHint: false, untrustedContentHint: false, consequentialHint: true },
 };
 
-function contract(tools: readonly unknown[] = [TOOL], fields: readonly string[] = ["count"]) {
-  return JSON.stringify({ v: 1, fields, tools });
+function contract(
+  tools: readonly unknown[] = [TOOL],
+  fields: readonly string[] = ["count"],
+  integers: readonly string[] = ["count"],
+) {
+  return JSON.stringify({ v: 1, fields, integers, tools });
 }
 
 function defined<T>(value: T | undefined): T {
@@ -56,6 +60,7 @@ describe("the island root's tool contract", () => {
   it("agent_012 parses tools named for the island's key", () => {
     const parsed = parseAgentTools(contract(), "main");
     expect(parsed.fields).toEqual(["count"]);
+    expect(parsed.integers).toEqual(["count"]);
     expect(parsed.tools).toHaveLength(1);
     expect(parsed.tools[0]).toMatchObject({
       action: "increment",
@@ -89,7 +94,11 @@ describe("the island root's tool contract", () => {
       ),
     );
     invalid(contract([TOOL], ["has space"]));
-    invalid(JSON.stringify({ v: 2, fields: [], tools: [TOOL] }));
+    // The 64-bit integer fields are agent-visible fields, each once.
+    invalid(contract([TOOL], ["count"], ["other"]));
+    invalid(contract([TOOL], ["count"], ["count", "count"]));
+    invalid(JSON.stringify({ v: 1, fields: ["count"], tools: [TOOL] }));
+    invalid(JSON.stringify({ v: 2, fields: [], integers: [], tools: [TOOL] }));
     invalid("not json");
   });
 });
@@ -201,7 +210,7 @@ describe("the tool result", () => {
         label: "Main",
         owner: "alice",
       }),
-      { fields: ["count", "label"], arguments: [] },
+      { fields: ["count", "label"], integers: ["count"], arguments: [] },
     );
     expect(result.isError).toBe(false);
     expect(result.structuredContent).toEqual({
@@ -210,12 +219,28 @@ describe("the tool result", () => {
     });
     expect(result.content[0]?.text).not.toContain("alice");
     expect(result.content[0]?.text).not.toContain("secret html");
-    expect(agentFields({ body: { state: { owner: "x" } } }, [])).toEqual({});
+    expect(agentFields({ body: { state: { owner: "x" } } }, [], [])).toEqual({});
+  });
+
+  it("agent_012 only a field the server marks as a 64-bit integer is unwrapped", () => {
+    const tag = { $live: "u64", value: "5" };
+    const result = agentToolResult(committed({ count: tag, shape: tag }), {
+      fields: ["count", "shape"],
+      integers: ["count"],
+      arguments: [],
+    });
+    // `shape` has the Json codec: it is shown as the snapshot carries it,
+    // as the server's headless result shows it.
+    expect(result.structuredContent).toEqual({
+      outcome: "accepted",
+      fields: { count: "5", shape: { $live: "u64", value: "5" } },
+    });
   });
 
   it("agent_012 a validation outcome is an error naming the issues", () => {
     const result = agentToolResult(committed({ count: 3 }, { count: "validation.range" }), {
       fields: ["count"],
+      integers: [],
       arguments: [],
     });
     expect(result.isError).toBe(true);
@@ -235,7 +260,7 @@ describe("the tool result", () => {
           "count.inner": "validation.range",
         },
       ),
-      { fields: ["count"], arguments: ["title"] },
+      { fields: ["count"], integers: [], arguments: ["title"] },
     );
     expect(result.isError).toBe(true);
     // The owner is neither agent-visible nor an argument: one generic
@@ -268,7 +293,7 @@ describe("the tool result", () => {
         recovery: "refresh_island",
         error: { category: "snapshot", detail: "x", recovery: "refresh_island" },
       } as unknown as ValidatedResponse,
-      { fields: ["count"], arguments: [] },
+      { fields: ["count"], integers: [], arguments: [] },
     );
     expect(result.isError).toBe(true);
     expect(result.structuredContent).not.toHaveProperty("fields");

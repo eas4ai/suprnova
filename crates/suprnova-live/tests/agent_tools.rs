@@ -867,6 +867,7 @@ mod root {
         let tools = tools_attribute(&html).expect("the root carries the tool contract");
         assert_eq!(tools["v"], 1);
         assert_eq!(tools["fields"], json!(["serial"]));
+        assert_eq!(tools["integers"], json!([]));
         let tool = &tools["tools"][0];
         assert_eq!(tools["tools"].as_array().map(Vec::len), Some(1));
         assert_eq!(tool["action"], "execute");

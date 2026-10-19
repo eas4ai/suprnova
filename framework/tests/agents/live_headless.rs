@@ -408,6 +408,26 @@ async fn agent_013_an_optional_mount_property_mounts_with_none() {
 }
 
 #[tokio::test]
+async fn agent_013_only_a_64_bit_integer_field_is_unwrapped() {
+    let _container = fixture::setup();
+    let client = live_fixture::live_client();
+    let result = client
+        .mcp()
+        .call("quota.read", json!({ "mount": {} }))
+        .await;
+    assert!(!result.is_error(), "{:?}", result.response());
+    let structured = result.structured().expect("structured content");
+    // A u64 field is its decimal string; a Json field holding the same
+    // shape is shown as the snapshot carries it.
+    assert_eq!(structured["fields"]["reads"], "1", "{structured}");
+    assert_eq!(
+        structured["fields"]["shape"],
+        json!({ "$live": "u64", "value": "5" }),
+        "{structured}"
+    );
+}
+
+#[tokio::test]
 async fn agent_013_mount_without_a_policy_is_refused() {
     let _container = fixture::setup();
     let client = live_fixture::live_client_with(AgentsConfig::new(), false);

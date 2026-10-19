@@ -5,8 +5,8 @@
  * read. Nothing else
  * of the island's state, its HTML, its events or its effects reaches the
  * agent. A 64-bit integer field, which the snapshot carries as a lossless
- * tag, is shown as its decimal string, as the server's headless result
- * shows it.
+ * tag and the island root marks, is shown as its decimal string, as the
+ * server's headless result shows it.
  */
 import type { ValidatedResponse } from "../application/types.js";
 import type { AgentToolDefinition } from "../islands/metadata.js";
@@ -20,8 +20,8 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-/** `value`, or the decimal string of a lossless 64-bit integer tag. */
-function shown(value: unknown): unknown {
+/** `value`, or the decimal string of `value` when it is a lossless 64-bit integer tag. */
+function unwrapped(value: unknown): unknown {
   const tagged = record(value);
   if (
     tagged !== null &&
@@ -34,16 +34,23 @@ function shown(value: unknown): unknown {
   return value;
 }
 
-/** The agent-visible fields of `snapshot`'s state, and no other. */
+/**
+ * The agent-visible fields of `snapshot`'s state, and no other. Only a
+ * field in `integers`, which the server marks as holding a 64-bit integer,
+ * is unwrapped from its lossless tag; any other field, a Json field
+ * holding the same shape included, is shown as the snapshot carries it.
+ */
 export function agentFields(
   snapshot: Readonly<Record<string, unknown>>,
   fields: readonly string[],
+  integers: readonly string[],
 ): Record<string, unknown> {
   const state = record(record(snapshot["body"])?.["state"]);
   const out: Record<string, unknown> = {};
   if (state === null) return out;
   for (const field of fields) {
-    if (Object.prototype.hasOwnProperty.call(state, field)) out[field] = shown(state[field]);
+    if (!Object.prototype.hasOwnProperty.call(state, field)) continue;
+    out[field] = integers.includes(field) ? unwrapped(state[field]) : state[field];
   }
   return out;
 }
@@ -101,6 +108,8 @@ export function agentToolError(message: string): ModelContextToolResult {
  */
 export interface AgentResultScope {
   readonly fields: readonly string[];
+  /** The agent-visible fields holding a 64-bit integer. */
+  readonly integers: readonly string[];
   readonly arguments: readonly string[];
 }
 
@@ -127,7 +136,7 @@ export function agentToolResult(
           : "accepted";
       const structured: Record<string, unknown> = {
         outcome,
-        fields: agentFields(response.snapshot, fields),
+        fields: agentFields(response.snapshot, fields, scope.integers),
       };
       if (invalid) structured["validation"] = shownValidation(validation, scope);
       return result(structured, invalid);

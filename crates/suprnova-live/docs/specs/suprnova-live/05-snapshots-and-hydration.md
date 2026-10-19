@@ -258,9 +258,12 @@ Acceptance criteria:
   lossless integer tag, `{"$live": "u64", "value": "..."}` or its `i64`
   form, before the mount's snapshot schema checks it, as a template's
   parameters already carry it.
-- A tool result, headless or in the browser, shows a 64-bit integer field as
-  its decimal string, never as the lossless tag; every other field value is
-  shown as the snapshot carries it.
+- A tool result, headless or in the browser, shows a field with a 64-bit
+  integer codec as its decimal string, never as the lossless tag; every
+  other field value, a Json field holding a value shaped like the tag
+  included, is shown as the snapshot carries it. The browser learns which
+  fields hold 64-bit integers from the tools attribute's `integers` list
+  (spec 09).
 - A validation outcome consumes a revision like any accepted outcome, so its
   result is an error that still carries the new handle.
 - A tool result, headless or in the browser, names a validation issue in

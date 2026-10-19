@@ -85,6 +85,9 @@ pub(crate) struct IslandRootInput<'a> {
 #[derive(Clone, Debug)]
 pub(crate) struct AgentToolsDeclaration {
     fields: Vec<String>,
+    /// The agent-visible fields with a 64-bit integer codec, whose lossless
+    /// tags a tool result shows as decimal strings.
+    integers: Vec<String>,
     tools: Vec<AgentToolEntry>,
 }
 
@@ -128,13 +131,32 @@ pub(crate) fn declared_agent_tools(
     if tools.is_empty() {
         return None;
     }
-    let fields = metadata
-        .fields()
-        .iter()
-        .filter(|field| field.agent_visible())
+    let visible = || {
+        metadata
+            .fields()
+            .iter()
+            .filter(|field| field.agent_visible())
+    };
+    let fields = visible()
         .map(|field| field.name().as_str().to_owned())
         .collect();
-    Some(AgentToolsDeclaration { fields, tools })
+    // The fields `agent_fields` unwraps on the server: the browser unwraps
+    // these and no other, so one value reads the same on both paths.
+    let integers = visible()
+        .filter(|field| {
+            matches!(
+                field.codec(),
+                crate::snapshot::state::StateCodec::I64Decimal
+                    | crate::snapshot::state::StateCodec::U64Decimal
+            )
+        })
+        .map(|field| field.name().as_str().to_owned())
+        .collect();
+    Some(AgentToolsDeclaration {
+        fields,
+        integers,
+        tools,
+    })
 }
 
 impl AgentToolsDeclaration {
@@ -173,7 +195,12 @@ impl AgentToolsDeclaration {
                 serde_json::Value::Object(entry)
             })
             .collect();
-        let value = json!({ "v": 1, "fields": self.fields, "tools": tools });
+        let value = json!({
+            "v": 1,
+            "fields": self.fields,
+            "integers": self.integers,
+            "tools": tools,
+        });
         serde_json_canonicalizer::to_vec(&value)
             .ok()
             .and_then(|bytes| String::from_utf8(bytes).ok())
@@ -441,5 +468,74 @@ mod tests {
         assert!(size.measured > 4 * 1024 * 1024, "{size:?}");
         assert_eq!(size.configured, 1024 * 1024);
         assert!(!size.at_least);
+    }
+
+    #[test]
+    fn agent_012_the_tool_contract_marks_its_64_bit_integer_fields() {
+        use crate::action::{ActionArgumentSchema, AuthorizationRequirement, TransactionPolicy};
+        use crate::identity::{ActionName, ModelField, ViewName};
+        use crate::metadata::{
+            ActionMetadata, ActionToolMetadata, ComponentMetadata, ContractVersions, FieldMetadata,
+        };
+        use crate::snapshot::state::{FieldCategory, StateCodec};
+        use crate::validation::ValidationSelection;
+
+        let field = |name: &str, codec: StateCodec| {
+            FieldMetadata::new(
+                ModelField::parse(name).expect("field"),
+                FieldCategory::State,
+                codec,
+                true,
+            )
+            .with_agent_visible()
+            .expect("visible")
+        };
+        let hidden = FieldMetadata::new(
+            ModelField::parse("total").expect("field"),
+            FieldCategory::State,
+            StateCodec::U64Decimal,
+            true,
+        );
+        let action = ActionMetadata::new_with_contract(
+            ActionName::parse("bump").expect("action"),
+            1,
+            ActionArgumentSchema::new(Vec::new()).expect("arguments"),
+            AuthorizationRequirement::Public,
+            ValidationSelection::None,
+            TransactionPolicy::None,
+        )
+        .expect("action")
+        .with_tool(
+            ActionToolMetadata::new("counter.bump", "Bump the counter.")
+                .expect("tool")
+                .for_browser(true),
+        )
+        .expect("tool");
+        let metadata = ComponentMetadata::new(
+            ComponentName::parse("tests.counter").expect("component"),
+            ViewName::parse("tests/counter.html").expect("view"),
+            ContractVersions::new(1, 1, 1, 1, 1).expect("versions"),
+            vec![
+                field("count", StateCodec::U64Decimal),
+                field("delta", StateCodec::I64Decimal),
+                field("shape", StateCodec::Json),
+                hidden,
+            ],
+            vec![action],
+        )
+        .expect("metadata");
+        let rendered = declared_agent_tools(&metadata)
+            .expect("a browser tool")
+            .render("main")
+            .expect("an instance key");
+        let contract: serde_json::Value = serde_json::from_str(&rendered).expect("json");
+        assert_eq!(
+            contract["fields"],
+            serde_json::json!(["count", "delta", "shape"])
+        );
+        // Only the agent-visible fields with a 64-bit integer codec: the
+        // browser unwraps their lossless tags and shows every other field
+        // as the snapshot carries it, as the server's headless result does.
+        assert_eq!(contract["integers"], serde_json::json!(["count", "delta"]));
     }
 }
