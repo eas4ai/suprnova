@@ -14,8 +14,12 @@ use super::super::dispatch::{CallFailure, RouteAnswer};
 use super::super::input::{InputReport, MAX_PATH_CHARS, MAX_REPORTED};
 use super::super::tool::ToolRegistry;
 
-/// The tools `caller` may call, sorted by name: the tools that accept the
-/// caller's kind and, for a token caller, whose scopes the token holds.
+/// The tools `caller` sees, sorted by name. A token caller sees the tools
+/// that accept its kind and whose scopes the token holds. A caller without a
+/// token sees every tool the endpoint offers, because MCP has no optional
+/// sign-in: a client is sent to sign in only by a 401, and it gets that 401
+/// only when it calls a tool that needs a token, so it must see that tool
+/// first. Public tools still run without a token (AGENT-004).
 ///
 /// With `object_only`, for a 2025-06-18 or 2025-11-25 request, a tool whose
 /// output schema is not an object is listed without it. Those revisions
@@ -25,7 +29,7 @@ pub(crate) fn list(registry: &ToolRegistry, caller: &ToolCaller, object_only: bo
     registry
         .tools()
         .iter()
-        .filter(|tool| tool.callable_by(caller))
+        .filter(|tool| caller.is_guest() || tool.callable_by(caller))
         .map(|tool| {
             let mut definition = tool.definition();
             if object_only

@@ -96,10 +96,12 @@ Claude Code:
 claude mcp add my-app --transport http https://app.example.com/mcp --scope user
 ```
 
-`posts.create` accepts users and agents, so the client needs a token: turn on
-the [OAuth server](#users-who-approve-a-client) or
-[agent accounts](#agent-accounts) to issue one. A `public` tool works with no
-token at all.
+`posts.create` accepts users and agents, so calling it needs a token. The
+client sees it in `tools/list` without one, and its first call answers 401,
+which sends the client to sign in. Turn on the
+[OAuth server](#users-who-approve-a-client) or
+[agent accounts](#agent-accounts) to issue tokens. A `public` tool works with
+no token at all.
 
 A project made with `suprnova new` serves all of this from the first run. Its
 `notes.search` and `notes.create` tools, under the `notes:read` and
@@ -481,16 +483,21 @@ session and never mints `Mcp-Session-Id`.
   allow answers 403. This stops a web page from reaching the endpoint through
   the user's browser. Clients outside a browser send no `Origin`, and those
   requests are accepted.
-- `tools/list` returns exactly the tools the presented credentials may call,
-  in a fixed order.
+- `tools/list` with a token returns exactly the tools that token may call.
+  Without a token it returns every tool, including the ones that need a
+  token, so a client sees what signing in would let it call. Both lists keep
+  a fixed order.
 
 ### Tokens and discovery
 
-A tool that accepts `user` or `agent` callers needs a bearer token. A call
+A tool that does not accept `public` callers needs a bearer token. A call
 without one answers 401 with `WWW-Authenticate: Bearer resource_metadata="..."`
 and the tool's scopes, so a client finds the protected resource metadata and,
-through it, the authorization server. A token that lacks a scope answers 403
-with `error="insufficient_scope"` and every scope the call needs.
+through it, the authorization server. Claude Code, for example, then reports
+that the server needs you to sign in, and `/mcp` signs you in. Every other
+request works without a token, `public` tools included. A token that lacks a
+scope answers 403 with `error="insufficient_scope"` and every scope the call
+needs.
 
 The endpoint verifies no token itself. It asks each resolver on
 `AgentsConfig` in order: the OAuth server's and agent auth's when they are

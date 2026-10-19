@@ -511,8 +511,8 @@ async fn authenticate(
     Err(invalid_token(config, id, "The token is not recognized."))
 }
 
-/// The tools the caller may call, each output schema as the request's
-/// revision allows.
+/// The tools the caller sees, each output schema as the request's revision
+/// allows: every tool without a token, and with one the tools it may call.
 fn list_tools(
     endpoint: &EndpointContext,
     config: &AgentsConfig,

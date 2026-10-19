@@ -15,10 +15,27 @@ use suprnova::{FrameworkError, MiddlewareRegistry, ToolCaller};
 use crate::fixture::{self, TestUser, scope};
 
 #[tokio::test]
-async fn agent_004_list_shows_only_public_tools_without_token() {
+async fn agent_004_list_without_token_shows_every_offered_tool() {
     let _container = fixture::setup();
     let client = fixture::client();
-    assert_eq!(client.mcp().list().await.tool_names(), PUBLIC_TOOLS);
+    let registry = fixture::router()
+        .tool_registry()
+        .expect("the fixture's tools check");
+    let offered: Vec<String> = registry
+        .tools()
+        .iter()
+        .map(|tool| tool.name().to_owned())
+        .collect();
+    let listed = client.mcp().list().await.tool_names();
+    assert_eq!(
+        listed, offered,
+        "a client without a token sees every tool, so calling one that needs a token can send it to sign in"
+    );
+    assert!(
+        listed.len() > PUBLIC_TOOLS.len()
+            && beyond_public(listed).contains(&"posts.delete".to_owned()),
+        "the fixture offers tools that need a token"
+    );
 }
 
 /// The fixture's tools that accept `public`, sorted: every caller may call
