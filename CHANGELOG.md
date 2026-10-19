@@ -25,7 +25,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   protected resource and authorization server metadata at the well-known
   locations under the application's root, lists only the tools a token may
   call, answers 401 and 403 with the scopes a call needs, refuses a foreign
-  `Origin`, and bounds the body, the answer and the run time.
+  `Origin`, and bounds the body, the answer and the run time. Structured
+  results follow the session's revision: on 2026-07-28 a tool's output
+  schema and result pass through as declared, and on the two older revisions
+  a non-object output schema is left out of `tools/list` and a non-object
+  result comes back as text alone.
 - **Users approve MCP clients through a built-in OAuth server.**
   `AgentsConfig::oauth_server(OAuthServer::new())` mounts the new Magnetar
   authorization server plugin: OAuth 2.1 with the authorization code grant and
@@ -70,6 +74,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   form a tool that fills and submits it through Inertia. A destructive form is
   filled and left for the user to submit. `suprnova generate-types` writes
   each form request's input schema to `frontend/src/types/tool-schemas.ts`.
+  The kits' `core.ts`, `suprnova-webmcp` and the Live runtime read a page's
+  tools by the keys they know and ignore the rest, so a later release can add
+  a field without breaking a scaffolded application. A change an older reader
+  must not ignore raises the payload's `v`.
 - **Rust front ends compiled to WebAssembly register WebMCP tools.** The new
   `suprnova-webmcp` crate registers typed page tools, with the input schema
   the server derives, for as long as their handles live, and calls the
@@ -85,6 +93,63 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `TestClient::with_peer_address` sends requests as if from that TCP peer, so
   `Request::ip()` and limits keyed by the client address see it.
   `TestRequest::body` sends a body of any content type as it is.
+- **Applications build their own consent pages on `AgentApprovals` and
+  `AgentClaims`.** `AgentApprovals::of(&request)` reads the signed-in user's
+  pending authorization as a `PendingApproval` and records the decision as an
+  `ApprovalDecision`. `AgentClaims::of(&request)` reads a `PendingClaim` and
+  confirms it with the user's code as a `ClaimConfirmation`. Both answer 403
+  to a tool call, so an agent never approves or claims for the user it acts
+  as. The framework's default pages use them too. `ConsentPageHeaders`
+  refuses framing with `frame-ancestors 'none'`, and sets `no-store` and
+  `no-referrer`, on every answer of a consent route, error pages included,
+  and keeps the application's nonce policy.
+- **`url::same_origin_path` checks a return address, and
+  `Redirect::intended_url` reads the intended one.** `same_origin_path`
+  accepts only a path that starts with a single `/` and holds no control
+  byte, so a sign-in page checks a `return_to` with it before
+  `Redirect::set_intended_url` stores it. `Redirect::intended_url()` returns
+  the address `Redirect::intended` would follow, without spending it, as
+  Laravel's `getIntendedUrl` does.
+- **An application's migrator can create the agents tables and a
+  case-insensitive email index.** `suprnova::agents::migrations()` creates
+  both plugins' tables, only what is missing. Its rollback leaves them in
+  place, and its documentation gives the statements that drop them.
+  `suprnova::auth::migrations::UniqueEmailIgnoringCase::on(table, column)`
+  adds a unique index on `LOWER(column)` on SQLite, PostgreSQL and MySQL
+  8.0.13 or later. On MariaDB and older MySQL it checks that the column has a
+  unique index of its own and a `_ci` collation. It refuses a table that
+  already holds addresses that differ only in case, and its index name fits
+  every engine's identifier limit.
+- **Tests build a router with agent auth without a signing key.**
+  `suprnova::testing::install_test_agent_auth_key()` gives the test process a
+  generated key when the environment names none.
+- **`#[tool_output]` and `#[tool_schema]` derive schemas through the
+  framework.** `#[tool_output]` marks a tool's output type, any struct or
+  enum, and derives `Serialize` and `JsonSchema` with no `serde` or
+  `schemars` dependency of the application's own. `#[tool_schema]` gives a
+  type nested in a tool's input or output its schema, and
+  `suprnova_webmcp::tool_schema` does the same for a page tool's input.
+- **Tools can carry WebMCP's `debugging` hint.**
+  `#[tool(annotations(debugging))]` on a server tool or a Live action, the
+  `debugging` option of the kits' `usePageTool` and `useFormTool`, and
+  `PageTool::debugging` mark a tool meant for debugging and developer
+  tooling rather than end users. The MCP endpoint does not send it.
+- **New projects serve agents.** `suprnova new` writes a fresh agent auth
+  signing key into `.env`, readable by its owner only (mode 0600), and
+  `.env.example` names both variables with no value. The Inertia and Live
+  kits serve the MCP endpoint, the OAuth server and agent auth from
+  `src/agents.rs`, and their migrator creates both plugins' tables and a
+  case-insensitive unique email index. Their sign-in sends a signed-in user
+  who opens a sign-in link on to a same-origin `return_to`, and keeps the
+  intended address through sign-in and registration. Every kit folds an
+  email address to ASCII lowercase before validating it, and bounds names at
+  255 characters and addresses at 254.
+- **The agents maintenance pass prunes the OAuth server's ended rows.** The
+  five-minute pass in `serve` and `agents:prune` delete lapsed pending
+  authorizations and codes, expired tokens, and grants revoked longer ago
+  than the retention, whenever the router mounts the OAuth server, with agent
+  auth or without. A live grant or token is never pruned. `agents:prune`
+  needs agent auth only for `--retry-failed`.
 
 ### Changed
 
@@ -106,6 +171,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   The file holds the input schema of each form request, or an empty list,
   beside the Inertia props types. Each run brings it up to date and names
   each request it cannot describe exactly as the server does.
+- **`Redirect::intended` follows only a path, an `http` or `https` URL, or a
+  relative reference.** It ignores a stored value with another scheme, such
+  as `javascript:`, `mailto:` or `localhost:3000/x`, and one with surrounding
+  whitespace or a backslash anywhere, and redirects to its fallback instead.
+  A browser trims whitespace and reads `\` as `/`, so such a value could
+  leave the application. See
+  [Storing the intended URL](manual/responses.md#storing-the-intended-url).
+- **An Inertia error page keeps a `no-store` the replaced response carried.**
+  The error page set `Cache-Control: no-cache, private` on every page it
+  rendered. It now sets `no-store` when the response it replaces said
+  `no-store`, so a page that must not be stored stays unstored when it fails.
 
 ### Fixed
 
@@ -153,6 +229,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   was registered as required, and no codec decodes null, so an `Option<T>`
   parameter could never be `None`. It is now optional: left out or null, it
   mounts as `None`.
+- **A page's scripts and styles no longer become the previous URL.** The
+  session recorded any successful GET as the previous URL: a script or
+  stylesheet that `StaticFiles` served, a request a global middleware
+  answered before any route matched, and an AJAX request. Without a
+  `Referer`, `Redirect::back()` could then send the user to a `.js` file. As
+  in Laravel, the session now records a GET only when a route answered it,
+  the fallback route included, and skips a request that sends
+  `X-Requested-With: XMLHttpRequest`. A file that `StaticFiles` serves is
+  never recorded.
 
 ## 4.3.0 - 2026-10-18
 

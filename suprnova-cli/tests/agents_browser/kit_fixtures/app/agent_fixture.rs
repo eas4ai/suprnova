@@ -1,16 +1,21 @@
 //! The AGENT-014 and AGENT-015 browser fixture, copied into a scaffolded
 //! kit as `src/controllers/agent_fixture.rs`: two pages that offer server
 //! tools, a page with two form tools, the form requests those tools submit,
-//! and a recorder of every request the fixture's routes see.
+//! a recorder of every request the fixture's routes see, a route that
+//! verifies the signed-in user's address for the agents' claim page, and a
+//! page whose form tool posts the approval form.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use suprnova::serde_json::{Value, json};
 use suprnova::{
-    HttpResponse, Inertia, InertiaProps, Middleware, Next, Request, Response, ToolCaller,
-    async_trait, handler, inertia_response, json_response, redirect, tool, tool_input,
+    Auth, FrameworkError, HttpResponse, Inertia, InertiaProps, Middleware, Model, Next, Request,
+    Response, ToolCaller, async_trait, handler, inertia_response, json_response, redirect, tool,
+    tool_input,
 };
+
+use crate::models::user::User;
 
 /// The number the first page shows and `fixture.bump` adds to.
 static COUNTER: AtomicI64 = AtomicI64::new(0);
@@ -84,6 +89,17 @@ pub async fn form(req: Request) -> Response {
     let notes = NOTES.lock().map(|notes| notes.clone()).unwrap_or_default();
     inertia_response!(&req, "AgentFixture/Form", AgentFixtureFormProps { notes })
 }
+
+/// `GET /agent-fixture/consent`: a page with a form tool that posts the
+/// approval form, which the approval route must refuse.
+#[handler]
+pub async fn consent(req: Request) -> Response {
+    inertia_response!(&req, "AgentFixture/Consent", AgentFixtureConsentProps {})
+}
+
+/// The consent fixture page's props: none.
+#[derive(InertiaProps)]
+pub struct AgentFixtureConsentProps {}
 
 /// What `fixture.bump` adds.
 #[tool_input]
@@ -225,4 +241,17 @@ pub async fn requests() -> Response {
         .map(|requests| requests.clone())
         .unwrap_or_default();
     Ok(HttpResponse::json(json!({ "requests": requests })))
+}
+
+/// `POST /agent-fixture/verify-me`: record the signed-in user's address as
+/// verified, as the mailed link does, which a browser test cannot read. An
+/// agent's claim needs a verified address (AGENT-017).
+#[handler]
+pub async fn verify_me() -> Response {
+    let mut user = Auth::user_as::<User>()
+        .await?
+        .ok_or(FrameworkError::Unauthorized)?;
+    user.email_verified_at = Some(chrono::Utc::now());
+    user.save().await?;
+    json_response!({ "verified": true })
 }

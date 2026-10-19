@@ -65,6 +65,11 @@ impl StaticFiles {
     }
 
     async fn serve(self: Arc<Self>, request: Request) -> Response {
+        // A page's own scripts and styles are not pages to come back to. In
+        // Laravel they never reach the application, so its session never
+        // records them as the previous URL; as the fallback route here,
+        // they would be.
+        crate::session::middleware::exempt_from_previous_url();
         let is_head = request.method() == Method::HEAD;
         if request.method() != Method::GET && !is_head {
             return not_found();

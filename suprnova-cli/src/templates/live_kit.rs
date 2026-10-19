@@ -9,7 +9,9 @@
 //! installs under `templates/suprnova-ui/` the way `live:add` does
 //! ([`LIBRARY_COMPONENTS`]). `tests/documents.rs` renders every document
 //! through the test client as its visitor sees it; the kit's compile check
-//! runs it.
+//! runs it. The agent pages, `src/controllers/agents.rs` and
+//! `templates/live/pages/agents-*.html`, are plain documents with native
+//! forms rather than Live documents.
 
 use std::fs;
 use std::path::Path;
@@ -61,6 +63,10 @@ const FILES: &[(&str, &str)] = &[
     (
         "src/controllers/mod.rs",
         include_str!("files/live/src/controllers/mod.rs.tpl"),
+    ),
+    (
+        "src/controllers/agents.rs",
+        include_str!("files/live/src/controllers/agents.rs.tpl"),
     ),
     (
         "src/controllers/auth.rs",
@@ -197,6 +203,22 @@ const FILES: &[(&str, &str)] = &[
     (
         "templates/live/pages/error.html",
         include_str!("files/live/templates/pages/error.html.tpl"),
+    ),
+    (
+        "templates/live/pages/agents-approve.html",
+        include_str!("files/live/templates/pages/agents-approve.html.tpl"),
+    ),
+    (
+        "templates/live/pages/agents-claim.html",
+        include_str!("files/live/templates/pages/agents-claim.html.tpl"),
+    ),
+    (
+        "templates/live/pages/agents-connected.html",
+        include_str!("files/live/templates/pages/agents-connected.html.tpl"),
+    ),
+    (
+        "templates/live/pages/agents-returning.html",
+        include_str!("files/live/templates/pages/agents-returning.html.tpl"),
     ),
     (
         "templates/live/forgot_password_form.html",

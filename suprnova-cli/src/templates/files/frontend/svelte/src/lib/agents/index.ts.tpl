@@ -5,7 +5,9 @@
 //   usePageTool({ name, description, inputSchema, execute })
 //     a tool that lives while the component is mounted
 //   useFormTool(form, { name, description, schema, action })
-//     a `useForm` form as a tool, its schema from `../types/tool-schemas`
+//     a `useForm` form as a tool, its schema from `src/types/tool-schemas.ts`,
+//     which a page under `pages/Notes/` imports as
+//     `import { toolSchemas } from '../../types/tool-schemas'`
 //
 // Call them while the component initializes. Tool names and descriptions
 // are what an agent reads as instructions: write them as code literals,
@@ -51,7 +53,9 @@ export function usePageTool<TInput = Record<string, unknown>>(options: PageToolO
  * route's validation errors come back as a tool error naming each field.
  * A destructive form, or one whose action is a `DELETE`, is filled and left
  * for the user to submit. The tool sends no tool-call header, so the
- * route's own throttle applies rather than the server tool budget.
+ * route's own throttle applies rather than the server tool budget. It
+ * marks its submission with the form-tool header, which the approval and
+ * claim pages refuse: consent comes from the person.
  */
 export function useFormTool<TForm extends object>(
   form: Pick<InertiaFormProps<TForm>, 'submit' | 'cancel'> & TForm,

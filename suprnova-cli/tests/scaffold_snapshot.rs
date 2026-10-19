@@ -427,12 +427,20 @@ fn shared_target_dir() -> PathBuf {
         .to_path_buf()
 }
 
-/// Runs `cargo <args>` in `project` against the shared build directory.
-fn run_cargo_shared(project: &Path, args: &[&str]) {
+/// Runs `cargo <args>` in `project` against the shared build directory, and
+/// returns what it printed to stdout.
+fn run_cargo_shared(project: &Path, args: &[&str]) -> String {
+    run_cargo_shared_with(project, args, &[])
+}
+
+/// [`run_cargo_shared`] with `envs` in cargo's environment, which the tests
+/// it runs inherit: a test process loads no `.env`.
+fn run_cargo_shared_with(project: &Path, args: &[&str], envs: &[(&str, &str)]) -> String {
     let output = Command::new(env!("CARGO"))
         .args(args)
         .current_dir(project)
         .env("CARGO_TARGET_DIR", shared_target_dir())
+        .envs(envs.iter().copied())
         .output()
         .expect("cargo should run");
     assert!(
@@ -443,6 +451,54 @@ fn run_cargo_shared(project: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Scaffold a Live kit named `name` in `tmp`, built against the in-tree
+/// framework and this workspace's lock, as `live_kit_compiles_and_renders`
+/// builds one.
+fn live_scaffold(tmp: &TempDir, name: &str, dev_dependencies: &[&str]) -> PathBuf {
+    scaffold(tmp, name, &["--frontend", "live"]);
+    let project = tmp.path().join(name);
+    if !dev_dependencies.is_empty() {
+        add_dev_dependencies(&project, dev_dependencies);
+    }
+    patch_local_suprnova(&project);
+    // The workspace's lock, so the scaffold resolves the dependency
+    // versions this workspace builds and tests rather than whatever is
+    // newest today; cargo drops the entries the scaffold does not use.
+    let workspace_lock = workspace_framework_dir()
+        .parent()
+        .expect("framework sits in the workspace")
+        .join("Cargo.lock");
+    std::fs::copy(&workspace_lock, project.join("Cargo.lock")).expect("copy Cargo.lock");
+    project
+}
+
+/// Append `lines` to the `[dev-dependencies]` table a scaffold's manifest
+/// ends with. Asserted rather than assumed: a table after it would take
+/// the lines instead.
+fn add_dev_dependencies(project: &Path, lines: &[&str]) {
+    let path = project.join("Cargo.toml");
+    let mut manifest = std::fs::read_to_string(&path).expect("read scaffolded Cargo.toml");
+    let last_table = manifest
+        .lines()
+        .rev()
+        .find(|line| line.trim().starts_with('['))
+        .expect("a table header");
+    assert_eq!(
+        last_table.trim(),
+        "[dev-dependencies]",
+        "the scaffold's manifest ends with its dev-dependencies"
+    );
+    if !manifest.ends_with('\n') {
+        manifest.push('\n');
+    }
+    for line in lines {
+        manifest.push_str(line);
+        manifest.push('\n');
+    }
+    std::fs::write(&path, manifest).expect("write patched Cargo.toml");
 }
 
 /// The scaffold's server process, stopped when the test ends however it
@@ -490,17 +546,7 @@ fn get(port: u16, path: &str) -> std::io::Result<(u16, String)> {
 fn live_kit_compiles_and_renders() {
     let tmp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("tempdir");
     let name = "live_render";
-    scaffold(&tmp, name, &["--frontend", "live"]);
-    let project = tmp.path().join(name);
-    patch_local_suprnova(&project);
-    // The workspace's lock, so the scaffold resolves the dependency
-    // versions this workspace builds and tests rather than whatever is
-    // newest today; cargo drops the entries the scaffold does not use.
-    let workspace_lock = workspace_framework_dir()
-        .parent()
-        .expect("framework sits in the workspace")
-        .join("Cargo.lock");
-    std::fs::copy(&workspace_lock, project.join("Cargo.lock")).expect("copy Cargo.lock");
+    let project = live_scaffold(&tmp, name, &[]);
 
     run_cargo_shared(&project, &["check"]);
     // The kit's own `tests/documents.rs`: every document rendered through
@@ -606,6 +652,183 @@ fn live_kit_compiles_and_renders() {
     );
 
     drop(server);
+}
+
+// ---------------------------------------------------------------------------
+// AGENT-017 in a generated Inertia application: the agents' pages, served.
+// ---------------------------------------------------------------------------
+
+/// The account-flows harness: the Vue scaffold, its manifest pointed at the
+/// in-tree framework, and its `.env` handed to the run. It builds into the
+/// account-flows target directory, so the framework builds once for both.
+#[path = "scaffold_account_flows/harness.rs"]
+mod account_flows_harness;
+
+/// The test that runs inside the generated project.
+const AGENT_PAGES_TEST: &str = include_str!("fixtures/scaffold/agent_pages.rs");
+
+/// Every case `tests/fixtures/scaffold/agent_pages.rs` runs, which must each
+/// report `ok`.
+const AGENT_PAGES_CASES: &[&str] = &[
+    "agent_017_kit_migrator_creates_the_plugins_tables_and_the_email_index_on_sqlite",
+    "agent_017_inertia_serves_the_endpoint_and_both_plugins",
+    "agent_017_inertia_approval_round_trip",
+    "agent_017_inertia_claim_round_trip",
+    "agent_017_inertia_connected_agents_lists_and_revokes_only_the_users_own",
+    "agent_017_inertia_consent_forms_need_the_csrf_token",
+    "agent_017_inertia_consent_pages_refuse_framing_caching_and_referrers",
+    "agent_017_inertia_another_user_cannot_decide_or_confirm",
+    "agent_017_inertia_a_guest_decides_and_confirms_nothing",
+    "agent_017_inertia_a_native_form_post_decides",
+    "agent_017_inertia_the_last_wrong_code_ends_the_claim",
+    "agent_017_login_returns_to_a_same_origin_address",
+    "agent_017_login_ignores_a_foreign_return_to",
+    "agent_008_registration_lowercases_and_refuses_a_mixed_case_duplicate",
+    "kit_registration_refuses_a_name_over_255_and_an_email_over_254",
+    "kit_a_signed_in_user_writes_a_note",
+];
+
+/// AGENT-017: a fresh Inertia application serves the MCP endpoint, the
+/// OAuth server and agent auth with its own approval, claim and
+/// connected-agents pages, and its sign-in follows a same-origin
+/// `return_to` and nothing else. Its own test drives every page through the
+/// application's router, under the settings and the signing key
+/// `suprnova new` wrote, on SQLite with the kit's own migrator.
+#[test]
+#[ignore = "AGENT-017 evidence: runs the generated application's own test; builds the framework and the app; slow"]
+fn agent_017_a_generated_inertia_application_serves_the_agent_pages() {
+    let tmp = account_flows_harness::scratch_dir();
+    let project = account_flows_harness::scaffold(tmp.path(), "agent_pages");
+    account_flows_harness::patch_manifest(&project);
+    // What `npm run build` would leave behind: a script every page loads.
+    let assets = project.join("public/assets");
+    std::fs::create_dir_all(&assets).expect("create public/assets");
+    std::fs::write(assets.join("app-agents.js"), "console.log('built')\n").expect("write asset");
+    // The OAuth server's issuer is the application's URL, which must be
+    // HTTPS or a loopback host.
+    let output = account_flows_harness::run_project_test(
+        tmp.path(),
+        &project,
+        "agent_pages",
+        AGENT_PAGES_TEST,
+        "http://localhost",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the generated application's agents test failed:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let missing: Vec<&str> = AGENT_PAGES_CASES
+        .iter()
+        .copied()
+        .filter(|case| !stdout.contains(&format!("case {case} ... ok")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these cases did not run and pass: {missing:#?}\nstdout:\n{stdout}"
+    );
+    // `--nocapture` prints the cases between the test's name and its `ok`.
+    assert!(
+        stdout.contains("test result: ok. 1 passed;"),
+        "the in-project test must have run and passed:\n{stdout}"
+    );
+}
+
+/// The test `agent_017_a_generated_live_application_serves_the_agent_pages`
+/// writes into the scaffold as `tests/agent_pages.rs`. `__PACKAGE__` is the
+/// scaffold's crate name.
+const LIVE_AGENT_PAGES: &str = include_str!("fixtures/scaffold/live_agent_pages.rs");
+
+/// The cases `tests/agent_pages.rs` runs, each of which prints
+/// `case <name> ... ok` when it passes.
+const LIVE_AGENT_CASES: [&str; 16] = [
+    "agent_017_live_migrator_creates_the_plugins_tables_and_the_email_index",
+    "agent_017_live_serves_the_endpoint_and_both_plugins",
+    "agent_017_live_forms_hint_the_name_and_email_bounds",
+    "agent_017_live_login_ignores_a_foreign_return_to",
+    "agent_017_live_login_returns_to_a_same_origin_address",
+    "agent_017_live_registration_continues_to_the_intended_address",
+    "agent_008_live_registration_lowercases_and_refuses_a_mixed_case_duplicate",
+    "kit_live_registration_refuses_a_name_over_255_and_an_email_over_254",
+    "agent_017_live_approval_round_trip",
+    "agent_017_live_claim_round_trip",
+    "agent_017_live_connected_agents_lists_and_revokes_only_the_users_own",
+    "agent_017_live_consent_forms_need_the_csrf_token",
+    "agent_017_live_consent_pages_refuse_framing_caching_and_referrers",
+    "agent_017_live_consent_headers_hold_on_every_refusal",
+    "agent_017_live_consent_pages_escape_what_the_client_chose",
+    "agent_017_live_consent_pages_act_for_their_own_user_only",
+];
+
+/// AGENT-017: a fresh `--frontend live` scaffold serves the MCP endpoint,
+/// both plugins and its own approval, claim and connected-agents pages.
+/// The scaffold's own `tests/documents.rs` and the fixture
+/// `fixtures/scaffold/live_agent_pages.rs` run in it, on the build
+/// directory `live_kit_compiles_and_renders` uses, so the framework builds
+/// once for both. The fixture drives the pages' native forms and the kit's
+/// Live sign-in and registration forms through the test client: the
+/// approval and claim round trips, the connected agents of two users,
+/// CSRF, the consent headers on every answer, what another user or a guest
+/// can do, escaping, the scripts the pages load, `return_to` and the
+/// intended address across sign-in and registration, the forms' bounds, and
+/// the migrator on SQLite.
+#[test]
+#[ignore = "compile check - builds a Live kit scaffold and drives its agent pages; slow"]
+fn agent_017_a_generated_live_application_serves_the_agent_pages() {
+    let tmp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("tempdir");
+    let name = "live_agents";
+    // What the fixture needs beside the framework: PKCE's SHA-256 and
+    // base64url, and URL parsing. The workspace's lock resolves each.
+    let project = live_scaffold(
+        &tmp,
+        name,
+        &[r#"sha2 = "0.10""#, r#"base64 = "0.22""#, r#"url = "2""#],
+    );
+    std::fs::write(
+        project.join("tests/agent_pages.rs"),
+        LIVE_AGENT_PAGES.replace("__PACKAGE__", name),
+    )
+    .expect("write the fixture into the scaffold");
+
+    // The registration flows mail a verification link, which needs a sender.
+    let printed = run_cargo_shared_with(
+        &project,
+        &[
+            "test",
+            "--no-fail-fast",
+            "--test",
+            "documents",
+            "--test",
+            "agent_pages",
+            "--",
+            "--nocapture",
+            "--test-threads=1",
+        ],
+        &[("MAIL_FROM", "ops@example.test")],
+    );
+    // Each binary runs its one test; its log lines can sit between the
+    // test's name and its `ok`.
+    for test in [
+        "test every_document_renders_for_its_visitor ...",
+        "test agent_pages_serve_their_flows ...",
+    ] {
+        assert!(printed.contains(test), "`{test}` did not run:\n{printed}");
+    }
+    assert_eq!(
+        printed.matches("test result: ok. 1 passed;").count(),
+        2,
+        "both tests must pass:\n{printed}"
+    );
+    let missing: Vec<&str> = LIVE_AGENT_CASES
+        .iter()
+        .copied()
+        .filter(|case| !printed.contains(&format!("case {case} ... ok")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these cases did not run and pass: {missing:#?}\n{printed}"
+    );
 }
 
 // ---------------------------------------------------------------------------

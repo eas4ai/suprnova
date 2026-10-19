@@ -1,5 +1,7 @@
 //! AGENT-015, and AGENT-014 for the Inertia kits: the React, Vue and Svelte
-//! kits' page tools, component tools and form tools.
+//! kits' page tools, component tools and form tools. AGENT-017 too: each
+//! kit's approval and claim pages in Chromium under the default security
+//! headers.
 //!
 //! The binary's root declares this module with one line,
 //! `#[path = "agents_browser/kits.rs"] mod kits;`: a test crate's root
@@ -116,6 +118,7 @@ const CORE_CASES: &[&str] = &[
     "agent_015_a_leaving_tool_unregisters_at_once_and_its_pending_call_still_answers",
     "agent_015_back_forward_cache_suspends_and_restores_tools",
     "agent_015_a_page_without_webmcp_registers_nothing",
+    "agent_017_a_form_tool_submission_carries_the_form_tool_header",
 ];
 
 /// The kit's own vitest cases, each named `agent_015_<kit>_<case>`.
@@ -272,13 +275,15 @@ fn agent_015_svelte_tools_in_jsdom() {
 /// The fixture's routes, inserted into the scaffold's `routes!` before the
 /// static files: two pages that offer server tools through `with_tools`, a
 /// group whose `fixture.help` every fixture page offers, the form page, the
-/// tools' own routes and the recorder.
+/// tools' own routes, the recorder, and the route that verifies the
+/// signed-in user's address for the agents' claim page.
 const FIXTURE_ROUTES: &str = r#"    // The AGENT-014 and AGENT-015 browser fixture.
     group!("/agent-fixture", {
         get!("/first", controllers::agent_fixture::first)
             .with_tools(["fixture.bump", "fixture.peek", "fixture.mine"]),
         get!("/second", controllers::agent_fixture::second).with_tools(["fixture.reset"]),
         get!("/form", controllers::agent_fixture::form),
+        get!("/consent", controllers::agent_fixture::consent),
         post!("/bump", controllers::agent_fixture::bump),
         get!("/peek", controllers::agent_fixture::peek),
         post!("/mine", controllers::agent_fixture::mine),
@@ -289,6 +294,7 @@ const FIXTURE_ROUTES: &str = r#"    // The AGENT-014 and AGENT-015 browser fixtu
         post!("/purge", controllers::agent_fixture::purge),
         get!("/schema", controllers::agent_fixture::schema),
         get!("/requests", controllers::agent_fixture::requests),
+        post!("/verify-me", controllers::agent_fixture::verify_me),
     })
     .with_tools(["fixture.help"])
     .middleware(controllers::agent_fixture::Recorder),
@@ -296,7 +302,9 @@ const FIXTURE_ROUTES: &str = r#"    // The AGENT-014 and AGENT-015 browser fixtu
 "#;
 
 /// The browser cases each kit's run must pass, each named
-/// `agent_01x_<kit>_<case>`.
+/// `agent_01x_<kit>_<case>`. The AGENT-017 cases run the kit's approval and
+/// claim pages under the default security headers, which the scaffold's
+/// `.env` sets.
 const BROWSER_CASES: &[&str] = &[
     "agent_014_{kit}_page_registers_the_server_tools_the_viewer_may_call",
     "agent_014_{kit}_server_tool_annotations_follow_the_markings",
@@ -310,6 +318,11 @@ const BROWSER_CASES: &[&str] = &[
     "agent_015_{kit}_form_tool_returns_each_invalid_field",
     "agent_015_{kit}_destructive_form_tool_leaves_the_submit_to_the_user",
     "agent_015_{kit}_form_tool_answers_when_its_submit_leaves_the_page",
+    "agent_017_{kit}_approval_page_round_trip",
+    "agent_017_{kit}_claim_page_round_trip",
+    "agent_017_{kit}_wrong_claim_code_shows_the_attempts_left",
+    "agent_017_{kit}_form_tool_cannot_approve",
+    "agent_017_{kit}_notes_after_a_claim_keep_their_form_errors",
 ];
 
 /// The application process, stopped when dropped.
@@ -374,7 +387,7 @@ fn add_fixture(project: &Path, kit: &str, work: &Path) -> Result<(), String> {
     };
     let pages = project.join("frontend/src/pages/AgentFixture");
     std::fs::create_dir_all(&pages).map_err(|error| error.to_string())?;
-    for page in ["First", "Second", "Form"] {
+    for page in ["First", "Second", "Form", "Consent"] {
         std::fs::copy(
             app.join(kit).join(format!("{page}.{ext}")),
             pages.join(format!("{page}.{ext}")),
@@ -470,6 +483,19 @@ fn kit_tools_in_a_browser(kit: &str) {
             .parent()
             .ok_or("the cargo target directory")?
             .to_path_buf();
+        // The project lies inside the target directory, so cargo records its
+        // sources by their path there, and a failed run keeps its directory:
+        // a later run of the same name would find those older sources and
+        // keep the binary they built. Clean the kit's own crate, so the
+        // build compiles this scaffold; the framework stays built.
+        run(
+            AsyncCommand::new(env!("CARGO"))
+                .args(["clean", "-p", name])
+                .current_dir(&project)
+                .env("CARGO_TARGET_DIR", &target),
+            &work.join("cargo-clean.log"),
+            minutes(5),
+        )?;
         run(
             AsyncCommand::new(env!("CARGO"))
                 .args(["build", "--bin", name])
@@ -527,6 +553,10 @@ fn kit_tools_in_a_browser(kit: &str) {
                     format!("sqlite://{}?mode=rwc", work.join("app.sqlite").display()),
                 )
                 .env("MAIL_DRIVER", "memory")
+                // The preset under test is the one the scaffold's `.env`
+                // names, the one a new application gets.
+                .env_remove("SECURITY_HEADERS")
+                .env_remove("SECURITY_HEADERS_CSP_REPORT_ONLY")
                 .stdout(log.try_clone().map_err(|error| error.to_string())?)
                 .stderr(log)
                 .spawn()

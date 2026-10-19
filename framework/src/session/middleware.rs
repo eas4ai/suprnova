@@ -96,16 +96,17 @@ tokio::task_local! {
     /// identities it replaced or ended. `SessionMiddleware` settles both
     /// after the handler.
     pub(crate) static IDENTITY_TRANSITION: Arc<Mutex<IdentityTransition>>;
-    /// Set by a middleware inside this one when its request must not
-    /// become the session's previous URL whatever it answers: the Inertia
-    /// DevTools entry endpoints, which the browser extension fetches while
-    /// the application is about to redirect back.
+    /// Set by a middleware or handler inside this one when its request must
+    /// not become the session's previous URL whatever it answers: the
+    /// Inertia DevTools entry endpoints, which the browser extension fetches
+    /// while the application is about to redirect back, and `StaticFiles`,
+    /// whose files never reach Laravel's router at all.
     static PREVIOUS_URL_EXEMPT: Arc<std::sync::atomic::AtomicBool>;
 }
 
 /// Keep the request in scope from becoming the session's previous URL, as
-/// Laravel's session middleware skips an XHR. A no-op outside a session
-/// scope.
+/// Laravel's session middleware skips an XHR and never sees a static file.
+/// A no-op outside a session scope.
 pub(crate) fn exempt_from_previous_url() {
     let _ = PREVIOUS_URL_EXEMPT.try_with(|exempt| {
         exempt.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1302,6 +1303,15 @@ struct PreviousUrlCandidate {
     is_precognitive: Arc<std::sync::atomic::AtomicBool>,
     /// The request accepts JSON and not HTML.
     wants_json: bool,
+    /// The request sends `X-Requested-With: XMLHttpRequest`, Laravel's
+    /// `$request->ajax()`: a script fetched it, not the browser's address
+    /// bar.
+    is_ajax: bool,
+    /// The router matched a route or answered with its fallback route,
+    /// Laravel's `$request->route() instanceof Route`. A request no route
+    /// answered, such as one a global middleware answers first, or the 404
+    /// for a path nothing matches, is not a page to come back to.
+    matched_route: bool,
     /// The request path, with its query string when it has one.
     current_url: String,
     /// A middleware inside the session asked that the request not become
@@ -1515,9 +1525,10 @@ impl SessionMiddleware {
         // Capture the current URL before `next()` consumes the
         // request. We write it to the session under `_previous.url`
         // AFTER the handler runs, but only when the response indicates
-        // a normal GET page load (200/300-range, not an Inertia visit,
-        // not a prefetch, not an AJAX endpoint). This mirrors Laravel's
-        // `StartSession::storeCurrentUrl`, which skips XHRs the same way;
+        // a normal GET page load that a route answered (200/300-range,
+        // not an Inertia visit, not a prefetch, not AJAX, not a static
+        // file). This mirrors Laravel's `StartSession::storeCurrentUrl`,
+        // which asks for a matched route and skips XHRs the same way;
         // the Inertia middleware records an Inertia visit itself
         // (`InertiaConfig::store_previous_url`). It is what
         // [`Redirect::back`] reads.
@@ -2202,6 +2213,10 @@ impl SessionMiddleware {
             .and_then(|v| v.to_str().ok())
             .map(|v| v.contains("application/json") && !v.contains("text/html"))
             .unwrap_or(false);
+        let is_ajax = request.ajax();
+        // The rule the Inertia middleware applies to an Inertia visit, so
+        // the two writers agree on what counts as a routed request.
+        let matched_route = request.route_pattern().is_some() || request.is_fallback_route();
         // The URL the browser asked for, public root included, so
         // `Redirect::back` sends it back under the same root (PFX-004).
         // The query is normalised, as Laravel's `StartSession` stores
@@ -2217,6 +2232,8 @@ impl SessionMiddleware {
             is_prefetch,
             is_precognitive: request.precognition_state(),
             wants_json,
+            is_ajax,
+            matched_route,
             current_url,
             exempt: false,
         }
@@ -2446,6 +2463,8 @@ impl SessionMiddleware {
             is_prefetch,
             is_precognitive,
             wants_json,
+            is_ajax,
+            matched_route,
             current_url,
             exempt,
         } = previous_url;
@@ -2513,9 +2532,10 @@ impl SessionMiddleware {
         }
 
         // Record the current URL as `_previous.url` if this turned out
-        // to be a "real" HTML page navigation - successful, GET, not an
-        // Inertia visit (the Inertia middleware records those), not a
-        // prefetch, not JSON-API. Drives `Redirect::back`.
+        // to be a "real" HTML page navigation - successful, GET, answered
+        // by a route, not an Inertia visit (the Inertia middleware records
+        // those), not a prefetch, not AJAX, not JSON-API. Drives
+        // `Redirect::back`.
         //
         // We only write when the value would change. Same-URL navigations
         // (a GET that returns to the same page on retry, a duplicate
@@ -2579,9 +2599,11 @@ impl SessionMiddleware {
         // clobber a genuinely good URL recorded by an earlier, legitimate
         // navigation still sitting in the session.
         if is_get
+            && matched_route
             && !is_inertia
             && !is_prefetch
             && !wants_json
+            && !is_ajax
             && !exempt
             && !shared_cacheable
             && (is_success || is_redirect)

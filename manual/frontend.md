@@ -275,7 +275,7 @@ and changes nothing without either), and
 `InertiaValidationRedirectMiddleware` (turns a `422` on an Inertia visit
 into a `303` back to the form page with the errors flashed).
 `InertiaVersionMiddleware` and `Inertia303Middleware` used to require
-separate registration; `Inertia::install` makes all five the default. See [Inertia Responses](frontend-inertia-responses.md#bootstrap-inertia-install)
+separate registration; `Inertia::install` makes all five the default. See [Inertia Responses](frontend-inertia-responses.md#bootstrap-inertiainstall)
 for the full registration order and what each middleware closes.
 
 With `.devtools(DevToolsConfig::new())`, `install` also registers the

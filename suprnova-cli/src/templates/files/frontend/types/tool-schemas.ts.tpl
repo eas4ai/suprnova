@@ -7,6 +7,42 @@
 // `useFormTool(form, { schema: toolSchemas.StoreNoteRequest, ... })`.
 
 export const toolSchemas = {
+  ApprovalDecisionRequest: {
+    "type": "object",
+    "properties": {
+      "authorization": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "decision": {
+        "type": "string"
+      }
+    },
+    "required": ["authorization", "decision"],
+    "description": "The approval page's two forms: which authorization, and the decision.",
+    "title": "ApprovalDecisionRequest",
+    "$schema": "https://json-schema.org/draft/2020-12/schema"
+  },
+  ClaimCodeRequest: {
+    "type": "object",
+    "properties": {
+      "claim_attempt_token": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "user_code": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 16
+      }
+    },
+    "required": ["claim_attempt_token", "user_code"],
+    "description": "The claim page's form: the attempt the link named, and the code the\nagent gave the user.",
+    "title": "ClaimCodeRequest",
+    "$schema": "https://json-schema.org/draft/2020-12/schema"
+  },
   ForgotPasswordRequest: {
     "type": "object",
     "properties": {

@@ -152,8 +152,10 @@ impl AgentApprovals {
     /// # Errors
     ///
     /// 403 for a tool call, one the MCP endpoint dispatched or one a page
-    /// made with the [`TOOL_CALL_HEADER`](crate::agents::TOOL_CALL_HEADER):
-    /// consent comes from the person, never an agent acting as them. 500
+    /// made with the [`TOOL_CALL_HEADER`](crate::agents::TOOL_CALL_HEADER),
+    /// and for a form a form tool submitted, with the
+    /// [`FORM_TOOL_HEADER`](crate::agents::FORM_TOOL_HEADER): consent comes
+    /// from the person, never an agent acting as them. 500
     /// when the router that served the request mounts no OAuth server.
     pub fn of(request: &Request) -> Result<Self, FrameworkError> {
         refuse_agents(request)?;
@@ -227,16 +229,22 @@ impl AgentApprovals {
 }
 
 /// Refuse a request an agent makes: a tool call the MCP endpoint
-/// dispatched, which carries the agent mark, or one from the browser,
-/// which carries the [`TOOL_CALL_HEADER`](super::TOOL_CALL_HEADER).
+/// dispatched, which carries the agent mark, one from the browser, which
+/// carries the [`TOOL_CALL_HEADER`](super::TOOL_CALL_HEADER), or a form a
+/// kit's form tool submitted, which carries the
+/// [`FORM_TOOL_HEADER`](super::FORM_TOOL_HEADER).
 ///
 /// A tool call runs as the user its caller acts for, so a route an
 /// application declared a tool by mistake would otherwise let an agent
-/// approve its own authorization or claim itself. Consent comes from the
-/// person, so both halves refuse here, before anything is read, whatever
-/// the route.
+/// approve its own authorization or claim itself, and a form tool on a
+/// consent page sends the page's own form with the user's session. Consent
+/// comes from the person, so both halves refuse here, before anything is
+/// read, whatever the route.
 fn refuse_agents(request: &Request) -> Result<(), FrameworkError> {
-    if request.is_agent_traffic() || request.header(super::TOOL_CALL_HEADER).is_some() {
+    if request.is_agent_traffic()
+        || request.header(super::TOOL_CALL_HEADER).is_some()
+        || request.header(super::FORM_TOOL_HEADER).is_some()
+    {
         return Err(FrameworkError::domain(
             "Consent must come from the person: an agent's tool call cannot approve, deny or \
              claim.",
@@ -412,7 +420,8 @@ impl AgentClaims {
     ///
     /// # Errors
     ///
-    /// 403 for a tool call, as [`AgentApprovals::of`] refuses one. 500
+    /// 403 for a tool call or a form tool's form, as [`AgentApprovals::of`]
+    /// refuses them. 500
     /// when the router that served the request mounts no agent auth.
     pub fn of(request: &Request) -> Result<Self, FrameworkError> {
         refuse_agents(request)?;

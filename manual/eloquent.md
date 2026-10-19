@@ -19,7 +19,7 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 - [Finding rows](#finding-rows)
 - [Creating and updating](#creating-and-updating)
 - [Deleting and soft deletes](#deleting-and-soft-deletes)
-- [Query builder - dual API](#query-builder--dual-api)
+- [Query builder - dual API](#query-builder---dual-api)
 - [Row locking](#row-locking)
 - [Transactions](#transactions)
 - [Scopes](#scopes)
@@ -37,12 +37,12 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 - [Prunable](#prunable)
 - [Multi-connection routing](#multi-connection-routing)
 - [Replication](#replication)
-- [Debugging - dump and dd](#debugging--dump-and-dd)
+- [Debugging - dump and dd](#debugging---dump-and-dd)
 - [Testing models](#testing-models)
 - [Dropping to SeaORM](#dropping-to-seaorm)
 - [Migrating from `database::Model`](#migrating-from-databasemodel)
-- [DB facade - model-less queries](#db-facade--model-less-queries)
-- [Laravel-13 parity - relation-existence + cheap shortcuts](#laravel-13-parity--relation-existence--cheap-shortcuts)
+- [DB facade - model-less queries](#db-facade---model-less-queries)
+- [Laravel-13 parity - relation-existence + cheap shortcuts](#relation-existence--cheap-shortcuts)
 
 ## Quick start
 
@@ -174,7 +174,7 @@ Function-level macros work alongside the struct attribute:
 - Global scopes are a runtime registration via the `GlobalScope`
   trait, registered with `ScopeRegistry::register::<M, _>(scope)`. There is no
   function-level `#[global_scope]` macro - see
-  [Macros](macros.md#suprnova-scopes-model) for the full pattern.
+  [Macros](macros.md#suprnovascopesmodel) for the full pattern.
 - `#[prunable]` on `impl Prunable for T { ... }` registers the
   pruner via inventory so `model:prune` finds it.
 

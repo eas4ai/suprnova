@@ -20,9 +20,13 @@ pub use lockout::{
 
 /// Normalize an email address for lookups, lockout keys, and abuse keys.
 ///
-/// Normalization is deliberately minimal (trim plus ASCII-insensitive
-/// lowercase) so it matches the deployed framework behavior; collision
-/// handling for legacy mixed-case rows belongs to the migration domain.
+/// Normalization is deliberately minimal: trim, then Unicode lowercase
+/// (`str::to_lowercase`), so `MÜNCHEN` becomes `münchen`. Magnetar folds
+/// the same way when it stores an address and when it looks one up, so a
+/// stored address is always found again; collision handling for legacy
+/// mixed-case rows belongs to the migration domain. The starter kits fold
+/// only ASCII letters, to match SQLite's `LOWER`, and compare through the
+/// database's `LOWER`.
 #[must_use]
 pub fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()

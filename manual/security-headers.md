@@ -354,7 +354,9 @@ already returns a `Result`:
 
 ```rust,ignore
 // cmd/main.rs
-.try_routes_async(|| async { live::routes_with_render_cache(routes::try_register()?).await })
+.try_routes_async(|| async {
+    live::routes_with_render_cache(agents::serve(routes::try_register()?)?).await
+})
 ```
 
 An application without the Live routes passes the function itself to

@@ -98,7 +98,7 @@ let cfg = InertiaConfig::new().default_title("Reports");
 inertia_response!(&req, "Reports/Index", props, cfg)
 ```
 
-Most apps register a single config at boot via [`Inertia::install`](#bootstrap-inertia-install)
+Most apps register a single config at boot via [`Inertia::install`](#bootstrap-inertiainstall)
 and never touch this argument - the installed config is already what
 every response starts from. Pass one here only to override the installed
 config for a single page.
@@ -1094,9 +1094,12 @@ It reads the `Referer` from the request `InertiaHeadersMiddleware` is
 handling, which `Inertia::install` puts on every route; `Redirect::back`
 reads the previous URL only.
 
-The previous URL is recorded twice over: `SessionMiddleware` records every
-successful page load that is not an Inertia visit, a prefetch or a JSON call,
-and the Inertia middleware records an Inertia `GET` that matched a route,
+The previous URL is recorded twice over: `SessionMiddleware` records a
+successful `GET` that a route answered, the fallback route included, unless
+it is an Inertia visit, a prefetch, a Precognition request, a JSON call or an
+AJAX call (`X-Requested-With: XMLHttpRequest`). A static file and a request
+no route answered are never recorded, as Laravel never sees them. The
+Inertia middleware records an Inertia `GET` that matched a route,
 unless it is a prefetch (`X-Moz`, `Purpose` or `Sec-Purpose` set to
 `prefetch`), a Precognition request or a partial reload of the component it
 rendered - deferred props, polling and infinite scroll reload the page the
@@ -1110,7 +1113,7 @@ that follows it. A prefetch keeps its plain redirect, since it is never
 shown. `InertiaResponse::redirect(url)` builds the same `409` by hand.
 
 For Inertia `PUT`, `PATCH` and `DELETE` visits, the framework converts a
-`302` redirect to `303 See Other` when [`Inertia303Middleware`](#bootstrap-inertia-install)
+`302` redirect to `303 See Other` when [`Inertia303Middleware`](#bootstrap-inertiainstall)
 is installed, so the browser issues a clean follow-up GET instead of
 re-submitting the original PUT/PATCH/DELETE to the redirect target.
 
@@ -1217,7 +1220,7 @@ from the request you pass, for code that runs outside a dispatched request.
 Inertia versions the asset manifest so a long-lived client doesn't try
 to mount a page from yesterday's bundle against today's server. When
 the client's `X-Inertia-Version` header on a `GET` doesn't match the
-server's current version, [`InertiaVersionMiddleware`](#bootstrap-inertia-install)
+server's current version, [`InertiaVersionMiddleware`](#bootstrap-inertiainstall)
 responds with `409 Conflict` before the handler runs. `X-Inertia-Location`
 holds the request's absolute URL (scheme, host, path and query, as
 Laravel's `fullUrl()` gives it), and `X-Inertia-Version` holds the current
@@ -1335,7 +1338,7 @@ pub fn register_http_stack() {
 
 Anything the Inertia layer depends on - `SessionMiddleware` - and
 anything an error page needs to read - `LocaleMiddleware` - goes *above*
-this call. See [the ordering rules below](#bootstrap-inertia-install).
+this call. See [the ordering rules below](#bootstrap-inertiainstall).
 
 ```rust
 // cmd/main.rs
@@ -1731,7 +1734,9 @@ replaced was the same for everyone, so it must never inherit permission
 to be stored by a shared cache and handed to a different visitor, nor
 validators that belong to an entity it is not. The page sets
 `Cache-Control: no-cache, private` for itself instead, the same default
-Laravel gives a session-bearing response.
+Laravel gives a session-bearing response. When the response it replaces
+said `no-store`, the page sets `no-store`, so a page that must not be stored,
+such as a consent page, stays unstored when it fails.
 
 Everything else carries: `Retry-After` on a `429` still tells the client
 when to come back, `WWW-Authenticate` on a `401` still carries the
@@ -1868,7 +1873,8 @@ It offers three decisions:
   response and keeps its status. `props` is anything that serializes to a
   JSON object, such as `json!({ ... })`. The page gets the same treatment
   as the default callback's page: the root template the request's chooser
-  picks, `Cache-Control: no-cache, private`, and the original headers
+  picks, `Cache-Control: no-cache, private` (or `no-store` when the replaced
+  response said it), and the original headers
   minus the ones described in [What survives the swap](#what-survives-the-swap).
 - `with_shared_data()` adds the shared props to that page: everything
   `Inertia::share` and `App::inertia_share` registered, the shared
@@ -2435,7 +2441,7 @@ under Node, Bun or Deno - over HTTP. SSR is on by default, as in Laravel,
 and gated by bundle detection: a first visit goes to the worker only when
 an SSR bundle exists, so an application without one renders on the client
 and never contacts the worker. Configure it on the config you hand to
-[`Inertia::install`](#bootstrap-inertia-install) - that config is what
+[`Inertia::install`](#bootstrap-inertiainstall) - that config is what
 every response starts from, so there is nothing to plumb through your
 handlers:
 
@@ -2752,7 +2758,7 @@ file for a frontend without the Inertia Vite plugin.
 ## Configuration
 
 Inertia behaviour is configured programmatically via `InertiaConfig`, and
-the config you hand to [`Inertia::install`](#bootstrap-inertia-install) is
+the config you hand to [`Inertia::install`](#bootstrap-inertiainstall) is
 the one every response starts from. `SUPRNOVA_FRONTEND` (`svelte` /
 `react` / `vue`) only supplies the default entry-point filename and
 page-component extensions when the config doesn't say - an explicit
@@ -2846,7 +2852,7 @@ let cfg = InertiaConfig::new()
 
 The resolver reads the request through `InertiaRequestExt`, and applies to
 every response built from the config you pass to
-[`Inertia::install`](#bootstrap-inertia-install) - the usual place for a
+[`Inertia::install`](#bootstrap-inertiainstall) - the usual place for a
 resolver that should apply app-wide. Override it for a single response
 with `InertiaResponse::with_config(cfg)`. A resolver changes `page.url`
 only. The 409 bounce keeps naming the URL that actually arrived - that is

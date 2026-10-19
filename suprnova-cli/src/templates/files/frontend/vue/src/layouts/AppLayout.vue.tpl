@@ -36,6 +36,13 @@ defineProps<{
             <Link :href="`${root}/notes`" class="text-sm font-medium text-gray-700 hover:text-gray-900">
               Notes
             </Link>
+            <Link
+              :href="`${root}/connected-agents`"
+              class="text-sm font-medium text-gray-700 hover:text-gray-900"
+              :aria-current="page.component.startsWith('Agents/') ? 'page' : undefined"
+            >
+              Agents
+            </Link>
           </template>
         </div>
         <div class="flex items-center gap-4">

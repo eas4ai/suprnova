@@ -11,5 +11,10 @@
 
 #[path = "kit_agents/api.rs"]
 mod api;
+#[path = "kit_agents/inertia.rs"]
+mod inertia;
 #[path = "kit_agents/shared.rs"]
 mod shared;
+
+#[path = "kit_agents/live.rs"]
+mod live;
