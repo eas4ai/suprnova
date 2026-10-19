@@ -25,7 +25,7 @@ use sea_orm::{
 };
 
 use super::store::{
-    AgentAuthStore, AgentEventRecord, AgentGrantRecord, IDENTITY_ASSERTION, NewAttempt,
+    AgentAuthStore, AgentEventRecord, AgentGrantRecord, IDENTITY_ASSERTION, NewAttempt, OutboxRow,
     RegistrationRecord, STATUS_ACTIVE, STATUS_CLAIMED, STATUS_EXPIRED, STATUS_PENDING,
     STATUS_REVOKED, STATUS_UNCLAIMED,
 };
@@ -191,6 +191,10 @@ pub mod agent_events {
         /// The end of the lease a delivery holds, while one does.
         #[sea_orm(nullable)]
         pub leased_until: Option<DateTimeUtc>,
+        /// The token of the lease a delivery holds: a delivery records its
+        /// result only while the row still holds it.
+        #[sea_orm(column_type = "String(StringLen::N(64))", nullable)]
+        pub lease_token: Option<String>,
         #[sea_orm(nullable)]
         pub delivered_at: Option<DateTimeUtc>,
         /// Refused deliveries since the event was written or put back.
@@ -464,11 +468,21 @@ fn grant_key(registration_id: &str, resource: &str) -> String {
     crate::authorization_server::token_digest(&format!("{registration_id}\n{resource}"))
 }
 
-fn event_record(model: agent_events::Model) -> Result<AgentEventRecord> {
-    let attributes = serde_json::from_str(&model.attributes).map_err(|error| Error::Internal {
-        message: format!("an agent auth outbox event's attributes do not read: {error}"),
-    })?;
-    Ok(AgentEventRecord {
+/// An outbox row as the store reads it: the event, or why it does not
+/// read. A negative attempt count was never written, and attributes that
+/// do not parse were never written either; such a row is reported, never
+/// guessed at.
+fn outbox_row(model: agent_events::Model) -> OutboxRow {
+    let Ok(attempts) = u32::try_from(model.attempts) else {
+        return OutboxRow::Unreadable(format!("the attempt count {} is negative", model.attempts));
+    };
+    let attributes = match serde_json::from_str(&model.attributes) {
+        Ok(attributes) => attributes,
+        Err(error) => {
+            return OutboxRow::Unreadable(format!("the attributes do not parse: {error}"));
+        }
+    };
+    OutboxRow::Event(AgentEventRecord {
         id: model.id,
         kind: model.kind,
         registration_id: model.registration_id,
@@ -476,9 +490,7 @@ fn event_record(model: agent_events::Model) -> Result<AgentEventRecord> {
         attributes,
         created_at: model.created_at,
         delivered_at: model.delivered_at,
-        // A negative count was never written; reading it as the largest
-        // count keeps the event from being retried without end.
-        attempts: u32::try_from(model.attempts).unwrap_or(u32::MAX),
+        attempts,
         last_error: model.last_error,
         failed_at: model.failed_at,
     })
@@ -770,6 +782,7 @@ impl AgentAuthStore for SqlAgentAuthStore {
                 attributes: Set(attributes),
                 created_at: Set(event.created_at),
                 leased_until: Set(None),
+                lease_token: Set(None),
                 delivered_at: Set(None),
                 attempts: Set(0),
                 last_error: Set(None),
@@ -1091,28 +1104,50 @@ impl AgentAuthStore for SqlAgentAuthStore {
             .rows_affected)
     }
 
-    async fn undelivered_events(
+    async fn undelivered_event_keys(
         &self,
         now: DateTime<Utc>,
+        after: Option<(DateTime<Utc>, String)>,
         limit: u64,
-    ) -> Result<Vec<AgentEventRecord>> {
-        agent_events::Entity::find()
+    ) -> Result<Vec<(DateTime<Utc>, String)>> {
+        let mut query = agent_events::Entity::find()
+            .select_only()
+            .column(agent_events::Column::CreatedAt)
+            .column(agent_events::Column::Id)
             .filter(agent_events::Column::DeliveredAt.is_null())
             .filter(agent_events::Column::FailedAt.is_null())
             .filter(
                 Condition::any()
                     .add(agent_events::Column::LeasedUntil.is_null())
                     .add(agent_events::Column::LeasedUntil.lte(now)),
-            )
+            );
+        if let Some((created_at, id)) = after {
+            query = query.filter(
+                Condition::any()
+                    .add(agent_events::Column::CreatedAt.gt(created_at))
+                    .add(
+                        Condition::all()
+                            .add(agent_events::Column::CreatedAt.eq(created_at))
+                            .add(agent_events::Column::Id.gt(id)),
+                    ),
+            );
+        }
+        query
             .order_by_asc(agent_events::Column::CreatedAt)
             .order_by_asc(agent_events::Column::Id)
             .limit(limit)
+            .into_tuple::<(DateTime<Utc>, String)>()
             .all(&self.db)
             .await
+            .map_err(db_error)
+    }
+
+    async fn find_event(&self, id: &str) -> Result<Option<OutboxRow>> {
+        Ok(agent_events::Entity::find_by_id(id.to_owned())
+            .one(&self.db)
+            .await
             .map_err(db_error)?
-            .into_iter()
-            .map(event_record)
-            .collect()
+            .map(outbox_row))
     }
 
     async fn lease_event(
@@ -1121,11 +1156,22 @@ impl AgentAuthStore for SqlAgentAuthStore {
         attempts: u32,
         now: DateTime<Utc>,
         until: DateTime<Utc>,
+        token: &str,
     ) -> Result<bool> {
         // A conditional update: the database lets one of two concurrent
         // deliveries move the lease, and only at the attempt count it read.
         let leased = agent_events::Entity::update_many()
             .col_expr(agent_events::Column::LeasedUntil, Expr::value(until))
+            .col_expr(
+                agent_events::Column::LeaseToken,
+                Expr::value(Some(token.to_owned())),
+            )
+            // The attempt counts when it starts, so one that never answers
+            // still moves the count toward the limit.
+            .col_expr(
+                agent_events::Column::Attempts,
+                Expr::col(agent_events::Column::Attempts).add(1),
+            )
             .filter(agent_events::Column::Id.eq(id.to_owned()))
             .filter(agent_events::Column::DeliveredAt.is_null())
             .filter(agent_events::Column::FailedAt.is_null())
@@ -1141,50 +1187,104 @@ impl AgentAuthStore for SqlAgentAuthStore {
         Ok(leased.rows_affected == 1)
     }
 
-    async fn mark_event_delivered(&self, id: &str, at: DateTime<Utc>) -> Result<()> {
+    async fn mark_event_delivered(&self, id: &str, token: &str, at: DateTime<Utc>) -> Result<bool> {
         let none = Option::<DateTime<Utc>>::None;
-        agent_events::Entity::update_many()
+        let no_token = Option::<String>::None;
+        let marked = agent_events::Entity::update_many()
             .col_expr(agent_events::Column::DeliveredAt, Expr::value(at))
             .col_expr(agent_events::Column::LeasedUntil, Expr::value(none))
+            .col_expr(agent_events::Column::LeaseToken, Expr::value(no_token))
             .filter(agent_events::Column::Id.eq(id.to_owned()))
             .filter(agent_events::Column::DeliveredAt.is_null())
+            .filter(agent_events::Column::LeaseToken.eq(token.to_owned()))
             .exec(&self.db)
             .await
             .map_err(db_error)?;
-        Ok(())
+        Ok(marked.rows_affected == 1)
     }
 
-    async fn fail_event_attempt(
+    async fn record_refusal(
         &self,
         id: &str,
+        token: &str,
         error: &str,
         failed_at: Option<DateTime<Utc>>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let none = Option::<DateTime<Utc>>::None;
-        agent_events::Entity::update_many()
-            .col_expr(
-                agent_events::Column::Attempts,
-                Expr::col(agent_events::Column::Attempts).add(1),
-            )
+        let no_token = Option::<String>::None;
+        let recorded = agent_events::Entity::update_many()
             .col_expr(
                 agent_events::Column::LastError,
                 Expr::value(Some(error.to_owned())),
             )
             .col_expr(agent_events::Column::LeasedUntil, Expr::value(none))
+            .col_expr(agent_events::Column::LeaseToken, Expr::value(no_token))
             .col_expr(agent_events::Column::FailedAt, Expr::value(failed_at))
             .filter(agent_events::Column::Id.eq(id.to_owned()))
             .filter(agent_events::Column::DeliveredAt.is_null())
+            .filter(agent_events::Column::LeaseToken.eq(token.to_owned()))
             .exec(&self.db)
             .await
             .map_err(db_error)?;
-        Ok(())
+        Ok(recorded.rows_affected == 1)
+    }
+
+    async fn fail_event(
+        &self,
+        id: &str,
+        attempts: u32,
+        now: DateTime<Utc>,
+        error: &str,
+    ) -> Result<bool> {
+        let failed = agent_events::Entity::update_many()
+            .col_expr(agent_events::Column::FailedAt, Expr::value(now))
+            .col_expr(
+                agent_events::Column::LastError,
+                Expr::value(Some(error.to_owned())),
+            )
+            .filter(agent_events::Column::Id.eq(id.to_owned()))
+            .filter(agent_events::Column::DeliveredAt.is_null())
+            .filter(agent_events::Column::FailedAt.is_null())
+            .filter(agent_events::Column::Attempts.eq(to_i32(attempts, "attempts")?))
+            .filter(
+                Condition::any()
+                    .add(agent_events::Column::LeasedUntil.is_null())
+                    .add(agent_events::Column::LeasedUntil.lte(now)),
+            )
+            .exec(&self.db)
+            .await
+            .map_err(db_error)?;
+        Ok(failed.rows_affected == 1)
+    }
+
+    async fn fail_unreadable_event(
+        &self,
+        id: &str,
+        now: DateTime<Utc>,
+        error: &str,
+    ) -> Result<bool> {
+        let failed = agent_events::Entity::update_many()
+            .col_expr(agent_events::Column::FailedAt, Expr::value(now))
+            .col_expr(
+                agent_events::Column::LastError,
+                Expr::value(Some(error.to_owned())),
+            )
+            .filter(agent_events::Column::Id.eq(id.to_owned()))
+            .filter(agent_events::Column::DeliveredAt.is_null())
+            .filter(agent_events::Column::FailedAt.is_null())
+            .exec(&self.db)
+            .await
+            .map_err(db_error)?;
+        Ok(failed.rows_affected == 1)
     }
 
     async fn retry_failed_events(&self) -> Result<u64> {
         let none = Option::<DateTime<Utc>>::None;
+        let no_token = Option::<String>::None;
         Ok(agent_events::Entity::update_many()
             .col_expr(agent_events::Column::FailedAt, Expr::value(none))
             .col_expr(agent_events::Column::LeasedUntil, Expr::value(none))
+            .col_expr(agent_events::Column::LeaseToken, Expr::value(no_token))
             .col_expr(agent_events::Column::Attempts, Expr::value(0))
             .filter(agent_events::Column::FailedAt.is_not_null())
             .filter(agent_events::Column::DeliveredAt.is_null())

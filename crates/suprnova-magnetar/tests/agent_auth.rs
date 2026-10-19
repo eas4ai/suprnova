@@ -14,6 +14,7 @@ mod harness;
 use std::sync::Arc;
 
 use harness::*;
+use magnetar::agent_auth::AgentAuthStore as _;
 use magnetar::agent_auth::sql::registrations;
 use magnetar::agent_auth::{IdentityTypes, RefuseProvisioning, RegistrationLimit};
 use magnetar::authorization_server::{AccessVerification, InvalidAccessReason};
@@ -785,6 +786,272 @@ async fn agent_009_redelivery_is_marked_as_a_retry() {
             .get("delivery_attempt")
             .map(String::as_str),
         Some("2")
+    );
+}
+
+/// The outbox store of a harness, as another node would reach it.
+fn outbox_store(h: &Harness) -> magnetar::agent_auth::SqlAgentAuthStore {
+    magnetar::agent_auth::SqlAgentAuthStore::new(h.db.clone())
+}
+
+#[tokio::test]
+async fn agent_009_hung_delivery_times_out_and_counts_one_attempt_per_pass() {
+    let mut options = Options::new();
+    options.config.event_delivery_timeout = std::time::Duration::from_millis(100);
+    let h = sqlite_harness_with(options).await;
+    h.events.hang(LifecycleEventKind::AgentClaimConfirmed);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let (registration, _) = h.claimed_anonymous("hung@example.test").await;
+        let id = registration["registration_id"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+        let row = h.outbox_of(&id).await.remove(0);
+        assert_eq!(row.attempts, 1, "the delivery after the commit counted");
+        assert_eq!(row.last_error.as_deref(), Some("the delivery timed out"));
+        assert!(row.failed_at.is_none() && row.delivered_at.is_none());
+        assert_eq!(h.engine.deliver_pending_events().await.expect("a pass"), 0);
+        let row = h.outbox_of(&id).await.remove(0);
+        assert_eq!(row.attempts, 2, "one attempt in the pass");
+    })
+    .await;
+    assert!(
+        outcome.is_ok(),
+        "a hung delivery must not hang the claim or the pass"
+    );
+}
+
+#[tokio::test]
+async fn agent_009_lease_by_a_stopped_process_counts_toward_the_limit() {
+    let h = sqlite_harness().await;
+    h.events
+        .refuse(LifecycleEventKind::AgentClaimConfirmed, u32::MAX);
+    let (registration, _) = h.claimed_anonymous("stopped@example.test").await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let event_id = h.outbox_of(id).await[0].id.clone();
+    let attempts = h.outbox_of(id).await[0].attempts;
+    // A node leases the event and stops before it hears an answer; its
+    // lease runs out at once.
+    let now = chrono::Utc::now();
+    assert!(
+        outbox_store(&h)
+            .lease_event(
+                &event_id,
+                u32::try_from(attempts).expect("a count"),
+                now,
+                now,
+                "stopped-node",
+            )
+            .await
+            .expect("lease")
+    );
+    h.engine.deliver_pending_events().await.expect("a pass");
+    assert_eq!(
+        h.outbox_of(id).await[0].attempts,
+        attempts + 2,
+        "the stopped node's lease and the pass both count"
+    );
+}
+
+#[tokio::test]
+async fn agent_009_stale_refusal_keeps_another_nodes_live_lease() {
+    use magnetar::agent_auth::OutboxRow;
+    let h = sqlite_harness().await;
+    h.events.refuse(LifecycleEventKind::AgentClaimConfirmed, 1);
+    let (registration, _) = h.claimed_anonymous("stale@example.test").await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let event_id = h.outbox_of(id).await[0].id.clone();
+    let store = outbox_store(&h);
+    let attempts = |rows: Vec<magnetar::agent_auth::sql::agent_events::Model>| {
+        u32::try_from(rows[0].attempts).expect("a count")
+    };
+    // Node A's lease runs out while its listener is slow; node B takes the
+    // event.
+    let now = chrono::Utc::now();
+    assert!(
+        store
+            .lease_event(
+                &event_id,
+                attempts(h.outbox_of(id).await),
+                now,
+                now,
+                "node-a"
+            )
+            .await
+            .expect("lease")
+    );
+    let later = chrono::Utc::now();
+    assert!(
+        store
+            .lease_event(
+                &event_id,
+                attempts(h.outbox_of(id).await),
+                later,
+                later + chrono::Duration::hours(1),
+                "node-b",
+            )
+            .await
+            .expect("lease")
+    );
+    let before = h.outbox_of(id).await.remove(0);
+    // A's late refusal changes nothing.
+    assert!(
+        !store
+            .record_refusal(&event_id, "node-a", "late answer", None)
+            .await
+            .expect("record")
+    );
+    let after = h.outbox_of(id).await.remove(0);
+    assert_eq!(after.lease_token.as_deref(), Some("node-b"));
+    assert_eq!(after.leased_until, before.leased_until, "B's lease stands");
+    assert_eq!(after.attempts, before.attempts, "no extra attempt");
+    assert_ne!(after.last_error.as_deref(), Some("late answer"));
+    assert!(matches!(
+        store.find_event(&event_id).await.expect("read"),
+        Some(OutboxRow::Event(_))
+    ));
+}
+
+#[tokio::test]
+async fn agent_009_one_pass_attempts_a_refused_row_once() {
+    let h = sqlite_harness().await;
+    h.events.refuse(LifecycleEventKind::AgentClaimConfirmed, 2);
+    let (first, _) = h.claimed_anonymous("refused-row@example.test").await;
+    let (second, _) = h.claimed_anonymous("accepted-row@example.test").await;
+    let refused_id = h
+        .outbox_of(first["registration_id"].as_str().expect("id"))
+        .await[0]
+        .id
+        .clone();
+    h.events.refuse_id(&refused_id);
+    assert_eq!(h.engine.deliver_pending_events().await.expect("a pass"), 1);
+    let attempts_at_refused = h
+        .events
+        .refused
+        .lock()
+        .iter()
+        .filter(|event| event.mutation_id == refused_id)
+        .count();
+    assert_eq!(
+        attempts_at_refused, 2,
+        "the claim's attempt and one in the pass"
+    );
+    assert!(
+        h.outbox_of(second["registration_id"].as_str().expect("id"))
+            .await[0]
+            .delivered_at
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn agent_009_unreadable_rows_are_failed_and_the_rest_delivered() {
+    use magnetar::agent_auth::sql::agent_events;
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let h = sqlite_harness().await;
+    h.events.refuse(LifecycleEventKind::AgentClaimConfirmed, 3);
+    let mut ids = Vec::new();
+    for email in [
+        "corrupt@example.test",
+        "negative@example.test",
+        "fine@example.test",
+    ] {
+        let (registration, _) = h.claimed_anonymous(email).await;
+        ids.push(
+            registration["registration_id"]
+                .as_str()
+                .expect("id")
+                .to_owned(),
+        );
+    }
+    agent_events::Entity::update_many()
+        .col_expr(agent_events::Column::Attributes, Expr::value("not json"))
+        .filter(agent_events::Column::RegistrationId.eq(ids[0].clone()))
+        .exec(&h.db)
+        .await
+        .expect("corrupt the attributes");
+    agent_events::Entity::update_many()
+        .col_expr(agent_events::Column::Attempts, Expr::value(-1))
+        .filter(agent_events::Column::RegistrationId.eq(ids[1].clone()))
+        .exec(&h.db)
+        .await
+        .expect("corrupt the count");
+    assert_eq!(h.engine.deliver_pending_events().await.expect("a pass"), 1);
+    for id in &ids[..2] {
+        let row = h.outbox_of(id).await.remove(0);
+        assert!(row.failed_at.is_some(), "{id} failed");
+        assert_eq!(
+            row.last_error.as_deref(),
+            Some("the outbox row could not be read")
+        );
+    }
+    assert!(h.outbox_of(&ids[2]).await[0].delivered_at.is_some());
+    assert_eq!(h.engine.failed_events().await.expect("a count"), 2);
+}
+
+#[tokio::test]
+async fn agent_009_unknown_kind_is_failed_and_counted() {
+    use magnetar::agent_auth::sql::agent_events;
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let h = sqlite_harness().await;
+    h.events.refuse(LifecycleEventKind::AgentClaimConfirmed, 1);
+    let (registration, _) = h.claimed_anonymous("mystery@example.test").await;
+    let id = registration["registration_id"].as_str().expect("id");
+    agent_events::Entity::update_many()
+        .col_expr(agent_events::Column::Kind, Expr::value("mystery.kind"))
+        .filter(agent_events::Column::RegistrationId.eq(id.to_owned()))
+        .exec(&h.db)
+        .await
+        .expect("change the kind");
+    assert_eq!(h.engine.deliver_pending_events().await.expect("a pass"), 0);
+    let row = h.outbox_of(id).await.remove(0);
+    assert!(row.failed_at.is_some(), "it leaves the queue");
+    assert_eq!(row.last_error.as_deref(), Some("unknown event kind"));
+    assert_eq!(h.engine.failed_events().await.expect("a count"), 1);
+}
+
+#[tokio::test]
+async fn agent_009_retry_failed_during_a_pass_never_breaks_a_live_lease() {
+    let h = sqlite_harness().await;
+    h.events.refuse(LifecycleEventKind::AgentClaimConfirmed, 13);
+    let (failing, _) = h.claimed_anonymous("failing@example.test").await;
+    let failing_id = failing["registration_id"].as_str().expect("id");
+    for _ in 1..magnetar::agent_auth::MAX_EVENT_ATTEMPTS {
+        h.engine.deliver_pending_events().await.expect("a pass");
+    }
+    assert!(h.outbox_of(failing_id).await[0].failed_at.is_some());
+    let (leased, _) = h.claimed_anonymous("leased@example.test").await;
+    let leased_id = leased["registration_id"].as_str().expect("id");
+    let row = h.outbox_of(leased_id).await.remove(0);
+    // Another node is delivering this one right now.
+    let now = chrono::Utc::now();
+    assert!(
+        outbox_store(&h)
+            .lease_event(
+                &row.id,
+                u32::try_from(row.attempts).expect("a count"),
+                now,
+                now + chrono::Duration::hours(1),
+                "live-node",
+            )
+            .await
+            .expect("lease")
+    );
+    let refused_before = h.events.refused.lock().len();
+    h.engine.deliver_pending_events().await.expect("a pass");
+    assert_eq!(
+        h.events.refused.lock().len(),
+        refused_before,
+        "the pass hands on neither the failed nor the leased event"
+    );
+    assert_eq!(h.engine.retry_failed_events().await.expect("put back"), 1);
+    let live = h.outbox_of(leased_id).await.remove(0);
+    assert_eq!(live.lease_token.as_deref(), Some("live-node"));
+    assert!(
+        live.leased_until
+            .is_some_and(|until| until > chrono::Utc::now())
     );
 }
 

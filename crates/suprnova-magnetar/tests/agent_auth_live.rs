@@ -441,6 +441,89 @@ async fn claim_outbox(url: &str) {
     assert!(nodes[0].outbox_of(id).await[0].delivered_at.is_some());
 }
 
+/// A claim whose outbox insert fails, here on an event id already taken,
+/// rolls back: the registration stays unclaimed and no second row exists.
+async fn claim_rollback(url: &str) {
+    use magnetar::agent_auth::{AgentAuthStore, AgentEventRecord, SqlAgentAuthStore};
+    let h = build(live_database(url).await, Options::new()).await;
+    let email = format!("{}@example.test", unique("rollback"));
+    let registration = h.anonymous().await;
+    let id = registration["registration_id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let user_id = h.create_user(&email, true).await;
+    let started = body(
+        &h.initiate(
+            registration["claim_token"].as_str().expect("claim token"),
+            &email,
+        )
+        .await,
+    );
+    let attempt = attempt_token(
+        started["claim_attempt"]["verification_uri"]
+            .as_str()
+            .expect("uri"),
+    );
+    let code = started["claim_attempt"]["user_code"]
+        .as_str()
+        .expect("code")
+        .to_owned();
+    // An earlier claim already holds the event id this one will try.
+    let (other, _) = h
+        .claimed_anonymous(&format!("{}@example.test", unique("holder")))
+        .await;
+    let taken = h
+        .outbox_of(other["registration_id"].as_str().expect("id"))
+        .await[0]
+        .id
+        .clone();
+    let event = AgentEventRecord {
+        id: taken,
+        kind: "claim.confirmed".to_owned(),
+        registration_id: id.clone(),
+        user_id: user_id.clone(),
+        attributes: std::collections::BTreeMap::new(),
+        created_at: chrono::Utc::now(),
+        delivered_at: None,
+        attempts: 0,
+        last_error: None,
+        failed_at: None,
+    };
+    let store = SqlAgentAuthStore::new(h.db.clone());
+    let refused = store
+        .confirm_claim(
+            &id,
+            &sha256_hex(&attempt),
+            &sha256_hex(&code),
+            &user_id,
+            None,
+            5,
+            chrono::Utc::now(),
+            &event,
+        )
+        .await;
+    assert!(refused.is_err(), "the duplicate id fails the transaction");
+    let unclaimed = h.registration(&id).await;
+    assert_eq!(unclaimed.status, "unclaimed", "the claim rolled back");
+    assert!(unclaimed.user_id.is_none());
+    assert!(h.outbox_of(&id).await.is_empty(), "no row for this claim");
+}
+
+#[cfg(feature = "seaorm-postgres")]
+#[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn agent_009_postgres_claim_rolls_back_on_a_duplicate_event_id() {
+    claim_rollback(&postgres_url()).await;
+}
+
+#[cfg(feature = "seaorm-mysql")]
+#[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn agent_009_mysql_claim_rolls_back_on_a_duplicate_event_id() {
+    claim_rollback(&mysql_url()).await;
+}
+
 #[cfg(feature = "seaorm-postgres")]
 #[tokio::test]
 #[ignore = "requires T2 live Postgres/MySQL database"]

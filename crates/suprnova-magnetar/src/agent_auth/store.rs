@@ -158,8 +158,8 @@ pub struct AgentEventRecord {
     pub created_at: DateTime<Utc>,
     /// When a delivery was accepted; `None` until then.
     pub delivered_at: Option<DateTime<Utc>>,
-    /// How many deliveries the host refused since the event was written or
-    /// last put back after it failed.
+    /// How many delivery attempts started since the event was written or
+    /// last put back after it failed. An attempt counts when it starts.
     pub attempts: u32,
     /// What the host answered the last refused delivery with, as text.
     pub last_error: Option<String>,
@@ -168,10 +168,23 @@ pub struct AgentEventRecord {
     pub failed_at: Option<DateTime<Utc>>,
 }
 
+/// One outbox row as the store read it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OutboxRow {
+    /// The event.
+    Event(AgentEventRecord),
+    /// A row whose attempt count or attributes do not read, with the
+    /// reason. It is marked failed and never stops a delivery pass.
+    Unreadable(String),
+}
+
 impl AgentEventRecord {
-    /// Whether a delivery now follows one the host refused: the host has
-    /// already been handed the event once and wrote what it writes for a
-    /// first delivery.
+    /// Whether a delivery now follows one the host refused: an earlier
+    /// attempt reached the host and was refused, so the host already wrote
+    /// what it writes for a first delivery. A process that stops after the
+    /// host wrote its record but before the delivery is marked leaves no
+    /// refusal, so the next delivery is a first one again and the host's
+    /// record can repeat: in that case the audit trail is at least once.
     #[must_use]
     pub fn is_retry(&self) -> bool {
         self.last_error.is_some()
@@ -325,38 +338,69 @@ pub trait AgentAuthStore: Send + Sync {
     /// Delete replay records that expired before `now`. Returns how many
     /// went.
     async fn prune_replays(&self, now: DateTime<Utc>) -> Result<u64>;
-    /// Up to `limit` outbox events not yet delivered, not failed and not
-    /// leased past `now`, oldest first.
-    async fn undelivered_events(
+    /// The keys of up to `limit` outbox events not yet delivered, not
+    /// failed and not leased past `now`, oldest first, after the key
+    /// `after` when one is given: a pass walks the outbox once, page by
+    /// page. Only the identifier and the creation time are read, so a row
+    /// whose other columns do not read cannot fail the listing.
+    async fn undelivered_event_keys(
         &self,
         now: DateTime<Utc>,
+        after: Option<(DateTime<Utc>, String)>,
         limit: u64,
-    ) -> Result<Vec<AgentEventRecord>>;
-    /// Lease an undelivered event until `until`, only while it has not
-    /// failed, still counts `attempts` refused deliveries and no other
-    /// lease on it runs past `now`: of two nodes delivering at once only
-    /// one hands it on, and the attempt number it hands on is exact.
-    /// Returns whether this call took it.
+    ) -> Result<Vec<(DateTime<Utc>, String)>>;
+    /// One outbox event, as stored: `None` when it no longer exists.
+    async fn find_event(&self, id: &str) -> Result<Option<OutboxRow>>;
+    /// Lease an undelivered event until `until` under `token`, counting
+    /// the attempt now: only while it has not failed, still counts
+    /// `attempts` and no other lease on it runs past `now`. Of two nodes
+    /// delivering at once only one hands it on, and the attempt number it
+    /// hands on is exact. A delivery that never answers, because its
+    /// process stopped, still counts. Returns whether this call took it.
     async fn lease_event(
         &self,
         id: &str,
         attempts: u32,
         now: DateTime<Utc>,
         until: DateTime<Utc>,
+        token: &str,
     ) -> Result<bool>;
-    /// Record that a delivery of the event was accepted at `at`.
-    async fn mark_event_delivered(&self, id: &str, at: DateTime<Utc>) -> Result<()>;
-    /// Record a refused delivery: count the attempt, keep `error`, end the
-    /// lease so the next delivery pass takes the event, and with
-    /// `failed_at` mark it failed.
-    async fn fail_event_attempt(
+    /// Record that a delivery of the event was accepted at `at`, only while
+    /// the event still holds the lease `token`. Returns whether it did.
+    async fn mark_event_delivered(&self, id: &str, token: &str, at: DateTime<Utc>) -> Result<bool>;
+    /// Record a refused delivery, only while the event still holds the
+    /// lease `token`: keep `error`, end the lease so the next delivery pass
+    /// takes the event, and with `failed_at` mark it failed. Returns whether
+    /// it did; a node whose lease was taken over changes nothing.
+    async fn record_refusal(
         &self,
         id: &str,
+        token: &str,
         error: &str,
         failed_at: Option<DateTime<Utc>>,
-    ) -> Result<()>;
-    /// Put every failed event back for delivery with a fresh count.
-    /// Returns how many.
+    ) -> Result<bool>;
+    /// Mark an event failed at `now` without delivering it, keeping
+    /// `error`: only while it is undelivered, not failed, still counts
+    /// `attempts` and holds no live lease. Returns whether it did.
+    async fn fail_event(
+        &self,
+        id: &str,
+        attempts: u32,
+        now: DateTime<Utc>,
+        error: &str,
+    ) -> Result<bool>;
+    /// Mark an event whose row does not read failed at `now`, keeping
+    /// `error`, while it is undelivered and not failed. Returns whether it
+    /// did.
+    async fn fail_unreadable_event(
+        &self,
+        id: &str,
+        now: DateTime<Utc>,
+        error: &str,
+    ) -> Result<bool>;
+    /// Put every failed event back for delivery with a fresh count. A
+    /// failed event holds no lease, so no live lease is touched. Returns
+    /// how many.
     async fn retry_failed_events(&self) -> Result<u64>;
     /// How many events failed and wait to be put back.
     async fn failed_event_count(&self) -> Result<u64>;
