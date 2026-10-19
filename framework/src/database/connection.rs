@@ -516,7 +516,7 @@ impl std::ops::Deref for DbConnection {
 }
 
 #[cfg(all(test, feature = "database-mysql"))]
-mod mysql_semantics_tests {
+mod snapshot_isolation_tests {
     use super::MysqlSemantics;
 
     /// How a MySQL-compatible proxy or service might refuse the statement:

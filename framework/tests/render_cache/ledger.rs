@@ -691,7 +691,7 @@ async fn render_cache_ledger_concurrent_advances_succeed_on_mariadb() {
 }
 
 #[tokio::test]
-#[ignore = "requires disposable MySQL at MYSQL_TEST_URL; drops and recreates tables"]
+#[ignore = "requires a disposable MySQL or MariaDB at MYSQL_TEST_URL; drops and recreates tables"]
 async fn render_cache_ledger_concurrent_advances_succeed_on_mysql() {
     let url = std::env::var("MYSQL_TEST_URL")
         .expect("set MYSQL_TEST_URL to a disposable MySQL - this test drops and recreates tables");

@@ -172,7 +172,7 @@ async fn auth_flow_token_consume_concurrently_on_mariadb() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+#[ignore = "requires a disposable MySQL or MariaDB at MYSQL_TEST_URL"]
 async fn auth_flow_token_consume_concurrently_on_mysql() {
     consume_concurrently(&url("MYSQL_TEST_URL")).await;
 }

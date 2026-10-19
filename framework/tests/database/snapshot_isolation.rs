@@ -13,9 +13,9 @@
 //!
 //! ```text
 //! MARIADB_TEST_URL=mysql://... cargo test -p suprnova --test database -- \
-//!   --ignored mysql_semantics::a_new_mariadb_
+//!   --ignored snapshot_isolation::a_new_mariadb_
 //! MYSQL_TEST_URL=mysql://... cargo test -p suprnova --test database -- \
-//!   --ignored mysql_semantics::a_new_mysql_
+//!   --ignored snapshot_isolation::a_new_mysql_
 //! ```
 
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement};
@@ -41,7 +41,7 @@ impl MigratorTrait for NoMigrations {
     }
 
     fn migration_table_name() -> DynIden {
-        Alias::new("suprnova_mysql_semantics_ledger").into_iden()
+        Alias::new("suprnova_snapshot_isolation_ledger").into_iden()
     }
 }
 
@@ -124,18 +124,26 @@ async fn a_new_mariadb_connection_runs_without_snapshot_isolation() {
     }
 }
 
-/// MySQL has no such variable. The connection the framework opens runs
-/// anyway: the statement that turns the setting off is refused as unknown,
-/// and that refusal means there is nothing to turn off.
+/// The rule on any MySQL-family server: a connection the framework opens
+/// never runs with snapshot isolation. On MySQL the variable does not
+/// exist, the statement that turns it off is refused as unknown, and the
+/// connection opens anyway. On MariaDB the variable exists and reads 0.
+/// The engine steps run this against both, under `MYSQL_TEST_URL`.
 #[tokio::test]
-#[ignore = "requires disposable MySQL at MYSQL_TEST_URL"]
+#[ignore = "requires a disposable MySQL or MariaDB at MYSQL_TEST_URL"]
 async fn a_new_mysql_connection_runs_without_snapshot_isolation() {
     let _env = crate::env_lock::lock_env_async().await;
     for (pool, setting) in settings_of_every_pool(&url("MYSQL_TEST_URL")).await {
-        let error = setting.expect_err("MySQL has no innodb_snapshot_isolation");
-        assert!(
-            error.to_string().contains(UNKNOWN_SYSTEM_VARIABLE),
-            "{pool}: the pool opened a connection, and only the variable is unknown: {error}"
-        );
+        match setting {
+            Ok(setting) => assert_eq!(
+                setting, 0,
+                "{pool}: a server that knows innodb_snapshot_isolation runs with it off"
+            ),
+            Err(error) => assert!(
+                error.to_string().contains(UNKNOWN_SYSTEM_VARIABLE),
+                "{pool}: the pool opened a connection, and only an unknown variable may fail \
+                 the read: {error}"
+            ),
+        }
     }
 }

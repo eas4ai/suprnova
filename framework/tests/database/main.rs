@@ -13,7 +13,6 @@ pub mod mariadb_scheme;
 pub mod medium_audit;
 pub mod monitor;
 pub mod multiconnection;
-pub mod mysql_semantics;
 pub mod observability;
 #[path = "../support/own_process.rs"]
 mod own_process;
@@ -24,6 +23,7 @@ mod query_fixture;
 pub mod query_helpers;
 pub mod raw_helpers;
 pub mod sea_orm_aliases;
+pub mod snapshot_isolation;
 pub mod time_column_types;
 pub mod transactions;
 pub mod tx_leak_diagnostic;
