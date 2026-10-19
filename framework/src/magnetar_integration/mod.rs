@@ -21,6 +21,8 @@ pub mod oauth;
 pub mod oauth_transport;
 pub mod passkey;
 pub mod password;
+#[cfg(feature = "agents")]
+pub(crate) mod plugin_host;
 mod sign_in;
 
 use std::sync::{Arc, Mutex, OnceLock};
@@ -613,6 +615,10 @@ impl engine::MagnetarFactorAuthEngine for PasswordFactorEngine {
 
     async fn admit_host_sign_in(&self, user_id: &str) -> magnetar::Result<u64> {
         self.password.admit_host_sign_in(user_id).await
+    }
+
+    async fn user_auth_epoch(&self, user_id: &str) -> magnetar::Result<Option<u64>> {
+        self.password.user_auth_epoch(user_id).await
     }
 
     async fn has_second_factor(&self, user_id: &str) -> magnetar::Result<bool> {

@@ -597,9 +597,11 @@ impl Default for CsrfMiddleware {
 impl Middleware for CsrfMiddleware {
     async fn handle(&self, mut request: Request, next: Next) -> Response {
         // Agent traffic carries no cookie to forge: the MCP endpoint takes a
-        // bearer token it verifies itself, and a tool call is built by the
-        // endpoint after that check. Neither is checked nor handed an
-        // `XSRF-TOKEN` cookie. The mark is a private field set from the
+        // bearer token it verifies itself, a tool call is built by the
+        // endpoint after that check, and a mounted Magnetar plugin's client
+        // routes (the token, revocation and registration endpoints) are
+        // called by clients without one (AGENT-011). None is checked or
+        // handed an `XSRF-TOKEN` cookie. The mark is a private field set from the
         // router's table or by the dispatcher, never from the request
         // (AGENT-001).
         if request.is_agent_traffic() {

@@ -144,6 +144,11 @@ pub struct Request {
     /// headers or extensions, so a request off the wire cannot carry it.
     #[cfg_attr(not(feature = "agents"), allow(dead_code))]
     agent: AgentMarkSlot,
+    /// The OAuth server the router that matched this request mounted, for
+    /// the facades that act on its grants. Set only by the server from the
+    /// router, never from anything the request carries.
+    #[cfg_attr(not(feature = "agents"), allow(dead_code))]
+    oauth: OAuthServerSlot,
 }
 
 /// The slot [`Request`] keeps its agent mark in: the mark with the `agents`
@@ -152,6 +157,13 @@ pub struct Request {
 type AgentMarkSlot = Option<std::sync::Arc<crate::agents::AgentMark>>;
 #[cfg(not(feature = "agents"))]
 type AgentMarkSlot = ();
+
+/// The slot [`Request`] keeps its router's OAuth server in, as
+/// [`AgentMarkSlot`] keeps the agent mark.
+#[cfg(feature = "agents")]
+type OAuthServerSlot = Option<std::sync::Arc<magnetar::authorization_server::AuthorizationServer>>;
+#[cfg(not(feature = "agents"))]
+type OAuthServerSlot = ();
 
 /// A value a route binding resolved, held until the handler takes it.
 pub(crate) type RouteBound = Box<dyn std::any::Any + Send + Sync>;
@@ -355,6 +367,7 @@ impl Request {
             route_settings: None,
             missing_answer: None,
             agent: Default::default(),
+            oauth: Default::default(),
         }
     }
 
@@ -527,6 +540,7 @@ impl Request {
             route_settings: None,
             missing_answer: None,
             agent: Default::default(),
+            oauth: Default::default(),
         }
     }
 
@@ -620,10 +634,11 @@ impl Request {
     }
 
     /// Whether the request is agent traffic: the MCP endpoint, its metadata
-    /// routes, or a tool call the endpoint dispatched. The CSRF, session,
-    /// bearer-token and RenderCache middleware step aside for it: the
-    /// endpoint authenticates its own bearer tokens and a tool call carries
-    /// no cookie (AGENT-001, AGENT-005).
+    /// routes, a client route of a mounted Magnetar plugin, or a tool call
+    /// the endpoint dispatched. The CSRF, session, bearer-token and
+    /// RenderCache middleware step aside for it: the endpoint authenticates
+    /// its own bearer tokens, a client route is called without a cookie, and
+    /// a tool call carries none (AGENT-001, AGENT-005, AGENT-011).
     pub(crate) fn is_agent_traffic(&self) -> bool {
         #[cfg(feature = "agents")]
         {
@@ -647,6 +662,24 @@ impl Request {
     #[cfg(feature = "agents")]
     pub(crate) fn set_agent_mark(&mut self, mark: crate::agents::AgentMark) {
         self.agent = Some(std::sync::Arc::new(mark));
+    }
+
+    /// Hand the request the OAuth server its router mounted. Only the
+    /// server calls this, from the router that matched the request.
+    #[cfg(feature = "agents")]
+    pub(crate) fn set_oauth_server(
+        &mut self,
+        server: std::sync::Arc<magnetar::authorization_server::AuthorizationServer>,
+    ) {
+        self.oauth = Some(server);
+    }
+
+    /// The OAuth server the router that matched this request mounted.
+    #[cfg(feature = "agents")]
+    pub(crate) fn oauth_server(
+        &self,
+    ) -> Option<&std::sync::Arc<magnetar::authorization_server::AuthorizationServer>> {
+        self.oauth.as_ref()
     }
 
     /// A request the tool dispatcher built for a tool call: `parts` and a
@@ -677,6 +710,7 @@ impl Request {
             route_settings: None,
             missing_answer: None,
             agent: Some(std::sync::Arc::new(mark)),
+            oauth: Default::default(),
         }
     }
 
@@ -2678,6 +2712,7 @@ mod url_helper_tests {
             route_settings: None,
             missing_answer: None,
             agent: Default::default(),
+            oauth: Default::default(),
         };
 
         // Use `.err()` rather than `expect_err` so the test doesn't require
@@ -2719,6 +2754,7 @@ mod url_helper_tests {
             route_settings: None,
             missing_answer: None,
             agent: Default::default(),
+            oauth: Default::default(),
         };
 
         let (_, bytes) = req
@@ -2775,6 +2811,7 @@ mod url_helper_tests {
             route_settings: None,
             missing_answer: None,
             agent: Default::default(),
+            oauth: Default::default(),
         };
 
         // The bogus middle hop is dropped - only parseable IPs (plus the
@@ -2824,6 +2861,7 @@ mod url_helper_tests {
             route_settings: None,
             missing_answer: None,
             agent: Default::default(),
+            oauth: Default::default(),
         };
 
         // A junk-only forwarded chain can't rotate rate-limit buckets - `ip()`

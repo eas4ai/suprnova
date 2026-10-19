@@ -1248,6 +1248,18 @@ where
         Ok(user.auth_epoch)
     }
 
+    /// The user's current auth epoch, or `None` for an id that is not one
+    /// of this engine's users. See
+    /// [`MagnetarFactorAuthEngine::user_auth_epoch`].
+    pub async fn user_auth_epoch(&self, user_id: &str) -> Result<Option<u64>> {
+        Ok(self
+            .binding
+            .storage()
+            .find_by_id(user_id)
+            .await?
+            .map(|user| user.auth_epoch))
+    }
+
     /// Issue a host-trusted session for a user the host application signed
     /// in itself, at the epoch its credential was checked at and behind the
     /// shared factor gate's enrollment check. See
@@ -1311,6 +1323,22 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
         Err(Error::DependencyUnavailable {
             dependency: "Magnetar session authority".to_owned(),
             message: "host sign-in is unavailable".to_owned(),
+        })
+    }
+
+    /// The user's current auth epoch, the value a password reset or "sign
+    /// out everywhere" moves, or `None` for an id that is not one of this
+    /// engine's users. Unlike [`Self::admit_host_sign_in`] it refuses no
+    /// one: it reads the epoch for a check that ends what an earlier
+    /// epoch issued, such as an OAuth grant.
+    ///
+    /// The default refuses, which keeps existing custom engines
+    /// source-compatible; what reads the epoch then fails closed.
+    async fn user_auth_epoch(&self, user_id: &str) -> Result<Option<u64>> {
+        let _ = user_id;
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar session authority".to_owned(),
+            message: "the user's auth epoch is unavailable".to_owned(),
         })
     }
 
@@ -1569,6 +1597,22 @@ pub trait MagnetarFactorAuthEngine: Send + Sync {
         })
     }
 
+    /// The user's current auth epoch, the value a password reset or "sign
+    /// out everywhere" moves, or `None` for an id that is not one of this
+    /// engine's users. Unlike [`Self::admit_host_sign_in`] it refuses no
+    /// one: it reads the epoch for a check that ends what an earlier
+    /// epoch issued, such as an OAuth grant.
+    ///
+    /// The default refuses, which keeps existing custom engines
+    /// source-compatible; what reads the epoch then fails closed.
+    async fn user_auth_epoch(&self, user_id: &str) -> Result<Option<u64>> {
+        let _ = user_id;
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar session authority".to_owned(),
+            message: "the user's auth epoch is unavailable".to_owned(),
+        })
+    }
+
     /// Whether `user_id` has a second factor in this engine, confirmed or
     /// waiting for its confirmation.
     ///
@@ -1680,6 +1724,10 @@ where
         MagnetarHostEngine::admit_host_sign_in(self, user_id).await
     }
 
+    async fn user_auth_epoch(&self, user_id: &str) -> Result<Option<u64>> {
+        MagnetarHostEngine::user_auth_epoch(self, user_id).await
+    }
+
     async fn has_second_factor(&self, user_id: &str) -> Result<bool> {
         MagnetarHostEngine::has_second_factor(self, user_id).await
     }
@@ -1722,6 +1770,10 @@ where
 
     async fn admit_host_sign_in(&self, user_id: &str) -> Result<u64> {
         MagnetarHostEngine::admit_host_sign_in(self, user_id).await
+    }
+
+    async fn user_auth_epoch(&self, user_id: &str) -> Result<Option<u64>> {
+        MagnetarHostEngine::user_auth_epoch(self, user_id).await
     }
 
     async fn has_second_factor(&self, user_id: &str) -> Result<bool> {

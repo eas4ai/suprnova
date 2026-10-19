@@ -895,7 +895,9 @@ pub use validator::Validate;
 // The JSON Schema generator behind `#[tool_input]` and `#[tool]`. The derive
 // is pointed at this path, so an application needs no `schemars` of its own.
 #[cfg(feature = "agents")]
-pub use agents::{AgentsConfig, CallerKind, ToolCaller};
+pub use agents::{
+    AgentsConfig, CallerKind, ConnectedAgents, OAuthServer, OutsideIssuer, ToolCaller,
+};
 #[cfg(feature = "agents")]
 #[doc(hidden)]
 pub use schemars as __schemars;

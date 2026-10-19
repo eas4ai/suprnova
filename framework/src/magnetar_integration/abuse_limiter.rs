@@ -169,6 +169,30 @@ impl magnetar::abuse::AbuseLimiter for FrameworkAbuseLimiter {
     }
 }
 
+/// [`FrameworkAbuseLimiter`] over the rate-limit driver bound when each
+/// budget is drawn, rather than when the limiter is built.
+///
+/// A Magnetar plugin's engine is built while routes are registered, and an
+/// application may bind its driver later in boot, or a test may bind its
+/// own in a per-test container. Resolving per call follows whichever driver
+/// is in force. No driver at all is a failure, never permission.
+#[cfg(feature = "agents")]
+pub(crate) struct AppAbuseLimiter;
+
+#[cfg(feature = "agents")]
+#[async_trait::async_trait]
+impl magnetar::abuse::AbuseLimiter for AppAbuseLimiter {
+    async fn acquire(
+        &self,
+        key: &str,
+        policy: magnetar::abuse::AbusePolicy,
+    ) -> magnetar::Result<magnetar::abuse::Permit> {
+        let limiter = FrameworkAbuseLimiter::from_app()
+            .map_err(|_| FrameworkAbuseLimiter::backend_unavailable())?;
+        magnetar::abuse::AbuseLimiter::acquire(&limiter, key, policy).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
