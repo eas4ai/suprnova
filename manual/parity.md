@@ -158,7 +158,7 @@ domains. The rows marked **not built** and **by design no** are the gaps.
 | Remember-me | Magnetar purpose-bound rotating credential behind the framework cookie | shipped | Auth-epoch checks, rotation, anomaly handling, and legacy fallback |
 | OAuth (Socialite) | Magnetar provider registry and `Auth::oauth(provider)` facade | shipped | OAuth, Apple `form_post`, PKCE/state binding, verified identity policy - [OAuth](oauth.md) |
 | Sanctum (API tokens) | `BearerTokenMiddleware` over Magnetar bearer sessions | diverged | Authenticates bearer sessions; no separate Sanctum token-management API |
-| Passport (OAuth server) | Magnetar is an OAuth client, not an authorization server | not built | Run a dedicated IdP (Hydra, Keycloak) behind Suprnova |
+| Passport (OAuth server) | The Magnetar authorization server plugin, turned on with `AgentsConfig::oauth_server(OAuthServer::new())` | diverged | OAuth 2.1 for MCP clients acting for a user: the authorization code grant with PKCE `S256`, clients identified by a client ID metadata document or dynamic registration, refresh tokens rotated on every use, revocation, and an approval page. `ConnectedAgents` lists and revokes a user's grants. No password, client credentials or implicit grants and no personal access tokens. [Agents](agents.md#users-who-approve-a-client) |
 | Fortify (auth backend) | Framework `Auth`/`auth_flows` facades over Magnetar engines | shipped | Framework owns HTTP, mail, events, cookies, and application binding |
 | Authorization (Policies / Gates) | `Gate::allows/denies` + `#[policy] impl PostPolicy` + `Authorizable` trait + macro registration + `Gate::default_denial_response` | shipped | [Authorization](authorization.md) |
 | Roles & permissions (spatie/laravel-permission) | `HasRoles` trait + spatie's `roles` / `permissions` / `model_has_roles` / `model_has_permissions` / `role_has_permissions` tables (`CreateRbacTables`) + `RoleMiddleware` / `PermissionMiddleware` (fail-closed) | shipped | First-party, not a community package. `create_role` / `give_permission_to_role` / `assign_role_to_model` helpers. `register_gate_bridge::<User>()` makes a held permission allow the same ability on the gate; it allows and never denies, and it answers the async forms (`allows_async`, `authorize_async`, `inspect_async`) only. [Roles and permissions](authorization.md#roles-and-permissions), [Answering the gate with permissions](authorization.md#answering-the-gate-with-permissions) |
@@ -239,7 +239,7 @@ domains. The rows marked **not built** and **by design no** are the gaps.
 | Laravel | Suprnova | Status | Notes / link |
 |---|---|---|---|
 | AI SDK | No first-party AI SDK | by design no | Bring the crate you already use (`async-openai`, `anthropic-sdk`, `ollama-rs`, `tokenizers`, etc.) and bind under `App` |
-| MCP (Model Context Protocol) | No first-party MCP server adapter | by design no | The Rust MCP crates (`mcp-rs`, `mcp-sdk-rust`) sit cleanly under the existing routing / supervisor surface |
+| MCP (Model Context Protocol) | `#[tool]` on a routed handler, served at `/mcp` by `Router::agents`, and in the browser through WebMCP | diverged | A tool call runs the route's middleware, validation and policies. Streamable HTTP (2026-07-28, and the `initialize`-based 2025 revisions without sessions), public, user and agent callers, OAuth discovery. Tools only, no prompts or resources. [Agents](agents.md) |
 | Boost (Laravel coding agent) | n/a | by design no | Out of framework scope |
 
 ## Testing
@@ -334,7 +334,7 @@ domains. The rows marked **not built** and **by design no** are the gaps.
 | Horizon | n/a | not built | Failed jobs surface through `suprnova queue:failed` and the commands beside it |
 | Mix | Replaced by Vite | diverged | Vite ships in every frontend scaffold (`suprnova new --api` has no frontend) |
 | Octane | n/a - we are already long-lived Tokio | by design no | Single binary, always warm, no FPM to swap out |
-| Passport | n/a | not built | Run a dedicated IdP (Hydra, Keycloak) behind Suprnova |
+| Passport | The Magnetar authorization server plugin (`OAuthServer`) | diverged | OAuth 2.1 for MCP clients; no password, client credentials or implicit grants and no personal access tokens. [Agents](agents.md#users-who-approve-a-client) |
 | Pennant (feature flags) | Re-implemented as `features::*` | shipped | [Feature Flags](feature-flags.md) |
 | Pint (PHP code style) | `cargo fmt` + `cargo clippy` | diverged | Standard Rust toolchain |
 | Precognition | Precognitive requests (the `Precognition` header) answered by `FormRequest` extraction, with the same `#[derive(Data, Validate)]` types | shipped | Validation runs without calling the handler |
@@ -415,7 +415,6 @@ instead:
 | Area | What's missing | Route instead |
 |---|---|---|
 | Search (Scout - keyword) | Algolia / Meilisearch / Elastic adapter | Use `meilisearch-sdk` / `elasticsearch` directly; [Vector](vector.md) handles semantic search |
-| Passport (OAuth server) | First-party OAuth identity provider | Run Hydra / Keycloak behind Suprnova |
 | Telescope (debug dashboard) | Web UI for requests / queries / events / cache hits | Use OTel + tracing output ([Observability](observability.md)) |
 | Pulse (perf dashboard) | Web UI for slow queries / errors / hot routes | Same: the OTel surface |
 | Horizon (queue dashboard) | Web UI for queue depth / failed jobs / throughput | `suprnova queue:failed` (and `queue:retry`, `queue:forget`, `queue:flush`, `queue:prune-failed`) and OTel metrics |
@@ -435,7 +434,7 @@ instead:
 | Valet | `suprnova serve` is the dev server |
 | Envoy (SSH deploys) | Containers / systemd / orchestrators do the job; we don't need a bespoke SSH DSL |
 | Concurrency facade (`Concurrency::run`) | Tokio (`tokio::join!` / `tokio::spawn` / `tokio::select!`) is the answer; no facade needed |
-| First-party AI SDK / MCP / Boost | Pick the Rust crates you already use; we don't gatekeep |
+| First-party AI SDK / Boost | Pick the Rust crates you already use; we don't gatekeep |
 | Prompts' arrow-key terminal UI | The prompts ship as `console::secret`, `select`, `multiselect`, `progress` and `form`, and each reads one line, so a command runs the same by hand, from a script and under `console::test`. [Console](console.md#prompts) |
 | Laravel-style PHP/JSON translation files | Localization ships, but the catalog format is Fluent `.ftl` - one format the server and the browser both parse. `trans_choice` has no equivalent either: Fluent selects CLDR plural categories inside the message. [Localization](localization.md) |
 | `php artisan dev --tabs` (TUI multi-pane dev-process mode) | Single-terminal, `[name]`-prefixed output is the Rust dev-tooling norm (`cargo watch`, `bacon`, `just`) - `suprnova serve` already gives every process (backend, frontend, and any `suprnova.toml` entry) its own colored prefix and auto-restart. A tabbed TUI is a second interaction model for a signal this already provides; `--stream`'s job - one scriptable, real-time output stream - ships as `suprnova serve --json` (NDJSON, one event per line). [Serve](cli-serve.md#extra-dev-processes) |
