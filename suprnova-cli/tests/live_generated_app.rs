@@ -99,11 +99,14 @@ fn a_generated_application_is_live_ready() {
         "{bootstrap}"
     );
     assert!(!bootstrap.contains("with_origin_policy"), "{bootstrap}");
+    // The routes are served through `agents::serve` (AGENT-017) before the
+    // Live install wraps them.
     let main = read(project.join("cmd/main.rs"));
     assert!(
-        main.contains(
-            ".try_routes_async(|| async { live::routes_with_render_cache(routes::register()).await })"
-        ),
+        main.contains(".try_routes_async(|| async {")
+            && main.contains(
+                "live::routes_with_render_cache(agents::serve(routes::register())?).await"
+            ),
         "{main}"
     );
     // Without the framework's own migration in the generated Migrator, the

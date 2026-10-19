@@ -199,6 +199,12 @@ pub fn lib_rs() -> &'static str {
     include_str!("files/backend/lib.rs.tpl")
 }
 
+/// `src/agents.rs`, which the Inertia and Live kits share: the MCP endpoint,
+/// the OAuth server and agent auth, with the kit's own consent pages.
+pub fn agents_rs() -> &'static str {
+    include_str!("files/backend/agents.rs.tpl")
+}
+
 pub fn routes_rs() -> &'static str {
     include_str!("files/backend/routes.rs.tpl")
 }
@@ -1484,6 +1490,8 @@ pub fn scaffold_frontend(
 // ============================================================================
 
 pub mod api {
+    use crate::commands::agent_key::AgentAuthKey;
+
     /// The API starter's `Cargo.toml`, pinning the framework where this
     /// build of the CLI chooses ([`super::framework_pin`]).
     pub fn cargo_toml(package_name: &str, project_name: &str) -> String {
@@ -1557,11 +1565,21 @@ pub mod api {
     pub fn migrations_create_users_rs() -> &'static str {
         include_str!("files/api/src/migrations/create_users_table.rs.tpl")
     }
-    pub fn env(package_name: &str, project_name: &str, app_key: &str) -> String {
-        include_str!("files/api/.env.tpl")
-            .replace("{package_name}", package_name)
-            .replace("{project_name}", project_name)
-            .replace("{app_key}", app_key)
+    /// The API starter's `.env`: the template, then the agent auth signing
+    /// key minted for this project ([`super::with_agent_key`]).
+    pub fn env(
+        package_name: &str,
+        project_name: &str,
+        app_key: &str,
+        agent_key: &AgentAuthKey,
+    ) -> String {
+        super::with_agent_key(
+            include_str!("files/api/.env.tpl")
+                .replace("{package_name}", package_name)
+                .replace("{project_name}", project_name)
+                .replace("{app_key}", app_key),
+            agent_key,
+        )
     }
     pub fn gitignore() -> &'static str {
         include_str!("files/api/.gitignore.tpl")
@@ -1599,6 +1617,10 @@ pub fn scaffold_api(
     ] {
         fs::create_dir_all(d).map_err(|e| format!("Failed to create {}: {}", d.display(), e))?;
     }
+
+    // A project never gets a `.env` without its agent auth signing key.
+    let agent_key = crate::commands::agent_key::generate()
+        .map_err(|e| format!("Failed to make the agent auth signing key: {e}"))?;
 
     let writes: &[(std::path::PathBuf, String)] = &[
         (
@@ -1650,6 +1672,7 @@ pub fn scaffold_api(
                 package_name,
                 project_name,
                 &crate::commands::key_generate::generate_app_key(),
+                &agent_key,
             ),
         ),
         (
@@ -1659,9 +1682,10 @@ pub fn scaffold_api(
     ];
 
     for (path, content) in writes {
-        // `.env` carries the generated APP_KEY, so it gets 0600 rather
-        // than whatever the umask happens to allow. Everything else is
-        // ordinary source and keeps the default mode.
+        // `.env` carries the generated APP_KEY and the agent auth signing
+        // key, so it gets 0600 rather than whatever the umask happens to
+        // allow. Everything else is ordinary source and keeps the default
+        // mode.
         let result = if path.file_name().is_some_and(|name| name == ".env") {
             crate::secure_fs::write_private(path, content)
         } else {
@@ -1757,16 +1781,50 @@ pub fn gitignore() -> &'static str {
 /// The Live kit runs no Vite server and installs no Inertia layer, so its
 /// `.env` takes [`live_kit::env_section`] in place of the ports and
 /// frontend section the Inertia kits get.
-pub fn env(project_name: &str, app_key: &str, frontend: Frontend) -> String {
+///
+/// The agent auth signing key minted for this project follows the template
+/// ([`with_agent_key`]).
+pub fn env(
+    project_name: &str,
+    app_key: &str,
+    frontend: Frontend,
+    agent_key: &crate::commands::agent_key::AgentAuthKey,
+) -> String {
     let template = include_str!("files/root/env.tpl");
     let template = match frontend {
         Frontend::Live => live_kit::env_section(template),
         Frontend::React | Frontend::Svelte | Frontend::Vue => template.to_owned(),
     };
-    template
-        .replace("{project_name}", project_name)
-        .replace("{app_key}", app_key)
-        .replace("{frontend}", frontend.as_str())
+    with_agent_key(
+        template
+            .replace("{project_name}", project_name)
+            .replace("{app_key}", app_key)
+            .replace("{frontend}", frontend.as_str()),
+        agent_key,
+    )
+}
+
+/// What `.env` says about the agent auth signing key above its two lines.
+/// `.env.example` carries the same words over the two names with no value.
+const AGENT_KEY_COMMENT: &str = "\
+# Agent auth signs the identity assertions it gives agents with this key,
+# made for this checkout by `suprnova new`. Give every other environment its
+# own: `cargo run -- agents:key` prints one. A literal \\n in the key is a
+# line break. The application does not start without a key.
+";
+
+/// `env`, a rendered environment file, followed by `agent_key` as the two
+/// lines `agents:key` prints. The key is added here rather than through a
+/// placeholder, so no template ever holds a place for key material and
+/// every kit's `.env` gets the same block.
+fn with_agent_key(mut env: String, agent_key: &crate::commands::agent_key::AgentAuthKey) -> String {
+    if !env.ends_with('\n') {
+        env.push('\n');
+    }
+    env.push('\n');
+    env.push_str(AGENT_KEY_COMMENT);
+    env.push_str(&crate::commands::agent_key::env_lines(agent_key));
+    env
 }
 
 pub fn env_example() -> &'static str {

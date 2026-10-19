@@ -737,7 +737,10 @@ mod routes {
         }
         let main = app.read("cmd/main.rs");
         assert!(
-            contains(&main, "live::routes_with_render_cache(routes::register())"),
+            contains(
+                &main,
+                "live::routes_with_render_cache(agents::serve(routes::register())?)"
+            ),
             "{main}"
         );
     }

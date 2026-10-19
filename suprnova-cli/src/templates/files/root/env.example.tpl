@@ -9,6 +9,13 @@ APP_URL=http://localhost:8765
 # local/dev/test and APP_KEY is unset.
 APP_KEY=
 
+# Agent auth signs the identity assertions it gives agents with this key.
+# `suprnova new` made one for the first checkout's `.env`. Give every other
+# environment its own: `cargo run -- agents:key` prints one. A literal \n in
+# the key is a line break. The application does not start without a key.
+# AGENT_AUTH_KEY_ID=
+# AGENT_AUTH_PRIVATE_KEY=
+
 # Backend + Vite ports. Distinctive defaults to dodge the universally
 # squatted 8080/5173; `suprnova serve` scans upward if they're busy.
 SERVER_HOST=127.0.0.1

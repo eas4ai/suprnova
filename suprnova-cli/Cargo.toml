@@ -61,6 +61,11 @@ regex = "1"
 rand = "0.10.1"
 base64 = "0.22"
 getrandom = "0.4.2"
+# `suprnova new` mints the agent auth signing key a new project's `.env`
+# carries: a P-256 private key in PKCS#8 PEM, the form the framework's
+# `agents:key` prints (`commands/agent_key.rs`). Already in the lock through
+# web push and Magnetar, so the build gains no crate.
+p256 = { version = "0.13", default-features = false, features = ["arithmetic", "pem"] }
 # `dev:tls` fingerprints the CA certificate before installing it into a
 # browser trust store, and pins that fingerprint so a CA that changes
 # underneath the user has to be re-confirmed by a human.
