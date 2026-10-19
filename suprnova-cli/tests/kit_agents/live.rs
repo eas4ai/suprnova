@@ -332,6 +332,46 @@ fn agent_017_live_consent_forms_post_the_csrf_token() {
     assert!(forms >= 5, "live: only {forms} consent forms");
 }
 
+/// AGENT-017: the kit's sign-in, registration and reset forms tell the
+/// browser the bounds their rules check, through the library input's
+/// `maxlength`: 255 characters for a name and 254 for an address.
+#[test]
+fn agent_017_live_forms_hint_the_name_and_email_bounds() {
+    let project = Project::new("live");
+    let input = project.read("templates/suprnova-ui/input/input.html");
+    assert!(
+        input.contains("maxlength=\"\") %}")
+            && input.contains(
+                "{% if !maxlength.is_empty() %} maxlength=\"{{ maxlength }}\"{% endif %}"
+            ),
+        "live: the library input takes a maxlength:\n{input}"
+    );
+    for (form, call) in [
+        (
+            "register_form",
+            r#"input::input("name", required=true, autocomplete="name", value=component.name, maxlength="255")"#,
+        ),
+        (
+            "register_form",
+            r#"input::input("email", kind="email", required=true, autocomplete="email", value=email, maxlength="254")"#,
+        ),
+        (
+            "login_form",
+            r#"input::input("email", kind="email", required=true, autocomplete="email", value=email, maxlength="254")"#,
+        ),
+        (
+            "forgot_password_form",
+            r#"input::input("email", kind="email", required=true, autocomplete="email", value=email, maxlength="254")"#,
+        ),
+    ] {
+        let template = project.read(&format!("templates/live/{form}.html"));
+        assert!(
+            contains(&template, call),
+            "live: {form} lacks `{call}`:\n{template}"
+        );
+    }
+}
+
 /// AGENT-017: the approval decision returns the user to the client by a
 /// page of its own. The client's redirect URI is usually on another
 /// origin, and the kit's policy (`form-action 'self'`) makes a browser
