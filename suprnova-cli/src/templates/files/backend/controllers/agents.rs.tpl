@@ -320,8 +320,12 @@ pub async fn decide(req: Request) -> Response {
         .await?
     {
         ApprovalDecision::Redirect(url) => {
-            // The page held the authorization id; the browser's history
-            // forgets this application's pages from here.
+            // Inertia's `clearHistory` drops the key an application that
+            // turns on `encryptHistory` encrypts its history with, so the
+            // approval page no longer reads back from the browser's history.
+            // The kit does not encrypt its history, so here the call changes
+            // nothing; it is kept for an application that does. The
+            // authorization id it would hide is spent by now.
             Inertia::clear_history();
             Ok(Inertia::location(url))
         }
@@ -376,8 +380,9 @@ pub async fn confirm(req: Request) -> Response {
         .await?
     {
         ClaimConfirmation::Claimed { .. } => {
-            // The page held the attempt token; the browser's history
-            // forgets it.
+            // As in `decide`: only an application that encrypts its history
+            // gains from this. The attempt token is in the claim page's
+            // address anyway, and it is spent by now.
             Inertia::clear_history();
             Inertia::flash("toast", Toast::success("The agent is connected."))?;
             Redirect::to(CONNECTED).status(303).into()
