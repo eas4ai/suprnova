@@ -59,10 +59,13 @@ pub struct User {
 pub use user::{ActiveModel, Column, Entity};
 
 impl User {
-    /// Find a user by their email address.
+    /// Find a user by their email address, whatever its case. Registration
+    /// stores addresses in lowercase, but a row written before, or by
+    /// another application on this database, may hold another case of the
+    /// same address. Agent auth matches addresses the same way.
     pub async fn find_by_email(email: &str) -> Result<Option<Self>, FrameworkError> {
         <Self as suprnova::eloquent::Model>::query()
-            .filter("email", email)
+            .where_raw("LOWER(email) = LOWER(?)", vec![email.into()])
             .first()
             .await
     }

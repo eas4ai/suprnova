@@ -2,13 +2,20 @@
 //!
 //! A public seed, so a visitor who is not signed in can use it. The action
 //! checks the fields, creates the account, mails a verification link, signs
-//! the new user in and sends the browser to the verification notice.
+//! the new user in and sends the browser to the verification notice. A
+//! visitor a sign-in link sent here, from a claim page for instance, goes
+//! back there instead through `login.continue`, and that page asks an
+//! unverified address to verify first. The address is not carried across
+//! verification: its link may open in another browser.
+//!
+//! The address is stored in lowercase and checked against every case of
+//! it, so an address is one account.
 
 use std::sync::Arc;
 
 use suprnova::auth_flows::EmailVerification;
 use suprnova::live::{ActionResult, ComponentError, LiveComponent, live};
-use suprnova::{Auth, Validate};
+use suprnova::{Auth, Redirect, Validate};
 
 use super::{FieldErrors, failed, redirect};
 use crate::controllers::email_verification::verification_link;
@@ -18,9 +25,12 @@ use crate::models::user::User;
 /// The rules each field must pass.
 #[derive(Validate)]
 struct RegisterInput {
-    #[validate(length(min = 2, message = "Name must be at least 2 characters"))]
+    #[validate(length(min = 2, max = 255, message = "Name must be 2 to 255 characters"))]
     name: String,
-    #[validate(email(message = "Please enter a valid email address"))]
+    #[validate(
+        email(message = "Please enter a valid email address"),
+        length(max = 254, message = "Email must be at most 254 characters")
+    )]
     email: String,
     #[validate(length(min = 8, message = "Password must be at least 8 characters"))]
     password: String,
@@ -53,7 +63,7 @@ impl RegisterForm {
     pub async fn register(&mut self) -> Result<ActionResult, ComponentError> {
         let input = RegisterInput {
             name: self.name.trim().to_owned(),
-            email: self.email.trim().to_owned(),
+            email: self.email.trim().to_lowercase(),
             password: self.password.clone(),
         };
         if let Err(errors) = input.validate() {
@@ -92,6 +102,11 @@ impl RegisterForm {
                 )
             }
         };
-        redirect("verification.notice", Some(toast))
+        let next = if Redirect::intended_url().is_some() {
+            "login.continue"
+        } else {
+            "verification.notice"
+        };
+        redirect(next, Some(toast))
     }
 }

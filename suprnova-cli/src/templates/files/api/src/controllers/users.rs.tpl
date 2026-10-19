@@ -1,10 +1,15 @@
 //! User controller -- list, show, register, login.
 //!
 //! `list_users` and `show_user` query the canonical `app_users` table.
-//! Registration and login use Magnetar through `Auth::password()`.
+//! Registration and login use Magnetar through `Auth::password()`, which
+//! folds every address to lowercase. Both bodies are form requests, so an
+//! address over 254 characters, longer than any deliverable one, gets a
+//! `422` naming the field.
 
 use serde::Deserialize;
-use suprnova::{Auth, FrameworkError, HttpResponse, Request, Resource, Response, handler};
+use suprnova::{
+    Auth, FormRequest, FrameworkError, HttpResponse, Request, Resource, Response, Validate, handler,
+};
 
 use crate::models::user::User;
 use crate::resources::user_resource::UserResource;
@@ -47,19 +52,20 @@ pub async fn show_user(req: Request) -> Response {
 // POST /api/auth/register
 // ============================================================================
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct RegisterRequest {
+    #[validate(
+        email(message = "Please enter a valid email address"),
+        length(max = 254, message = "Email must be at most 254 characters")
+    )]
     pub email: String,
     pub password: String,
 }
 
-#[handler]
-pub async fn register(req: Request) -> Response {
-    let body: RegisterRequest = req
-        .json()
-        .await
-        .map_err(|e| FrameworkError::bad_request(e.to_string()))?;
+impl FormRequest for RegisterRequest {}
 
+#[handler]
+pub async fn register(body: RegisterRequest) -> Response {
     // An address that already has an account is `Registration::Accepted`:
     // its account is neither changed nor returned. Both outcomes get the
     // same answer, so this endpoint does not reveal which addresses are
@@ -78,19 +84,20 @@ pub async fn register(req: Request) -> Response {
 // POST /api/auth/login
 // ============================================================================
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct LoginRequest {
+    #[validate(
+        email(message = "Please enter a valid email address"),
+        length(max = 254, message = "Email must be at most 254 characters")
+    )]
     pub email: String,
     pub password: String,
 }
 
-#[handler]
-pub async fn login(req: Request) -> Response {
-    let body: LoginRequest = req
-        .json()
-        .await
-        .map_err(|e| FrameworkError::bad_request(e.to_string()))?;
+impl FormRequest for LoginRequest {}
 
+#[handler]
+pub async fn login(body: LoginRequest) -> Response {
     let (_user, session) = Auth::password()
         .authenticate(&body.email, &body.password, None, None)
         .await?;

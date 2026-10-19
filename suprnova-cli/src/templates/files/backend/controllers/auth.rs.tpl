@@ -3,11 +3,15 @@
 //! Renders the login/register Inertia pages on GET and validates and
 //! persists credentials on POST. A login continues to `/dashboard`; a
 //! registration mails a verification link and continues to
-//! `/verify-email` (see `email_verification`). Each action that succeeds
+//! `/verify-email` (see `email_verification`). Either continues instead to
+//! the address the session holds as intended (`Redirect::intended`): the
+//! page a guarded route or a sign-in link's `return_to` sent the user from,
+//! such as the claim page an agent sent them to. Each action that succeeds
 //! flashes a toast (`crate::props::flash::Toast`) the page it lands on
-//! shows once. Form bodies are extracted
-//! via `FormRequest`. On an Inertia visit a per-field failure comes back
-//! as a `303` to the form page with the errors flashed, so
+//! shows once. Addresses are stored and compared in lowercase, so an
+//! address is one account whatever case it is typed in. Form bodies are
+//! extracted via `FormRequest`. On an Inertia visit a per-field failure
+//! comes back as a `303` to the form page with the errors flashed, so
 //! `useForm().errors` fills in; a plain REST client still gets the `422`
 //! `{ message, errors }` envelope.
 //!
@@ -21,7 +25,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use suprnova::{
-    Auth, Credentials, FormRequest, Inertia, InertiaProps, Request, Response, Validate,
+    Auth, Credentials, FormRequest, Inertia, InertiaProps, Redirect, Request, Response, Validate,
     ValidationErrors, auth_flows::EmailVerification, handler, inertia_response, redirect,
 };
 
@@ -37,12 +41,18 @@ pub struct LoginProps {}
 
 #[handler]
 pub async fn show_login(req: Request) -> Response {
+    // A sign-in link from the OAuth server or agent auth names where the
+    // user was going; the login continues there.
+    crate::middleware::authenticate::remember_return_to(&req);
     inertia_response!(&req, "auth/Login", LoginProps {})
 }
 
 #[derive(Deserialize, Validate)]
 pub struct LoginRequest {
-    #[validate(email(message = "Please enter a valid email address"))]
+    #[validate(
+        email(message = "Please enter a valid email address"),
+        length(max = 254, message = "Email must be at most 254 characters")
+    )]
     pub email: String,
     #[validate(length(min = 1, message = "Password is required"))]
     pub password: String,
@@ -62,18 +72,25 @@ fn invalid_credentials() -> suprnova::FrameworkError {
 
 #[handler]
 pub async fn login(form: LoginRequest) -> Response {
+    let email = form.email.trim().to_lowercase();
     // `Auth::attempt` verifies the password through the registered user
     // provider, logs the user into the session on success, and issues a
     // remember-me token when requested - all via the named-guard system
     // wired in bootstrap.rs.
     match Auth::attempt(
-        &Credentials::password(&form.email, &form.password),
+        &Credentials::password(&email, &form.password),
         form.remember,
     )
     .await?
     {
         Some(_user) => {
             Inertia::flash("toast", Toast::success("Signed in."))?;
+            // The intended address may be a route a plugin serves, such as
+            // the authorization endpoint, which can end at another site. An
+            // Inertia visit leaves for it with a full page load.
+            if Redirect::intended_url().is_some() {
+                return Ok(Inertia::location(Redirect::intended("/dashboard")));
+            }
             redirect!("/dashboard").into()
         }
         None => Err(invalid_credentials().into()),
@@ -94,9 +111,12 @@ pub async fn show_register(req: Request) -> Response {
 
 #[derive(Deserialize, Validate)]
 pub struct RegisterRequest {
-    #[validate(length(min = 2, message = "Name must be at least 2 characters"))]
+    #[validate(length(min = 2, max = 255, message = "Name must be 2 to 255 characters"))]
     pub name: String,
-    #[validate(email(message = "Please enter a valid email address"))]
+    #[validate(
+        email(message = "Please enter a valid email address"),
+        length(max = 254, message = "Email must be at most 254 characters")
+    )]
     pub email: String,
     #[validate(length(min = 8, message = "Password must be at least 8 characters"))]
     pub password: String,
@@ -119,13 +139,14 @@ impl FormRequest for RegisterRequest {
 
 #[handler]
 pub async fn register(form: RegisterRequest) -> Response {
-    if User::find_by_email(&form.email).await?.is_some() {
+    let email = form.email.trim().to_lowercase();
+    if User::find_by_email(&email).await?.is_some() {
         let mut errs = ValidationErrors::new();
         errs.add("email", "This email is already registered.");
         return Err(suprnova::FrameworkError::Validation(errs).into());
     }
 
-    let user = User::create(&form.name, &form.email, &form.password).await?;
+    let user = User::create(&form.name, &email, &form.password).await?;
     // Mail the verification link. This runs before the login below, so a
     // delivery failure (nothing listening on `MAIL_SMTP_HOST`, `MAIL_FROM`
     // unset) is reported as the error it is rather than after a session
@@ -136,6 +157,13 @@ pub async fn register(form: RegisterRequest) -> Response {
     Auth::login(Arc::new(user), false).await?;
 
     Inertia::flash("toast", Toast::success(format!("Welcome, {}.", form.name)))?;
+    // A visitor a sign-in link sent here, from a claim page for instance,
+    // goes back there, and that page asks an unverified address to verify
+    // first. The address is not carried across verification: its link may
+    // open in another browser.
+    if Redirect::intended_url().is_some() {
+        return Ok(Inertia::location(Redirect::intended("/verify-email")));
+    }
     redirect!("/verify-email").into()
 }
 

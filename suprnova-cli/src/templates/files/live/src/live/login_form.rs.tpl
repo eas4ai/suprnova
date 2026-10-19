@@ -2,11 +2,13 @@
 //!
 //! A public seed, so a visitor who is not signed in can use it. The action
 //! checks the fields, asks the registered user provider through
-//! `Auth::attempt`, and on success sends the browser to the dashboard with a
-//! toast. A failure stays on the form, with the message under its control.
+//! `Auth::attempt`, and on success sends the browser on with a toast: to the
+//! session's intended address through `login.continue`, or else to the
+//! dashboard. A failure stays on the form, with the message under its
+//! control. The address is folded to lowercase, as registration stores it.
 
 use suprnova::live::{ActionResult, ComponentError, LiveComponent, live};
-use suprnova::{Auth, Credentials, Validate};
+use suprnova::{Auth, Credentials, Redirect, Validate};
 
 use super::{FieldErrors, failed, redirect};
 use crate::flash::Toast;
@@ -14,7 +16,10 @@ use crate::flash::Toast;
 /// The rules the form checks before it asks for the account.
 #[derive(Validate)]
 struct LoginInput {
-    #[validate(email(message = "Please enter a valid email address"))]
+    #[validate(
+        email(message = "Please enter a valid email address"),
+        length(max = 254, message = "Email must be at most 254 characters")
+    )]
     email: String,
     #[validate(length(min = 1, message = "Password is required"))]
     password: String,
@@ -39,11 +44,11 @@ pub struct LoginForm {
 
 #[live]
 impl LoginForm {
-    /// Signs the user in and continues to the dashboard, or shows why not.
+    /// Signs the user in and continues, or shows why not.
     #[action]
     pub async fn login(&mut self) -> Result<ActionResult, ComponentError> {
         let input = LoginInput {
-            email: self.email.trim().to_owned(),
+            email: self.email.trim().to_lowercase(),
             password: self.password.clone(),
         };
         if let Err(errors) = input.validate() {
@@ -63,6 +68,11 @@ impl LoginForm {
             self.errors = FieldErrors::one("email", "These credentials do not match our records.");
             return Ok(ActionResult::render());
         }
-        redirect("dashboard", Some(Toast::success("Signed in.")))
+        let next = if Redirect::intended_url().is_some() {
+            "login.continue"
+        } else {
+            "dashboard"
+        };
+        redirect(next, Some(Toast::success("Signed in.")))
     }
 }

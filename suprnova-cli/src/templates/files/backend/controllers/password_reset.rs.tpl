@@ -34,7 +34,10 @@ pub struct ResetPasswordProps {
 
 #[derive(Deserialize, Validate)]
 pub struct ForgotPasswordRequest {
-    #[validate(email(message = "Please enter a valid email address"))]
+    #[validate(
+        email(message = "Please enter a valid email address"),
+        length(max = 254, message = "Email must be at most 254 characters")
+    )]
     pub email: String,
 }
 
@@ -71,10 +74,11 @@ pub async fn forgot(req: Request) -> Response {
 ///
 /// The response is the same whether or not the address is on file (or
 /// verified), the toast included; only a verified account receives mail.
-/// `url::to` prefixes `APP_URL`, so the link works from any inbox.
+/// `url::to` prefixes `APP_URL`, so the link works from any inbox. The
+/// address is folded to lowercase, as registration stores it.
 #[handler]
 pub async fn send_link(form: ForgotPasswordRequest) -> Response {
-    PasswordReset::send_link(&form.email, &url::to(RESET_PATH)).await?;
+    PasswordReset::send_link(&form.email.trim().to_lowercase(), &url::to(RESET_PATH)).await?;
     Inertia::flash(
         "toast",
         Toast::info("If that address is registered, a reset link is on its way."),

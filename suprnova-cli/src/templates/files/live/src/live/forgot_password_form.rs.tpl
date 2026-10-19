@@ -19,7 +19,10 @@ const RESET_PATH: &str = "/reset-password";
 /// The rule the address must pass.
 #[derive(Validate)]
 struct ForgotPasswordInput {
-    #[validate(email(message = "Please enter a valid email address"))]
+    #[validate(
+        email(message = "Please enter a valid email address"),
+        length(max = 254, message = "Email must be at most 254 characters")
+    )]
     email: String,
 }
 
@@ -41,11 +44,12 @@ pub struct ForgotPasswordForm {
 impl ForgotPasswordForm {
     /// Mails a reset link and returns to the form with the same toast
     /// whether or not the address is on file. `url::to` prefixes `APP_URL`,
-    /// so the link works from any inbox.
+    /// so the link works from any inbox. The address is folded to
+    /// lowercase, as registration stores it.
     #[action]
     pub async fn send(&mut self) -> Result<ActionResult, ComponentError> {
         let input = ForgotPasswordInput {
-            email: self.email.trim().to_owned(),
+            email: self.email.trim().to_lowercase(),
         };
         if let Err(errors) = input.validate() {
             self.errors = FieldErrors::from_rules(&errors);

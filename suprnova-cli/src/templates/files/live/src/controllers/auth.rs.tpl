@@ -4,9 +4,17 @@
 //! public seed, whose action signs the user in or creates the account
 //! (`live::login_form`, `live::register_form`). Signing out is an ordinary
 //! form post, so it works before any script runs.
+//!
+//! A sign-in link from the OAuth server or agent auth names where the user
+//! was going in `return_to`, which `/login` keeps as the session's intended
+//! address. A Live action redirects only to a named route, so the forms
+//! send a user with an intended address to `/login/continue`, which takes
+//! them there.
 
 use suprnova::live::{CanonicalValue, LiveDocument, MountFlags};
-use suprnova::{Auth, FrameworkError, HttpResponse, Request, Response, handler, redirect};
+use suprnova::{
+    Auth, FrameworkError, HttpResponse, Redirect, Request, Response, handler, redirect,
+};
 
 use crate::flash::Toast;
 use crate::live::mounts;
@@ -20,6 +28,7 @@ pub(crate) fn no_parameters() -> CanonicalValue {
 /// `GET /login`: the sign-in form.
 #[handler]
 pub async fn login(req: Request) -> Response {
+    crate::middleware::authenticate::remember_return_to(&req);
     Ok(login_page(&req).await?)
 }
 
@@ -53,6 +62,14 @@ async fn register_page(req: &Request) -> Result<HttpResponse, FrameworkError> {
         form: form.html().clone(),
     };
     views::render(document, "live/pages/register.html", &page)
+}
+
+/// `GET /login/continue`: where the sign-in and registration forms send a
+/// user whose session holds an intended address, such as the claim page an
+/// agent sent them to. The address was checked when it was stored.
+#[handler]
+pub async fn continue_after_sign_in(_req: Request) -> Response {
+    Redirect::intended("/dashboard").into()
 }
 
 /// `POST /logout`: ends the session and returns to the welcome page.

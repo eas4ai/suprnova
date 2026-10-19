@@ -38,6 +38,10 @@ routes! {
         get!("/notes", controllers::notes::index).name("notes.index"),
         get!("/notes/{id}", controllers::notes::show).name("notes.show"),
         post!("/logout", controllers::auth::logout).name("logout"),
+        // Where the sign-in and registration forms continue to when the
+        // session holds an intended address: a Live action redirects only
+        // to a named route.
+        get!("/login/continue", controllers::auth::continue_after_sign_in).name("login.continue"),
         // The display name over JSON, the endpoint the Inertia kits ship;
         // the dashboard's island saves it through Live.
         post!("/profile/name", controllers::profile::update_name).name("profile.name"),

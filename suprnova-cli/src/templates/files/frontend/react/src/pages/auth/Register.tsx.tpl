@@ -35,6 +35,7 @@ export default function Register() {
                   id="name"
                   name="name"
                   type="text"
+                  maxLength={255}
                   required
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
                 />
@@ -50,6 +51,7 @@ export default function Register() {
                   name="email"
                   type="email"
                   autoComplete="email"
+                  maxLength={254}
                   required
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
                 />
