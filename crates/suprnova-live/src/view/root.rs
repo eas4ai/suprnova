@@ -78,8 +78,10 @@ pub(crate) struct IslandRootInput<'a> {
 
 /// The browser tools of one component, before an island's key names them.
 ///
-/// Built from the generated metadata alone, so the attribute is the same for
-/// every viewer: a public seed's bytes stay shareable and do not change when
+/// Built from the generated metadata, narrowed by the host to the tools the
+/// request's viewer may call ([`crate::host::AgentToolFilter`]). A component
+/// whose tools all accept every viewer gets the same attribute for every
+/// viewer, so a public seed's bytes stay shareable and do not change when
 /// the seed is promoted. Who may call a tool is still decided when it is
 /// called.
 #[derive(Clone, Debug)]
@@ -103,15 +105,16 @@ struct AgentToolEntry {
     consequential: bool,
 }
 
-/// The browser tools `metadata` declares, or `None` when it offers the
-/// browser none.
+/// The browser tools `metadata` declares that `filter` admits, or `None`
+/// when it offers the browser none of them.
 #[must_use]
 pub(crate) fn declared_agent_tools(
     metadata: &crate::metadata::ComponentMetadata,
+    filter: &crate::host::AgentToolFilter,
 ) -> Option<AgentToolsDeclaration> {
     let tools: Vec<AgentToolEntry> = metadata
         .tools()
-        .filter(|(_, tool)| tool.browser())
+        .filter(|(_, tool)| tool.browser() && filter.admits(tool.name()))
         .filter_map(|(action, tool)| {
             // `ActionMetadata::with_tool` already refused arguments with no
             // schema, so a missing one cannot happen; it is left out rather
@@ -524,7 +527,7 @@ mod tests {
             vec![action],
         )
         .expect("metadata");
-        let rendered = declared_agent_tools(&metadata)
+        let rendered = declared_agent_tools(&metadata, &crate::host::AgentToolFilter::All)
             .expect("a browser tool")
             .render("main")
             .expect("an instance key");
@@ -537,5 +540,63 @@ mod tests {
         // browser unwraps their lossless tags and shows every other field
         // as the snapshot carries it, as the server's headless result does.
         assert_eq!(contract["integers"], serde_json::json!(["count", "delta"]));
+    }
+
+    #[test]
+    fn agent_014_a_filter_lists_only_the_tools_it_admits() {
+        use crate::action::{ActionArgumentSchema, AuthorizationRequirement, TransactionPolicy};
+        use crate::host::AgentToolFilter;
+        use crate::identity::{ActionName, ViewName};
+        use crate::metadata::{
+            ActionMetadata, ActionToolMetadata, ComponentMetadata, ContractVersions,
+        };
+        use crate::validation::ValidationSelection;
+
+        let action = |name: &str, tool: &str| {
+            ActionMetadata::new_with_contract(
+                ActionName::parse(name).expect("action"),
+                1,
+                ActionArgumentSchema::new(Vec::new()).expect("arguments"),
+                AuthorizationRequirement::Public,
+                ValidationSelection::None,
+                TransactionPolicy::None,
+            )
+            .expect("action")
+            .with_tool(
+                ActionToolMetadata::new(tool, "A tool.")
+                    .expect("tool")
+                    .for_browser(true),
+            )
+            .expect("tool")
+        };
+        let metadata = ComponentMetadata::new(
+            ComponentName::parse("tests.counter").expect("component"),
+            ViewName::parse("tests/counter.html").expect("view"),
+            ContractVersions::new(1, 1, 1, 1, 1).expect("versions"),
+            Vec::new(),
+            vec![action("peek", "counter.peek"), action("add", "counter.add")],
+        )
+        .expect("metadata");
+        let names = |filter: &AgentToolFilter| -> Vec<String> {
+            let Some(declared) = declared_agent_tools(&metadata, filter) else {
+                return Vec::new();
+            };
+            let rendered: serde_json::Value =
+                serde_json::from_str(&declared.render("main").expect("an instance key"))
+                    .expect("json");
+            rendered["tools"]
+                .as_array()
+                .expect("tools")
+                .iter()
+                .map(|tool| tool["name"].as_str().expect("name").to_owned())
+                .collect()
+        };
+        assert_eq!(names(&AgentToolFilter::All).len(), 2);
+        let only_peek = AgentToolFilter::Only(["counter.peek".to_owned()].into_iter().collect());
+        assert_eq!(names(&only_peek), vec!["counter.peek.main".to_owned()]);
+        // A filter that admits none of the tools lists no attribute at all.
+        assert!(
+            declared_agent_tools(&metadata, &AgentToolFilter::Only(Default::default())).is_none()
+        );
     }
 }
