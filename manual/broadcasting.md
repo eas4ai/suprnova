@@ -1129,7 +1129,7 @@ async fn shipping_an_order_broadcasts_to_the_user_channel() {
 
 To assert that a `Broadcastable` *event* was dispatched at all
 (rather than what reached the wire), `EventFacade::fake()` records
-the event itself - see [Events](events.md#testing--eventfacadefake).
+the event itself - see [Events](events.md#testing---eventfacadefake).
 
 ## Laravel parity reference
 

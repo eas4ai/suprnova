@@ -10,11 +10,11 @@ or resources.
 
 - [The contract](#the-contract)
 - [`to_array` and `to_json`](#to_array-and-to_json)
-- [Hiding fields - `hidden = [...]`](#hiding-fields--hidden--)
-- [Whitelisting fields - `visible = [...]`](#whitelisting-fields--visible--)
-- [Appending accessors - `appends = [...]`](#appending-accessors--appends--)
+- [Hiding fields - `hidden = [...]`](#hiding-fields---hidden--)
+- [Whitelisting fields - `visible = [...]`](#whitelisting-fields---visible--)
+- [Appending accessors - `appends = [...]`](#appending-accessors---appends--)
 - [The filter pipeline order](#the-filter-pipeline-order)
-- [Per-call filtering - `to_array_except` / `to_array_only`](#per-call-filtering--to_array_except--to_array_only)
+- [Per-call filtering - `to_array_except` / `to_array_only`](#per-call-filtering---to_array_except--to_array_only)
 - [Conditional hiding by viewer](#conditional-hiding-by-viewer)
 - [Serde serialization](#serde-serialization)
 - [Serializing collections](#serializing-collections)
@@ -321,7 +321,7 @@ pub async fn show(req: Request) -> Response {
 For more elaborate per-viewer shape - different attributes for admins,
 trial users, paid users - the right tool is the **JSON:API resource
 layer** with `Maybe<T>` / `MissingValue<T>` fields. See
-[JSON:API resources](eloquent-resources.md#conditional-attributes--maybet--missingvaluet)
+[JSON:API resources](eloquent-resources.md#conditional-attributes---maybet--missingvaluet)
 for the declarative form.
 
 ## Serde serialization
@@ -457,7 +457,7 @@ right answer when:
 - The same model appears under different envelopes (one endpoint ships
   `posts`, another ships `subscriptions`).
 
-See [JSON:API resources](eloquent-resources.md#compound-documents--include-chains)
+See [JSON:API resources](eloquent-resources.md#compound-documents---include-chains)
 for the full pattern.
 
 ## What about JSON:API?
