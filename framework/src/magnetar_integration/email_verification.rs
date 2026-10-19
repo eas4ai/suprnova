@@ -167,6 +167,10 @@ async fn issue_for_id(user_id: &str) -> Result<EmailVerificationIssue, Framework
     }))
 }
 
+/// The engine's failure as a `500`, logged first: the answer's body says
+/// nothing, so the log is where the cause shows. Magnetar's errors never
+/// carry the token, whose digest is all its store sees.
 fn map_magnetar_email_verification_error(error: magnetar::Error) -> FrameworkError {
+    tracing::error!(%error, "Magnetar email verification failed");
     FrameworkError::internal(format!("Magnetar email verification: {error}"))
 }

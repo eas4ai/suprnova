@@ -191,7 +191,16 @@ fn api_client(token: &str) -> TestClient {
 
 /// The JSON answer of `response`, which must be a 200.
 fn answer(response: &TestResponse) -> Value {
-    assert_eq!(response.status(), 200, "{}", response.body_text());
+    // The body of a `500` says nothing; the error report carries the cause.
+    assert!(
+        response.status() == 200,
+        "status {}: {}\nerror report: {}",
+        response.status(),
+        response.body_text(),
+        response
+            .error_report()
+            .map_or_else(|| "none".to_owned(), ToString::to_string)
+    );
     response.json()
 }
 
@@ -664,33 +673,39 @@ async fn verify_at_once(client: &TestClient, token: &str, count: usize) -> Vec<S
         .collect()
 }
 
-/// Eight requests present one link at once: one verifies and the others
-/// find it spent. The address then reads as verified.
+/// Ten rounds, each with an account and a link of its own: eight requests
+/// present the link at once, one verifies, and the others are refused. A
+/// request that loses the race in the database is refused too, never
+/// answered `500`. The address then reads as verified.
 async fn concurrent_verifies_spend_the_token_once() {
-    let (_, token) = account("race").await;
-    let client = api_client(&token);
-    let issued = answer(&client.get("/issue").send().await);
-    assert_eq!(issued["outcome"], "issued", "{issued}");
-    let link = issued["token"].as_str().expect("a token").to_owned();
-    let outcomes = verify_at_once(&client, &link, 8).await;
-    assert_eq!(
-        outcomes
-            .iter()
-            .filter(|outcome| *outcome == "verified")
-            .count(),
-        1,
-        "{outcomes:?}"
-    );
-    assert!(
-        outcomes
-            .iter()
-            .all(|outcome| outcome == "verified" || outcome == "unknown"),
-        "{outcomes:?}"
-    );
-    assert_eq!(
-        answer(&client.get("/issue").send().await)["outcome"],
-        "already_verified"
-    );
+    for round in 1..=10 {
+        let (_, token) = account(&format!("race-{round}")).await;
+        let client = api_client(&token);
+        let issued = answer(&client.get("/issue").send().await);
+        assert_eq!(issued["outcome"], "issued", "round {round}: {issued}");
+        let link = issued["token"].as_str().expect("a token").to_owned();
+        let outcomes = verify_at_once(&client, &link, 8).await;
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| *outcome == "verified")
+                .count(),
+            1,
+            "round {round}: {outcomes:?}"
+        );
+        assert!(
+            outcomes.iter().all(|outcome| matches!(
+                outcome.as_str(),
+                "verified" | "unknown" | "already_verified"
+            )),
+            "round {round}: {outcomes:?}"
+        );
+        assert_eq!(
+            answer(&client.get("/issue").send().await)["outcome"],
+            "already_verified",
+            "round {round}"
+        );
+    }
 }
 
 #[tokio::test]
