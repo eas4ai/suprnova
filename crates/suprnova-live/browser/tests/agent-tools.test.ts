@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { agentFields, agentToolError, agentToolResult } from "../src/agents/result.js";
+import {
+  agentFields,
+  agentToolError,
+  agentToolResult,
+  argumentNames,
+} from "../src/agents/result.js";
 import {
   modelContextOf,
   registerAgentTools,
@@ -196,7 +201,7 @@ describe("the tool result", () => {
         label: "Main",
         owner: "alice",
       }),
-      ["count", "label"],
+      { fields: ["count", "label"], arguments: [] },
     );
     expect(result.isError).toBe(false);
     expect(result.structuredContent).toEqual({
@@ -209,14 +214,50 @@ describe("the tool result", () => {
   });
 
   it("agent_012 a validation outcome is an error naming the issues", () => {
-    const result = agentToolResult(committed({ count: 3 }, { count: "validation.range" }), [
-      "count",
-    ]);
+    const result = agentToolResult(committed({ count: 3 }, { count: "validation.range" }), {
+      fields: ["count"],
+      arguments: [],
+    });
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toMatchObject({
       outcome: "invalid",
-      validation: { count: "validation.range" },
+      validation: { count: ["validation.range"] },
     });
+  });
+
+  it("agent_013 validation names only visible fields and the tool's arguments", () => {
+    const result = agentToolResult(
+      committed(
+        { count: 3 },
+        {
+          owner: { id: "validation.length", text: "The owner is too long." },
+          title: { id: "validation.length", text: "The title is too long." },
+          "count.inner": "validation.range",
+        },
+      ),
+      { fields: ["count"], arguments: ["title"] },
+    );
+    expect(result.isError).toBe(true);
+    // The owner is neither agent-visible nor an argument: one generic
+    // issue, with no field name and no message.
+    expect(result.structuredContent).toEqual({
+      outcome: "invalid",
+      fields: { count: 3 },
+      validation: {
+        "": [],
+        "count.inner": ["validation.range"],
+        title: ["The title is too long."],
+      },
+    });
+    expect(result.content[0]?.text).not.toContain("owner");
+    // The arguments are the properties the tool's input schema lists.
+    expect(
+      argumentNames({
+        ...TOOL,
+        inputSchema: { type: "object", properties: { title: { type: "string" } } },
+      }),
+    ).toEqual(["title"]);
+    expect(argumentNames({ ...TOOL, inputSchema: { type: "object" } })).toEqual([]);
   });
 
   it("agent_012 a refused action is an error", () => {
@@ -227,7 +268,7 @@ describe("the tool result", () => {
         recovery: "refresh_island",
         error: { category: "snapshot", detail: "x", recovery: "refresh_island" },
       } as unknown as ValidatedResponse,
-      ["count"],
+      { fields: ["count"], arguments: [] },
     );
     expect(result.isError).toBe(true);
     expect(result.structuredContent).not.toHaveProperty("fields");

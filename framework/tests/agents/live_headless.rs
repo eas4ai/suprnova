@@ -806,6 +806,56 @@ async fn agent_018_live_tool_through_mcp_and_the_browser_endpoint() {
 }
 
 #[tokio::test]
+async fn agent_013_validation_names_only_visible_fields_and_arguments() {
+    let _container = fixture::setup();
+    let client = live_fixture::live_client();
+    // The owner is not agent-visible: an issue on it is one generic issue,
+    // with no field name and no message.
+    let long_name = ToolCaller::user(TestUser::arc("a-user-with-a-long-name"));
+    let hidden = client
+        .mcp()
+        .as_caller(long_name)
+        .call(
+            "counter.check",
+            json!({ "mount": { "start": 1, "label": "Main" } }),
+        )
+        .await;
+    assert!(hidden.is_error(), "{:?}", hidden.response());
+    let structured = hidden.structured().expect("structured content");
+    assert_eq!(structured["outcome"], "invalid", "{structured}");
+    assert_eq!(structured["validation"], json!({ "": [] }), "{structured}");
+    assert!(!hidden.text().contains("owner"), "{}", hidden.text());
+    // An issue on the tool's own argument is the agent's input: it shows
+    // in full.
+    let renamed = client
+        .mcp()
+        .as_caller(alice())
+        .call(
+            "counter.rename",
+            json!({
+                "mount": { "start": 1, "label": "Main" },
+                "arguments": { "title": "far too long a title" },
+            }),
+        )
+        .await;
+    assert!(renamed.is_error(), "{:?}", renamed.response());
+    let structured = renamed.structured().expect("structured content");
+    assert_eq!(structured["outcome"], "invalid", "{structured}");
+    let validation = structured["validation"]
+        .as_object()
+        .expect("validation issues");
+    assert_eq!(validation.len(), 1, "{structured}");
+    let messages = validation["title"].as_array().expect("the title's issues");
+    assert_eq!(messages.len(), 1, "{structured}");
+    assert!(
+        messages[0]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "{structured}"
+    );
+}
+
+#[tokio::test]
 async fn agent_013_a_validation_outcome_is_an_error_with_the_new_handle() {
     let _container = fixture::setup();
     let client = live_fixture::live_client();

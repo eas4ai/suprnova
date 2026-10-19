@@ -263,6 +263,12 @@ Acceptance criteria:
   shown as the snapshot carries it.
 - A validation outcome consumes a revision like any accepted outcome, so its
   result is an error that still carries the new handle.
+- A tool result, headless or in the browser, names a validation issue in
+  full, by path and with its words, only when the path's first segment is an
+  agent-visible field or one of the tool's own arguments, which are the
+  agent's own input. Every other issue is reported as one entry under the
+  empty path with no message, so the agent learns the call failed
+  validation without reading a field it cannot see.
 
 UX flow:
 1. Agent calls a headless tool with mount properties -> the component is
@@ -355,6 +361,9 @@ owner lineage records the newly applied parent revision.
 
 ## Decisions and revisions
 
+- 2026-10-18 -- A tool result names validation issues only on agent-visible
+  fields and the tool's arguments. Copying the whole validation map showed
+  an agent the name and message of an issue on a field it cannot see.
 - 2026-10-18 -- Added headless state handles (AGENT-013). A headless call
   mounts its component under a per-component catalog entry on the reserved
   agent route, with the session required absent and the document key

@@ -296,9 +296,11 @@ Acceptance criteria:
   abort signal WebMCP passes cancels the call and rejects it with
   `AbortError`.
 - A call resolves to `{content, structuredContent, isError}`. A committed
-  response gives the outcome, `accepted`, `no_render` or `invalid` with its
-  validation issues, and the agent-visible fields of the committed snapshot,
-  with a 64-bit integer field as its decimal string; a navigation gives
+  response gives the outcome, `accepted`, `no_render` or `invalid` with the
+  validation issues the agent may read (spec 05), the tool's arguments being
+  the properties its input schema lists, and the agent-visible fields of the
+  committed snapshot, with a 64-bit integer field as its decimal string; a
+  navigation gives
   `redirect`. A refused response gives an error. The result carries nothing
   else of the island's state, HTML, events or effects.
 - A refused call delivers its `isError` result to the agent before the island

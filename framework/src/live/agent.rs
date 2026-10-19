@@ -45,7 +45,7 @@
 //! | Context, snapshot, document key, ledger, arguments, authorization, validation, transaction, sealing | The browser endpoint's service, unchanged, with the caller scope as the context scope. |
 //! | Session-state commit and flash | No session: components with session fields are refused at boot, and flash is dropped. |
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -518,7 +518,7 @@ async fn run_action(
         .and_then(text)
         .unwrap_or_default();
     match outcome.as_str() {
-        "accepted" => accepted(descriptor, &scope, &answer),
+        "accepted" => accepted(descriptor, target, &scope, &answer),
         "refresh_required" => match observer.cause() {
             Some(suprnova_live::execution::ExecutionFailure::Action(
                 suprnova_live::component::ActionExecutionErrorKind::Action(
@@ -543,6 +543,7 @@ async fn run_action(
 /// sealed as the next handle.
 fn accepted(
     descriptor: &ComponentDescriptor,
+    target: &LiveTarget,
     scope: &ScopeFingerprint,
     answer: &CanonicalValue,
 ) -> HttpResponse {
@@ -570,7 +571,7 @@ fn accepted(
         .and_then(text)
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or_default();
-    let validation = validation_of(answer);
+    let validation = validation_of(answer, &shown_paths(descriptor, target.action));
     let redirect = top_field(answer, "redirect").is_some();
     let no_render = top_field(answer, "render")
         .and_then(|render| match render {
@@ -603,27 +604,56 @@ fn accepted(
     HttpResponse::bytes_body(Bytes::from(body.to_string()), RESULT_MEDIA_TYPE)
 }
 
-/// Each validation issue's path with the text the user would read, or its
-/// message identity when it has no text.
-fn validation_of(answer: &CanonicalValue) -> Map<String, Value> {
+/// The validation paths an agent may read: the component's agent-visible
+/// fields, and the arguments of `action`, which are the agent's own input.
+fn shown_paths<'a>(descriptor: &'a ComponentDescriptor, action: &str) -> BTreeSet<&'a str> {
+    let metadata = descriptor.metadata();
+    let fields = metadata
+        .fields()
+        .iter()
+        .filter(|field| field.agent_visible())
+        .map(|field| field.name().as_str());
+    let arguments = metadata
+        .actions()
+        .iter()
+        .filter(|candidate| candidate.name().as_str() == action)
+        .flat_map(|candidate| candidate.arguments().fields())
+        .map(|argument| argument.name().as_str());
+    fields.chain(arguments).collect()
+}
+
+/// Each validation issue the agent may read, by path, with the text the
+/// user would read or its message identity when it has no text. An issue
+/// on any other path is reported once, under the empty path and with no
+/// message: the agent learns the call failed validation without reading a
+/// field it cannot see.
+fn validation_of(answer: &CanonicalValue, shown: &BTreeSet<&str>) -> Map<String, Value> {
     let Some(CanonicalValue::Object(issues)) = top_field(answer, "validation") else {
         return Map::new();
     };
-    issues
-        .iter()
-        .map(|(path, issue)| {
-            let message = match issue {
-                CanonicalValue::String(id) => id.clone(),
-                CanonicalValue::Object(issue) => issue
-                    .get("text")
-                    .or_else(|| issue.get("id"))
-                    .and_then(text)
-                    .unwrap_or_default(),
-                _ => String::new(),
-            };
-            (path.clone(), json!([message]))
-        })
-        .collect()
+    let mut validation = Map::new();
+    let mut hidden = false;
+    for (path, issue) in issues {
+        let root = path.split('.').next().unwrap_or_default();
+        if !shown.contains(root) {
+            hidden = true;
+            continue;
+        }
+        let message = match issue {
+            CanonicalValue::String(id) => id.clone(),
+            CanonicalValue::Object(issue) => issue
+                .get("text")
+                .or_else(|| issue.get("id"))
+                .and_then(text)
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        validation.insert(path.clone(), json!([message]));
+    }
+    if hidden {
+        validation.insert(String::new(), json!([]));
+    }
+    validation
 }
 
 /// The Live update request a browser would send to invoke the action on

@@ -29,7 +29,8 @@ pub mod filters {
 }
 
 /// A counter an agent can add to: its count and label are shown to the
-/// agent, its owner never is. A count over 100 does not validate.
+/// agent, its owner never is. A count over 100 does not validate, nor does
+/// an owner longer than 16 characters.
 #[derive(LiveComponent, validator::Validate)]
 #[live(name = "tests.agent-counter", view = "live/tests/agent-counter.html")]
 pub struct AgentCounter {
@@ -39,7 +40,15 @@ pub struct AgentCounter {
     #[agent_visible]
     label: String,
     #[locked]
+    #[validate(length(max = 16))]
     owner: String,
+}
+
+/// The title `counter.rename` validates.
+#[derive(validator::Validate)]
+struct Title {
+    #[validate(length(max = 8))]
+    title: String,
 }
 
 #[live]
@@ -85,6 +94,23 @@ impl AgentCounter {
     )]
     #[action(validate = "whole")]
     pub fn check(&mut self) {}
+
+    #[tool(
+        name = "counter.rename",
+        description = "Rename the counter.",
+        callers = [user],
+        headless,
+    )]
+    #[action(validate = "arguments")]
+    pub fn rename(&mut self, title: String) {
+        self.label = title;
+    }
+
+    /// The argument validation `rename` asks for.
+    #[validate(action = "rename")]
+    pub fn validate_rename(&mut self, title: String) -> Result<(), validator::ValidationErrors> {
+        validator::Validate::validate(&Title { title })
+    }
 
     /// The whole-component validation `check` asks for.
     #[validate]

@@ -1,13 +1,15 @@
 /**
  * The result a WebMCP tool call of a Live action returns (AGENT-012): the
  * outcome, the fields the island root lists as agent-visible, copied from
- * the committed snapshot's state, and any validation issues. Nothing else
+ * the committed snapshot's state, and the validation issues the agent may
+ * read. Nothing else
  * of the island's state, its HTML, its events or its effects reaches the
  * agent. A 64-bit integer field, which the snapshot carries as a lossless
  * tag, is shown as its decimal string, as the server's headless result
  * shows it.
  */
 import type { ValidatedResponse } from "../application/types.js";
+import type { AgentToolDefinition } from "../islands/metadata.js";
 import type { ModelContextToolResult } from "./model-context.js";
 
 const INTEGER_TAG = "$live";
@@ -46,6 +48,38 @@ export function agentFields(
   return out;
 }
 
+/** The words of one validation issue: its text, else its message identity. */
+function message(issue: unknown): string {
+  if (typeof issue === "string") return issue;
+  const entry = record(issue);
+  const words = entry?.["text"] ?? entry?.["id"];
+  return typeof words === "string" ? words : "";
+}
+
+/**
+ * Each validation issue the agent may read, by path, with its words: an
+ * issue on an agent-visible field or on one of the tool's arguments. An
+ * issue on any other path is reported once, under the empty path and with
+ * no message, so the agent learns the call failed validation without
+ * reading a field it cannot see. The server's headless result reports
+ * issues the same way.
+ */
+function shownValidation(
+  validation: Readonly<Record<string, unknown>>,
+  scope: AgentResultScope,
+): Record<string, string[]> {
+  const shown = new Set([...scope.fields, ...scope.arguments]);
+  const out: Record<string, string[]> = {};
+  let hidden = false;
+  for (const [path, issue] of Object.entries(validation)) {
+    const root = path.split(".", 1)[0] ?? "";
+    if (shown.has(root)) out[path] = [message(issue)];
+    else hidden = true;
+  }
+  if (hidden) out[""] = [];
+  return out;
+}
+
 function result(structured: Record<string, unknown>, isError: boolean): ModelContextToolResult {
   return Object.freeze({
     content: Object.freeze([
@@ -61,11 +95,27 @@ export function agentToolError(message: string): ModelContextToolResult {
   return result({ outcome: "error", message }, true);
 }
 
+/**
+ * What a tool result may show of an island: its agent-visible fields, and
+ * the names of the tool's own arguments, which are the agent's own input.
+ */
+export interface AgentResultScope {
+  readonly fields: readonly string[];
+  readonly arguments: readonly string[];
+}
+
+/** The names of `tool`'s arguments: the properties its input schema lists. */
+export function argumentNames(tool: AgentToolDefinition): string[] {
+  const properties = record(tool.inputSchema["properties"]);
+  return properties === null ? [] : Object.keys(properties);
+}
+
 /** The result of a call whose action request the island applied. */
 export function agentToolResult(
   response: ValidatedResponse,
-  fields: readonly string[],
+  scope: AgentResultScope,
 ): ModelContextToolResult {
+  const fields = scope.fields;
   switch (response.kind) {
     case "committed": {
       const validation = response.validation;
@@ -79,7 +129,7 @@ export function agentToolResult(
         outcome,
         fields: agentFields(response.snapshot, fields),
       };
-      if (invalid) structured["validation"] = validation;
+      if (invalid) structured["validation"] = shownValidation(validation, scope);
       return result(structured, invalid);
     }
     case "navigation":

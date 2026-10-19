@@ -64,7 +64,7 @@ import {
   type ModelContextClient,
   type ModelContextToolResult,
 } from "../agents/model-context.js";
-import { agentToolError, agentToolResult } from "../agents/result.js";
+import { agentToolError, agentToolResult, argumentNames } from "../agents/result.js";
 import type { ServerIntent } from "../scheduler/intent.js";
 import { IslandRecord } from "./record.js";
 import {
@@ -963,7 +963,7 @@ export class DocumentRuntime {
       this.#agentWaiters.set(scheduled.intent, (response, applied) => {
         settle(
           applied
-            ? agentToolResult(response, fields)
+            ? agentToolResult(response, { fields, arguments: argumentNames(tool) })
             : agentToolError("The island did not apply the call's response."),
         );
       });
