@@ -357,7 +357,7 @@ impl Core {
         let claims = &verified.claims;
         let checked = match self.check_id_jag(&verified.trusted, claims, now) {
             Ok(checked) => checked,
-            Err(response) => return Ok(response),
+            Err(response) => return Ok(*response),
         };
         // The identifier is spent last, after every other check passed, so
         // a refused token does not need a fresh one to be corrected.
@@ -386,57 +386,77 @@ impl Core {
         trusted: &TrustedIssuer,
         claims: &Map<String, Value>,
         now: DateTime<Utc>,
-    ) -> std::result::Result<CheckedIdJag, WireResponse> {
+    ) -> std::result::Result<CheckedIdJag, Box<WireResponse>> {
         let skew = i64::try_from(self.config.clock_skew.as_secs()).unwrap_or(i64::MAX);
         let max_age = self.config.id_jag_max_auth_age.as_secs();
         let Some(exp) = numeric_date(claims, "exp") else {
-            return Err(agent_error(400, "invalid_request", "exp is required"));
+            return Err(Box::new(agent_error(
+                400,
+                "invalid_request",
+                "exp is required",
+            )));
         };
         if exp <= now.timestamp() {
-            return Err(agent_error(400, "expired", "the ID-JAG expired"));
+            return Err(Box::new(agent_error(400, "expired", "the ID-JAG expired")));
         }
         let max_ahead =
             i64::try_from(self.config.max_provider_token_lifetime.as_secs()).unwrap_or(i64::MAX);
         if exp > now.timestamp().saturating_add(max_ahead) {
-            return Err(agent_error(
+            return Err(Box::new(agent_error(
                 400,
                 "invalid_request",
                 "exp is further ahead than this service accepts; mint a near-term ID-JAG",
-            ));
+            )));
         }
         if !audience_matches(claims, &self.audiences) {
-            return Err(agent_error(
+            return Err(Box::new(agent_error(
                 400,
                 "invalid_audience",
                 "aud does not name this service",
-            ));
+            )));
         }
         let Some(iat) = numeric_date(claims, "iat") else {
-            return Err(agent_error(400, "invalid_request", "iat is required"));
+            return Err(Box::new(agent_error(
+                400,
+                "invalid_request",
+                "iat is required",
+            )));
         };
         if iat > now.timestamp().saturating_add(skew) {
-            return Err(agent_error(
+            return Err(Box::new(agent_error(
                 400,
                 "invalid_request",
                 "iat is further in the future than the allowed clock skew",
-            ));
+            )));
         }
         let subject = match claims.get("sub").and_then(Value::as_str) {
             Some(subject) if !subject.is_empty() && subject.len() <= 1024 => subject.to_owned(),
-            _ => return Err(agent_error(400, "invalid_request", "sub is required")),
+            _ => {
+                return Err(Box::new(agent_error(
+                    400,
+                    "invalid_request",
+                    "sub is required",
+                )));
+            }
         };
         let jti = match claims.get("jti").and_then(Value::as_str) {
             Some(jti) if !jti.is_empty() && jti.len() <= 512 => jti.to_owned(),
-            _ => return Err(agent_error(400, "invalid_request", "jti is required")),
+            _ => {
+                return Err(Box::new(agent_error(
+                    400,
+                    "invalid_request",
+                    "jti is required",
+                )));
+            }
         };
         match claims.get("client_id").and_then(Value::as_str) {
             Some(client_id) if trusted.accepts_client_id(client_id) => {}
             _ => {
-                return Err(agent_error(
+                return Err(Box::new(agent_error(
                     400,
                     "invalid_client_id",
                     "client_id does not name this provider",
-                ));
+                )));
             }
         }
         let verified = |flag: &str, value: &str| {
@@ -455,11 +475,11 @@ impl Core {
             .flatten()
             .map(|phone| phone.trim().to_owned());
         if verified_email.is_none() && verified_phone.is_none() {
-            return Err(agent_error(
+            return Err(Box::new(agent_error(
                 400,
                 "missing_verified_email",
                 "the ID-JAG carries neither a verified email nor a verified phone number",
-            ));
+            )));
         }
         let login_required = |description: String| {
             let header = format!(
@@ -481,22 +501,22 @@ impl Core {
             )
         };
         let Some(auth_time) = numeric_date(claims, "auth_time") else {
-            return Err(login_required(
+            return Err(Box::new(login_required(
                 "auth_time is missing. Re-authenticate at the provider and request a fresh ID-JAG."
                     .to_owned(),
-            ));
+            )));
         };
         if auth_time > now.timestamp().saturating_add(skew) {
-            return Err(login_required(
+            return Err(Box::new(login_required(
                 "auth_time is in the future. Re-authenticate at the provider and request a fresh ID-JAG."
                     .to_owned(),
-            ));
+            )));
         }
         let age = now.timestamp().saturating_sub(auth_time);
         if u64::try_from(age).unwrap_or(0) > max_age {
-            return Err(login_required(format!(
+            return Err(Box::new(login_required(format!(
                 "auth_time is {age}s old; max allowed is {max_age}s. Re-authenticate at the provider and request a fresh ID-JAG."
-            )));
+            ))));
         }
         Ok(CheckedIdJag {
             subject,
@@ -577,13 +597,28 @@ impl Core {
         now: DateTime<Utc>,
     ) -> Result<WireResponse> {
         let matched = match &checked.verified_email {
-            Some(email) => self.users.find_by_verified_email(email).await?,
-            None => None,
+            Some(email) => self.users.find_by_verified_email(email).await,
+            None => Ok(None),
         };
         let matched = match (matched, &checked.verified_phone) {
-            (Some(user), _) => Some(user),
-            (None, Some(phone)) => self.users.find_by_verified_phone(phone).await?,
-            (None, None) => None,
+            (Ok(Some(user)), _) => Ok(Some(user)),
+            (Ok(None), Some(phone)) => self.users.find_by_verified_phone(phone).await,
+            (other, _) => other,
+        };
+        let matched = match matched {
+            Ok(matched) => matched,
+            // The address is verified on more than one account: binding or
+            // creating one would pick an account for the user, so neither
+            // happens.
+            Err(Error::Conflict { .. }) => {
+                return Ok(agent_error(
+                    400,
+                    "invalid_request",
+                    "the provider's verified address matches more than one account at this \
+                     service; sign in at the service and use another registration type",
+                ));
+            }
+            Err(error) => return Err(error),
         };
         if let Some(user) = matched {
             return self
@@ -665,7 +700,7 @@ impl Core {
                     "registration_type": IDENTITY_ASSERTION,
                     "identity_assertion": assertion,
                     "assertion_expires": timestamp(expires),
-                    "scopes": existing.scopes,
+                    "scopes": self.bound_scopes(&existing),
                 })),
                 &NO_STORE,
             ));

@@ -17,7 +17,9 @@ use magnetar::plugins::authorization_server::AuthorizationServerPlugin;
 use sea_orm::DatabaseConnection;
 
 pub use grants::{ClientGrant, ConnectedAgents, GrantScope};
+pub(crate) use resolver::load_user;
 
+use super::agent_auth::{AgentAuth, BuiltAgentAuth, MountedAgentAuth};
 use super::{AgentsConfig, CallLimit};
 use crate::error::FrameworkError;
 use crate::magnetar_integration::plugin_host::{HostUserEpochs, PluginMount};
@@ -260,7 +262,15 @@ impl OAuthServer {
     /// `iss` of every authorization response against it, so an `APP_URL`
     /// left to its development default is refused outside the local and
     /// testing environments rather than published.
-    pub(crate) fn build(self, config: &AgentsConfig) -> Result<BuiltOAuthServer, FrameworkError> {
+    ///
+    /// With `agent`, agent auth is added to the server before it is shared:
+    /// its grants, its metadata block and its revocation listener ride on
+    /// this one server, token endpoint and metadata document.
+    pub(crate) fn build(
+        self,
+        config: &AgentsConfig,
+        agent: Option<AgentAuth>,
+    ) -> Result<BuiltOAuthServer, FrameworkError> {
         if !app_url_named()
             && !matches!(
                 crate::config::Config::environment(),
@@ -328,26 +338,50 @@ impl OAuthServer {
                 "the OAuth server's configuration is invalid: {error}"
             ))
         })?;
+        let (server, agent) = match agent {
+            Some(agent) => {
+                let (server, built) = agent.install(server, &connection)?;
+                (server, Some(built))
+            }
+            None => (Arc::new(server), None),
+        };
         Ok(BuiltOAuthServer {
-            server: Arc::new(server),
+            server,
+            agent,
             setup: self,
             connection,
         })
     }
 }
 
+/// What a router's OAuth server mounted: the server, and agent auth when
+/// it is on. The router keeps it, and every request the router routes
+/// carries it for [`ConnectedAgents`] and the pages.
+pub(crate) struct MountedOAuth {
+    /// The authorization server.
+    pub(crate) server: Arc<AuthorizationServer>,
+    /// Agent auth, installed on the same server.
+    pub(crate) agent: Option<Arc<MountedAgentAuth>>,
+}
+
 /// An authorization server built for one router, ready to mount.
 pub(crate) struct BuiltOAuthServer {
     server: Arc<AuthorizationServer>,
+    agent: Option<BuiltAgentAuth>,
     setup: OAuthServer,
     connection: DatabaseConnection,
 }
 
 impl BuiltOAuthServer {
     /// The resolver that turns the server's access tokens into user
-    /// callers.
+    /// callers, and agent tokens into agent callers when agent auth is on.
     pub(crate) fn resolver(&self) -> Arc<dyn super::CallerResolver> {
-        Arc::new(resolver::UserTokens::new(Arc::clone(&self.server)))
+        Arc::new(resolver::ServerTokens::new(
+            Arc::clone(&self.server),
+            self.agent
+                .as_ref()
+                .map(|agent| super::agent_auth::resolver::AgentTokens::new(agent.mounted())),
+        ))
     }
 
     /// The server's metadata, for the well-known routes.
@@ -355,13 +389,17 @@ impl BuiltOAuthServer {
         Arc::new(resolver::ServerMetadata::new(Arc::clone(&self.server)))
     }
 
-    /// The server, which every request the router routes carries for
-    /// [`ConnectedAgents`].
-    pub(crate) fn server(&self) -> Arc<AuthorizationServer> {
-        Arc::clone(&self.server)
+    /// The server and agent auth, which every request the router routes
+    /// carries for [`ConnectedAgents`].
+    pub(crate) fn mounted(&self) -> Arc<MountedOAuth> {
+        Arc::new(MountedOAuth {
+            server: Arc::clone(&self.server),
+            agent: self.agent.as_ref().map(BuiltAgentAuth::mounted),
+        })
     }
 
-    /// Mount the server's routes and the default pages on `router`.
+    /// Mount the server's routes, agent auth's routes and the default pages
+    /// on `router`.
     pub(crate) fn mount(self, router: Router) -> Result<Router, FrameworkError> {
         let max_body_bytes = self.server.config().max_request_bytes;
         let mut mount = PluginMount::new(
@@ -373,12 +411,24 @@ impl BuiltOAuthServer {
             mount = mount.client_route(name);
         }
         let mut router = router.try_mount_magnetar_plugin(mount)?;
-        let pages = Arc::new(pages::Pages::new(Arc::clone(&self.server), &self.setup));
+        let pages = Arc::new(pages::Pages::new(
+            Arc::clone(&self.server),
+            self.agent.as_ref().map(BuiltAgentAuth::mounted),
+            &self.setup,
+        ));
         if self.setup.default_approval_page {
             router = pages::mount_approval(router, Arc::clone(&pages), &self.setup.approval_path)?;
         }
         if let Some(path) = &self.setup.connected_path {
             router = pages::mount_connected(router, Arc::clone(&pages), path)?;
+        }
+        if let Some(agent) = self.agent {
+            router = agent.mount(
+                router,
+                crate::routing::url::to(&self.setup.sign_in_path),
+                self.setup.return_to_parameter.clone(),
+                self.setup.connected_path.clone(),
+            )?;
         }
         Ok(router)
     }

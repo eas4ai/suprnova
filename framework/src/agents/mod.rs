@@ -38,6 +38,7 @@
 //! }
 //! ```
 
+pub(crate) mod agent_auth;
 mod auth;
 mod caller;
 mod dispatch;
@@ -49,6 +50,7 @@ mod metadata;
 mod middleware;
 mod oauth;
 mod outside_issuer;
+mod page;
 mod scope;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -62,11 +64,21 @@ use crate::error::FrameworkError;
 use crate::routing::Router;
 use hyper::Method;
 
+pub use agent_auth::{AgentAccount, AgentAuth, AgentClaimed, AgentUserProvisioner, IdentityType};
 pub use auth::{
     AuthorizationServerMetadata, CallerResolver, MetadataKind, ResolveContext, ResolveError,
 };
 pub use caller::{AgentRegistration, CallerChannel, CallerKind, ToolCaller};
 pub(crate) use limit::address_bucket;
+/// The parts of the Magnetar agent auth plugin an application names in its
+/// configuration: a provider on the trust list, the user agent auth reads
+/// and binds, the directory it finds users in, and the identity an ID-JAG
+/// asserts, which an [`AgentUserProvisioner`] receives.
+pub use magnetar::agent_auth::{AgentUser, AgentUserDirectory, ProvidedIdentity, TrustedIssuer};
+/// What a client metadata document fetch answers with: the client's
+/// metadata, or why the document was refused. A test that drives a
+/// [`ClientMetadataFetcher`] directly reads them.
+pub use magnetar::authorization_server::{ClientMetadata, ClientMetadataError};
 /// The parts of Magnetar's fenced HTTPS fetch an application or a test
 /// hands to [`OAuthServer::client_metadata_fetcher`] and
 /// [`OutsideIssuer::key_fetch`]: the resolver, whose every answer is
@@ -76,15 +88,12 @@ pub use magnetar::authorization_server::{
     ClientMetadataFetcher, ClientMetadataPolicy, HostResolver, PinnedHttpClient, PinnedResponse,
     ResponseBody, is_public_address,
 };
-/// What a client metadata document fetch answers with: the client's
-/// metadata, or why the document was refused. A test that drives a
-/// [`ClientMetadataFetcher`] directly reads them.
-pub use magnetar::authorization_server::{ClientMetadata, ClientMetadataError};
 /// The error and result Magnetar's resolver and pinned client traits
 /// answer with.
 pub use magnetar::{Error as MagnetarError, Result as MagnetarResult};
 pub(crate) use mark::AgentMark;
 pub(crate) use middleware::{BrowserToolRefusal, LiveToolGate};
+pub(crate) use oauth::MountedOAuth;
 pub use oauth::{ClientGrant, ConnectedAgents, GrantScope, OAuthServer};
 pub use outside_issuer::OutsideIssuer;
 pub use scope::{Scope, ScopeRecord, declared_scopes};
@@ -124,6 +133,7 @@ pub struct AgentsConfig {
     pub(crate) resolvers: Vec<Arc<dyn CallerResolver>>,
     pub(crate) authorization_server: Option<Arc<dyn AuthorizationServerMetadata>>,
     pub(crate) oauth: Option<OAuthServer>,
+    pub(crate) agent_auth: Option<AgentAuth>,
     pub(crate) server_name: Option<String>,
     pub(crate) server_version: Option<String>,
     pub(crate) instructions: Option<String>,
@@ -150,6 +160,12 @@ impl CallLimit {
     pub const fn per_minute(max_calls: u32) -> Self {
         Self::new(max_calls, Duration::from_secs(60))
     }
+
+    /// `max_calls` calls per hour, the unit auth.md's registration budgets
+    /// are written in.
+    pub const fn per_hour(max_calls: u32) -> Self {
+        Self::new(max_calls, Duration::from_secs(3600))
+    }
 }
 
 impl Default for AgentsConfig {
@@ -171,6 +187,7 @@ impl std::fmt::Debug for AgentsConfig {
             .field("resolvers", &self.resolvers.len())
             .field("authorization_server", &self.authorization_server.is_some())
             .field("oauth", &self.oauth)
+            .field("agent_auth", &self.agent_auth)
             .finish_non_exhaustive()
     }
 }
@@ -195,6 +212,7 @@ impl AgentsConfig {
             resolvers: Vec::new(),
             authorization_server: None,
             oauth: None,
+            agent_auth: None,
             server_name: None,
             server_version: None,
             instructions: None,
@@ -347,7 +365,7 @@ pub(crate) struct RouterAgents {
     config: Option<Arc<AgentsConfig>>,
     routes: HashMap<(Method, String), AgentRoute>,
     registry: OnceLock<Result<Arc<ToolRegistry>, FrameworkError>>,
-    oauth: Option<Arc<magnetar::authorization_server::AuthorizationServer>>,
+    oauth: Option<Arc<MountedOAuth>>,
 }
 
 impl RouterAgents {
@@ -396,8 +414,18 @@ impl Router {
         // The OAuth server is built here, where the endpoint's path and the
         // application's public URL are final: its resource is the one and
         // its issuer the other.
+        let agent_auth = config.agent_auth.take();
         let oauth = match config.oauth.take() {
-            Some(server) => Some(server.build(&config)?),
+            Some(server) => Some(server.build(&config, agent_auth)?),
+            // Building a server here would quietly open the user flows
+            // (approval, dynamic registration) the application never asked
+            // for.
+            None if agent_auth.is_some() => {
+                return Err(FrameworkError::internal(
+                    "agent auth issues its tokens on the OAuth server's token endpoint; turn \
+                     on AgentsConfig::oauth_server",
+                ));
+            }
             None => None,
         };
         if let Some(built) = &oauth {
@@ -462,9 +490,9 @@ impl Router {
             }
         }
         if let Some(built) = oauth {
-            let server = built.server();
+            let mounted = built.mounted();
             router = built.mount(router)?;
-            router.agents.oauth = Some(server);
+            router.agents.oauth = Some(mounted);
         }
         router.agents.config = Some(config);
         Ok(router)
@@ -480,11 +508,9 @@ impl Router {
             .insert((method, pattern), AgentRoute::PluginClient);
     }
 
-    /// The OAuth server this router mounted, which every request it routes
-    /// carries for [`ConnectedAgents`].
-    pub(crate) fn oauth_server(
-        &self,
-    ) -> Option<Arc<magnetar::authorization_server::AuthorizationServer>> {
+    /// The OAuth server this router mounted, with agent auth when it is
+    /// on, which every request it routes carries for [`ConnectedAgents`].
+    pub(crate) fn oauth_server(&self) -> Option<Arc<MountedOAuth>> {
         self.agents.oauth.clone()
     }
 
