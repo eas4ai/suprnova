@@ -631,10 +631,15 @@ function encodeSegment(segment: string): string {
 /**
  * The path of a call: each parameter filled from the argument of its name
  * and percent-encoded, a catch-all encoded part by part, and an absent
- * optional parameter dropped with the `/` before it.
+ * optional parameter dropped with the `/` before it. `filled` names the
+ * parameters that filled a segment.
  */
-export function fillPath(path: PathPiece[], args: Record<string, unknown>): { path: string } | { error: string } {
+export function fillPath(
+  path: PathPiece[],
+  args: Record<string, unknown>,
+): { path: string; filled: string[] } | { error: string } {
   let out = ''
+  const filled: string[] = []
   let previous: PathPiece | null = null
   for (const piece of path) {
     if ('text' in piece) {
@@ -658,6 +663,7 @@ export function fillPath(path: PathPiece[], args: Record<string, unknown>): { pa
       } catch {
         return { error: `the path parameter \`${piece.param}\` is not valid text` }
       }
+      filled.push(piece.param)
     } else if (piece.optional) {
       if (previous !== null && 'text' in previous && previous.text.endsWith('/')) {
         out = out.slice(0, -1)
@@ -667,7 +673,7 @@ export function fillPath(path: PathPiece[], args: Record<string, unknown>): { pa
     }
     previous = piece
   }
-  return { path: out === '' ? '/' : out }
+  return { path: out === '' ? '/' : out, filled }
 }
 
 /** The request a call of `tool` with `args` sends, or why it cannot be sent. */
@@ -682,12 +688,14 @@ export function toolRequest(
   if (tool.method !== 'GET') {
     return { path: filled.path, body: JSON.stringify(args) }
   }
-  // A browser cannot send a GET body, so a GET tool's other arguments go
-  // in the query, as the MCP endpoint sends them.
+  // A browser cannot send a GET body, so a GET tool's arguments go in the
+  // query, in argument order: every scalar one, path arguments included,
+  // since a form request on GET reads its query. A null, and a path
+  // argument that filled no segment, stay out.
   const inPath = new Set(tool.path.flatMap((piece) => ('param' in piece ? [piece.param] : [])))
   const query = new URLSearchParams()
   for (const [name, value] of Object.entries(args)) {
-    if (inPath.has(name)) {
+    if (inPath.has(name) && !filled.filled.includes(name)) {
       continue
     }
     const text = scalarText(value)

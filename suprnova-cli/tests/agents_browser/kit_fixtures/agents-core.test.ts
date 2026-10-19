@@ -62,19 +62,9 @@ describe('agent_014_server_tool_paths_match_the_shared_cases', () => {
       expect(server.sent).toHaveLength(0)
       return
     }
-    const wanted = `${window.location.origin}${expected.url}`
-    if (new URL(wanted).href !== wanted) {
-      // The browser's URL parser resolves a `.` or `..` segment, encoded or
-      // not, before a request leaves, so this URL cannot be sent as the case
-      // gives it: the call would reach another route. The page refuses it.
-      expect(call.result.isError).toBe(true)
-      expect(call.result.content[0]?.text).toMatch(/^Invalid input: the path parameter `\w+` cannot be `\.` or `\.\.`/u)
-      expect(server.sent).toHaveLength(0)
-      return
-    }
     expect(server.sent).toHaveLength(1)
     const [request] = server.sent
-    expect(request.url).toBe(wanted)
+    expect(request.url).toBe(`${window.location.origin}${expected.url}`)
     expect(request.init.method).toBe(entry.method)
     if (expected.body === null) {
       expect(request.init.body).toBeUndefined()
