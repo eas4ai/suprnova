@@ -290,6 +290,38 @@ where
         }))
     }
 
+    async fn retrieve_by_email_ignoring_case(
+        &self,
+        email: &str,
+    ) -> Result<Option<AuthFlowUser>, FrameworkError> {
+        if let Some(exact) = self.retrieve_by_email(email).await? {
+            return Ok(Some(exact));
+        }
+        // `LOWER` on both sides compares the same way on SQLite, PostgreSQL,
+        // MySQL and MariaDB. Two rows are enough to tell one match from
+        // several, and several with no exact one name no one.
+        let mut users = M::query()
+            .where_raw(
+                "LOWER(email) = LOWER(?)",
+                vec![Value::String(email.to_owned())],
+            )
+            .limit(2)
+            .get()
+            .await?
+            .into_iter();
+        let (Some(user), None) = (users.next(), users.next()) else {
+            return Ok(None);
+        };
+        // As `retrieve_by_email`, the carrier echoes the address the user
+        // was looked up by; a caller that needs the stored one reads
+        // `verification_email` by the id.
+        Ok(Some(AuthFlowUser {
+            id: user.get_auth_identifier(),
+            email: email.to_owned(),
+            name: user.name().map(str::to_string),
+        }))
+    }
+
     fn supports_password_reset(&self) -> bool {
         true
     }

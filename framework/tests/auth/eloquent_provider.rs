@@ -713,3 +713,71 @@ async fn a_password_reset_keeps_an_encrypted_column_changed_while_it_ran() {
         "the newer encrypted value survives"
     );
 }
+
+// The lookup agent auth matches a provider's verified email with: a
+// provider folds the address to lower case, and the stored one keeps the
+// case the user typed. The exact lookup the reset and verification flows
+// use is unchanged.
+#[tokio::test]
+async fn retrieve_by_email_ignoring_case_matches_a_mixed_case_address() {
+    let db = setup().await;
+    db.execute_unprepared(
+        "INSERT INTO users (email, password, is_admin) VALUES ('Alice@Corp.test', 'x', 0)",
+    )
+    .await
+    .unwrap();
+    let p = provider();
+
+    let found = p
+        .retrieve_by_email_ignoring_case("alice@corp.test")
+        .await
+        .unwrap()
+        .expect("the mixed-case address matches");
+    assert_eq!(found.id, "2");
+    assert_eq!(
+        p.verification_email(&found.id).await.unwrap().as_deref(),
+        Some("Alice@Corp.test"),
+        "the stored address is read by the id"
+    );
+    assert!(
+        p.retrieve_by_email("alice@corp.test")
+            .await
+            .unwrap()
+            .is_none(),
+        "the exact lookup still matches the column exactly"
+    );
+    assert!(
+        p.retrieve_by_email_ignoring_case("nobody@corp.test")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+// Two accounts whose addresses differ only in case: the exact one wins,
+// and with none exact the lookup names no one rather than guess.
+#[tokio::test]
+async fn retrieve_by_email_ignoring_case_prefers_the_exact_address_and_never_guesses() {
+    let db = setup().await;
+    db.execute_unprepared(
+        "INSERT INTO users (email, password, is_admin) VALUES \
+         ('Bob@Corp.test', 'x', 0), ('bob@corp.test', 'x', 0)",
+    )
+    .await
+    .unwrap();
+    let p = provider();
+
+    let exact = p
+        .retrieve_by_email_ignoring_case("bob@corp.test")
+        .await
+        .unwrap()
+        .expect("the exact address");
+    assert_eq!(exact.id, "3");
+    assert!(
+        p.retrieve_by_email_ignoring_case("BOB@CORP.TEST")
+            .await
+            .unwrap()
+            .is_none(),
+        "two candidates and no exact one: no match"
+    );
+}

@@ -212,6 +212,26 @@ pub trait UserProvider: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// Look up a user by email whatever its letter case, for a lookup by
+    /// an address another party normalized. Agent auth matches the verified
+    /// email of a provider's ID-JAG with it: providers send the address in
+    /// lower case, and a stored `Alice@Corp.test` must still be found, or the
+    /// identity falls to the provisioning policy and a second account could
+    /// be made for the same person.
+    ///
+    /// An exact match wins. When several users differ from `email` only in
+    /// case and none matches exactly, an implementation answers `None`
+    /// rather than pick one. Default: [`retrieve_by_email`](Self::retrieve_by_email),
+    /// an exact match. [`retrieve_by_email`](Self::retrieve_by_email) itself
+    /// stays exact, so password reset and the verification flows keep their
+    /// behaviour.
+    async fn retrieve_by_email_ignoring_case(
+        &self,
+        email: &str,
+    ) -> Result<Option<crate::auth::AuthFlowUser>, FrameworkError> {
+        self.retrieve_by_email(email).await
+    }
+
     /// Whether this provider supports the verified-account fallback used by
     /// [`crate::auth_flows::PasswordReset`] when no Magnetar engine is installed.
     ///
