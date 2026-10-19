@@ -160,11 +160,22 @@ impl ContentSecurityPolicy {
     }
 }
 
-/// `policy` with every `frame-ancestors` directive replaced by one
-/// `frame-ancestors 'none'` at its end. A browser applies the first of two
+/// `value` with every policy in it refusing every framing ancestor. One
+/// header value can hold several policies separated by commas, each
+/// enforced on its own, so each gets `frame-ancestors 'none'` at its end in
+/// place of whatever framing it named: a browser applies the first of two
 /// same-named directives, so every one is removed rather than the first.
 /// Works on a template and on a rendered header alike.
-pub(super) fn refuse_framing(policy: &str) -> String {
+pub(super) fn refuse_framing(value: &str) -> String {
+    value
+        .split(',')
+        .map(refuse_framing_in_one)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One policy, with no comma, refusing every framing ancestor.
+fn refuse_framing_in_one(policy: &str) -> String {
     policy
         .split(';')
         .map(str::trim)
@@ -317,6 +328,19 @@ mod framing_tests {
             );
         }
         assert_eq!(refuse_framing(""), "frame-ancestors 'none'");
+        // One header value can hold several policies, separated by commas.
+        let joined = refuse_framing("default-src 'self', frame-ancestors *");
+        let policies: Vec<&str> = joined.split(',').map(str::trim).collect();
+        assert_eq!(policies.len(), 2, "{joined}");
+        for policy in policies {
+            let framing: Vec<&str> = policy
+                .split(';')
+                .map(str::trim)
+                .filter(|directive| directive.starts_with("frame-ancestors"))
+                .collect();
+            assert_eq!(framing, ["frame-ancestors 'none'"], "{joined}");
+        }
+        assert!(!joined.contains('*'), "{joined}");
         // A directive that only starts like it is another directive.
         assert_eq!(
             refuse_framing("frame-ancestors-extra x"),
