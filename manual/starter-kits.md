@@ -263,9 +263,29 @@ account with a second factor is told that the page does not offer one, and
 stays signed out. To let those users approve clients, add the factor
 challenge to the page.
 
-A claim also needs the user's email address verified: agent auth reads
-`app_users.email_verified_at`. The API kit has no route that verifies an
-address, so add one before your users claim agents.
+#### Email verification
+
+A claim needs the user's email address verified, so the kit verifies it with
+a link, through `Auth::email_verification()`
+(`src/controllers/email_verification.rs`):
+
+1. Registration mails a new account the link, once. Registering an address
+   that already has an account mails nothing.
+2. A signed-in client asks for a new link with
+   `POST /api/email/verification-notification`. It answers `202` when it
+   mails one, and `204` when the address is already verified. The route
+   takes six requests a minute, and one address gets at most three links
+   an hour, the registration's included; past either it answers `429`.
+3. The link opens `/email/verify?token=...` in a browser. A guest is sent
+   to `/login` and comes back, and the page then verifies the address of
+   the user signed in there.
+
+The link works once and expires after 24 hours. It verifies only for the
+account's own user: anyone can register another person's address with a
+password of their own, and a link that verified whoever opened it would
+verify that account. Verifying changes no credential and starts no
+session. The mail comes from `MAIL_FROM`, and names the application as
+`APP_NAME`.
 
 #### Sessions on the consent pages only
 
@@ -277,6 +297,7 @@ middleware on these paths and no others:
   where a user approves a client.
 - `/oauth/connected` and the revoke forms under it.
 - `/agent/claim` and its form.
+- `/email/verify`, the page the verification link opens.
 
 Every other route serves a client of the JSON API, an MCP client, or an
 agent, which sign in with a bearer token: `/api/*`, `/mcp`, the
