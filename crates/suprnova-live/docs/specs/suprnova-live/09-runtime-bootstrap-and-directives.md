@@ -309,7 +309,17 @@ Acceptance criteria:
   else of the island's state, HTML, events or effects.
 - A refused call delivers its `isError` result to the agent before the island
   applies any recovery from the refusal, a page reload included, so the
-  agent hears of every refusal.
+  agent hears of every refusal. When a response would end the island, a
+  navigation or a refusal the island recovers from by reloading, remounting
+  or stopping, the runtime unregisters the island's tools at once, answers
+  every pending call of the island, the response's own call with its result
+  and any other with an error saying whether it ran, and holds the response
+  250 ms before applying it: the browser passes a result to the agent
+  asynchronously and the page cannot observe when it has. A call that
+  arrives meanwhile, through a registration that has left, is answered with
+  an error and never queued. With no call pending the recovery runs at once,
+  as a refused click's does, and an island the response leaves in place
+  registers its tools again.
 
 UX flow:
 
@@ -333,6 +343,13 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-18 -- A response that ends an island waits for the island's
+  pending WebMCP results. Answering the call and yielding one task was not
+  enough: Chromium dropped a result when the page reloaded within about
+  10 ms of it, so the agent never heard of the refusal, and a second call
+  could queue behind the refused one and meet the reload. The island's
+  tools now leave at once, every pending call is answered, and the response
+  is held 250 ms.
 - 2026-10-18 -- The tools attribute gained `integers`. The runtime unwrapped
   any value shaped like a 64-bit integer tag, in any field, while the
   server unwraps only fields with a 64-bit integer codec, so a Json field

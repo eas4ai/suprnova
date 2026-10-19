@@ -178,7 +178,11 @@ test('agent_012_tool_call_is_authorized', async ({ page }) => {
   const agent = await openTools(page);
   await touch(page, 'main');
   await reset(page);
-  await agent.invoke('counter.add.main', { amount: 5 });
+  const response = await agent.invoke('counter.add.main', { amount: 5 });
+  // The agent hears of the refusal: the page holds its recovery until the
+  // error result is on its way.
+  expect(response.output?.isError).toBe(true);
+  expect(response.output?.structuredContent?.outcome).toBe('error');
   const [call] = await actionRequests(page);
   // The call reached the action's own policy, as bob, and stopped there:
   // the endpoint refused it before the action ran.
@@ -187,9 +191,7 @@ test('agent_012_tool_call_is_authorized', async ({ page }) => {
   expect(call?.phases).toContain('Authorize');
   expect(call?.phases).not.toContain('Action');
   expect(call?.status).toBe(409);
-  // The island recovers as it does after a refused click, unchanged. That
-  // recovery reloads the page, which can end the WebMCP invocation before
-  // its error result reaches the agent.
+  // The island then recovers as it does after a refused click, unchanged.
   await expect(count(page, 'main')).toHaveText('0');
 });
 
