@@ -1,11 +1,13 @@
-//! `agents-browser`: Live tool actions registered with WebMCP in Chromium
-//! (AGENT-012).
+//! `agents-browser`: tools registered with WebMCP in Chromium: Live tool
+//! actions (AGENT-012) and the server tools a page offers (AGENT-014).
 //!
-//! Each test starts `framework/examples/agents_live_host.rs` on a free port
-//! and runs one spec of `tests/agents_browser/agents.spec.ts` against it in
-//! Playwright's Chromium with WebMCP enabled. The suite reuses the Live
-//! browser package's installed Playwright (`@playwright/test` 1.62.1) and
-//! downloads nothing.
+//! Each test starts an example host, `framework/examples/agents_live_host.rs`
+//! unless it names another, on a free port and runs one spec of the
+//! `tests/agents_browser/*.spec.ts` files against it in Playwright's
+//! Chromium with WebMCP enabled. The suite reuses the Live browser package's
+//! installed Playwright (`@playwright/test` 1.62.1) and downloads nothing.
+//! Each area owns a module under `tests/agents_browser/` beside its spec:
+//! `live_pages` the Live runtime's server tools.
 //!
 //! Run: `cargo nextest run -p suprnova-cli --test agents_browser --run-ignored only`,
 //! with `TMPDIR` set to a short directory: Chromium's socket path is
@@ -74,15 +76,16 @@ impl Drop for Host {
     }
 }
 
-/// Build the example host and start it on a free port; its base URL.
-fn start_host(work: &Path) -> Result<(Host, String), String> {
+/// Build the framework's example `example` and start it on a free port; its
+/// base URL.
+fn start_host(work: &Path, example: &str) -> Result<(Host, String), String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let mut build = Command::new(cargo);
     build
-        .args(["build", "-p", "suprnova", "--example", "agents_live_host"])
+        .args(["build", "-p", "suprnova", "--example", example])
         .current_dir(workspace());
     run(build, &work.join("build.log"), Duration::from_secs(1800))?;
-    let binary = target().join("debug/examples/agents_live_host");
+    let binary = target().join("debug/examples").join(example);
     let port = TcpListener::bind("127.0.0.1:0")
         .and_then(|listener| listener.local_addr())
         .map_err(|error| error.to_string())?
@@ -125,7 +128,21 @@ fn prepare_suite(work: &Path) -> Result<PathBuf, String> {
     let suite = work.join("suite");
     fs::create_dir_all(&suite).map_err(|error| error.to_string())?;
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agents_browser");
-    for file in ["package.json", "playwright.config.ts", "agents.spec.ts"] {
+    let mut files = vec![
+        "package.json".to_string(),
+        "playwright.config.ts".to_string(),
+    ];
+    for entry in fs::read_dir(&source).map_err(|error| error.to_string())? {
+        let name = entry
+            .map_err(|error| error.to_string())?
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
+        if name.ends_with(".spec.ts") {
+            files.push(name);
+        }
+    }
+    for file in &files {
         fs::copy(source.join(file), suite.join(file))
             .map_err(|error| format!("copy {file}: {error}"))?;
     }
@@ -146,14 +163,20 @@ fn prepare_suite(work: &Path) -> Result<PathBuf, String> {
     Ok(suite)
 }
 
-/// Run the spec named `name` against a fresh host.
+/// Run the spec named `name` against a fresh `agents_live_host`.
 fn spec(name: &str) {
+    spec_on("agents_live_host", name);
+}
+
+/// Run the spec named `name` against a fresh host built from the
+/// framework's example `example`.
+fn spec_on(example: &str, name: &str) {
     let work = target().join("agents_browser").join(name);
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work).expect("create the run directory");
     let result = (|| -> Result<(), String> {
         let suite = prepare_suite(&work)?;
-        let (_host, url) = start_host(&work)?;
+        let (_host, url) = start_host(&work, example)?;
         let mut playwright = Command::new("node");
         playwright
             .arg(suite.join("node_modules/@playwright/test/cli.js"))
@@ -172,6 +195,9 @@ fn spec(name: &str) {
         panic!("{name} failed:\n{error}\nhost log:\n{host}");
     }
 }
+
+#[path = "agents_browser/live_pages.rs"]
+mod live_pages;
 
 #[test]
 #[ignore = "needs Playwright's Chromium 1.62.1; run with --run-ignored only"]
