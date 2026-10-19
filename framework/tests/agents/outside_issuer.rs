@@ -15,7 +15,9 @@ use suprnova::MiddlewareRegistry;
 use suprnova::agents::{AgentsConfig, OutsideIssuer};
 use suprnova::testing::TestClient;
 
-use crate::oauth::{FakeDocuments, FakeResolver, account_email, container, new_account};
+use crate::oauth::{
+    FakeDocuments, FakeResolver, account_email, account_oid, container, new_account,
+};
 
 const ISSUER: &str = "https://login.issuer.test";
 const JWKS: &str = "https://login.issuer.test/.well-known/jwks.json";
@@ -774,4 +776,88 @@ async fn agent_006_an_unknown_key_id_during_a_key_set_outage_is_503() {
             .0,
         200
     );
+}
+
+// ------------------------------------------------ issuer-assigned ids ----
+
+#[tokio::test]
+async fn agent_006_an_issuer_id_claim_needs_no_verified_flag() {
+    let key = IssuerKey::generate("k1");
+    let world = world_with(&[&key], |issuer| {
+        issuer
+            .id_claim("oid")
+            .expect("oid is an issuer-assigned id")
+            .match_user_on("entra_oid")
+    });
+    let user = new_account("entra-oid");
+    // Entra's `sub` is pairwise, a value of this client app's own; the
+    // object id is the same for every app, and the issuer sends no flag.
+    let token = key.sign(&with(
+        claims("pairwise-sub-for-this-app", "posts:read"),
+        "oid",
+        json!(account_oid(&user)),
+    ));
+    let profile = world
+        .client
+        .mcp()
+        .with_token(&token)
+        .call("users.profile", json!({}))
+        .await;
+    assert_eq!(profile.status(), 200, "{:?}", profile.response());
+    assert_eq!(
+        profile.structured().map(|value| value["user"].clone()),
+        Some(json!(user))
+    );
+}
+
+#[test]
+fn agent_006_id_claim_refuses_a_claim_a_user_can_set() {
+    let issuer = || OutsideIssuer::new(ISSUER, JWKS).expect("a valid issuer");
+    for claim in [
+        "email",
+        "Preferred_Username",
+        "upn",
+        "phone_number_verified",
+        "unique_name",
+        "verified_primary_email",
+        "NAME",
+        "",
+    ] {
+        let refused = issuer()
+            .id_claim(claim)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(
+            !refused.is_empty() && refused.contains(&format!("`{claim}`")),
+            "id_claim({claim:?}) is refused naming the claim: {refused:?}"
+        );
+    }
+    for claim in ["oid", "sub", "tid_oid"] {
+        assert!(issuer().id_claim(claim).is_ok(), "{claim} is an id claim");
+    }
+}
+
+#[tokio::test]
+async fn agent_006_user_claim_still_needs_its_flag() {
+    let key = IssuerKey::generate("k1");
+    let world = world_with(&[&key], |issuer| {
+        issuer.user_claim("oid").match_user_on("entra_oid")
+    });
+    let user = new_account("user-claim-oid");
+    let claimed = with(
+        claims("someone-else", "posts:read"),
+        "oid",
+        json!(account_oid(&user)),
+    );
+    assert_eq!(
+        refusal(&world.client, &key.sign(&claimed)).await,
+        (
+            401,
+            "The claim the user is matched on is not verified.".to_owned()
+        ),
+        "user_claim keeps its meaning: a claim that needs its verified flag"
+    );
+    let verified = key.sign(&with(claimed, "oid_verified", json!(true)));
+    assert_eq!(refusal(&world.client, &verified).await.0, 200);
 }

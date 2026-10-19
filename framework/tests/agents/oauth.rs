@@ -123,16 +123,22 @@ impl UserProvider for Accounts {
         }))
     }
 
-    /// An account by its address, [`account_email`] of its id.
+    /// An account by its address, [`account_email`] of its id, or by the
+    /// object id an outside issuer gave it, [`account_oid`] of its id,
+    /// stored in `entra_oid`.
     async fn retrieve_by_credentials(
         &self,
         credentials: &Value,
     ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
-        let Some(id) = credentials
+        let by_email = credentials
             .get("email")
             .and_then(Value::as_str)
-            .and_then(|email| email.strip_suffix("@accounts.test"))
-        else {
+            .and_then(|email| email.strip_suffix("@accounts.test"));
+        let by_oid = credentials
+            .get("entra_oid")
+            .and_then(Value::as_str)
+            .and_then(|oid| oid.strip_prefix("oid-"));
+        let Some(id) = by_email.or(by_oid) else {
             return Ok(None);
         };
         self.retrieve_by_id(id).await
@@ -142,6 +148,11 @@ impl UserProvider for Accounts {
 /// The address of the account `id`.
 pub fn account_email(id: &str) -> String {
     format!("{id}@accounts.test")
+}
+
+/// The object id an outside issuer assigned the account `id`.
+pub fn account_oid(id: &str) -> String {
+    format!("oid-{id}")
 }
 
 // ---------------------------------------------------------- sessions ----
