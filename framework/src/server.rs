@@ -833,12 +833,18 @@ pub async fn handle_request_with_peer(
         req,
         peer_ip,
     )));
-    let response = reporting_scope
+    #[cfg_attr(not(feature = "agents"), allow(unused_mut))]
+    let mut response = reporting_scope
         .run(crate::container::scope::run_in_new_scope(
             crate::routing::root::scope(root, file_request.serve(request)),
         ))
         .await;
     reporting_scope.note_status(response.status().as_u16());
+    // Every HTML document carries the WebMCP Origin Trial token when one is
+    // set (AGENT-014): here, where every served response leaves, so error
+    // pages and static files carry it too.
+    #[cfg(feature = "agents")]
+    crate::agents::origin_trial::decorate(&mut response);
     close_after_timeout(response)
 }
 
