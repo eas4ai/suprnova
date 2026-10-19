@@ -11,8 +11,8 @@
 
 use serde::Deserialize;
 use suprnova::{
-    Auth, EmailVerificationIssue, FormRequest, FrameworkError, HttpResponse, Registration, Request,
-    Resource, Response, Validate, handler,
+    Auth, FormRequest, FrameworkError, HttpResponse, Log, Registration, Request, Resource,
+    Response, Validate, handler,
 };
 
 use crate::controllers::email_verification;
@@ -86,12 +86,17 @@ pub async fn register(body: RegisterRequest) -> Response {
     let registration = Auth::password()
         .register(&body.email, &body.password)
         .await?;
-    // A new account is mailed the link that verifies its address, once.
+    // A new account is mailed the link that verifies its address, once. A
+    // failure to mail it is logged rather than answered, so the answer stays
+    // the one every registration gets; the user asks for a new link once
+    // signed in.
     if let Registration::Created(user) = registration
-        && let EmailVerificationIssue::Issued(link) =
-            Auth::email_verification().issue_for(&user).await?
+        && let Err(error) = email_verification::mail_new_account(&user).await
     {
-        email_verification::mail_link(&link).await?;
+        Log::error_with(
+            "the email verification link for a new account was not mailed",
+            serde_json::json!({ "error": error.to_string() }),
+        );
     }
 
     Ok(HttpResponse::json(serde_json::json!({

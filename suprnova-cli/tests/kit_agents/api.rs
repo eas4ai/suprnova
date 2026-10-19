@@ -229,8 +229,8 @@ fn agent_017_api_kit_verifies_email_through_a_mailed_link() {
     let register = item(&users, "register");
     for part in [
         "Registration::Created(user)",
-        "Auth::email_verification().issue_for(&user)",
-        "email_verification::mail_link(&link)",
+        "email_verification::mail_new_account(&user)",
+        "Log::error_with(",
     ] {
         assert!(
             contains(register, part),
@@ -240,6 +240,7 @@ fn agent_017_api_kit_verifies_email_through_a_mailed_link() {
     let verification = project.read("src/controllers/email_verification.rs");
     for part in [
         "Auth::email_verification().issue()",
+        "Auth::email_verification().issue_for(account)",
         "EmailVerificationMail {",
         "Auth::email_verification().verify(&token)",
         "Redirect::to(SIGN_IN_PAGE)",

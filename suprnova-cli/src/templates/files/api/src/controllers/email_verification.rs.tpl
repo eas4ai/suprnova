@@ -45,6 +45,16 @@ pub async fn notification(_req: Request) -> Response {
     }
 }
 
+/// Mail a new account its link, as registration does once.
+pub async fn mail_new_account(account: &suprnova::User) -> Result<(), FrameworkError> {
+    if let EmailVerificationIssue::Issued(link) =
+        Auth::email_verification().issue_for(account).await?
+    {
+        mail_link(&link).await?;
+    }
+    Ok(())
+}
+
 /// Mail `link` to its address, from `MAIL_FROM`, as the framework's
 /// verification mail.
 pub async fn mail_link(link: &EmailVerificationLink) -> Result<(), FrameworkError> {

@@ -285,7 +285,9 @@ account's own user: anyone can register another person's address with a
 password of their own, and a link that verified whoever opened it would
 verify that account. Verifying changes no credential and starts no
 session. The mail comes from `MAIL_FROM`, and names the application as
-`APP_NAME`.
+`APP_NAME`. Set `MAIL_FROM` in every environment: without it no
+verification mail goes out. Registration still answers `202` and logs the
+failure, and the resend route answers `500`.
 
 #### Sessions on the consent pages only
 
