@@ -4,9 +4,10 @@
 //! This application has no frontend, so the approval page, the claim page
 //! and the connected-agents page are the framework's own: plain HTML with
 //! no script. A guest who opens the approval or the claim page signs in at
-//! the kit's sign-in page (`controllers::sign_in`) and comes back. Those
-//! pages are the only ones a person uses in a browser, so they are the
-//! only ones with a session ([`ConsentSession`]).
+//! the kit's sign-in page (`controllers::sign_in`) and comes back, as does a
+//! guest who opens the email verification link. Those pages are the only
+//! ones a person uses in a browser, so they are the only ones with a
+//! session ([`ConsentSession`]).
 //!
 //! Agent auth signs the identity assertions it gives agents with the key in
 //! `AGENT_AUTH_KEY_ID` and `AGENT_AUTH_PRIVATE_KEY`. `suprnova new` wrote one
@@ -42,6 +43,11 @@ pub const CONNECTED_PAGE: &str = "/oauth/connected";
 /// an agent to send its user to.
 pub const CLAIM_PAGE: &str = "/agent/claim";
 
+/// The page the email verification link opens
+/// (`controllers::email_verification`). A claim needs a verified address,
+/// and the page verifies it for the user signed in there.
+pub const VERIFY_EMAIL_PAGE: &str = "/email/verify";
+
 /// What the application serves to agents. Anonymous and `service_auth`
 /// registrations are on. An agent holds no scope until a user claims it,
 /// and then every scope the application declares with `tool_scopes!`.
@@ -65,8 +71,8 @@ pub fn serve(router: Router) -> Result<Router, FrameworkError> {
 }
 
 /// The browser session, on the pages a person uses in a browser and nowhere
-/// else: the sign-in page and the approval, connected-agents and claim
-/// pages, with the routes their forms post to.
+/// else: the sign-in page, the approval, connected-agents and claim pages,
+/// with the routes their forms post to, and the email verification page.
 ///
 /// Every other route serves a client of the JSON API, an MCP client or an
 /// agent, which sign in with a bearer token. A session on every path would
@@ -84,7 +90,14 @@ impl ConsentSession {
     /// Whether a request to `path` gets the session.
     pub fn covers(path: &str) -> bool {
         let oauth = path.strip_prefix(OAUTH_ROUTES).unwrap_or_default();
-        [SIGN_IN_PAGE, APPROVAL_PAGE, CONNECTED_PAGE, CLAIM_PAGE].contains(&path)
+        [
+            SIGN_IN_PAGE,
+            APPROVAL_PAGE,
+            CONNECTED_PAGE,
+            CLAIM_PAGE,
+            VERIFY_EMAIL_PAGE,
+        ]
+        .contains(&path)
             || oauth == "/authorize"
             || oauth.starts_with("/authorizations/")
             || path

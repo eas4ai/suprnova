@@ -636,6 +636,9 @@ const API_AGENTS_CASES: &[&str] = &[
     "agent_017_api_only_the_consent_pages_start_a_session",
     "agent_017_api_auth_user_reads_the_session_and_the_bearer_caller",
     "agent_017_api_existing_json_routes_behave_as_before",
+    "agent_017_api_registration_mails_a_verification_link",
+    "agent_017_api_verification_link_verifies_the_address_once",
+    "agent_017_api_claim_needs_a_verified_address",
 ];
 
 /// The version the workspace lockfile resolves `name` to, among those

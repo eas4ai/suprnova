@@ -164,7 +164,7 @@ fn agent_017_api_kit_runs_the_session_on_the_consent_pages_only() {
     for part in [
         "pub struct ConsentSession(SessionMiddleware);",
         "pub fn covers(path: &str) -> bool {",
-        "[SIGN_IN_PAGE, APPROVAL_PAGE, CONNECTED_PAGE, CLAIM_PAGE].contains(&path)",
+        "[SIGN_IN_PAGE, APPROVAL_PAGE, CONNECTED_PAGE, CLAIM_PAGE, VERIFY_EMAIL_PAGE,].contains(&path)",
         "path.strip_prefix(OAUTH_ROUTES)",
         "== \"/authorize\"",
         ".starts_with(\"/authorizations/\")",
@@ -178,6 +178,89 @@ fn agent_017_api_kit_runs_the_session_on_the_consent_pages_only() {
             contains(&agents, part),
             "api: src/agents.rs lacks `{part}`:\n{agents}"
         );
+    }
+}
+
+/// AGENT-017: a claim needs a verified address, so the kit verifies one
+/// through a mailed link. Registration mails it to a new account, a bearer
+/// route mails a new one, and the link opens a page on the consent session
+/// that verifies the address for the user signed in there, sending a guest
+/// to sign in and back. Nothing in the kit writes `email_verified_at`.
+#[test]
+fn agent_017_api_kit_verifies_email_through_a_mailed_link() {
+    let project = Project::new("api");
+    let agents = project.read("src/agents.rs");
+    assert!(
+        contains(
+            &agents,
+            "pub const VERIFY_EMAIL_PAGE: &str = \"/email/verify\";"
+        ),
+        "{agents}"
+    );
+    let routes = project.read("src/routes.rs");
+    let gated_start = routes.find("group!(\"/api\"").expect("the gated group");
+    let gated_end = gated_start
+        + routes[gated_start..]
+            .find("}).middleware(AuthMiddleware::new()),")
+            .expect("the gated group's end");
+    assert!(
+        contains(
+            &routes[gated_start..gated_end],
+            "post!(\"/email/verification-notification\", controllers::email_verification::notification).middleware(ThrottleRequestsMiddleware::with(6, 1, \"email-verification\")),"
+        ),
+        "api: the resend route is the signed-in user's, six a minute:\n{routes}"
+    );
+    let consent = routes.find("group!(\"/\"").expect("the consent group");
+    assert!(
+        contains(
+            &routes[consent..],
+            "get!(agents::VERIFY_EMAIL_PAGE, controllers::email_verification::verify),"
+        ),
+        "api: the link's page is a consent page:\n{routes}"
+    );
+    let controllers = project.read("src/controllers/mod.rs");
+    assert!(
+        controllers
+            .lines()
+            .any(|line| line == "pub mod email_verification;"),
+        "{controllers}"
+    );
+    let users = project.read("src/controllers/users.rs");
+    let register = item(&users, "register");
+    for part in [
+        "Registration::Created(user)",
+        "Auth::email_verification().issue_for(&user)",
+        "email_verification::mail_link(&link)",
+    ] {
+        assert!(
+            contains(register, part),
+            "api: registration lacks `{part}`:\n{register}"
+        );
+    }
+    let verification = project.read("src/controllers/email_verification.rs");
+    for part in [
+        "Auth::email_verification().issue()",
+        "EmailVerificationMail {",
+        "Auth::email_verification().verify(&token)",
+        "Redirect::to(SIGN_IN_PAGE)",
+        ".query(RETURN_TO,",
+    ] {
+        assert!(
+            contains(&verification, part),
+            "api: email verification lacks `{part}`:\n{verification}"
+        );
+    }
+    for entry in walkdir::WalkDir::new(project.root.join("src")) {
+        let entry = entry.expect("walk the scaffold");
+        if entry.file_type().is_file() {
+            let source = std::fs::read_to_string(entry.path()).expect("read a source file");
+            assert!(
+                !source.contains("email_verified_at =")
+                    && !source.contains("SET email_verified_at"),
+                "api: {} writes email_verified_at itself",
+                entry.path().display()
+            );
+        }
     }
 }
 

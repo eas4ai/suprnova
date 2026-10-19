@@ -6,13 +6,16 @@
 //! (`crate::email_address`), so the rules check what is stored, and an
 //! address over 254 characters, longer than any deliverable one, gets a
 //! `422` naming the field. Registration asks for a password of eight
-//! characters, as the other kits do.
+//! characters, as the other kits do, and mails a new account the link that
+//! verifies its address (`controllers::email_verification`).
 
 use serde::Deserialize;
 use suprnova::{
-    Auth, FormRequest, FrameworkError, HttpResponse, Request, Resource, Response, Validate, handler,
+    Auth, EmailVerificationIssue, FormRequest, FrameworkError, HttpResponse, Registration, Request,
+    Resource, Response, Validate, handler,
 };
 
+use crate::controllers::email_verification;
 use crate::email_address;
 use crate::models::user::User;
 use crate::resources::user_resource::UserResource;
@@ -80,9 +83,16 @@ pub async fn register(body: RegisterRequest) -> Response {
     // its account is neither changed nor returned. Both outcomes get the
     // same answer, so this endpoint does not reveal which addresses are
     // registered. The client signs in through `POST /api/auth/login`.
-    let _registration = Auth::password()
+    let registration = Auth::password()
         .register(&body.email, &body.password)
         .await?;
+    // A new account is mailed the link that verifies its address, once.
+    if let Registration::Created(user) = registration
+        && let EmailVerificationIssue::Issued(link) =
+            Auth::email_verification().issue_for(&user).await?
+    {
+        email_verification::mail_link(&link).await?;
+    }
 
     Ok(HttpResponse::json(serde_json::json!({
         "message": "Registration received. Sign in with your email and password."

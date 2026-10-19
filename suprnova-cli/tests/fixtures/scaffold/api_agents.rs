@@ -82,6 +82,8 @@ async fn boot() {
                 "the harness runs this binary with APP_ENV=test and never loads .env"
             );
             __PACKAGE__::config::register_all();
+            // Mail stays in memory, where a case reads the links it carries.
+            mail();
             let url = std::env::var("DATABASE_URL").expect("the harness names the database");
             let db = Database::connect(&url)
                 .await
@@ -97,6 +99,41 @@ async fn boot() {
             suprnova::rate_limit::bootstrap_default().await;
         })
         .await;
+}
+
+/// The mail the application sent, kept in memory for the whole run.
+fn mail() -> &'static suprnova::mail::MailFake {
+    static MAIL: OnceLock<suprnova::mail::MailFake> = OnceLock::new();
+    MAIL.get_or_init(suprnova::Mail::fake)
+}
+
+/// How many messages went to `email`.
+fn mails_to(email: &str) -> usize {
+    mail()
+        .captured()
+        .iter()
+        .filter(|message| message.to.iter().any(|to| to.email == email))
+        .count()
+}
+
+/// The path and query of the newest verification link mailed to `email`.
+fn mailed_link(email: &str) -> String {
+    let marker = "/email/verify?token=";
+    mail()
+        .captured()
+        .iter()
+        .rev()
+        .filter(|message| message.to.iter().any(|to| to.email == email))
+        .filter_map(|message| message.text.as_deref())
+        .find_map(|text| {
+            let start = text.find(marker)?;
+            let token: String = text[start + marker.len()..]
+                .chars()
+                .take_while(char::is_ascii_hexdigit)
+                .collect();
+            Some(format!("{marker}{token}"))
+        })
+        .unwrap_or_else(|| panic!("no verification link was mailed to {email}"))
 }
 
 /// A browser, or any other client, with no cookies yet.
@@ -163,20 +200,30 @@ async fn register(email: &str) {
     assert_eq!(response.status(), 202, "{}", response.body_text());
 }
 
-/// Mark `email` verified in `app_users`, where agent auth reads it. A claim
-/// needs the address the agent named, verified. The kit itself has no route
-/// that verifies an address, so this stands in for the verification an
-/// application adds.
+/// Verify `email` by following the newest link mailed to it, in a browser
+/// of its own: as a guest, through the kit's sign-in and back. A claim
+/// needs the address the agent named, verified.
 async fn verify(email: &str) {
-    let updated = DB::connection()
-        .expect("the database")
-        .inner()
-        .execute_unprepared(&format!(
-            "UPDATE app_users SET email_verified_at = '2026-01-01 00:00:00' WHERE email = '{email}'"
-        ))
-        .await
-        .expect("verify the address");
-    assert_eq!(updated.rows_affected(), 1, "{email} has one account");
+    let link = mailed_link(email);
+    let visitor = browser();
+    let to_sign_in = visitor
+        .get(&link)
+        .header("Accept", "text/html")
+        .send()
+        .await;
+    assert_eq!(to_sign_in.status(), 302, "{}", to_sign_in.body_text());
+    let sign_in = path_of(&location(&to_sign_in));
+    assert!(sign_in.starts_with("/login?"), "{sign_in}");
+    let signed_in = sign_in_at(&visitor, &sign_in, email, PASSWORD).await;
+    assert_eq!(signed_in.status(), 302, "{}", signed_in.body_text());
+    assert!(
+        lands_on(&location(&signed_in), &link),
+        "{}",
+        location(&signed_in)
+    );
+    let page = visitor.get(&link).send().await;
+    assert_eq!(page.status(), 200, "{}", page.body_text());
+    page.assert_see("Your email address is verified.");
 }
 
 /// The `Location` an answer sends the browser to.
@@ -1519,5 +1566,125 @@ fn agent_017_api_existing_json_routes_behave_as_before() {
         assert!(shown.body_text().contains(email), "{}", shown.body_text());
         let missing = client.get("/api/users/999999").send().await;
         assert_eq!(missing.status(), 404, "{}", missing.body_text());
+    });
+}
+
+/// AGENT-017: registration mails a new account the link that verifies its
+/// address, once. Registering the address again mails nothing, so neither
+/// the answer nor the mail tells which addresses have accounts.
+#[test]
+fn agent_017_api_registration_mails_a_verification_link() {
+    run(async {
+        let email = "mailed@example.test";
+        register(email).await;
+        assert_eq!(mails_to(email), 1, "one verification mail");
+        assert!(mailed_link(email).starts_with("/email/verify?token="));
+        register(email).await;
+        assert_eq!(mails_to(email), 1, "an existing account is mailed nothing");
+    });
+}
+
+/// AGENT-017: the link verifies the address of the user signed in where it
+/// opens. Another account's session is refused and the link stays usable;
+/// a guest signs in at the kit's `/login` and comes back; a second use is
+/// refused. The resend route mails a new link until the address is
+/// verified, and then answers `204`.
+#[test]
+fn agent_017_api_verification_link_verifies_the_address_once() {
+    run(async {
+        let email = "link@example.test";
+        register(email).await;
+        let client = api_client(email).await;
+        let resent = client
+            .post("/api/email/verification-notification")
+            .send()
+            .await;
+        assert_eq!(resent.status(), 202, "{}", resent.body_text());
+        assert_eq!(mails_to(email), 2, "the resend mails a second link");
+        let link = mailed_link(email);
+
+        let other = "link-other@example.test";
+        register(other).await;
+        let stranger = browser();
+        let signed_in = sign_in_at(&stranger, "/login", other, PASSWORD).await;
+        assert_eq!(signed_in.status(), 302, "{}", signed_in.body_text());
+        let refused = stranger.get(&link).send().await;
+        assert_eq!(refused.status(), 403, "{}", refused.body_text());
+        refused.assert_see("This link is for another account.");
+        assert_consent_headers(&refused, "a refused link");
+
+        let visitor = browser();
+        let to_sign_in = visitor.get(&link).send().await;
+        assert_eq!(to_sign_in.status(), 302, "{}", to_sign_in.body_text());
+        assert_consent_headers(&to_sign_in, "the link's redirect to sign in");
+        let sign_in = path_of(&location(&to_sign_in));
+        assert!(
+            lands_on(
+                &query_param(&sign_in, "return_to").expect("return_to"),
+                &link
+            ),
+            "{sign_in}"
+        );
+        let signed_in = sign_in_at(&visitor, &sign_in, email, PASSWORD).await;
+        assert!(
+            lands_on(&location(&signed_in), &link),
+            "{}",
+            location(&signed_in)
+        );
+        let page = visitor.get(&link).send().await;
+        assert_eq!(page.status(), 200, "{}", page.body_text());
+        page.assert_see("Your email address is verified.");
+        assert_consent_headers(&page, "the verification page");
+        let user = User::find_by_email(email)
+            .await
+            .expect("read the account")
+            .expect("the account");
+        assert!(user.email_verified_at.is_some(), "the address is verified");
+
+        let again = visitor.get(&link).send().await;
+        assert_eq!(again.status(), 404, "{}", again.body_text());
+        again.assert_see("This link is not valid, or it was already used.");
+
+        let done = client
+            .post("/api/email/verification-notification")
+            .send()
+            .await;
+        assert_eq!(done.status(), 204, "{}", done.body_text());
+        assert_eq!(mails_to(email), 2, "a verified address is mailed nothing");
+    });
+}
+
+/// AGENT-017: an agent's claim for an address its user has not verified
+/// answers the facade's refusal, and goes through once the user follows
+/// the link mailed at registration.
+#[test]
+fn agent_017_api_claim_needs_a_verified_address() {
+    run(async {
+        let email = "unverified@example.test";
+        register(email).await;
+        let registration = register_agent(email).await;
+        let claim = path_of(
+            registration["claim"]["verification_uri"]
+                .as_str()
+                .expect("a verification URI"),
+        );
+        let visitor = browser();
+        let to_sign_in = visitor.get(&claim).send().await;
+        assert_eq!(to_sign_in.status(), 302, "{}", to_sign_in.body_text());
+        let signed_in =
+            sign_in_at(&visitor, &path_of(&location(&to_sign_in)), email, PASSWORD).await;
+        assert!(
+            lands_on(&location(&signed_in), &claim),
+            "{}",
+            location(&signed_in)
+        );
+        let refused = visitor.get(&claim).send().await;
+        assert_eq!(refused.status(), 403, "{}", refused.body_text());
+        refused.assert_see("This claim is for another account");
+
+        verify(email).await;
+        let page = visitor.get(&claim).send().await;
+        assert_eq!(page.status(), 200, "{}", page.body_text());
+        page.assert_see("Let an agent act for you?");
     });
 }

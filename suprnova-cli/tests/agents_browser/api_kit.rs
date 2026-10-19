@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use super::{Host, prepare_suite, run, target, workspace};
 
-/// The account both flows sign in as. Its address is verified, which a
-/// claim needs.
+/// The account both flows sign in as. The claim flow verifies its address
+/// first, through the link registration mailed, which a claim needs.
 const EMAIL: &str = "ada@example.test";
 
 /// The account's password.
@@ -95,7 +95,10 @@ fn start(work: &Path, project: &Path, name: &str) -> Result<(Host, String), Stri
             "DATABASE_URL",
             format!("sqlite://{}?mode=rwc", work.join("app.sqlite").display()),
         )
-        .env("MAIL_DRIVER", "memory")
+        // The log driver writes each mail into the server log, where
+        // `verification_link` reads the link registration mails.
+        .env("MAIL_DRIVER", "log")
+        .env("MAIL_FROM", "ops@example.test")
         .env_remove("SECURITY_HEADERS")
         .env_remove("SECURITY_HEADERS_CSP_REPORT_ONLY")
         .stdout(log.try_clone().map_err(|error| error.to_string())?)
@@ -106,12 +109,10 @@ fn start(work: &Path, project: &Path, name: &str) -> Result<(Host, String), Stri
     Ok((Host(child), url))
 }
 
-/// Wait for the application, then give it the account both flows use:
-/// registered through its JSON API, its address marked verified in
-/// `app_users`, where agent auth reads it. The kit itself has no route that
-/// verifies an address, so this stands in for the verification an
-/// application adds.
-fn prepare_account(host: &mut Host, url: &str, work: &Path) -> Result<(), String> {
+/// Wait for the application, then give it the account both flows use,
+/// registered through its JSON API; the path of the verification link
+/// registration mailed it.
+fn prepare_account(host: &mut Host, url: &str, work: &Path) -> Result<String, String> {
     let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
     runtime.block_on(async {
         let client = reqwest::Client::builder()
@@ -150,31 +151,43 @@ fn prepare_account(host: &mut Host, url: &str, work: &Path) -> Result<(), String
                 registered.text().await.unwrap_or_default()
             ));
         }
-        let database = sea_orm::Database::connect(format!(
-            "sqlite://{}?mode=rw",
-            work.join("app.sqlite").display()
-        ))
-        .await
-        .map_err(|error| error.to_string())?;
-        let verified = sea_orm::ConnectionTrait::execute_unprepared(
-            &database,
-            &format!(
-                "UPDATE app_users SET email_verified_at = '2026-01-01 00:00:00' \
-                 WHERE email = '{EMAIL}'"
-            ),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        if verified.rows_affected() != 1 {
-            return Err(format!("{EMAIL} has no account to verify"));
+        // The log is written as the mail goes; give it a moment.
+        let mailed = Instant::now();
+        loop {
+            match verification_link(work) {
+                Ok(link) => return Ok(link),
+                Err(error) if mailed.elapsed() > Duration::from_secs(10) => return Err(error),
+                Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+            }
         }
-        database.close().await.map_err(|error| error.to_string())
     })
+}
+
+/// The path of the verification link the log mail driver wrote into the
+/// server log.
+fn verification_link(work: &Path) -> Result<String, String> {
+    let marker = "/email/verify?token=";
+    let log =
+        std::fs::read_to_string(work.join("server.log")).map_err(|error| error.to_string())?;
+    let start = log
+        .rfind(marker)
+        .ok_or_else(|| format!("no verification link in the server log:\n{log}"))?;
+    let token: String = log[start + marker.len()..]
+        .chars()
+        .take_while(char::is_ascii_hexdigit)
+        .collect();
+    if token.is_empty() {
+        return Err(format!(
+            "an empty verification link in the server log:\n{log}"
+        ));
+    }
+    Ok(format!("{marker}{token}"))
 }
 
 /// AGENT-017: in Chromium, with the API kit's default security headers, a
 /// guest the framework's approval page sends to the kit's `/login` signs
-/// in, approves, and the decision reaches the client's redirect URI; and a
+/// in, approves, and the decision reaches the client's redirect URI; and,
+/// once the user has followed the verification link registration mailed, a
 /// guest the claim page sends there signs in, claims the agent, and the
 /// agent gets its token.
 #[test]
@@ -192,7 +205,7 @@ fn agent_017_api_kit_consent_pages_complete_in_a_browser() {
         let suite = prepare_suite(&work)?;
         let project = build(&work, name)?;
         let (mut host, url) = start(&work, &project, name)?;
-        prepare_account(&mut host, &url, &work)?;
+        let link = prepare_account(&mut host, &url, &work)?;
         for case in CASES {
             let log = work.join(format!("{case}.log"));
             let mut playwright = Command::new("node");
@@ -203,7 +216,8 @@ fn agent_017_api_kit_consent_pages_complete_in_a_browser() {
                 .env("AGENTS_BASE_URL", &url)
                 .env("AGENTS_BROWSER_RESULTS", work.join("results"))
                 .env("API_KIT_EMAIL", EMAIL)
-                .env("API_KIT_PASSWORD", PASSWORD);
+                .env("API_KIT_PASSWORD", PASSWORD)
+                .env("API_KIT_VERIFICATION_LINK", &link);
             run(playwright, &log, Duration::from_secs(600))?;
             // A case the filter missed, or one the spec skipped, ends the
             // run without a failure; only a pass counts.

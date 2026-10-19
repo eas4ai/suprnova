@@ -7,11 +7,13 @@ import { expect, test, type Page } from '@playwright/test';
 // kit installs by default: the framework's default approval and claim
 // pages send a guest to the kit's `/login`, and once signed in there the
 // guest's decision reaches the client. Run through
-// `tests/agents_browser/api_kit.rs`, which scaffolds and starts the kit and
-// gives it a verified account.
+// `tests/agents_browser/api_kit.rs`, which scaffolds and starts the kit,
+// registers the account, and reads the verification link registration
+// mailed from the server log.
 
 const email = process.env.API_KIT_EMAIL ?? '';
 const password = process.env.API_KIT_PASSWORD ?? '';
+const verificationLink = process.env.API_KIT_VERIFICATION_LINK ?? '';
 
 test.skip(email === '', 'Run through tests/agents_browser/api_kit.rs, which sets API_KIT_EMAIL.');
 
@@ -114,7 +116,20 @@ test('agent_017_api_kit_approval_reaches_the_client_through_the_kit_sign_in', as
   }
 });
 
-test('agent_017_api_kit_claim_reaches_the_agent_through_the_kit_sign_in', async ({ page, request, baseURL }) => {
+test('agent_017_api_kit_claim_reaches_the_agent_through_the_kit_sign_in', async ({ browser, page, request, baseURL }) => {
+  // A claim needs a verified address. The person opens the link
+  // registration mailed, as a guest in a browser of its own, signs in at the
+  // kit's `/login`, and comes back to the page that verifies it.
+  const mailbox = await browser.newContext({ baseURL });
+  try {
+    const opened = await mailbox.newPage();
+    await opened.goto(verificationLink);
+    await signIn(opened, /\/email\/verify\?token=/);
+    await expect(opened.getByText('Your email address is verified.')).toBeVisible();
+  } finally {
+    await mailbox.close();
+  }
+
   // The agent registers under `service_auth`, naming the account's
   // address, and hands the person its link and code.
   const registered = await request.post('/agent/identity', {

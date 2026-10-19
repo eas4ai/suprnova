@@ -1558,6 +1558,11 @@ pub mod api {
     pub fn controllers_users_rs() -> &'static str {
         include_str!("files/api/src/controllers/users.rs.tpl")
     }
+    /// `src/controllers/email_verification.rs`: the link that verifies an
+    /// account's address.
+    pub fn controllers_email_verification_rs() -> &'static str {
+        include_str!("files/api/src/controllers/email_verification.rs.tpl")
+    }
     /// `src/controllers/agents.rs`: connected agents over JSON.
     pub fn controllers_agents_rs() -> &'static str {
         include_str!("files/api/src/controllers/agents.rs.tpl")
@@ -1675,6 +1680,10 @@ pub fn scaffold_api(
         (
             controllers.join("agents.rs"),
             api::controllers_agents_rs().to_string(),
+        ),
+        (
+            controllers.join("email_verification.rs"),
+            api::controllers_email_verification_rs().to_string(),
         ),
         (
             controllers.join("sign_in.rs"),

@@ -1,5 +1,6 @@
 use suprnova::{
-    AuthMiddleware, ConsentPageHeaders, CsrfMiddleware, delete, get, group, post, routes,
+    AuthMiddleware, ConsentPageHeaders, CsrfMiddleware, ThrottleRequestsMiddleware, delete, get,
+    group, post, routes,
 };
 
 use crate::{agents, controllers};
@@ -27,6 +28,11 @@ routes! {
         get!("/connected-agents", controllers::agents::index),
         delete!("/connected-agents/clients/:grant", controllers::agents::revoke_client),
         delete!("/connected-agents/agents/:registration", controllers::agents::revoke_agent),
+
+        // A new link that verifies the signed-in user's address, at most
+        // six a minute (`controllers::email_verification`).
+        post!("/email/verification-notification", controllers::email_verification::notification)
+            .middleware(ThrottleRequestsMiddleware::with(6, 1, "email-verification")),
     }).middleware(AuthMiddleware::new()),
 
     // The sign-in page the framework's approval and claim pages send a
@@ -37,5 +43,7 @@ routes! {
         get!(agents::SIGN_IN_PAGE, controllers::sign_in::show),
         post!(agents::SIGN_IN_PAGE, controllers::sign_in::store)
             .middleware(CsrfMiddleware::new().without_xsrf_cookie()),
+        // The page the email verification link opens, in the same session.
+        get!(agents::VERIFY_EMAIL_PAGE, controllers::email_verification::verify),
     }).middleware(ConsentPageHeaders),
 }
