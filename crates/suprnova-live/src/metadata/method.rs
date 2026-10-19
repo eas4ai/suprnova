@@ -4,7 +4,7 @@ use crate::action::{ActionArgumentSchema, AuthorizationRequirement, TransactionP
 use crate::identity::ActionName;
 use crate::validation::ValidationSelection;
 
-use super::{MetadataError, MetadataErrorKind};
+use super::{ActionToolMetadata, MetadataError, MetadataErrorKind};
 
 /// Canonical metadata for one explicitly registered Live action.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -15,6 +15,7 @@ pub struct ActionMetadata {
     authorization: AuthorizationRequirement,
     validation: ValidationSelection,
     transaction: TransactionPolicy,
+    tool: Option<ActionToolMetadata>,
 }
 
 impl ActionMetadata {
@@ -30,6 +31,7 @@ impl ActionMetadata {
             authorization: AuthorizationRequirement::Public,
             validation: ValidationSelection::None,
             transaction: TransactionPolicy::None,
+            tool: None,
         })
     }
 
@@ -61,7 +63,23 @@ impl ActionMetadata {
             authorization,
             validation,
             transaction,
+            tool: None,
         })
+    }
+
+    /// The same action, declared an agent tool by `#[tool]`.
+    ///
+    /// # Errors
+    ///
+    /// [`MetadataErrorKind::InvalidActionMetadata`] when the action is
+    /// already a tool, or an argument's codec has no JSON Schema: an agent
+    /// would be told less than the action enforces.
+    pub fn with_tool(mut self, tool: ActionToolMetadata) -> Result<Self, MetadataError> {
+        if self.tool.is_some() || !ActionToolMetadata::fits(&self.arguments) {
+            return Err(MetadataError::new(MetadataErrorKind::InvalidActionMetadata));
+        }
+        self.tool = Some(tool);
+        Ok(self)
     }
 
     /// Returns the registered action identity.
@@ -98,5 +116,11 @@ impl ActionMetadata {
     #[must_use]
     pub const fn transaction(&self) -> TransactionPolicy {
         self.transaction
+    }
+
+    /// What `#[tool]` declares, when the action is an agent tool.
+    #[must_use]
+    pub const fn tool(&self) -> Option<&ActionToolMetadata> {
+        self.tool.as_ref()
     }
 }

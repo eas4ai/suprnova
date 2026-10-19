@@ -15,6 +15,7 @@ export const DIAGNOSTIC_CODES = [
   "navigation_failed",
   "lifecycle_notice",
   "resource_limit",
+  "agent_tool_rejected",
 ] as const;
 
 export const DIAGNOSTIC_SEVERITIES = ["error", "warning", "info"] as const;

@@ -161,6 +161,7 @@ fn generated_abi_is_symbol_allowlisted() {
         "suprnova_live::identity::ModelField",
         "suprnova_live::identity::ViewName",
         "suprnova_live::metadata::ActionMetadata",
+        "suprnova_live::metadata::ActionToolMetadata",
         "suprnova_live::metadata::ComponentMetadata",
         "suprnova_live::metadata::ContractVersions",
         "suprnova_live::metadata::EffectMetadata",

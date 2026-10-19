@@ -1,7 +1,7 @@
 # Suprnova Live -- 03 Component State and Binding
 
 Status: Normative design specification
-Last revised: 2026-10-04
+Last revised: 2026-10-18
 
 ## Scope
 
@@ -190,6 +190,39 @@ UX flow:
 2. A request exceeds a hard limit -> the server rejects it before expensive
    hydration and offers the defined fresh-render recovery.
 
+### Agent-visible fields
+
+A component shall choose, field by field, what an agent may read of its
+state after a tool call (AGENT-012). The `#[agent_visible]` field helper marks
+a field a tool result shows; every other field stays out of every tool
+result, in the browser and over the MCP endpoint alike. Marking a field
+grants no browser mutation and changes no other category rule.
+
+Acceptance criteria:
+- `#[agent_visible]` is accepted on ordinary state and on `#[public]`,
+  `#[model]` and `#[locked]` fields: the categories the instanced snapshot
+  signs, which a tool result copies from.
+- On a `#[secret]`, `#[server_only]`, `#[session]`, computed or
+  `#[model(transient)]` field it fails to compile, and
+  `FieldMetadata::with_agent_visible` refuses the same categories with
+  `InvalidBindingMetadata`, because such a field never leaves the server
+  and marking it would promise an agent a value it never gets.
+- The helper takes no arguments and appears at most once on a field.
+- The field's contract-digest entry gains `"agent_visible": true` only when
+  the field is marked. A component that marks nothing keeps the digest it
+  had before agent tools existed, so every deployed snapshot stays valid.
+- A tool result's fields hold exactly the marked fields, copied from the
+  successor snapshot's instanced state; a field the state holds that is not
+  marked never appears, whatever the state carries (spec 05).
+- The island root lists the marked field names, in canonical order, in the
+  tool contract the browser registers from (spec 09).
+
+UX flow:
+1. Application developer marks the fields an agent needs -> a tool result
+   carries those fields and nothing else of the component's state.
+2. Application developer marks a server-only or secret field -> the build
+   fails naming the field, before any agent can be promised it.
+
 ## Iteration 002 implementation profile
 
 Iteration 002 implements generated field metadata and server execution for
@@ -237,8 +270,17 @@ bytes, browser paths, and trusted metadata never enter that batch.
 - Binding preserves Rust types and reports invalid conversion safely.
 - Timing and URL binding remain consistent with real routes and scheduling.
 - State is bounded and evolvable without sticky server objects.
+- A tool result shows only the fields a component marks agent-visible, and
+  only categories the instanced snapshot signs can be marked.
 
 ## Decisions and revisions
+
+- 2026-10-18 -- Added the agent-visible field marker (AGENT-012). A field
+  marked `#[agent_visible]` is shown to an agent in a tool result; nothing
+  else of the state is. The marker is allowed on ordinary, public, model and
+  locked fields and refused on every category that never leaves the server.
+  The digest gains the `agent_visible` key only for a marked field, so the
+  digest of every existing component is unchanged.
 
 - 2026-10-04 -- Session-backed fields now read and write through the Suprnova
   session as the acceptance criterion above requires. A field is read whenever

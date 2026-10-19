@@ -99,6 +99,112 @@ impl fmt::Display for BindingIssue {
     }
 }
 
+/// Why one named field of an object an agent sent would be refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FieldIssueKind {
+    /// The value is not an object of named fields.
+    NotAnObject,
+    /// The schema declares no field of this name.
+    Unknown,
+    /// A required field is absent.
+    Missing,
+    /// A required field is `null`.
+    Null,
+    /// The field's codec refuses its value.
+    Invalid(BindingIssueKind),
+}
+
+impl FieldIssueKind {
+    /// What is wrong, in words an agent can act on.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::NotAnObject => "must be an object of named fields",
+            Self::Unknown => "is not a field this tool accepts",
+            Self::Missing => "is required",
+            Self::Null => "is required and cannot be null",
+            Self::Invalid(BindingIssueKind::InvalidType) => "has the wrong type",
+            Self::Invalid(BindingIssueKind::InvalidValue | BindingIssueKind::TypeMismatch) => {
+                "is not a value this field accepts"
+            }
+            Self::Invalid(
+                BindingIssueKind::InputTooLarge
+                | BindingIssueKind::InputTooDeep
+                | BindingIssueKind::TooManyEntries
+                | BindingIssueKind::StringTooLong,
+            ) => "is larger than this field accepts",
+        }
+    }
+}
+
+/// One named field of an object an agent sent that the engine would
+/// refuse, and why.
+///
+/// The engine itself refuses such input with one closed, redacted error:
+/// the browser runtime only ever sends what its own directives built. An
+/// agent writes the input by hand, so a check that names each field lets it
+/// correct the call; the engine's refusal still decides.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FieldIssue {
+    field: String,
+    kind: FieldIssueKind,
+}
+
+impl FieldIssue {
+    pub(crate) fn new(field: impl Into<String>, kind: FieldIssueKind) -> Self {
+        Self {
+            field: field.into(),
+            kind,
+        }
+    }
+
+    /// The field's name as the agent sent it; empty for
+    /// [`FieldIssueKind::NotAnObject`].
+    #[must_use]
+    pub fn field(&self) -> &str {
+        &self.field
+    }
+
+    /// Why the field would be refused.
+    #[must_use]
+    pub const fn kind(&self) -> FieldIssueKind {
+        self.kind
+    }
+}
+
+/// The JSON Schema dialect every agent-facing schema the engine derives
+/// names.
+pub const JSON_SCHEMA_DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
+
+/// A closed draft 2020-12 object schema of `properties`, listing `required`
+/// when any field is.
+pub(crate) fn object_schema(
+    properties: serde_json::Map<String, serde_json::Value>,
+    required: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    let mut schema = serde_json::Map::new();
+    schema.insert(
+        "$schema".to_owned(),
+        serde_json::Value::String(JSON_SCHEMA_DIALECT.to_owned()),
+    );
+    schema.insert(
+        "type".to_owned(),
+        serde_json::Value::String("object".to_owned()),
+    );
+    schema.insert(
+        "properties".to_owned(),
+        serde_json::Value::Object(properties),
+    );
+    if !required.is_empty() {
+        schema.insert("required".to_owned(), serde_json::Value::Array(required));
+    }
+    schema.insert(
+        "additionalProperties".to_owned(),
+        serde_json::Value::Bool(false),
+    );
+    serde_json::Value::Object(schema)
+}
+
 /// Registered typed conversion applied to one model field.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelCodec {
@@ -187,6 +293,27 @@ impl ModelCodec {
             .map_err(|_| BindingIssue::new(BindingIssueKind::TypeMismatch))
     }
 
+    /// `value` in the one JSON form this codec decodes, whatever accepted
+    /// form it arrived in: a 64-bit integer as a JSON integer, whether it
+    /// was written as a number, a decimal string or its lossless tag; a
+    /// UUID hyphenated in lower case; a date-time in RFC 3339; a list or a
+    /// map entry by entry. Code that decides on a value before it is
+    /// decoded, such as a policy, reads this form, so two spellings of one
+    /// value cannot reach it as two different values.
+    ///
+    /// # Errors
+    ///
+    /// The [`BindingIssue`] [`ModelCodec::decode`] reports for a value the
+    /// codec refuses.
+    pub fn normalize(
+        &self,
+        value: &CanonicalValue,
+        limits: &InputLimits,
+    ) -> Result<serde_json::Value, BindingIssue> {
+        validate_limits(value, limits)?;
+        self.normalized_serde(value, limits, 0)
+    }
+
     /// Encodes a registered Rust value into its bounded canonical representation.
     pub fn encode<T: Serialize + 'static>(
         &self,
@@ -220,6 +347,65 @@ impl ModelCodec {
         };
         validate_limits(&canonical, limits)?;
         Ok(canonical)
+    }
+
+    /// The JSON Schema (draft 2020-12) of exactly the values this codec
+    /// accepts, or `None` when the codec is [`ModelCodec::Json`], directly
+    /// or as the entry of a list or map.
+    ///
+    /// An agent reads a tool's schema as the contract of its input, so each
+    /// shape follows what the codec's validation enforces: a 64-bit
+    /// integer is a JSON number only inside the interoperable safe range, or
+    /// else its canonical decimal string; a UUID is the hyphenated form in
+    /// either case. `Json` accepts any canonical JSON its Serde type reads,
+    /// which no schema derived here can promise, so it has none.
+    #[must_use]
+    pub fn json_schema(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+
+        const SAFE: i64 = 9_007_199_254_740_991;
+        Some(match self {
+            Self::String => json!({ "type": "string" }),
+            Self::Boolean => json!({ "type": "boolean" }),
+            Self::I64 => json!({
+                "anyOf": [
+                    { "type": "integer", "minimum": -SAFE, "maximum": SAFE },
+                    { "type": "string", "pattern": "^(0|-?[1-9][0-9]*)$" },
+                ]
+            }),
+            Self::U64 => json!({
+                "anyOf": [
+                    { "type": "integer", "minimum": 0, "maximum": SAFE },
+                    { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+                ]
+            }),
+            Self::F64 => json!({ "type": "number" }),
+            Self::Json => return None,
+            Self::Date => json!({ "type": "string", "format": "date" }),
+            Self::DateTime => json!({ "type": "string", "format": "date-time" }),
+            Self::Uuid => json!({
+                "type": "string",
+                "format": "uuid",
+                "pattern":
+                    "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+            }),
+            Self::Enumeration(variants) => json!({ "type": "string", "enum": variants }),
+            Self::List(entry) => json!({ "type": "array", "items": entry.json_schema()? }),
+            Self::Map(value) => json!({
+                "type": "object",
+                "additionalProperties": value.json_schema()?,
+            }),
+        })
+    }
+
+    /// Whether [`json_schema`](Self::json_schema) describes this codec.
+    #[must_use]
+    pub fn has_json_schema(&self) -> bool {
+        match self {
+            Self::Json => false,
+            Self::List(codec) | Self::Map(codec) => codec.has_json_schema(),
+            _ => true,
+        }
     }
 
     pub(crate) fn validate(

@@ -150,6 +150,16 @@ impl ComponentMetadata {
         {
             return Err(MetadataError::new(MetadataErrorKind::DuplicateAction));
         }
+        // A browser and the MCP endpoint find a tool by its base name, so one
+        // component cannot declare a name twice.
+        let mut tool_names = BTreeSet::new();
+        if actions
+            .iter()
+            .filter_map(ActionMetadata::tool)
+            .any(|tool| !tool_names.insert(tool.name()))
+        {
+            return Err(MetadataError::new(MetadataErrorKind::InvalidActionMetadata));
+        }
         if fields.iter().any(|field| {
             field.upload_policy().is_some_and(|policy| {
                 !actions
@@ -292,5 +302,20 @@ impl ComponentMetadata {
     #[must_use]
     pub const fn contract_digest(&self) -> &ContentDigest {
         &self.contract_digest
+    }
+
+    /// The actions declared agent tools, each with its declaration, in
+    /// canonical action order.
+    pub fn tools(&self) -> impl Iterator<Item = (&ActionMetadata, &super::ActionToolMetadata)> {
+        self.actions
+            .iter()
+            .filter_map(|action| action.tool().map(|tool| (action, tool)))
+    }
+
+    /// Whether the browser registers any of the component's tools, which
+    /// binds its islands to the tool instance-key grammar.
+    #[must_use]
+    pub fn has_browser_tools(&self) -> bool {
+        self.tools().any(|(_, tool)| tool.browser())
     }
 }

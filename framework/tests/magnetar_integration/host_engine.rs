@@ -1503,6 +1503,7 @@ async fn run_password_host_engine_scenario() {
             mutation_id: "committed-session-mutation".to_owned(),
             kind: LifecycleEventKind::SessionCreated,
             user_id: created.user_id,
+            attributes: Default::default(),
         }]
     );
     password_lockout

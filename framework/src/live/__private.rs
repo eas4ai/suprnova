@@ -153,6 +153,7 @@ pub mod identity {
 #[doc(hidden)]
 pub mod metadata {
     pub use suprnova_live::metadata::ActionMetadata;
+    pub use suprnova_live::metadata::ActionToolMetadata;
     pub use suprnova_live::metadata::ComponentMetadata;
     pub use suprnova_live::metadata::ContractVersions;
     pub use suprnova_live::metadata::EffectMetadata;

@@ -49,6 +49,11 @@ pub enum DiagnosticCode {
     InvalidKey,
     /// A stable key was repeated in one rendered branch.
     DuplicateKey,
+    /// A component whose actions the browser registers as agent tools has a
+    /// `live:key` that is not one literal in the tool instance grammar, or
+    /// sits inside a loop: the key becomes part of each tool name, and data
+    /// must never reach a tool name (AGENT-012).
+    ToolComponentKey,
     /// A URL directive disagreed with registered URL policy.
     InvalidUrlBinding,
     /// An event identity was not registered.
@@ -110,6 +115,7 @@ impl DiagnosticCode {
             Self::UnknownComponent => "unknown_component",
             Self::InvalidKey => "invalid_key",
             Self::DuplicateKey => "duplicate_key",
+            Self::ToolComponentKey => "tool_component_key",
             Self::InvalidUrlBinding => "invalid_url_binding",
             Self::UnknownEvent => "unknown_event",
             Self::UnknownEffect => "unknown_effect",

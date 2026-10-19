@@ -1,0 +1,5 @@
+error: a tool name uses ASCII letters, digits, `_`, `-` and `.` only; `counter add` contains ' '
+  --> tests/agents/compile_fail/live/agent_001_invalid_name.rs:11:19
+   |
+11 |     #[tool(name = "counter add", description = "Add to the counter.", callers = [user])]
+   |                   ^^^^^^^^^^^^^

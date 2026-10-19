@@ -1,7 +1,7 @@
 # Suprnova Live -- 04 Actions and Validation
 
 Status: Normative design specification
-Last revised: 2026-10-04
+Last revised: 2026-10-18
 
 ## Scope
 
@@ -160,6 +160,91 @@ UX flow:
 2. Runtime is unavailable -> no Live action is attempted or falsely reported as
    successful; any ordinary alternative is application-authored.
 
+### Actions as agent tools
+
+A registered action shall be able to be an agent tool (AGENT-012, AGENT-013).
+`#[tool(...)]` sits beside `#[action]` inside a `#[live]` impl and declares
+the tool's name, description and optional title, the callers it accepts
+(`public`, `user`, `agent`), its scopes, its hints and its guard, and with
+`headless` makes the action callable over the MCP endpoint with no browser.
+The tool runs its action, never a route, so it takes no `input`, `output` or
+`route`: its input schema comes from the action's argument codecs. An agent
+reads a tool's name, description and schema as instructions, so all of them
+are fixed when the component is built.
+
+The engine records the declaration as `ActionToolMetadata` on the action:
+the base name, the description, the title, the hints `read_only`,
+`untrusted_content` and `consequential` (the tool's `destructive` hint),
+whether the browser registers it (it accepts a `public` or a `user`
+caller, the callers a page has) and whether it is `headless`.
+
+The input schema is draft 2020-12 JSON Schema derived from the codecs, each
+describing exactly what the codec accepts: a string, a boolean, a 64-bit
+integer as a JSON number inside the interoperable safe range or else its
+canonical decimal string, an unsigned 64-bit integer likewise with no sign,
+a finite number, a `date` or `date-time` string, a hyphenated UUID in either
+case, an enumeration of its variants, a list of its entry and a map of its
+value. The argument object lists every argument in declared order, marks
+the required ones required, lets an optional one also be `null`, and allows
+no other property, since preparation refuses an unknown name. The Json codec,
+which accepts any canonical JSON its Serde type reads, has no schema.
+
+`#[resolve(path)]` on a `#[mount]` parameter names an
+`async fn(&ToolCaller) -> Result<T, FrameworkError>` that fills that mount
+property for a headless call from the caller. The generated adapter encodes
+the value with the parameter's codec, and an `Option<T>` resolver that
+returns `None` mounts the component with `None` (spec 02). The mount
+properties an agent sends follow the same schema rules as arguments: the
+required ones listed, and an optional `Option<T>` one also accepting
+`null`.
+
+Acceptance criteria:
+- `#[tool]` on a method with no `#[action]` fails to compile, and so does a
+  second `#[tool]` on one action, an `input`, `output` or `route` argument,
+  a name outside 1 to 128 ASCII letters, digits, `_`, `-` and `.`, a base
+  name longer than 64 characters, and a missing, empty or non-literal
+  description.
+- A tool action whose argument type resolves to the Json codec, directly or
+  as the entry of a `Vec` or the value of a `BTreeMap`, fails to compile
+  naming the argument. The macro falls back to Json for every type it does
+  not know, so an agent is never told less than the action enforces.
+- A Live tool emits the same build-time name marker a handler tool emits, so
+  a Live tool and a handler tool of one name in one crate fail the build.
+- `ActionToolMetadata::new` refuses a base name outside `[A-Za-z0-9_.-]` or
+  longer than 64 bytes and a blank description or one over 4 KiB;
+  `with_title` refuses a blank title or one over 256 bytes.
+- `ActionMetadata::with_tool` refuses a second declaration and an action
+  with any argument whose codec has no schema, with
+  `InvalidActionMetadata`. Two actions of one component cannot share a tool
+  name.
+- The action's contract-digest entry gains a `tool` key, holding the base
+  name, description, title, hints, browser and headless flags, only when the
+  action declares a tool. A component without a tool keeps the digest it
+  had before agent tools existed.
+- `ActionArgumentSchema::field_issues` names every argument preparation would
+  refuse, with its closed reason: an unknown name, a missing or `null`
+  required argument, or a value its codec refuses. Preparation still runs
+  and decides.
+- A headless tool is refused when the application boots, naming the tool,
+  when its component has `#[session]` fields (a call with no browser has no
+  session), when its action is an upload finalize action (the browser that
+  sent the file finishes it), when a mount property the agent sends has the
+  Json codec, or when a `#[resolve]` names a parameter the mount does not
+  take.
+- A resolved mount property is left out of the headless input schema, and an
+  agent that sends it gets an unknown-property refusal. Resolvers run only
+  after the mount's Gate check allows the call (spec 07).
+- `#[resolve]` on a parameter of anything but `#[mount]`, or on a component
+  with no headless tool, fails to compile.
+
+UX flow:
+1. Application developer marks an action `#[tool(...)]` -> the browser and,
+   for a headless tool, the MCP endpoint offer it with a schema derived from
+   the action's own argument codecs.
+2. Application developer marks an action whose argument has no schema, or a
+   headless action that needs a session -> the build or the boot fails naming
+   the tool and what to change.
+
 ## Iteration 002 implementation profile
 
 Iteration 002 implements registered typed action dispatch, bounded argument
@@ -221,9 +306,21 @@ facility rather than relying on a fallible reporting hook.
   transport handlers.
 - Redirects, events, effects, and no-render outcomes remain typed and bounded.
 - Live does not generate no-JavaScript action parity.
+- An action becomes an agent tool only through `#[tool]`, with a name,
+  description and schema fixed at build, and a headless tool only where a
+  call with no browser can run it.
 
 ## Decisions and revisions
 
+- 2026-10-18 -- An optional mount property resolved to `None`, or left
+  `null` by the agent, mounts with `None` instead of failing the call.
+- 2026-10-18 -- Added actions as agent tools (AGENT-012, AGENT-013).
+  `#[tool]` beside `#[action]` records `ActionToolMetadata`; the input schema
+  comes from the argument codecs, and an argument with the Json codec is
+  refused at build. The digest gains the `tool` key only for a declared tool.
+  A headless tool is refused at boot on a component with session fields or
+  on an upload finalize action, and `#[resolve]` fills a mount property from
+  the caller.
 - 2026-10-04 -- An action's argument schema keeps the order the action
   declares its parameters in, beside the name order it decodes by. A
   directive's positional literal arguments bind in that order (spec 09), and

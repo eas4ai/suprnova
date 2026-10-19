@@ -125,7 +125,9 @@ impl StateSchema {
         self.version
     }
 
-    /// Validates exact fields, exposure categories, required values, and codecs.
+    /// Validates exact fields, exposure categories, required values, and
+    /// codecs. A field that is not required may be absent or `null`: an
+    /// optional mount parameter is `None` either way.
     pub fn validate(
         &self,
         value: &CanonicalValue,
@@ -142,6 +144,9 @@ impl StateSchema {
                 .ok_or_else(|| SnapshotError::new(SnapshotErrorKind::UnknownStateField))?;
             if !category_allowed(field.category, exposure) {
                 return Err(SnapshotError::new(SnapshotErrorKind::ForbiddenStateField));
+            }
+            if !field.required && matches!(value, CanonicalValue::Null) {
+                continue;
             }
             validate_codec(value, field.codec)?;
         }

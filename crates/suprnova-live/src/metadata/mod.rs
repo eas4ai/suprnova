@@ -1,5 +1,6 @@
 //! Canonical generated component, field, action, and version metadata.
 
+mod agent;
 mod browser;
 mod component;
 mod digest;
@@ -11,6 +12,10 @@ mod version;
 use std::error::Error;
 use std::fmt;
 
+pub use agent::{
+    ActionToolMetadata, MAX_TOOL_BASE_BYTES, MAX_TOOL_INSTANCE_BYTES, agent_fields,
+    is_tool_instance_key,
+};
 pub use browser::{
     EffectMetadata, EffectPayloadMetadata, EventMetadata, EventPayloadMetadata,
     PayloadContractIdentity,
