@@ -427,12 +427,20 @@ fn shared_target_dir() -> PathBuf {
         .to_path_buf()
 }
 
-/// Runs `cargo <args>` in `project` against the shared build directory.
-fn run_cargo_shared(project: &Path, args: &[&str]) {
+/// Runs `cargo <args>` in `project` against the shared build directory, and
+/// returns what it printed to stdout.
+fn run_cargo_shared(project: &Path, args: &[&str]) -> String {
+    run_cargo_shared_with(project, args, &[])
+}
+
+/// [`run_cargo_shared`] with `envs` in cargo's environment, which the tests
+/// it runs inherit: a test process loads no `.env`.
+fn run_cargo_shared_with(project: &Path, args: &[&str], envs: &[(&str, &str)]) -> String {
     let output = Command::new(env!("CARGO"))
         .args(args)
         .current_dir(project)
         .env("CARGO_TARGET_DIR", shared_target_dir())
+        .envs(envs.iter().copied())
         .output()
         .expect("cargo should run");
     assert!(
@@ -443,6 +451,54 @@ fn run_cargo_shared(project: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Scaffold a Live kit named `name` in `tmp`, built against the in-tree
+/// framework and this workspace's lock, as `live_kit_compiles_and_renders`
+/// builds one.
+fn live_scaffold(tmp: &TempDir, name: &str, dev_dependencies: &[&str]) -> PathBuf {
+    scaffold(tmp, name, &["--frontend", "live"]);
+    let project = tmp.path().join(name);
+    if !dev_dependencies.is_empty() {
+        add_dev_dependencies(&project, dev_dependencies);
+    }
+    patch_local_suprnova(&project);
+    // The workspace's lock, so the scaffold resolves the dependency
+    // versions this workspace builds and tests rather than whatever is
+    // newest today; cargo drops the entries the scaffold does not use.
+    let workspace_lock = workspace_framework_dir()
+        .parent()
+        .expect("framework sits in the workspace")
+        .join("Cargo.lock");
+    std::fs::copy(&workspace_lock, project.join("Cargo.lock")).expect("copy Cargo.lock");
+    project
+}
+
+/// Append `lines` to the `[dev-dependencies]` table a scaffold's manifest
+/// ends with. Asserted rather than assumed: a table after it would take
+/// the lines instead.
+fn add_dev_dependencies(project: &Path, lines: &[&str]) {
+    let path = project.join("Cargo.toml");
+    let mut manifest = std::fs::read_to_string(&path).expect("read scaffolded Cargo.toml");
+    let last_table = manifest
+        .lines()
+        .rev()
+        .find(|line| line.trim().starts_with('['))
+        .expect("a table header");
+    assert_eq!(
+        last_table.trim(),
+        "[dev-dependencies]",
+        "the scaffold's manifest ends with its dev-dependencies"
+    );
+    if !manifest.ends_with('\n') {
+        manifest.push('\n');
+    }
+    for line in lines {
+        manifest.push_str(line);
+        manifest.push('\n');
+    }
+    std::fs::write(&path, manifest).expect("write patched Cargo.toml");
 }
 
 /// The scaffold's server process, stopped when the test ends however it
@@ -490,17 +546,7 @@ fn get(port: u16, path: &str) -> std::io::Result<(u16, String)> {
 fn live_kit_compiles_and_renders() {
     let tmp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("tempdir");
     let name = "live_render";
-    scaffold(&tmp, name, &["--frontend", "live"]);
-    let project = tmp.path().join(name);
-    patch_local_suprnova(&project);
-    // The workspace's lock, so the scaffold resolves the dependency
-    // versions this workspace builds and tests rather than whatever is
-    // newest today; cargo drops the entries the scaffold does not use.
-    let workspace_lock = workspace_framework_dir()
-        .parent()
-        .expect("framework sits in the workspace")
-        .join("Cargo.lock");
-    std::fs::copy(&workspace_lock, project.join("Cargo.lock")).expect("copy Cargo.lock");
+    let project = live_scaffold(&tmp, name, &[]);
 
     run_cargo_shared(&project, &["check"]);
     // The kit's own `tests/documents.rs`: every document rendered through
@@ -606,4 +652,94 @@ fn live_kit_compiles_and_renders() {
     );
 
     drop(server);
+}
+
+/// The test `agent_017_a_generated_live_application_serves_the_agent_pages`
+/// writes into the scaffold as `tests/agent_pages.rs`. `__PACKAGE__` is the
+/// scaffold's crate name.
+const LIVE_AGENT_PAGES: &str = include_str!("fixtures/scaffold/live_agent_pages.rs");
+
+/// The cases `tests/agent_pages.rs` runs, each of which prints
+/// `case <name> ... ok` when it passes.
+const LIVE_AGENT_CASES: [&str; 12] = [
+    "agent_017_live_migrator_creates_the_plugins_tables_and_the_email_index",
+    "agent_017_live_serves_the_endpoint_and_both_plugins",
+    "agent_017_live_login_ignores_a_foreign_return_to",
+    "agent_017_live_login_returns_to_a_same_origin_address",
+    "agent_017_live_registration_continues_to_the_intended_address",
+    "agent_008_live_registration_lowercases_and_refuses_a_mixed_case_duplicate",
+    "kit_live_registration_refuses_a_name_over_255_and_an_email_over_254",
+    "agent_017_live_approval_round_trip",
+    "agent_017_live_claim_round_trip",
+    "agent_017_live_connected_agents_lists_and_revokes_only_the_users_own",
+    "agent_017_live_consent_forms_need_the_csrf_token",
+    "agent_017_live_consent_pages_refuse_framing_caching_and_referrers",
+];
+
+/// AGENT-017: a fresh `--frontend live` scaffold serves the MCP endpoint,
+/// both plugins and its own approval, claim and connected-agents pages.
+/// The scaffold's own `tests/documents.rs` and the fixture
+/// `fixtures/scaffold/live_agent_pages.rs` run in it, on the build
+/// directory `live_kit_compiles_and_renders` uses, so the framework builds
+/// once for both. The fixture drives the pages' native forms and the kit's
+/// Live sign-in and registration forms through the test client: the
+/// approval and claim round trips, the connected agents of two users,
+/// CSRF, the consent headers, `return_to` and the intended address across
+/// sign-in and registration, and the migrator on SQLite.
+#[test]
+#[ignore = "compile check - builds a Live kit scaffold and drives its agent pages; slow"]
+fn agent_017_a_generated_live_application_serves_the_agent_pages() {
+    let tmp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("tempdir");
+    let name = "live_agents";
+    // What the fixture needs beside the framework: PKCE's SHA-256 and
+    // base64url, and URL parsing. The workspace's lock resolves each.
+    let project = live_scaffold(
+        &tmp,
+        name,
+        &[r#"sha2 = "0.10""#, r#"base64 = "0.22""#, r#"url = "2""#],
+    );
+    std::fs::write(
+        project.join("tests/agent_pages.rs"),
+        LIVE_AGENT_PAGES.replace("__PACKAGE__", name),
+    )
+    .expect("write the fixture into the scaffold");
+
+    // The registration flows mail a verification link, which needs a sender.
+    let printed = run_cargo_shared_with(
+        &project,
+        &[
+            "test",
+            "--no-fail-fast",
+            "--test",
+            "documents",
+            "--test",
+            "agent_pages",
+            "--",
+            "--nocapture",
+            "--test-threads=1",
+        ],
+        &[("MAIL_FROM", "ops@example.test")],
+    );
+    // Each binary runs its one test; its log lines can sit between the
+    // test's name and its `ok`.
+    for test in [
+        "test every_document_renders_for_its_visitor ...",
+        "test agent_pages_serve_their_flows ...",
+    ] {
+        assert!(printed.contains(test), "`{test}` did not run:\n{printed}");
+    }
+    assert_eq!(
+        printed.matches("test result: ok. 1 passed;").count(),
+        2,
+        "both tests must pass:\n{printed}"
+    );
+    let missing: Vec<&str> = LIVE_AGENT_CASES
+        .iter()
+        .copied()
+        .filter(|case| !printed.contains(&format!("case {case} ... ok")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these cases did not run and pass: {missing:#?}\n{printed}"
+    );
 }
