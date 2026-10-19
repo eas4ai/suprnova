@@ -44,11 +44,17 @@ impl UniqueEmailIgnoringCase {
     /// The index on `column` of `table`. Both are plain SQL identifiers
     /// (letters, digits and `_`); any other name fails the migration rather
     /// than reach the SQL. The migration's name includes both, so one
-    /// migrator can index more than one table.
+    /// migrator can index more than one table:
+    /// `m20261019_000003_{table}_{column}_unique_ignoring_case_{n}`, where
+    /// `n` is the table name's length, so no two tables and columns share a
+    /// name, as the index's name does.
     pub fn on(table: impl Into<String>, column: impl Into<String>) -> Self {
         let table = table.into();
         let column = column.into();
-        let name = format!("m20261019_000003_{table}_{column}_unique_ignoring_case");
+        let name = format!(
+            "m20261019_000003_{table}_{column}_unique_ignoring_case_{}",
+            table.len()
+        );
         Self {
             table,
             column,
@@ -362,7 +368,7 @@ mod tests {
         let migration = UniqueEmailIgnoringCase::on("users", "email");
         assert_eq!(
             migration.name(),
-            "m20261019_000003_users_email_unique_ignoring_case"
+            "m20261019_000003_users_email_unique_ignoring_case_5"
         );
         assert_eq!(migration.index_name(), "users_email_lower_unique_5");
     }
@@ -382,6 +388,31 @@ mod tests {
         let mut names: Vec<String> = pairs
             .iter()
             .map(|(table, column)| UniqueEmailIgnoringCase::on(*table, *column).index_name())
+            .collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), pairs.len(), "{names:?}");
+    }
+
+    #[test]
+    fn agent_008_no_two_tables_and_columns_share_a_migration_name() {
+        let pairs = [
+            ("a_b", "c"),
+            ("a", "b_c"),
+            ("a_", "_b"),
+            ("a", "__b"),
+            ("a__", "b"),
+            ("users", "email"),
+            ("users_email", "x"),
+            ("users", "email_x"),
+        ];
+        let mut names: Vec<String> = pairs
+            .iter()
+            .map(|(table, column)| {
+                UniqueEmailIgnoringCase::on(*table, *column)
+                    .name()
+                    .to_owned()
+            })
             .collect();
         names.sort();
         names.dedup();
