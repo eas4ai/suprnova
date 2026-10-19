@@ -5,7 +5,9 @@
 //! dispatcher's (`fill_path` and `query_of` in
 //! `framework/src/agents/dispatch.rs`): each value is percent-encoded into
 //! one segment, an optional parameter without a value drops its segment,
-//! and a GET call sends its other scalar arguments in the query.
+//! and a GET call sends its scalar arguments in the query. Unlike the
+//! dispatcher, a GET call sends its path arguments in the query too, since
+//! a form request on GET reads its whole input from there.
 //!
 //! One rule is the browser's own. The dispatcher encodes a `.` or `..`
 //! value as `%2E` so it cannot climb, but a browser's URL parser resolves
@@ -102,9 +104,12 @@ pub(crate) fn fill(pieces: &[Piece], arguments: &Map<String, Value>) -> Result<S
     Ok(out)
 }
 
-/// For a GET call, the scalar arguments that fill no parameter of
-/// `pieces`, as a query string in argument order. A structured argument is
-/// refused, because a browser sends no body with a GET.
+/// For a GET call, every scalar argument as a query string in argument
+/// order, path arguments included: a form request on GET reads its whole
+/// input from the query, and a tool's input holds its path parameters. A
+/// path argument that filled no segment, empty or null, stays out, as a
+/// null argument does. A structured argument is refused, because a browser
+/// sends no body with a GET.
 pub(crate) fn query(
     pieces: &[Piece],
     arguments: &Map<String, Value>,
@@ -117,10 +122,8 @@ pub(crate) fn query(
     let mut query = form_urlencoded::Serializer::new(String::new());
     let mut any = false;
     for (name, value) in arguments {
-        if in_path(name) {
-            continue;
-        }
         match scalar(Some(value)) {
+            Ok(Some(text)) if text.is_empty() && in_path(name) => {}
             Ok(Some(text)) => {
                 query.append_pair(name, &text);
                 any = true;
