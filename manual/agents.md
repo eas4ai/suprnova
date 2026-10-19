@@ -1449,8 +1449,11 @@ export default function NewNote() {
 A form for a destructive action, marked `destructive: true` or sent with
 `DELETE`, is filled and left for the user to submit. A form tool sends no
 tool-call header: it drives the page's own form, so the route's throttle and
-checks apply rather than the tool budget. Vue and Svelte take the same
-options; their `useFormTool` takes the `useForm` object.
+checks apply rather than the tool budget. Its submission carries
+`Suprnova-Form-Tool: 1` instead (`suprnova::agents::FORM_TOOL_HEADER`), and
+the consent facade refuses a request that carries it, so a form tool on an
+approval or claim page can never approve or claim for the user. Vue and
+Svelte take the same options; their `useFormTool` takes the `useForm` object.
 
 `generate-types` refuses, by name, a request type it cannot describe exactly
 as the server does, rather than write an approximate schema.
