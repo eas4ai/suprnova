@@ -36,3 +36,6 @@ mod page_tools;
 mod registry;
 mod schema;
 mod surface;
+#[cfg(feature = "localization")]
+mod wasm_messages;
+mod wasm_schema;

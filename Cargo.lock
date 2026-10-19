@@ -8929,6 +8929,7 @@ dependencies = [
  "suprnova-macros",
  "suprnova-magnetar",
  "suprnova-web-push",
+ "suprnova-webmcp",
  "tempfile",
  "tera",
  "thiserror 2.0.20",
@@ -9204,6 +9205,25 @@ dependencies = [
  "tracing",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "suprnova-webmcp"
+version = "4.3.0"
+dependencies = [
+ "form_urlencoded",
+ "js-sys",
+ "percent-encoding",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "suprnova-macros",
+ "thiserror 2.0.20",
+ "trybuild",
+ "validator",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

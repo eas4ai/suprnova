@@ -13,6 +13,8 @@
 
 #[path = "agents_browser/kits.rs"]
 mod kits;
+#[path = "agents_browser/wasm.rs"]
+mod wasm;
 
 use std::fs;
 use std::net::TcpListener;
