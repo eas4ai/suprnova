@@ -1474,9 +1474,32 @@ async fn handle_request_inner(
             // A tool's route checks the browser caller's kind and limit, and
             // hands the handler its caller (AGENT-002).
             #[cfg(feature = "agents")]
-            let tool_access = router.tool_access(&effective_method, &pattern);
+            let tool_access = match router.tool_access(&effective_method, &pattern) {
+                // A tool call to a route that serves no tool is refused: a
+                // browser cannot see which route a tool's path reached
+                // (AGENT-014). The Live routes check their own tool calls.
+                None if pattern != crate::live::LIVE_UPDATE_PATH
+                    && pattern != crate::live::LIVE_AGENT_PATH =>
+                {
+                    request
+                        .header(crate::agents::TOOL_CALL_HEADER)
+                        .map(|name| crate::agents::no_tool(name.to_string()))
+                }
+                access => access,
+            };
             #[cfg(not(feature = "agents"))]
             let tool_access: Option<crate::middleware::BoxedMiddleware> = None;
+            // The page tools of the request (AGENT-014): stamped before any
+            // middleware, so RenderCache and the route's layers see them,
+            // with the step that reads the viewer once the route's
+            // middleware has signed them in.
+            #[cfg(feature = "agents")]
+            let page_tools_step = router.page_tools_context().map(|context| {
+                crate::agents::page_tools::stamp(context);
+                crate::agents::page_tools::viewer_step()
+            });
+            #[cfg(not(feature = "agents"))]
+            let page_tools_step: Option<crate::middleware::BoxedMiddleware> = None;
 
             // Resolve the request id ONCE for this request. The same id is
             // handed to the middleware (which scopes it) and to
@@ -1494,6 +1517,7 @@ async fn handle_request_inner(
                 1 + global_mw.len()
                     + route_middleware.len()
                     + usize::from(tool_access.is_some())
+                    + usize::from(page_tools_step.is_some())
                     + usize::from(live_metadata.is_some()),
             );
 
@@ -1539,6 +1563,10 @@ async fn handle_request_inner(
                 chain.push(layer(access));
             }
 
+            if let Some(step) = page_tools_step {
+                chain.push(layer(step));
+            }
+
             // Live completion is always innermost, after every configured
             // owner middleware, so omission and ordering remain observable.
             if let Some(metadata) = live_metadata {
@@ -1581,10 +1609,21 @@ async fn handle_request_inner(
                 let request_id = crate::logging::request_id::resolve_request_id(&request);
                 crate::error::debug_page::note_request_id(request_id.as_str());
 
+                // The fallback page offers the shared tools too (AGENT-014).
+                #[cfg(feature = "agents")]
+                let page_tools_step = router.page_tools_context().map(|context| {
+                    crate::agents::page_tools::stamp(context);
+                    crate::agents::page_tools::viewer_step()
+                });
+                #[cfg(not(feature = "agents"))]
+                let page_tools_step: Option<crate::middleware::BoxedMiddleware> = None;
+
                 // Build middleware chain for fallback, pre-sized
                 // (see matched-route branch for rationale).
                 let mut chain = MiddlewareChain::with_capacity(
-                    1 + middleware_registry.global_middleware().len() + fallback_middleware.len(),
+                    1 + middleware_registry.global_middleware().len()
+                        + fallback_middleware.len()
+                        + usize::from(page_tools_step.is_some()),
                 );
 
                 // 0. RequestId is always outermost (same as the matched-route path).
@@ -1595,6 +1634,10 @@ async fn handle_request_inner(
 
                 // 2. Add fallback-specific middleware
                 chain.extend(fallback_middleware);
+
+                if let Some(step) = page_tools_step {
+                    chain.push(step);
+                }
 
                 // 3. Execute chain with fallback handler, catching panics.
                 let http_response =

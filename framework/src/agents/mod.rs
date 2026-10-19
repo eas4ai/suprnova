@@ -51,6 +51,7 @@ mod middleware;
 mod oauth;
 mod outside_issuer;
 mod page;
+pub(crate) mod page_tools;
 mod scope;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -92,10 +93,11 @@ pub use magnetar::authorization_server::{
 /// answer with.
 pub use magnetar::{Error as MagnetarError, Result as MagnetarResult};
 pub(crate) use mark::AgentMark;
-pub(crate) use middleware::{BrowserToolRefusal, LiveToolGate};
+pub(crate) use middleware::{BrowserToolRefusal, LiveToolGate, no_tool};
 pub(crate) use oauth::MountedOAuth;
 pub use oauth::{ClientGrant, ConnectedAgents, GrantScope, OAuthServer};
 pub use outside_issuer::OutsideIssuer;
+pub use page_tools::PageTools;
 pub use scope::{Scope, ScopeRecord, declared_scopes};
 #[cfg(feature = "testing")]
 pub use testing::{AgentsFake, McpResponse, McpTestClient, McpToolResult};
@@ -366,6 +368,10 @@ pub(crate) struct RouterAgents {
     routes: HashMap<(Method, String), AgentRoute>,
     registry: OnceLock<Result<Arc<ToolRegistry>, FrameworkError>>,
     oauth: Option<Arc<MountedOAuth>>,
+    /// The tools every page offers, from [`Router::share_tools`].
+    pub(crate) shared_tools: Vec<&'static str>,
+    /// The check of every tool the router's pages offer, run once.
+    page_tools: OnceLock<Result<(), FrameworkError>>,
 }
 
 impl RouterAgents {
@@ -550,6 +556,15 @@ impl Router {
         self.agents
             .registry
             .get_or_init(|| ToolRegistry::build(self).map(Arc::new))
+    }
+
+    /// The tools the router's pages offer, checked against the registry
+    /// on the first call (AGENT-014).
+    pub(crate) fn checked_page_tools(&self) -> &Result<(), FrameworkError> {
+        self.agents.page_tools.get_or_init(|| {
+            let registry = self.checked_tools().as_ref().map_err(Clone::clone)?;
+            page_tools::check(self, registry)
+        })
     }
 
     /// Whether the router installs the Live tool gate on its Live action

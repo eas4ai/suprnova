@@ -885,6 +885,23 @@ impl Router {
             .unwrap_or_default()
     }
 
+    /// Every route that offers page tools with `with_tools`, its own or
+    /// its group's, with the tools in the order its layers name them.
+    #[cfg(feature = "agents")]
+    pub(crate) fn page_tools_by_route(&self) -> Vec<(Method, String, Vec<&'static str>)> {
+        self.route_middleware
+            .iter()
+            .filter_map(|((method, pattern), middleware)| {
+                let names: Vec<&'static str> = middleware
+                    .iter()
+                    .filter_map(crate::middleware::page_tools_of)
+                    .flat_map(|names| names.to_vec())
+                    .collect();
+                (!names.is_empty()).then(|| (method.clone(), pattern.clone(), names))
+            })
+            .collect()
+    }
+
     pub(crate) fn register_live_route_metadata(
         &mut self,
         method: Method,
@@ -1304,7 +1321,7 @@ impl Router {
         #[cfg(feature = "agents")]
         {
             match self.checked_tools() {
-                Ok(_) => Ok(()),
+                Ok(_) => self.checked_page_tools().clone(),
                 Err(error) => Err(error.clone()),
             }
         }
@@ -2662,6 +2679,27 @@ impl RouteBuilder {
         let mut router = self.router;
         router.note_route_name(self.last_method, &self.last_path, name);
         Ok(router)
+    }
+
+    /// Offer the tools `names` on the pages of the most recently registered
+    /// route, beside the ones [`Router::share_tools`] offers on every page
+    /// (AGENT-014). Each page lists only the tools its viewer may call.
+    ///
+    /// Each name must be a routed `#[tool]` that accepts the public or
+    /// users: the server refuses to start otherwise, naming the tool and the
+    /// route. A browser sends a `GET` tool's arguments in the query, so its
+    /// handler reads them with [`Request::query_into`](crate::Request::query_into);
+    /// one that reads its input from the body is refused at boot.
+    ///
+    /// ```rust,ignore
+    /// Router::new()
+    ///     .get("/posts", posts::index)
+    ///     .with_tools(["posts.search", "posts.create"])
+    ///     .name("posts.index")
+    /// ```
+    #[cfg(feature = "agents")]
+    pub fn with_tools<I: IntoIterator<Item = &'static str>>(self, names: I) -> RouteBuilder {
+        self.middleware(crate::agents::page_tools::PageToolsLayer::new(names))
     }
 
     /// Apply middleware to the most recently registered route
