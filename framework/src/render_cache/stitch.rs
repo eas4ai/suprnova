@@ -379,7 +379,13 @@ async fn render_slot(
     let context = live
         .validate_request_context(request, registration.selection.clone())
         .map_err(|_| ())?;
-    let output = collector::slot_scope(
+    // The island lists the Live tools of this hit's viewer, read in the slot
+    // bucket as the mount's own reads are (AGENT-014).
+    let output = collector::slot_scope(async {
+        #[cfg(feature = "agents")]
+        let context = context.with_agent_tool_filter(
+            crate::agents::page_tools::island_filter(&slot.component).await?,
+        );
         live.mount_private_component(
             scope,
             PrivateMountRequest::new(
@@ -389,8 +395,9 @@ async fn render_slot(
             )
             .with_document_path(path.clone()),
             &context,
-        ),
-    )
+        )
+        .await
+    })
     .await
     .map_err(|_| ())?;
     // The slot comes from the mount's own metadata, not from the stored
