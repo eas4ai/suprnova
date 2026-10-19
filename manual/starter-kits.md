@@ -255,7 +255,10 @@ an unverified user to verify first. A few rules hold on every page:
   (`Inertia::location`), which the browser follows itself. A redirect that
   answers the form would be blocked by the policy's `form-action 'self'`.
 - No page offers a tool, and no consent route declares one, so an agent in
-  the browser can never approve a client or claim itself.
+  the browser can never approve a client or claim itself. A form tool marks
+  the form it submits with the `Suprnova-Form-Tool` header, and the pages
+  refuse it with a 403, so even a form tool an application adds to one of
+  them cannot approve or claim.
 - Text a client, an agent or the user chose sits in `<bdi>`, and no page
   renders raw HTML or loads a URL the client chose.
 
