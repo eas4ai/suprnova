@@ -114,6 +114,8 @@ pub trait Middleware: Send + Sync {
 }
 
 #[cfg(feature = "agents")]
+#[cfg(feature = "agents")]
+pub(crate) use identity::page_tools_of;
 pub(crate) use identity::type_of;
 pub(crate) use identity::{MiddlewareExclusion, alias_of, boxed_as, inherit_identity, name_as};
 

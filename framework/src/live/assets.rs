@@ -451,6 +451,23 @@ impl LiveBootstrap {
         &self.roles
     }
 
+    /// The bootstrap with `element`, markup the framework wrote, after its
+    /// own: the page tools element (AGENT-014), which the head carries
+    /// beside the runtime that reads it.
+    #[cfg(feature = "agents")]
+    pub(crate) fn with_element(self, element: &str) -> Result<Self, BootstrapFailure> {
+        let mut html = String::with_capacity(self.html.as_str().len() + element.len());
+        html.push_str(self.html.as_str());
+        html.push_str(element);
+        let reason = TrustedMarkupReason::new(
+            "Live bootstrap markup followed by the framework's page tools element",
+        )
+        .map_err(|_| BootstrapFailure::MarkupRejected)?;
+        let html = TrustedHtml::framework_generated(html, reason)
+            .map_err(|_| BootstrapFailure::MarkupRejected)?;
+        Ok(Self { html, ..self })
+    }
+
     /// Returns the delivery form.
     #[must_use]
     pub const fn strategy(&self) -> LiveBootstrapStrategy {

@@ -9,6 +9,7 @@ mod env_lock;
 mod own_process;
 
 pub mod file_responses;
+pub mod form_request_query;
 mod laravel_delta;
 pub mod laravel_http_gaps;
 pub mod laravel_infra_gaps;
