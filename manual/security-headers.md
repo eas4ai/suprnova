@@ -313,24 +313,52 @@ Choose external scripts with the same care as application dependencies.
 ## Override a route or group
 
 Attach `SecurityHeadersOverride` as ordinary route or group middleware. It
-records changes for the outer global middleware to apply:
+records changes for the outer global middleware to apply.
+
+Building an override can fail, because `header` validates the name and value,
+and `routes!` cannot return that error: it defines `pub fn register() ->
+Router` from its list. Build the overrides in a function that returns a
+`Result`, and register their routes on top of the router `register()` builds:
 
 ```rust,ignore
+// src/routes.rs
 use suprnova::{FrameworkError, Router, SecurityHeadersOverride, get, group, routes};
 
-fn router() -> Result<Router, FrameworkError> {
+use crate::controllers;
+
+// The routes that need no override.
+routes! {
+    get!("/", controllers::home::index),
+}
+
+/// Every route, with the two that carry an override.
+pub fn try_register() -> Result<Router, FrameworkError> {
     let route_policy = SecurityHeadersOverride::new()
         .header("referrer-policy", Some("no-referrer"))?;
     let group_policy = SecurityHeadersOverride::new()
         .header("cross-origin-resource-policy", None)?;
-    Ok(routes! {
-        get!("/report", handlers::report).middleware(route_policy),
-        group!("/shared", {
-            get!("/image", handlers::image),
-        }).middleware(group_policy),
+    let router = get!("/report", controllers::reports::show)
+        .middleware(route_policy)
+        .register(register());
+    Ok(group!("/shared", {
+        get!("/image", controllers::images::show),
     })
+    .middleware(group_policy)
+    .register(router))
 }
 ```
+
+Then call `routes::try_register()` where `cmd/main.rs` calls
+`routes::register()`. In a scaffolded project that is the routes hook, which
+already returns a `Result`:
+
+```rust,ignore
+// cmd/main.rs
+.try_routes_async(|| async { live::routes_with_render_cache(routes::try_register()?).await })
+```
+
+An application without the Live routes passes the function itself to
+`Application::try_routes(routes::try_register)`.
 
 Use `.content_security_policy(None)` on the override to turn off the policy
 in the global builder's selected mode for that route or group. Use the named
