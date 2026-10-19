@@ -7,6 +7,7 @@
 
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use sea_orm_migration::prelude::*;
+use sha2::{Digest, Sha256};
 
 /// A unique index on the lower-cased address of a users table, so
 /// `Alice@example.com` beside `alice@example.com` is refused.
@@ -62,18 +63,39 @@ impl UniqueEmailIgnoringCase {
         }
     }
 
-    /// The index's name, the same on every engine:
-    /// `{table}_{column}_lower_unique_{n}`, where `n` is the table name's
-    /// length. The length tells where the table name ends, so `a_b` and `c`
-    /// never share a name with `a` and `b_c`, whatever underscores either
-    /// holds.
-    fn index_name(&self) -> String {
-        format!(
+    /// The name of the index the migration creates, the same on every
+    /// engine, and the name every check for it looks up.
+    ///
+    /// It is `{table}_{column}_lower_unique_{n}`, where `n` is the table
+    /// name's length: the length tells where the table name ends, so `a_b`
+    /// and `c` never share a name with `a` and `b_c`, whatever underscores
+    /// either holds. A name longer than 63 bytes keeps its first bytes and
+    /// ends with `_` and 16 hex characters of the SHA-256 of the table, a
+    /// zero byte and the column, so it is exactly 63 bytes and still names
+    /// one table and column: PostgreSQL would cut a longer name to 63 bytes
+    /// without saying so, and MySQL refuses one over 64.
+    pub fn index_name(&self) -> String {
+        let full = format!(
             "{}_{}_lower_unique_{}",
             self.table,
             self.column,
             self.table.len()
-        )
+        );
+        if full.len() <= MAX_INDEX_NAME_BYTES {
+            return full;
+        }
+        let mut digest = Sha256::new();
+        digest.update(self.table.as_bytes());
+        digest.update([0_u8]);
+        digest.update(self.column.as_bytes());
+        let suffix = format!("_{}", hex::encode(&digest.finalize()[..8]));
+        let mut keep = MAX_INDEX_NAME_BYTES - suffix.len();
+        // Identifiers are ASCII once checked; a name that is not still
+        // never splits a character.
+        while !full.is_char_boundary(keep) {
+            keep -= 1;
+        }
+        format!("{}{suffix}", &full[..keep])
     }
 
     /// The table and column, checked to be identifiers the SQL can carry.
@@ -82,7 +104,8 @@ impl UniqueEmailIgnoringCase {
             if !is_identifier(value) {
                 return Err(DbErr::Migration(format!(
                     "UniqueEmailIgnoringCase: the {what} name must be a plain SQL identifier \
-                     (letters, digits and _), not {value:?}"
+                     (letters, digits and _) of at most {MAX_IDENTIFIER_BYTES} bytes, not \
+                     {value:?}"
                 )));
             }
         }
@@ -247,13 +270,23 @@ async fn mysql_has_unique_column_index<C: ConnectionTrait + ?Sized>(
         .is_some())
 }
 
-/// Whether `value` is a plain SQL identifier, which needs no escaping
-/// inside quotes on any backend.
+/// The longest index name every engine keeps whole: PostgreSQL's 63
+/// bytes, one under MySQL's 64.
+const MAX_INDEX_NAME_BYTES: usize = 63;
+
+/// The longest table or column name the migration takes: MySQL's limit.
+/// It also keeps the migration's name, which the migrator stores in a
+/// `varchar(255)`, within 170 bytes.
+const MAX_IDENTIFIER_BYTES: usize = 64;
+
+/// Whether `value` is a plain SQL identifier no engine refuses for its
+/// length, which needs no escaping inside quotes on any backend.
 fn is_identifier(value: &str) -> bool {
     let mut chars = value.chars();
-    chars
-        .next()
-        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+    value.len() <= MAX_IDENTIFIER_BYTES
+        && chars
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
@@ -392,6 +425,65 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), pairs.len(), "{names:?}");
+    }
+
+    #[test]
+    fn agent_008_an_index_name_fits_every_engine() {
+        let longest = "t".repeat(64);
+        let column = "c".repeat(64);
+        let name = UniqueEmailIgnoringCase::on(longest.as_str(), column.as_str()).index_name();
+        assert!(name.len() <= 63, "{} bytes: {name}", name.len());
+        // The engine run's table: a unique name per run.
+        let table = "email_case_users_4e766f35571241e1a7be9eca7b7a9828";
+        let name = UniqueEmailIgnoringCase::on(table, "email").index_name();
+        assert_eq!(name.len(), 63, "{name}");
+        assert!(name.starts_with("email_case_users_"), "{name}");
+        // A name that fits is the readable one.
+        assert_eq!(
+            UniqueEmailIgnoringCase::on("users", "email").index_name(),
+            "users_email_lower_unique_5"
+        );
+        assert_eq!(
+            UniqueEmailIgnoringCase::on("app_users", "email_address").index_name(),
+            "app_users_email_address_lower_unique_9"
+        );
+    }
+
+    #[test]
+    fn agent_008_long_names_sharing_a_prefix_stay_apart() {
+        let table = "t".repeat(60);
+        let first = UniqueEmailIgnoringCase::on(table.as_str(), "email_a").index_name();
+        let second = UniqueEmailIgnoringCase::on(table.as_str(), "email_b").index_name();
+        assert!(first.len() <= 63 && second.len() <= 63, "{first} {second}");
+        assert_ne!(first, second);
+        // The same pair always gets the same name, release after release.
+        assert_eq!(
+            first,
+            UniqueEmailIgnoringCase::on(table.as_str(), "email_a").index_name()
+        );
+    }
+
+    #[test]
+    fn agent_008_the_migration_name_fits_the_migrators_version_column() {
+        // The longest table and column the migration takes; its name is
+        // kept in `seaql_migrations.version`, a `varchar(255)` on MySQL.
+        let longest = "t".repeat(64);
+        let column = "c".repeat(64);
+        let migration = UniqueEmailIgnoringCase::on(longest.as_str(), column.as_str());
+        assert!(migration.identifiers().is_ok());
+        assert!(migration.name().len() <= 255, "{}", migration.name().len());
+        // A longer name is no identifier any engine takes.
+        let too_long = "t".repeat(65);
+        assert!(
+            UniqueEmailIgnoringCase::on(too_long.as_str(), "email")
+                .identifiers()
+                .is_err()
+        );
+        assert!(
+            UniqueEmailIgnoringCase::on("users", too_long.as_str())
+                .identifiers()
+                .is_err()
+        );
     }
 
     #[test]

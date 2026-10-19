@@ -122,8 +122,9 @@ async fn indexes_of(db: &DatabaseConnection, table: &str) -> Vec<String> {
         ),
         DbBackend::MySql => Statement::from_sql_and_values(
             backend,
-            "SELECT CONCAT(INDEX_NAME, ' ', COALESCE(COLUMN_NAME, ''), ' ', \
-             COALESCE(EXPRESSION, ''), ' ', NON_UNIQUE) FROM information_schema.STATISTICS \
+            // No EXPRESSION column: MariaDB's STATISTICS has none.
+            "SELECT CONCAT(INDEX_NAME, ' ', COALESCE(COLUMN_NAME, ''), ' ', NON_UNIQUE, ' ', \
+             SEQ_IN_INDEX) FROM information_schema.STATISTICS \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
             [table.into()],
         ),
@@ -142,8 +143,15 @@ async fn indexes_of(db: &DatabaseConnection, table: &str) -> Vec<String> {
 
 /// The migration, twice, on a users table of `db`: the second run changes
 /// nothing, and the table then refuses a second address differing only in
-/// case.
-async fn refuses_case_duplicates(db: &DatabaseConnection, table: &str, collation: &str) {
+/// case. `functional` says whether the engine takes a functional index,
+/// which the migration then creates; without one it adds none and the
+/// column's own unique index refuses the duplicate.
+async fn refuses_case_duplicates(
+    db: &DatabaseConnection,
+    table: &str,
+    collation: &str,
+    functional: bool,
+) {
     create_users(db, table, true, collation).await;
     up(db, table).await.expect("the first run");
     let first = indexes_of(db, table).await;
@@ -153,7 +161,7 @@ async fn refuses_case_duplicates(db: &DatabaseConnection, table: &str, collation
         indexes_of(db, table).await,
         "the second run changed nothing"
     );
-    assert!(has_index(db, table, &index_of(table)).await);
+    assert_eq!(has_index(db, table, &index_of(table)).await, functional);
     insert(db, table, "alice@example.test")
         .await
         .expect("the first account");
@@ -165,10 +173,37 @@ async fn refuses_case_duplicates(db: &DatabaseConnection, table: &str, collation
     drop_users(db, table).await;
 }
 
-/// The index the migration makes on `table`'s `email`: the table name's
-/// length closes the name, so no other table and column share it.
+/// The index the migration makes on `table`'s `email`, named as the
+/// migration names it.
 fn index_of(table: &str) -> String {
-    format!("{table}_email_lower_unique_{}", table.len())
+    UniqueEmailIgnoringCase::on(table, "email").index_name()
+}
+
+/// Whether a MySQL-family server takes functional indexes, by the rule the
+/// migration follows: MySQL 8.0.13 and later, never MariaDB.
+async fn takes_functional_indexes(db: &DatabaseConnection) -> bool {
+    let row = db
+        .query_one_raw(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT VERSION()",
+        ))
+        .await
+        .expect("the version")
+        .expect("a row");
+    let version: String = row.try_get_by_index(0).expect("a version");
+    if version.to_ascii_lowercase().contains("mariadb") {
+        return false;
+    }
+    let mut parts = version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    let release = (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    );
+    release >= (8, 0, 13)
 }
 
 /// A table name no other run uses.
@@ -203,7 +238,7 @@ async fn agent_008_users_email_is_unique_ignoring_case_on_sqlite() {
     insert(&db, "plain_users", "ALICE@example.test")
         .await
         .expect("SQLite's unique column alone takes it");
-    refuses_case_duplicates(&db, "users", "").await;
+    refuses_case_duplicates(&db, "users", "", true).await;
     // `down` drops the index, and the duplicate goes in again.
     create_users(&db, "users", true, "").await;
     up(&db, "users").await.expect("up");
@@ -267,16 +302,24 @@ async fn agent_008_email_index_migration_refuses_an_identifier_it_cannot_quote()
 #[ignore = "requires disposable Postgres at PG_TEST_URL"]
 async fn agent_008_users_email_is_unique_ignoring_case_on_postgres() {
     let db = engine("PG_TEST_URL").await;
-    refuses_case_duplicates(&db, &unique_table(), "").await;
+    refuses_case_duplicates(&db, &unique_table(), "", true).await;
 }
 
 #[tokio::test]
-#[ignore = "requires disposable MySQL 8.0.13 or later at MYSQL_TEST_URL"]
+#[ignore = "requires a disposable MySQL or MariaDB at MYSQL_TEST_URL"]
 async fn agent_008_users_email_is_unique_ignoring_case_on_mysql() {
     let db = engine("MYSQL_TEST_URL").await;
-    // A binary collation makes the column's own unique index compare case,
-    // so the refusal below is the functional index's.
-    refuses_case_duplicates(&db, &unique_table(), "COLLATE utf8mb4_bin").await;
+    if takes_functional_indexes(&db).await {
+        // A binary collation makes the column's own unique index compare
+        // case, so the refusal below is the functional index's.
+        refuses_case_duplicates(&db, &unique_table(), "COLLATE utf8mb4_bin", true).await;
+    } else {
+        // The gate runs MySQL-named tests against MariaDB too, which has no
+        // functional index: the migration relies on a case-insensitive
+        // collation, so the column gets one, and the refusal below is its
+        // unique index's.
+        refuses_case_duplicates(&db, &unique_table(), "COLLATE utf8mb4_general_ci", false).await;
+    }
 }
 
 #[tokio::test]
