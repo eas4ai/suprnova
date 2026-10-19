@@ -1857,20 +1857,145 @@ async fn agent_009_claim_dispatches_agent_claimed() {
     let user = new_account("claimed-event");
     let _events = EventFacade::fake_only(&["AgentClaimed"]);
     let claimed = claim_anonymous(&world, &user).await;
+    let registration_id = claimed.registration["registration_id"].as_str().unwrap();
     let events = dispatched::<AgentClaimed>(|_| true);
     assert_eq!(
         events,
         vec![AgentClaimed {
-            registration_id: claimed.registration["registration_id"]
-                .as_str()
-                .unwrap()
-                .to_owned(),
+            event_id: outbox_of(&world.db, registration_id).await[0].id.clone(),
+            registration_id: registration_id.to_owned(),
             registration_type: "anonymous".to_owned(),
             user_id: user.clone(),
             provider: None,
             client_address: Some(PEER.to_owned()),
         }]
     );
+}
+
+/// Every outbox event of a registration.
+async fn outbox_of(
+    db: &DatabaseConnection,
+    registration_id: &str,
+) -> Vec<magnetar::agent_auth::sql::agent_events::Model> {
+    use magnetar::agent_auth::sql::agent_events;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    agent_events::Entity::find()
+        .filter(agent_events::Column::RegistrationId.eq(registration_id.to_owned()))
+        .all(db)
+        .await
+        .expect("read the outbox")
+}
+
+#[tokio::test]
+async fn agent_009_claim_event_carries_a_stable_id() {
+    let world = agent_world(|agent| agent).await;
+    let user = new_account("stable-id");
+    let _events = EventFacade::fake_only(&["AgentClaimed", "MagnetarLifecycleEvent"]);
+    let claimed = claim_anonymous(&world, &user).await;
+    let registration_id = claimed.registration["registration_id"].as_str().unwrap();
+    let outbox = outbox_of(&world.db, registration_id).await;
+    assert_eq!(outbox.len(), 1, "the claim wrote one event");
+    assert!(
+        outbox[0].delivered_at.is_some(),
+        "delivered after the commit"
+    );
+    let event_id = outbox[0].id.clone();
+    assert!(event_id.starts_with("agent-auth:"), "{event_id}");
+    let claimed_events = dispatched::<AgentClaimed>(|_| true);
+    assert_eq!(claimed_events.len(), 1);
+    assert_eq!(claimed_events[0].event_id, event_id);
+    let lifecycle = dispatched::<MagnetarLifecycleEvent>(|event| {
+        event.kind.audit_name() == Some("claim.confirmed")
+    });
+    assert_eq!(lifecycle.len(), 1);
+    assert_eq!(
+        lifecycle[0].mutation_id, event_id,
+        "one id on every form of it"
+    );
+}
+
+/// An `AgentClaimed` listener that fails its first call and records the
+/// event id of every call.
+#[derive(Default)]
+struct FailsFirst {
+    calls: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl suprnova::Listener<AgentClaimed> for FailsFirst {
+    async fn handle(&self, event: &AgentClaimed) -> Result<(), FrameworkError> {
+        let first = {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(event.event_id.clone());
+            calls.len() == 1
+        };
+        if first {
+            return Err(FrameworkError::internal("the listener's store is down"));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn agent_009_claim_event_survives_a_failed_dispatch() {
+    if !crate::own_process::is_child() {
+        crate::own_process::run_alone(
+            "agent_auth::agent_009_claim_event_survives_a_failed_dispatch",
+        );
+        return;
+    }
+    // SAFETY: this test runs alone in its own process.
+    unsafe {
+        std::env::set_var("APP_ENV", "testing");
+        std::env::set_var("APP_URL", ISSUER);
+    }
+    suprnova::boot::load_env().expect("pre-runtime configuration");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(async {
+            let listener = Arc::new(FailsFirst::default());
+            EventFacade::listen::<AgentClaimed, _>(listener.clone()).await;
+            let world = agent_world(|agent| agent).await;
+            let user = new_account("failed-dispatch");
+            // The claim stands though its event's first dispatch fails.
+            let claimed = claim_anonymous(&world, &user).await;
+            let registration_id = claimed.registration["registration_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let outbox = outbox_of(&world.db, &registration_id).await;
+            assert_eq!(outbox.len(), 1);
+            assert!(outbox[0].delivered_at.is_none(), "the event is not lost");
+            let event_id = outbox[0].id.clone();
+            assert_eq!(
+                listener.calls.lock().unwrap().clone(),
+                vec![event_id.clone()]
+            );
+
+            let (db, pem, resolver, documents) = (
+                world.db.clone(),
+                world.pem.clone(),
+                world.resolver.clone(),
+                world.documents.clone(),
+            );
+            suprnova::Application::new()
+                .routes(move || agent_router(&db, &pem, &resolver, &documents, |agent| agent))
+                .run_with_args(["app", "agents:prune"])
+                .await
+                .expect("agents:prune runs");
+            assert_eq!(
+                listener.calls.lock().unwrap().clone(),
+                vec![event_id.clone(), event_id.clone()],
+                "the pass fires AgentClaimed again, with the same event id"
+            );
+            assert!(
+                outbox_of(&world.db, &registration_id).await[0]
+                    .delivered_at
+                    .is_some()
+            );
+        });
 }
 
 #[tokio::test]

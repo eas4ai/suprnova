@@ -9,8 +9,8 @@ use serde_json::{Map, Value};
 use super::AgentClaimed;
 use crate::magnetar_integration::engine::MagnetarLifecycleEvent;
 
-/// Records every audit event agent auth emits. Each one is written once,
-/// after the mutation it describes committed:
+/// Records every audit event agent auth emits, after the mutation it
+/// describes committed:
 ///
 /// 1. one log record, to the channel the application named or the default
 ///    one, whose message is fixed (`agent auth: registration.created`) and
@@ -21,8 +21,12 @@ use crate::magnetar_integration::engine::MagnetarLifecycleEvent;
 /// 2. a [`MagnetarLifecycleEvent`] carrying the attributes;
 /// 3. [`AgentClaimed`] for a confirmed claim.
 ///
-/// Both dispatches are best effort: a listener's error is logged and never
-/// turns the committed mutation into a failure.
+/// A listener's error never turns the committed mutation into a failure.
+/// The claim's event comes from agent auth's outbox, though: when an
+/// [`AgentClaimed`] listener fails, `enqueue` answers `Err`, the event stays
+/// in the outbox, and the next delivery pass hands it here again with the
+/// same mutation id. So a claim's record and both its dispatches can come
+/// more than once. Every other event is delivered once, best effort.
 pub(crate) struct AuditSink {
     channel: Option<String>,
     trusted: Vec<TrustedIssuer>,
@@ -72,6 +76,8 @@ impl AuditSink {
     fn claimed(&self, event: &LifecycleEvent) -> AgentClaimed {
         let attribute = |name: &str| event.attributes.get(name).cloned();
         AgentClaimed {
+            // The outbox event's identifier: the same on every delivery.
+            event_id: event.mutation_id.clone(),
             registration_id: attribute("registration_id").unwrap_or_default(),
             registration_type: attribute("registration_type").unwrap_or_default(),
             user_id: event.user_id.clone(),
@@ -102,7 +108,16 @@ impl DurableLifecycleDelivery for AuditSink {
             && let Err(error) =
                 crate::events::EventFacade::dispatch_best_effort(self.claimed(&event)).await
         {
-            tracing::error!(%error, "a listener of AgentClaimed failed");
+            tracing::error!(
+                %error,
+                event_id = %event.mutation_id,
+                "a listener of AgentClaimed failed; the event stays in the outbox for the next \
+                 delivery pass"
+            );
+            return Err(magnetar::plugin::PluginError::Request {
+                plugin: "agent-auth".to_owned(),
+                message: format!("a listener of AgentClaimed failed: {error}"),
+            });
         }
         Ok(())
     }
@@ -158,6 +173,7 @@ mod tests {
         assert_eq!(
             sink.claimed(&event),
             AgentClaimed {
+                event_id: "agent-auth:2".to_owned(),
                 registration_id: "reg_2".to_owned(),
                 registration_type: "identity_assertion".to_owned(),
                 user_id: "user-7".to_owned(),

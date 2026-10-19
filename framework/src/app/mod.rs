@@ -348,8 +348,9 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Expire unclaimed agent registrations past their window and delete
-    /// spent replay records, the pass `serve` runs every five minutes.
+    /// Deliver waiting claim events, expire unclaimed agent registrations
+    /// past their window and delete spent replay records and old delivered
+    /// claim events: the pass `serve` runs every five minutes.
     #[cfg(feature = "agents")]
     #[command(name = "agents:prune")]
     AgentsPrune,
@@ -1671,8 +1672,9 @@ where
             AgentsCommand::Prune => {
                 let done = operator::maintain(&engine).await?;
                 println!(
-                    "Expired {} agent registrations and pruned {} replay records.",
-                    done.expired, done.pruned
+                    "Delivered {} claim events, expired {} agent registrations, and pruned {} \
+                     replay records and {} delivered claim events.",
+                    done.delivered, done.expired, done.pruned, done.events_pruned
                 );
             }
         }

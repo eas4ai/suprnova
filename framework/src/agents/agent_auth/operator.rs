@@ -33,26 +33,47 @@ pub(crate) async fn revoke_all(
 /// What one maintenance pass did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Maintenance {
+    /// Claim events a failed dispatch or a stopped process left, now
+    /// delivered.
+    pub(crate) delivered: u64,
     /// Unclaimed registrations whose window passed, now expired with their
     /// tokens ended and `registration.expired` recorded.
     pub(crate) expired: u64,
     /// Replay records of provider tokens that can no longer be replayed.
     pub(crate) pruned: u64,
+    /// Claim events delivered longer ago than the outbox keeps them.
+    pub(crate) events_pruned: u64,
 }
 
-/// Expire the registrations whose window passed, then delete the replay
-/// records no token can use any more. Each step is a conditional write, so
-/// every node may run it at once.
+/// Deliver the claim events still waiting, expire the registrations whose
+/// window passed, then delete the replay records no token can use and the
+/// claim events delivered more than seven days ago. Each step is a
+/// conditional write, so every node may run it at once.
 pub(crate) async fn maintain(
     engine: &magnetar::agent_auth::AgentAuth,
 ) -> Result<Maintenance, FrameworkError> {
+    let delivered = engine.deliver_pending_events().await.map_err(|error| {
+        FrameworkError::internal(format!(
+            "delivering agent auth's claim events failed: {error}"
+        ))
+    })?;
     let expired = engine.expire_registrations().await.map_err(|error| {
         FrameworkError::internal(format!("expiring agent registrations failed: {error}"))
     })?;
     let pruned = engine.prune_replay_records().await.map_err(|error| {
         FrameworkError::internal(format!("pruning agent auth replay records failed: {error}"))
     })?;
-    Ok(Maintenance { expired, pruned })
+    let events_pruned = engine.prune_delivered_events().await.map_err(|error| {
+        FrameworkError::internal(format!(
+            "pruning agent auth's delivered events failed: {error}"
+        ))
+    })?;
+    Ok(Maintenance {
+        delivered,
+        expired,
+        pruned,
+        events_pruned,
+    })
 }
 
 /// A new signing key: its identifier and its P-256 private key in PKCS#8
@@ -107,8 +128,10 @@ pub(crate) fn spawn_maintenance(
             interval.tick().await;
             match maintain(&engine).await {
                 Ok(done) => tracing::debug!(
+                    delivered = done.delivered,
                     expired = done.expired,
                     pruned = done.pruned,
+                    events_pruned = done.events_pruned,
                     "agent auth maintenance pass"
                 ),
                 Err(error) => tracing::error!(%error, "agent auth maintenance pass failed"),
