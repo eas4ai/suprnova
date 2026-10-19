@@ -412,28 +412,30 @@ export class DocumentRuntime {
         : parsed;
       const call = this.#agentCalls.get(ticket.intent);
       this.#agentCalls.delete(ticket.intent);
-      // A navigation, or a refusal the island recovers from by reloading
-      // or stopping, ends the page's WebMCP calls of the island: each
-      // pending one is answered, the island's tools leave so no new call
-      // starts, and the recovery waits until the results can reach the
-      // agent. A refused click with no call pending recovers at once.
-      const leaving =
-        response.kind === "navigation" || response.kind === "recovery" || response.kind === "fatal";
-      if (leaving) {
-        await this.#agentHost.release(
-          record,
-          (pending) =>
-            pending === call?.pending
-              ? call.answer(response, true)
-              : agentToolError(this.#endedCallMessage(record, pending)),
-          (pending) => {
-            const other = this.#agentTickets.get(pending);
-            if (pending !== call?.pending && other !== undefined) {
-              record.scheduler.cancel(other, { abortTransport: false });
-            }
-          },
-        );
-      } else if (response.kind !== "committed") {
+      // A navigation, or a refusal recovered by reloading the page, ends
+      // every island's WebMCP calls; a refusal that stops the island ends
+      // its own. Before either, each pending call is answered, the tools
+      // leave so no new call starts, and the recovery waits until the
+      // results can reach the agent. A refused click with no call pending
+      // recovers at once.
+      const pageLevel =
+        response.kind === "navigation" ||
+        response.kind === "recovery" ||
+        (response.kind === "fatal" && response.recovery === "navigate");
+      const islandLevel = response.kind === "fatal" && !pageLevel;
+      const answer = (pending: PendingAgentCall, island: IslandRecord): ModelContextToolResult =>
+        pending === call?.pending
+          ? call.answer(response, true)
+          : agentToolError(this.#endedCallMessage(island, pending));
+      const after = (pending: PendingAgentCall, island: IslandRecord): void => {
+        const other = this.#agentTickets.get(pending);
+        if (pending !== call?.pending && other !== undefined) {
+          island.scheduler.cancel(other, { abortTransport: false });
+        }
+      };
+      if (pageLevel) await this.#agentHost.releaseAll(answer, after);
+      else if (islandLevel) await this.#agentHost.release(record, answer, after);
+      else if (response.kind !== "committed") {
         call?.pending.settle(call.answer(response, true));
       }
       const machine = new ResponseApplicationMachine(
@@ -462,9 +464,12 @@ export class DocumentRuntime {
       );
       const accepted = result.disposition === "committed" || result.disposition === "navigated";
       if (response.kind === "committed") call?.pending.settle(call.answer(response, accepted));
-      // A released island that stayed, its response stale, offers its
-      // tools again.
-      if (leaving && !LEFT_PAGE.has(result.disposition)) this.#agentHost.restore(record);
+      // Islands released for a response that did not end them, a stale
+      // one, offer their tools again.
+      if (!LEFT_PAGE.has(result.disposition)) {
+        if (pageLevel) this.#agentHost.restoreAll();
+        else if (islandLevel) this.#agentHost.restore(record);
+      }
       record.scheduler.finish(ticket, accepted ? "accepted" : "rejected");
     } catch {
       record.scheduler.finish(ticket, "rejected");

@@ -63,27 +63,37 @@ function message(issue: unknown): string {
   return typeof words === "string" ? words : "";
 }
 
+/** The field a validation path names: everything before its first `.` or `[`. */
+function fieldRoot(path: string): string {
+  return /^[^.[]*/u.exec(path)?.[0] ?? "";
+}
+
 /**
  * Each validation issue the agent may read, by path, with its words: an
- * issue on an agent-visible field or on one of the tool's arguments. An
- * issue on any other path is reported once, under the empty path and with
- * no message, so the agent learns the call failed validation without
- * reading a field it cannot see. The server's headless result reports
- * issues the same way.
+ * issue on an agent-visible field, or on one of the tool's arguments that
+ * no other field of the component shares a name with. Arguments and fields
+ * share one key space, so an argument named like a field the agent cannot
+ * see may be reporting that field's issue, and fails closed. Any other
+ * issue is reported once, under the empty path and with no message, so the
+ * agent learns the call failed validation without reading a field it
+ * cannot see. The server's headless result reports issues the same way.
  */
 function shownValidation(
   validation: Readonly<Record<string, unknown>>,
   scope: AgentResultScope,
+  stateFields: readonly string[],
 ): Record<string, string[]> {
-  const shown = new Set([...scope.fields, ...scope.arguments]);
+  const visible = new Set(scope.fields);
+  const hidden = new Set(stateFields.filter((field) => !visible.has(field)));
+  const arguments_ = new Set(scope.arguments.filter((argument) => !hidden.has(argument)));
   const out: Record<string, string[]> = {};
-  let hidden = false;
+  let generic = false;
   for (const [path, issue] of Object.entries(validation)) {
-    const root = path.split(".", 1)[0] ?? "";
-    if (shown.has(root)) out[path] = [message(issue)];
-    else hidden = true;
+    const root = fieldRoot(path);
+    if (visible.has(root) || arguments_.has(root)) out[path] = [message(issue)];
+    else generic = true;
   }
-  if (hidden) out[""] = [];
+  if (generic) out[""] = [];
   return out;
 }
 
@@ -138,7 +148,14 @@ export function agentToolResult(
         outcome,
         fields: agentFields(response.snapshot, fields, scope.integers),
       };
-      if (invalid) structured["validation"] = shownValidation(validation, scope);
+      if (invalid) {
+        const state = record(record(response.snapshot["body"])?.["state"]);
+        structured["validation"] = shownValidation(
+          validation,
+          scope,
+          state === null ? [] : Object.keys(state),
+        );
+      }
       return result(structured, invalid);
     }
     case "navigation":

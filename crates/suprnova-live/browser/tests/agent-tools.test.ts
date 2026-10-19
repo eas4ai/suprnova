@@ -285,6 +285,36 @@ describe("the tool result", () => {
     expect(argumentNames({ ...TOOL, inputSchema: { type: "object" } })).toEqual([]);
   });
 
+  it("agent_013 an argument named like a hidden field shows only the generic issue", () => {
+    // `probe(secret)` on a component whose `secret` field is locked: the
+    // issue may be the field's, so it fails closed.
+    const result = agentToolResult(
+      committed(
+        { count: 3, secret: "hidden" },
+        { secret: { id: "validation.length", text: "The secret is too long." } },
+      ),
+      { fields: ["count"], integers: [], arguments: ["secret"] },
+    );
+    expect(result.structuredContent).toEqual({
+      outcome: "invalid",
+      fields: { count: 3 },
+      validation: { "": [] },
+    });
+    expect(result.content[0]?.text).not.toContain("too long");
+  });
+
+  it("agent_013 a keyed path of a visible field shows in full", () => {
+    const result = agentToolResult(
+      committed({ items: {} }, { "items[k].qty": { id: "validation.range", text: "Too many." } }),
+      { fields: ["items"], integers: [], arguments: [] },
+    );
+    expect(result.structuredContent).toEqual({
+      outcome: "invalid",
+      fields: { items: {} },
+      validation: { "items[k].qty": ["Too many."] },
+    });
+  });
+
   it("agent_012 a refused action is an error", () => {
     const result = agentToolResult(
       {

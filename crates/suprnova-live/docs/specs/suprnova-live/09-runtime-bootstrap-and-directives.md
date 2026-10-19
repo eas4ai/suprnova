@@ -309,24 +309,29 @@ Acceptance criteria:
 - A call resolves to `{content, structuredContent, isError}`. A committed
   response gives the outcome, `accepted`, `no_render` or `invalid` with the
   validation issues the agent may read (spec 05), the tool's arguments being
-  the properties its input schema lists, and the agent-visible fields of the
+  the properties its input schema lists less any a field of the committed
+  snapshot's state not listed in `fields` shares a name with, and a path
+  matched by its field root, everything before its first `.` or `[`, and
+  the agent-visible fields of the
   committed snapshot, with a field `integers` lists as its decimal string and
   every other field as the snapshot carries it; a navigation gives
   `redirect`. A refused response gives an error. The result carries nothing
   else of the island's state, HTML, events or effects.
 - A refused call delivers its `isError` result to the agent before the island
   applies any recovery from the refusal, a page reload included, so the
-  agent hears of every refusal. When a response would end the island, a
-  navigation or a refusal the island recovers from by reloading, remounting
-  or stopping, the runtime unregisters the island's tools at once, answers
-  every pending call of the island, the response's own call with its result
-  and any other with an error saying whether it ran, and holds the response
-  250 ms before applying it: the browser passes a result to the agent
-  asynchronously and the page cannot observe when it has. A call that
-  arrives meanwhile, through a registration that has left, is answered with
-  an error and never queued. With no call pending the recovery runs at once,
-  as a refused click's does, and an island the response leaves in place
-  registers its tools again.
+  agent hears of every refusal. A response that would reload or navigate
+  the page, a navigation or a refusal recovered by reloading, remounting or
+  navigating, ends every island's calls, whichever island it answers: before
+  applying it the runtime unregisters every island's tools at once, answers
+  every island's pending calls, the response's own call with its result and
+  any other with an error saying whether it ran, and holds the response
+  250 ms when any island had a call pending: the browser passes a result to
+  the agent asynchronously and the page cannot observe when it has. A
+  refusal that only stops its island does the same for that island alone.
+  A call that arrives meanwhile, through a registration that has left, is
+  answered with an error and never queued. With no call pending anywhere
+  the recovery runs at once, as a refused click's does, and islands the
+  response leaves in place register their tools again.
 
 UX flow:
 
@@ -350,6 +355,13 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-18 -- A page-level reload answers every island's WebMCP calls
+  first. Recovery reloads the whole page, but only the refused island's
+  calls were answered and held for, so a refused click on one island ended
+  another island's call in flight with no result, and its tools stayed
+  registered meanwhile. An argument named like a hidden field of the
+  snapshot no longer shows that field's issue, and a keyed path such as
+  `items[k].qty` is matched by `items`.
 - 2026-10-18 -- A page offers no tool on a router that does not serve
   agents. The attribute came from the component's metadata alone, so an
   application without `Router::agents` registered WebMCP tools whose calls

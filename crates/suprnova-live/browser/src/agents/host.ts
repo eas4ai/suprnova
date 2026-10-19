@@ -9,7 +9,9 @@
  * first ends without a result, so the agent never hears of the refusal.
  * {@link AgentToolHost.release} answers every pending call of the island
  * first, unregisters the island's tools so no new call starts, and holds the
- * recovery long enough for the browser to hand the results to the agent.
+ * recovery long enough for the browser to hand the results to the agent;
+ * {@link AgentToolHost.releaseAll} does the same for every island before a
+ * reload or navigation of the whole page.
  */
 import type {
   ModelContextClient,
@@ -142,35 +144,71 @@ export class AgentToolHost<Island extends object> {
   }
 
   /**
-   * `island` is about to reload or leave the page: unregister its tools at
-   * once, answer every pending call with `answer`, then hand each to
-   * `after`, and resolve once the browser has had
-   * {@link AGENT_RESULT_HOLD_MS} to pass those results to the agent. With no
-   * call pending it resolves at once.
+   * `island` alone is about to stop: unregister its tools at once, answer
+   * every pending call with `answer`, then hand each to `after`, and
+   * resolve once the browser has had {@link AGENT_RESULT_HOLD_MS} to pass
+   * those results to the agent. With no call pending it resolves at once.
    */
   async release(
     island: Island,
-    answer: (call: PendingAgentCall) => ModelContextToolResult,
-    after: (call: PendingAgentCall) => void = () => undefined,
+    answer: (call: PendingAgentCall, island: Island) => ModelContextToolResult,
+    after: (call: PendingAgentCall, island: Island) => void = () => undefined,
   ): Promise<void> {
     const entry = this.#entries.get(island);
-    if (entry === undefined) return;
-    this.#unregister(entry);
-    const calls = [...entry.pending];
-    if (calls.length === 0) return;
-    for (const call of calls) {
-      call.settle(answer(call));
-      after(call);
+    if (entry !== undefined && this.#releaseEntry(island, entry, answer, after)) {
+      await this.#hold();
     }
-    await new Promise<void>((resolve) => {
-      this.#scheduler.timeout(resolve, AGENT_RESULT_HOLD_MS);
-    });
+  }
+
+  /**
+   * The whole page is about to reload or navigate: every island's tools
+   * leave at once, every island's pending calls are answered, and the
+   * promise resolves after the hold when any island had one. A reload for
+   * one island ends every island's calls, so all of them hear first.
+   */
+  async releaseAll(
+    answer: (call: PendingAgentCall, island: Island) => ModelContextToolResult,
+    after: (call: PendingAgentCall, island: Island) => void = () => undefined,
+  ): Promise<void> {
+    let pending = false;
+    for (const [island, entry] of this.#entries) {
+      if (this.#releaseEntry(island, entry, answer, after)) pending = true;
+    }
+    if (pending) await this.#hold();
   }
 
   /** `island` stayed on the page after a release: register its tools again. */
   restore(island: Island): void {
     const entry = this.#entries.get(island);
     if (entry !== undefined && !this.#suspended) this.#register(entry);
+  }
+
+  /** The page stayed after a release of every island: register them all again. */
+  restoreAll(): void {
+    if (this.#suspended) return;
+    for (const entry of this.#entries.values()) this.#register(entry);
+  }
+
+  /** Unregister `entry` and answer its pending calls; whether it had any. */
+  #releaseEntry(
+    island: Island,
+    entry: Entry,
+    answer: (call: PendingAgentCall, island: Island) => ModelContextToolResult,
+    after: (call: PendingAgentCall, island: Island) => void,
+  ): boolean {
+    this.#unregister(entry);
+    const calls = [...entry.pending];
+    for (const call of calls) {
+      call.settle(answer(call, island));
+      after(call, island);
+    }
+    return calls.length > 0;
+  }
+
+  #hold(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      this.#scheduler.timeout(resolve, AGENT_RESULT_HOLD_MS);
+    });
   }
 
   #register(entry: Entry): void {
