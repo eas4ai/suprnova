@@ -1,5 +1,6 @@
 //! Shared fixtures keep each native database corpus isolated.
 
+use sea_orm_migration::prelude::{Alias, DynIden, IntoIden};
 use sea_orm_migration::{MigrationTrait, MigratorTrait, SchemaManager};
 use std::{collections::BTreeMap, sync::Arc};
 use suprnova::{
@@ -20,6 +21,13 @@ pub(super) struct Migrator;
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
         suprnova::search::migrations()
+    }
+
+    /// A ledger of its own: the gate runs every engine test against one
+    /// database, and a migrator refuses a ledger naming migrations it does
+    /// not have, so the search tests' rows must not sit in the shared one.
+    fn migration_table_name() -> DynIden {
+        Alias::new("suprnova_search_test_ledger").into_iden()
     }
 }
 

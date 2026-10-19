@@ -128,6 +128,63 @@ impl Db {
 
 static SQLITE_FILES: AtomicU64 = AtomicU64::new(0);
 
+/// Drops what the tests created in `public`, and nothing an extension owns.
+///
+/// Dropping the schema itself would take the database's extensions with it,
+/// `vector` from the template included, and the gate's role may not create
+/// them again: the pgvector tests that share the database then fail.
+const EMPTY_THE_PUBLIC_SCHEMA: &str = r#"DO $$
+DECLARE
+    item record;
+BEGIN
+    FOR item IN
+        SELECT c.relname,
+               CASE c.relkind
+                   WHEN 'v' THEN 'VIEW'
+                   WHEN 'm' THEN 'MATERIALIZED VIEW'
+                   WHEN 'S' THEN 'SEQUENCE'
+                   WHEN 'f' THEN 'FOREIGN TABLE'
+                   ELSE 'TABLE'
+               END AS kind
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e'
+          )
+    LOOP
+        EXECUTE format('DROP %s IF EXISTS public.%I CASCADE', item.kind, item.relname);
+    END LOOP;
+    FOR item IN
+        SELECT p.oid::regprocedure::text AS signature
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public'
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e'
+          )
+    LOOP
+        EXECUTE format('DROP ROUTINE IF EXISTS %s CASCADE', item.signature);
+    END LOOP;
+    FOR item IN
+        SELECT t.typname,
+               CASE t.typtype WHEN 'd' THEN 'DOMAIN' ELSE 'TYPE' END AS kind
+        FROM pg_type t
+        JOIN pg_namespace n ON n.oid = t.typnamespace
+        WHERE n.nspname = 'public'
+          AND (t.typtype IN ('d', 'e', 'r')
+               OR (t.typtype = 'c'
+                   AND EXISTS (SELECT 1 FROM pg_class c
+                               WHERE c.oid = t.typrelid AND c.relkind = 'c')))
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_depend d WHERE d.objid = t.oid AND d.deptype = 'e'
+          )
+    LOOP
+        EXECUTE format('DROP %s IF EXISTS public.%I CASCADE', item.kind, item.typname);
+    END LOOP;
+END
+$$"#;
 /// An empty database on `engine`.
 pub async fn empty(engine: Engine) -> Db {
     match engine {
@@ -160,12 +217,9 @@ pub async fn empty(engine: Engine) -> Db {
             let url = std::env::var("PG_TEST_URL")
                 .expect("set PG_TEST_URL to a throwaway Postgres database");
             let conn = connect(&url, 4).await;
-            conn.execute_unprepared("DROP SCHEMA IF EXISTS public CASCADE")
+            conn.execute_unprepared(EMPTY_THE_PUBLIC_SCHEMA)
                 .await
-                .expect("drop the public schema");
-            conn.execute_unprepared("CREATE SCHEMA public")
-                .await
-                .expect("create the public schema");
+                .expect("empty the public schema");
             Db {
                 conn,
                 sqlite_file: None,

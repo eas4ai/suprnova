@@ -440,4 +440,8 @@ pub async fn fresh_reloads_views_and_routines(url: &str, dir: &Path, engine: &st
     db.execute_unprepared("DROP VIEW sd_emails")
         .await
         .expect("clean up");
+    // Leave the database empty, its ledger included: the gate runs other
+    // engine tests against the same database afterwards, and a migrator
+    // refuses a ledger that names migrations it does not have.
+    wipe(&db).await;
 }

@@ -30,6 +30,7 @@ pub mod password_reset_provider;
 pub mod revoke_user_credentials;
 #[cfg(feature = "testing")]
 pub mod scaffold_token_table;
+pub mod token_consume_engines;
 #[cfg(feature = "testing")]
 pub mod two_factor;
 pub mod two_factor_brute_force_integration;

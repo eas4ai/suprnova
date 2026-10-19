@@ -307,9 +307,9 @@ async fn finish_transaction_inner(
 /// A retry is only ever safe when nothing was written. Once the COMMIT lands,
 /// the closure's writes are durable and re-running it would apply them twice -
 /// so an after-commit callback failing has to be a distinct outcome, not an
-/// error the retry loop pattern-matches on a message. `is_deadlock` matches the
-/// substring `"deadlock"`, and a deferred queue push failing against a
-/// contended table produces exactly that string, after the commit.
+/// error the retry loop classifies. `is_deadlock` retries a deadlock by its
+/// database code, and a deferred queue push failing against a contended table
+/// produces exactly that error, after the commit.
 enum TransactionFailure {
     /// The transaction did not commit: the closure returned `Err`, a leaked
     /// `TxHandle` blocked the commit, or the database refused it. Nothing is
@@ -2083,21 +2083,29 @@ impl DB {
     }
 
     /// Run `f` inside a transaction, retrying up to `attempts` times
-    /// when the inner `FrameworkError` looks like a deadlock or
-    /// serialization failure.
+    /// when the database refused an attempt with a deadlock, a lock wait
+    /// timeout or a serialization failure.
     ///
     /// The closure body runs from scratch on every attempt - capture
     /// owned state (or `Arc`s) rather than `&mut` references so the
     /// retry path is well-defined.
     ///
-    /// Detection is by Display-string substring against the inner
-    /// error:
+    /// The database's error code decides, not the words of its message:
     ///
-    /// - Postgres SQLSTATE `40001` (serialization_failure)
-    /// - Postgres SQLSTATE `40P01` (deadlock_detected)
-    /// - Case-insensitive `"deadlock"` substring (covers MySQL
-    ///   `Deadlock found when trying to get lock` and any user-
-    ///   surfaced deadlock string)
+    /// - MySQL and MariaDB error 1213 (deadlock), 1205 (lock wait
+    ///   timeout) and 1020 (a row changed after the transaction's first
+    ///   read, under MariaDB's `innodb_snapshot_isolation`)
+    /// - SQLSTATE `40001` (serialization failure) and `40P01` (deadlock)
+    ///
+    /// An error with any other code is returned at once. The code is read
+    /// from a database error the `FrameworkError` keeps as its source, as
+    /// [`FrameworkError::from_external`] keeps one, and otherwise from the
+    /// error number sqlx's MySQL driver writes at the front of the text `?`
+    /// leaves. A Postgres error turned into text keeps no code, so wrap the
+    /// `DbErr` with [`FrameworkError::from_external`] for its serialization
+    /// failures to be retried. An error with no code at all, such as one the
+    /// closure builds itself, is retried when its message contains
+    /// `deadlock` in any case, `40001` or `40P01`.
     ///
     /// Between attempts a jittered backoff sleeps for the internal
     /// `deadlock_retry_backoff` helper's computed duration - exponential
@@ -2312,12 +2320,141 @@ async fn emit_tx_event<E: crate::Event>(event: E) {
     }
 }
 
-/// Whether `e`'s Display matches the deadlock / serialization-failure
-/// pattern. Used by [`DB::transaction_with_attempts`] to decide
-/// whether to retry.
+/// Whether a failed attempt of [`DB::transaction_with_attempts`] may run
+/// again: the database refused it for a reason a new attempt, with a new
+/// snapshot and new locks, can get past.
+///
+/// The database's code decides, not the words of its message: MySQL's and
+/// MariaDB's error numbers 1213 (deadlock), 1205 (lock wait timeout) and
+/// 1020 (a row changed after the transaction's first read, under MariaDB's
+/// `innodb_snapshot_isolation`), and the SQLSTATEs 40001 (serialization
+/// failure) and 40P01 (deadlock). An error with any other code is not
+/// retried, whatever its message says. Only an error that carries no
+/// database code falls back to its message, such as one a closure built
+/// itself.
 fn is_deadlock(e: &FrameworkError) -> bool {
+    match database_code(e) {
+        Some(code) => code.is_retryable(),
+        None => mentions_deadlock(e),
+    }
+}
+
+/// The message test for an error that carries no database code: the word
+/// "deadlock" in any case, or one of the two retryable SQLSTATEs written
+/// in the text.
+fn mentions_deadlock(e: &FrameworkError) -> bool {
     let msg = format!("{e}");
     msg.contains("40001") || msg.contains("40P01") || msg.to_lowercase().contains("deadlock")
+}
+
+/// The code a database gave for a failure.
+enum DatabaseCode {
+    /// A MySQL or MariaDB error number. It says more than the SQLSTATE
+    /// those servers send beside it: 1205 and 1020 share `HY000` with
+    /// most other errors.
+    MysqlNumber(u16),
+    /// A SQLSTATE, as Postgres reports every error.
+    SqlState(String),
+}
+
+impl DatabaseCode {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::MysqlNumber(number) => matches!(number, 1213 | 1205 | 1020),
+            Self::SqlState(state) => matches!(state.as_str(), "40001" | "40P01"),
+        }
+    }
+}
+
+/// The database's code for `e`, when it has one.
+///
+/// A `FrameworkError` keeps the database error whole only when it was
+/// built with [`FrameworkError::from_external`] or its `_with` sibling; its
+/// code is read from there. The `?` operator and
+/// `FrameworkError::database(e.to_string())` keep only the text, where
+/// sqlx's MySQL driver writes the error number first, so that is read
+/// next. sqlx's Postgres driver writes the message alone, so a Postgres
+/// error kept as text has no code.
+fn database_code(e: &FrameworkError) -> Option<DatabaseCode> {
+    kept_database_code(e).or_else(|| written_mysql_number(&e.to_string()))
+}
+
+/// The code of the sqlx database error in `e`'s source chain.
+#[cfg(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+))]
+fn kept_database_code(e: &FrameworkError) -> Option<DatabaseCode> {
+    use sea_orm::sqlx::error::DatabaseError;
+
+    fn of(database: &dyn DatabaseError) -> Option<DatabaseCode> {
+        #[cfg(feature = "database-mysql")]
+        if let Some(mysql) = database.try_downcast_ref::<sea_orm::sqlx::mysql::MySqlDatabaseError>()
+        {
+            return Some(DatabaseCode::MysqlNumber(mysql.number()));
+        }
+        database
+            .code()
+            .map(|state| DatabaseCode::SqlState(state.into_owned()))
+    }
+
+    fn sqlx_error_in<'e>(
+        error: &'e (dyn std::error::Error + 'static),
+    ) -> Option<&'e sea_orm::sqlx::Error> {
+        match error.downcast_ref::<sea_orm::DbErr>() {
+            Some(
+                sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(error))
+                | sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(error))
+                | sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(error)),
+            ) => Some(&**error),
+            _ => error.downcast_ref::<sea_orm::sqlx::Error>(),
+        }
+    }
+
+    let mut next: Option<&(dyn std::error::Error + 'static)> = e
+        .external_source()
+        .map(|source| source as &(dyn std::error::Error + 'static));
+    while let Some(error) = next {
+        if let Some(database) = sqlx_error_in(error).and_then(|error| error.as_database_error()) {
+            return of(database);
+        }
+        next = error.source();
+    }
+    None
+}
+
+/// Without a database driver there is no database error to keep.
+#[cfg(not(any(
+    feature = "database-sqlite",
+    feature = "database-postgres",
+    feature = "database-mysql"
+)))]
+fn kept_database_code(_e: &FrameworkError) -> Option<DatabaseCode> {
+    None
+}
+
+/// The error number sqlx's MySQL driver writes at the front of a database
+/// error: `error returned from database: 1213 (40001): Deadlock found ...`,
+/// or without the SQLSTATE `error returned from database: 1213: ...`.
+fn written_mysql_number(text: &str) -> Option<DatabaseCode> {
+    const RETURNED: &str = "error returned from database: ";
+    text.match_indices(RETURNED).find_map(|(at, _)| {
+        let rest = &text[at + RETURNED.len()..];
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let (number, after) = rest.split_at(digits);
+        let sqlstate_follows = after
+            .strip_prefix(" (")
+            .and_then(|after| after.get(5..))
+            .is_some_and(|after| after.starts_with("): "))
+            && after
+                .get(2..7)
+                .is_some_and(|state| state.bytes().all(|b| b.is_ascii_alphanumeric()));
+        if digits == 0 || !(sqlstate_follows || after.starts_with(": ")) {
+            return None;
+        }
+        number.parse().ok().map(DatabaseCode::MysqlNumber)
+    })
 }
 
 #[cfg(test)]
@@ -2412,6 +2549,144 @@ mod tests {
         )));
         assert!(is_deadlock(&FrameworkError::database("simulated deadlock")));
         assert!(is_deadlock(&FrameworkError::database("DEADLOCK!")));
+    }
+
+    /// The text a `DbErr` from sqlx's MySQL driver flattens to: the server's
+    /// error number and SQLSTATE come first, then its message.
+    fn flattened_mysql(number: u16, sqlstate: &str, message: &str) -> FrameworkError {
+        FrameworkError::database(format!(
+            "Execution Error: error returned from database: {number} ({sqlstate}): {message}"
+        ))
+    }
+
+    #[test]
+    fn is_deadlock_matches_the_mysql_error_numbers_a_new_attempt_can_get_past() {
+        assert!(is_deadlock(&flattened_mysql(
+            1213,
+            "40001",
+            "Deadlock found when trying to get lock; try restarting transaction"
+        )));
+        assert!(is_deadlock(&flattened_mysql(
+            1205,
+            "HY000",
+            "Lock wait timeout exceeded; try restarting transaction"
+        )));
+        assert!(is_deadlock(&flattened_mysql(
+            1020,
+            "HY000",
+            "Record has changed since last read in table 'suprnova_render_generations'"
+        )));
+        // sqlx leaves the SQLSTATE out when the server sent none.
+        assert!(is_deadlock(&FrameworkError::database(
+            "error returned from database: 1205: Lock wait timeout exceeded"
+        )));
+    }
+
+    #[test]
+    fn is_deadlock_follows_a_mysql_error_number_over_the_words_of_its_message() {
+        assert!(!is_deadlock(&flattened_mysql(
+            1062,
+            "23000",
+            "Duplicate entry 'deadlock' for key 'tags.name'"
+        )));
+        assert!(!is_deadlock(&flattened_mysql(
+            1146,
+            "42S02",
+            "Table 'app.deadlock_40001' doesn't exist"
+        )));
+    }
+
+    #[test]
+    fn is_deadlock_reads_the_code_of_a_database_error_kept_as_the_source() {
+        assert!(is_deadlock(&reported(
+            "40001",
+            "could not serialize access due to concurrent update"
+        )));
+        assert!(is_deadlock(&reported("40P01", "deadlock detected")));
+        assert!(!is_deadlock(&reported(
+            "23505",
+            "duplicate key value violates unique constraint \"deadlock_names_key\""
+        )));
+    }
+
+    /// A closure that hit MariaDB's "Record has changed since last read"
+    /// committed nothing, and a new attempt takes a new snapshot: it is
+    /// retried, though its message never says "deadlock".
+    #[tokio::test]
+    async fn a_closure_that_read_a_changed_record_is_retried() {
+        let _db = crate::testing::TestDatabase::sqlite_memory()
+            .await
+            .expect("sqlite");
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counter = runs.clone();
+
+        DB::transaction_with_attempts(3, move |_tx| {
+            let counter = counter.clone();
+            Box::pin(async move {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(flattened_mysql(
+                        1020,
+                        "HY000",
+                        "Record has changed since last read in table 'posts'",
+                    ));
+                }
+                Ok::<(), FrameworkError>(())
+            })
+        })
+        .await
+        .expect("the second attempt commits");
+
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    /// A database error with a SQLSTATE, as sqlx's Postgres driver reports
+    /// one, kept whole as the source of the framework error.
+    fn reported(sqlstate: &'static str, message: &'static str) -> FrameworkError {
+        let error =
+            sea_orm::sqlx::Error::Database(Box::new(ReportedByTheDatabase { sqlstate, message }));
+        FrameworkError::from_external(sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(
+            Arc::new(error),
+        )))
+    }
+
+    #[derive(Debug)]
+    struct ReportedByTheDatabase {
+        sqlstate: &'static str,
+        message: &'static str,
+    }
+
+    impl std::fmt::Display for ReportedByTheDatabase {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.message)
+        }
+    }
+
+    impl std::error::Error for ReportedByTheDatabase {}
+
+    impl sea_orm::sqlx::error::DatabaseError for ReportedByTheDatabase {
+        fn message(&self) -> &str {
+            self.message
+        }
+
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(std::borrow::Cow::Borrowed(self.sqlstate))
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+
+        fn kind(&self) -> sea_orm::sqlx::error::ErrorKind {
+            sea_orm::sqlx::error::ErrorKind::Other
+        }
     }
 
     #[test]
