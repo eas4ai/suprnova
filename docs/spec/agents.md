@@ -141,15 +141,16 @@ Falsifier: a 2026-07-28 client or an initialize-based 2025-06-18 or 2025-11-25 c
 Mechanism: `agents`.
 Status: Agreed 2026-10-18
 
-[AGENT-004] When any declared tool needs a token, every MCP request
-without a token MUST get 401 with `WWW-Authenticate: Bearer
-resource_metadata="..."`, whatever its method, so a client is sent to sign
-in before it initializes; a 401 for `tools/call` also names the called
-tool's scopes when it has any. When every declared tool is public, a request
-without a token MUST be served and `tools/list` MUST return every tool. With
-a token, `tools/list` MUST return exactly the tools that accept its caller
-kind and whose scopes it carries. A token without a needed scope MUST get
-403 with `error="insufficient_scope"` and every scope the operation needs. The
+[AGENT-004] A request without a token MUST be served whatever its method,
+and `tools/list` without a token MUST return every tool the endpoint offers,
+the ones that need a token included, so a client sees what signing in would
+let it call. A `tools/call` without a token MUST run a public tool, and for
+a tool that needs a token MUST get 401 with `WWW-Authenticate: Bearer
+resource_metadata="..."` and the tool's scopes when it has any, which sends
+the client to sign in. With a token, `tools/list` MUST return exactly the
+tools that accept its caller kind and whose scopes it carries. A token
+without a needed scope MUST get 403 with `error="insufficient_scope"` and
+every scope the operation needs. The
 framework MUST serve OAuth protected resource metadata (RFC 9728) at
 `/.well-known/oauth-protected-resource` and its path-inserted form for the
 MCP endpoint, and authorization server metadata (RFC 8414) at the
@@ -157,10 +158,10 @@ path-inserted well-known location, at `<issuer>/.well-known/oauth-authorization-
 and at `<issuer>/.well-known/openid-configuration`, so an application
 served under a path prefix (PFX) is discoverable without owning the host
 root.
-Falsifier: on an application with a non-public tool, a token-less `initialize`, `tools/list` or `tools/call` that AGENT-003 would serve gets anything but 401 with the metadata URL, or a token-less `tools/call` of a scoped tool gets a 401 without its scopes; on an all-public application a token-less request is refused or its list misses a tool; a token sees a tool that does not accept its caller kind, or a scoped token sees a tool outside its scopes; a 403 for a missing scope lacks `insufficient_scope` or names scopes one at a time; or a client cannot find the metadata of an application served under a prefix.
+Falsifier: a token-less request that AGENT-003 would serve is refused other than by the 401 of a `tools/call` for a tool that needs a token; a token-less list misses a tool the endpoint offers; a token-less call of a public tool is refused; a token-less call of a tool that needs a token gets anything but 401 with the metadata URL and the tool's scopes; a token sees a tool that does not accept its caller kind, or a scoped token sees a tool outside its scopes; a 403 for a missing scope lacks `insufficient_scope` or names scopes one at a time; or a client cannot find the metadata of an application served under a prefix.
 Mechanism: `agents`.
-Rationale: Claude Code connected without a token to a new Live kit, listed no tools and never offered sign-in, because only `tools/call` answered 401 (Shawn, 2026-10-18: "yes").
-Status: Agreed 2026-10-18
+Rationale: Claude Code connected without a token to a new Live kit, listed no tools and never offered sign-in, because the list hid the tools that need a token; public tools still need none (Shawn, 2026-10-19: "Public tools should not require a token", then "ok").
+Status: Agreed 2026-10-19
 
 [AGENT-005] A Magnetar plugin, the authorization server, MUST let a user
 approve an MCP client to act as them under OAuth 2.1: the authorization

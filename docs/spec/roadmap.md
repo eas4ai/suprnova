@@ -1349,6 +1349,31 @@ Requirements: AGENT-001, AGENT-002, AGENT-003, AGENT-004, AGENT-005, AGENT-006, 
    authentication, signed in and called a user tool and a headless Live
    tool once, and the review is recorded.
 
+## agents-public-tools-stay-open
+
+Requirements: AGENT-001, AGENT-002, AGENT-003, AGENT-004, AGENT-005, AGENT-006, AGENT-007, AGENT-008, AGENT-009, AGENT-010, AGENT-011, AGENT-012, AGENT-013, AGENT-014, AGENT-015, AGENT-016, AGENT-017, AGENT-018, AGENT-019
+
+61. agents-public-tools-stay-open - agents-sign-in-up-front, superseded on
+   2026-10-19 when the developer ruled "Public tools should not require a
+   token" and chose, with "ok", how a client is still sent to sign in. A
+   request without a token is served whatever its method; the token-less
+   list shows every tool the endpoint offers, the ones that need a token
+   included; a public tool runs without a token; and a call of a tool that
+   needs a token gets the 401 that sends the client to sign in. This
+   commitment carries all of the agents work, committed before its start,
+   and adds:
+   - the token-less list of every offered tool, with the AGENT-004 tests
+   - the manual's MCP section, the starter kits' `claude mcp add` text and
+     the changelog entry
+   Delivery: as for agents, plus the change above in
+   `framework/src/agents/`. Mechanisms: `agents` and `agents-browser`, as
+   declared and bound for agents. Done when every requirement has a
+   current pass on a committed tree, a hand-run `claude mcp add --transport
+   http` against the dogfood application has listed its tools without a
+   token, been sent to sign in by a call of a tool that needs one, signed in
+   and called a user tool and a headless Live tool once, and the review is
+   recorded.
+
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
 layouts), tag input, nested menus, command palette, drag-reorder,
