@@ -702,3 +702,76 @@ async fn agent_006_an_oversized_key_set_is_not_used() {
         503
     );
 }
+
+// ------------------------------------------------------ fix round 2 ----
+
+#[tokio::test]
+async fn agent_006_a_short_max_age_refetches_from_a_healthy_issuer() {
+    let key = IssuerKey::generate("k1");
+    let world = world_with(&[&key], |issuer| {
+        issuer.key_cache(Duration::from_millis(200), Duration::from_secs(5))
+    });
+    let user = new_account("short-age");
+    assert_eq!(
+        refusal(&world.client, &key.sign(&claims(&user, "posts:read")))
+            .await
+            .0,
+        200
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        refusal(&world.client, &key.sign(&claims(&user, "posts:read")))
+            .await
+            .0,
+        200,
+        "a set past its age with no failure behind it is fetched again"
+    );
+    assert_eq!(world.documents.requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn agent_006_an_unknown_key_id_during_a_key_set_outage_is_503() {
+    let first = IssuerKey::generate("k1");
+    let second = IssuerKey::generate("k2");
+    let world = world_with(&[&first], |issuer| {
+        issuer.key_cache(Duration::from_secs(10), Duration::from_millis(300))
+    });
+    let user = new_account("outage-unknown-key");
+    assert_eq!(
+        refusal(&world.client, &first.sign(&claims(&user, "posts:read")))
+            .await
+            .0,
+        200
+    );
+    world.documents.forget(JWKS);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    // The refetch for k2 fails: the server cannot tell a key it failed to
+    // fetch from a made-up one, so it does not call the token invalid.
+    assert_eq!(
+        refusal(&world.client, &second.sign(&claims(&user, "posts:read")))
+            .await
+            .0,
+        503,
+        "right after the failed fetch"
+    );
+    assert_eq!(world.documents.requests.lock().unwrap().len(), 2);
+    assert_eq!(
+        refusal(&world.client, &second.sign(&claims(&user, "posts:read")))
+            .await
+            .0,
+        503,
+        "from the cached state inside the refetch interval"
+    );
+    assert_eq!(
+        world.documents.requests.lock().unwrap().len(),
+        2,
+        "no fetch"
+    );
+    // The key the last good set holds still verifies.
+    assert_eq!(
+        refusal(&world.client, &first.sign(&claims(&user, "posts:read")))
+            .await
+            .0,
+        200
+    );
+}
