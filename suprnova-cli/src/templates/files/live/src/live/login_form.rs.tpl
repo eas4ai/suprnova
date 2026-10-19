@@ -5,12 +5,14 @@
 //! `Auth::attempt`, and on success sends the browser on with a toast: to the
 //! session's intended address through `login.continue`, or else to the
 //! dashboard. A failure stays on the form, with the message under its
-//! control. The address is folded to lowercase, as registration stores it.
+//! control. The address is folded before the rules run, as registration
+//! stores it (`crate::email_address`).
 
 use suprnova::live::{ActionResult, ComponentError, LiveComponent, live};
 use suprnova::{Auth, Credentials, Redirect, Validate};
 
 use super::{FieldErrors, failed, redirect};
+use crate::email_address;
 use crate::flash::Toast;
 
 /// The rules the form checks before it asks for the account.
@@ -48,7 +50,7 @@ impl LoginForm {
     #[action]
     pub async fn login(&mut self) -> Result<ActionResult, ComponentError> {
         let input = LoginInput {
-            email: self.email.trim().to_lowercase(),
+            email: email_address::normalize(&self.email),
             password: self.password.clone(),
         };
         if let Err(errors) = input.validate() {

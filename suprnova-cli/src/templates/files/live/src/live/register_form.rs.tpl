@@ -8,8 +8,9 @@
 //! unverified address to verify first. The address is not carried across
 //! verification: its link may open in another browser.
 //!
-//! The address is stored in lowercase and checked against every case of
-//! it, so an address is one account.
+//! The address is folded before the rules run, so they check what is
+//! stored (`crate::email_address`), and the duplicate check compares without
+//! case through the database's `LOWER`.
 
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ use suprnova::{Auth, Redirect, Validate};
 
 use super::{FieldErrors, failed, redirect};
 use crate::controllers::email_verification::verification_link;
+use crate::email_address;
 use crate::flash::Toast;
 use crate::models::user::User;
 
@@ -63,7 +65,7 @@ impl RegisterForm {
     pub async fn register(&mut self) -> Result<ActionResult, ComponentError> {
         let input = RegisterInput {
             name: self.name.trim().to_owned(),
-            email: self.email.trim().to_lowercase(),
+            email: email_address::normalize(&self.email),
             password: self.password.clone(),
         };
         if let Err(errors) = input.validate() {

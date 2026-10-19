@@ -1,8 +1,9 @@
 //! User controller -- list, show, register, login.
 //!
 //! `list_users` and `show_user` query the canonical `app_users` table.
-//! Registration and login use Magnetar through `Auth::password()`, which
-//! folds every address to lowercase. Both bodies are form requests, so an
+//! Registration and login use Magnetar through `Auth::password()`. Both
+//! bodies are form requests that fold the address before their rules run
+//! (`crate::email_address`), so the rules check what is stored, and an
 //! address over 254 characters, longer than any deliverable one, gets a
 //! `422` naming the field.
 
@@ -11,6 +12,7 @@ use suprnova::{
     Auth, FormRequest, FrameworkError, HttpResponse, Request, Resource, Response, Validate, handler,
 };
 
+use crate::email_address;
 use crate::models::user::User;
 use crate::resources::user_resource::UserResource;
 
@@ -62,7 +64,13 @@ pub struct RegisterRequest {
     pub password: String,
 }
 
-impl FormRequest for RegisterRequest {}
+impl FormRequest for RegisterRequest {
+    /// Fold the address before the rules run, so they check what is stored.
+    fn prepare_for_validation(req: &mut Request) -> Result<(), FrameworkError> {
+        req.transform_input("email", |email| email_address::normalize(&email));
+        Ok(())
+    }
+}
 
 #[handler]
 pub async fn register(body: RegisterRequest) -> Response {
@@ -94,7 +102,14 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-impl FormRequest for LoginRequest {}
+impl FormRequest for LoginRequest {
+    /// Fold the address before the rules run, so they check what is looked
+    /// up.
+    fn prepare_for_validation(req: &mut Request) -> Result<(), FrameworkError> {
+        req.transform_input("email", |email| email_address::normalize(&email));
+        Ok(())
+    }
+}
 
 #[handler]
 pub async fn login(body: LoginRequest) -> Response {

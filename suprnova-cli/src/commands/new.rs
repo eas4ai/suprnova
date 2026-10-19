@@ -490,6 +490,14 @@ pub(crate) fn create_project(
     fs::write(project_path.join("src/agents.rs"), templates::agents_rs())
         .map_err(|e| format!("Failed to write src/agents.rs: {}", e))?;
 
+    // Write src/email_address.rs - the form sign-in, registration and the
+    // reset form store and look up an address in.
+    fs::write(
+        project_path.join("src/email_address.rs"),
+        templates::email_address_rs(),
+    )
+    .map_err(|e| format!("Failed to write src/email_address.rs: {}", e))?;
+
     // Write src/config/mod.rs
     fs::write(
         project_path.join("src/config/mod.rs"),

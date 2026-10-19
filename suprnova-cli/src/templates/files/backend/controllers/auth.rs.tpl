@@ -8,9 +8,10 @@
 //! page a guarded route or a sign-in link's `return_to` sent the user from,
 //! such as the claim page an agent sent them to. Each action that succeeds
 //! flashes a toast (`crate::props::flash::Toast`) the page it lands on
-//! shows once. Addresses are stored and compared in lowercase, so an
-//! address is one account whatever case it is typed in. Form bodies are
-//! extracted via `FormRequest`. On an Inertia visit a per-field failure
+//! shows once. Each form folds the address it takes before its rules run
+//! (`crate::email_address`), so the rules check what is stored, and
+//! registration's duplicate check compares without case through the
+//! database's `LOWER`. Form bodies are extracted via `FormRequest`. On an Inertia visit a per-field failure
 //! comes back as a `303` to the form page with the errors flashed, so
 //! `useForm().errors` fills in; a plain REST client still gets the `422`
 //! `{ message, errors }` envelope.
@@ -25,10 +26,12 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use suprnova::{
-    Auth, Credentials, FormRequest, Inertia, InertiaProps, Redirect, Request, Response, Validate,
-    ValidationErrors, auth_flows::EmailVerification, handler, inertia_response, redirect,
+    Auth, Credentials, FormRequest, FrameworkError, Inertia, InertiaProps, Redirect, Request,
+    Response, Validate, ValidationErrors, auth_flows::EmailVerification, handler, inertia_response,
+    redirect,
 };
 
+use crate::email_address;
 use crate::models::user::User;
 use crate::props::flash::Toast;
 
@@ -60,25 +63,31 @@ pub struct LoginRequest {
     pub remember: bool,
 }
 
-impl FormRequest for LoginRequest {}
+impl FormRequest for LoginRequest {
+    /// Fold the address before the rules run, so they check what is looked
+    /// up.
+    fn prepare_for_validation(req: &mut Request) -> Result<(), FrameworkError> {
+        req.transform_input("email", |email| email_address::normalize(&email));
+        Ok(())
+    }
+}
 
 /// Build a `FrameworkError::Validation` that pins the failure to the
 /// `email` field, mirroring how the bundled validators surface errors.
-fn invalid_credentials() -> suprnova::FrameworkError {
+fn invalid_credentials() -> FrameworkError {
     let mut errs = ValidationErrors::new();
     errs.add("email", "These credentials do not match our records.");
-    suprnova::FrameworkError::Validation(errs)
+    FrameworkError::Validation(errs)
 }
 
 #[handler]
 pub async fn login(form: LoginRequest) -> Response {
-    let email = form.email.trim().to_lowercase();
     // `Auth::attempt` verifies the password through the registered user
     // provider, logs the user into the session on success, and issues a
     // remember-me token when requested - all via the named-guard system
     // wired in bootstrap.rs.
     match Auth::attempt(
-        &Credentials::password(&email, &form.password),
+        &Credentials::password(&form.email, &form.password),
         form.remember,
     )
     .await?
@@ -124,6 +133,12 @@ pub struct RegisterRequest {
 }
 
 impl FormRequest for RegisterRequest {
+    /// Fold the address before the rules run, so they check what is stored.
+    fn prepare_for_validation(req: &mut Request) -> Result<(), FrameworkError> {
+        req.transform_input("email", |email| email_address::normalize(&email));
+        Ok(())
+    }
+
     /// Cross-field check: confirm the password and its confirmation
     /// match. Runs after the per-field rules pass, so we know each
     /// individual value is well-formed before comparing them.
@@ -139,14 +154,13 @@ impl FormRequest for RegisterRequest {
 
 #[handler]
 pub async fn register(form: RegisterRequest) -> Response {
-    let email = form.email.trim().to_lowercase();
-    if User::find_by_email(&email).await?.is_some() {
+    if User::find_by_email(&form.email).await?.is_some() {
         let mut errs = ValidationErrors::new();
         errs.add("email", "This email is already registered.");
-        return Err(suprnova::FrameworkError::Validation(errs).into());
+        return Err(FrameworkError::Validation(errs).into());
     }
 
-    let user = User::create(&form.name, &email, &form.password).await?;
+    let user = User::create(&form.name, &form.email, &form.password).await?;
     // Mail the verification link. This runs before the login below, so a
     // delivery failure (nothing listening on `MAIL_SMTP_HOST`, `MAIL_FROM`
     // unset) is reported as the error it is rather than after a session

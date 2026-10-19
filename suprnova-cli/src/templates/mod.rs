@@ -199,6 +199,12 @@ pub fn lib_rs() -> &'static str {
     include_str!("files/backend/lib.rs.tpl")
 }
 
+/// `src/email_address.rs`, which every kit shares: the form an email address
+/// is stored and looked up in.
+pub fn email_address_rs() -> &'static str {
+    include_str!("files/backend/email_address.rs.tpl")
+}
+
 /// `src/agents.rs`, which the Inertia and Live kits share: the MCP endpoint,
 /// the OAuth server and agent auth, with the kit's own consent pages.
 pub fn agents_rs() -> &'static str {
@@ -1637,6 +1643,7 @@ pub fn scaffold_api(
         ),
         (commands.join("mod.rs"), api::commands_mod_rs().to_string()),
         (src.join("lib.rs"), api::lib_rs().to_string()),
+        (src.join("email_address.rs"), email_address_rs().to_string()),
         (src.join("bootstrap.rs"), api::bootstrap_rs(package_name)),
         (src.join("routes.rs"), api::routes_rs().to_string()),
         (config.join("mod.rs"), api::config_mod_rs().to_string()),

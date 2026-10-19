@@ -18,6 +18,7 @@ use suprnova::{
     ValidationErrors, auth_flows::PasswordReset, handler, inertia_response, redirect, url,
 };
 
+use crate::email_address;
 use crate::props::flash::Toast;
 
 /// Where the mailed link lands: the form that takes the new password.
@@ -41,7 +42,14 @@ pub struct ForgotPasswordRequest {
     pub email: String,
 }
 
-impl FormRequest for ForgotPasswordRequest {}
+impl FormRequest for ForgotPasswordRequest {
+    /// Fold the address before the rules run, as registration stored it
+    /// (`crate::email_address`).
+    fn prepare_for_validation(req: &mut Request) -> Result<(), FrameworkError> {
+        req.transform_input("email", |email| email_address::normalize(&email));
+        Ok(())
+    }
+}
 
 #[derive(Deserialize, Validate)]
 pub struct ResetPasswordRequest {
@@ -74,11 +82,10 @@ pub async fn forgot(req: Request) -> Response {
 ///
 /// The response is the same whether or not the address is on file (or
 /// verified), the toast included; only a verified account receives mail.
-/// `url::to` prefixes `APP_URL`, so the link works from any inbox. The
-/// address is folded to lowercase, as registration stores it.
+/// `url::to` prefixes `APP_URL`, so the link works from any inbox.
 #[handler]
 pub async fn send_link(form: ForgotPasswordRequest) -> Response {
-    PasswordReset::send_link(&form.email.trim().to_lowercase(), &url::to(RESET_PATH)).await?;
+    PasswordReset::send_link(&form.email, &url::to(RESET_PATH)).await?;
     Inertia::flash(
         "toast",
         Toast::info("If that address is registered, a reset link is on its way."),

@@ -267,6 +267,107 @@ async fn agent_017_the_written_signing_key_builds_agent_auth() {
     }
 }
 
+/// The variable that names the project the child test below reads.
+const CHILD_PROJECT: &str = "KIT_AGENTS_PROJECT";
+
+/// The child test's name, as the test harness filters it.
+const CHILD_TEST: &str = "shared::agent_017_environment_child_builds_agent_auth";
+
+/// Run [`agent_017_environment_child_builds_agent_auth`] in a process of its
+/// own on the project at `root`, with no signing key in its inherited
+/// environment. Loading `.env` writes the process environment, which no
+/// other test of this binary may share. Answers whether it passed, and what
+/// it printed.
+fn run_environment_child(root: &std::path::Path) -> (bool, String) {
+    let output = Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--ignored", "--exact", CHILD_TEST, "--test-threads=1"])
+        .env(CHILD_PROJECT, root)
+        .env_remove("AGENT_AUTH_KEY_ID")
+        .env_remove("AGENT_AUTH_PRIVATE_KEY")
+        .output()
+        .expect("run the child test");
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let passed = output.status.success() && printed.contains("test result: ok. 1 passed");
+    (passed, printed)
+}
+
+/// AGENT-017: the application reads the key `suprnova new` wrote the way it
+/// reads it at boot. `Config::init` loads `.env` into the environment, and
+/// agent auth, configured as `src/agents.rs` configures it, takes its key
+/// from there. A `.env` without the key fails the same build.
+#[test]
+fn agent_017_the_written_signing_key_builds_agent_auth_from_the_environment() {
+    for kit in ["svelte", "api"] {
+        let project = Project::new(kit);
+        let (passed, printed) = run_environment_child(&project.root);
+        assert!(
+            passed,
+            "{kit}: the key in .env does not build agent auth:\n{printed}"
+        );
+
+        let keyless = TempDir::new().expect("a temporary directory");
+        let env = project.read(".env");
+        let without_key: String = env
+            .lines()
+            .filter(|line| !line.starts_with("AGENT_AUTH_"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        fs::write(keyless.path().join(".env"), without_key).expect("write a keyless .env");
+        let (passed, printed) = run_environment_child(keyless.path());
+        assert!(
+            !passed && printed.contains("AGENT_AUTH_KEY_ID"),
+            "{kit}: a .env without the key must fail the build:\n{printed}"
+        );
+    }
+}
+
+/// The child of the test above: load the project's `.env` with the
+/// framework's own loader, then build agent auth as `src/agents.rs` builds
+/// it, with no key named in code.
+#[test]
+#[ignore = "runs in its own process, started by \
+            agent_017_the_written_signing_key_builds_agent_auth_from_the_environment"]
+fn agent_017_environment_child_builds_agent_auth() {
+    use suprnova::agents::{AgentAuth, AgentsConfig, OAuthServer};
+
+    let root = std::env::var_os(CHILD_PROJECT).expect("the parent test names the project");
+    // Before any runtime starts: the loader refuses to write the
+    // environment from inside one.
+    suprnova::Config::init(std::path::Path::new(&root)).expect("the project's .env loads");
+    let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+    let built = runtime.block_on(async {
+        let db = sea_orm::Database::connect("sqlite::memory:")
+            .await
+            .map_err(|error| error.to_string())?;
+        OAuthServer::migrate(&db)
+            .await
+            .map_err(|error| error.to_string())?;
+        AgentAuth::migrate(&db)
+            .await
+            .map_err(|error| error.to_string())?;
+        suprnova::Router::new()
+            .try_agents(
+                AgentsConfig::new()
+                    .oauth_server(
+                        OAuthServer::new()
+                            .custom_approval_page("/oauth/approve")
+                            .custom_connected_agents_page()
+                            .connection(db),
+                    )
+                    .agent_auth(AgentAuth::new().custom_claim_page("/agent/claim")),
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
+    if let Err(error) = built {
+        panic!("agent auth did not build from the environment: {error}");
+    }
+}
+
 /// AGENT-017: every project gets its own key, never a shared one.
 #[test]
 fn agent_017_two_new_projects_get_different_signing_keys() {
@@ -338,8 +439,10 @@ fn agent_017_new_prints_no_key_material() {
     }
 }
 
-/// AGENT-017: no template carries a private key. Every key is minted when a
-/// project is made, and a key in a template would be every project's key.
+/// AGENT-017: no template carries a private key, and a new project holds
+/// its key in `.env` alone, which only its owner reads. Every key is minted
+/// when a project is made, and a key in a template would be every project's
+/// key.
 #[test]
 fn agent_017_no_template_holds_a_private_key() {
     let files = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/templates/files");
@@ -365,6 +468,38 @@ fn agent_017_no_template_holds_a_private_key() {
         }
     }
     assert!(read > 100, "walked only {read} templates");
+
+    for kit in ["svelte", "live", "api"] {
+        let project = Project::new(kit);
+        let mut written = 0;
+        for entry in walkdir::WalkDir::new(&project.root) {
+            let entry = entry.expect("walk the project");
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            written += 1;
+            let text =
+                String::from_utf8_lossy(&fs::read(entry.path()).expect("read a file")).into_owned();
+            let is_env = entry.path() == project.root.join(".env");
+            assert_eq!(
+                text.contains("PRIVATE KEY"),
+                is_env,
+                "{kit}: {} {} the private key",
+                entry.path().display(),
+                if is_env { "lacks" } else { "holds" }
+            );
+        }
+        assert!(written > 10, "{kit}: walked only {written} files");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(project.root.join(".env"))
+                .expect(".env exists")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{kit}: .env must be 0600");
+        }
+    }
 }
 
 /// AGENT-017: the Inertia and Live kits serve the MCP endpoint, the OAuth
@@ -592,50 +727,161 @@ fn agent_017_sign_in_and_registration_continue_to_the_intended_address() {
     );
 }
 
-/// AGENT-017: an address is one account whatever its case. Sign-in,
-/// registration and the reset form fold the address to lowercase, and
-/// registration's duplicate check ignores case, as agent auth's email match
-/// does.
+/// The kits' address rule, compiled from the template every kit writes as
+/// `src/email_address.rs`.
+mod email_address {
+    include!("../../src/templates/files/backend/email_address.rs.tpl");
+}
+
+/// The `impl` block whose header is `header`, from its first line to the
+/// next line that closes an item at column zero.
+fn impl_block<'a>(source: &'a str, header: &str) -> &'a str {
+    let start = source
+        .find(&format!("impl {header} {{"))
+        .unwrap_or_else(|| panic!("no `impl {header}` in:\n{source}"));
+    let rest = &source[start..];
+    let end = rest.find("\n}\n").map_or(rest.len(), |end| end + 3);
+    &rest[..end]
+}
+
+/// AGENT-017: the kits fold an address by changing ASCII letters only. A
+/// database's `LOWER` folds ASCII letters on every engine, so a stored
+/// address stays reachable wherever it was written, and the length the
+/// rules checked is the length stored.
+#[test]
+fn agent_017_email_address_folds_ascii_letters_only() {
+    assert_eq!(
+        email_address::normalize("  Ada@MÜNCHEN.de \n"),
+        "ada@mÜnchen.de"
+    );
+    assert_eq!(
+        email_address::normalize("ADA@EXAMPLE.COM"),
+        "ada@example.com"
+    );
+    // `İ` lowercases to two characters under Unicode rules, which made a
+    // 254-character address 264 characters long.
+    let long = format!("{}@x.io", "İ".repeat(249));
+    assert_eq!(long.chars().count(), 254);
+    let folded = email_address::normalize(&long);
+    assert_eq!(folded.chars().count(), 254, "the fold changed the length");
+    assert_eq!(folded, long, "only ASCII letters may change");
+    for address in [
+        "ẞ@X.IO",
+        "Σ@ΣΑΣ.GR",
+        "Ǆ@x.io",
+        "ﬀ@x.io",
+        "KELVIN\u{212A}@x.io",
+    ] {
+        let folded = email_address::normalize(address);
+        assert_eq!(folded.chars().count(), address.chars().count(), "{address}");
+        assert!(
+            folded
+                .chars()
+                .zip(address.chars())
+                .all(|(after, before)| after == before.to_ascii_lowercase()),
+            "{address} became {folded}"
+        );
+    }
+}
+
+/// AGENT-017: sign-in, registration and the reset form store and look up an
+/// address in one form, folded before the rules check it, so the rules
+/// check what is stored. Every kit takes the form from
+/// `src/email_address.rs`, and registration's duplicate check compares
+/// without case through the database's `LOWER`.
 #[test]
 fn agent_017_kits_fold_the_email_to_lowercase() {
+    let template = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/templates/files/backend/email_address.rs.tpl"),
+    )
+    .expect("the address rule's template");
+    let prepared = "req.transform_input(\"email\", |email| email_address::normalize(&email));";
+
+    for kit in ["svelte", "react", "vue", "live", "api"] {
+        let project = Project::new(kit);
+        assert_eq!(
+            project.read("src/email_address.rs"),
+            template,
+            "{kit}: src/email_address.rs is the template"
+        );
+        let lib = project.read("src/lib.rs");
+        assert!(
+            lib.lines().any(|line| line == "pub mod email_address;"),
+            "{kit}: src/lib.rs must declare `pub mod email_address;`:\n{lib}"
+        );
+        // No kit folds an address with Unicode rules.
+        for entry in walkdir::WalkDir::new(project.root.join("src")) {
+            let entry = entry.expect("walk the scaffold");
+            if entry.file_type().is_file() {
+                let source = fs::read_to_string(entry.path()).expect("read a source file");
+                assert!(
+                    !source.contains("to_lowercase()"),
+                    "{kit}: {} folds with Unicode rules",
+                    entry.path().display()
+                );
+            }
+        }
+    }
+
     for kit in INERTIA_KITS {
         let project = Project::new(kit);
         let auth = project.read("src/controllers/auth.rs");
-        for handler in ["login", "register"] {
-            let body = item(&auth, handler);
+        let reset = project.read("src/controllers/password_reset.rs");
+        for (source, request) in [
+            (&auth, "LoginRequest"),
+            (&auth, "RegisterRequest"),
+            (&reset, "ForgotPasswordRequest"),
+        ] {
+            let block = impl_block(source, &format!("FormRequest for {request}"));
             assert!(
-                body.contains("let email = form.email.trim().to_lowercase();"),
-                "{kit}: `{handler}` must fold the address:\n{body}"
+                contains(block, "fn prepare_for_validation(req: &mut Request)")
+                    && contains(block, prepared),
+                "{kit}: `{request}` must fold the address before the rules run:\n{block}"
             );
         }
         assert!(
-            item(&auth, "login").contains("Credentials::password(&email, "),
+            item(&auth, "login").contains("Credentials::password(&form.email, "),
             "{kit}: login must sign in with the folded address"
         );
         let register = item(&auth, "register");
         assert!(
-            register.contains("User::find_by_email(&email)")
-                && register.contains("User::create(&form.name, &email, "),
+            register.contains("User::find_by_email(&form.email)")
+                && register.contains("User::create(&form.name, &form.email, "),
             "{kit}: registration must check and store the folded address:\n{register}"
         );
-        let reset = project.read("src/controllers/password_reset.rs");
-        let send = item(&reset, "send_link");
         assert!(
-            send.contains("PasswordReset::send_link(&form.email.trim().to_lowercase(), "),
-            "{kit}: the reset form must fold the address:\n{send}"
+            item(&reset, "send_link").contains("PasswordReset::send_link(&form.email, "),
+            "{kit}: the reset form must look up the folded address"
         );
     }
 
     let project = Project::new("live");
-    for file in [
-        "src/live/login_form.rs",
-        "src/live/register_form.rs",
-        "src/live/forgot_password_form.rs",
+    for (file, action) in [
+        ("src/live/login_form.rs", "login"),
+        ("src/live/register_form.rs", "register"),
+        ("src/live/forgot_password_form.rs", "send"),
     ] {
         let source = project.read(file);
+        let body = item(&source, action);
+        let folded = body
+            .find("email: email_address::normalize(&self.email),")
+            .unwrap_or_else(|| panic!("live: {file} must fold the address:\n{body}"));
+        let checked = body.find("input.validate()").expect("the rules run");
         assert!(
-            source.contains("email: self.email.trim().to_lowercase(),"),
-            "live: {file} must fold the address:\n{source}"
+            folded < checked,
+            "live: {file} must fold the address before the rules run:\n{body}"
+        );
+    }
+
+    let project = Project::new("api");
+    let users = project.read("src/controllers/users.rs");
+    for request in ["RegisterRequest", "LoginRequest"] {
+        let block = impl_block(&users, &format!("FormRequest for {request}"));
+        assert!(
+            contains(block, "fn prepare_for_validation(req: &mut Request)")
+                && contains(block, prepared),
+            "api: `{request}` must fold the address before the rules run:\n{block}"
         );
     }
 
