@@ -4,9 +4,15 @@
 //! client reads the router's placeholder grammar. The rules are the MCP
 //! dispatcher's (`fill_path` and `query_of` in
 //! `framework/src/agents/dispatch.rs`): each value is percent-encoded into
-//! one segment, a segment of dots alone cannot climb, an optional parameter
-//! without a value drops its segment, and a GET call sends its other
-//! scalar arguments in the query.
+//! one segment, an optional parameter without a value drops its segment,
+//! and a GET call sends its other scalar arguments in the query.
+//!
+//! One rule is the browser's own. The dispatcher encodes a `.` or `..`
+//! value as `%2E` so it cannot climb, but a browser's URL parser resolves
+//! those segments, percent-encoded or not, before the request leaves, and
+//! the call would reach another route. So a value that is `.` or `..`, or
+//! a catch-all with such a part, is refused. Longer runs of dots are not
+//! steps of a path, and are encoded as the dispatcher encodes them.
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
@@ -70,6 +76,12 @@ pub(crate) fn fill(pieces: &[Piece], arguments: &Map<String, Value>) -> Result<S
                         ));
                     }
                     Ok(Some(value)) if !value.is_empty() => {
+                        if steps(&value, param.catch_all) {
+                            return Err(format!(
+                                "the path parameter `{name}` cannot be `.` or `..`, or hold one \
+                                 as a part, because a browser resolves it as a step of the path"
+                            ));
+                        }
                         out.push_str(&encode(&value, param.catch_all));
                     }
                     Ok(_) if param.optional => {
@@ -137,9 +149,20 @@ fn scalar(value: Option<&Value>) -> Result<Option<String>, ()> {
     }
 }
 
+/// Whether `value`, or for a catch-all one of its parts, is `.` or `..`,
+/// which a browser resolves as a step of the path.
+fn steps(value: &str, catch_all: bool) -> bool {
+    let step = |part: &str| part == "." || part == "..";
+    if catch_all {
+        value.split('/').any(step)
+    } else {
+        step(value)
+    }
+}
+
 /// `value` as one path segment, or for a catch-all as segments each
-/// encoded on its own. A segment of dots alone is encoded too, so it
-/// cannot read as `.` or `..`.
+/// encoded on its own. A segment of dots alone, three or more once `.`
+/// and `..` are refused, is encoded too, as the dispatcher encodes it.
 fn encode(value: &str, catch_all: bool) -> String {
     let segment = |part: &str| -> String {
         if !part.is_empty() && part.bytes().all(|byte| byte == b'.') {

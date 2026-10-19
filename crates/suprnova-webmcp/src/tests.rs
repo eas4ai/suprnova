@@ -152,7 +152,7 @@ fn agent_016_path_csrf_and_results_match_the_browser_fixture() {
     let fixture = fixture();
     let mut failures = Vec::new();
     let lists: [(&str, CaseCheck, usize); 3] = [
-        ("paths", path_case, 25),
+        ("paths", path_case, 27),
         ("csrf", csrf_case, 7),
         ("results", result_case, 31),
     ];
