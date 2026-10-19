@@ -66,6 +66,7 @@ pub use auth::{
 pub use caller::{AgentRegistration, CallerChannel, CallerKind, ToolCaller};
 pub(crate) use limit::address_bucket;
 pub(crate) use mark::AgentMark;
+pub(crate) use middleware::{BrowserToolRefusal, LiveToolGate};
 pub use scope::{Scope, ScopeRecord, declared_scopes};
 #[cfg(feature = "testing")]
 pub use testing::{AgentsFake, McpResponse, McpTestClient, McpToolResult};

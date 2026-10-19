@@ -493,9 +493,11 @@ async fn run_action(
     let observer = super::action::RefreshObserver::default();
     let (service, _completion) = runtime.endpoint_service_with(
         None,
+        // The MCP endpoint already checked the caller against the tool, and
+        // counted the call.
         super::action::KernelExtras {
             refresh_observer: Some(observer.clone()),
-            tool_claim: None,
+            ..super::action::KernelExtras::default()
         },
     );
     // A flash the action sets would go to the browser's session, which a

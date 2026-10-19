@@ -688,6 +688,22 @@ impl Request {
         self.parts.extensions.insert(claim);
     }
 
+    /// Give a Live action request the check its action kernel runs on a
+    /// tool action invoked without the tool-call header. Only the Live
+    /// action route's tool access calls this.
+    #[cfg(feature = "agents")]
+    pub(crate) fn set_live_tool_gate(&mut self, gate: crate::agents::LiveToolGate) {
+        self.parts.extensions.insert(gate);
+    }
+
+    /// The check a Live action request's kernel runs on a tool action
+    /// invoked without the tool-call header, when the application serves
+    /// agents.
+    #[cfg(feature = "agents")]
+    pub(crate) fn live_tool_gate(&self) -> Option<&crate::agents::LiveToolGate> {
+        self.parts.extensions.get::<crate::agents::LiveToolGate>()
+    }
+
     /// The browser tool a Live action request was admitted as, if any.
     pub(crate) fn live_tool_claim(&self) -> Option<&crate::live::action::LiveToolClaim> {
         self.parts

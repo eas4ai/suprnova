@@ -624,6 +624,19 @@ impl ToolRegistry {
             })
     }
 
+    /// The Live tool whose action is `action` of `component`, offered to an
+    /// agent, to a browser or to both. A Live action is at most one tool's.
+    pub(crate) fn live_tool_of(
+        &self,
+        component: &suprnova_live::identity::ComponentName,
+        action: &str,
+    ) -> Option<&RegisteredTool> {
+        self.tools.iter().chain(&self.browser_tools).find(|tool| {
+            tool.live_target()
+                .is_some_and(|target| &target.component == component && target.action == action)
+        })
+    }
+
     /// The Live tool a browser registers as `name`, `{base}.{instance}`,
     /// with the instance.
     pub(crate) fn browser_tool<'a>(&self, name: &'a str) -> Option<(&RegisteredTool, &'a str)> {

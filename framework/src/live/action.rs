@@ -282,11 +282,15 @@ pub(crate) async fn handle(request: Request) -> Response {
         Err(error) => return failure_response(error.kind(), &error),
     };
     let tool_claim = request.live_tool_claim().cloned();
+    #[cfg(feature = "agents")]
+    let tool_admission = ToolAdmission::of(&request);
     let (service, completion) = runtime.endpoint_service_with(
         upload_context,
         KernelExtras {
             refresh_observer: None,
             tool_claim,
+            #[cfg(feature = "agents")]
+            tool_admission: tool_admission.clone(),
         },
     );
     // Session-only fields the request's components staged reach the
@@ -296,6 +300,15 @@ pub(crate) async fn handle(request: Request) -> Response {
             service.handle_reported(endpoint_request),
         ))
         .await;
+    // A tool action the browser caller may not invoke was refused before
+    // anything ran; it is answered as the tool's own check answers.
+    #[cfg(feature = "agents")]
+    if let Some(refusal) = tool_admission
+        .as_ref()
+        .and_then(ToolAdmission::take_refusal)
+    {
+        return Err(refusal.into_response());
+    }
     let completed = response.status.is_success();
     let projected = project_response(response);
     if let Some(error) = failure {
@@ -419,6 +432,8 @@ pub(crate) struct SuprnovaEndpointKernel {
     upload_context: Option<suprnova_live::host::TrustedLiveRequestContext>,
     refresh_observer: Option<RefreshObserver>,
     tool_claim: Option<LiveToolClaim>,
+    #[cfg(feature = "agents")]
+    tool_admission: Option<ToolAdmission>,
 }
 
 /// What a request's kernel is given beyond the browser's ordinary action.
@@ -429,6 +444,62 @@ pub(crate) struct KernelExtras {
     /// The browser tool the request was admitted as, if it carries the
     /// tool-call header.
     pub(crate) tool_claim: Option<LiveToolClaim>,
+    /// The browser caller check of a tool action invoked without the
+    /// tool-call header, when the application serves agents.
+    #[cfg(feature = "agents")]
+    pub(crate) tool_admission: Option<ToolAdmission>,
+}
+
+/// The browser caller check a Live action request without the tool-call
+/// header passes when its action is a tool's (AGENT-002, AGENT-012), and
+/// where the kernel leaves a refusal for the handler to answer: the
+/// kernel's own errors are closed and answer no 401 or 403.
+#[cfg(feature = "agents")]
+#[derive(Clone)]
+pub(crate) struct ToolAdmission {
+    gate: crate::agents::LiveToolGate,
+    address: Option<std::net::IpAddr>,
+    refusal: Arc<std::sync::Mutex<Option<crate::agents::BrowserToolRefusal>>>,
+}
+
+#[cfg(feature = "agents")]
+impl ToolAdmission {
+    /// The check of `request`, when the Live action route's tool access
+    /// gave it one.
+    fn of(request: &Request) -> Option<Self> {
+        request.live_tool_gate().map(|gate| Self {
+            gate: gate.clone(),
+            address: request.ip().and_then(|ip| ip.parse().ok()),
+            refusal: Arc::default(),
+        })
+    }
+
+    /// Whether the browser caller may invoke `action` of `component`; a
+    /// refusal is kept for [`Self::take_refusal`].
+    async fn admit(
+        &self,
+        component: &suprnova_live::identity::ComponentName,
+        action: &str,
+    ) -> bool {
+        match self.gate.admit(component, action, self.address).await {
+            Ok(()) => true,
+            Err(refusal) => {
+                *self
+                    .refusal
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(refusal);
+                false
+            }
+        }
+    }
+
+    /// The refusal the kernel left, if it refused the request.
+    fn take_refusal(&self) -> Option<crate::agents::BrowserToolRefusal> {
+        self.refusal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
 }
 
 /// The browser tool a Live action request was admitted as (AGENT-012): the
@@ -529,6 +600,8 @@ impl SuprnovaEndpointKernel {
             upload_context,
             refresh_observer: extras.refresh_observer,
             tool_claim: extras.tool_claim,
+            #[cfg(feature = "agents")]
+            tool_admission: extras.tool_admission,
         }
     }
 
@@ -555,6 +628,17 @@ impl SuprnovaEndpointKernel {
             if !claimed {
                 return Err(EndpointKernelError::context_inconsistent());
             }
+        }
+        // A tool action without the header runs the tool's browser caller
+        // check before anything of it runs: a promotion, a lock, the
+        // action itself.
+        #[cfg(feature = "agents")]
+        if self.tool_claim.is_none()
+            && let Some(admission) = &self.tool_admission
+            && let RequestedOperation::Action { name, .. } = &operation
+            && !admission.admit(request.component(), name.as_str()).await
+        {
+            return Err(EndpointKernelError::context_inconsistent());
         }
         let result = match request.snapshot() {
             VerifiedEndpointSnapshot::Instance(snapshot) => {

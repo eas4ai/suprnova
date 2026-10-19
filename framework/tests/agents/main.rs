@@ -18,6 +18,7 @@ mod build;
 mod callers;
 mod dispatch;
 mod endpoint;
+mod live_browser;
 mod live_headless;
 mod marker;
 mod registry;

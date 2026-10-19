@@ -268,7 +268,8 @@ pub fn register_components() {
     );
 }
 
-/// The page mounting a counter as a public seed, keyed `main`.
+/// The page mounting a counter as a public seed, keyed `main`, and a quota
+/// beside it, keyed `side`.
 pub const PAGE: &str = "/agents/page";
 
 /// The page's document.
@@ -276,6 +277,7 @@ pub const PAGE: &str = "/agents/page";
 pub struct AgentPage<'a> {
     pub bootstrap: &'a TrustedHtml,
     pub island: &'a TrustedHtml,
+    pub side: &'a TrustedHtml,
 }
 
 /// The fixture's routes, the counter's page, and Live installed behind
@@ -284,11 +286,13 @@ pub fn live_router_with(config: AgentsConfig) -> Router {
     crate::fixture::define_policies();
     let mount = LiveMount::<AgentCounter>::public_seed(PAGE, "counter", "main")
         .expect("declare the counter's mount");
-    let handler_mount = mount.clone();
+    let side = LiveMount::<AgentQuota>::public_seed(PAGE, "quota", "side")
+        .expect("declare the quota's mount");
+    let handler_mounts = (mount.clone(), side.clone());
     let router: Router = crate::fixture::routes()
         .get(PAGE, move |request: Request| {
-            let mount = handler_mount.clone();
-            async move { render_page(request, mount).await }
+            let (mount, side) = handler_mounts.clone();
+            async move { render_page(request, mount, side).await }
         })
         .into();
     router
@@ -296,12 +300,15 @@ pub fn live_router_with(config: AgentsConfig) -> Router {
         .expect("install Live")
         .try_live_mount(&mount)
         .expect("register the counter's mount")
+        .try_live_mount(&side)
+        .expect("register the quota's mount")
         .agents(config)
 }
 
 async fn render_page(
     request: Request,
     mount: LiveMount<AgentCounter>,
+    side: LiveMount<AgentQuota>,
 ) -> Result<HttpResponse, HttpResponse> {
     let result: Result<HttpResponse, FrameworkError> = async {
         let mut document = LiveDocument::from_request(&request)
@@ -332,6 +339,16 @@ async fn render_page(
             )
             .await
             .map_err(|error| FrameworkError::internal(format!("mount {error}")))?;
+        // The quota's optional parameters are left out: it mounts with
+        // none of them.
+        let side = document
+            .mount(
+                &side,
+                CanonicalValue::Object(BTreeMap::new()),
+                MountFlags::empty(),
+            )
+            .await
+            .map_err(|error| FrameworkError::internal(format!("mount side {error}")))?;
         let bootstrap = document
             .bootstrap(LiveBootstrapOptions::esm())
             .map_err(|error| FrameworkError::internal(format!("bootstrap {error}")))?;
@@ -342,6 +359,7 @@ async fn render_page(
                 &AgentPage {
                     bootstrap: bootstrap.html(),
                     island: island.html(),
+                    side: side.html(),
                 },
                 DocumentResponseIntent::html(StatusCode::OK)
                     .map_err(|_| FrameworkError::internal("response intent"))?,

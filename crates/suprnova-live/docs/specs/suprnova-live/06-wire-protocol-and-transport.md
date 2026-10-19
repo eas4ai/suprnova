@@ -233,7 +233,8 @@ Acceptance criteria:
 - The browser runtime sends `Suprnova-Tool-Call` with the tool's full name on
   every Live action request a tool call makes, and on no other request. An
   ordinary action request carries no such header and is not counted as a
-  tool call.
+  tool call, but a request that invokes a tool's action without it still
+  passes the tool's caller check (spec 07).
 - A Live action request carrying the header names a browser tool, as
   `{base}.{instance}`, or is answered 400. The server then holds the request
   to that tool: its component, its island's document key and the one action

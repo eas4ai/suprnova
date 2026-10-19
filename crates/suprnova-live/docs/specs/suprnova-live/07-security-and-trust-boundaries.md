@@ -250,18 +250,23 @@ and result. Then:
 | Session-state commit and flash | No session: a component with session fields has no headless tool, and a flash an action sets is dropped. |
 
 Acceptance criteria:
-- A browser tool call runs the tool's caller check after the route guard: a
-  guest is a `public` caller, a user the session guard resolved from the
-  browser's session is a `user` caller holding every scope, a user signed in
-  any other way holds no scope, and a browser caller is never an agent
-  account. A tool that does not accept the caller is answered 401 for a guest
-  and 403 otherwise; a missing scope is answered 403 with
-  `insufficient_scope`.
-- A browser tool call counts against the caller's tool budget, per user or,
-  for a guest, per address bucket, in the one bucket MCP calls of the same
-  caller count in. A used budget is answered 429, and a limiter that cannot
-  answer refuses the call with 503 rather than run it unlimited. An ordinary
-  action request is never counted.
+- Every browser request to a tool's action runs the tool's caller check
+  after the route guard, with or without the tool-call header, as every
+  request to a route tool's route does: a guest is a `public` caller, a user
+  the session guard resolved from the browser's session is a `user` caller
+  holding every scope, a user signed in any other way holds no scope, and a
+  browser caller is never an agent account. A tool that does not accept the
+  caller is answered 401 for a guest and 403 otherwise; a missing scope is
+  answered 403 with `insufficient_scope`. A request with the header is
+  checked before the endpoint; one without it is checked by the action
+  kernel once the snapshot is verified and the action it invokes is known,
+  before anything of the action runs.
+- A browser tool call, a request carrying the header, counts against the
+  caller's tool budget, per user or, for a guest, per address bucket, in the
+  one bucket MCP calls of the same caller count in. A used budget is
+  answered 429, and a limiter that cannot answer refuses the call with 503
+  rather than run it unlimited. A request without the header, a tool
+  action's included, is never counted.
 - A headless mount asks the Gate `live:{component}.mount` with the
   `ToolCaller` and a `LiveMountRequest` holding the component and the mount
   properties the agent sent, before anything is loaded: before a resolver
@@ -366,6 +371,10 @@ production feature or public convenience constructor.
 
 ## Decisions and revisions
 
+- 2026-10-18 -- A tool's caller check runs on every request to its action.
+  It ran only for a request with the tool-call header, so a guest who left
+  the header off invoked a `callers = [user]` tool's action. The budget
+  still counts only requests with the header.
 - 2026-10-18 -- The mount Gate reads each property in its codec's one form.
   A policy that read whichever form the agent wrote compared the number
   5000 and refused it, but read the string `"5000"` as no number at all and,
