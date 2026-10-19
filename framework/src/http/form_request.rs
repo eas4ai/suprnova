@@ -14,7 +14,8 @@ use validator::Validate;
 /// Trait for validated form/JSON request data
 ///
 /// Implement this trait on request structs to enable automatic:
-/// - Body parsing (JSON, form-urlencoded or multipart based on Content-Type)
+/// - Body parsing (JSON, form-urlencoded or multipart based on Content-Type),
+///   or the query string on a `GET` or `HEAD` request without a body
 /// - Validation using the `validator` crate
 /// - Authorization checks
 ///
@@ -206,7 +207,8 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
     /// This method:
     /// 1. Prepares input and checks authorization before reading the body
     /// 2. Parses the request body (JSON, form or multipart based on
-    ///    Content-Type)
+    ///    Content-Type), or the query string of a `GET` or `HEAD` request
+    ///    that carries no body, read as a url-encoded form body is
     /// 3. Validates the parsed data
     ///
     /// Returns `Err(FrameworkError)` on authorization failure, parse error,
@@ -245,9 +247,26 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
         let is_json = media_type
             .as_deref()
             .is_some_and(|mt| mt == "application/json" || mt.ends_with("+json"));
-        if !is_form && !is_multipart && !is_json && !(query_input && media_type.is_none()) {
+        // A GET or HEAD without a body reads its query, as Laravel validates
+        // `$request->all()`, which is the query on a GET: a search page's
+        // filters, or a browser's call of a GET tool (AGENT-014). The query
+        // reads as a form body does, so it decodes, validates and names its
+        // fields as `request.query_into()` and a form post do. One that
+        // carries a body, such as the MCP dispatcher's JSON, reads the body.
+        let reads_query = !is_precognition
+            && (req.is_method("GET") || req.is_method("HEAD"))
+            && !is_form
+            && !is_multipart
+            && !is_json;
+        if !is_form
+            && !is_multipart
+            && !is_json
+            && !reads_query
+            && !(query_input && media_type.is_none())
+        {
             return Err(FrameworkError::UnsupportedMediaType);
         }
+        let is_form = is_form || reads_query;
         let route_inputs = Self::route_inputs(&req)?;
         let target = req.validation_redirect_target();
         let transform = req.prepared_input();
@@ -284,7 +303,11 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
             super::input::parse_multipart_with_route_inputs(payload, route_inputs)
                 .map_err(|error| error.into_framework_error("Failed to parse multipart body"))
         } else {
-            let (_, bytes) = req.body_bytes_with_cap(Self::max_body_bytes()).await?;
+            let bytes = if reads_query {
+                bytes::Bytes::from(req.query().unwrap_or("").to_owned())
+            } else {
+                req.body_bytes_with_cap(Self::max_body_bytes()).await?.1
+            };
             let bytes = if has_preparation {
                 prepare_body(bytes, is_form, &transform)?
             } else {
