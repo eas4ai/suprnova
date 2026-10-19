@@ -193,6 +193,15 @@ pub mod agent_events {
         pub leased_until: Option<DateTimeUtc>,
         #[sea_orm(nullable)]
         pub delivered_at: Option<DateTimeUtc>,
+        /// Refused deliveries since the event was written or put back.
+        #[sea_orm(column_type = "Integer")]
+        pub attempts: i32,
+        /// What the host answered the last refused delivery with.
+        #[sea_orm(column_type = "Text", nullable)]
+        pub last_error: Option<String>,
+        /// When the event failed for good.
+        #[sea_orm(nullable)]
+        pub failed_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -467,6 +476,11 @@ fn event_record(model: agent_events::Model) -> Result<AgentEventRecord> {
         attributes,
         created_at: model.created_at,
         delivered_at: model.delivered_at,
+        // A negative count was never written; reading it as the largest
+        // count keeps the event from being retried without end.
+        attempts: u32::try_from(model.attempts).unwrap_or(u32::MAX),
+        last_error: model.last_error,
+        failed_at: model.failed_at,
     })
 }
 
@@ -757,6 +771,9 @@ impl AgentAuthStore for SqlAgentAuthStore {
                 created_at: Set(event.created_at),
                 leased_until: Set(None),
                 delivered_at: Set(None),
+                attempts: Set(0),
+                last_error: Set(None),
+                failed_at: Set(None),
             })
             .exec(&transaction)
             .await
@@ -1081,6 +1098,7 @@ impl AgentAuthStore for SqlAgentAuthStore {
     ) -> Result<Vec<AgentEventRecord>> {
         agent_events::Entity::find()
             .filter(agent_events::Column::DeliveredAt.is_null())
+            .filter(agent_events::Column::FailedAt.is_null())
             .filter(
                 Condition::any()
                     .add(agent_events::Column::LeasedUntil.is_null())
@@ -1100,15 +1118,18 @@ impl AgentAuthStore for SqlAgentAuthStore {
     async fn lease_event(
         &self,
         id: &str,
+        attempts: u32,
         now: DateTime<Utc>,
         until: DateTime<Utc>,
     ) -> Result<bool> {
         // A conditional update: the database lets one of two concurrent
-        // deliveries move the lease.
+        // deliveries move the lease, and only at the attempt count it read.
         let leased = agent_events::Entity::update_many()
             .col_expr(agent_events::Column::LeasedUntil, Expr::value(until))
             .filter(agent_events::Column::Id.eq(id.to_owned()))
             .filter(agent_events::Column::DeliveredAt.is_null())
+            .filter(agent_events::Column::FailedAt.is_null())
+            .filter(agent_events::Column::Attempts.eq(to_i32(attempts, "attempts")?))
             .filter(
                 Condition::any()
                     .add(agent_events::Column::LeasedUntil.is_null())
@@ -1133,16 +1154,54 @@ impl AgentAuthStore for SqlAgentAuthStore {
         Ok(())
     }
 
-    async fn release_event(&self, id: &str) -> Result<()> {
+    async fn fail_event_attempt(
+        &self,
+        id: &str,
+        error: &str,
+        failed_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
         let none = Option::<DateTime<Utc>>::None;
         agent_events::Entity::update_many()
+            .col_expr(
+                agent_events::Column::Attempts,
+                Expr::col(agent_events::Column::Attempts).add(1),
+            )
+            .col_expr(
+                agent_events::Column::LastError,
+                Expr::value(Some(error.to_owned())),
+            )
             .col_expr(agent_events::Column::LeasedUntil, Expr::value(none))
+            .col_expr(agent_events::Column::FailedAt, Expr::value(failed_at))
             .filter(agent_events::Column::Id.eq(id.to_owned()))
             .filter(agent_events::Column::DeliveredAt.is_null())
             .exec(&self.db)
             .await
             .map_err(db_error)?;
         Ok(())
+    }
+
+    async fn retry_failed_events(&self) -> Result<u64> {
+        let none = Option::<DateTime<Utc>>::None;
+        Ok(agent_events::Entity::update_many()
+            .col_expr(agent_events::Column::FailedAt, Expr::value(none))
+            .col_expr(agent_events::Column::LeasedUntil, Expr::value(none))
+            .col_expr(agent_events::Column::Attempts, Expr::value(0))
+            .filter(agent_events::Column::FailedAt.is_not_null())
+            .filter(agent_events::Column::DeliveredAt.is_null())
+            .exec(&self.db)
+            .await
+            .map_err(db_error)?
+            .rows_affected)
+    }
+
+    async fn failed_event_count(&self) -> Result<u64> {
+        use sea_orm::PaginatorTrait;
+        agent_events::Entity::find()
+            .filter(agent_events::Column::FailedAt.is_not_null())
+            .filter(agent_events::Column::DeliveredAt.is_null())
+            .count(&self.db)
+            .await
+            .map_err(db_error)
     }
 
     async fn prune_events(&self, before: DateTime<Utc>) -> Result<u64> {

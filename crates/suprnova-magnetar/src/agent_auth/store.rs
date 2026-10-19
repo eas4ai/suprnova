@@ -158,6 +158,24 @@ pub struct AgentEventRecord {
     pub created_at: DateTime<Utc>,
     /// When a delivery was accepted; `None` until then.
     pub delivered_at: Option<DateTime<Utc>>,
+    /// How many deliveries the host refused since the event was written or
+    /// last put back after it failed.
+    pub attempts: u32,
+    /// What the host answered the last refused delivery with, as text.
+    pub last_error: Option<String>,
+    /// When the event failed for good, after the last attempt the limit
+    /// allows; it is not delivered again until it is put back.
+    pub failed_at: Option<DateTime<Utc>>,
+}
+
+impl AgentEventRecord {
+    /// Whether a delivery now follows one the host refused: the host has
+    /// already been handed the event once and wrote what it writes for a
+    /// first delivery.
+    #[must_use]
+    pub fn is_retry(&self) -> bool {
+        self.last_error.is_some()
+    }
 }
 
 /// Storage for agent auth.
@@ -307,23 +325,42 @@ pub trait AgentAuthStore: Send + Sync {
     /// Delete replay records that expired before `now`. Returns how many
     /// went.
     async fn prune_replays(&self, now: DateTime<Utc>) -> Result<u64>;
-    /// Up to `limit` outbox events not yet delivered and not leased past
-    /// `now`, oldest first.
+    /// Up to `limit` outbox events not yet delivered, not failed and not
+    /// leased past `now`, oldest first.
     async fn undelivered_events(
         &self,
         now: DateTime<Utc>,
         limit: u64,
     ) -> Result<Vec<AgentEventRecord>>;
-    /// Lease an undelivered event until `until`, only while no other lease
-    /// on it runs past `now`, so of two nodes delivering at once only one
-    /// hands it on. Returns whether this call took it.
-    async fn lease_event(&self, id: &str, now: DateTime<Utc>, until: DateTime<Utc>)
-    -> Result<bool>;
+    /// Lease an undelivered event until `until`, only while it has not
+    /// failed, still counts `attempts` refused deliveries and no other
+    /// lease on it runs past `now`: of two nodes delivering at once only
+    /// one hands it on, and the attempt number it hands on is exact.
+    /// Returns whether this call took it.
+    async fn lease_event(
+        &self,
+        id: &str,
+        attempts: u32,
+        now: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> Result<bool>;
     /// Record that a delivery of the event was accepted at `at`.
     async fn mark_event_delivered(&self, id: &str, at: DateTime<Utc>) -> Result<()>;
-    /// End the lease on an event whose delivery failed, so the next
-    /// delivery pass takes it at once.
-    async fn release_event(&self, id: &str) -> Result<()>;
-    /// Delete the events delivered before `before`. Returns how many went.
+    /// Record a refused delivery: count the attempt, keep `error`, end the
+    /// lease so the next delivery pass takes the event, and with
+    /// `failed_at` mark it failed.
+    async fn fail_event_attempt(
+        &self,
+        id: &str,
+        error: &str,
+        failed_at: Option<DateTime<Utc>>,
+    ) -> Result<()>;
+    /// Put every failed event back for delivery with a fresh count.
+    /// Returns how many.
+    async fn retry_failed_events(&self) -> Result<u64>;
+    /// How many events failed and wait to be put back.
+    async fn failed_event_count(&self) -> Result<u64>;
+    /// Delete the events delivered before `before`. A failed event is never
+    /// deleted. Returns how many went.
     async fn prune_events(&self, before: DateTime<Utc>) -> Result<u64>;
 }

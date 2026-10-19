@@ -295,6 +295,8 @@ impl AbuseLimiter for WindowLimiter {
 #[derive(Default)]
 pub struct RecordingEvents {
     pub events: Mutex<Vec<LifecycleEvent>>,
+    /// The events the host refused, in order.
+    pub refused: Mutex<Vec<LifecycleEvent>>,
     refusals: Mutex<HashMap<LifecycleEventKind, u32>>,
 }
 
@@ -322,6 +324,7 @@ impl DurableLifecycleDelivery for RecordingEvents {
             && *left > 0
         {
             *left -= 1;
+            self.refused.lock().push(event);
             return Err(magnetar::plugin::PluginError::Request {
                 plugin: "test-host".to_owned(),
                 message: "the host refused the event".to_owned(),
@@ -635,11 +638,12 @@ impl AgentAuthStore for FlakyAgentStore {
     async fn lease_event(
         &self,
         id: &str,
+        attempts: u32,
         now: chrono::DateTime<chrono::Utc>,
         until: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
         self.faults.check("lease_event")?;
-        self.inner.lease_event(id, now, until).await
+        self.inner.lease_event(id, attempts, now, until).await
     }
     async fn mark_event_delivered(
         &self,
@@ -649,9 +653,22 @@ impl AgentAuthStore for FlakyAgentStore {
         self.faults.check("mark_event_delivered")?;
         self.inner.mark_event_delivered(id, at).await
     }
-    async fn release_event(&self, id: &str) -> Result<()> {
-        self.faults.check("release_event")?;
-        self.inner.release_event(id).await
+    async fn fail_event_attempt(
+        &self,
+        id: &str,
+        error: &str,
+        failed_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<()> {
+        self.faults.check("fail_event_attempt")?;
+        self.inner.fail_event_attempt(id, error, failed_at).await
+    }
+    async fn retry_failed_events(&self) -> Result<u64> {
+        self.faults.check("retry_failed_events")?;
+        self.inner.retry_failed_events().await
+    }
+    async fn failed_event_count(&self) -> Result<u64> {
+        self.faults.check("failed_event_count")?;
+        self.inner.failed_event_count().await
     }
     async fn prune_events(&self, before: chrono::DateTime<chrono::Utc>) -> Result<u64> {
         self.faults.check("prune_events")?;

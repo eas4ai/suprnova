@@ -280,7 +280,11 @@ pub struct AgentAuthServices {
     /// `enqueue` right after the commit. An `Err` from `enqueue` leaves it
     /// in the outbox for [`AgentAuth::deliver_pending_events`], so a host
     /// answers `Err` when it could not take the event, and expects the same
-    /// event, by its `mutation_id`, more than once.
+    /// event, by its `mutation_id`, more than once. A delivery after a
+    /// refused one carries the attribute [`DELIVERY_ATTEMPT`]. The outbox
+    /// keeps the text of the last `Err`, so a host leaves secrets and
+    /// personal data out of it. After [`MAX_EVENT_ATTEMPTS`] refusals the
+    /// event fails until [`AgentAuth::retry_failed_events`] puts it back.
     pub events: Arc<dyn DurableLifecycleDelivery>,
 }
 
@@ -355,6 +359,12 @@ const EVENT_LEASE: Duration = Duration::from_secs(120);
 /// [`AgentAuth::prune_delivered_events`] deletes it: seven days, room to
 /// read back what was delivered when a listener's work is in doubt.
 pub const DELIVERED_EVENT_RETENTION: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// How many refused deliveries a claim event gets before it fails: twelve,
+/// about an hour of five-minute delivery passes. A failed event is logged
+/// once at error level, never delivered again by the passes and never
+/// pruned, until [`AgentAuth::retry_failed_events`] puts it back.
+pub const MAX_EVENT_ATTEMPTS: u32 = 12;
 
 impl AgentAuth {
     /// Add agent auth to `server`: the JWT bearer and claim grants, the
@@ -761,6 +771,27 @@ impl AgentAuth {
         }
     }
 
+    /// How many claim events failed after [`MAX_EVENT_ATTEMPTS`] refused
+    /// deliveries and wait for [`retry_failed_events`](Self::retry_failed_events).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage fails.
+    pub async fn failed_events(&self) -> Result<u64> {
+        self.core.store.failed_event_count().await
+    }
+
+    /// Put every failed claim event back for delivery with a fresh count of
+    /// attempts, once what refused it is fixed. The next delivery pass
+    /// delivers them. Returns how many were put back.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage fails.
+    pub async fn retry_failed_events(&self) -> Result<u64> {
+        self.core.store.retry_failed_events().await
+    }
+
     /// Delete outbox events delivered more than
     /// [`DELIVERED_EVENT_RETENTION`] ago. For a host to run on a schedule.
     /// An event not yet delivered is never deleted. Returns how many went.
@@ -876,10 +907,13 @@ impl Core {
     }
 
     /// Hand one outbox event to the host's delivery: lease it, enqueue it
-    /// under its stable identifier, and mark it delivered. A refused
-    /// delivery ends the lease, so the next pass takes the event at once.
-    /// Returns whether this call delivered it; `false` also for an event
-    /// another node holds or already delivered.
+    /// under its stable identifier, and mark it delivered. A delivery that
+    /// follows a refused one carries the attribute `delivery_attempt`, its
+    /// attempt number, so the host writes once what it writes for a first
+    /// delivery. A refused delivery counts an attempt, keeps the host's
+    /// answer and ends the lease; the last attempt the limit allows marks
+    /// the event failed. Returns whether this call delivered it; `false`
+    /// also for an event another node holds or already delivered.
     pub(crate) async fn deliver_event(&self, event: &AgentEventRecord) -> Result<bool> {
         let Some(kind) = outbox_kind(&event.kind) else {
             tracing::error!(
@@ -892,13 +926,19 @@ impl Core {
         let now = Utc::now();
         if !self
             .store
-            .lease_event(&event.id, now, later(now, EVENT_LEASE)?)
+            .lease_event(&event.id, event.attempts, now, later(now, EVENT_LEASE)?)
             .await?
         {
             return Ok(false);
         }
+        let attempt = event.attempts.saturating_add(1);
         let mut lifecycle = LifecycleEvent::new(event.id.clone(), kind, event.user_id.clone());
         lifecycle.attributes = event.attributes.clone();
+        if event.is_retry() {
+            lifecycle
+                .attributes
+                .insert(DELIVERY_ATTEMPT.to_owned(), attempt.to_string());
+        }
         match self.events.enqueue(lifecycle).await {
             Ok(()) => {
                 self.store
@@ -907,12 +947,28 @@ impl Core {
                 Ok(true)
             }
             Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    event_id = %event.id,
-                    "the host refused an agent auth event; the next delivery pass retries it"
-                );
-                self.store.release_event(&event.id).await?;
+                let answer = bounded_error(&error.to_string());
+                let failed = attempt >= MAX_EVENT_ATTEMPTS;
+                self.store
+                    .fail_event_attempt(&event.id, &answer, failed.then(Utc::now))
+                    .await?;
+                if failed {
+                    // Once: a failed event is not delivered again until it
+                    // is put back.
+                    tracing::error!(
+                        event_id = %event.id,
+                        attempts = attempt,
+                        last_error = %answer,
+                        "an agent auth claim event failed after its last delivery attempt; \
+                         it is not delivered again until the failed events are put back"
+                    );
+                } else {
+                    tracing::debug!(
+                        event_id = %event.id,
+                        attempt,
+                        "the host refused an agent auth event; the next delivery pass retries it"
+                    );
+                }
                 Ok(false)
             }
         }
@@ -1378,6 +1434,19 @@ impl Core {
         (record.status == STATUS_ACTIVE || record.status == STATUS_CLAIMED)
             && record.user_id.is_some()
     }
+}
+
+/// The attribute a redelivered outbox event carries: its attempt number,
+/// 2 or more.
+pub const DELIVERY_ATTEMPT: &str = "delivery_attempt";
+
+/// The longest host answer an outbox event keeps.
+const MAX_ERROR_CHARS: usize = 500;
+
+/// A host's answer as the outbox keeps it: at most [`MAX_ERROR_CHARS`]
+/// characters.
+fn bounded_error(answer: &str) -> String {
+    answer.chars().take(MAX_ERROR_CHARS).collect()
 }
 
 /// The lifecycle kind of an outbox event's audit name.

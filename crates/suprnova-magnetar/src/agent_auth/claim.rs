@@ -272,6 +272,9 @@ impl Core {
             attributes,
             created_at: now,
             delivered_at: None,
+            attempts: 0,
+            last_error: None,
+            failed_at: None,
         };
         if !self
             .store

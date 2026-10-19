@@ -702,6 +702,93 @@ async fn agent_009_two_concurrent_passes_deliver_an_event_once() {
 }
 
 #[tokio::test]
+async fn agent_009_claim_event_fails_after_the_attempt_limit_and_is_not_delivered_again() {
+    let h = sqlite_harness().await;
+    h.events
+        .refuse(LifecycleEventKind::AgentClaimConfirmed, u32::MAX);
+    let (registration, _) = h.claimed_anonymous("always-refused@example.test").await;
+    let id = registration["registration_id"].as_str().expect("id");
+    // The delivery after the commit is the first attempt; each pass is one
+    // more.
+    for _ in 1..magnetar::agent_auth::MAX_EVENT_ATTEMPTS {
+        assert_eq!(h.engine.deliver_pending_events().await.expect("a pass"), 0);
+    }
+    let row = h.outbox_of(id).await.remove(0);
+    assert_eq!(row.attempts, 12);
+    assert!(row.failed_at.is_some(), "failed after the limit");
+    assert!(row.delivered_at.is_none());
+    assert!(
+        row.last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("refused")),
+        "{:?}",
+        row.last_error
+    );
+    assert_eq!(h.engine.failed_events().await.expect("a count"), 1);
+    let refused_before = h.events.refused.lock().len();
+    assert_eq!(refused_before, 12);
+    assert_eq!(h.engine.deliver_pending_events().await.expect("a pass"), 0);
+    assert_eq!(
+        h.events.refused.lock().len(),
+        refused_before,
+        "a failed event is not handed on again"
+    );
+    assert_eq!(h.engine.prune_delivered_events().await.expect("prune"), 0);
+    assert_eq!(
+        h.outbox_of(id).await.len(),
+        1,
+        "a failed event is never pruned"
+    );
+}
+
+#[tokio::test]
+async fn agent_009_retry_failed_puts_a_failed_event_back_with_a_fresh_count() {
+    let h = sqlite_harness().await;
+    h.events.refuse(LifecycleEventKind::AgentClaimConfirmed, 12);
+    let (registration, _) = h.claimed_anonymous("put-back@example.test").await;
+    let id = registration["registration_id"].as_str().expect("id");
+    for _ in 1..magnetar::agent_auth::MAX_EVENT_ATTEMPTS {
+        h.engine.deliver_pending_events().await.expect("a pass");
+    }
+    assert!(h.outbox_of(id).await[0].failed_at.is_some());
+    // What refused it is fixed: the host takes events again.
+    assert_eq!(h.engine.retry_failed_events().await.expect("put back"), 1);
+    let row = h.outbox_of(id).await.remove(0);
+    assert_eq!(row.attempts, 0, "a fresh count");
+    assert!(row.failed_at.is_none());
+    assert_eq!(h.engine.failed_events().await.expect("a count"), 0);
+    assert_eq!(h.engine.deliver_pending_events().await.expect("a pass"), 1);
+    let delivered = h.events.of(LifecycleEventKind::AgentClaimConfirmed);
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].mutation_id, row.id);
+}
+
+#[tokio::test]
+async fn agent_009_redelivery_is_marked_as_a_retry() {
+    let h = sqlite_harness().await;
+    h.events.refuse(LifecycleEventKind::AgentClaimConfirmed, 1);
+    h.claimed_anonymous("marked@example.test").await;
+    let first = h.events.refused.lock()[0].clone();
+    assert!(
+        !first.attributes.contains_key("delivery_attempt"),
+        "the first delivery is not a retry"
+    );
+    assert_eq!(h.engine.deliver_pending_events().await.expect("a pass"), 1);
+    let retried = h
+        .events
+        .of(LifecycleEventKind::AgentClaimConfirmed)
+        .remove(0);
+    assert_eq!(retried.mutation_id, first.mutation_id);
+    assert_eq!(
+        retried
+            .attributes
+            .get("delivery_attempt")
+            .map(String::as_str),
+        Some("2")
+    );
+}
+
+#[tokio::test]
 async fn agent_009_delivered_events_are_pruned_after_the_retention() {
     use magnetar::agent_auth::sql::agent_events;
     use sea_orm::sea_query::Expr;
