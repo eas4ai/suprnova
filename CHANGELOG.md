@@ -196,8 +196,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   error instead of answering that the link was used. Every connection the
   framework opens to MySQL or MariaDB now runs
   `SET SESSION innodb_snapshot_isolation = OFF` once, when it opens. A
-  server without the variable, MySQL included,
-  refuses it as unknown and the connection opens as before. See
+  server without the variable, MySQL included, refuses it as unknown and
+  the connection opens as before. The statement never fails a connection:
+  any other refusal, as a MySQL-compatible proxy or service may give, is
+  logged once per pool at `warn`, and the connection opens with the
+  server's own setting. See
   [MySQL semantics on MariaDB](manual/database.md#mysql-semantics-on-mariadb).
 - **`DB::transaction_with_attempts` retries by the database's error code.**
   It re-runs an attempt the database refused with MySQL or MariaDB error

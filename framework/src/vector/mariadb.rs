@@ -216,10 +216,9 @@ impl MariaDbVectorDriver {
     /// `manual/database.md` explains why. A pool handed to
     /// [`Self::from_pool`] keeps whatever its builder set.
     pub fn from_url(url: &str) -> Result<Self, FrameworkError> {
+        let semantics = crate::database::connection::MysqlSemantics::new();
         let pool = MySqlPoolOptions::new()
-            .after_connect(|connection, _metadata| {
-                crate::database::connection::mysql_semantics(connection)
-            })
+            .after_connect(move |connection, _metadata| semantics.apply(connection))
             .connect_lazy(crate::database::config::driver_url(url).as_ref())
             // The URL carries the password, so the error names the fault
             // and not the URL.

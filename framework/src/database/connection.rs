@@ -168,12 +168,16 @@ impl DbConnection {
             opt.map_sqlx_mysql_opts(move |options| options.charset(&charset).collation(&collation));
         }
         // A `customize` that replaces the MySQL pool options replaces this
-        // hook too, so it must run `mysql_semantics` itself, as the test
+        // hook too, so it must apply `MysqlSemantics` itself, as the test
         // transaction's does.
         #[cfg(feature = "database-mysql")]
-        opt.map_sqlx_mysql_pool_opts(|pool| {
-            pool.after_connect(|connection, _metadata| mysql_semantics(connection))
-        });
+        {
+            let semantics = MysqlSemantics::new();
+            opt.map_sqlx_mysql_pool_opts(move |pool| {
+                let semantics = semantics.clone();
+                pool.after_connect(move |connection, _metadata| semantics.apply(connection))
+            });
+        }
         customize(&mut opt);
 
         let conn = Database::connect(opt)
@@ -297,7 +301,7 @@ impl DbConnection {
 }
 
 /// The statement that gives a MariaDB session MySQL's concurrency
-/// semantics. See [`mysql_semantics`].
+/// semantics. See [`MysqlSemantics`].
 #[cfg(feature = "database-mysql")]
 const MYSQL_SEMANTICS: &str = "SET SESSION innodb_snapshot_isolation = OFF";
 
@@ -306,8 +310,9 @@ const MYSQL_SEMANTICS: &str = "SET SESSION innodb_snapshot_isolation = OFF";
 #[cfg(feature = "database-mysql")]
 const UNKNOWN_SYSTEM_VARIABLE: u16 = 1193;
 
-/// Gives a new MySQL-family connection MySQL 8.4's concurrency semantics.
-/// Runs once, when the pool opens the connection, never per query.
+/// Gives the new connections of one MySQL-family pool MySQL 8.4's
+/// concurrency semantics. Runs once per connection, when the pool opens
+/// it, never per query.
 ///
 /// MariaDB 11.8 and later turn `innodb_snapshot_isolation` on by default.
 /// Under it, an UPDATE, a DELETE or a locking read in a REPEATABLE READ
@@ -327,19 +332,85 @@ const UNKNOWN_SYSTEM_VARIABLE: u16 = 1193;
 /// on every server, since sqlx keeps only the numbers of the version and
 /// not the `MariaDB` in it, and would need a list of the releases that have
 /// the variable.
-/// Any other refusal fails the connection: a session that cannot be given
-/// MySQL's semantics is not one to hand out.
+///
+/// The setting never fails a connection. A MySQL-compatible proxy or
+/// managed service may refuse an unknown variable with another error, and
+/// an application that cannot connect at all is far worse off than one
+/// whose MariaDB keeps the server's own concurrency behavior. Such a
+/// refusal is logged at warn once per pool, and the connection is handed
+/// out.
+///
+/// Clones share one pool's state, so make one per pool.
 #[cfg(feature = "database-mysql")]
-pub(crate) fn mysql_semantics(
-    connection: &mut sea_orm::sqlx::mysql::MySqlConnection,
-) -> futures::future::BoxFuture<'_, Result<(), sea_orm::sqlx::Error>> {
-    Box::pin(async move {
-        match sea_orm::sqlx::Executor::execute(connection, MYSQL_SEMANTICS).await {
-            Ok(_) => Ok(()),
-            Err(error) if refused_as_unknown_variable(&error) => Ok(()),
-            Err(error) => Err(error),
+#[derive(Clone)]
+pub(crate) struct MysqlSemantics {
+    statement: &'static str,
+    /// Whether this pool has warned that a connection kept the server's
+    /// setting, so the warning comes once and not with every connection.
+    warned: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(feature = "database-mysql")]
+impl MysqlSemantics {
+    /// The semantics of a new pool.
+    pub(crate) fn new() -> Self {
+        Self::running(MYSQL_SEMANTICS)
+    }
+
+    /// A pool whose connections run `statement`: the real one, or in a
+    /// test one the server refuses.
+    fn running(statement: &'static str) -> Self {
+        Self {
+            statement,
+            warned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
-    })
+    }
+
+    /// The pool's connect hook: runs the statement on `connection`.
+    pub(crate) fn apply<'c>(
+        &self,
+        connection: &'c mut sea_orm::sqlx::mysql::MySqlConnection,
+    ) -> futures::future::BoxFuture<'c, Result<(), sea_orm::sqlx::Error>> {
+        let semantics = self.clone();
+        Box::pin(async move {
+            let outcome = sea_orm::sqlx::Executor::execute(connection, semantics.statement).await;
+            semantics.settle(outcome.map(|_| ()))
+        })
+    }
+
+    /// The hook's answer to the statement's outcome, which is always to
+    /// hand the connection out. A 1193 means there was nothing to turn off
+    /// and says nothing. Any other refusal warns, once per pool. The error
+    /// is the server's or the driver's answer to the statement and carries
+    /// neither the URL nor a credential.
+    fn settle(
+        &self,
+        outcome: Result<(), sea_orm::sqlx::Error>,
+    ) -> Result<(), sea_orm::sqlx::Error> {
+        match outcome {
+            Ok(()) => {}
+            Err(error) if refused_as_unknown_variable(&error) => {}
+            Err(error) => {
+                if !self.warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::warn!(
+                        target: "suprnova::database",
+                        error = %error,
+                        "could not turn innodb_snapshot_isolation off for this pool's \
+                         connections; on MariaDB 11.8 and later, concurrent transactions \
+                         keep the server's own behavior, where an update of a row another \
+                         transaction changed after this one's first read fails with error 1020",
+                    );
+                } else {
+                    tracing::debug!(
+                        target: "suprnova::database",
+                        error = %error,
+                        "could not turn innodb_snapshot_isolation off for this connection",
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Whether the server refused a statement because it has no such system
@@ -441,6 +512,79 @@ impl std::ops::Deref for DbConnection {
 
     fn deref(&self) -> &Self::Target {
         &self.inner
+    }
+}
+
+#[cfg(all(test, feature = "database-mysql"))]
+mod mysql_semantics_tests {
+    use super::MysqlSemantics;
+
+    /// How a MySQL-compatible proxy or service might refuse the statement:
+    /// with anything but MySQL's own error 1193.
+    fn refused(reason: &str) -> Result<(), sea_orm::sqlx::Error> {
+        Err(sea_orm::sqlx::Error::Protocol(reason.to_owned()))
+    }
+
+    fn warnings(lines: &[&str]) -> usize {
+        lines
+            .iter()
+            .filter(|line| line.contains("WARN") && line.contains("innodb_snapshot_isolation"))
+            .count()
+    }
+
+    /// The setting is worth having, never worth failing a connection over:
+    /// a refusal other than 1193 still hands the connection out, and the
+    /// pool says so once, however many of its connections are refused.
+    #[test]
+    #[tracing_test::traced_test]
+    fn a_refused_setting_still_opens_the_connection_and_warns_once_per_pool() {
+        let pool = MysqlSemantics::new();
+        pool.settle(refused("unsupported system variable"))
+            .expect("the first refused connection is handed out");
+        pool.clone()
+            .settle(refused("unsupported system variable"))
+            .expect("a second refused connection of the pool is handed out");
+        logs_assert(|lines| match warnings(lines) {
+            1 => Ok(()),
+            seen => Err(format!("one pool warns once, saw {seen} warnings")),
+        });
+
+        MysqlSemantics::new()
+            .settle(refused("unsupported system variable"))
+            .expect("another pool's refused connection is handed out");
+        logs_assert(|lines| match warnings(lines) {
+            2 => Ok(()),
+            seen => Err(format!(
+                "a second pool warns once more, saw {seen} warnings"
+            )),
+        });
+    }
+
+    /// A real refusal on MariaDB: a value the variable does not take fails
+    /// with error 1231, and the connection still opens and runs queries.
+    #[tokio::test]
+    #[ignore = "requires disposable MariaDB at MARIADB_TEST_URL"]
+    async fn mariadb_a_refused_setting_still_gives_a_working_connection() {
+        let url = std::env::var("MARIADB_TEST_URL").expect("set MARIADB_TEST_URL");
+        let semantics =
+            MysqlSemantics::running("SET SESSION innodb_snapshot_isolation = 'neither'");
+        let pool = sea_orm::sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(2)
+            .after_connect(move |connection, _metadata| semantics.apply(connection))
+            .connect(&crate::database::config::driver_url(&url))
+            .await
+            .expect("a refused setting does not fail the connection");
+        let first = pool.acquire().await.expect("a first connection");
+        let mut second = pool.acquire().await.expect("a second connection");
+        let (session, global): (i64, i64) = sea_orm::sqlx::query_as(
+            "SELECT @@SESSION.innodb_snapshot_isolation, @@GLOBAL.innodb_snapshot_isolation",
+        )
+        .fetch_one(&mut *second)
+        .await
+        .expect("the connection runs queries");
+        assert_eq!(session, global, "the refused statement changed nothing");
+        drop((first, second));
+        pool.close().await;
     }
 }
 

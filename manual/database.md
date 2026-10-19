@@ -121,11 +121,21 @@ replica, `TestDatabase`, and `MariaDbVectorDriver::from_url`. MySQL, older
 MariaDB releases and other MySQL-compatible servers have no such variable
 and refuse the statement with error 1193, which the framework takes to mean
 there is nothing to turn off: the connection opens as usual and nothing is
-logged. Any other refusal fails the connection. There is no setting to turn
-this off. The server's global value stays as it is for every other client,
-and a pool your application builds and hands to the framework, through
-`DbConnection::from_raw` or `MariaDbVectorDriver::from_pool`, keeps whatever
-its builder set.
+logged.
+
+The statement never fails a connection. A MySQL-compatible proxy or
+service, such as Vitess, ProxySQL or TiDB, may refuse it with another
+error. The connection then opens anyway, keeping the server's own setting,
+and the pool logs one warning at `warn` that names
+`innodb_snapshot_isolation`. On MariaDB 11.8 and later that means
+concurrent transactions behave as the server does on its own, and two at
+once can fail one with error 1020. The warning carries the server's error,
+never the URL or a credential.
+
+There is no setting to turn this off. The server's global value stays as it
+is for every other client, and a pool your application builds and hands to
+the framework, through `DbConnection::from_raw` or
+`MariaDbVectorDriver::from_pool`, keeps whatever its builder set.
 
 ### Pool liveness
 
