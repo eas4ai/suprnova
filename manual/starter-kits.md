@@ -213,10 +213,6 @@ each page shows part of the client at work:
   button, or the sign-in and register links for a guest. Every page titles
   its tab with `Head`.
 
-For API-only services, `suprnova new my-api --api` initializes Magnetar,
-installs bearer-session middleware, and scaffolds password registration and
-login against the canonical `app_users` table without a frontend.
-
 ### Agents in the Inertia kits
 
 The React, Vue and Svelte kits serve [agents](agents.md) from the first
@@ -318,6 +314,12 @@ page. Suprnova's scaffold lists the signed-in user's own notes, so deferred
 and optional props, cursor scrolling, a JSON form, and flashed toasts each
 have a working server to talk to. No handler lists accounts: a directory of
 users would show every member the name and email of every other member.
+
+## The API kit
+
+For API-only services, `suprnova new my-api --api` initializes Magnetar,
+installs bearer-session middleware, and scaffolds password registration and
+login against the canonical `app_users` table without a frontend.
 
 ### Agents in the API kit
 
