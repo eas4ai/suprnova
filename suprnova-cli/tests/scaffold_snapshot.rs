@@ -639,6 +639,14 @@ const API_AGENTS_CASES: &[&str] = &[
     "agent_017_api_registration_mails_a_verification_link",
     "agent_017_api_verification_link_verifies_the_address_once",
     "agent_017_api_claim_needs_a_verified_address",
+    "agent_017_api_consent_session_cookie_ends_with_the_browser",
+    "agent_017_api_consent_session_ends_after_fifteen_idle_minutes",
+    "agent_017_api_sign_out_ends_the_consent_session",
+    "agent_017_api_registration_is_limited_per_address",
+    "agent_017_api_session_allow_list_matches_whole_paths",
+    "agent_017_api_consent_forms_need_the_csrf_token",
+    "agent_017_api_verification_resend_is_limited",
+    "agent_017_api_registration_answers_202_when_the_mail_cannot_go",
 ];
 
 /// The version the workspace lockfile resolves `name` to, among those

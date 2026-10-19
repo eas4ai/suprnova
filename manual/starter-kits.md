@@ -270,7 +270,9 @@ a link, through `Auth::email_verification()`
 (`src/controllers/email_verification.rs`):
 
 1. Registration mails a new account the link, once. Registering an address
-   that already has an account mails nothing.
+   that already has an account mails nothing. `POST /api/auth/register`
+   takes six requests a minute from one client address, and answers `429`
+   past that.
 2. A signed-in client asks for a new link with
    `POST /api/email/verification-notification`. It answers `202` when it
    mails one, and `204` when the address is already verified. The route
@@ -283,7 +285,10 @@ a link, through `Auth::email_verification()`
 The link works once and expires after 24 hours. It verifies only for the
 account's own user: anyone can register another person's address with a
 password of their own, and a link that verified whoever opened it would
-verify that account. Verifying changes no credential and starts no
+verify that account. It also proves only the address it was mailed to: once
+the account's address is another, the page answers `409` and verifies
+nothing, and the user asks for a new link. Verifying with one link spends
+the account's other links. Verifying changes no credential and starts no
 session. The mail comes from `MAIL_FROM`, and names the application as
 `APP_NAME`.
 
@@ -300,6 +305,7 @@ route answers `500`.
 middleware on these paths and no others:
 
 - `/login`, the sign-in page, and its form.
+- `/logout`, where the sign-out form posts.
 - `/oauth/authorize`, `/oauth/approve` and `/oauth/authorizations/{id}`,
   where a user approves a client.
 - `/oauth/connected` and the revoke forms under it.
@@ -313,8 +319,17 @@ endpoints, and agent auth's JSON routes. None of them starts a session or
 sets a cookie, so no client or agent can create a session row per request,
 and the JSON sign-in at `POST /api/auth/login` returns a token and nothing
 else. The migrator creates the `sessions` table, and the session settings
-are the `SESSION_*` variables in [Environment variables](env-vars.md). The
-kit adds no global CSRF middleware, so the JSON API still takes no token.
+are the `SESSION_*` variables in [Environment variables](env-vars.md), with
+two exceptions. A consent session ends after 15 minutes without a request
+(`agents::CONSENT_SESSION_IDLE`), and its cookie has no expiry, so the
+browser drops it when it closes. The kit adds no global CSRF middleware, so
+the JSON API still takes no token.
+
+A signed-in user ends the session at once with the **Sign out** form, which
+posts to `/logout` with the session's CSRF token. The form is on the email
+verification page, the page a signed-in user sees: `/login` sends a user who
+is already signed in straight on. Signing out ends the session, and the next
+approval or claim asks for a sign-in again.
 
 `bootstrap.rs` also registers a `DatabaseUserProvider` over `app_users`, so
 `Auth::user()` finds the user a bearer token or a consent page's session

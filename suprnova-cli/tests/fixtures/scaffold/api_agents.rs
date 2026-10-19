@@ -14,7 +14,9 @@
 //! `TestClient`, which keeps cookies as a browser does.
 
 use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -136,12 +138,27 @@ fn mailed_link(email: &str) -> String {
         .unwrap_or_else(|| panic!("no verification link was mailed to {email}"))
 }
 
-/// A browser, or any other client, with no cookies yet.
+/// An address no other client of this run has. Each client gets one, as
+/// browsers on different machines would, so a limit counted per address
+/// counts each client apart. The addresses are in 198.18.0.0/15, a block
+/// set aside for tests that no proxy list trusts.
+fn next_address() -> IpAddr {
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    let offset = NEXT.fetch_add(1, Ordering::Relaxed);
+    IpAddr::V4(Ipv4Addr::from(
+        u32::from(Ipv4Addr::new(198, 18, 0, 0)) + offset,
+    ))
+}
+
+/// A browser, or any other client, with no cookies yet, at an address of
+/// its own.
 fn browser() -> TestClient {
     let router = __PACKAGE__::agents::serve(__PACKAGE__::routes::register())
         .expect("the routes with agents");
     // A password hash in a debug build takes a while.
-    TestClient::new(router, MiddlewareRegistry::from_global()).timeout(Duration::from_secs(60))
+    TestClient::new(router, MiddlewareRegistry::from_global())
+        .timeout(Duration::from_secs(60))
+        .with_peer_address(next_address())
 }
 
 /// A browser with two routes added for this test, each answering the id of
@@ -160,7 +177,9 @@ fn browser_with_whoami() -> TestClient {
         .get("/oauth/connected/whoami", whoami)
         .into();
     let router = __PACKAGE__::agents::serve(routes).expect("the routes with agents");
-    TestClient::new(router, MiddlewareRegistry::from_global()).timeout(Duration::from_secs(60))
+    TestClient::new(router, MiddlewareRegistry::from_global())
+        .timeout(Duration::from_secs(60))
+        .with_peer_address(next_address())
 }
 
 /// How many sessions the session store holds.
@@ -302,6 +321,28 @@ fn field(page: &str, name: &str) -> String {
 /// The CSRF token a page's form carries.
 fn form_token(page: &str) -> String {
     field(page, "_token")
+}
+
+/// The path of the first form on a page whose `action` contains `part`.
+fn form_action(page: &str, part: &str) -> String {
+    let marker = "action=\"";
+    page.match_indices(marker)
+        .map(|(start, _)| {
+            let value = &page[start + marker.len()..];
+            &value[..value.find('"').expect("the action ends")]
+        })
+        .find(|action| action.contains(part))
+        .map(path_of)
+        .unwrap_or_else(|| panic!("a form posting to `{part}` in {page}"))
+}
+
+/// The attributes of a `Set-Cookie` line, without the cookie's value:
+/// `Path=/`, `HttpOnly` and so on.
+fn cookie_attributes(line: &str) -> Vec<String> {
+    line.split(';')
+        .skip(1)
+        .map(|attribute| attribute.trim().to_owned())
+        .collect()
 }
 
 /// A PKCE verifier and its S256 challenge.
@@ -1686,5 +1727,405 @@ fn agent_017_api_claim_needs_a_verified_address() {
         let page = visitor.get(&claim).send().await;
         assert_eq!(page.status(), 200, "{}", page.body_text());
         page.assert_see("Let an agent act for you?");
+    });
+}
+
+/// AGENT-017: the consent session's cookie carries no `Max-Age` and no
+/// `Expires`, so the browser drops it when it closes.
+#[test]
+fn agent_017_api_consent_session_cookie_ends_with_the_browser() {
+    run(async {
+        let name = suprnova::SessionConfig::from_env().cookie_name;
+        let page = browser()
+            .get("/login")
+            .header("Accept", "text/html")
+            .send()
+            .await;
+        assert_eq!(page.status(), 200, "{}", page.body_text());
+        assert!(page.cookie(&name).is_some(), "the page starts a session");
+        let line = page.header("set-cookie").unwrap_or_default();
+        assert!(
+            line.starts_with(&format!("{name}=")),
+            "the first cookie is the session's: {:?}",
+            line.split('=').next()
+        );
+        let attributes = cookie_attributes(line);
+        assert!(
+            attributes.iter().all(|attribute| {
+                let attribute = attribute.to_ascii_lowercase();
+                !attribute.starts_with("max-age") && !attribute.starts_with("expires")
+            }),
+            "{attributes:?}"
+        );
+    });
+}
+
+/// AGENT-017: a consent session ends after fifteen minutes without a
+/// request. Requests keep it alive, so it is the idle time that counts, not
+/// the time since the sign-in.
+#[test]
+fn agent_017_api_consent_session_ends_after_fifteen_idle_minutes() {
+    run(async {
+        let email = "idle@example.test";
+        register(email).await;
+        suprnova::testing::TestClock::scope(chrono::Utc::now(), |clock| async move {
+            let visitor = browser();
+            let signed_in = sign_in_at(&visitor, "/login", email, PASSWORD).await;
+            assert_eq!(signed_in.status(), 302, "{}", signed_in.body_text());
+            for (minutes, what) in [
+                (0, "just signed in"),
+                (10, "after ten idle minutes"),
+                (10, "ten more, twenty since the sign-in"),
+            ] {
+                clock.advance(chrono::Duration::minutes(minutes));
+                let page = visitor.get(HOME).send().await;
+                assert_eq!(page.status(), 200, "{what}: {}", page.body_text());
+            }
+            clock.advance(chrono::Duration::minutes(16));
+            let idle = visitor.get(HOME).send().await;
+            assert_eq!(idle.status(), 302, "{}", idle.body_text());
+            let sign_in = path_of(&location(&idle));
+            assert!(sign_in.starts_with("/login?"), "{sign_in}");
+        })
+        .await;
+    });
+}
+
+/// AGENT-017: a signed-in user can end the consent session. The
+/// verification page, which a signed-in user sees, carries the form; it
+/// posts to `/logout` with the session's CSRF token, and the next
+/// authorization asks for a sign-in again.
+#[test]
+fn agent_017_api_sign_out_ends_the_consent_session() {
+    run(async {
+        let email = "sign-out@example.test";
+        register(email).await;
+        let visitor = browser();
+        let client_id = register_client(&visitor).await;
+        let (_, challenge) = pkce();
+        let authorize = authorize_path(&client_id, &challenge);
+        let signed_in = sign_in_at(&visitor, "/login", email, PASSWORD).await;
+        assert_eq!(signed_in.status(), 302, "{}", signed_in.body_text());
+        let to_approval = visitor.get(&authorize).send().await;
+        assert_eq!(to_approval.status(), 302, "{}", to_approval.body_text());
+        let approval = path_of(&location(&to_approval));
+        assert!(approval.starts_with("/oauth/approve?"), "{approval}");
+
+        let page = visitor
+            .get("/email/verify?token=00")
+            .header("Accept", "text/html")
+            .send()
+            .await;
+        assert_eq!(page.status(), 404, "{}", page.body_text());
+        let text = page.body_text();
+        assert_eq!(form_action(&text, "/logout"), "/logout");
+        let signed_out = visitor
+            .post("/logout")
+            .header("Accept", "text/html")
+            .form(&[("_token", form_token(&text).as_str())])
+            .send()
+            .await;
+        assert!(
+            matches!(signed_out.status(), 302 | 303),
+            "{} {}",
+            signed_out.status(),
+            signed_out.body_text()
+        );
+        assert_eq!(path_of(&location(&signed_out)), "/login");
+        assert_consent_headers(&signed_out, "the sign-out");
+
+        let again = visitor.get(&authorize).send().await;
+        assert_eq!(again.status(), 302, "{}", again.body_text());
+        let sign_in = path_of(&location(&again));
+        assert!(sign_in.starts_with("/login?"), "{sign_in}");
+        let guest_page = visitor
+            .get("/email/verify?token=not-hex")
+            .header("Accept", "text/html")
+            .send()
+            .await;
+        assert_eq!(guest_page.status(), 404, "{}", guest_page.body_text());
+        assert!(
+            !guest_page.body_text().contains("/logout"),
+            "a guest is offered no sign-out: {}",
+            guest_page.body_text()
+        );
+    });
+}
+
+/// AGENT-017: one address registers at most six accounts a minute. The
+/// seventh request gets `429` and makes no account; another address is not
+/// held back.
+#[test]
+fn agent_017_api_registration_is_limited_per_address() {
+    run(async {
+        let client = browser();
+        let register_as = |email: &str, password: &str| {
+            client
+                .post("/api/auth/register")
+                .header("Accept", "application/json")
+                .json(&json!({ "email": email, "password": password }))
+                .send()
+        };
+        let first = register_as("limited-0@example.test", PASSWORD).await;
+        assert_eq!(first.status(), 202, "{}", first.body_text());
+        // Refused forms count too, and cost no password hash.
+        for attempt in 1..6 {
+            let refused = register_as(&format!("limited-{attempt}@example.test"), "short").await;
+            assert_eq!(
+                refused.status(),
+                422,
+                "attempt {attempt}: {}",
+                refused.body_text()
+            );
+        }
+        let seventh = register_as("limited-6@example.test", PASSWORD).await;
+        assert_eq!(seventh.status(), 429, "{}", seventh.body_text());
+        assert!(
+            User::find_by_email("limited-6@example.test")
+                .await
+                .expect("read the account")
+                .is_none(),
+            "the seventh request made no account"
+        );
+        register("limited-7@example.test").await;
+    });
+}
+
+/// AGENT-017: the session's allow-list matches whole paths. A path that
+/// only looks like a consent page gets no session, and its answer is the
+/// one the routes give with no middleware at all.
+#[test]
+fn agent_017_api_session_allow_list_matches_whole_paths() {
+    run(async {
+        use __PACKAGE__::agents::ConsentSession;
+
+        let lookalikes = [
+            "/login/",
+            "/LOGIN",
+            "/oauthx/authorize",
+            "/oauth/connectedx",
+            "/oauth/authorizations",
+        ];
+        for path in lookalikes {
+            assert!(!ConsentSession::covers(path), "{path}");
+        }
+        for path in [
+            "/login",
+            "/logout",
+            "/email/verify",
+            "/oauth/approve",
+            "/oauth/connected",
+            "/oauth/connected/clients/1/revoke",
+            "/agent/claim",
+            "/oauth/authorize",
+            "/oauth/authorizations/1",
+        ] {
+            assert!(ConsentSession::covers(path), "{path}");
+        }
+
+        let bare = TestClient::new(
+            __PACKAGE__::agents::serve(__PACKAGE__::routes::register())
+                .expect("the routes with agents"),
+            MiddlewareRegistry::new(),
+        )
+        .timeout(Duration::from_secs(60));
+        let before = session_rows().await;
+        for path in lookalikes {
+            for post in [false, true] {
+                let ask = |client: &TestClient| {
+                    let request = if post {
+                        client.post(path).form(&[("decision", "approve")])
+                    } else {
+                        client.get(path)
+                    };
+                    request.header("Accept", "application/json").send()
+                };
+                let served = ask(&browser()).await;
+                let plain = ask(&bare).await;
+                let method = if post { "POST" } else { "GET" };
+                assert!(
+                    served.header("set-cookie").is_none(),
+                    "{method} {path} set a cookie"
+                );
+                assert_eq!(
+                    (served.status(), served.body_text()),
+                    (plain.status(), plain.body_text()),
+                    "{method} {path}"
+                );
+            }
+        }
+        assert_eq!(session_rows().await, before, "no request stored a session");
+    });
+}
+
+/// AGENT-017: the approval, claim, revoke and sign-out forms are refused
+/// with `419` when posted without the session's CSRF token, and change
+/// nothing.
+#[test]
+fn agent_017_api_consent_forms_need_the_csrf_token() {
+    run(async {
+        let email = "forms@example.test";
+        register(email).await;
+        verify(email).await;
+        let visitor = browser();
+        let (_, access) = approve_through_sign_in(&visitor, email).await;
+
+        // A second client's approval, in the same signed-in browser.
+        let client_id = register_client(&visitor).await;
+        let (_, challenge) = pkce();
+        let to_approval = visitor
+            .get(authorize_path(&client_id, &challenge))
+            .send()
+            .await;
+        assert_eq!(to_approval.status(), 302, "{}", to_approval.body_text());
+        let approval = path_of(&location(&to_approval));
+        let page = visitor.get(&approval).send().await;
+        assert_eq!(page.status(), 200, "{}", page.body_text());
+        let id = query_param(&approval, "authorization").expect("the authorization");
+        let decision = format!("/oauth/authorizations/{id}");
+        let refused = visitor
+            .post(&decision)
+            .form(&[("decision", "approve")])
+            .send()
+            .await;
+        assert_eq!(refused.status(), 419, "approval: {}", refused.body_text());
+        let decided = visitor
+            .post(&decision)
+            .form(&[
+                ("_token", form_token(&page.body_text()).as_str()),
+                ("decision", "approve"),
+            ])
+            .send()
+            .await;
+        assert!(
+            matches!(decided.status(), 302 | 303),
+            "the approval was still open: {} {}",
+            decided.status(),
+            decided.body_text()
+        );
+
+        // The revoke form of the client whose code was exchanged, the only
+        // one with a grant.
+        let connected = visitor.get(HOME).send().await;
+        assert_eq!(connected.status(), 200, "{}", connected.body_text());
+        let revoke = form_action(&connected.body_text(), "/revoke");
+        let refused = visitor.post(&revoke).send().await;
+        assert_eq!(refused.status(), 419, "revoke: {}", refused.body_text());
+        assert_eq!(mcp_status(&access).await, 200, "nothing was revoked");
+
+        // The claim form.
+        let registration = register_agent(email).await;
+        let claim = path_of(
+            registration["claim"]["verification_uri"]
+                .as_str()
+                .expect("a verification URI"),
+        );
+        let page = visitor.get(&claim).send().await;
+        assert_eq!(page.status(), 200, "{}", page.body_text());
+        let attempt = field(&page.body_text(), "claim_attempt_token");
+        let code = registration["claim"]["user_code"]
+            .as_str()
+            .expect("a user code");
+        let refused = visitor
+            .post("/agent/claim")
+            .form(&[
+                ("claim_attempt_token", attempt.as_str()),
+                ("user_code", code),
+            ])
+            .send()
+            .await;
+        assert_eq!(refused.status(), 419, "claim: {}", refused.body_text());
+        let claimed = visitor
+            .post("/agent/claim")
+            .form(&[
+                ("_token", form_token(&page.body_text()).as_str()),
+                ("claim_attempt_token", attempt.as_str()),
+                ("user_code", code),
+            ])
+            .send()
+            .await;
+        assert_eq!(
+            claimed.status(),
+            200,
+            "the claim was still open: {}",
+            claimed.body_text()
+        );
+
+        // The sign-out form.
+        let refused = visitor.post("/logout").send().await;
+        assert_eq!(refused.status(), 419, "sign-out: {}", refused.body_text());
+        let still = visitor.get(HOME).send().await;
+        assert_eq!(still.status(), 200, "still signed in");
+    });
+}
+
+/// AGENT-017: the route that mails a new link answers at most six times a
+/// minute for one user. A verified user's request mails nothing (`204`), so
+/// the seventh `429` is the route's limit and not Magnetar's per-address
+/// mail budget.
+#[test]
+fn agent_017_api_verification_resend_is_limited() {
+    run(async {
+        let email = "resend-limit@example.test";
+        register(email).await;
+        verify(email).await;
+        let client = api_client(email).await;
+        for attempt in 1..=6 {
+            let answer = client
+                .post("/api/email/verification-notification")
+                .send()
+                .await;
+            assert_eq!(
+                answer.status(),
+                204,
+                "attempt {attempt}: {}",
+                answer.body_text()
+            );
+        }
+        let seventh = client
+            .post("/api/email/verification-notification")
+            .send()
+            .await;
+        assert_eq!(seventh.status(), 429, "{}", seventh.body_text());
+    });
+}
+
+/// AGENT-017: registration answers `202` and keeps the account when the
+/// verification mail cannot go, here because the SMTP server is down. The
+/// account asks for a new link later.
+#[test]
+fn agent_017_api_registration_answers_202_when_the_mail_cannot_go() {
+    run(async {
+        // A port nothing listens on: bound, then released.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("a free port")
+            .local_addr()
+            .expect("its address")
+            .port();
+        // `Mail::fake` keeps the transport it replaces and puts it back when
+        // the guard drops, so the run's capture comes back after this case.
+        let restore = suprnova::Mail::fake();
+        suprnova::Mail::set_transport(std::sync::Arc::new(
+            suprnova::mail::smtp::SmtpMailTransport::unencrypted("127.0.0.1", port)
+                .expect("an SMTP transport"),
+        ))
+        .expect("send mail to the dead port");
+        let email = "dead-smtp@example.test";
+        let response = browser()
+            .post("/api/auth/register")
+            .header("Accept", "application/json")
+            .json(&json!({ "email": email, "password": PASSWORD }))
+            .send()
+            .await;
+        drop(restore);
+        assert_eq!(response.status(), 202, "{}", response.body_text());
+        assert!(
+            User::find_by_email(email)
+                .await
+                .expect("read the account")
+                .is_some(),
+            "the account was kept"
+        );
+        assert_eq!(mails_to(email), 0, "no link was captured");
     });
 }

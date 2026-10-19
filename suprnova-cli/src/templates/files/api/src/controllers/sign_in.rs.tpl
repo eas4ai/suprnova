@@ -16,6 +16,10 @@
 //! never framed, cached or sent as a referrer, and the form posts through
 //! the route's CSRF middleware. An account with a second factor is told
 //! that this page does not offer one, and stays signed out.
+//!
+//! `POST /logout` ends the session. A signed-in user who opens `/login` is
+//! sent on at once and never sees this page, so the form that posts there
+//! is on the email verification page, which a signed-in user does see.
 
 use serde::Deserialize;
 use suprnova::{
@@ -23,7 +27,7 @@ use suprnova::{
     Validate, handler, url,
 };
 
-use crate::agents::{CONNECTED_PAGE, RETURN_TO};
+use crate::agents::{CONNECTED_PAGE, RETURN_TO, SIGN_IN_PAGE};
 use crate::email_address;
 
 /// The answer to a wrong address or password. A form that is not valid gets
@@ -139,6 +143,15 @@ pub async fn store(req: Request) -> Response {
         Err(error) if error.status_code() == 401 => page(422, Some(INVALID)),
         Err(error) => Err(error.into()),
     }
+}
+
+/// `POST /logout`: end this browser's session, its sign-in and everything
+/// it holds, and go to the sign-in page. The next approval or claim asks
+/// for a sign-in again.
+#[handler]
+pub async fn destroy(_req: Request) -> Response {
+    Auth::logout_and_invalidate().await?;
+    Redirect::to(SIGN_IN_PAGE).into()
 }
 
 /// The page with `status`, and `notice` above the form when there is one.

@@ -139,6 +139,7 @@ fn agent_017_api_kit_signs_a_browser_in_for_the_consent_pages() {
     for part in [
         "get!(agents::SIGN_IN_PAGE, controllers::sign_in::show),",
         "post!(agents::SIGN_IN_PAGE, controllers::sign_in::store).middleware(CsrfMiddleware::new().without_xsrf_cookie()),",
+        "post!(agents::SIGN_OUT, controllers::sign_in::destroy).middleware(CsrfMiddleware::new().without_xsrf_cookie()),",
         "}).middleware(ConsentPageHeaders),",
     ] {
         assert!(
@@ -154,17 +155,23 @@ fn agent_017_api_kit_signs_a_browser_in_for_the_consent_pages() {
 }
 
 /// AGENT-017: the session runs only on the browser pages, by an allow-list
-/// built from the paths `config()` gives the plugins, so the two cannot
-/// drift apart. A session on every path would let any client or agent
-/// create a session row per request.
+/// of the page paths `config()` gives the plugins and the OAuth server's
+/// two routes, which it names as literals copied from the framework. A
+/// session on every path would let any client or agent create a session
+/// row per request. The session is idle for at most fifteen minutes, and
+/// its cookie ends with the browser.
 #[test]
 fn agent_017_api_kit_runs_the_session_on_the_consent_pages_only() {
     let project = Project::new("api");
     let agents = project.read("src/agents.rs");
     for part in [
+        "pub const SIGN_OUT: &str = \"/logout\";",
+        "pub const CONSENT_SESSION_IDLE: Duration = Duration::from_secs(15 * 60);",
         "pub struct ConsentSession(SessionMiddleware);",
+        "config.lifetime = CONSENT_SESSION_IDLE;",
+        "config.expire_on_close = true;",
         "pub fn covers(path: &str) -> bool {",
-        "[SIGN_IN_PAGE, APPROVAL_PAGE, CONNECTED_PAGE, CLAIM_PAGE, VERIFY_EMAIL_PAGE,].contains(&path)",
+        "[SIGN_IN_PAGE, SIGN_OUT, APPROVAL_PAGE, CONNECTED_PAGE, CLAIM_PAGE, VERIFY_EMAIL_PAGE,].contains(&path)",
         "path.strip_prefix(OAUTH_ROUTES)",
         "== \"/authorize\"",
         ".starts_with(\"/authorizations/\")",
@@ -243,8 +250,14 @@ fn agent_017_api_kit_verifies_email_through_a_mailed_link() {
         "Auth::email_verification().issue_for(account)",
         "EmailVerificationMail {",
         "Auth::email_verification().verify(&token)",
+        "EmailVerificationOutcome::AddressChanged => page(409, ADDRESS_CHANGED),",
         "Redirect::to(SIGN_IN_PAGE)",
         ".query(RETURN_TO,",
+        // The sign-out form, for a signed-in user only, with its two
+        // values escaped.
+        "let token = if Auth::check() { suprnova::csrf_token() } else { None };",
+        "&escape(&url::to(SIGN_OUT)),",
+        "&escape(&token),",
     ] {
         assert!(
             contains(&verification, part),
@@ -353,7 +366,10 @@ fn agent_017_api_sign_in_page_is_fixed_markup_and_keeps_return_to_on_this_origin
         "api: the page interpolates the escaped CSRF token:\n{page}"
     );
     assert!(
-        contains(&sign_in, "use crate::agents::{CONNECTED_PAGE, RETURN_TO};"),
+        contains(
+            &sign_in,
+            "use crate::agents::{CONNECTED_PAGE, RETURN_TO, SIGN_IN_PAGE};"
+        ),
         "api: the sign-in page takes its paths from src/agents.rs:\n{sign_in}"
     );
 
@@ -488,10 +504,19 @@ fn agent_017_api_kit_lists_and_revokes_over_json() {
 
 /// Items 3 and 4: registration folds the address before its rules run,
 /// bounds it at 254 characters, and asks for a password of eight
-/// characters, as the other kits do.
+/// characters, as the other kits do. One client address registers at most
+/// six times a minute.
 #[test]
 fn kit_api_register_bounds_the_email_and_the_password() {
     let project = Project::new("api");
+    let routes = project.read("src/routes.rs");
+    assert!(
+        contains(
+            &routes,
+            "post!(\"/api/auth/register\", controllers::users::register).middleware(ThrottleRequestsMiddleware::with(6, 1, \"registration\")),"
+        ),
+        "api: registration is limited per client address:\n{routes}"
+    );
     let users = project.read("src/controllers/users.rs");
     let register = item(&users, "RegisterRequest");
     for part in [

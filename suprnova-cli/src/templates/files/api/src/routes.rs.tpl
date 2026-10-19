@@ -7,8 +7,10 @@ use crate::{agents, controllers};
 
 routes! {
     // Authentication - public by necessity: these are how a client gets a
-    // token in the first place.
-    post!("/api/auth/register", controllers::users::register),
+    // token in the first place. Registration hashes a password and mails a
+    // link, so one client address registers at most six times a minute.
+    post!("/api/auth/register", controllers::users::register)
+        .middleware(ThrottleRequestsMiddleware::with(6, 1, "registration")),
     post!("/api/auth/login",    controllers::users::login),
 
     // User directory - requires a valid bearer token.
@@ -38,10 +40,13 @@ routes! {
     // The sign-in page the framework's approval and claim pages send a
     // guest to (`controllers::sign_in`), at the path `src/agents.rs` gives
     // the OAuth server. It is never framed, cached or sent as a referrer,
-    // and its form posts with the session's CSRF token.
+    // and its form posts with the session's CSRF token, as does the form
+    // that signs out.
     group!("/", {
         get!(agents::SIGN_IN_PAGE, controllers::sign_in::show),
         post!(agents::SIGN_IN_PAGE, controllers::sign_in::store)
+            .middleware(CsrfMiddleware::new().without_xsrf_cookie()),
+        post!(agents::SIGN_OUT, controllers::sign_in::destroy)
             .middleware(CsrfMiddleware::new().without_xsrf_cookie()),
         // The page the email verification link opens, in the same session.
         get!(agents::VERIFY_EMAIL_PAGE, controllers::email_verification::verify),

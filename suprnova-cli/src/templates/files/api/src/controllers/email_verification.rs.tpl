@@ -13,7 +13,12 @@
 //! register another person's address with a password of their own; a link
 //! that verified whoever opened it would let that person's click verify the
 //! registrant's account. Verifying changes no credential and starts no
-//! session.
+//! session. The link proves the address it was mailed to, so it verifies
+//! nothing once the account's address is another.
+//!
+//! A signed-in user sees this page with a form that signs out
+//! (`POST /logout`): the one to use when the link belongs to another
+//! account.
 
 use suprnova::{
     Auth, EmailVerificationIssue, EmailVerificationLink, EmailVerificationMail,
@@ -21,7 +26,7 @@ use suprnova::{
     handler, url,
 };
 
-use crate::agents::{RETURN_TO, SIGN_IN_PAGE, VERIFY_EMAIL_PAGE};
+use crate::agents::{RETURN_TO, SIGN_IN_PAGE, SIGN_OUT, VERIFY_EMAIL_PAGE};
 
 // ============================================================================
 // POST /api/email/verification-notification
@@ -92,6 +97,7 @@ pub async fn verify(req: Request) -> Response {
         EmailVerificationOutcome::Verified => page(200, VERIFIED),
         EmailVerificationOutcome::AlreadyVerified => page(200, ALREADY_VERIFIED),
         EmailVerificationOutcome::OtherAccount => page(403, OTHER_ACCOUNT),
+        EmailVerificationOutcome::AddressChanged => page(409, ADDRESS_CHANGED),
         EmailVerificationOutcome::Expired => page(410, EXPIRED),
         EmailVerificationOutcome::Unknown => page(404, UNKNOWN),
         EmailVerificationOutcome::SignIn => Redirect::to(SIGN_IN_PAGE)
@@ -105,14 +111,43 @@ const VERIFIED: &str = "Your email address is verified.";
 const ALREADY_VERIFIED: &str = "Your email address was already verified.";
 const OTHER_ACCOUNT: &str =
     "This link is for another account. Sign in to the account it was sent to, then open it again.";
+const ADDRESS_CHANGED: &str =
+    "This link was sent to an address your account no longer uses. Ask for a new one.";
 const EXPIRED: &str = "This link expired. Ask for a new one.";
 const UNKNOWN: &str = "This link is not valid, or it was already used. Ask for a new one.";
 
-/// The page, with `message` as its one paragraph. Every message is fixed
-/// text.
+/// The page, with `message` as its one paragraph, and for a signed-in user
+/// the form that signs out. Every message is fixed text; the form's two
+/// values, its address and the session's CSRF token, are escaped.
 fn page(status: u16, message: &'static str) -> Response {
-    let html = [PAGE_HEAD, message, PAGE_TAIL].concat();
+    // Only a signed-in user's page reads the token: a guest's stores no
+    // session for a form it does not show.
+    let token = if Auth::check() {
+        suprnova::csrf_token()
+    } else {
+        None
+    };
+    let sign_out = match token {
+        Some(token) => [
+            FORM_HEAD,
+            &escape(&url::to(SIGN_OUT)),
+            FORM_TOKEN,
+            &escape(&token),
+            FORM_TAIL,
+        ]
+        .concat(),
+        None => String::new(),
+    };
+    let html = [PAGE_HEAD, message, PAGE_MESSAGE_END, &sign_out, PAGE_TAIL].concat();
     Ok(HttpResponse::html(html).status(status))
+}
+
+/// `text` escaped for a double-quoted attribute value.
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// The page, up to its message.
@@ -130,5 +165,21 @@ const PAGE_HEAD: &str = concat!(
     "<p role=\"status\">",
 );
 
+/// The end of the message.
+const PAGE_MESSAGE_END: &str = "</p>\n";
+
+/// The sign-out form, up to its address.
+const FORM_HEAD: &str = "<form method=\"post\" action=\"";
+
+/// The sign-out form, from its address to its CSRF token.
+const FORM_TOKEN: &str = "\">\n<input type=\"hidden\" name=\"_token\" value=\"";
+
+/// The rest of the sign-out form.
+const FORM_TAIL: &str = concat!(
+    "\">\n",
+    "<button type=\"submit\">Sign out</button>\n",
+    "</form>\n",
+);
+
 /// The rest of the page.
-const PAGE_TAIL: &str = concat!("</p>\n", "</main>\n", "</body>\n", "</html>\n");
+const PAGE_TAIL: &str = concat!("</main>\n", "</body>\n", "</html>\n");
