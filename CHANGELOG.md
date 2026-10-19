@@ -229,6 +229,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   was registered as required, and no codec decodes null, so an `Option<T>`
   parameter could never be `None`. It is now optional: left out or null, it
   mounts as `None`.
+- **A page's scripts and styles no longer become the previous URL.** The
+  session recorded any successful GET as the previous URL: a script or
+  stylesheet that `StaticFiles` served, a request a global middleware
+  answered before any route matched, and an AJAX request. Without a
+  `Referer`, `Redirect::back()` could then send the user to a `.js` file. As
+  in Laravel, the session now records a GET only when a route answered it,
+  the fallback route included, and skips a request that sends
+  `X-Requested-With: XMLHttpRequest`. A file that `StaticFiles` serves is
+  never recorded.
 
 ## 4.3.0 - 2026-10-18
 

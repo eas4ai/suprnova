@@ -1094,9 +1094,12 @@ It reads the `Referer` from the request `InertiaHeadersMiddleware` is
 handling, which `Inertia::install` puts on every route; `Redirect::back`
 reads the previous URL only.
 
-The previous URL is recorded twice over: `SessionMiddleware` records every
-successful page load that is not an Inertia visit, a prefetch or a JSON call,
-and the Inertia middleware records an Inertia `GET` that matched a route,
+The previous URL is recorded twice over: `SessionMiddleware` records a
+successful `GET` that a route answered, the fallback route included, unless
+it is an Inertia visit, a prefetch, a Precognition request, a JSON call or an
+AJAX call (`X-Requested-With: XMLHttpRequest`). A static file and a request
+no route answered are never recorded, as Laravel never sees them. The
+Inertia middleware records an Inertia `GET` that matched a route,
 unless it is a prefetch (`X-Moz`, `Purpose` or `Sec-Purpose` set to
 `prefetch`), a Precognition request or a partial reload of the component it
 rendered - deferred props, polling and infinite scroll reload the page the

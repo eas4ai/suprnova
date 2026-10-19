@@ -66,7 +66,7 @@ pub async fn register() {
     // Database migrations run before this hook; the engine generation does not.
     crate::models::note::Note::initialize_search()
         .await
-        .expect("Failed to initialize notes search index");
+        .expect("Failed to initialize notes search index (on a new database, run `migrate` first)");
 
     // Register reusable notes fixtures for `db:seed` and `--class=NotesSeeder`.
     suprnova::seed::register::<crate::seeders::notes::NotesSeeder>();

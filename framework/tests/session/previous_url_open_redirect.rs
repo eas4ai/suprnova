@@ -104,6 +104,10 @@ fn encode_cookie_value(value: &str) -> String {
 /// line is built by hand so `raw_target` can carry a `//`-leading path
 /// a higher-level request builder might normalize away before we ever
 /// get to exercise the guard.
+///
+/// The request carries a route pattern, as the server stamps one before
+/// any middleware runs: the session records only a request a route
+/// answered, and these stand for a page a catch-all route answers.
 async fn get_request(raw_target: &str, cookie: Option<(&str, &str)>) -> suprnova::Request {
     use bytes::Bytes;
     use hyper::server::conn::http1;
@@ -149,7 +153,10 @@ async fn get_request(raw_target: &str, cookie: Option<(&str, &str)>) -> suprnova
     let mut client = client_io;
     client.write_all(&http_bytes).await.unwrap();
     drop(client);
-    req_rx.await.expect("server received request")
+    req_rx
+        .await
+        .expect("server received request")
+        .with_route_pattern("/{*path}")
 }
 
 /// A protocol-relative current URL must never reach `_previous.url`.
