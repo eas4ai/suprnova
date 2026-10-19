@@ -456,10 +456,18 @@ mod tests {
         let second = UniqueEmailIgnoringCase::on(table.as_str(), "email_b").index_name();
         assert!(first.len() <= 63 && second.len() <= 63, "{first} {second}");
         assert_ne!(first, second);
-        // The same pair always gets the same name, release after release.
+        // The same pair always gets the same name, release after release: a
+        // migration run by a later release finds the index an earlier one
+        // made by this name. The value is pinned, so a change to the hash or
+        // the cut fails here instead of orphaning existing indexes.
+        assert_eq!(first, format!("{}_e09bd5316ac7c836", "t".repeat(46)));
         assert_eq!(
-            first,
-            UniqueEmailIgnoringCase::on(table.as_str(), "email_a").index_name()
+            UniqueEmailIgnoringCase::on(
+                "email_case_users_4e766f35571241e1a7be9eca7b7a9828",
+                "email"
+            )
+            .index_name(),
+            "email_case_users_4e766f35571241e1a7be9eca7b7a9_39cf21e3ceff1ce5"
         );
     }
 
