@@ -55,7 +55,7 @@ name = "console"
 path = "src/bin/console.rs"
 
 [dependencies]
-# Production build shape: default features off, the ten non-`testing`
+# Production build shape: default features off, the fourteen non-`testing`
 # defaults listed explicitly, so the binaries above never carry a test
 # seam. See the manual, "Production build shape" (deployment.md).
 suprnova = {{ git = "https://github.com/eas4ai/suprnova.git", {framework_pin}, default-features = false, features = ["search-media", "filesystem", "database-sqlite", "database-postgres", "database-mysql", "vector-mariadb", "vector-pgvector", "web-push", "localization", "magnetar-oauth", "media", "queue-sqs", "reporting-sentry", "agents"] }}

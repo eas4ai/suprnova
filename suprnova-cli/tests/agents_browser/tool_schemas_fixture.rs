@@ -291,7 +291,10 @@ pub struct LikeTheKitNoteForm {
 
 #[tool_input]
 pub struct LikeTheKitLoginForm {
-    #[validate(email(message = "Please enter a valid email address"))]
+    #[validate(
+        email(message = "Please enter a valid email address"),
+        length(max = 254, message = "Email must be at most 254 characters")
+    )]
     pub email: String,
     #[validate(length(min = 1, message = "Password is required"))]
     pub password: String,

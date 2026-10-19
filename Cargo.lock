@@ -8981,6 +8981,7 @@ dependencies = [
  "oxc_parser",
  "oxc_span",
  "oxc_syntax",
+ "p256",
  "proc-macro2",
  "rand 0.10.1",
  "regex",

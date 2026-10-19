@@ -12,6 +12,7 @@ export const toolSchemas = {
     "properties": {
       "email": {
         "type": "string",
+        "maxLength": 254,
         "format": "email"
       }
     },
@@ -24,6 +25,7 @@ export const toolSchemas = {
     "properties": {
       "email": {
         "type": "string",
+        "maxLength": 254,
         "format": "email"
       },
       "password": {
@@ -44,10 +46,12 @@ export const toolSchemas = {
     "properties": {
       "name": {
         "type": "string",
-        "minLength": 2
+        "minLength": 2,
+        "maxLength": 255
       },
       "email": {
         "type": "string",
+        "maxLength": 254,
         "format": "email"
       },
       "password": {

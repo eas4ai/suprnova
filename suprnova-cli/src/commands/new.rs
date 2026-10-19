@@ -445,10 +445,16 @@ pub(crate) fn create_project(
     // `Crypt`, and a default umask leaves it 0644 - readable by every
     // account on the machine, which on a shared box or a CI runner is
     // the whole key.
+    //
+    // It also carries the agent auth signing key, which the application
+    // needs to start (`src/agents.rs`). A project never gets a `.env`
+    // without one.
     let app_key = crate::commands::key_generate::generate_app_key();
+    let agent_key = crate::commands::agent_key::generate()
+        .map_err(|e| format!("Failed to make the agent auth signing key: {e}"))?;
     crate::secure_fs::write_private(
         &project_path.join(".env"),
-        &templates::env(project_name, &app_key, frontend),
+        &templates::env(project_name, &app_key, frontend, &agent_key),
     )
     .map_err(|e| format!("Failed to write .env: {}", e))?;
 
@@ -478,6 +484,19 @@ pub(crate) fn create_project(
         templates::commands_mod_rs(),
     )
     .map_err(|e| format!("Failed to write src/commands/mod.rs: {}", e))?;
+
+    // Write src/agents.rs - the MCP endpoint and both plugins, which the
+    // entry serves the routes through. Each kit's lib.rs declares it.
+    fs::write(project_path.join("src/agents.rs"), templates::agents_rs())
+        .map_err(|e| format!("Failed to write src/agents.rs: {}", e))?;
+
+    // Write src/email_address.rs - the form sign-in, registration and the
+    // reset form store and look up an address in.
+    fs::write(
+        project_path.join("src/email_address.rs"),
+        templates::email_address_rs(),
+    )
+    .map_err(|e| format!("Failed to write src/email_address.rs: {}", e))?;
 
     // Write src/config/mod.rs
     fs::write(
