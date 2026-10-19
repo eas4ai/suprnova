@@ -76,6 +76,10 @@ pub use magnetar::authorization_server::{
     ClientMetadataFetcher, ClientMetadataPolicy, HostResolver, PinnedHttpClient, PinnedResponse,
     ResponseBody, is_public_address,
 };
+/// What a client metadata document fetch answers with: the client's
+/// metadata, or why the document was refused. A test that drives a
+/// [`ClientMetadataFetcher`] directly reads them.
+pub use magnetar::authorization_server::{ClientMetadata, ClientMetadataError};
 /// The error and result Magnetar's resolver and pinned client traits
 /// answer with.
 pub use magnetar::{Error as MagnetarError, Result as MagnetarResult};

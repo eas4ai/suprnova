@@ -46,8 +46,11 @@ pub struct GrantScope {
     pub description: String,
 }
 
-impl From<ClientGrantSummary> for ClientGrant {
-    fn from(summary: ClientGrantSummary) -> Self {
+impl ClientGrant {
+    /// The grant as the authorization server's store summarizes it. Kept
+    /// off the public surface: Magnetar's summary type is not one an
+    /// application can name.
+    pub(crate) fn from_summary(summary: ClientGrantSummary) -> Self {
         Self {
             id: summary.grant_id,
             client_id: summary.client_id,
@@ -151,7 +154,7 @@ pub(super) async fn list(
         // Agent auth keeps its grants on this server too; it lists them
         // with the registrations they belong to.
         .filter(|grant| grant.kind == magnetar::authorization_server::USER_GRANT_KIND)
-        .map(ClientGrant::from)
+        .map(ClientGrant::from_summary)
         .collect();
     grants.sort_by_key(|grant| std::cmp::Reverse(grant.created_at));
     Ok(grants)
