@@ -61,7 +61,8 @@ const AUTHORIZATION_SERVER_TABLES: [&str; 4] = [
 
 /// The tables the agent auth migration adds to a database.
 #[cfg(feature = "agent-auth")]
-const AGENT_AUTH_TABLES: [&str; 3] = [
+const AGENT_AUTH_TABLES: [&str; 4] = [
+    "auth_agent_events",
     "auth_agent_grants",
     "auth_agent_registrations",
     "auth_agent_replays",

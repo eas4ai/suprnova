@@ -381,6 +381,11 @@ pub struct AgentAuthConfig {
     pub max_request_bytes: usize,
     /// The registration budgets.
     pub limits: RegistrationLimits,
+    /// How long one delivery of a claim event may take before it counts as
+    /// refused with "the delivery timed out": 60 seconds by default. The
+    /// delivery's lease is twice as long, so a delivery always ends, and
+    /// records its result, before another node may take the event.
+    pub event_delivery_timeout: Duration,
 }
 
 impl AgentAuthConfig {
@@ -414,6 +419,7 @@ impl AgentAuthConfig {
             default_resource: None,
             max_request_bytes: 16 * 1024,
             limits: RegistrationLimits::default(),
+            event_delivery_timeout: Duration::from_secs(60),
         }
     }
 
@@ -495,6 +501,14 @@ impl AgentAuthConfig {
         }
         if self.max_request_bytes == 0 {
             return Err(invalid("max_request_bytes", "must be positive"));
+        }
+        if self.event_delivery_timeout.is_zero()
+            || chrono::Duration::from_std(self.event_delivery_timeout.saturating_mul(2)).is_err()
+        {
+            return Err(invalid(
+                "event_delivery_timeout",
+                "must be positive and finite",
+            ));
         }
         for (field, path) in [
             ("route_prefix", &self.route_prefix),

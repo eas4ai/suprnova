@@ -18,9 +18,9 @@ use base64::Engine;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use magnetar::abuse::{AbuseLimiter, AbusePolicy, Permit};
 use magnetar::agent_auth::{
-    AgentAuth, AgentAuthConfig, AgentAuthServices, AgentAuthStore, AgentGrantRecord, IdentityTypes,
-    KeySetFetcher, KeySetPolicy, NewAttempt, ProvisionUsers, ProvisioningPolicy,
-    RegistrationRecord, SigningKey, SqlAgentAuthStore, TrustedIssuer,
+    AgentAuth, AgentAuthConfig, AgentAuthServices, AgentAuthStore, AgentEventRecord,
+    AgentGrantRecord, IdentityTypes, KeySetFetcher, KeySetPolicy, NewAttempt, ProvisionUsers,
+    ProvisioningPolicy, RegistrationRecord, SigningKey, SqlAgentAuthStore, TrustedIssuer,
 };
 use magnetar::auth::{AuthenticationContext, FactorGate, SignInDecision, VerifiedPrincipal};
 use magnetar::authorization_server::{
@@ -291,10 +291,17 @@ impl AbuseLimiter for WindowLimiter {
     }
 }
 
-/// The host's durable delivery, recording every audit event.
+/// The host's durable delivery, recording every audit event it accepts.
 #[derive(Default)]
 pub struct RecordingEvents {
     pub events: Mutex<Vec<LifecycleEvent>>,
+    /// The events the host refused, in order.
+    pub refused: Mutex<Vec<LifecycleEvent>>,
+    refusals: Mutex<HashMap<LifecycleEventKind, u32>>,
+    /// Events, by mutation id, the host always refuses.
+    refused_ids: Mutex<std::collections::HashSet<String>>,
+    /// Kinds whose delivery never answers.
+    hanging: Mutex<std::collections::HashSet<LifecycleEventKind>>,
 }
 
 impl RecordingEvents {
@@ -306,11 +313,47 @@ impl RecordingEvents {
             .cloned()
             .collect()
     }
+
+    /// Refuse the next `times` events of `kind`, as a host whose listener
+    /// failed.
+    pub fn refuse(&self, kind: LifecycleEventKind, times: u32) {
+        self.refusals.lock().insert(kind, times);
+    }
+
+    /// Always refuse the event `mutation_id`.
+    pub fn refuse_id(&self, mutation_id: &str) {
+        self.refused_ids.lock().insert(mutation_id.to_owned());
+    }
+
+    /// Never answer a delivery of `kind`, as a host whose listener hangs.
+    pub fn hang(&self, kind: LifecycleEventKind) {
+        self.hanging.lock().insert(kind);
+    }
 }
 
 #[async_trait]
 impl DurableLifecycleDelivery for RecordingEvents {
     async fn enqueue(&self, event: LifecycleEvent) -> PluginResult<()> {
+        if self.hanging.lock().contains(&event.kind) {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+        if self.refused_ids.lock().contains(&event.mutation_id) {
+            self.refused.lock().push(event);
+            return Err(magnetar::plugin::PluginError::Request {
+                plugin: "test-host".to_owned(),
+                message: "the host refused the event".to_owned(),
+            });
+        }
+        if let Some(left) = self.refusals.lock().get_mut(&event.kind)
+            && *left > 0
+        {
+            *left -= 1;
+            self.refused.lock().push(event);
+            return Err(magnetar::plugin::PluginError::Request {
+                plugin: "test-host".to_owned(),
+                message: "the host refused the event".to_owned(),
+            });
+        }
         self.events.lock().push(event);
         Ok(())
     }
@@ -470,6 +513,7 @@ impl AgentAuthStore for FlakyAgentStore {
         auth_epoch: Option<u64>,
         max_failures: u32,
         now: chrono::DateTime<chrono::Utc>,
+        event: &AgentEventRecord,
     ) -> Result<bool> {
         self.faults.check("confirm_claim")?;
         self.faults.pass_before("confirm_claim").await;
@@ -483,6 +527,7 @@ impl AgentAuthStore for FlakyAgentStore {
                 auth_epoch,
                 max_failures,
                 now,
+                event,
             )
             .await;
         self.faults.pass("confirm_claim").await;
@@ -605,6 +650,82 @@ impl AgentAuthStore for FlakyAgentStore {
     async fn prune_replays(&self, now: chrono::DateTime<chrono::Utc>) -> Result<u64> {
         self.faults.check("prune_replays")?;
         self.inner.prune_replays(now).await
+    }
+    async fn undelivered_event_keys(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        after: Option<(chrono::DateTime<chrono::Utc>, String)>,
+        limit: u64,
+    ) -> Result<Vec<(chrono::DateTime<chrono::Utc>, String)>> {
+        self.faults.check("undelivered_event_keys")?;
+        self.inner.undelivered_event_keys(now, after, limit).await
+    }
+    async fn find_event(&self, id: &str) -> Result<Option<magnetar::agent_auth::OutboxRow>> {
+        self.faults.check("find_event")?;
+        self.inner.find_event(id).await
+    }
+    async fn lease_event(
+        &self,
+        id: &str,
+        attempts: u32,
+        now: chrono::DateTime<chrono::Utc>,
+        until: chrono::DateTime<chrono::Utc>,
+        token: &str,
+    ) -> Result<bool> {
+        self.faults.check("lease_event")?;
+        self.inner
+            .lease_event(id, attempts, now, until, token)
+            .await
+    }
+    async fn mark_event_delivered(
+        &self,
+        id: &str,
+        token: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        self.faults.check("mark_event_delivered")?;
+        self.inner.mark_event_delivered(id, token, at).await
+    }
+    async fn record_refusal(
+        &self,
+        id: &str,
+        token: &str,
+        error: &str,
+        failed_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<bool> {
+        self.faults.check("record_refusal")?;
+        self.inner.record_refusal(id, token, error, failed_at).await
+    }
+    async fn fail_event(
+        &self,
+        id: &str,
+        attempts: u32,
+        now: chrono::DateTime<chrono::Utc>,
+        error: &str,
+    ) -> Result<bool> {
+        self.faults.check("fail_event")?;
+        self.inner.fail_event(id, attempts, now, error).await
+    }
+    async fn fail_unreadable_event(
+        &self,
+        id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        error: &str,
+    ) -> Result<bool> {
+        self.faults.check("fail_unreadable_event")?;
+        self.inner.fail_unreadable_event(id, now, error).await
+    }
+    async fn retry_failed_events(&self) -> Result<u64> {
+        self.faults.check("retry_failed_events")?;
+        self.inner.retry_failed_events().await
+    }
+    async fn failed_event_count(&self) -> Result<u64> {
+        self.faults.check("failed_event_count")?;
+        self.inner.failed_event_count().await
+    }
+    async fn prune_events(&self, before: chrono::DateTime<chrono::Utc>) -> Result<u64> {
+        self.faults.check("prune_events")?;
+        self.inner.prune_events(before).await
     }
 }
 
@@ -964,6 +1085,22 @@ pub async fn build(db: DatabaseConnection, options: Options) -> Harness {
         limiter,
         events,
         provider: options.provider,
+    }
+}
+
+impl Harness {
+    /// Every outbox event of a registration.
+    pub async fn outbox_of(
+        &self,
+        registration_id: &str,
+    ) -> Vec<magnetar::agent_auth::sql::agent_events::Model> {
+        use magnetar::agent_auth::sql::agent_events;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        agent_events::Entity::find()
+            .filter(agent_events::Column::RegistrationId.eq(registration_id.to_owned()))
+            .all(&self.db)
+            .await
+            .expect("read the outbox")
     }
 }
 
