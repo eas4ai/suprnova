@@ -19,6 +19,10 @@ use super::context::{LiveRouteMetadata, LiveRouteSecurityPolicy};
 pub(crate) const LIVE_ROUTE_VERSION: u16 = 1;
 pub(crate) const LIVE_UPDATE_PATH: &str = "/__live/action";
 pub(crate) const LIVE_UPLOAD_PATH: &str = "/__live/upload";
+/// The route a headless Live tool call runs through (AGENT-013). Only a
+/// call the MCP endpoint dispatched reaches its handler; anything else, a
+/// request off the wire included, is answered 404.
+pub(crate) const LIVE_AGENT_PATH: &str = "/__live/agent";
 const LIVE_HTTP_METHODS: [Method; 7] = [
     Method::GET,
     Method::POST,
@@ -222,6 +226,25 @@ fn install(mut router: Router, guard: &LiveRouteGuard) -> Result<Router, Framewo
             LIVE_UPDATE_PATH,
             LiveRouteMetadata::new(LiveOperation::Action, strict_action_policy()),
         )?;
+    }
+    // Headless Live tool calls (AGENT-013): POST only, behind the same
+    // application guard, and answered only for a call the MCP endpoint
+    // dispatched. The route's policy closes no absence: the handler closes
+    // the ones a marked call permits, as the action route closes a public
+    // seed's.
+    #[cfg(feature = "agents")]
+    {
+        router = guard.apply(router.try_methods(
+            &[Method::POST],
+            LIVE_AGENT_PATH,
+            super::agent::handle,
+        )?);
+        router.register_live_route_metadata(
+            Method::POST,
+            LIVE_AGENT_PATH,
+            LiveRouteMetadata::new(LiveOperation::AgentAction, strict_action_policy()),
+        )?;
+        super::agent::register_catalog_entries(&mut router)?;
     }
     router = guard.apply(router.try_methods(
         &LIVE_HTTP_METHODS,

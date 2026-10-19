@@ -725,8 +725,12 @@ async fn run_call(
         ),
     )
     .await;
+    let live = tool.live_target().is_some();
     let result = match answer {
-        Ok(answer) => tools::answer_result(&answer, config.max_result_bytes),
+        Ok(answer) => match live.then(|| tools::live_result(&answer)).flatten() {
+            Some(result) => result,
+            None => tools::answer_result(&answer, config.max_result_bytes),
+        },
         Err(failure) => tools::failure_result(&failure),
     };
     let result = match result {

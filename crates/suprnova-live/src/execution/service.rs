@@ -801,6 +801,8 @@ struct SuccessorPresentation {
     protocol_minimum: u16,
     protocol_version: u16,
     context_expires_at: UnixMillis,
+    /// Whether the successor root lists the component's browser tools.
+    agent_tools: bool,
 }
 
 impl ExecutionService {
@@ -915,6 +917,7 @@ impl ExecutionService {
                 protocol_minimum: request.context.mount().minimum_protocol(),
                 protocol_version: request.context.mount().protocol(),
                 context_expires_at: request.context.expires_at(),
+                agent_tools: request.context.mount().agent_tools(),
             },
             request.context.mount().expected_seed().schemas(),
             output,
@@ -992,6 +995,7 @@ impl ExecutionService {
                 protocol_minimum: request.context.mount().minimum_protocol(),
                 protocol_version: request.context.mount().protocol(),
                 context_expires_at: request.context.expires_at(),
+                agent_tools: request.context.mount().agent_tools(),
             },
             request.context.mount().expected_seed().schemas(),
             output,
@@ -1090,6 +1094,7 @@ impl ExecutionService {
                 protocol_minimum: request.context.mount().minimum_protocol(),
                 protocol_version: request.context.mount().protocol(),
                 context_expires_at: request.context.expires_at(),
+                agent_tools: request.context.mount().agent_tools(),
             },
             request.context.mount().expected_seed().schemas(),
             output,
@@ -1219,6 +1224,7 @@ impl ExecutionService {
                 protocol_minimum: request.context.mount().minimum_protocol(),
                 protocol_version: request.context.mount().protocol(),
                 context_expires_at: request.context.expires_at(),
+                agent_tools: request.context.mount().agent_tools(),
             },
             schemas,
             output,
@@ -1627,6 +1633,10 @@ impl ExecutionService {
                         action_parameters: crate::view::declared_action_parameters(
                             descriptor.metadata(),
                         ),
+                        agent_tools: presentation
+                            .agent_tools
+                            .then(|| crate::view::declared_agent_tools(descriptor.metadata()))
+                            .flatten(),
                     },
                     // The configured island size, the bound a mount's root
                     // gets too, not a fixed 1 MiB: the root carries the

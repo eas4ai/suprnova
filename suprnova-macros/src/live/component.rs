@@ -116,6 +116,11 @@ pub(crate) fn derive(input: DeriveInput) -> syn::Result<TokenStream2> {
                 )?
             };
         }
+        if field_args.agent_visible {
+            metadata = quote! {
+                (#metadata).with_agent_visible()?
+            };
+        }
         if let Some(upload) = field_args.upload {
             let policy = upload.policy;
             metadata = quote! {
@@ -600,6 +605,41 @@ pub(crate) fn model_codec_tokens(ty: &Type) -> TokenStream2 {
             quote!(::suprnova::live::__private::state::ModelCodec::map(#value))
         }
         _ => quote!(::suprnova::live::__private::state::ModelCodec::Json),
+    }
+}
+
+/// Whether the codec [`model_codec_tokens`] picks for `ty` has a JSON Schema:
+/// any codec but the Json fallback, directly or as a list entry or map
+/// value.
+pub(crate) fn model_codec_has_schema(ty: &Type) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+    let ident = segment.ident.unraw().to_string();
+    if matches!(
+        ident.as_str(),
+        "String" | "bool" | "i64" | "u64" | "f32" | "f64" | "Date" | "OffsetDateTime" | "Uuid"
+    ) {
+        return true;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return false;
+    };
+    let types = arguments
+        .args
+        .iter()
+        .filter_map(|argument| match argument {
+            syn::GenericArgument::Type(ty) => Some(ty),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    match (ident.as_str(), types.as_slice()) {
+        ("Option" | "Vec", [inner]) => model_codec_has_schema(inner),
+        ("BTreeMap" | "HashMap", [_key, value]) => model_codec_has_schema(value),
+        _ => false,
     }
 }
 

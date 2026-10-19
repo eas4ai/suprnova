@@ -42,6 +42,9 @@ pub(crate) struct EndpointContext {
 pub(crate) struct CallContext {
     /// The tool's name.
     pub(crate) tool: &'static str,
+    /// The Live action the tool runs, for a headless Live tool: what the
+    /// `/__live/agent` route requires before it does anything (AGENT-013).
+    pub(crate) live: Option<Arc<super::LiveTarget>>,
 }
 
 impl AgentMark {

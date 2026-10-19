@@ -80,6 +80,7 @@ pub fn derive_searchable(input: TokenStream) -> TokenStream {
         transient,
         url,
         upload,
+        agent_visible,
         mount,
         action,
         computed,
