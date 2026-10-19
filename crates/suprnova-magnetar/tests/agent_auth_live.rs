@@ -398,6 +398,146 @@ async fn revocation_layers_on(url: &str) {
     );
 }
 
+/// A claim whose delivery is refused writes its outbox event with the
+/// claim; two nodes then run the delivery pass at once, each on its own
+/// pool, and the event is delivered once.
+async fn claim_outbox(url: &str) {
+    let first = build(live_database(url).await, Options::new()).await;
+    let second = build(live_database(url).await, Options::new()).await;
+    first
+        .events
+        .refuse(magnetar::plugin::LifecycleEventKind::AgentClaimConfirmed, 1);
+    let (registration, user_id) = first
+        .claimed_anonymous(&format!("{}@example.test", unique("outbox")))
+        .await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let outbox = first.outbox_of(id).await;
+    assert_eq!(outbox.len(), 1, "the claim wrote its event");
+    assert_eq!(outbox[0].user_id, user_id);
+    assert!(outbox[0].delivered_at.is_none());
+    let event_id = outbox[0].id.clone();
+    let nodes = [Arc::new(first), Arc::new(second)];
+    let mut passes = Vec::new();
+    for round in 0..4 {
+        let node = nodes[round % 2].clone();
+        passes.push(tokio::spawn(async move {
+            node.engine.deliver_pending_events().await
+        }));
+    }
+    for pass in passes {
+        pass.await.expect("a pass").expect("the pass reads storage");
+    }
+    let deliveries: usize = nodes
+        .iter()
+        .map(|node| {
+            node.events
+                .of(magnetar::plugin::LifecycleEventKind::AgentClaimConfirmed)
+                .iter()
+                .filter(|event| event.mutation_id == event_id)
+                .count()
+        })
+        .sum();
+    assert_eq!(deliveries, 1, "one delivery across both nodes");
+    assert!(nodes[0].outbox_of(id).await[0].delivered_at.is_some());
+}
+
+/// A claim whose outbox insert fails, here on an event id already taken,
+/// rolls back: the registration stays unclaimed and no second row exists.
+async fn claim_rollback(url: &str) {
+    use magnetar::agent_auth::{AgentAuthStore, AgentEventRecord, SqlAgentAuthStore};
+    let h = build(live_database(url).await, Options::new()).await;
+    let email = format!("{}@example.test", unique("rollback"));
+    let registration = h.anonymous().await;
+    let id = registration["registration_id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let user_id = h.create_user(&email, true).await;
+    let started = body(
+        &h.initiate(
+            registration["claim_token"].as_str().expect("claim token"),
+            &email,
+        )
+        .await,
+    );
+    let attempt = attempt_token(
+        started["claim_attempt"]["verification_uri"]
+            .as_str()
+            .expect("uri"),
+    );
+    let code = started["claim_attempt"]["user_code"]
+        .as_str()
+        .expect("code")
+        .to_owned();
+    // An earlier claim already holds the event id this one will try.
+    let (other, _) = h
+        .claimed_anonymous(&format!("{}@example.test", unique("holder")))
+        .await;
+    let taken = h
+        .outbox_of(other["registration_id"].as_str().expect("id"))
+        .await[0]
+        .id
+        .clone();
+    let event = AgentEventRecord {
+        id: taken,
+        kind: "claim.confirmed".to_owned(),
+        registration_id: id.clone(),
+        user_id: user_id.clone(),
+        attributes: std::collections::BTreeMap::new(),
+        created_at: chrono::Utc::now(),
+        delivered_at: None,
+        attempts: 0,
+        last_error: None,
+        failed_at: None,
+    };
+    let store = SqlAgentAuthStore::new(h.db.clone());
+    let refused = store
+        .confirm_claim(
+            &id,
+            &sha256_hex(&attempt),
+            &sha256_hex(&code),
+            &user_id,
+            None,
+            5,
+            chrono::Utc::now(),
+            &event,
+        )
+        .await;
+    assert!(refused.is_err(), "the duplicate id fails the transaction");
+    let unclaimed = h.registration(&id).await;
+    assert_eq!(unclaimed.status, "unclaimed", "the claim rolled back");
+    assert!(unclaimed.user_id.is_none());
+    assert!(h.outbox_of(&id).await.is_empty(), "no row for this claim");
+}
+
+#[cfg(feature = "seaorm-postgres")]
+#[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn agent_009_postgres_claim_rolls_back_on_a_duplicate_event_id() {
+    claim_rollback(&postgres_url()).await;
+}
+
+#[cfg(feature = "seaorm-mysql")]
+#[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn agent_009_mysql_claim_rolls_back_on_a_duplicate_event_id() {
+    claim_rollback(&mysql_url()).await;
+}
+
+#[cfg(feature = "seaorm-postgres")]
+#[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn agent_009_postgres_claim_outbox_is_written_and_delivered_once() {
+    claim_outbox(&postgres_url()).await;
+}
+
+#[cfg(feature = "seaorm-mysql")]
+#[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn agent_009_mysql_claim_outbox_is_written_and_delivered_once() {
+    claim_outbox(&mysql_url()).await;
+}
+
 #[cfg(feature = "seaorm-postgres")]
 #[tokio::test]
 #[ignore = "requires T2 live Postgres/MySQL database"]

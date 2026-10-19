@@ -13,6 +13,9 @@
 //! with `TMPDIR` set to a short directory: Chromium's socket path is
 //! refused under a long one.
 
+#[path = "agents_browser/kits.rs"]
+mod kits;
+
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};

@@ -55,7 +55,10 @@ pub use config::{
 };
 pub use key_sets::{KeySetError, KeySetFetcher, KeySetPolicy};
 pub use sql::{SqlAgentAuthStore, migrate};
-pub use store::{AgentAuthStore, AgentGrantRecord, NewAttempt, RegistrationRecord};
+pub use store::{
+    AgentAuthStore, AgentEventRecord, AgentGrantRecord, CLAIM_CONFIRMED, NewAttempt, OutboxRow,
+    RegistrationRecord,
+};
 
 use config::RegistrationLimit as Limit;
 use store::{STATUS_ACTIVE, STATUS_CLAIMED, STATUS_EXPIRED, STATUS_REVOKED};
@@ -271,6 +274,17 @@ pub struct AgentAuthServices {
     pub key_sets: Arc<KeySetFetcher>,
     /// Where the audit events go. The host persists each and later
     /// delivers it to lifecycle hooks or its own audit log.
+    ///
+    /// A confirmed claim's event is delivered at least once: it is written
+    /// to agent auth's outbox in the claim's transaction and handed to
+    /// `enqueue` right after the commit. An `Err` from `enqueue` leaves it
+    /// in the outbox for [`AgentAuth::deliver_pending_events`], so a host
+    /// answers `Err` when it could not take the event, and expects the same
+    /// event, by its `mutation_id`, more than once. A delivery after a
+    /// refused one carries the attribute [`DELIVERY_ATTEMPT`]. The outbox
+    /// keeps the text of the last `Err`, so a host leaves secrets and
+    /// personal data out of it. After [`MAX_EVENT_ATTEMPTS`] refusals the
+    /// event fails until [`AgentAuth::retry_failed_events`] puts it back.
     pub events: Arc<dyn DurableLifecycleDelivery>,
 }
 
@@ -335,6 +349,34 @@ pub struct AgentAuth {
 
 /// How many registrations one maintenance pass reads at a time.
 const BATCH: u64 = 500;
+
+/// How long a delivered outbox event is kept before
+/// [`AgentAuth::prune_delivered_events`] deletes it: seven days, room to
+/// read back what was delivered when a listener's work is in doubt.
+pub const DELIVERED_EVENT_RETENTION: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// How many delivery attempts a claim event gets before it fails: twelve.
+/// Each delivery pass makes at most one attempt per event, so with the
+/// five-minute pass of a host that runs one node this is about an hour; on
+/// several nodes running the pass it comes sooner. An attempt counts when
+/// it starts, so one that never answers, because its process stopped,
+/// counts too. A failed event is logged once at error level, never
+/// delivered again by the passes and never pruned, until
+/// [`AgentAuth::retry_failed_events`] puts it back.
+pub const MAX_EVENT_ATTEMPTS: u32 = 12;
+
+/// The error kept for a delivery that took longer than
+/// [`AgentAuthConfig::event_delivery_timeout`].
+const TIMED_OUT: &str = "the delivery timed out";
+/// The error kept for an outbox row whose attempt count or attributes do
+/// not read.
+const UNREADABLE: &str = "the outbox row could not be read";
+/// The error kept for an outbox row of a kind this version does not
+/// deliver.
+const UNKNOWN_KIND: &str = "unknown event kind";
+/// The error kept for an event whose last attempt the limit allows started
+/// and never answered.
+const NO_ANSWER: &str = "the last delivery attempt never answered";
 
 impl AgentAuth {
     /// Add agent auth to `server`: the JWT bearer and claim grants, the
@@ -704,6 +746,89 @@ impl AgentAuth {
     pub async fn prune_replay_records(&self) -> Result<u64> {
         self.core.store.prune_replays(Utc::now()).await
     }
+
+    /// Deliver every outbox event still waiting: one whose delivery right
+    /// after its commit failed, or whose process stopped first. For a host
+    /// to run on a schedule; every node may run it at once, since each
+    /// event is leased before it is handed on. Each event gets at most one
+    /// attempt in a pass, bounded by
+    /// [`event_delivery_timeout`](AgentAuthConfig::event_delivery_timeout),
+    /// and a row that does not read is marked failed without stopping the
+    /// pass. Leases compare times from each node's clock, so the nodes keep
+    /// their clocks in sync, as session and token expiry already need.
+    /// Returns how many this call delivered.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage fails. A delivery the host refused is
+    /// not an error: the event waits for the next pass.
+    pub async fn deliver_pending_events(&self) -> Result<u64> {
+        // One walk through the outbox, page by page in key order: each
+        // event gets at most one attempt in a pass, whatever it answers.
+        let started = Utc::now();
+        let mut delivered = 0;
+        let mut after = None;
+        loop {
+            let keys = self
+                .core
+                .store
+                .undelivered_event_keys(started, after.clone(), BATCH)
+                .await?;
+            for (_, id) in &keys {
+                // A row that fails, or a storage error on one row, never
+                // stops the pass: the rows behind it are still delivered.
+                match self.core.deliver_stored_event(id).await {
+                    Ok(true) => delivered += 1,
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::error!(error = %error, event_id = %id, "delivering an agent auth outbox event failed");
+                    }
+                }
+            }
+            let full = u64::try_from(keys.len()).unwrap_or(u64::MAX) >= BATCH;
+            match keys.into_iter().last() {
+                Some(last) if full => after = Some(last),
+                _ => return Ok(delivered),
+            }
+        }
+    }
+
+    /// How many claim events failed, after [`MAX_EVENT_ATTEMPTS`] attempts
+    /// or because their row did not read, and wait for
+    /// [`retry_failed_events`](Self::retry_failed_events).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage fails.
+    pub async fn failed_events(&self) -> Result<u64> {
+        self.core.store.failed_event_count().await
+    }
+
+    /// Put every failed claim event back for delivery with a fresh count of
+    /// attempts, once what refused it is fixed. The next delivery pass
+    /// delivers them. Returns how many were put back.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage fails.
+    pub async fn retry_failed_events(&self) -> Result<u64> {
+        self.core.store.retry_failed_events().await
+    }
+
+    /// Delete outbox events delivered more than
+    /// [`DELIVERED_EVENT_RETENTION`] ago. For a host to run on a schedule.
+    /// An event not yet delivered is never deleted. Returns how many went.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage fails.
+    pub async fn prune_delivered_events(&self) -> Result<u64> {
+        let before = chrono::Duration::from_std(DELIVERED_EVENT_RETENTION)
+            .ok()
+            .and_then(|retention| Utc::now().checked_sub_signed(retention))
+            .unwrap_or(DateTime::<Utc>::MIN_UTC);
+        self.core.store.prune_events(before).await
+    }
 }
 
 impl Core {
@@ -802,6 +927,127 @@ impl Core {
             Permit::Rejected { retry_after } => Ok(Some(retry_after)),
             Permit::Allowed { .. } => Ok(None),
         }
+    }
+
+    /// Deliver the outbox event `id`, read as one row so a row that does
+    /// not read fails alone: it is marked failed and logged, and the pass
+    /// goes on. Returns whether this call delivered the event.
+    pub(crate) async fn deliver_stored_event(&self, id: &str) -> Result<bool> {
+        match self.store.find_event(id).await? {
+            None => Ok(false),
+            Some(OutboxRow::Unreadable(reason)) => {
+                if self
+                    .store
+                    .fail_unreadable_event(id, Utc::now(), UNREADABLE)
+                    .await?
+                {
+                    tracing::error!(event_id = %id, reason, "an agent auth outbox row could not be read; it is marked failed");
+                }
+                Ok(false)
+            }
+            Some(OutboxRow::Event(event)) => {
+                if event.delivered_at.is_some() || event.failed_at.is_some() {
+                    return Ok(false);
+                }
+                self.deliver_event(&event).await
+            }
+        }
+    }
+
+    /// Hand one outbox event to the host's delivery: lease it under a fresh
+    /// token, which counts the attempt, enqueue it under its stable
+    /// identifier within the delivery timeout, and record the result while
+    /// the lease is still this call's. A delivery that follows a refused one
+    /// carries the attribute [`DELIVERY_ATTEMPT`], so the host writes once
+    /// what it writes for a first delivery. A refusal or a timeout keeps the
+    /// answer and ends the lease; the last attempt the limit allows marks
+    /// the event failed. Returns whether this call delivered it; `false`
+    /// also for an event another node holds or already delivered.
+    pub(crate) async fn deliver_event(&self, event: &AgentEventRecord) -> Result<bool> {
+        let now = Utc::now();
+        let Some(kind) = outbox_kind(&event.kind) else {
+            if self
+                .store
+                .fail_event(&event.id, event.attempts, now, UNKNOWN_KIND)
+                .await?
+            {
+                tracing::error!(event_id = %event.id, kind = %event.kind, "an agent auth outbox event has a kind this version does not deliver; it is marked failed");
+            }
+            return Ok(false);
+        };
+        if event.attempts >= MAX_EVENT_ATTEMPTS {
+            // Every attempt the limit allows started; the last never
+            // answered, because its process stopped.
+            if self
+                .store
+                .fail_event(&event.id, event.attempts, now, NO_ANSWER)
+                .await?
+            {
+                tracing::error!(event_id = %event.id, attempts = event.attempts, "an agent auth claim event used its last delivery attempt without an answer; it is not delivered again until the failed events are put back");
+            }
+            return Ok(false);
+        }
+        let timeout = self.config.event_delivery_timeout;
+        // Twice the timeout: a delivery always records its result before
+        // another node may take the event.
+        let lease = timeout.saturating_mul(2);
+        let token = random_hex(16);
+        if !self
+            .store
+            .lease_event(&event.id, event.attempts, now, later(now, lease)?, &token)
+            .await?
+        {
+            return Ok(false);
+        }
+        let attempt = event.attempts.saturating_add(1);
+        let mut lifecycle = LifecycleEvent::new(event.id.clone(), kind, event.user_id.clone());
+        lifecycle.attributes = event.attributes.clone();
+        if event.is_retry() {
+            lifecycle
+                .attributes
+                .insert(DELIVERY_ATTEMPT.to_owned(), attempt.to_string());
+        }
+        let answer = match tokio::time::timeout(timeout, self.events.enqueue(lifecycle)).await {
+            Ok(Ok(())) => {
+                if !self
+                    .store
+                    .mark_event_delivered(&event.id, &token, Utc::now())
+                    .await?
+                {
+                    tracing::debug!(event_id = %event.id, "an agent auth event's lease was taken over before its delivery was recorded");
+                }
+                return Ok(true);
+            }
+            Ok(Err(error)) => bounded_error(&error.to_string()),
+            Err(_) => TIMED_OUT.to_owned(),
+        };
+        let failed = attempt >= MAX_EVENT_ATTEMPTS;
+        if !self
+            .store
+            .record_refusal(&event.id, &token, &answer, failed.then(Utc::now))
+            .await?
+        {
+            tracing::debug!(event_id = %event.id, "an agent auth event's lease was taken over before its refusal was recorded");
+            return Ok(false);
+        }
+        if failed {
+            // Once: a failed event is not delivered again until it is put
+            // back.
+            tracing::error!(
+                event_id = %event.id,
+                attempts = attempt,
+                last_error = %answer,
+                "an agent auth claim event failed after its last delivery attempt; \
+                 it is not delivered again until the failed events are put back"
+            );
+        } else {
+            tracing::debug!(
+                event_id = %event.id,
+                attempt,
+                "the host refused an agent auth event; the next delivery pass retries it"
+            );
+        }
+        Ok(false)
     }
 
     /// Record one audit event. The mutation it describes is committed, so
@@ -1264,6 +1510,28 @@ impl Core {
         (record.status == STATUS_ACTIVE || record.status == STATUS_CLAIMED)
             && record.user_id.is_some()
     }
+}
+
+/// The attribute an outbox event carries on a delivery that follows a
+/// refused one: the number of this attempt, counting from the event's
+/// write or, after [`AgentAuth::retry_failed_events`] put it back, from the
+/// put-back. So it is 2 or more on a retry before any put-back, and 1 on the
+/// first delivery after one, which is still a retry: the host already wrote
+/// what it writes for a first delivery.
+pub const DELIVERY_ATTEMPT: &str = "delivery_attempt";
+
+/// The longest host answer an outbox event keeps.
+const MAX_ERROR_CHARS: usize = 500;
+
+/// A host's answer as the outbox keeps it: at most [`MAX_ERROR_CHARS`]
+/// characters.
+fn bounded_error(answer: &str) -> String {
+    answer.chars().take(MAX_ERROR_CHARS).collect()
+}
+
+/// The lifecycle kind of an outbox event's audit name.
+fn outbox_kind(name: &str) -> Option<LifecycleEventKind> {
+    (name == CLAIM_CONFIRMED).then_some(LifecycleEventKind::AgentClaimConfirmed)
 }
 
 /// Log a storage failure behind a token endpoint answer and hide it.
