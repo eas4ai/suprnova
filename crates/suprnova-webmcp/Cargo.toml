@@ -25,6 +25,9 @@ thiserror = "2"
 # holds.
 percent-encoding = "2.3.2"
 form_urlencoded = "1.2.2"
+# `#[tool_input]`, which reads a field's serde names with the code the
+# server's `#[tool_input]` reads them with.
+suprnova-macros = { path = "../../suprnova-macros", version = "4.3.0" }
 
 # The browser half. Every other target compiles without it and answers
 # `Unsupported::Target`.
@@ -53,3 +56,8 @@ web-sys = { version = "0.3.99", features = [
     "Url",
     "Window",
 ] }
+
+[dev-dependencies]
+# The compile-fail case of a nested input without `#[tool_input]`. The
+# version the framework pins, so the lock gains nothing.
+trybuild = "=1.0.120"

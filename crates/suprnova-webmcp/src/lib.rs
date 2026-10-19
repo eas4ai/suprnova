@@ -4,10 +4,12 @@
 //! through `document.modelContext`:
 //!
 //! - **Page tools** the front end defines itself. [`PageTool`] registers
-//!   one with a typed input: its JSON Schema is derived from the input type
-//!   exactly as the server derives a `#[tool]`'s (AGENT-001), so what an
-//!   agent is told matches what the handler accepts. The registration lasts
-//!   as long as its [`ToolHandle`]; dropping the handle removes it.
+//!   one with a typed input, a struct marked [`tool_input`]: its JSON Schema
+//!   is derived from the input type exactly as the server derives a
+//!   `#[tool]`'s (AGENT-001), so what an agent is told matches what the
+//!   handler accepts, and its validation errors name each field as the
+//!   server's do. The registration lasts as long as its [`ToolHandle`];
+//!   dropping the handle removes it.
 //! - **Server tools** the server lists for the page (AGENT-014), in the
 //!   `<script id="suprnova-agent-tools">` element `PageTools::element`
 //!   writes into the page's head. [`ServerTools`] reads that element,
@@ -17,13 +19,10 @@
 //!   [`ToolResult`].
 //!
 //! ```no_run
-//! use schemars::JsonSchema;
-//! use serde::Deserialize;
-//! use suprnova_webmcp::{PageTool, ServerTools, ToolResult, WebMcpError};
-//! use validator::Validate;
+//! use suprnova_webmcp::{PageTool, ServerTools, ToolResult, WebMcpError, tool_input};
 //!
 //! /// An item to add to the visible todo list.
-//! #[derive(Deserialize, JsonSchema, Validate)]
+//! #[tool_input]
 //! struct AddTodo {
 //!     /// What to do.
 //!     #[validate(length(min = 1, max = 200))]
@@ -42,10 +41,11 @@
 //! }
 //! ```
 //!
-//! An input type derives `serde::Deserialize`, `schemars::JsonSchema`
-//! (schemars 1.x) and `validator::Validate` (validator 0.20), the three
-//! derives `#[tool_input]` adds on the server. Sharing one input type
-//! between the server and the front end keeps the two in step.
+//! [`tool_input`] is the server's `#[tool_input]` for a crate that cannot
+//! depend on the framework: it derives `Deserialize`, `JsonSchema` and
+//! `Validate` through this crate's own copies of serde, schemars 1.x and
+//! validator 0.20, so the front end needs none of them as a dependency, and
+//! the field attributes are theirs: `#[serde(...)]` and `#[validate(...)]`.
 //!
 //! # Without a browser
 //!
@@ -76,6 +76,7 @@
 
 mod csrf;
 mod error;
+mod names;
 mod path;
 mod result;
 mod server;
@@ -94,6 +95,11 @@ use unsupported as platform;
 #[cfg(test)]
 mod tests;
 
+// `#[tool_input]` names this crate by its absolute path, which the crate's
+// own tests reach through this alias.
+#[cfg(test)]
+extern crate self as suprnova_webmcp;
+
 use std::future::Future;
 use std::pin::Pin;
 
@@ -101,6 +107,38 @@ pub use error::{Unsupported, WebMcpError};
 pub use result::{Content, ToolError, ToolResult};
 pub use server::ServerTools;
 pub use tool::{PageTool, ToolHandle};
+
+/// Marks the input type of a page tool: `#[suprnova_webmcp::tool_input]`.
+///
+/// It derives `Deserialize`, `Validate` and `JsonSchema` and records each
+/// field's Rust name with the key the client sends it under, read from its
+/// serde attributes as the server's `#[tool_input]` reads them, so a page
+/// tool's validation errors name the fields as the server's form request
+/// does (`items.1.unitPrice`). The type of a `#[validate(nested)]` field
+/// must carry the attribute too; without it the build fails and names the
+/// fix.
+///
+/// ```
+/// #[suprnova_webmcp::tool_input]
+/// #[serde(rename_all = "camelCase")]
+/// struct AddTodo {
+///     /// What to do.
+///     #[validate(length(min = 1, max = 200))]
+///     todo_title: String,
+/// }
+/// # let _ = suprnova_webmcp::input_schema::<AddTodo>();
+/// ```
+pub use suprnova_macros::webmcp_tool_input as tool_input;
+
+/// What `#[tool_input]` expands to names, kept out of the documented
+/// surface.
+#[doc(hidden)]
+pub mod __private {
+    pub use crate::names::{InputField, InputNames};
+    pub use schemars;
+    pub use serde;
+    pub use validator;
+}
 
 /// The input schema of a typed tool: the JSON Schema (draft 2020-12)
 /// `schemars` derives from `T`, its `serde` attributes and its `validator`

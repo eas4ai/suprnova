@@ -13,15 +13,18 @@ use serde_json::{Map, Value, json};
 use validator::Validate;
 
 use crate::error::WebMcpError;
+use crate::names::{InputNames, input_key};
 use crate::result::{self, ToolError, ToolResult};
 use crate::{DEFAULT_MAX_RESULT_BYTES, LocalFuture, platform};
 
 /// A page tool with a typed input, ready to register.
 ///
-/// The input schema is derived from `T` as the server derives a
-/// `#[tool]`'s, and a call's input is read into `T` and checked against its
-/// `validator` rules before the handler sees it, so the handler only ever
-/// receives input that matches what the agent was told.
+/// `T` is a struct marked [`tool_input`](crate::tool_input). The input
+/// schema is derived from it as the server derives a `#[tool]`'s, and a
+/// call's input is read into `T` and checked against its `validator` rules
+/// before the handler sees it, so the handler only ever receives input that
+/// matches what the agent was told. Input that breaks a rule comes back
+/// naming each field by the key the agent sent, as the server's errors do.
 ///
 /// The name and description are `&'static str` because an agent reads them
 /// as instructions: they belong in the code, never in data a user can
@@ -36,7 +39,7 @@ pub struct PageTool<T> {
 
 impl<T> PageTool<T>
 where
-    T: DeserializeOwned + JsonSchema + Validate + 'static,
+    T: DeserializeOwned + JsonSchema + Validate + InputNames + 'static,
 {
     /// A tool named `name`, which an agent chooses by `description`.
     ///
@@ -258,7 +261,7 @@ pub(crate) fn descriptor(
 /// is wrong, as a server tool's 422 is, and the handler never sees it.
 pub(crate) async fn run<T, F, Fut>(handler: &F, input: &str) -> ToolResult
 where
-    T: DeserializeOwned + Validate,
+    T: DeserializeOwned + Validate + InputNames,
     F: Fn(T) -> Fut,
     Fut: Future<Output = Result<ToolResult, ToolError>>,
 {
@@ -267,7 +270,7 @@ where
         Err(error) => return result::invalid_input(&error.to_string()),
     };
     if let Err(errors) = value.validate() {
-        return result::input_validation(&errors, DEFAULT_MAX_RESULT_BYTES);
+        return result::input_validation(&errors, input_key::<T>, DEFAULT_MAX_RESULT_BYTES);
     }
     match handler(value).await {
         Ok(output) => output,

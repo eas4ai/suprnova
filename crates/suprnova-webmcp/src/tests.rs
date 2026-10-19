@@ -1,19 +1,17 @@
 //! The crate's own rules, checked without a browser: the shared browser
-//! call fixture, the server tools element, a page tool's descriptor and
-//! how a page tool's call reaches its handler (AGENT-016).
+//! call fixture, the server tools element, a page tool's descriptor, how a
+//! page tool's call reaches its handler, and the names its validation
+//! errors use (AGENT-016).
 
 use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use schemars::JsonSchema;
-use serde::Deserialize;
 use serde_json::{Value, json};
-use validator::Validate;
 
 use crate::result::{self, Answer};
 use crate::server::{self, ServerTools};
-use crate::{PageTool, ToolError, ToolResult, WebMcpError, csrf, input_schema};
+use crate::{PageTool, ToolError, ToolResult, WebMcpError, csrf, input_schema, tool_input};
 
 /// The cases every browser implementation of a server tool call shares.
 const FIXTURE: &str = include_str!("../../../framework/tests/agents/fixtures/browser-calls.json");
@@ -376,7 +374,8 @@ fn agent_016_an_element_with_a_null_title_is_refused() {
 }
 
 /// The input of a typed page tool.
-#[derive(Debug, Deserialize, JsonSchema, Validate)]
+#[tool_input]
+#[derive(Debug)]
 struct AddTodo {
     /// What to do.
     #[validate(length(min = 1, max = 20))]
@@ -479,4 +478,72 @@ fn agent_016_page_tool_checks_its_input_before_the_handler() {
             "isError": true
         })
     );
+}
+
+/// A line of an order, its fields renamed as the client sends them.
+#[tool_input]
+#[serde(rename_all = "camelCase")]
+struct OrderLine {
+    /// The price of one, in cents.
+    #[validate(range(min = 1))]
+    unit_price: u32,
+}
+
+/// Where an order goes.
+#[tool_input]
+#[serde(rename_all = "camelCase")]
+struct Destination {
+    /// The street.
+    #[validate(length(min = 1))]
+    street_name: String,
+}
+
+/// An order, with a renamed field, a renamed nested list and a renamed
+/// nested object.
+#[tool_input]
+#[serde(rename_all = "camelCase")]
+struct PlaceOrder {
+    /// Who orders.
+    #[validate(length(min = 1))]
+    customer_name: String,
+    /// What is ordered.
+    #[serde(rename = "items")]
+    #[validate(nested)]
+    line_items: Vec<OrderLine>,
+    /// Where it goes.
+    #[validate(nested)]
+    ship_to: Option<Destination>,
+}
+
+async fn place(_order: PlaceOrder) -> Result<ToolResult, ToolError> {
+    Ok(ToolResult::text("Placed."))
+}
+
+#[test]
+fn agent_016_validation_errors_use_the_clients_field_names() {
+    // The server's form request reports each field by the key the client
+    // sent, list positions as their own segment, so the agent reads one
+    // naming whichever side checked the input.
+    let invalid = ready(crate::tool::run(
+        &place,
+        r#"{"customerName":"","items":[{"unitPrice":5},{"unitPrice":0}],"shipTo":{"streetName":""}}"#,
+    ));
+    assert_eq!(
+        shown(&invalid),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": "The input is not valid:\n\
+                         - customerName: Validation failed for field 'customerName'\n\
+                         - items.1.unitPrice: Validation failed for field 'items.1.unitPrice'\n\
+                         - shipTo.streetName: Validation failed for field 'shipTo.streetName'"
+            }],
+            "isError": true
+        })
+    );
+    let valid = ready(crate::tool::run(
+        &place,
+        r#"{"customerName":"Ada","items":[{"unitPrice":5}]}"#,
+    ));
+    assert!(!valid.is_error, "{valid:?}");
 }

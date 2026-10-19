@@ -259,33 +259,40 @@ fn route_validation(errors: &Map<String, Value>, max_bytes: usize) -> ToolResult
 /// naming each field the way a route's validation failure does.
 ///
 /// Nested failures are named in the framework's dotted form
-/// (`address.street`, `items.1.name`), and the fields are sorted, since
+/// (`address.street`, `items.1.name`), each key passed through `key` to
+/// take the names the client sent, and the fields are sorted, since
 /// `validator` keeps them in a hash map.
 pub(crate) fn input_validation(
     errors: &validator::ValidationErrors,
+    key: fn(&str) -> String,
     max_bytes: usize,
 ) -> ToolResult {
     let mut fields = Vec::new();
-    flatten(errors, "", &mut fields);
+    flatten(errors, "", key, &mut fields);
     fields.sort_by(|a, b| a.0.cmp(&b.0));
     let total = fields.len();
     field_list(fields.into_iter(), total, max_bytes)
 }
 
-/// Every failing field of `errors` under `prefix`, with its messages.
+/// Every failing field of `errors` under `prefix`, a path in Rust field
+/// names, with its messages, keyed by `rename` of its path.
 fn flatten(
     errors: &validator::ValidationErrors,
     prefix: &str,
+    rename: fn(&str) -> String,
     out: &mut Vec<(String, Vec<String>)>,
 ) {
     for (field, kind) in errors.errors() {
-        let key = if prefix.is_empty() {
+        let path = if prefix.is_empty() {
             field.to_string()
         } else {
             format!("{prefix}.{field}")
         };
         match kind {
             validator::ValidationErrorsKind::Field(failures) => {
+                // The fallback names the field as the client knows it, as
+                // the server's does.
+                let key = rename(&path);
                 let messages = failures
                     .iter()
                     .map(|failure| match &failure.message {
@@ -297,10 +304,10 @@ fn flatten(
                     .collect();
                 out.push((key, messages));
             }
-            validator::ValidationErrorsKind::Struct(inner) => flatten(inner, &key, out),
+            validator::ValidationErrorsKind::Struct(inner) => flatten(inner, &path, rename, out),
             validator::ValidationErrorsKind::List(items) => {
                 for (index, inner) in items {
-                    flatten(inner, &format!("{key}.{index}"), out);
+                    flatten(inner, &format!("{path}.{index}"), rename, out);
                 }
             }
         }

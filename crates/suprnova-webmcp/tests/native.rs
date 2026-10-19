@@ -9,12 +9,12 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
 use suprnova_webmcp::{
-    PageTool, ServerTools, ToolError, ToolHandle, ToolResult, Unsupported, WebMcpError,
+    PageTool, ServerTools, ToolError, ToolHandle, ToolResult, Unsupported, WebMcpError, tool_input,
 };
 use validator::{Validate, ValidationErrors};
 
 /// The input of a typed page tool.
-#[derive(Deserialize, JsonSchema, Validate)]
+#[tool_input]
 struct AddTodo {
     /// What to do.
     #[validate(length(min = 1, max = 200))]
@@ -29,6 +29,14 @@ struct Count(u32);
 impl Validate for Count {
     fn validate(&self) -> Result<(), ValidationErrors> {
         Ok(())
+    }
+}
+
+// `#[tool_input]` only takes a struct with named fields, so the check that
+// an input's schema is an object is reached through a hand-written impl.
+impl suprnova_webmcp::__private::InputNames for Count {
+    fn input_field(_rust: &str) -> Option<suprnova_webmcp::__private::InputField> {
+        None
     }
 }
 
@@ -122,4 +130,12 @@ fn agent_016_tool_results_take_the_shape_webmcp_reads() {
         failure.message(),
         "the page offers no server tool named `posts.nope`"
     );
+}
+
+#[test]
+fn agent_016_a_nested_input_without_the_attribute_does_not_compile() {
+    // A nested type's fields are reported by their client names only when
+    // it carries `#[tool_input]` too, so leaving it off is a build error
+    // that names the fix.
+    trybuild::TestCases::new().compile_fail("tests/compile_fail/agent_016_*.rs");
 }

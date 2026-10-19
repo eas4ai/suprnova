@@ -47,6 +47,7 @@ mod test_macro;
 mod tool;
 mod utils;
 mod view;
+mod webmcp_input;
 mod workflow;
 mod workflow_step;
 
@@ -275,6 +276,31 @@ pub fn derive_route_binding(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(InputNames, attributes(serde))]
 pub fn derive_input_names(input: TokenStream) -> TokenStream {
     input_names::derive_input_names(input)
+}
+
+/// The input type of a WebAssembly front end's page tool, used as
+/// `#[suprnova_webmcp::tool_input]` (AGENT-016): the server's `#[tool_input]`
+/// for a crate that cannot depend on the framework.
+///
+/// It derives `Deserialize`, `Validate` and `JsonSchema` through
+/// `suprnova-webmcp`'s own copies, and records each field's Rust name with
+/// the key the client sends it under, read from the serde attributes the
+/// way the server reads them. A page tool's validation errors then name
+/// every field as the server's form request does. The type of a
+/// `#[validate(nested)]` field needs the attribute too; without it the
+/// build fails and names the fix.
+///
+/// ```rust,ignore
+/// #[suprnova_webmcp::tool_input]
+/// #[serde(rename_all = "camelCase")]
+/// struct AddTodo {
+///     #[validate(length(min = 1, max = 200))]
+///     todo_title: String, // an error on it is keyed `todoTitle`
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn webmcp_tool_input(attr: TokenStream, input: TokenStream) -> TokenStream {
+    webmcp_input::tool_input_attr_impl(attr, input)
 }
 
 /// Create an Inertia response with compile-time component validation.
