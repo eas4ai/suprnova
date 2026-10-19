@@ -13,7 +13,7 @@ use sea_orm::{
     ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement, TransactionTrait,
 };
 use sea_orm_migration::prelude::*;
-use suprnova::agents::AgentAuth;
+use suprnova::agents::{AgentAuth, OAuthServer};
 
 use crate::agent_auth::{agent_world_on, anonymous};
 use crate::oauth::container;
@@ -216,7 +216,40 @@ async fn agent_017_agents_migrations_create_both_plugins_tables_on_sqlite() {
         registration["identity_assertion"].is_string(),
         "{registration}"
     );
-    // `down` removes every table, the referring ones first.
+    // Beside the boot-time migrate, which creates the same tables, the set
+    // still runs.
+    AgentAuth::migrate(&db).await.expect("agent auth's tables");
+    up_in_transactions(&db).await;
+}
+
+/// The rows of `table`.
+async fn rows(db: &DatabaseConnection, table: &str) -> i64 {
+    db.query_one_raw(Statement::from_string(
+        db.get_database_backend(),
+        format!("SELECT COUNT(*) FROM {table}"),
+    ))
+    .await
+    .expect("the count")
+    .expect("a row")
+    .try_get_by_index::<i64>(0)
+    .expect("a number")
+}
+
+#[tokio::test]
+async fn agent_017_agents_migrations_down_leaves_the_tables_and_their_rows() {
+    // The tables already exist, made at boot, and hold live credentials.
+    let db = Database::connect("sqlite::memory:").await.expect("SQLite");
+    OAuthServer::migrate(&db)
+        .await
+        .expect("the OAuth server's tables");
+    AgentAuth::migrate(&db).await.expect("agent auth's tables");
+    let _container = container();
+    let world = agent_world_on(db.clone(), |agent| agent);
+    anonymous(&world.client).await;
+    let registrations = rows(&db, "auth_agent_registrations").await;
+    assert_eq!(registrations, 1);
+    // The set runs over them, and a rollback undoes nothing it did not do.
+    up_in_transactions(&db).await;
     for migration in suprnova::agents::migrations().iter().rev() {
         migration
             .down(&SchemaManager::new(&db))
@@ -224,12 +257,9 @@ async fn agent_017_agents_migrations_create_both_plugins_tables_on_sqlite() {
             .unwrap_or_else(|error| panic!("{}: {error}", migration.name()));
     }
     for table in TABLES {
-        assert!(!has_table(&db, table).await, "{table} is gone");
+        assert!(has_table(&db, table).await, "{table} stays");
     }
-    // Beside the boot-time migrate, which creates the same tables, the set
-    // still runs.
-    AgentAuth::migrate(&db).await.expect("agent auth's tables");
-    up_in_transactions(&db).await;
+    assert_eq!(rows(&db, "auth_agent_registrations").await, registrations);
 }
 
 #[tokio::test]
@@ -240,8 +270,10 @@ async fn agent_017_agents_migrations_run_from_an_applications_migrator() {
         assert!(has_table(&db, table).await, "{table}");
     }
     Migrator::down(&db, None).await.expect("down");
+    // The migrator forgets them; the tables, which other paths also
+    // create, stay for an operator to drop.
     for table in TABLES {
-        assert!(!has_table(&db, table).await, "{table} is gone");
+        assert!(has_table(&db, table).await, "{table} stays");
     }
     let pending = Migrator::get_pending_migrations(&db)
         .await

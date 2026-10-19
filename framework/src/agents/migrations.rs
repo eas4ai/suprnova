@@ -21,6 +21,22 @@
 //! Each migration creates only what is missing, so it is safe beside
 //! [`init_magnetar`](crate::init_magnetar) or a boot-time `migrate`, which
 //! create the same tables.
+//!
+//! # Rolling back
+//!
+//! `down` changes nothing. The tables hold live credentials (registered
+//! clients, grants, token digests and agent registrations), and other
+//! paths create the same tables, so a migration that did not make them,
+//! or made only some, cannot know they are its own to drop. A rollback
+//! that dropped them would sign every connected client and agent out. An
+//! operator who means to remove them drops them deliberately:
+//!
+//! ```sql
+//! DROP TABLE auth_agent_events, auth_agent_replays, auth_agent_grants,
+//!     auth_agent_registrations;
+//! DROP TABLE auth_oauth_tokens, auth_oauth_grants, auth_oauth_authorizations,
+//!     auth_oauth_clients;
+//! ```
 
 use sea_orm_migration::prelude::*;
 
@@ -47,17 +63,9 @@ impl MigrationTrait for CreateOAuthServerTables {
             })
     }
 
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        drop_tables(
-            manager,
-            &[
-                "auth_oauth_tokens",
-                "auth_oauth_grants",
-                "auth_oauth_authorizations",
-                "auth_oauth_clients",
-            ],
-        )
-        .await
+    /// Leaves the tables in place: see the module's "Rolling back".
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        Ok(())
     }
 }
 
@@ -80,34 +88,10 @@ impl MigrationTrait for CreateAgentAuthTables {
             .map_err(|error| DbErr::Migration(format!("create agent auth's tables: {error}")))
     }
 
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        drop_tables(
-            manager,
-            &[
-                "auth_agent_events",
-                "auth_agent_replays",
-                "auth_agent_grants",
-                "auth_agent_registrations",
-            ],
-        )
-        .await
+    /// Leaves the tables in place: see the module's "Rolling back".
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        Ok(())
     }
-}
-
-/// Drop `tables` in order, each only if it exists. The lists above name
-/// the tables that hold references to others first.
-async fn drop_tables(manager: &SchemaManager<'_>, tables: &[&str]) -> Result<(), DbErr> {
-    for table in tables {
-        manager
-            .drop_table(
-                Table::drop()
-                    .table(Alias::new(*table))
-                    .if_exists()
-                    .to_owned(),
-            )
-            .await?;
-    }
-    Ok(())
 }
 
 /// Both plugins' tables, the authorization server's first: agent auth
