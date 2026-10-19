@@ -22,7 +22,11 @@ import type { RuntimePorts } from "../runtime/ports.js";
 import type { CoreResourceKind, ResourceLedger } from "../lifecycle/resources.js";
 import type { RuntimeConfig } from "../runtime/types.js";
 import type { SchedulerTicket } from "../scheduler/types.js";
-import { createFreshRenderIntent, createParamsChangedIntent } from "../scheduler/intent.js";
+import {
+  createFreshRenderIntent,
+  createParamsChangedIntent,
+  createServerIntent,
+} from "../scheduler/intent.js";
 import { SignalRuntime } from "../signals/lifecycle.js";
 import type { StimulusBootstrapOptions } from "../stimulus/port.js";
 import { LiveTransportCoordinator } from "../transport/fetch.js";
@@ -69,6 +73,14 @@ import {
   type ModelContextToolResult,
 } from "../agents/model-context.js";
 import { agentToolError, agentToolResult, argumentNames } from "../agents/result.js";
+import {
+  ServerToolsError,
+  callServerTool,
+  pageCsrfHeader,
+  readServerTools,
+  type ServerToolDefinition,
+  type ServerTools,
+} from "../agents/server-tools.js";
 import type { ServerIntent } from "../scheduler/intent.js";
 import { IslandRecord } from "./record.js";
 import {
@@ -93,6 +105,22 @@ import {
 } from "../features/host.js";
 
 type DocumentRuntimeState = "idle" | "running" | "suspended" | "disposed";
+
+/**
+ * The page's server tools (AGENT-014): one more entry of the runtime's
+ * WebMCP host beside its islands, so suspend, resume, dispose and a
+ * page-level release cover them as they cover islands.
+ */
+class PageServerTools {
+  constructor(readonly tools: ServerTools) {}
+}
+
+/** What owns a WebMCP registration of the page: an island, or the page's server tools. */
+type ToolOwner = IslandRecord | PageServerTools;
+
+/** What a pending server tool call hears when the page reloads or leaves first. */
+const SERVER_CALL_ENDED =
+  "The page is reloading or leaving before this call's result arrived: read the page before calling again.";
 
 interface PreparedSuccessor {
   readonly metadata: IslandMetadata;
@@ -159,7 +187,9 @@ export class DocumentRuntime {
   readonly #transitionCompletion = new BrowserTransitionCompletion();
   readonly #navigation: NativeDocumentNavigation;
   readonly #resourceLedger: ResourceLedger | undefined;
-  readonly #agentHost: AgentToolHost<IslandRecord>;
+  readonly #agentHost: AgentToolHost<ToolOwner>;
+  /** The page's server tools, read once at start; `null` when it offers none. */
+  #serverTools: PageServerTools | null | undefined = undefined;
   readonly #agentCalls = new WeakMap<ServerIntent, AgentCall>();
   readonly #agentTickets = new WeakMap<PendingAgentCall, SchedulerTicket>();
   #featureDriver: InspectedRuntimeFeatureDriver | null = null;
@@ -223,6 +253,7 @@ export class DocumentRuntime {
     this.#navigation.start();
     this.#observe();
     this.#discover(this.#document.querySelectorAll(ISLAND_ROOT_SELECTOR));
+    this.#connectServerTools();
   }
 
   suspend(): void {
@@ -334,6 +365,7 @@ export class DocumentRuntime {
     this.#listeners.dispose();
     this.#navigation.dispose();
     for (const record of this.#records.values()) record.dispose();
+    if (this.#serverTools) this.#agentHost.disconnect(this.#serverTools);
     const driver = this.#featureDriver;
     const started = this.#featureDriverState !== 0;
     this.#featureDriver = null;
@@ -423,13 +455,15 @@ export class DocumentRuntime {
         response.kind === "recovery" ||
         (response.kind === "fatal" && response.recovery === "navigate");
       const islandLevel = response.kind === "fatal" && !pageLevel;
-      const answer = (pending: PendingAgentCall, island: IslandRecord): ModelContextToolResult =>
+      const answer = (pending: PendingAgentCall, island: ToolOwner): ModelContextToolResult =>
         pending === call?.pending
           ? call.answer(response, true)
-          : agentToolError(this.#endedCallMessage(island, pending));
-      const after = (pending: PendingAgentCall, island: IslandRecord): void => {
+          : island instanceof IslandRecord
+            ? agentToolError(this.#endedCallMessage(island, pending))
+            : agentToolError(SERVER_CALL_ENDED);
+      const after = (pending: PendingAgentCall, island: ToolOwner): void => {
         const other = this.#agentTickets.get(pending);
-        if (pending !== call?.pending && other !== undefined) {
+        if (island instanceof IslandRecord && pending !== call?.pending && other !== undefined) {
           island.scheduler.cancel(other, { abortTransport: false });
         }
       };
@@ -906,6 +940,137 @@ export class DocumentRuntime {
       name,
       input,
     );
+  }
+
+  /**
+   * Read the page's server tools from the head once, and register them with
+   * the page's model context beside the islands' tools (AGENT-014). An
+   * element the runtime does not accept registers nothing and records
+   * `agent_tool_rejected`.
+   */
+  #connectServerTools(): void {
+    if (this.#serverTools !== undefined) return;
+    let tools: ServerTools | null;
+    try {
+      tools = readServerTools(this.#document);
+    } catch (error: unknown) {
+      if (!(error instanceof ServerToolsError)) throw error;
+      tools = null;
+      this.#diagnostics.record({
+        code: "agent_tool_rejected",
+        severity: "warning",
+        phase: "discovery",
+        detailCode: "invalid_shape",
+      });
+    }
+    const owner = tools === null ? null : new PageServerTools(tools);
+    this.#serverTools = owner;
+    if (owner !== null) {
+      this.#agentHost.connect(owner, () => this.#serverRegistration(owner));
+    }
+  }
+
+  /** The registration of the page's server tools, built again on each resume. */
+  #serverRegistration(owner: PageServerTools): AgentToolRegistration<ServerToolDefinition> | null {
+    if (this.#state !== "running") return null;
+    const context = modelContextOf(this.#document);
+    if (context === null) return null;
+    return {
+      context,
+      tools: owner.tools.tools,
+      execute: (tool, input, client) => this.#executeServerTool(owner, tool, input, client),
+      onFailure: () => {
+        this.#diagnostics.record({
+          code: "agent_tool_rejected",
+          severity: "warning",
+          phase: "lifecycle",
+          detailCode: "operation_rejected",
+        });
+      },
+    };
+  }
+
+  /**
+   * Call a server tool from the page, tracked by the host, so a page-level
+   * release answers it before a reload; after a write tool, every island
+   * renders fresh before the call resolves.
+   */
+  #executeServerTool(
+    owner: PageServerTools,
+    tool: ServerToolDefinition,
+    input: unknown,
+    client?: ModelContextClient,
+  ): Promise<ModelContextToolResult> {
+    const signal = client?.signal;
+    if (signal?.aborted === true) {
+      return Promise.reject(new DOMException("The tool call was aborted.", "AbortError"));
+    }
+    return new Promise<ModelContextToolResult>((resolve, reject) => {
+      const pending = this.#agentHost.track(owner, resolve);
+      if (pending === null) {
+        resolve(agentToolError("The page's tools have left: call again once the page lists them."));
+        return;
+      }
+      const view: unknown = this.#document.defaultView;
+      const location: unknown =
+        typeof view === "object" && view !== null ? Reflect.get(view, "location") : null;
+      const href: unknown =
+        typeof location === "object" && location !== null ? Reflect.get(location, "href") : null;
+      callServerTool(tool, input, {
+        origin: new URL(typeof href === "string" ? href : this.#document.baseURI).origin,
+        fetch: (url, init) => this.#ports.transport.fetch(url, init),
+        csrf: () => pageCsrfHeader(this.#document),
+        limits: owner.tools.limits,
+        scheduler: this.#ports.scheduler,
+        ...(signal === undefined ? {} : { signal }),
+        refresh: () => this.#renderIslandsFresh(),
+      }).then(
+        (result) => {
+          pending.settle(result);
+        },
+        (error: unknown) => {
+          pending.withdraw();
+          reject(error instanceof Error ? error : new Error("server_tool_failed"));
+        },
+      );
+    });
+  }
+
+  /**
+   * Render every connected island fresh, so the page shows what a write
+   * tool changed (AGENT-014): an instance takes a fresh render, a public
+   * seed is promoted and rendered with its current data. Resolves when
+   * every island's render has settled, whatever its outcome.
+   */
+  #renderIslandsFresh(): Promise<void> {
+    const renders: Promise<void>[] = [];
+    for (const record of this.#records.values()) {
+      if (this.#state !== "running" || !record.active()) continue;
+      const intent =
+        record.metadata.snapshotForm === "seed"
+          ? createServerIntent(
+              Object.freeze({
+                directive: null,
+                element: record.element,
+                eventType: "agent",
+                island: record,
+                trusted: false,
+              }),
+              Object.freeze([{ kind: "fresh_render" as const }]),
+              this.#ports.randomness,
+              true,
+            )
+          : createFreshRenderIntent(record, "agent");
+      renders.push(
+        new Promise<void>((resolve) => {
+          intent.onFinish(() => {
+            resolve();
+          });
+          if (record.enqueueTicket(intent) === null) resolve();
+        }),
+      );
+    }
+    return Promise.all(renders).then(() => undefined);
   }
 
   /**
