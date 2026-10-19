@@ -1,0 +1,298 @@
+{
+  "about": "The English text of each built-in validator rule's message, generated from framework/src/localization/catalogs/en/validation.ftl by the agents test wasm_messages. Do not edit it. After a change to the catalog, regenerate it with: SUPRNOVA_WEBMCP_CATALOG=write cargo nextest run -p suprnova --test agents -E 'test(/agent_016_page_tool_messages_match_the_english_catalog/)'",
+  "messages": {
+    "validation-contains": [
+      {
+        "text": "The "
+      },
+      {
+        "arg": "field"
+      },
+      {
+        "text": " field is missing a required value."
+      }
+    ],
+    "validation-email": [
+      {
+        "text": "The "
+      },
+      {
+        "arg": "field"
+      },
+      {
+        "text": " field must be a valid email address."
+      }
+    ],
+    "validation-ip": [
+      {
+        "text": "The "
+      },
+      {
+        "arg": "field"
+      },
+      {
+        "text": " field must be a valid IP address."
+      }
+    ],
+    "validation-length": [
+      {
+        "select": "kind",
+        "variants": [
+          {
+            "key": "equal",
+            "pattern": [
+              {
+                "text": "The "
+              },
+              {
+                "arg": "field"
+              },
+              {
+                "text": " field must be exactly "
+              },
+              {
+                "arg": "equal"
+              },
+              {
+                "text": " characters."
+              }
+            ]
+          },
+          {
+            "key": "min",
+            "pattern": [
+              {
+                "text": "The "
+              },
+              {
+                "arg": "field"
+              },
+              {
+                "text": " field must be at least "
+              },
+              {
+                "arg": "min"
+              },
+              {
+                "text": " characters."
+              }
+            ]
+          },
+          {
+            "key": "max",
+            "pattern": [
+              {
+                "text": "The "
+              },
+              {
+                "arg": "field"
+              },
+              {
+                "text": " field must be at most "
+              },
+              {
+                "arg": "max"
+              },
+              {
+                "text": " characters."
+              }
+            ]
+          },
+          {
+            "key": "range",
+            "pattern": [
+              {
+                "text": "The "
+              },
+              {
+                "arg": "field"
+              },
+              {
+                "text": " field must be between "
+              },
+              {
+                "arg": "min"
+              },
+              {
+                "text": " and "
+              },
+              {
+                "arg": "max"
+              },
+              {
+                "text": " characters."
+              }
+            ]
+          },
+          {
+            "key": "other",
+            "pattern": [
+              {
+                "text": "The "
+              },
+              {
+                "arg": "field"
+              },
+              {
+                "text": " field has an invalid length."
+              }
+            ]
+          }
+        ],
+        "default": "other"
+      }
+    ],
+    "validation-must-match": [
+      {
+        "text": "The "
+      },
+      {
+        "arg": "field"
+      },
+      {
+        "text": " field must match the field it is paired with."
+      }
+    ],
+    "validation-range": [
+      {
+        "select": "kind",
+        "variants": [
+          {
+            "key": "equal",
+            "pattern": [
+              {
+                "text": "The "
+              },
+              {
+                "arg": "field"
+              },
+              {
+                "text": " field must be exactly "
+              },
+              {
+                "arg": "equal"
+              },
+              {
+                "text": "."
+              }
+            ]
+          },
+          {
+            "key": "min",
+            "pattern": [
+              {
+                "text": "The "
+              },
+              {
+                "arg": "field"
+              },
+              {
+                "text": " field must be at least "
+              },
+              {
+                "arg": "min"
+              },
+              {
+                "text": "."
+              }
+            ]
+          },
+          {
+            "key": "max",
+            "pattern": [
+              {
+                "text": "The "
+              },
+              {
+                "arg": "field"
+              },
+              {
+                "text": " field must not be greater than "
+              },
+              {
+                "arg": "max"
+              },
+              {
+                "text": "."
+              }
+            ]
+          },
+          {
+            "key": "range",
+            "pattern": [
+              {
+                "text": "The "
+              },
+              {
+                "arg": "field"
+              },
+              {
+                "text": " field must be between "
+              },
+              {
+                "arg": "min"
+              },
+              {
+                "text": " and "
+              },
+              {
+                "arg": "max"
+              },
+              {
+                "text": "."
+              }
+            ]
+          },
+          {
+            "key": "other",
+            "pattern": [
+              {
+                "text": "The "
+              },
+              {
+                "arg": "field"
+              },
+              {
+                "text": " field is out of range."
+              }
+            ]
+          }
+        ],
+        "default": "other"
+      }
+    ],
+    "validation-regex": [
+      {
+        "text": "The "
+      },
+      {
+        "arg": "field"
+      },
+      {
+        "text": " field format is invalid."
+      }
+    ],
+    "validation-required": [
+      {
+        "text": "The "
+      },
+      {
+        "arg": "field"
+      },
+      {
+        "text": " field is required."
+      }
+    ],
+    "validation-url": [
+      {
+        "text": "The "
+      },
+      {
+        "arg": "field"
+      },
+      {
+        "text": " field must be a valid URL."
+      }
+    ]
+  }
+}

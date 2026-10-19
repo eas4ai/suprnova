@@ -464,7 +464,7 @@ fn agent_016_page_tool_checks_its_input_before_the_handler() {
         json!({
             "content": [{
                 "type": "text",
-                "text": "The input is not valid:\n- title: Validation failed for field 'title'\n- urgency: Validation failed for field 'urgency'"
+                "text": "The input is not valid:\n- title: The title field must be between 1 and 20 characters.\n- urgency: The urgency field must be between 1 and 3."
             }],
             "isError": true
         })
@@ -534,9 +534,10 @@ fn agent_016_validation_errors_use_the_clients_field_names() {
             "content": [{
                 "type": "text",
                 "text": "The input is not valid:\n\
-                         - customerName: Validation failed for field 'customerName'\n\
-                         - items.1.unitPrice: Validation failed for field 'items.1.unitPrice'\n\
-                         - shipTo.streetName: Validation failed for field 'shipTo.streetName'"
+                         - customerName: The customer name field must be at least 1 characters.\n\
+                         - items.1.unitPrice: The items.1.unit price field must be at least 1.\n\
+                         - shipTo.streetName: The ship to.street name field must be at least 1 \
+                         characters."
             }],
             "isError": true
         })
@@ -546,4 +547,53 @@ fn agent_016_validation_errors_use_the_clients_field_names() {
         r#"{"customerName":"Ada","items":[{"unitPrice":5}]}"#,
     ));
     assert!(!valid.is_error, "{valid:?}");
+}
+
+/// Signing up, with one rule of each kind the server's catalog words.
+#[tool_input]
+#[serde(rename_all = "camelCase")]
+struct SignUp {
+    /// The name to show.
+    #[validate(length(min = 3, max = 20))]
+    display_name: String,
+    /// Age in years.
+    #[validate(range(min = 18, max = 120))]
+    age_years: u32,
+    /// Where to write.
+    #[validate(email)]
+    contact_email: String,
+    /// What friends call you.
+    #[validate(length(min = 1, message = "Say what friends call you."))]
+    nickname: String,
+}
+
+async fn sign_up(_input: SignUp) -> Result<ToolResult, ToolError> {
+    Ok(ToolResult::text("Signed up."))
+}
+
+#[test]
+fn agent_016_validation_messages_take_the_servers_english_text() {
+    // The texts the server's English catalog gives for the same rules,
+    // with the client's field name humanized as the server humanizes it;
+    // the framework's `wasm_messages` test pins the server to the same
+    // texts. An author's own message still wins.
+    let invalid = ready(crate::tool::run(
+        &sign_up,
+        r#"{"displayName":"Al","ageYears":12,"contactEmail":"not-an-address","nickname":""}"#,
+    ));
+    assert_eq!(
+        shown(&invalid),
+        json!({
+            "content": [{
+                "type": "text",
+                "text": "The input is not valid:\n\
+                         - ageYears: The age years field must be between 18 and 120.\n\
+                         - contactEmail: The contact email field must be a valid email address.\n\
+                         - displayName: The display name field must be between 3 and 20 \
+                         characters.\n\
+                         - nickname: Say what friends call you."
+            }],
+            "isError": true
+        })
+    );
 }

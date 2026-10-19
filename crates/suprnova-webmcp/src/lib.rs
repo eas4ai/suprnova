@@ -76,6 +76,7 @@
 
 mod csrf;
 mod error;
+mod messages;
 mod names;
 mod path;
 mod result;

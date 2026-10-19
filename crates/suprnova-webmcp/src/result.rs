@@ -290,17 +290,12 @@ fn flatten(
         };
         match kind {
             validator::ValidationErrorsKind::Field(failures) => {
-                // The fallback names the field as the client knows it, as
-                // the server's does.
+                // Each message names the field as the client knows it, as
+                // the server's do.
                 let key = rename(&path);
                 let messages = failures
                     .iter()
-                    .map(|failure| match &failure.message {
-                        // The author's own message wins, as it does on the
-                        // server.
-                        Some(message) => message.to_string(),
-                        None => format!("Validation failed for field '{key}'"),
-                    })
+                    .map(|failure| crate::messages::message(&key, failure))
                     .collect();
                 out.push((key, messages));
             }
