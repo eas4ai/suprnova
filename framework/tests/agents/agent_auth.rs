@@ -2025,6 +2025,17 @@ async fn agents_prune(
     configure: impl FnOnce(AgentAuth) -> AgentAuth + Send + 'static,
     extra: &[&'static str],
 ) {
+    agents_prune_result(world, configure, extra)
+        .await
+        .expect("agents:prune runs");
+}
+
+/// [`agents_prune`], answering what the command returned.
+async fn agents_prune_result(
+    world: &AgentWorld,
+    configure: impl FnOnce(AgentAuth) -> AgentAuth + Send + 'static,
+    extra: &[&'static str],
+) -> Result<(), FrameworkError> {
     let (db, pem, resolver, documents) = (
         world.db.clone(),
         world.pem.clone(),
@@ -2037,7 +2048,6 @@ async fn agents_prune(
         .routes(move || agent_router(&db, &pem, &resolver, &documents, configure))
         .run_with_args(args)
         .await
-        .expect("agents:prune runs");
 }
 
 /// An `AgentClaimed` listener that fails until it is told to work, with an
@@ -2209,6 +2219,194 @@ fn agent_009_claim_event_retry_writes_no_second_audit_record() {
                 1,
                 "one MagnetarLifecycleEvent for the claim"
             );
+        },
+    );
+}
+
+/// An `AgentClaimed` listener that never answers.
+struct NeverAnswers;
+
+#[async_trait]
+impl suprnova::Listener<AgentClaimed> for NeverAnswers {
+    async fn handle(&self, _event: &AgentClaimed) -> Result<(), FrameworkError> {
+        std::future::pending().await
+    }
+}
+
+/// Move a registration's claim window an hour into the past, as if it had
+/// waited out its window.
+async fn lapse_window(db: &DatabaseConnection, registration_id: &str) {
+    use magnetar::agent_auth::sql::registrations;
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    registrations::Entity::update_many()
+        .col_expr(
+            registrations::Column::ClaimExpiresAt,
+            Expr::value(chrono::Utc::now() - chrono::Duration::hours(1)),
+        )
+        .filter(registrations::Column::Id.eq(registration_id.to_owned()))
+        .exec(db)
+        .await
+        .expect("lapse the window");
+}
+
+/// A replay record that expired an hour ago.
+async fn stale_replay(db: &DatabaseConnection) -> String {
+    use magnetar::agent_auth::sql::replays;
+    use sea_orm::{ActiveValue::Set, EntityTrait};
+    let id = unique("replay");
+    replays::Entity::insert(replays::ActiveModel {
+        id: Set(id.chars().take(64).collect()),
+        expires_at: Set(chrono::Utc::now() - chrono::Duration::hours(1)),
+    })
+    .exec(db)
+    .await
+    .expect("insert a replay record");
+    id.chars().take(64).collect()
+}
+
+async fn registration_status(db: &DatabaseConnection, registration_id: &str) -> String {
+    use magnetar::agent_auth::sql::registrations;
+    use sea_orm::EntityTrait;
+    registrations::Entity::find_by_id(registration_id.to_owned())
+        .one(db)
+        .await
+        .expect("read")
+        .expect("the registration")
+        .status
+}
+
+async fn replay_exists(db: &DatabaseConnection, id: &str) -> bool {
+    use magnetar::agent_auth::sql::replays;
+    use sea_orm::EntityTrait;
+    replays::Entity::find_by_id(id.to_owned())
+        .one(db)
+        .await
+        .expect("read")
+        .is_some()
+}
+
+#[test]
+fn agent_009_hung_claim_listener_counts_one_attempt_per_pass_and_maintenance_runs() {
+    alone(
+        "agent_009_hung_claim_listener_counts_one_attempt_per_pass_and_maintenance_runs",
+        async {
+            EventFacade::listen::<AgentClaimed, _>(Arc::new(NeverAnswers)).await;
+            let quick = |agent: AgentAuth| agent.event_delivery_timeout(Duration::from_millis(200));
+            let world = agent_world(quick).await;
+            let user = new_account("hung-listener");
+            // The claim answers once its event's first delivery times out.
+            let claimed = claim_anonymous(&world, &user).await;
+            let registration_id = claimed.registration["registration_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let row = outbox_of(&world.db, &registration_id).await.remove(0);
+            assert_eq!(row.attempts, 1);
+            assert_eq!(row.last_error.as_deref(), Some("the delivery timed out"));
+            let unclaimed = anonymous(&world.client).await;
+            let unclaimed_id = unclaimed["registration_id"].as_str().unwrap();
+            lapse_window(&world.db, unclaimed_id).await;
+            let replay = stale_replay(&world.db).await;
+
+            agents_prune(&world, quick, &[]).await;
+            let row = outbox_of(&world.db, &registration_id).await.remove(0);
+            assert_eq!(
+                row.attempts, 2,
+                "one attempt in the pass, after the timeout"
+            );
+            assert_eq!(
+                registration_status(&world.db, unclaimed_id).await,
+                "expired"
+            );
+            assert!(
+                !replay_exists(&world.db, &replay).await,
+                "replays were pruned"
+            );
+        },
+    );
+}
+
+#[test]
+fn agent_009_a_failing_delivery_step_never_stops_maintenance() {
+    alone(
+        "agent_009_a_failing_delivery_step_never_stops_maintenance",
+        async {
+            let world = agent_world(|agent| agent).await;
+            let unclaimed = anonymous(&world.client).await;
+            let unclaimed_id = unclaimed["registration_id"].as_str().unwrap();
+            lapse_window(&world.db, unclaimed_id).await;
+            let replay = stale_replay(&world.db).await;
+            // The delivery step cannot read the outbox at all.
+            world
+                .db
+                .execute_unprepared("DROP TABLE auth_agent_events")
+                .await
+                .unwrap();
+            let outcome = agents_prune_result(&world, |agent| agent, &[]).await;
+            let error = outcome.expect_err("a failed step fails the command");
+            assert!(
+                error.message().contains("delivering"),
+                "{}",
+                error.message()
+            );
+            assert_eq!(
+                registration_status(&world.db, unclaimed_id).await,
+                "expired",
+                "expiry still ran"
+            );
+            assert!(
+                !replay_exists(&world.db, &replay).await,
+                "replays were pruned"
+            );
+        },
+    );
+}
+
+#[test]
+fn agent_009_claim_inside_event_defer_with_a_failing_listener_stays_undelivered() {
+    alone(
+        "agent_009_claim_inside_event_defer_with_a_failing_listener_stays_undelivered",
+        async {
+            let listener = Arc::new(FailsUntilFixed::default());
+            EventFacade::listen::<AgentClaimed, _>(listener.clone()).await;
+            let world = agent_world(|agent| agent).await;
+            let client = &world.client;
+            let user = new_account("deferred");
+            let registration = anonymous(client).await;
+            let started = initiate(
+                client,
+                registration["claim_token"].as_str().unwrap(),
+                &account_email(&user),
+            )
+            .await
+            .json();
+            sign_in(client, &user).await;
+            let page = open_claim(
+                client,
+                started["claim_attempt"]["verification_uri"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .await;
+            let code = started["claim_attempt"]["user_code"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let (done, _) = EventFacade::defer(None, async {
+                Ok::<_, FrameworkError>(confirm(client, &page, &code).await)
+            })
+            .await
+            .expect("the deferred scope runs");
+            assert_eq!(done.status(), 200, "{}", done.body_text());
+            let row = outbox_of(&world.db, registration["registration_id"].as_str().unwrap())
+                .await
+                .remove(0);
+            assert!(
+                row.delivered_at.is_none(),
+                "the listener's failure counted although the claim ran in a defer scope"
+            );
+            assert_eq!(row.attempts, 1);
         },
     );
 }

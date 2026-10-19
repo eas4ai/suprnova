@@ -1686,7 +1686,7 @@ where
                     let put_back = operator::retry_failed(&engine).await?;
                     println!("Put {put_back} failed claim events back for delivery.");
                 }
-                let done = operator::maintain(&engine).await?;
+                let done = operator::maintain(&engine).await;
                 println!(
                     "Delivered {} claim events, expired {} agent registrations, and pruned {} \
                      replay records and {} delivered claim events.",
@@ -1698,6 +1698,15 @@ where
                          refused them, then run `agents:prune --retry-failed`.",
                         done.failed
                     );
+                }
+                // Every step ran; one that failed still fails the command,
+                // so the operator sees it.
+                if !done.failed_steps.is_empty() {
+                    return Err(failed(format!(
+                        "suprnova: {name}: these steps failed, and the others ran: {}; the log \
+                         has the errors",
+                        done.failed_steps.join(", ")
+                    )));
                 }
             }
         }

@@ -351,6 +351,7 @@ pub struct AgentAuth {
     audit_channel: Option<String>,
     key_fetch: Option<(Arc<dyn HostResolver>, Arc<dyn PinnedHttpClient>)>,
     key_cache: Option<(Duration, Duration)>,
+    event_delivery_timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for AgentAuth {
@@ -422,6 +423,7 @@ impl AgentAuth {
             audit_channel: None,
             key_fetch: None,
             key_cache: None,
+            event_delivery_timeout: None,
         }
     }
 
@@ -635,6 +637,16 @@ impl AgentAuth {
         self
     }
 
+    /// How long one delivery of a claim event may take before it counts as
+    /// a refused attempt with "the delivery timed out": 60 seconds unless
+    /// set. A claim confirmation waits at most this long for its event's
+    /// first delivery, and a slow listener cannot stall the maintenance
+    /// pass. Each delivery's lease is twice as long.
+    pub fn event_delivery_timeout(mut self, timeout: Duration) -> Self {
+        self.event_delivery_timeout = Some(timeout);
+        self
+    }
+
     /// Create agent auth's tables on `connection` if they do not exist:
     /// `auth_agent_registrations`, `auth_agent_grants`,
     /// `auth_agent_replays` and `auth_agent_events`, the outbox of claim
@@ -719,6 +731,9 @@ impl AgentAuth {
         }
         if let Some(lifetime) = self.assertion_lifetime {
             config.assertion_lifetime = lifetime;
+        }
+        if let Some(timeout) = self.event_delivery_timeout {
+            config.event_delivery_timeout = timeout;
         }
         for (identity_type, per_address, per_application) in &self.limits {
             let limit = RegistrationLimit {

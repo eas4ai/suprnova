@@ -936,6 +936,21 @@ impl Event {
         global().dispatch_best_effort(event).await
     }
 
+    /// [`dispatch_best_effort`](Self::dispatch_best_effort) that runs the
+    /// listeners now even inside a [`defer`](Self::defer) scope, for a
+    /// caller that must know at once whether every listener took the event:
+    /// agent auth's outbox counts a listener's failure as a refused
+    /// delivery, which a deferred dispatch would hide.
+    pub(crate) async fn dispatch_best_effort_now<E: super::Event>(
+        event: E,
+    ) -> Result<(), FrameworkError> {
+        if super::testing::is_active::<E>() {
+            super::testing::record(event);
+            return Ok(());
+        }
+        global().dispatch_best_effort_inner(event).await
+    }
+
     /// Register a listener for events of type `E`.
     pub async fn listen<E, L>(listener: Arc<L>)
     where

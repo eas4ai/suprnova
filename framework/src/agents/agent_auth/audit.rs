@@ -137,8 +137,11 @@ impl DurableLifecycleDelivery for AuditSink {
         // The dispatcher logs the listener's own error. The answer agent auth
         // keeps in its outbox names only the event, so no detail a listener
         // put in its error, such as a user's address, is stored there.
+        // At once, never deferred: inside an `Event::defer` scope a deferred
+        // dispatch would answer before any listener ran, and the outbox
+        // would mark the event delivered whatever the listener did.
         if event.kind == LifecycleEventKind::AgentClaimConfirmed
-            && crate::events::EventFacade::dispatch_best_effort(self.claimed(&event))
+            && crate::events::EventFacade::dispatch_best_effort_now(self.claimed(&event))
                 .await
                 .is_err()
         {

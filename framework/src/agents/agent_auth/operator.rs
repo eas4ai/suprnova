@@ -31,58 +31,87 @@ pub(crate) async fn revoke_all(
 }
 
 /// What one maintenance pass did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Maintenance {
-    /// Claim events a failed dispatch or a stopped process left, now
-    /// delivered.
-    pub(crate) delivered: u64,
     /// Unclaimed registrations whose window passed, now expired with their
     /// tokens ended and `registration.expired` recorded.
     pub(crate) expired: u64,
     /// Replay records of provider tokens that can no longer be replayed.
     pub(crate) pruned: u64,
+    /// Claim events a failed dispatch or a stopped process left, now
+    /// delivered.
+    pub(crate) delivered: u64,
     /// Claim events delivered longer ago than the outbox keeps them.
     pub(crate) events_pruned: u64,
-    /// Claim events that failed after their last delivery attempt and wait
-    /// to be put back.
+    /// Claim events that failed and wait to be put back.
     pub(crate) failed: u64,
+    /// The steps that failed, each already logged at error level.
+    pub(crate) failed_steps: Vec<&'static str>,
 }
 
-/// Deliver the claim events still waiting, expire the registrations whose
-/// window passed, then delete the replay records no token can use and the
-/// claim events delivered more than seven days ago. Each step is a
-/// conditional write, so every node may run it at once.
-pub(crate) async fn maintain(
-    engine: &magnetar::agent_auth::AgentAuth,
-) -> Result<Maintenance, FrameworkError> {
-    let delivered = engine.deliver_pending_events().await.map_err(|error| {
-        FrameworkError::internal(format!(
-            "delivering agent auth's claim events failed: {error}"
-        ))
-    })?;
-    let expired = engine.expire_registrations().await.map_err(|error| {
-        FrameworkError::internal(format!("expiring agent registrations failed: {error}"))
-    })?;
-    let pruned = engine.prune_replay_records().await.map_err(|error| {
-        FrameworkError::internal(format!("pruning agent auth replay records failed: {error}"))
-    })?;
-    let events_pruned = engine.prune_delivered_events().await.map_err(|error| {
-        FrameworkError::internal(format!(
-            "pruning agent auth's delivered events failed: {error}"
-        ))
-    })?;
-    let failed = engine.failed_events().await.map_err(|error| {
-        FrameworkError::internal(format!(
-            "counting agent auth's failed events failed: {error}"
-        ))
-    })?;
-    Ok(Maintenance {
-        delivered,
+/// Run one step of the pass: its count, or 0 after logging its error and
+/// naming it in `failed_steps`, so the steps after it still run.
+async fn step(
+    name: &'static str,
+    failed_steps: &mut Vec<&'static str>,
+    run: impl std::future::Future<Output = magnetar::Result<u64>>,
+) -> u64 {
+    match run.await {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::error!(%error, step = name, "an agent auth maintenance step failed; the pass goes on");
+            failed_steps.push(name);
+            0
+        }
+    }
+}
+
+/// Expire the registrations whose window passed, delete the replay records
+/// no token can use, deliver the claim events still waiting and delete the
+/// claim events delivered more than seven days ago. Every step runs
+/// whatever happens to the others: a failed step is logged and named in
+/// [`Maintenance::failed_steps`]. Each step is a conditional write, so every
+/// node may run the pass at once.
+pub(crate) async fn maintain(engine: &magnetar::agent_auth::AgentAuth) -> Maintenance {
+    let mut failed_steps = Vec::new();
+    let expired = step(
+        "expiring agent registrations",
+        &mut failed_steps,
+        engine.expire_registrations(),
+    )
+    .await;
+    let pruned = step(
+        "pruning replay records",
+        &mut failed_steps,
+        engine.prune_replay_records(),
+    )
+    .await;
+    let delivered = step(
+        "delivering claim events",
+        &mut failed_steps,
+        engine.deliver_pending_events(),
+    )
+    .await;
+    let events_pruned = step(
+        "pruning delivered claim events",
+        &mut failed_steps,
+        engine.prune_delivered_events(),
+    )
+    .await;
+    let failed = step(
+        "counting failed claim events",
+        &mut failed_steps,
+        engine.failed_events(),
+    )
+    .await;
+    Maintenance {
         expired,
         pruned,
+        delivered,
         events_pruned,
         failed,
-    })
+        failed_steps,
+    }
 }
 
 /// Put the claim events that failed after their last delivery attempt back
@@ -145,17 +174,17 @@ pub(crate) fn spawn_maintenance(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            match maintain(&engine).await {
-                Ok(done) => tracing::debug!(
-                    delivered = done.delivered,
-                    expired = done.expired,
-                    pruned = done.pruned,
-                    events_pruned = done.events_pruned,
-                    failed = done.failed,
-                    "agent auth maintenance pass"
-                ),
-                Err(error) => tracing::error!(%error, "agent auth maintenance pass failed"),
-            }
+            // A failed step was logged by the pass itself.
+            let done = maintain(&engine).await;
+            tracing::debug!(
+                delivered = done.delivered,
+                expired = done.expired,
+                pruned = done.pruned,
+                events_pruned = done.events_pruned,
+                failed = done.failed,
+                failed_steps = done.failed_steps.len(),
+                "agent auth maintenance pass"
+            );
         }
     })))
 }
