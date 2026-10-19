@@ -8998,6 +8998,7 @@ dependencies = [
  "tokio",
  "toml",
  "toml_edit",
+ "validator",
  "walkdir",
 ]
 

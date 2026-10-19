@@ -127,3 +127,7 @@ nix = { version = "=0.31.3", default-features = false, features = ["process", "s
 suprnova = { path = "../framework", version = "4.3.0" }
 # Integration tests that invoke the binary with a temp working directory.
 tempfile = "3"
+# The form tool schema agreement tests (`tests/agents_browser/schemas.rs`)
+# compile request types through `#[tool_input]`, whose `Validate` derive
+# names the `validator` crate, as an application's own manifest does.
+validator = { version = "0.20", features = ["derive"] }
