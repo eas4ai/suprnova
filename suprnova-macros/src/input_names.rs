@@ -1,6 +1,10 @@
 //! The registration a request type makes of its fields' input names, so
 //! validation errors reported under Rust names can be keyed by the names
 //! the client sent. The runtime half is `suprnova::data::input_names`.
+//!
+//! The WebAssembly crate's `#[tool_input]` (`webmcp_input.rs`) reads its
+//! field names through [`lenient_fields`] and [`peel`] too, so a page
+//! tool's errors and the server's name every field the same way.
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -18,7 +22,7 @@ pub(crate) struct InputFieldSpec<'a> {
 /// key segments (list indexes, map keys) come before that type's fields.
 /// `Option`, `Box`, `Field`, `Rc` and `Arc` add none; a list or a set adds
 /// one index, a map one key.
-fn peel(ty: &Type) -> (&Type, u8) {
+pub(crate) fn peel(ty: &Type) -> (&Type, u8) {
     match ty {
         Type::Paren(inner) => peel(&inner.elem),
         Type::Group(inner) => peel(&inner.elem),
@@ -110,6 +114,14 @@ pub(crate) fn registration(struct_name: &Ident, fields: &[InputFieldSpec<'_>]) -
 /// the renames and skips of its serde attributes. `None` for a generic
 /// struct or one without named fields.
 pub(crate) fn lenient_registration(input: &DeriveInput) -> syn::Result<Option<TokenStream>> {
+    Ok(lenient_fields(input)?.map(|fields| registration(&input.ident, &fields)))
+}
+
+/// The fields serde reads of a struct serde's own derive handles, each with
+/// its Rust name, the key serde reads it from and its type, from the
+/// renames and skips of its serde attributes alone. `None` for a generic
+/// struct or one without named fields.
+pub(crate) fn lenient_fields(input: &DeriveInput) -> syn::Result<Option<Vec<InputFieldSpec<'_>>>> {
     let syn::Data::Struct(data) = &input.data else {
         return Ok(None);
     };
@@ -136,7 +148,7 @@ pub(crate) fn lenient_registration(input: &DeriveInput) -> syn::Result<Option<To
             ty: &field.ty,
         });
     }
-    Ok(Some(registration(&input.ident, &fields)))
+    Ok(Some(fields))
 }
 
 /// `#[derive(InputNames)]`: the registration alone, for a plain
