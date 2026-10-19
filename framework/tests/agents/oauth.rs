@@ -2084,3 +2084,183 @@ async fn agent_017_redirect_uris_are_ascii_on_the_approval_page() {
     assert_eq!(raw_variant.status(), 400, "{}", raw_variant.body_text());
     assert!(!raw_variant.body_text().contains('\u{202E}'));
 }
+
+// ------------------------------------------------------------ pruning ----
+
+/// The digest the OAuth server stores a token as.
+fn token_digest(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+/// The stored token row of `token`, if it is still there.
+pub async fn token_row(
+    db: &DatabaseConnection,
+    token: &str,
+) -> Option<magnetar::authorization_server::sql::tokens::Model> {
+    use magnetar::authorization_server::sql::tokens;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    tokens::Entity::find()
+        .filter(tokens::Column::TokenHash.eq(token_digest(token)))
+        .one(db)
+        .await
+        .unwrap()
+}
+
+/// The grant row `grant_id`, if it is still there.
+pub async fn grant_row(
+    db: &DatabaseConnection,
+    grant_id: &str,
+) -> Option<magnetar::authorization_server::sql::grants::Model> {
+    use magnetar::authorization_server::sql::grants;
+    use sea_orm::EntityTrait;
+    grants::Entity::find_by_id(grant_id.to_owned())
+        .one(db)
+        .await
+        .unwrap()
+}
+
+/// The grant `token` belongs to.
+pub async fn grant_of(db: &DatabaseConnection, token: &str) -> String {
+    token_row(db, token)
+        .await
+        .expect("the token is stored")
+        .grant_id
+}
+
+/// Mark the grant `grant_id` revoked `days` ago.
+pub async fn revoke_grant_days_ago(db: &DatabaseConnection, grant_id: &str, days: i64) {
+    use magnetar::authorization_server::sql::grants;
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let at = chrono::Utc::now() - chrono::Duration::days(days);
+    grants::Entity::update_many()
+        .col_expr(grants::Column::RevokedAt, Expr::value(at))
+        .filter(grants::Column::Id.eq(grant_id))
+        .exec(db)
+        .await
+        .unwrap();
+}
+
+/// Make `token` expire an hour ago.
+pub async fn expire_token(db: &DatabaseConnection, token: &str) {
+    use magnetar::authorization_server::sql::tokens;
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let at = chrono::Utc::now() - chrono::Duration::hours(1);
+    tokens::Entity::update_many()
+        .col_expr(tokens::Column::ExpiresAt, Expr::value(at))
+        .filter(tokens::Column::TokenHash.eq(token_digest(token)))
+        .exec(db)
+        .await
+        .unwrap();
+}
+
+/// Run `body` as the only test of a child process, with the environment a
+/// booted command such as `agents:prune` needs. `test` is the test's name.
+fn alone(test: &str, body: impl std::future::Future<Output = ()>) {
+    if !crate::own_process::is_child() {
+        crate::own_process::run_alone(&format!("oauth::{test}"));
+        return;
+    }
+    // SAFETY: this test runs alone in its own process.
+    unsafe {
+        std::env::set_var("APP_ENV", "testing");
+        std::env::set_var("APP_URL", "http://localhost");
+    }
+    suprnova::boot::load_env().expect("pre-runtime configuration");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(body);
+}
+
+#[test]
+fn agent_005_agents_prune_prunes_ended_oauth_rows_with_only_the_oauth_server() {
+    alone(
+        "agent_005_agents_prune_prunes_ended_oauth_rows_with_only_the_oauth_server",
+        async {
+            let world = world().await;
+            let client = &world.client;
+            let db = &world.db;
+            let live = connect(client, &new_account("prune-live"), "posts:read").await;
+            let ended = connect(client, &new_account("prune-ended"), "posts:read").await;
+            let recent = connect(client, &new_account("prune-recent"), "posts:read").await;
+            let expiring = connect(client, &new_account("prune-expiring"), "posts:read").await;
+            let ended_grant = grant_of(db, &ended.access).await;
+            let recent_grant = grant_of(db, &recent.access).await;
+            let live_grant = grant_of(db, &live.access).await;
+            let expiring_grant = grant_of(db, &expiring.access).await;
+            // Revoked longer ago than the 30 days of retention, and a day ago.
+            revoke_grant_days_ago(db, &ended_grant, 40).await;
+            revoke_grant_days_ago(db, &recent_grant, 1).await;
+            expire_token(db, &expiring.access).await;
+            // A pending authorization nobody answered, past its lifetime.
+            sign_in(client, &new_account("prune-pending")).await;
+            let (_, challenge) = pkce();
+            let (pending, _) = open_approval(
+                client,
+                &live.client_id,
+                LOOPBACK_REDIRECT,
+                &challenge,
+                "posts:read",
+            )
+            .await;
+            {
+                use magnetar::authorization_server::sql::authorizations;
+                use sea_orm::sea_query::Expr;
+                use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                authorizations::Entity::update_many()
+                    .col_expr(
+                        authorizations::Column::ExpiresAt,
+                        Expr::value(chrono::Utc::now() - chrono::Duration::hours(1)),
+                    )
+                    .filter(authorizations::Column::Id.eq(pending.clone()))
+                    .exec(db)
+                    .await
+                    .unwrap();
+            }
+
+            // The application serves the OAuth server and no agent auth.
+            let prune_db = db.clone();
+            suprnova::Application::new()
+                .routes(move || {
+                    router(
+                        AgentsConfig::new()
+                            .oauth_server(OAuthServer::new().connection(prune_db.clone())),
+                    )
+                })
+                .run_with_args(["app", "agents:prune"])
+                .await
+                .expect("agents:prune runs with only the OAuth server");
+
+            // Ended past retention: the grant and its tokens go.
+            assert!(grant_row(db, &ended_grant).await.is_none());
+            assert!(token_row(db, &ended.access).await.is_none());
+            assert!(token_row(db, &ended.refresh).await.is_none());
+            // Revoked within retention: kept, as a record of the approval.
+            assert!(grant_row(db, &recent_grant).await.is_some());
+            // An expired token goes; its grant and live refresh token stay.
+            assert!(token_row(db, &expiring.access).await.is_none());
+            assert!(token_row(db, &expiring.refresh).await.is_some());
+            assert!(grant_row(db, &expiring_grant).await.is_some());
+            // The lapsed pending authorization goes.
+            {
+                use magnetar::authorization_server::sql::authorizations;
+                use sea_orm::EntityTrait;
+                assert!(
+                    authorizations::Entity::find_by_id(pending)
+                        .one(db)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            // The live grant is untouched and still works.
+            assert!(grant_row(db, &live_grant).await.is_some());
+            assert!(token_row(db, &live.access).await.is_some());
+            assert!(token_row(db, &live.refresh).await.is_some());
+            assert_eq!(profile_status(client, &live.access).await, 200);
+        },
+    );
+}
