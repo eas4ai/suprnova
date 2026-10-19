@@ -7,10 +7,13 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
 
-use super::store::{IDENTITY_ASSERTION, RegistrationRecord, STATUS_PENDING, STATUS_UNCLAIMED};
+use super::store::{
+    AgentEventRecord, CLAIM_CONFIRMED, IDENTITY_ASSERTION, RegistrationRecord, STATUS_PENDING,
+    STATUS_UNCLAIMED,
+};
 use super::{
-    AgentUser, Core, NO_FRAMING, NO_STORE, SignedInUser, digest, failure, respond, same_email,
-    timestamp,
+    AgentUser, Core, NO_FRAMING, NO_STORE, SignedInUser, digest, failure, random_hex, respond,
+    same_email, timestamp,
 };
 use crate::Result;
 use crate::authorization_server::AuthorizationServer;
@@ -245,6 +248,31 @@ impl Core {
                 &HEADERS,
             ));
         }
+        // The claim's event, written to the outbox in the claim's own
+        // transaction: a committed claim always has it.
+        let mut attributes = std::collections::BTreeMap::from([
+            ("registration_id".to_owned(), record.id.clone()),
+            ("registration_type".to_owned(), record.kind.clone()),
+            ("claimed_by_user_id".to_owned(), user.user_id.clone()),
+        ]);
+        if let Some(issuer) = &record.issuer {
+            attributes.insert("iss".to_owned(), issuer.clone());
+        }
+        if let Some(subject) = &record.subject {
+            attributes.insert("sub".to_owned(), subject.clone());
+        }
+        if let Some(address) = client_address {
+            attributes.insert("client_address".to_owned(), address.to_owned());
+        }
+        let event = AgentEventRecord {
+            id: format!("agent-auth:{}", random_hex(16)),
+            kind: CLAIM_CONFIRMED.to_owned(),
+            registration_id: record.id.clone(),
+            user_id: user.user_id.clone(),
+            attributes,
+            created_at: now,
+            delivered_at: None,
+        };
         if !self
             .store
             .confirm_claim(
@@ -255,6 +283,7 @@ impl Core {
                 user.auth_epoch,
                 self.config.max_user_code_failures,
                 now,
+                &event,
             )
             .await?
         {
@@ -266,26 +295,12 @@ impl Core {
                 "this code can no longer be used; ask the agent for a new one",
             ));
         }
-        // The claim is committed: it is recorded before anything else can
-        // fail.
-        let mut attributes = vec![
-            ("registration_id", record.id.clone()),
-            ("registration_type", record.kind.clone()),
-            ("claimed_by_user_id", user.user_id.clone()),
-        ];
-        if let Some(issuer) = &record.issuer {
-            attributes.push(("iss", issuer.clone()));
+        // The claim and its event are committed. The event is delivered now;
+        // a failure here, or a stop before it, leaves it in the outbox for
+        // the host's next delivery pass, and the claim stands either way.
+        if let Err(error) = self.deliver_event(&event).await {
+            tracing::error!(error = %error, event_id = %event.id, "delivering a claim's event failed; the next delivery pass retries it");
         }
-        if let Some(subject) = &record.subject {
-            attributes.push(("sub", subject.clone()));
-        }
-        self.emit(
-            LifecycleEventKind::AgentClaimConfirmed,
-            Some(&user.user_id),
-            &attributes,
-            client_address,
-        )
-        .await;
         // The pre-claim tokens end here: every grant not bound to the
         // claiming user, read now that the claim has committed, whichever
         // exchange made it; a grant a poll made for the user in between is

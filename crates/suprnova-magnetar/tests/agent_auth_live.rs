@@ -398,6 +398,63 @@ async fn revocation_layers_on(url: &str) {
     );
 }
 
+/// A claim whose delivery is refused writes its outbox event with the
+/// claim; two nodes then run the delivery pass at once, each on its own
+/// pool, and the event is delivered once.
+async fn claim_outbox(url: &str) {
+    let first = build(live_database(url).await, Options::new()).await;
+    let second = build(live_database(url).await, Options::new()).await;
+    first
+        .events
+        .refuse(magnetar::plugin::LifecycleEventKind::AgentClaimConfirmed, 1);
+    let (registration, user_id) = first
+        .claimed_anonymous(&format!("{}@example.test", unique("outbox")))
+        .await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let outbox = first.outbox_of(id).await;
+    assert_eq!(outbox.len(), 1, "the claim wrote its event");
+    assert_eq!(outbox[0].user_id, user_id);
+    assert!(outbox[0].delivered_at.is_none());
+    let event_id = outbox[0].id.clone();
+    let nodes = [Arc::new(first), Arc::new(second)];
+    let mut passes = Vec::new();
+    for round in 0..4 {
+        let node = nodes[round % 2].clone();
+        passes.push(tokio::spawn(async move {
+            node.engine.deliver_pending_events().await
+        }));
+    }
+    for pass in passes {
+        pass.await.expect("a pass").expect("the pass reads storage");
+    }
+    let deliveries: usize = nodes
+        .iter()
+        .map(|node| {
+            node.events
+                .of(magnetar::plugin::LifecycleEventKind::AgentClaimConfirmed)
+                .iter()
+                .filter(|event| event.mutation_id == event_id)
+                .count()
+        })
+        .sum();
+    assert_eq!(deliveries, 1, "one delivery across both nodes");
+    assert!(nodes[0].outbox_of(id).await[0].delivered_at.is_some());
+}
+
+#[cfg(feature = "seaorm-postgres")]
+#[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn agent_009_postgres_claim_outbox_is_written_and_delivered_once() {
+    claim_outbox(&postgres_url()).await;
+}
+
+#[cfg(feature = "seaorm-mysql")]
+#[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn agent_009_mysql_claim_outbox_is_written_and_delivered_once() {
+    claim_outbox(&mysql_url()).await;
+}
+
 #[cfg(feature = "seaorm-postgres")]
 #[tokio::test]
 #[ignore = "requires T2 live Postgres/MySQL database"]

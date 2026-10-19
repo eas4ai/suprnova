@@ -1,11 +1,12 @@
 //! SeaORM tables and store for agent auth on SQLite, PostgreSQL and
 //! MySQL/MariaDB.
 //!
-//! Three tables belong to the plugin: `auth_agent_registrations` holds one
+//! Four tables belong to the plugin: `auth_agent_registrations` holds one
 //! row per registration with its claim ceremony, `auth_agent_grants` the
-//! one authorization server grant a registration holds per resource, and
+//! one authorization server grant a registration holds per resource,
 //! `auth_agent_replays` the identifiers of ID-JAGs and Security Event
-//! Tokens already seen. [`migrate`] creates them, and
+//! Tokens already seen, and `auth_agent_events` the outbox of events that
+//! must be delivered at least once. [`migrate`] creates them, and
 //! [`crate::default_schema::migrate`] calls it when the `agent-auth`
 //! feature is on.
 //!
@@ -24,9 +25,9 @@ use sea_orm::{
 };
 
 use super::store::{
-    AgentAuthStore, AgentGrantRecord, IDENTITY_ASSERTION, NewAttempt, RegistrationRecord,
-    STATUS_ACTIVE, STATUS_CLAIMED, STATUS_EXPIRED, STATUS_PENDING, STATUS_REVOKED,
-    STATUS_UNCLAIMED,
+    AgentAuthStore, AgentEventRecord, AgentGrantRecord, IDENTITY_ASSERTION, NewAttempt,
+    RegistrationRecord, STATUS_ACTIVE, STATUS_CLAIMED, STATUS_EXPIRED, STATUS_PENDING,
+    STATUS_REVOKED, STATUS_UNCLAIMED,
 };
 use crate::storage::db_error;
 use crate::storage::migrations::has_index;
@@ -162,6 +163,44 @@ pub mod replays {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// SeaORM entity for the `auth_agent_events` table: the outbox.
+#[allow(missing_docs)]
+pub mod agent_events {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "auth_agent_events")]
+    pub struct Model {
+        /// The event's stable identifier.
+        #[sea_orm(
+            primary_key,
+            auto_increment = false,
+            column_type = "String(StringLen::N(64))"
+        )]
+        pub id: String,
+        #[sea_orm(column_type = "String(StringLen::N(64))")]
+        pub kind: String,
+        #[sea_orm(column_type = "String(StringLen::N(64))")]
+        pub registration_id: String,
+        #[sea_orm(column_type = "String(StringLen::N(191))")]
+        pub user_id: String,
+        /// The attributes as a JSON object of strings.
+        #[sea_orm(column_type = "Text")]
+        pub attributes: String,
+        pub created_at: DateTimeUtc,
+        /// The end of the lease a delivery holds, while one does.
+        #[sea_orm(nullable)]
+        pub leased_until: Option<DateTimeUtc>,
+        #[sea_orm(nullable)]
+        pub delivered_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 /// Create agent auth's tables and indexes when they are missing. Running
 /// it again changes nothing, and two processes running it at once both
 /// succeed.
@@ -193,6 +232,10 @@ pub async fn migrate(db: &DatabaseConnection) -> Result<()> {
             .to_owned(),
         schema
             .create_table_from_entity(replays::Entity)
+            .if_not_exists()
+            .to_owned(),
+        schema
+            .create_table_from_entity(agent_events::Entity)
             .if_not_exists()
             .to_owned(),
     ] {
@@ -251,6 +294,16 @@ pub async fn migrate(db: &DatabaseConnection) -> Result<()> {
         "auth_agent_replays",
         "auth_agent_replays_expires_at",
         &["expires_at"],
+        false,
+    )
+    .await?;
+    // A delivery pass reads the undelivered events, oldest first, and the
+    // pruning deletes the delivered ones by age.
+    ensure_index(
+        db,
+        "auth_agent_events",
+        "auth_agent_events_delivery",
+        &["delivered_at", "created_at"],
         false,
     )
     .await
@@ -400,6 +453,21 @@ async fn finish_transaction(
 /// fixed-length whatever the resource's length, so it indexes on MySQL.
 fn grant_key(registration_id: &str, resource: &str) -> String {
     crate::authorization_server::token_digest(&format!("{registration_id}\n{resource}"))
+}
+
+fn event_record(model: agent_events::Model) -> Result<AgentEventRecord> {
+    let attributes = serde_json::from_str(&model.attributes).map_err(|error| Error::Internal {
+        message: format!("an agent auth outbox event's attributes do not read: {error}"),
+    })?;
+    Ok(AgentEventRecord {
+        id: model.id,
+        kind: model.kind,
+        registration_id: model.registration_id,
+        user_id: model.user_id,
+        attributes,
+        created_at: model.created_at,
+        delivered_at: model.delivered_at,
+    })
 }
 
 fn grant_record(model: agent_grants::Model) -> AgentGrantRecord {
@@ -639,42 +707,64 @@ impl AgentAuthStore for SqlAgentAuthStore {
         auth_epoch: Option<u64>,
         max_failures: u32,
         now: DateTime<Utc>,
+        event: &AgentEventRecord,
     ) -> Result<bool> {
         let none = Option::<String>::None;
-        let moved = registrations::Entity::update_many()
-            .col_expr(registrations::Column::Status, Expr::value(STATUS_CLAIMED))
-            .col_expr(
-                registrations::Column::UserId,
-                Expr::value(user_id.to_owned()),
-            )
-            .col_expr(
-                registrations::Column::AuthEpoch,
-                Expr::value(epoch_to_db(auth_epoch)?),
-            )
-            .col_expr(registrations::Column::ClaimedAt, Expr::value(now))
-            .col_expr(
-                registrations::Column::AttemptTokenHash,
-                Expr::value(none.clone()),
-            )
-            .col_expr(registrations::Column::UserCodeHash, Expr::value(none))
-            .col_expr(
-                registrations::Column::AssertionVersion,
-                Expr::col(registrations::Column::AssertionVersion).add(1),
-            )
-            .filter(registrations::Column::Id.eq(id.to_owned()))
-            .filter(registrations::Column::AttemptTokenHash.eq(attempt_token_hash.to_owned()))
-            .filter(registrations::Column::UserCodeHash.eq(user_code_hash.to_owned()))
-            .filter(
-                registrations::Column::UserCodeFailures
-                    .lt(to_i32(max_failures, "max_user_code_failures")?),
-            )
-            .filter(registrations::Column::UserCodeExpiresAt.gt(now))
-            .filter(registrations::Column::ClaimExpiresAt.gt(now))
-            .filter(claimable())
-            .exec(&self.db)
+        let attributes =
+            serde_json::to_string(&event.attributes).map_err(|error| Error::Internal {
+                message: format!("an agent auth outbox event's attributes do not encode: {error}"),
+            })?;
+        let failures = to_i32(max_failures, "max_user_code_failures")?;
+        let epoch = epoch_to_db(auth_epoch)?;
+        let transaction = self.db.begin().await.map_err(db_error)?;
+        let outcome = async {
+            let moved = registrations::Entity::update_many()
+                .col_expr(registrations::Column::Status, Expr::value(STATUS_CLAIMED))
+                .col_expr(
+                    registrations::Column::UserId,
+                    Expr::value(user_id.to_owned()),
+                )
+                .col_expr(registrations::Column::AuthEpoch, Expr::value(epoch))
+                .col_expr(registrations::Column::ClaimedAt, Expr::value(now))
+                .col_expr(
+                    registrations::Column::AttemptTokenHash,
+                    Expr::value(none.clone()),
+                )
+                .col_expr(registrations::Column::UserCodeHash, Expr::value(none))
+                .col_expr(
+                    registrations::Column::AssertionVersion,
+                    Expr::col(registrations::Column::AssertionVersion).add(1),
+                )
+                .filter(registrations::Column::Id.eq(id.to_owned()))
+                .filter(registrations::Column::AttemptTokenHash.eq(attempt_token_hash.to_owned()))
+                .filter(registrations::Column::UserCodeHash.eq(user_code_hash.to_owned()))
+                .filter(registrations::Column::UserCodeFailures.lt(failures))
+                .filter(registrations::Column::UserCodeExpiresAt.gt(now))
+                .filter(registrations::Column::ClaimExpiresAt.gt(now))
+                .filter(claimable())
+                .exec(&transaction)
+                .await
+                .map_err(db_error)?;
+            if moved.rows_affected != 1 {
+                return Ok(false);
+            }
+            agent_events::Entity::insert(agent_events::ActiveModel {
+                id: Set(event.id.clone()),
+                kind: Set(event.kind.clone()),
+                registration_id: Set(event.registration_id.clone()),
+                user_id: Set(event.user_id.clone()),
+                attributes: Set(attributes),
+                created_at: Set(event.created_at),
+                leased_until: Set(None),
+                delivered_at: Set(None),
+            })
+            .exec(&transaction)
             .await
             .map_err(db_error)?;
-        Ok(moved.rows_affected == 1)
+            Ok(true)
+        }
+        .await;
+        finish_transaction(transaction, outcome).await
     }
 
     async fn record_poll(
@@ -978,6 +1068,87 @@ impl AgentAuthStore for SqlAgentAuthStore {
     async fn prune_replays(&self, now: DateTime<Utc>) -> Result<u64> {
         Ok(replays::Entity::delete_many()
             .filter(replays::Column::ExpiresAt.lte(now))
+            .exec(&self.db)
+            .await
+            .map_err(db_error)?
+            .rows_affected)
+    }
+
+    async fn undelivered_events(
+        &self,
+        now: DateTime<Utc>,
+        limit: u64,
+    ) -> Result<Vec<AgentEventRecord>> {
+        agent_events::Entity::find()
+            .filter(agent_events::Column::DeliveredAt.is_null())
+            .filter(
+                Condition::any()
+                    .add(agent_events::Column::LeasedUntil.is_null())
+                    .add(agent_events::Column::LeasedUntil.lte(now)),
+            )
+            .order_by_asc(agent_events::Column::CreatedAt)
+            .order_by_asc(agent_events::Column::Id)
+            .limit(limit)
+            .all(&self.db)
+            .await
+            .map_err(db_error)?
+            .into_iter()
+            .map(event_record)
+            .collect()
+    }
+
+    async fn lease_event(
+        &self,
+        id: &str,
+        now: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> Result<bool> {
+        // A conditional update: the database lets one of two concurrent
+        // deliveries move the lease.
+        let leased = agent_events::Entity::update_many()
+            .col_expr(agent_events::Column::LeasedUntil, Expr::value(until))
+            .filter(agent_events::Column::Id.eq(id.to_owned()))
+            .filter(agent_events::Column::DeliveredAt.is_null())
+            .filter(
+                Condition::any()
+                    .add(agent_events::Column::LeasedUntil.is_null())
+                    .add(agent_events::Column::LeasedUntil.lte(now)),
+            )
+            .exec(&self.db)
+            .await
+            .map_err(db_error)?;
+        Ok(leased.rows_affected == 1)
+    }
+
+    async fn mark_event_delivered(&self, id: &str, at: DateTime<Utc>) -> Result<()> {
+        let none = Option::<DateTime<Utc>>::None;
+        agent_events::Entity::update_many()
+            .col_expr(agent_events::Column::DeliveredAt, Expr::value(at))
+            .col_expr(agent_events::Column::LeasedUntil, Expr::value(none))
+            .filter(agent_events::Column::Id.eq(id.to_owned()))
+            .filter(agent_events::Column::DeliveredAt.is_null())
+            .exec(&self.db)
+            .await
+            .map_err(db_error)?;
+        Ok(())
+    }
+
+    async fn release_event(&self, id: &str) -> Result<()> {
+        let none = Option::<DateTime<Utc>>::None;
+        agent_events::Entity::update_many()
+            .col_expr(agent_events::Column::LeasedUntil, Expr::value(none))
+            .filter(agent_events::Column::Id.eq(id.to_owned()))
+            .filter(agent_events::Column::DeliveredAt.is_null())
+            .exec(&self.db)
+            .await
+            .map_err(db_error)?;
+        Ok(())
+    }
+
+    async fn prune_events(&self, before: DateTime<Utc>) -> Result<u64> {
+        Ok(agent_events::Entity::delete_many()
+            .filter(agent_events::Column::DeliveredAt.is_not_null())
+            .filter(agent_events::Column::DeliveredAt.lte(before))
             .exec(&self.db)
             .await
             .map_err(db_error)?

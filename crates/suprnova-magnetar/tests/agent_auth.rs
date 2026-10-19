@@ -573,6 +573,171 @@ async fn agent_008_address_matching_several_accounts_is_refused() {
     );
 }
 
+// The claim event's outbox (AGENT-009) ---------------------------------------
+
+#[tokio::test]
+async fn agent_009_confirmed_claim_writes_one_outbox_event_and_delivery_marks_it() {
+    let h = sqlite_harness().await;
+    let (registration, user_id) = h.claimed_anonymous("outbox@example.test").await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let outbox = h.outbox_of(id).await;
+    assert_eq!(outbox.len(), 1, "exactly one event for the claim");
+    let row = &outbox[0];
+    assert_eq!(row.kind, "claim.confirmed");
+    assert_eq!(row.user_id, user_id);
+    let attributes: Value = serde_json::from_str(&row.attributes).expect("JSON attributes");
+    assert_eq!(attributes["registration_type"], "anonymous");
+    assert_eq!(attributes["claimed_by_user_id"], user_id.as_str());
+    assert!(
+        row.delivered_at.is_some(),
+        "delivered right after the commit"
+    );
+    let delivered = h.events.of(LifecycleEventKind::AgentClaimConfirmed);
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].mutation_id, row.id, "the stable id");
+}
+
+#[tokio::test]
+async fn agent_009_claim_whose_transaction_fails_leaves_no_outbox_event() {
+    use sea_orm::ConnectionTrait;
+    let h = sqlite_harness().await;
+    let email = "rolled-back@example.test";
+    let registration = h.anonymous().await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let user_id = h.create_user(email, true).await;
+    let bearer = h.sign_in(&user_id).await;
+    let started = body(
+        &h.initiate(
+            registration["claim_token"].as_str().expect("claim token"),
+            email,
+        )
+        .await,
+    );
+    let attempt = attempt_token(
+        started["claim_attempt"]["verification_uri"]
+            .as_str()
+            .expect("uri"),
+    );
+    let code = started["claim_attempt"]["user_code"]
+        .as_str()
+        .expect("code")
+        .to_owned();
+    // The outbox write fails inside the claim's transaction.
+    h.db.execute_unprepared("DROP TABLE auth_agent_events")
+        .await
+        .expect("drop the outbox");
+    let failed = h.confirm(&attempt, &code, Some(&bearer)).await;
+    assert_eq!(status(&failed), 500, "{:?}", body(&failed));
+    let unclaimed = h.registration(id).await;
+    assert_eq!(
+        unclaimed.status, "unclaimed",
+        "the claim rolled back with it"
+    );
+    assert!(unclaimed.user_id.is_none());
+    magnetar::agent_auth::migrate(&h.db)
+        .await
+        .expect("recreate the outbox");
+    assert!(
+        h.outbox_of(id).await.is_empty(),
+        "no event without its claim"
+    );
+    let confirmed = h.confirm(&attempt, &code, Some(&bearer)).await;
+    assert_eq!(status(&confirmed), 200, "{:?}", body(&confirmed));
+    assert_eq!(h.outbox_of(id).await.len(), 1);
+}
+
+#[tokio::test]
+async fn agent_009_undelivered_claim_event_is_delivered_by_the_pass() {
+    let h = sqlite_harness().await;
+    h.events.refuse(LifecycleEventKind::AgentClaimConfirmed, 1);
+    let (registration, _) = h.claimed_anonymous("retry@example.test").await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let outbox = h.outbox_of(id).await;
+    assert_eq!(outbox.len(), 1);
+    assert!(outbox[0].delivered_at.is_none(), "the refused event waits");
+    assert!(
+        h.events
+            .of(LifecycleEventKind::AgentClaimConfirmed)
+            .is_empty()
+    );
+    assert_eq!(h.engine.deliver_pending_events().await.expect("a pass"), 1);
+    let delivered = h.events.of(LifecycleEventKind::AgentClaimConfirmed);
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].mutation_id, outbox[0].id, "the same event id");
+    assert!(h.outbox_of(id).await[0].delivered_at.is_some());
+    assert_eq!(
+        h.engine.deliver_pending_events().await.expect("a pass"),
+        0,
+        "nothing is delivered twice by the passes"
+    );
+}
+
+#[tokio::test]
+async fn agent_009_two_concurrent_passes_deliver_an_event_once() {
+    let db = magnetar::default_schema::database().await;
+    let first = build(db.clone(), Options::new()).await;
+    let second = build(db, Options::new()).await;
+    first
+        .events
+        .refuse(LifecycleEventKind::AgentClaimConfirmed, 1);
+    let (registration, _) = first.claimed_anonymous("twice@example.test").await;
+    let id = registration["registration_id"].as_str().expect("id");
+    let event_id = first.outbox_of(id).await[0].id.clone();
+    let (left, right) = tokio::join!(
+        first.engine.deliver_pending_events(),
+        second.engine.deliver_pending_events()
+    );
+    assert_eq!(left.expect("a pass") + right.expect("a pass"), 1);
+    let deliveries = [&first, &second]
+        .iter()
+        .map(|node| {
+            node.events
+                .of(LifecycleEventKind::AgentClaimConfirmed)
+                .iter()
+                .filter(|event| event.mutation_id == event_id)
+                .count()
+        })
+        .sum::<usize>();
+    assert_eq!(deliveries, 1, "one delivery across both nodes");
+}
+
+#[tokio::test]
+async fn agent_009_delivered_events_are_pruned_after_the_retention() {
+    use magnetar::agent_auth::sql::agent_events;
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let h = sqlite_harness().await;
+    let (old, _) = h.claimed_anonymous("old@example.test").await;
+    h.events.refuse(LifecycleEventKind::AgentClaimConfirmed, 1);
+    let (waiting, _) = h.claimed_anonymous("waiting@example.test").await;
+    let old_id = old["registration_id"].as_str().expect("id");
+    let waiting_id = waiting["registration_id"].as_str().expect("id");
+    let eight_days_ago = chrono::Utc::now() - chrono::Duration::days(8);
+    agent_events::Entity::update_many()
+        .col_expr(
+            agent_events::Column::DeliveredAt,
+            Expr::value(eight_days_ago),
+        )
+        .col_expr(agent_events::Column::CreatedAt, Expr::value(eight_days_ago))
+        .filter(agent_events::Column::RegistrationId.eq(old_id.to_owned()))
+        .exec(&h.db)
+        .await
+        .expect("age the delivered event");
+    agent_events::Entity::update_many()
+        .col_expr(agent_events::Column::CreatedAt, Expr::value(eight_days_ago))
+        .filter(agent_events::Column::RegistrationId.eq(waiting_id.to_owned()))
+        .exec(&h.db)
+        .await
+        .expect("age the waiting event");
+    assert_eq!(h.engine.prune_delivered_events().await.expect("prune"), 1);
+    assert!(h.outbox_of(old_id).await.is_empty());
+    assert_eq!(
+        h.outbox_of(waiting_id).await.len(),
+        1,
+        "an undelivered event is never pruned"
+    );
+}
+
 /// Every authorization server grant issued to a registration, as
 /// `(grant id, revoked)`.
 async fn grants_of(h: &Harness, registration_id: &str) -> Vec<(String, bool)> {

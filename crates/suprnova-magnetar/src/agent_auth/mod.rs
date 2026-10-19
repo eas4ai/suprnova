@@ -55,7 +55,10 @@ pub use config::{
 };
 pub use key_sets::{KeySetError, KeySetFetcher, KeySetPolicy};
 pub use sql::{SqlAgentAuthStore, migrate};
-pub use store::{AgentAuthStore, AgentGrantRecord, NewAttempt, RegistrationRecord};
+pub use store::{
+    AgentAuthStore, AgentEventRecord, AgentGrantRecord, CLAIM_CONFIRMED, NewAttempt,
+    RegistrationRecord,
+};
 
 use config::RegistrationLimit as Limit;
 use store::{STATUS_ACTIVE, STATUS_CLAIMED, STATUS_EXPIRED, STATUS_REVOKED};
@@ -271,6 +274,13 @@ pub struct AgentAuthServices {
     pub key_sets: Arc<KeySetFetcher>,
     /// Where the audit events go. The host persists each and later
     /// delivers it to lifecycle hooks or its own audit log.
+    ///
+    /// A confirmed claim's event is delivered at least once: it is written
+    /// to agent auth's outbox in the claim's transaction and handed to
+    /// `enqueue` right after the commit. An `Err` from `enqueue` leaves it
+    /// in the outbox for [`AgentAuth::deliver_pending_events`], so a host
+    /// answers `Err` when it could not take the event, and expects the same
+    /// event, by its `mutation_id`, more than once.
     pub events: Arc<dyn DurableLifecycleDelivery>,
 }
 
@@ -335,6 +345,16 @@ pub struct AgentAuth {
 
 /// How many registrations one maintenance pass reads at a time.
 const BATCH: u64 = 500;
+
+/// How long one delivery of an outbox event holds it. A process that stops
+/// mid-delivery leaves the lease behind; the event is delivered again once
+/// it ends.
+const EVENT_LEASE: Duration = Duration::from_secs(120);
+
+/// How long a delivered outbox event is kept before
+/// [`AgentAuth::prune_delivered_events`] deletes it: seven days, room to
+/// read back what was delivered when a listener's work is in doubt.
+pub const DELIVERED_EVENT_RETENTION: Duration = Duration::from_secs(7 * 24 * 3600);
 
 impl AgentAuth {
     /// Add agent auth to `server`: the JWT bearer and claim grants, the
@@ -704,6 +724,57 @@ impl AgentAuth {
     pub async fn prune_replay_records(&self) -> Result<u64> {
         self.core.store.prune_replays(Utc::now()).await
     }
+
+    /// Deliver every outbox event still waiting: one whose delivery right
+    /// after its commit failed, or whose process stopped first. For a host
+    /// to run on a schedule; every node may run it at once, since each
+    /// event is leased before it is handed on. Returns how many this call
+    /// delivered.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage fails. A delivery the host refused is
+    /// not an error: the event waits for the next pass.
+    pub async fn deliver_pending_events(&self) -> Result<u64> {
+        let mut delivered = 0;
+        loop {
+            let events = self
+                .core
+                .store
+                .undelivered_events(Utc::now(), BATCH)
+                .await?;
+            if events.is_empty() {
+                return Ok(delivered);
+            }
+            let mut this_batch = 0;
+            for event in &events {
+                if self.core.deliver_event(event).await? {
+                    this_batch += 1;
+                }
+            }
+            delivered += this_batch;
+            // What is left was refused or taken by another node: the next
+            // pass tries it again.
+            if this_batch == 0 {
+                return Ok(delivered);
+            }
+        }
+    }
+
+    /// Delete outbox events delivered more than
+    /// [`DELIVERED_EVENT_RETENTION`] ago. For a host to run on a schedule.
+    /// An event not yet delivered is never deleted. Returns how many went.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage fails.
+    pub async fn prune_delivered_events(&self) -> Result<u64> {
+        let before = chrono::Duration::from_std(DELIVERED_EVENT_RETENTION)
+            .ok()
+            .and_then(|retention| Utc::now().checked_sub_signed(retention))
+            .unwrap_or(DateTime::<Utc>::MIN_UTC);
+        self.core.store.prune_events(before).await
+    }
 }
 
 impl Core {
@@ -801,6 +872,49 @@ impl Core {
         match self.limiter.acquire(&key, policy).await? {
             Permit::Rejected { retry_after } => Ok(Some(retry_after)),
             Permit::Allowed { .. } => Ok(None),
+        }
+    }
+
+    /// Hand one outbox event to the host's delivery: lease it, enqueue it
+    /// under its stable identifier, and mark it delivered. A refused
+    /// delivery ends the lease, so the next pass takes the event at once.
+    /// Returns whether this call delivered it; `false` also for an event
+    /// another node holds or already delivered.
+    pub(crate) async fn deliver_event(&self, event: &AgentEventRecord) -> Result<bool> {
+        let Some(kind) = outbox_kind(&event.kind) else {
+            tracing::error!(
+                event_id = %event.id,
+                kind = %event.kind,
+                "an agent auth outbox event has a kind this version does not deliver"
+            );
+            return Ok(false);
+        };
+        let now = Utc::now();
+        if !self
+            .store
+            .lease_event(&event.id, now, later(now, EVENT_LEASE)?)
+            .await?
+        {
+            return Ok(false);
+        }
+        let mut lifecycle = LifecycleEvent::new(event.id.clone(), kind, event.user_id.clone());
+        lifecycle.attributes = event.attributes.clone();
+        match self.events.enqueue(lifecycle).await {
+            Ok(()) => {
+                self.store
+                    .mark_event_delivered(&event.id, Utc::now())
+                    .await?;
+                Ok(true)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    event_id = %event.id,
+                    "the host refused an agent auth event; the next delivery pass retries it"
+                );
+                self.store.release_event(&event.id).await?;
+                Ok(false)
+            }
         }
     }
 
@@ -1264,6 +1378,11 @@ impl Core {
         (record.status == STATUS_ACTIVE || record.status == STATUS_CLAIMED)
             && record.user_id.is_some()
     }
+}
+
+/// The lifecycle kind of an outbox event's audit name.
+fn outbox_kind(name: &str) -> Option<LifecycleEventKind> {
+    (name == CLAIM_CONFIRMED).then_some(LifecycleEventKind::AgentClaimConfirmed)
 }
 
 /// Log a storage failure behind a token endpoint answer and hide it.
