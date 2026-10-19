@@ -443,7 +443,11 @@ fn kit_tools_in_a_browser(kit: &str) {
     let server_log = work.join("server.log");
     let minutes = |count: u64| Duration::from_secs(60 * count);
     let outcome = (|| -> Result<(), String> {
-        let name = "agent_browser_app";
+        // Each kit gets its own binary name: the three runs share one target
+        // directory, so under parallel test threads one name would let a
+        // later kit's build replace the binary another kit's server starts.
+        let name = format!("agent_browser_{kit}");
+        let name = name.as_str();
         let project = scaffold(&work, name, kit)?;
         add_fixture(&project, kit, &work)?;
         let frontend = project.join("frontend");
