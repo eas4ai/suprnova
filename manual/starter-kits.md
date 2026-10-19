@@ -217,6 +217,55 @@ For API-only services, `suprnova new my-api --api` initializes Magnetar,
 installs bearer-session middleware, and scaffolds password registration and
 login against the canonical `app_users` table without a frontend.
 
+### Agents in the Inertia kits
+
+The React, Vue and Svelte kits serve [agents](agents.md) from the first
+`cargo run`: the MCP endpoint at `/mcp`, the OAuth server an MCP client signs
+its user in through, and agent accounts under auth.md. `src/agents.rs` turns
+them on, and `cmd/main.rs` serves the routes through `agents::serve`. The
+kit replaces the framework's three default pages with its own, rendered by
+`src/controllers/agents.rs` in the kit's frontend:
+
+| Page | Route | What the user does there |
+|---|---|---|
+| `Agents/Approve` | `GET /oauth/approve` | Allows or denies an MCP client. The page names the client, its host, every permission it asks for and the address the user returns to. |
+| `Agents/Claim` | `GET /agent/claim` | Lets an agent act for them, with the code the agent gave them. A wrong code comes back as the field's error with the attempts left. |
+| `Agents/Connected` | `GET /connected-agents` | Sees and revokes every app and agent that acts for them. The app layout links it as **Agents**. |
+
+The paths of the first two are the framework's defaults, so a link a client
+or an agent holds opens the same page with or without the kit. A guest who
+opens either one signs in and comes back: the sign-in page keeps a
+`return_to` that is a path on this application, and a registration in the
+same session keeps it too. A `return_to` that a browser would read as
+another site, such as `//evil.example`, is ignored, and the user goes to the
+dashboard.
+
+The pages read and record what the user decides through `AgentApprovals`,
+`AgentClaims` and `ConnectedAgents`, which act for the signed-in user only.
+Approving a client needs a signed-in user, as the dashboard does. Claiming
+an agent needs the address the agent named, verified: the claim page tells
+an unverified user to verify first. A few rules hold on every page:
+
+- Each route runs `ConsentPageHeaders`, so another site can't frame the
+  page, and no cache or referrer keeps the authorization id or the claim's
+  attempt token. The rest of the security headers policy, its nonce among
+  it, stays as `SecurityHeaders` sets it.
+- The global CSRF middleware checks every form.
+- A decision leaves for the client by a location visit
+  (`Inertia::location`), which the browser follows itself. A redirect that
+  answers the form would be blocked by the policy's `form-action 'self'`.
+- No page offers a tool, and no consent route declares one, so an agent in
+  the browser can never approve a client or claim itself.
+- Text a client, an agent or the user chose sits in `<bdi>`, and no page
+  renders raw HTML or loads a URL the client chose.
+
+`suprnova new` writes a signing key for agent auth into `.env`, as
+`AGENT_AUTH_KEY_ID` and `AGENT_AUTH_PRIVATE_KEY`. The application doesn't
+start without one. Every other environment needs its own key, so a deploy
+that doesn't copy `.env`, such as the production image, sets both
+variables. `cargo run -- agents:key` prints a new pair. For rotation, see
+[Keys and operations](agents.md#keys-and-operations).
+
 ### Why Suprnova diverges
 
 Laravel's starter kits ship a dashboard with placeholder content and no list
