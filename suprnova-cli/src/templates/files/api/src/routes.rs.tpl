@@ -1,6 +1,8 @@
-use suprnova::{AuthMiddleware, get, group, post, routes};
+use suprnova::{
+    AuthMiddleware, ConsentPageHeaders, CsrfMiddleware, delete, get, group, post, routes,
+};
 
-use crate::controllers;
+use crate::{agents, controllers};
 
 routes! {
     // Authentication - public by necessity: these are how a client gets a
@@ -19,5 +21,21 @@ routes! {
     group!("/api", {
         get!("/users",     controllers::users::list_users),
         get!("/users/:id", controllers::users::show_user),
+
+        // The MCP clients and agents that act for the signed-in user, and
+        // taking either back (`controllers::agents`).
+        get!("/connected-agents", controllers::agents::index),
+        delete!("/connected-agents/clients/:grant", controllers::agents::revoke_client),
+        delete!("/connected-agents/agents/:registration", controllers::agents::revoke_agent),
     }).middleware(AuthMiddleware::new()),
+
+    // The sign-in page the framework's approval and claim pages send a
+    // guest to (`controllers::sign_in`), at the path `src/agents.rs` gives
+    // the OAuth server. It is never framed, cached or sent as a referrer,
+    // and its form posts with the session's CSRF token.
+    group!("/", {
+        get!(agents::SIGN_IN_PAGE, controllers::sign_in::show),
+        post!(agents::SIGN_IN_PAGE, controllers::sign_in::store)
+            .middleware(CsrfMiddleware::new().without_xsrf_cookie()),
+    }).middleware(ConsentPageHeaders),
 }

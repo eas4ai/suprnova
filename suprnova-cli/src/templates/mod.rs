@@ -1532,6 +1532,11 @@ pub mod api {
     pub fn lib_rs() -> &'static str {
         include_str!("files/api/src/lib.rs.tpl")
     }
+    /// `src/agents.rs`: the MCP endpoint and both plugins, with the
+    /// framework's default approval, claim and connected-agents pages.
+    pub fn agents_rs() -> &'static str {
+        include_str!("files/api/src/agents.rs.tpl")
+    }
     /// The template's "switching databases" doc comment names the project's
     /// own database, so it carries a `{package_name}` placeholder and must
     /// be substituted rather than emitted verbatim. It was emitted verbatim
@@ -1552,6 +1557,15 @@ pub mod api {
     }
     pub fn controllers_users_rs() -> &'static str {
         include_str!("files/api/src/controllers/users.rs.tpl")
+    }
+    /// `src/controllers/agents.rs`: connected agents over JSON.
+    pub fn controllers_agents_rs() -> &'static str {
+        include_str!("files/api/src/controllers/agents.rs.tpl")
+    }
+    /// `src/controllers/sign_in.rs`: the browser sign-in the default
+    /// approval and claim pages send a guest to.
+    pub fn controllers_sign_in_rs() -> &'static str {
+        include_str!("files/api/src/controllers/sign_in.rs.tpl")
     }
     pub fn resources_mod_rs() -> &'static str {
         include_str!("files/api/src/resources/mod.rs.tpl")
@@ -1595,7 +1609,9 @@ pub mod api {
 /// Scaffold a JSON:API-only project under `project_path`.
 ///
 /// No Inertia, no frontend. Registers `BearerTokenMiddleware` and
-/// `IncludeMiddleware` globally; includes example `UserResource` with
+/// `IncludeMiddleware` globally, and a session on the consent pages only;
+/// serves agents with the framework's default pages and a browser sign-in
+/// for them; includes example `UserResource` with
 /// `#[derive(Data)] #[json_resource("users")]`.
 pub fn scaffold_api(
     project_path: &Path,
@@ -1643,6 +1659,7 @@ pub fn scaffold_api(
         ),
         (commands.join("mod.rs"), api::commands_mod_rs().to_string()),
         (src.join("lib.rs"), api::lib_rs().to_string()),
+        (src.join("agents.rs"), api::agents_rs().to_string()),
         (src.join("email_address.rs"), email_address_rs().to_string()),
         (src.join("bootstrap.rs"), api::bootstrap_rs(package_name)),
         (src.join("routes.rs"), api::routes_rs().to_string()),
@@ -1654,6 +1671,14 @@ pub fn scaffold_api(
         (
             controllers.join("users.rs"),
             api::controllers_users_rs().to_string(),
+        ),
+        (
+            controllers.join("agents.rs"),
+            api::controllers_agents_rs().to_string(),
+        ),
+        (
+            controllers.join("sign_in.rs"),
+            api::controllers_sign_in_rs().to_string(),
         ),
         (
             resources.join("mod.rs"),

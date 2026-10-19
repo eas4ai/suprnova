@@ -5,7 +5,8 @@
 //! bodies are form requests that fold the address before their rules run
 //! (`crate::email_address`), so the rules check what is stored, and an
 //! address over 254 characters, longer than any deliverable one, gets a
-//! `422` naming the field.
+//! `422` naming the field. Registration asks for a password of eight
+//! characters, as the other kits do.
 
 use serde::Deserialize;
 use suprnova::{
@@ -61,6 +62,7 @@ pub struct RegisterRequest {
         length(max = 254, message = "Email must be at most 254 characters")
     )]
     pub email: String,
+    #[validate(length(min = 8, message = "Password must be at least 8 characters"))]
     pub password: String,
 }
 
