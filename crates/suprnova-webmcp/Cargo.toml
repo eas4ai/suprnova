@@ -57,6 +57,13 @@ web-sys = { version = "0.3.99", features = [
     "Window",
 ] }
 
+# The front end the `agents_browser` suite loads in Chromium. A `cdylib`,
+# as `wasm-bindgen --target web` binds one; empty outside the browser
+# target.
+[[example]]
+name = "browser_fixture"
+crate-type = ["cdylib"]
+
 [dev-dependencies]
 # The compile-fail case of a nested input without `#[tool_input]`. The
 # version the framework pins, so the lock gains nothing.
