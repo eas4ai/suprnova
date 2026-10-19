@@ -11,3 +11,6 @@
 
 #[path = "kit_agents/shared.rs"]
 mod shared;
+
+#[path = "kit_agents/live.rs"]
+mod live;
