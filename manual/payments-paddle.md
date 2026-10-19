@@ -600,7 +600,7 @@ The same divergence applies to `Payment` (server-side capture). Stripe
 implements it; Paddle does not, and `provider.as_payment()` returns
 `None`. Code that needs charge/capture/refund must check
 `as_payment().is_some()` rather than calling blindly - see
-[Payments](payments.md#payment--optional-server-side-capture).
+[Payments](payments.md#payment---optional-server-side-capture).
 
 ## Testing your integration
 

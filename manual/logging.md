@@ -303,7 +303,7 @@ pub async fn load_dashboard(
 ```
 
 The same `#[instrument]` becomes an OpenTelemetry span when the `otel`
-feature is enabled - see [Observability](observability.md#opentelemetry).
+feature is enabled - see [Observability](observability.md#distributed-tracing-otel).
 
 ## Log levels
 
@@ -477,7 +477,7 @@ the rest are no-ops.
 
 For the OTel-aware variant (the same `LogConfig`, plus
 distributed-tracing export), use
-[`init_telemetry`](observability.md#opentelemetry).
+[`init_telemetry`](observability.md#distributed-tracing-otel).
 
 ### The daemons
 
