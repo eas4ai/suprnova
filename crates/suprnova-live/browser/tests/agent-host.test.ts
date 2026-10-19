@@ -81,7 +81,7 @@ function settledState<T>(promise: Promise<T>): { settled: boolean; value?: T } {
  * A host with one island whose calls stay pending until the test answers
  * them through the host, as the document runtime's scheduler does.
  */
-function hostWithIsland(current: () => boolean = () => true) {
+function hostWithIsland() {
   const context = new FakeModelContext();
   const scheduler = new ManualScheduler();
   const host = new AgentToolHost<object>(scheduler);
@@ -91,7 +91,6 @@ function hostWithIsland(current: () => boolean = () => true) {
     context,
     tools: [TOOL],
     execute: (_tool: AgentToolDefinition, input: unknown) => {
-      if (!current()) return Promise.resolve(agentToolError("The component has left the page."));
       scheduled.push(input);
       return new Promise<ModelContextToolResult>((resolve) => {
         host.track(island, resolve);
@@ -173,17 +172,7 @@ describe("the page's agent tool islands", () => {
     expect(context.live()).toEqual(["counter.increment.main"]);
   });
 
-  it("agent_012 execute refuses once its island has left", async () => {
-    let current = true;
-    const { context, scheduled } = hostWithIsland(() => current);
-    current = false;
-    const result = await context.call("counter.increment.main");
-    expect(result.isError).toBe(true);
-    expect(result.structuredContent).toMatchObject({ outcome: "error" });
-    expect(scheduled).toEqual([]);
-  });
-
-  it("agent_012 a disconnected island's tools leave and its execute refuses", async () => {
+  it("agent_012 execute refuses once its island has left the page", async () => {
     const { context, host, island, scheduled } = hostWithIsland();
     const execute = context.registered[0]?.tool.execute;
     host.disconnect(island);
