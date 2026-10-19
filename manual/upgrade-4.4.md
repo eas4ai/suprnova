@@ -18,7 +18,8 @@ Agent tools are new: nothing is served to agents until you adopt them. Two
 changes can need an edit: code that builds a Magnetar lifecycle event field
 by field, and a `match` over one of three enums with no wildcard arm. With
 the framework's default features on, Magnetar's `migrate` also creates eight
-new tables.
+new tables. `Redirect::intended` ignores a few more kinds of stored value; read
+that entry if your code stores the intended URL itself.
 
 ## Upgrade in this order
 
@@ -75,8 +76,8 @@ authorization server for MCP clients under `/oauth`, with default approval
 and connected-agents pages and `ConnectedAgents`.
 
 **Do:** Nothing unless you adopt it. To adopt it, set `APP_URL` to the URL
-clients reach the application at, run `OAuthServer::migrate` or the Magnetar
-default engine's migrations so its four tables exist, and follow [Users who approve a
+clients reach the application at, append `suprnova::agents::migrations()` to
+your migrator so its four tables exist, and follow [Users who approve a
 client](agents.md#users-who-approve-a-client).
 
 ### Tokens from an outside identity provider sign users in.
@@ -99,9 +100,12 @@ beside the OAuth server, with the `agents:key`, `agents:revoke-all` and
 `agents:prune` commands.
 
 **Do:** Nothing unless you adopt it. To adopt it, turn on the OAuth server
-too, set `AGENT_AUTH_KEY_ID` and `AGENT_AUTH_PRIVATE_KEY` (the `agents:key`
-command prints a pair), run `AgentAuth::migrate` or the Magnetar default
-engine's migrations, and follow [Agent accounts](agents.md#agent-accounts).
+too, set `AGENT_AUTH_KEY_ID` and `AGENT_AUTH_PRIVATE_KEY` in every
+environment (the `agents:key` command prints a pair), append
+`suprnova::agents::migrations()` to your migrator, and follow [Agent
+accounts](agents.md#agent-accounts). In tests, call
+`suprnova::testing::install_test_agent_auth_key()` before you build the
+router.
 
 ### Live actions can be agent tools, in the browser and headless.
 
@@ -140,6 +144,14 @@ has no `src/lib/agents`. To adopt the helpers, scaffold a new project of the
 same kit and copy `src/lib/agents` and the `installPageTools(router)` call
 from its entry file.
 
+Your project keeps its copy of `src/lib/agents/core.ts` when you later move
+to a newer tag. It reads a page's tools by the keys it knows and ignores the
+rest, so a release that adds a field leaves it working. A change it must not
+ignore raises the payload's `v`, and a `core.ts` that does not know the new
+`v` registers no server tools. When a release's upgrade chapter says the
+version moved, copy `src/lib/agents` again from a new project of that
+release.
+
 ### Rust front ends compiled to WebAssembly register WebMCP tools.
 
 **Before:** 4.3 had no WebAssembly crate.
@@ -167,6 +179,107 @@ only as JSON or a form.
 **Now:** `TestClient::with_peer_address` and `TestRequest::body` set both.
 
 **Do:** Nothing unless you adopt them.
+
+### Applications build their own consent pages on `AgentApprovals` and `AgentClaims`.
+
+**Before:** 4.3 had no consent pages.
+
+**Now:** `AgentApprovals` and `AgentClaims` read and record the signed-in
+user's decisions for an approval page and a claim page of your own, and
+answer 403 to a tool call. `ConsentPageHeaders` keeps those pages unframed,
+unstored and out of referrers on every answer.
+
+**Do:** Nothing unless you adopt them. A route that serves an approval or a
+claim page of your own runs `ConsentPageHeaders`, and the route that records
+the decision runs the CSRF middleware.
+
+### `url::same_origin_path` checks a return address, and `Redirect::intended_url` reads the intended one.
+
+**Before:** 4.3 had neither function.
+
+**Now:** `url::same_origin_path` accepts only a path on the application, and
+`Redirect::intended_url()` reads the intended address without spending it.
+
+**Do:** if a sign-in page of yours stores a `return_to` from the query with
+`Redirect::set_intended_url`, check it with `url::same_origin_path` first, as
+[Storing the intended URL](responses.md#storing-the-intended-url) shows.
+Otherwise a link can send your users to another site after they sign in.
+
+### An application's migrator can create the agents tables and a case-insensitive email index.
+
+**Before:** 4.3 had neither migration.
+
+**Now:** `suprnova::agents::migrations()` creates the OAuth server's and agent
+auth's tables, and `UniqueEmailIgnoringCase::on(table, column)` makes the
+database refuse two addresses that differ only in case.
+
+**Do:** Nothing unless you adopt them. Before you add
+`UniqueEmailIgnoringCase` to an existing users table, merge any accounts
+whose addresses differ only in case: the migration fails on them and says how
+many there are. On MariaDB and MySQL before 8.0.13, the column needs a unique
+index of its own and a `_ci` collation, or the migration fails naming what is
+missing.
+
+### Tests build a router with agent auth without a signing key.
+
+**Before:** 4.3 had no agent auth.
+
+**Now:** `suprnova::testing::install_test_agent_auth_key()` gives the test
+process a generated signing key when the environment names none.
+
+**Do:** Nothing unless you adopt agent auth.
+
+### `#[tool_output]` and `#[tool_schema]` derive schemas through the framework.
+
+**Before:** 4.3 had no tool schemas.
+
+**Now:** `#[tool_output]` marks a tool's output type, and `#[tool_schema]` a
+type nested in a tool's input or output.
+
+**Do:** Nothing unless you adopt agent tools.
+
+### Tools can carry WebMCP's `debugging` hint.
+
+**Before:** 4.3 had no tool hints.
+
+**Now:** `annotations(debugging)`, the kits' `debugging` option and
+`PageTool::debugging` mark a tool meant for developers.
+
+**Do:** Nothing unless you adopt agent tools.
+
+### New projects serve agents.
+
+**Before:** a project 4.3 scaffolded had no agents wiring, no signing key and
+no case-insensitive email index, and its sign-in page did not follow a
+`return_to`.
+
+**Now:** a new project gets a signing key in `.env`. The Inertia and Live
+kits serve agents from `src/agents.rs` and create the agents tables and the
+email index. Their sign-in follows a same-origin `return_to` and keeps the
+intended address through registration. Every kit folds an address to ASCII
+lowercase before it validates it, and bounds names at 255 characters and
+addresses at 254.
+
+**Do:** an application scaffolded before 4.4 keeps its files. To serve agents
+as a new project does, scaffold a new project of the same kit and copy:
+
+- `src/agents.rs`, its `pub mod agents;` line in `src/lib.rs`, and the
+  `agents::serve(...)` call around `routes::register()` in `cmd/main.rs`;
+- `suprnova::agents::migrations()` and
+  `UniqueEmailIgnoringCase::on("users", "email")` in your migrator;
+- a signing key in `.env` from the `agents:key` command, and its two names in
+  `.env.example`;
+- `src/email_address.rs`, and its `normalize` call wherever your sign-in,
+  registration and reset forms read an address.
+
+### The agents maintenance pass prunes the OAuth server's ended rows.
+
+**Before:** 4.3 had no OAuth server.
+
+**Now:** the pass in `serve` and `agents:prune` delete the OAuth server's
+lapsed and revoked rows whenever the router mounts it.
+
+**Do:** Nothing unless you adopt the OAuth server.
 
 ## Changed entries
 
@@ -235,6 +348,34 @@ exactly.
 **Do:** commit the file with the other generated types, or ignore it as you
 ignore them. A line naming a request with no schema matters only when a form
 tool uses that request.
+
+### `Redirect::intended` follows only a path, an `http` or `https` URL, or a relative reference.
+
+**Before:** `Redirect::intended` ignored an empty stored value, a value with
+a control character and a path that starts with `//`, `/\` or `\`, and
+followed anything else.
+
+**Now:** it also ignores a value with another scheme, such as `javascript:`,
+`mailto:` or `localhost:3000/x`, a value with surrounding whitespace, and a
+value with a backslash anywhere. It redirects to its fallback instead.
+`Redirect::intended_url()` reads by the same rules.
+
+**Do:** nothing, unless your code stores such a value with
+`Redirect::set_intended_url`. Store an absolute `https` URL, a path that
+starts with `/`, or a relative reference such as `?tab=2`, with no
+surrounding whitespace. A user whose session holds an older value of another
+kind lands on the fallback once. See [Storing the intended
+URL](responses.md#storing-the-intended-url).
+
+### An Inertia error page keeps a `no-store` the replaced response carried.
+
+**Before:** the error page always set `Cache-Control: no-cache, private`.
+
+**Now:** it sets `no-store` when the response it replaces said `no-store`,
+and `no-cache, private` otherwise.
+
+**Do:** nothing. A test that expected `no-cache, private` on the error page
+of a `no-store` response expects `no-store` now.
 
 ## Fixed entries that change behaviour
 
