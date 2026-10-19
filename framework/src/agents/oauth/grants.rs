@@ -158,7 +158,7 @@ impl ConnectedAgents {
 }
 
 /// The OAuth server the request's router mounted.
-fn mounted(request: &Request) -> Result<Arc<AuthorizationServer>, FrameworkError> {
+pub(crate) fn mounted(request: &Request) -> Result<Arc<AuthorizationServer>, FrameworkError> {
     request
         .oauth_server()
         .map(|mounted| Arc::clone(&mounted.server))
@@ -171,7 +171,7 @@ fn mounted(request: &Request) -> Result<Arc<AuthorizationServer>, FrameworkError
 }
 
 /// The agent auth the request's router mounted.
-fn mounted_agent_auth(
+pub(crate) fn mounted_agent_auth(
     request: &Request,
 ) -> Result<Arc<crate::agents::agent_auth::MountedAgentAuth>, FrameworkError> {
     request

@@ -89,7 +89,8 @@ impl MiddlewareChain {
     /// Typed [`SecurityHeaders`](crate::SecurityHeaders) registration always
     /// runs outside caches and error middleware. Route and group
     /// [`SecurityHeadersOverride`](crate::SecurityHeadersOverride) instances run
-    /// immediately inside it, before cache lookup. The server's request-id
+    /// immediately inside it, before cache lookup, and
+    /// [`ConsentPageHeaders`](crate::ConsentPageHeaders) inside those. The server's request-id
     /// lifecycle wrapper remains outside application middleware.
     ///
     /// The middleware priority list
