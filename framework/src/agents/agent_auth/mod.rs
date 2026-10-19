@@ -167,7 +167,12 @@ impl AgentAccount {
 ///
 /// So the event can arrive more than once, after a crash or a retry, and a
 /// listener must be idempotent, keyed on [`event_id`](Self::event_id): do
-/// the move once per id, or make doing it again change nothing. Keep the
+/// the move once per id, or make doing it again change nothing.
+///
+/// A listener that keeps failing gets twelve attempts, about an hour of
+/// passes. The event then fails: it is logged once at error level, kept,
+/// and delivered again only after `agents:prune --retry-failed` puts it
+/// back, which an operator runs once the listener is fixed. Keep the
 /// registration id on every row an agent creates (a tool reads it as
 /// `ToolCaller::registration().id()`), so the move is a query by that id;
 /// [`ConnectedAgents::agent_accounts`](super::ConnectedAgents::agent_accounts)
@@ -259,8 +264,11 @@ impl crate::events::Event for AgentClaimed {
 ///   failed dispatch or a stopped process left, expires unclaimed
 ///   registrations past their window, prunes spent replay records and
 ///   deletes claim events delivered more than seven days ago; the
-///   `agents:prune` command runs the same pass once, and every node may run
-///   it;
+///   `agents:prune` command runs the same pass once and reports how many
+///   claim events failed, and every node may run it. A claim event whose
+///   listener refused it twelve times fails, is logged once at error level
+///   and is never delivered again or pruned until
+///   `agents:prune --retry-failed` puts it back with a fresh count;
 /// - **storage**: the OAuth server's connection, or
 ///   [`connection`](Self::connection). Its four tables come from
 ///   [`AgentAuth::migrate`], or from the Magnetar default engine's

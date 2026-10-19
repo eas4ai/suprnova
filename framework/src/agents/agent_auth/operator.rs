@@ -43,6 +43,9 @@ pub(crate) struct Maintenance {
     pub(crate) pruned: u64,
     /// Claim events delivered longer ago than the outbox keeps them.
     pub(crate) events_pruned: u64,
+    /// Claim events that failed after their last delivery attempt and wait
+    /// to be put back.
+    pub(crate) failed: u64,
 }
 
 /// Deliver the claim events still waiting, expire the registrations whose
@@ -68,11 +71,27 @@ pub(crate) async fn maintain(
             "pruning agent auth's delivered events failed: {error}"
         ))
     })?;
+    let failed = engine.failed_events().await.map_err(|error| {
+        FrameworkError::internal(format!(
+            "counting agent auth's failed events failed: {error}"
+        ))
+    })?;
     Ok(Maintenance {
         delivered,
         expired,
         pruned,
         events_pruned,
+        failed,
+    })
+}
+
+/// Put the claim events that failed after their last delivery attempt back
+/// with a fresh count, for `agents:prune --retry-failed`. Returns how many.
+pub(crate) async fn retry_failed(
+    engine: &magnetar::agent_auth::AgentAuth,
+) -> Result<u64, FrameworkError> {
+    engine.retry_failed_events().await.map_err(|error| {
+        FrameworkError::internal(format!("putting failed claim events back failed: {error}"))
     })
 }
 
@@ -132,6 +151,7 @@ pub(crate) fn spawn_maintenance(
                     expired = done.expired,
                     pruned = done.pruned,
                     events_pruned = done.events_pruned,
+                    failed = done.failed,
                     "agent auth maintenance pass"
                 ),
                 Err(error) => tracing::error!(%error, "agent auth maintenance pass failed"),

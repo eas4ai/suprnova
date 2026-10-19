@@ -1998,6 +1998,221 @@ fn agent_009_claim_event_survives_a_failed_dispatch() {
         });
 }
 
+/// Run `body` as the only test of a child process, with the environment a
+/// booted command such as `agents:prune` needs. `test` is the test's name.
+fn alone(test: &str, body: impl std::future::Future<Output = ()>) {
+    if !crate::own_process::is_child() {
+        crate::own_process::run_alone(&format!("agent_auth::{test}"));
+        return;
+    }
+    // SAFETY: this test runs alone in its own process.
+    unsafe {
+        std::env::set_var("APP_ENV", "testing");
+        std::env::set_var("APP_URL", ISSUER);
+    }
+    suprnova::boot::load_env().expect("pre-runtime configuration");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(body);
+}
+
+/// Run `agents:prune` with `extra` arguments over a router of `world`'s
+/// database, its agent auth as `configure` adjusts it.
+async fn agents_prune(
+    world: &AgentWorld,
+    configure: impl FnOnce(AgentAuth) -> AgentAuth + Send + 'static,
+    extra: &[&'static str],
+) {
+    let (db, pem, resolver, documents) = (
+        world.db.clone(),
+        world.pem.clone(),
+        world.resolver.clone(),
+        world.documents.clone(),
+    );
+    let mut args = vec!["app", "agents:prune"];
+    args.extend_from_slice(extra);
+    suprnova::Application::new()
+        .routes(move || agent_router(&db, &pem, &resolver, &documents, configure))
+        .run_with_args(args)
+        .await
+        .expect("agents:prune runs");
+}
+
+/// An `AgentClaimed` listener that fails until it is told to work, with an
+/// error naming a detail the outbox must not keep.
+#[derive(Default)]
+struct FailsUntilFixed {
+    working: std::sync::atomic::AtomicBool,
+    calls: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl suprnova::Listener<AgentClaimed> for FailsUntilFixed {
+    async fn handle(&self, event: &AgentClaimed) -> Result<(), FrameworkError> {
+        self.calls.lock().unwrap().push(event.event_id.clone());
+        if self.working.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
+        Err(FrameworkError::internal(format!(
+            "secret-detail: cannot move rows for {}",
+            event.user_id
+        )))
+    }
+}
+
+/// Claim a registration as a new user while `listener` fails, and run
+/// `agents:prune` until the claim event used every attempt. Answers the
+/// registration id and the user.
+async fn claim_event_failed_for_good(
+    world: &AgentWorld,
+    listener: &FailsUntilFixed,
+) -> (String, String) {
+    let user = new_account("failed-for-good");
+    let claimed = claim_anonymous(world, &user).await;
+    let registration_id = claimed.registration["registration_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // The delivery after the commit was the first attempt.
+    for _ in 1..12 {
+        agents_prune(world, |agent| agent, &[]).await;
+    }
+    assert_eq!(listener.calls.lock().unwrap().len(), 12, "twelve attempts");
+    (registration_id, user)
+}
+
+#[test]
+fn agent_009_claim_event_that_always_fails_is_marked_failed_and_not_delivered_again() {
+    alone(
+        "agent_009_claim_event_that_always_fails_is_marked_failed_and_not_delivered_again",
+        async {
+            let listener = Arc::new(FailsUntilFixed::default());
+            EventFacade::listen::<AgentClaimed, _>(listener.clone()).await;
+            let world = agent_world(|agent| agent).await;
+            let (registration_id, user) = claim_event_failed_for_good(&world, &listener).await;
+            let row = outbox_of(&world.db, &registration_id).await.remove(0);
+            assert_eq!(row.attempts, 12);
+            assert!(row.failed_at.is_some(), "failed after the limit");
+            assert!(row.delivered_at.is_none());
+            let last_error = row.last_error.unwrap_or_default();
+            assert!(last_error.contains("AgentClaimed"), "{last_error}");
+            assert!(
+                !last_error.contains("secret-detail") && !last_error.contains(&user),
+                "the outbox keeps no listener detail: {last_error}"
+            );
+            agents_prune(&world, |agent| agent, &[]).await;
+            assert_eq!(
+                listener.calls.lock().unwrap().len(),
+                12,
+                "a failed event is not delivered again"
+            );
+        },
+    );
+}
+
+#[test]
+fn agent_009_retry_failed_delivers_a_failed_claim_event_once_the_listener_works() {
+    alone(
+        "agent_009_retry_failed_delivers_a_failed_claim_event_once_the_listener_works",
+        async {
+            let listener = Arc::new(FailsUntilFixed::default());
+            EventFacade::listen::<AgentClaimed, _>(listener.clone()).await;
+            let world = agent_world(|agent| agent).await;
+            let (registration_id, _) = claim_event_failed_for_good(&world, &listener).await;
+            let event_id = outbox_of(&world.db, &registration_id).await[0].id.clone();
+            listener
+                .working
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            agents_prune(&world, |agent| agent, &["--retry-failed"]).await;
+            let calls = listener.calls.lock().unwrap().clone();
+            assert_eq!(calls.len(), 13, "one more delivery");
+            assert_eq!(calls[12], event_id, "the same event");
+            let row = outbox_of(&world.db, &registration_id).await.remove(0);
+            assert!(row.delivered_at.is_some());
+            assert!(row.failed_at.is_none());
+        },
+    );
+}
+
+/// Counts the claim's `MagnetarLifecycleEvent`s.
+#[derive(Default)]
+struct CountsClaimLifecycle(std::sync::atomic::AtomicUsize);
+
+#[async_trait]
+impl suprnova::Listener<MagnetarLifecycleEvent> for CountsClaimLifecycle {
+    async fn handle(&self, event: &MagnetarLifecycleEvent) -> Result<(), FrameworkError> {
+        if event.kind.audit_name() == Some("claim.confirmed") {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn agent_009_claim_event_retry_writes_no_second_audit_record() {
+    alone(
+        "agent_009_claim_event_retry_writes_no_second_audit_record",
+        async {
+            let sink = Arc::new(MemorySink::default());
+            let driver = unique("retry-audit-driver");
+            let channel = unique("retry-audit");
+            let shared = sink.clone();
+            suprnova::Log::extend(&driver, move |_| {
+                Ok(shared.clone() as Arc<dyn suprnova::LogSink>)
+            });
+            suprnova::Log::define(&channel, suprnova::LogChannel::driver(&driver));
+            let listener = Arc::new(FailsFirst::default());
+            EventFacade::listen::<AgentClaimed, _>(listener.clone()).await;
+            let lifecycle = Arc::new(CountsClaimLifecycle::default());
+            EventFacade::listen::<MagnetarLifecycleEvent, _>(lifecycle.clone()).await;
+            let named = channel.clone();
+            let world = agent_world(move |agent| agent.audit_log_channel(named)).await;
+            let user = new_account("retry-audit");
+            let claimed = claim_anonymous(&world, &user).await;
+            let registration_id = claimed.registration["registration_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let event_id = outbox_of(&world.db, &registration_id).await[0].id.clone();
+            let again = channel.clone();
+            agents_prune(&world, move |agent| agent.audit_log_channel(again), &[]).await;
+            assert_eq!(
+                listener.calls.lock().unwrap().len(),
+                2,
+                "the retry delivered it"
+            );
+
+            let records = sink.records.lock().unwrap().clone();
+            let claim_records = records
+                .iter()
+                .filter(|record| record.message == "agent auth: claim.confirmed")
+                .count();
+            assert_eq!(claim_records, 1, "one audit record: {records:?}");
+            let warnings: Vec<_> = records
+                .iter()
+                .filter(|record| record.level == suprnova::LogLevel::Warning)
+                .collect();
+            assert_eq!(warnings.len(), 1, "one warning for the retry: {records:?}");
+            let field = |name: &str| {
+                warnings[0]
+                    .context
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.clone())
+            };
+            assert_eq!(field("event_id").as_deref(), Some(event_id.as_str()));
+            assert_eq!(field("attempt").as_deref(), Some("2"));
+            assert_eq!(
+                lifecycle.0.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "one MagnetarLifecycleEvent for the claim"
+            );
+        },
+    );
+}
+
 #[tokio::test]
 async fn agent_009_reinitiation_with_the_same_claim_token_mints_a_new_code() {
     let world = agent_world(|agent| agent).await;

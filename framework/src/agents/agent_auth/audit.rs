@@ -2,7 +2,7 @@
 //! the framework's lifecycle event and, for a claim, [`AgentClaimed`].
 
 use async_trait::async_trait;
-use magnetar::agent_auth::TrustedIssuer;
+use magnetar::agent_auth::{DELIVERY_ATTEMPT, TrustedIssuer};
 use magnetar::plugin::{DurableLifecycleDelivery, LifecycleEvent, LifecycleEventKind};
 use serde_json::{Map, Value};
 
@@ -25,8 +25,10 @@ use crate::magnetar_integration::engine::MagnetarLifecycleEvent;
 /// The claim's event comes from agent auth's outbox, though: when an
 /// [`AgentClaimed`] listener fails, `enqueue` answers `Err`, the event stays
 /// in the outbox, and the next delivery pass hands it here again with the
-/// same mutation id. So a claim's record and both its dispatches can come
-/// more than once. Every other event is delivered once, best effort.
+/// same mutation id and a `delivery_attempt`. A retry writes one warning
+/// naming the event and the attempt, and dispatches [`AgentClaimed`] only:
+/// the record and the lifecycle event were written by the first attempt.
+/// Every other event is delivered once, best effort.
 pub(crate) struct AuditSink {
     channel: Option<String>,
     trusted: Vec<TrustedIssuer>,
@@ -55,11 +57,16 @@ impl AuditSink {
         (format!("agent auth: {name}"), Value::Object(fields))
     }
 
-    fn write(&self, message: &str, fields: Value) {
+    /// Write a record at info level, or at warning level with `warning`.
+    fn write(&self, message: &str, fields: Value, warning: bool) {
         if let Some(channel) = &self.channel {
             match crate::logging::Log::channel(channel) {
                 Ok(logger) => {
-                    logger.info_with(message, fields);
+                    if warning {
+                        logger.warning_with(message, fields);
+                    } else {
+                        logger.info_with(message, fields);
+                    }
                     return;
                 }
                 Err(error) => {
@@ -69,7 +76,11 @@ impl AuditSink {
                 }
             }
         }
-        crate::logging::Log::info_with(message, fields);
+        if warning {
+            crate::logging::Log::warning_with(message, fields);
+        } else {
+            crate::logging::Log::info_with(message, fields);
+        }
     }
 
     /// The claim event for a confirmed claim.
@@ -96,27 +107,44 @@ impl AuditSink {
 #[async_trait]
 impl DurableLifecycleDelivery for AuditSink {
     async fn enqueue(&self, event: LifecycleEvent) -> magnetar::plugin::PluginResult<()> {
-        let (message, fields) = Self::record(&event);
-        self.write(&message, fields);
-        if let Err(error) =
-            crate::events::EventFacade::dispatch_best_effort(MagnetarLifecycleEvent::from(&event))
+        match event.attributes.get(DELIVERY_ATTEMPT) {
+            // A retry: the first attempt wrote the record and dispatched the
+            // lifecycle event, so a retry writes one warning instead.
+            Some(attempt) => {
+                let name = event.kind.audit_name().unwrap_or("lifecycle");
+                self.write(
+                    &format!("agent auth: retrying the delivery of {name}"),
+                    serde_json::json!({
+                        "event_id": event.mutation_id,
+                        "attempt": attempt,
+                        "event": name,
+                    }),
+                    true,
+                );
+            }
+            None => {
+                let (message, fields) = Self::record(&event);
+                self.write(&message, fields, false);
+                if let Err(error) = crate::events::EventFacade::dispatch_best_effort(
+                    MagnetarLifecycleEvent::from(&event),
+                )
                 .await
-        {
-            tracing::error!(%error, "a listener of an agent auth lifecycle event failed");
+                {
+                    tracing::error!(%error, "a listener of an agent auth lifecycle event failed");
+                }
+            }
         }
+        // The dispatcher logs the listener's own error. The answer agent auth
+        // keeps in its outbox names only the event, so no detail a listener
+        // put in its error, such as a user's address, is stored there.
         if event.kind == LifecycleEventKind::AgentClaimConfirmed
-            && let Err(error) =
-                crate::events::EventFacade::dispatch_best_effort(self.claimed(&event)).await
+            && crate::events::EventFacade::dispatch_best_effort(self.claimed(&event))
+                .await
+                .is_err()
         {
-            tracing::error!(
-                %error,
-                event_id = %event.mutation_id,
-                "a listener of AgentClaimed failed; the event stays in the outbox for the next \
-                 delivery pass"
-            );
             return Err(magnetar::plugin::PluginError::Request {
                 plugin: "agent-auth".to_owned(),
-                message: format!("a listener of AgentClaimed failed: {error}"),
+                message: "a listener of AgentClaimed failed".to_owned(),
             });
         }
         Ok(())

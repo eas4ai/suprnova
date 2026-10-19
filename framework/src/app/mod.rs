@@ -350,10 +350,16 @@ enum Commands {
     },
     /// Deliver waiting claim events, expire unclaimed agent registrations
     /// past their window and delete spent replay records and old delivered
-    /// claim events: the pass `serve` runs every five minutes.
+    /// claim events: the pass `serve` runs every five minutes. Reports how
+    /// many claim events failed after their twelve delivery attempts.
     #[cfg(feature = "agents")]
     #[command(name = "agents:prune")]
-    AgentsPrune,
+    AgentsPrune {
+        /// Put claim events that failed after their last delivery attempt
+        /// back with a fresh count, before the pass delivers what waits.
+        #[arg(long)]
+        retry_failed: bool,
+    },
     /// Print a new agent auth signing key as AGENT_AUTH_KEY_ID and
     /// AGENT_AUTH_PRIVATE_KEY lines for the environment. Writes nothing.
     #[cfg(feature = "agents")]
@@ -398,7 +404,7 @@ impl Commands {
             // They build the router, whose agent auth they act on, after the
             // process-wide hook and the runtime drivers.
             #[cfg(feature = "agents")]
-            Commands::AgentsRevokeAll { .. } | Commands::AgentsPrune => ProcessBoot::Work,
+            Commands::AgentsRevokeAll { .. } | Commands::AgentsPrune { .. } => ProcessBoot::Work,
             // It only draws a key: like the migration commands it runs no
             // hook and boots nothing.
             #[cfg(feature = "agents")]
@@ -1590,8 +1596,14 @@ where
                 }
             }
             #[cfg(feature = "agents")]
-            Some(Commands::AgentsPrune) => {
-                Self::run_agents_command(AgentsCommand::Prune, boot, bootstrap_fn, routes_fn).await
+            Some(Commands::AgentsPrune { retry_failed }) => {
+                Self::run_agents_command(
+                    AgentsCommand::Prune { retry_failed },
+                    boot,
+                    bootstrap_fn,
+                    routes_fn,
+                )
+                .await
             }
             #[cfg(feature = "agents")]
             Some(Commands::AgentsKey) => {
@@ -1669,13 +1681,24 @@ where
                 let revoked = operator::revoke_all(&engine).await?;
                 println!("Revoked {revoked} agent registrations and every token issued from them.");
             }
-            AgentsCommand::Prune => {
+            AgentsCommand::Prune { retry_failed } => {
+                if retry_failed {
+                    let put_back = operator::retry_failed(&engine).await?;
+                    println!("Put {put_back} failed claim events back for delivery.");
+                }
                 let done = operator::maintain(&engine).await?;
                 println!(
                     "Delivered {} claim events, expired {} agent registrations, and pruned {} \
                      replay records and {} delivered claim events.",
                     done.delivered, done.expired, done.pruned, done.events_pruned
                 );
+                if done.failed > 0 {
+                    println!(
+                        "{} claim events failed after their last delivery attempt; fix what \
+                         refused them, then run `agents:prune --retry-failed`.",
+                        done.failed
+                    );
+                }
             }
         }
         Ok(())
@@ -2838,7 +2861,7 @@ fn authorize_agents_revoke_all(
 #[derive(Clone, Copy)]
 enum AgentsCommand {
     RevokeAll,
-    Prune,
+    Prune { retry_failed: bool },
 }
 
 #[cfg(feature = "agents")]
@@ -2846,7 +2869,7 @@ impl AgentsCommand {
     fn name(self) -> &'static str {
         match self {
             Self::RevokeAll => "agents:revoke-all",
-            Self::Prune => "agents:prune",
+            Self::Prune { .. } => "agents:prune",
         }
     }
 }
