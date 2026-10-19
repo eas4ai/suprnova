@@ -19,7 +19,8 @@ pub use checks::{
     CheckDisposition, CheckFact, CheckKind, HostCheckFacts, PolicyReason, RequiredChecks,
 };
 pub use context::{
-    LiveRequestContextCandidate, LiveRequestContextValidator, TrustedLiveRequestContext,
+    AgentToolFilter, LiveRequestContextCandidate, LiveRequestContextValidator,
+    TrustedLiveRequestContext,
 };
 
 /// Closed reason untrusted or inconsistent host facts did not become Live authority.

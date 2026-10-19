@@ -158,6 +158,10 @@ pub struct InertiaResponse {
     /// takes the metadata `Head::errors` registered for it. Set by the
     /// Inertia error page.
     head_status: Option<u16>,
+    /// The server tools this response offers on its page, beside the ones
+    /// its route names (AGENT-014).
+    #[cfg(feature = "agents")]
+    agent_tools: Vec<&'static str>,
 }
 
 /// Request-scoped snapshot of session values that an Inertia response delivers once.
@@ -389,6 +393,8 @@ impl InertiaResponse {
             shared_data: true,
             render_source: std::panic::Location::caller(),
             head_status: None,
+            #[cfg(feature = "agents")]
+            agent_tools: Vec::new(),
         }
     }
 
@@ -433,6 +439,22 @@ impl InertiaResponse {
     /// match.
     pub fn with_config(mut self, config: InertiaConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Offer the server tools `names` on this page, beside the ones its
+    /// route, its group and [`Router::share_tools`](crate::Router::share_tools)
+    /// offer (AGENT-014). The page lists only the tools its viewer may call,
+    /// in the page object's `agentTools` field, which every visit carries,
+    /// partial reloads included.
+    ///
+    /// # Errors
+    ///
+    /// [`resolve`](Self::resolve) fails when a name is not a routed tool a
+    /// browser can call, naming it.
+    #[cfg(feature = "agents")]
+    pub fn with_tools<I: IntoIterator<Item = &'static str>>(mut self, names: I) -> Self {
+        self.agent_tools.extend(names);
         self
     }
 
@@ -1406,6 +1428,8 @@ impl InertiaResponse {
             shared_data,
             render_source,
             head_status,
+            #[cfg(feature = "agents")]
+            agent_tools,
         } = self;
         // The document head `Head` resolves for this request (PAR-160): its
         // tags go into the `head` prop and the first visit's `<head>`.
@@ -1667,7 +1691,8 @@ impl InertiaResponse {
             encode_big_integers_in(&mut flash);
         }
 
-        let page = build_page_object(
+        #[cfg_attr(not(feature = "agents"), allow(unused_mut))]
+        let mut page = build_page_object(
             &component,
             ResolvedProps {
                 props: materialized,
@@ -1684,6 +1709,15 @@ impl InertiaResponse {
             },
             shared_keys,
         );
+        // The page's server tools, a top-level field rather than a prop: the
+        // client replaces it on every visit, `only` and `except` never drop
+        // it, and it collides with no prop of the application (AGENT-014).
+        #[cfg(feature = "agents")]
+        if let Some(tools) = crate::agents::page_tools::payload(&agent_tools).await?
+            && let Value::Object(page) = &mut page
+        {
+            page.insert("agentTools".to_owned(), tools);
+        }
         let response = if is_inertia_request {
             build_json_response(&page)?
         } else {
@@ -1785,6 +1819,8 @@ impl InertiaResponse {
             shared_data: _,
             render_source: _,
             head_status: _,
+            #[cfg(feature = "agents")]
+                agent_tools: _,
         } = self;
         let (mut materialized, metadata) = resolve_props(
             props,
@@ -2986,7 +3022,7 @@ fn build_json_response<P: Serialize + ?Sized>(page: &P) -> Result<HttpResponse, 
 /// those characters themselves, never part of a longer character. The
 /// escapes go straight into the one document buffer, with no copy of the
 /// page (MEM-003).
-struct SlashEscaping<'a>(&'a mut Vec<u8>);
+pub(crate) struct SlashEscaping<'a>(pub(crate) &'a mut Vec<u8>);
 
 impl std::io::Write for SlashEscaping<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
