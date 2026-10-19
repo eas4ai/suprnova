@@ -16,6 +16,17 @@
 use suprnova::agents::{AgentAuth, AgentsConfig, OAuthServer};
 use suprnova::{FrameworkError, Router};
 
+suprnova::tool_scopes! {
+    /// What a client or an agent may do for a user. A token holds the
+    /// scopes the user approved, and each tool names the ones it needs.
+    /// The approval page shows each description, and a claimed agent holds
+    /// them all. The notes tools (`controllers::note_tools`) use these two.
+    pub mod scope {
+        NOTES_READ = "notes:read" => "Read your notes";
+        NOTES_WRITE = "notes:write" => "Write notes for you";
+    }
+}
+
 /// What the application serves to agents. Anonymous and `service_auth`
 /// registrations are on. An agent holds no scope until a user claims it,
 /// and then every scope the application declares with `tool_scopes!`.
