@@ -603,6 +603,101 @@ async fn live_mysql_concurrent_advances_in_opposite_order_do_not_deadlock() {
     assert_concurrent_opposite_order_advances_do_not_deadlock().await;
 }
 
+/// Many writes to one table overlap, and each advances the table's
+/// generation. MariaDB 11.8 and later run REPEATABLE READ with
+/// `innodb_snapshot_isolation` on: there the upsert of a row another
+/// transaction committed after this one's snapshot fails with error 1020,
+/// "Record has changed since last read", where MySQL waits for the row and
+/// advances it. Every model write advances the ledger, so on such a server
+/// two overlapping writes to one table answered one of them with a 500.
+///
+/// The overlap is made certain, not left to timing: every writer takes its
+/// snapshot with the read the advance itself begins with, waits on a
+/// barrier until all of them have one, and only then upserts. The pool is
+/// the framework's own, so it opens its connections the way an application's
+/// does.
+async fn assert_overlapping_advances_of_one_table_all_succeed(url: &str) {
+    const WRITERS: usize = 6;
+    let config = suprnova::DatabaseConfig::builder()
+        .url(url)
+        .max_connections(WRITERS as u32 + 2)
+        .min_connections(0)
+        .logging(false)
+        .build();
+    let conn = suprnova::DbConnection::connect(&config)
+        .await
+        .expect("the framework's pool connects to the test database");
+    let _guard = reset_and_migrate(conn.inner().clone()).await;
+
+    let posts = DependencyIdentity::table("posts");
+    // The row exists before the writers start, so every writer takes the
+    // upsert's update branch and contends for the one row.
+    DB::transaction(|_tx| {
+        Box::pin(async move {
+            advance_in_current_transaction(&[DependencyIdentity::table("posts")]).await
+        })
+    })
+    .await
+    .expect("the first advance creates the row");
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(WRITERS));
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|_| {
+            let barrier = std::sync::Arc::clone(&barrier);
+            let posts = posts.clone();
+            tokio::spawn(async move {
+                DB::transaction(|_tx| {
+                    Box::pin(async move {
+                        DB::select(
+                            "SELECT epoch FROM suprnova_render_epochs WHERE singleton = 1",
+                            Vec::new(),
+                        )
+                        .await?;
+                        barrier.wait().await;
+                        advance_in_current_transaction(&[posts]).await
+                    })
+                })
+                .await
+            })
+        })
+        .collect();
+    for (writer, handle) in writers.into_iter().enumerate() {
+        handle
+            .await
+            .expect("a writer must not panic")
+            .unwrap_or_else(|error| {
+                panic!("writer {writer} failed to advance the ledger: {error}")
+            });
+    }
+
+    let set = SqlGenerationLedger::new()
+        .current(&[posts.digest()])
+        .await
+        .expect("current");
+    assert_eq!(
+        set.get(&posts),
+        Some(1 + WRITERS as u64),
+        "every overlapping writer advanced posts once"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable MariaDB at MARIADB_TEST_URL; drops and recreates tables"]
+async fn render_cache_ledger_concurrent_advances_succeed_on_mariadb() {
+    let url = std::env::var("MARIADB_TEST_URL").expect(
+        "set MARIADB_TEST_URL to a disposable MariaDB - this test drops and recreates tables",
+    );
+    assert_overlapping_advances_of_one_table_all_succeed(&url).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable MySQL or MariaDB at MYSQL_TEST_URL; drops and recreates tables"]
+async fn render_cache_ledger_concurrent_advances_succeed_on_mysql() {
+    let url = std::env::var("MYSQL_TEST_URL")
+        .expect("set MYSQL_TEST_URL to a disposable MySQL - this test drops and recreates tables");
+    assert_overlapping_advances_of_one_table_all_succeed(&url).await;
+}
+
 /// The ledger stamps `updated_at` and `committed_at` with the server's
 /// current time. MySQL refuses to store a `TIMESTAMP` after 2038-01-19, so
 /// the migration creates `DATETIME`, which holds a time past it.

@@ -871,17 +871,30 @@ fn hold_one_transaction(options: &mut ConnectOptions, state: &Arc<TransactionSta
     #[cfg(feature = "database-sqlite")]
     {
         let state = Arc::clone(state);
-        options.map_sqlx_sqlite_pool_opts(move |pool| begin_on_connect(pool, Arc::clone(&state)));
+        options.map_sqlx_sqlite_pool_opts(move |pool| {
+            begin_on_connect(pool, Arc::clone(&state), nothing_to_set_up)
+        });
     }
     #[cfg(feature = "database-postgres")]
     {
         let state = Arc::clone(state);
-        options.map_sqlx_postgres_pool_opts(move |pool| begin_on_connect(pool, Arc::clone(&state)));
+        options.map_sqlx_postgres_pool_opts(move |pool| {
+            begin_on_connect(pool, Arc::clone(&state), nothing_to_set_up)
+        });
     }
+    // This replaces the pool options `DbConnection::connect_with` set, its
+    // own connect hook among them, so the session setup that hook runs is
+    // passed on to run before the transaction begins.
     #[cfg(feature = "database-mysql")]
     {
         let state = Arc::clone(state);
-        options.map_sqlx_mysql_pool_opts(move |pool| begin_on_connect(pool, Arc::clone(&state)));
+        let semantics = crate::database::connection::MysqlSemantics::new();
+        options.map_sqlx_mysql_pool_opts(move |pool| {
+            let semantics = semantics.clone();
+            begin_on_connect(pool, Arc::clone(&state), move |connection| {
+                semantics.apply(connection)
+            })
+        });
     }
     #[cfg(not(any(
         feature = "database-sqlite",
@@ -891,22 +904,45 @@ fn hold_one_transaction(options: &mut ConnectOptions, state: &Arc<TransactionSta
     let _no_driver_to_hook = state;
 }
 
+/// The session setup of an engine whose connections need none.
+#[cfg(any(feature = "database-sqlite", feature = "database-postgres"))]
+fn nothing_to_set_up<C>(
+    _connection: &mut C,
+) -> futures::future::BoxFuture<'_, Result<(), sea_orm::sqlx::Error>> {
+    Box::pin(std::future::ready(Ok(())))
+}
+
 /// Begins a transaction on each connection the pool opens and leaves it
 /// open, so every statement of the connection runs in it, and tells the
-/// helper of each use of the connection.
+/// helper of each use of the connection. `set_up` runs first, outside the
+/// transaction: the session settings every connection the framework opens
+/// to the engine carries, as on a connection of the framework's own pool.
 #[cfg(any(
     feature = "database-sqlite",
     feature = "database-postgres",
     feature = "database-mysql"
 ))]
-fn begin_on_connect<DB: sea_orm::sqlx::Database>(
+fn begin_on_connect<DB, S>(
     pool: sea_orm::sqlx::pool::PoolOptions<DB>,
     state: Arc<TransactionState>,
-) -> sea_orm::sqlx::pool::PoolOptions<DB> {
+    set_up: S,
+) -> sea_orm::sqlx::pool::PoolOptions<DB>
+where
+    DB: sea_orm::sqlx::Database,
+    S: for<'c> Fn(
+            &'c mut DB::Connection,
+        ) -> futures::future::BoxFuture<'c, Result<(), sea_orm::sqlx::Error>>
+        + Send
+        + Sync
+        + 'static,
+{
     let on_acquire = Arc::clone(&state);
+    let set_up = Arc::new(set_up);
     pool.after_connect(move |connection, _metadata| {
         let state = Arc::clone(&state);
+        let set_up = Arc::clone(&set_up);
         Box::pin(async move {
+            set_up(&mut *connection).await?;
             let transaction = sea_orm::sqlx::Connection::begin(connection).await?;
             // The handle would queue a rollback when dropped. Forgotten, it
             // leaves the transaction open on the connection, and sqlx still

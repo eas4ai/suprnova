@@ -95,6 +95,48 @@ DB_COLLATION=utf8mb4_0900_ai_ci
 
 `SHOW TABLE STATUS` lists each table's collation.
 
+### MySQL semantics on MariaDB
+
+MariaDB 11.8 and later turn `innodb_snapshot_isolation` on by default.
+Under it, an `UPDATE`, a `DELETE` or a locking read inside a `REPEATABLE
+READ` transaction fails with error 1020, "Record has changed since last
+read", when another transaction committed a change to the row after this
+transaction's first read. MySQL 8.4 instead waits for the row and works on
+its latest committed version. The framework's own concurrency is written
+for MySQL's behavior. For example, spending a single-use token, such as an
+email verification or password reset link, and advancing the RenderCache
+ledger, which every model write does, each read a row and then update it
+in one transaction. On MariaDB with the setting on, two of them at once
+failed one request with a database error.
+
+So every connection the framework opens to a MySQL or MariaDB server runs
+this once, when the pool opens it:
+
+```sql
+SET SESSION innodb_snapshot_isolation = OFF
+```
+
+That covers the primary connection, each named connection and read
+replica, `TestDatabase`, and `MariaDbVectorDriver::from_url`. MySQL, older
+MariaDB releases and other MySQL-compatible servers have no such variable
+and refuse the statement with error 1193, which the framework takes to mean
+there is nothing to turn off: the connection opens as usual and nothing is
+logged.
+
+The statement never fails a connection. A MySQL-compatible proxy or
+service, such as Vitess, ProxySQL or TiDB, may refuse it with another
+error. The connection then opens anyway, keeping the server's own setting,
+and the pool logs one warning at `warn` that names
+`innodb_snapshot_isolation`. On MariaDB 11.8 and later that means
+concurrent transactions behave as the server does on its own, and two at
+once can fail one with error 1020. The warning carries the server's error,
+never the URL or a credential.
+
+There is no setting to turn this off. The server's global value stays as it
+is for every other client, and a pool your application builds and hands to
+the framework, through `DbConnection::from_raw` or
+`MariaDbVectorDriver::from_pool`, keeps whatever its builder set.
+
 ### Pool liveness
 
 A NAT gateway, a load balancer, or a firewall will silently drop a TCP
@@ -497,13 +539,28 @@ dynamic values; do not interpolate untrusted input.
 ```rust
 DB::transaction_with_attempts(5, |_tx| {
     Box::pin(async move {
-        // Same closure body as above. Re-runs from scratch on
-        // SQLSTATE 40001 / 40P01 / any error containing "deadlock"
-        // (case-insensitive).
+        // Same closure body as above. Re-runs from scratch when the
+        // database refused the attempt with a deadlock, a lock wait
+        // timeout or a serialization failure.
         Ok::<(), suprnova::FrameworkError>(())
     })
 }).await?;
 ```
+
+The database's error code decides whether an attempt runs again: MySQL's
+and MariaDB's error numbers 1213 (deadlock), 1205 (lock wait timeout) and
+1020 (a row changed after the transaction's first read), and Postgres's
+SQLSTATEs 40001 (serialization failure) and 40P01 (deadlock). An error
+with any other code is returned at once, even when its message mentions a
+deadlock. The code is read from the database error a `FrameworkError`
+keeps as its source, as `FrameworkError::from_external(db_err)` does, or,
+for a MySQL or MariaDB error that `?` turned into text, from the error
+number the driver writes at its front. An error that carries no code, such
+as one the closure builds itself, is retried when its message contains
+"deadlock" or one of the two SQLSTATEs. A Postgres error turned into text
+by `?` carries no code, so only its message decides: a deadlock is retried
+and a serialization failure is not; wrap the `DbErr` with
+`FrameworkError::from_external` to retry both.
 
 ### Manual form
 

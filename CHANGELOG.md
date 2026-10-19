@@ -241,6 +241,30 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **Concurrent writes no longer fail on MariaDB 11.8 and later.** These
+  releases turn `innodb_snapshot_isolation` on by default, under which a
+  transaction that updates a row another transaction changed after its
+  first read fails with error 1020, "Record has changed since last read",
+  where MySQL waits and works on the latest row. Two overlapping writes to
+  one table failed one of them with a 500, because each advances the
+  RenderCache ledger, and two requests spending one email verification or
+  password reset link at once could fail the losing request with a database
+  error instead of answering that the link was used. Every connection the
+  framework opens to MySQL or MariaDB now runs
+  `SET SESSION innodb_snapshot_isolation = OFF` once, when it opens. A
+  server without the variable, MySQL included, refuses it as unknown and
+  the connection opens as before. The statement never fails a connection:
+  any other refusal, as a MySQL-compatible proxy or service may give, is
+  logged once per pool at `warn`, and the connection opens with the
+  server's own setting. See
+  [MySQL semantics on MariaDB](manual/database.md#mysql-semantics-on-mariadb).
+- **`DB::transaction_with_attempts` retries by the database's error code.**
+  It re-runs an attempt the database refused with MySQL or MariaDB error
+  1213, 1205 or 1020, or Postgres SQLSTATE 40001 or 40P01, and returns any
+  other database error at once, even one whose message mentions a
+  deadlock. It used to match the word "deadlock" in the message, so a lock
+  wait timeout and MariaDB's error 1020 were never retried. An error with no
+  database code is still matched by its message.
 - **Magnetar's tables hold long values on MySQL and MariaDB.** Byte
   columns were limited to 255 bytes. These hold passkey and OAuth sign-in
   steps, two-factor secrets and recovery codes, and saved provider tokens.
