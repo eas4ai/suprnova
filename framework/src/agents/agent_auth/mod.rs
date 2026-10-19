@@ -81,6 +81,12 @@ pub enum IdentityType {
 /// have the provider's verified email, verified: the identity assertion
 /// agent auth signs for a bound user says its email is verified.
 ///
+/// A provisioner must create a new user and never answer with one that
+/// already exists. An existing account that holds the address was already
+/// looked for, and it is bound only after its owner signs in and confirms
+/// the claim; a provisioner that finds and returns it would bind it with no
+/// ceremony.
+///
 /// ```rust,ignore
 /// struct CreateUsers;
 ///
@@ -269,6 +275,10 @@ impl crate::events::Event for AgentClaimed {
 /// `AGENT_AUTH_PREVIOUS_ROTATED_AT` (RFC 3339), so a rotation needs no code
 /// change. A missing or unreadable key fails the build in every
 /// environment: an ephemeral key would make nodes and restarts disagree.
+/// After a key leaks, configure a new key first and leave the leaked one
+/// out of the previous key, then run `app agents:revoke-all`: the command
+/// builds the router, which needs a key, and revokes every registration and
+/// token the leaked key could have reached.
 ///
 /// # Replacing the claim page
 ///

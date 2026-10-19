@@ -17,7 +17,7 @@ use magnetar::agent_auth::SignedInUser;
 use magnetar::plugin::WireResponse;
 use serde_json::Value;
 
-use crate::agents::page::{Html, csrf_token, guarded, notice, sign_in_redirect};
+use crate::agents::page::{Html, csrf_token, guard_errors, guarded, notice, sign_in_redirect};
 use crate::csrf::CsrfMiddleware;
 use crate::error::FrameworkError;
 use crate::http::{HttpResponse, Request, Response};
@@ -47,13 +47,13 @@ pub(super) fn mount_claim(router: Router, page: Arc<ClaimPage>) -> Result<Router
     let router: Router = router
         .try_get(&path, move |request: Request| {
             let page = Arc::clone(&show);
-            async move { claim(page, request).await }
+            async move { guard_errors(claim(page, request).await) }
         })?
         .into();
     Ok(router
         .try_post(&path, move |request: Request| {
             let page = Arc::clone(&page);
-            async move { confirm(page, request).await }
+            async move { guard_errors(confirm(page, request).await) }
         })?
         .middleware(CsrfMiddleware::new().without_xsrf_cookie())
         .into())
@@ -282,7 +282,7 @@ fn render_claim(
     }
     html.raw("</p>\n<p>If you allow it, the agent will use this application as you, with the permissions below, until you revoke it.</p>\n")
         .raw("<p>You are signed in as <strong>")
-        .text(text("signed_in_as"))
+        .client(text("signed_in_as"))
         .raw("</strong>.");
     if let Some(email) = claim.get("email").and_then(Value::as_str) {
         html.raw(" The agent named <strong>")
@@ -396,6 +396,22 @@ mod tests {
         assert!(page.contains("value=\"cat_&quot;x\""));
         assert!(page.contains("about 9 more minutes"));
         assert!(page.contains("no agent from this provider has acted for you before"));
+    }
+
+    #[test]
+    fn agent_009_signed_in_email_is_isolated() {
+        // The user chose their address, so it is isolated as any text a
+        // party other than the application chose.
+        let claim = json!({
+            "registration_type": "anonymous",
+            "signed_in_as": "\u{202e}me@corp.test",
+            "scopes": [],
+        });
+        let page = render_claim(&claim, "/agent/claim", "cat_1", "csrf", None);
+        assert!(
+            page.contains("signed in as <strong><bdi>\u{202e}me@corp.test</bdi></strong>"),
+            "{page}"
+        );
     }
 
     #[test]

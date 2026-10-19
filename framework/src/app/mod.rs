@@ -339,7 +339,8 @@ enum Commands {
     SsrCheck,
     /// Revoke every agent registration and every token issued from them,
     /// for incident response. Running it again finishes a run that failed
-    /// partway.
+    /// partway. After a leaked signing key, configure the new key first:
+    /// the command builds the router, which needs one.
     #[cfg(feature = "agents")]
     #[command(name = "agents:revoke-all")]
     AgentsRevokeAll {

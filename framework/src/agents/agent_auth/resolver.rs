@@ -30,12 +30,15 @@ use crate::error::FrameworkError;
 /// | `revoked`, `expired`, `pending` | [`ResolveError::Invalid`] |
 /// | `unclaimed`, window open, token bound to no user | the pre-claim scopes the token carries |
 /// | `unclaimed`, window passed (the expiry pass has not run yet) | [`ResolveError::Invalid`] |
-/// | `active` or `claimed`, token bound to the registration's user | the registration's scopes the token carries, acting as the user |
+/// | `active` or `claimed`, token bound to the registration's user | the scopes the token carries that the registration was granted and the configuration still grants after a claim, acting as the user |
 /// | `active` or `claimed`, token bound to no user or another (a pre-claim token) | [`ResolveError::Invalid`] |
 /// | the store fails | [`ResolveError::Unavailable`] |
 ///
-/// The scopes are the token's, cut to what the registration holds now, so
-/// a configuration that names fewer scopes applies at once.
+/// The scopes are the token's, cut to what the registration holds now: the
+/// current pre-claim scopes before a claim, and after it the scopes it was
+/// granted that the current post-claim scopes still name. A configuration
+/// that names fewer scopes applies at once, to a token minted before the
+/// change as to a new one.
 pub(crate) struct AgentTokens {
     mounted: Arc<MountedAgentAuth>,
 }
@@ -65,10 +68,12 @@ impl AgentTokens {
                 )));
             }
         };
+        let config = self.mounted.engine.config();
         let entitlement = entitlement(
             &record,
             access.user_id.as_deref(),
-            &self.mounted.engine.config().pre_claim_scopes,
+            &config.pre_claim_scopes,
+            &config.post_claim_scopes,
             crate::clock::now(),
         )?;
         let scopes: Vec<&String> = access
@@ -89,12 +94,14 @@ impl AgentTokens {
     }
 }
 
-/// What `record` holds now for a token bound to `token_user`, or why the
+/// What `record` holds now for a token bound to `token_user`, under the
+/// configuration's current pre-claim and post-claim scopes, or why the
 /// token no longer works.
 fn entitlement<'a>(
     record: &'a RegistrationRecord,
     token_user: Option<&str>,
     pre_claim_scopes: &'a [String],
+    post_claim_scopes: &[String],
     now: DateTime<Utc>,
 ) -> Result<BTreeSet<&'a str>, ResolveError> {
     match record.status.as_str() {
@@ -111,7 +118,12 @@ fn entitlement<'a>(
                     "The token was issued before the agent registration was claimed.",
                 ));
             }
-            Ok(record.scopes.iter().map(String::as_str).collect())
+            Ok(record
+                .scopes
+                .iter()
+                .filter(|scope| post_claim_scopes.contains(scope))
+                .map(String::as_str)
+                .collect())
         }
         _ => Err(ResolveError::Invalid(
             "The agent registration was revoked or has ended.",
@@ -176,38 +188,45 @@ mod tests {
     #[test]
     fn agent_010_resolver_maps_every_registration_status() {
         let pre = vec!["posts:read".to_owned()];
+        let post = vec!["posts:read".to_owned(), "posts:write".to_owned()];
         let now = crate::clock::now();
         let unclaimed = record(STATUS_UNCLAIMED, None, true);
         assert_eq!(
-            held(entitlement(&unclaimed, None, &pre, now)),
+            held(entitlement(&unclaimed, None, &pre, &post, now)),
             ["posts:read"]
         );
         let lapsed = record(STATUS_UNCLAIMED, None, false);
         assert_eq!(
-            refused(entitlement(&lapsed, None, &pre, now)),
+            refused(entitlement(&lapsed, None, &pre, &post, now)),
             "The agent registration expired."
         );
         for status in [STATUS_ACTIVE, STATUS_CLAIMED] {
             let bound = record(status, Some("u1"), true);
             assert_eq!(
-                held(entitlement(&bound, Some("u1"), &pre, now)),
+                held(entitlement(&bound, Some("u1"), &pre, &post, now)),
                 ["posts:read", "posts:write"]
+            );
+            // A narrowed configuration cuts what a bound registration
+            // holds at once.
+            assert_eq!(
+                held(entitlement(&bound, Some("u1"), &pre, &pre, now)),
+                ["posts:read"]
             );
             // A pre-claim token left behind a claim, and a token of another
             // user, both stop here.
             assert_eq!(
-                refused(entitlement(&bound, None, &pre, now)),
+                refused(entitlement(&bound, None, &pre, &post, now)),
                 "The token was issued before the agent registration was claimed."
             );
             assert!(matches!(
-                entitlement(&bound, Some("u2"), &pre, now),
+                entitlement(&bound, Some("u2"), &pre, &post, now),
                 Err(ResolveError::Invalid(_))
             ));
         }
         for status in [STATUS_REVOKED, STATUS_EXPIRED, STATUS_PENDING] {
             let ended = record(status, Some("u1"), true);
             assert_eq!(
-                refused(entitlement(&ended, Some("u1"), &pre, now)),
+                refused(entitlement(&ended, Some("u1"), &pre, &post, now)),
                 "The agent registration was revoked or has ended."
             );
         }

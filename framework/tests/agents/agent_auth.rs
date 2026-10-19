@@ -410,7 +410,11 @@ struct Claimed {
 /// Register anonymously, have `user` (signed in on `client`) claim it, and
 /// poll for the tokens.
 async fn claim_anonymous(world: &AgentWorld, user: &str) -> Claimed {
-    let client = &world.client;
+    claim_anonymous_on(&world.client, &world.db, user).await
+}
+
+/// [`claim_anonymous`] through `client`, a node on `db`.
+async fn claim_anonymous_on(client: &TestClient, db: &DatabaseConnection, user: &str) -> Claimed {
     let registration = anonymous(client).await;
     let claim_token = registration["claim_token"].as_str().unwrap();
     let started = initiate(client, claim_token, &account_email(user)).await;
@@ -421,7 +425,7 @@ async fn claim_anonymous(world: &AgentWorld, user: &str) -> Claimed {
     assert_eq!(page.status(), 200, "{}", page.body_text());
     let done = confirm(client, &page, attempt["user_code"].as_str().unwrap()).await;
     assert_eq!(done.status(), 200, "{}", done.body_text());
-    forget_polls(&world.db).await;
+    forget_polls(db).await;
     let tokens = poll(client, claim_token).await;
     assert_eq!(tokens.status(), 200, "{}", tokens.body_text());
     Claimed {
@@ -838,6 +842,56 @@ async fn agent_007_unclaimed_agent_holds_only_pre_claim_scopes() {
         .unwrap_or_default()
         .to_owned();
     assert!(www.contains("error=\"insufficient_scope\""), "{www}");
+}
+
+#[tokio::test]
+async fn agent_007_narrowed_post_claim_scopes_apply_to_a_bound_agent_at_once() {
+    let world = agent_world(|agent| agent).await;
+    let user = new_account("narrowed");
+    let claimed = claim_anonymous(&world, &user).await;
+    let token = claimed.tokens["access_token"].as_str().unwrap();
+    let assertion = claimed.tokens["identity_assertion"].as_str().unwrap();
+    assert_eq!(
+        call(
+            &world.client,
+            token,
+            "posts.create",
+            json!({ "title": "Before" })
+        )
+        .await
+        .0,
+        200
+    );
+
+    // The operator narrows the post-claim scopes and restarts.
+    let narrowed = world.node(|agent| agent.post_claim_scopes([scope::POSTS_READ]));
+    // The token minted before carries posts:write; only the resolver cuts
+    // it.
+    let refused = narrowed
+        .mcp()
+        .with_token(token)
+        .call("posts.create", json!({ "title": "After" }))
+        .await;
+    assert_eq!(refused.status(), 403, "{:?}", refused.response());
+    let www = refused
+        .response()
+        .header("www-authenticate")
+        .unwrap_or_default()
+        .to_owned();
+    assert!(www.contains("error=\"insufficient_scope\""), "{www}");
+    assert_eq!(
+        call(&narrowed, token, "posts.show", json!({ "post": "1" }))
+            .await
+            .0,
+        200,
+        "what the configuration still grants keeps working"
+    );
+    let wider = exchange(&narrowed, assertion, Some("posts:write")).await;
+    assert_eq!(wider.status(), 400, "{}", wider.body_text());
+    assert_eq!(wider.json()["error"], "invalid_scope");
+    let cut = exchange(&narrowed, assertion, None).await;
+    assert_eq!(cut.status(), 200, "{}", cut.body_text());
+    assert_eq!(cut.json()["scope"], "posts:read");
 }
 
 #[tokio::test]
@@ -2188,6 +2242,111 @@ async fn agent_010_password_change_ends_a_bound_agent_token() {
     );
 }
 
+#[tokio::test]
+async fn agent_010_agent_revoke_form_needs_the_csrf_token() {
+    // The revoke route checks the token itself, so an application that
+    // installed no CSRF middleware of its own is protected too.
+    let world = agent_world(|agent| agent).await;
+    let client = world.node_with(crate::oauth::session_registry(), |agent| agent);
+    let user = new_account("revoke-csrf");
+    let claimed = claim_anonymous_on(&client, &world.db, &user).await;
+    let token = claimed.tokens["access_token"].as_str().unwrap();
+    let id = claimed.registration["registration_id"].as_str().unwrap();
+    let refused = client
+        .post(format!("/oauth/connected/agents/{id}/revoke"))
+        .form(&[("padding", "x")])
+        .send()
+        .await;
+    assert_eq!(refused.status(), 419, "{}", refused.body_text());
+    assert_eq!(
+        call(&client, token, "posts.show", json!({ "post": "1" }))
+            .await
+            .0,
+        200,
+        "nothing was revoked"
+    );
+}
+
+/// The four headers every answer of the default pages carries.
+fn assert_guarded(response: &TestResponse) {
+    assert_eq!(response.header("cache-control"), Some("no-store"));
+    assert_eq!(response.header("x-frame-options"), Some("DENY"));
+    assert_eq!(
+        response.header("content-security-policy"),
+        Some("frame-ancestors 'none'")
+    );
+    assert_eq!(response.header("referrer-policy"), Some("no-referrer"));
+}
+
+#[tokio::test]
+async fn agent_009_claim_page_store_failure_keeps_the_protective_headers() {
+    let world = agent_world(|agent| agent).await;
+    let client = &world.client;
+    let user = new_account("claim-failure");
+    let registration = service_auth(client, &account_email(&user)).await;
+    sign_in(client, &user).await;
+    world
+        .db
+        .execute_unprepared("DROP TABLE auth_agent_registrations")
+        .await
+        .unwrap();
+    let page = open_claim(
+        client,
+        registration["claim"]["verification_uri"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(page.status(), 503, "{}", page.body_text());
+    assert_guarded(&page);
+}
+
+#[tokio::test]
+async fn agent_010_connected_page_store_failure_keeps_the_protective_headers() {
+    let world = agent_world(|agent| agent).await;
+    let client = &world.client;
+    sign_in(client, &new_account("connected-failure")).await;
+    world
+        .db
+        .execute_unprepared("DROP TABLE auth_agent_registrations")
+        .await
+        .unwrap();
+    let page = client.get("/oauth/connected").send().await;
+    assert_eq!(page.status(), 503, "{}", page.body_text());
+    assert_guarded(&page);
+}
+
+/// A provisioner that answers with an account that already exists, whose
+/// email is not the provider's.
+struct ReturnsExisting(String);
+
+#[async_trait]
+impl AgentUserProvisioner for ReturnsExisting {
+    async fn provision(
+        &self,
+        _identity: &ProvidedIdentity,
+    ) -> Result<Option<String>, FrameworkError> {
+        Ok(Some(self.0.clone()))
+    }
+}
+
+#[tokio::test]
+async fn agent_008_provisioned_user_with_another_email_is_refused() {
+    let other = new_account("someone-else");
+    let world = agent_world(|agent| {
+        with_id_jags(agent).provision_users(Arc::new(ReturnsExisting(other.clone())))
+    })
+    .await;
+    let refused = present(
+        &world.client,
+        &world.id_jag(&id_jag_claims(
+            "mismatch",
+            &account_email(&unique("asserted")),
+        )),
+    )
+    .await;
+    assert_eq!(refused.status(), 400, "{}", refused.body_text());
+    assert!(refused.json().get("identity_assertion").is_none());
+}
+
 // ---------------------------------------------------------- AGENT-011 ----
 
 #[tokio::test]
@@ -2775,39 +2934,13 @@ impl AgentUserProvisioner for CountingProvisioner {
 
 #[tokio::test]
 async fn agent_008_mixed_case_stored_email_matches_and_is_never_provisioned_again() {
-    let container = crate::oauth::container_with_users(Arc::new(suprnova::EloquentUserProvider::<
-        EloquentAccount,
-    >::new()));
-    let connection = suprnova::DbConnection::connect(
-        &suprnova::DatabaseConfig::builder()
-            .url("sqlite::memory:")
-            .max_connections(1)
-            .min_connections(1)
-            .build(),
-    )
-    .await
-    .unwrap();
-    suprnova::container::testing::TestContainer::singleton(connection.clone());
-    let db = connection.inner().clone();
-    db.execute_unprepared(
-        "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, \
-         password TEXT NOT NULL, email_verified_at TEXT)",
-    )
-    .await
-    .unwrap();
-    db.execute_unprepared(
-        "INSERT INTO users (email, password, email_verified_at) \
-         VALUES ('Alice@Corp.test', 'stored-hash', '2026-01-01T00:00:00Z')",
-    )
-    .await
-    .unwrap();
-    OAuthServer::migrate(&db).await.unwrap();
-    AgentAuth::migrate(&db).await.unwrap();
     let provisioner = Arc::new(CountingProvisioner::default());
     let counted = provisioner.clone();
-    let world = agent_world_in(container, db.clone(), move |agent| {
+    let world = eloquent_world(&[("Alice@Corp.test", true)], move |agent| {
         with_id_jags(agent).provision_users(counted)
-    });
+    })
+    .await;
+    let db = world.db.clone();
     let client = &world.client;
 
     let response = present(
@@ -2856,4 +2989,147 @@ async fn agent_008_mixed_case_stored_email_matches_and_is_never_provisioned_agai
         0,
         "the stored account is found, never provisioned again"
     );
+}
+
+/// A world whose default guard reads the application's own `users` table
+/// through the Eloquent provider, holding `accounts` (address, verified)
+/// as ids 1, 2 and so on, on the same in-memory database as the OAuth
+/// server and agent auth.
+async fn eloquent_world(
+    accounts: &[(&str, bool)],
+    configure: impl FnOnce(AgentAuth) -> AgentAuth,
+) -> AgentWorld {
+    let container = crate::oauth::container_with_users(Arc::new(suprnova::EloquentUserProvider::<
+        EloquentAccount,
+    >::new()));
+    let connection = suprnova::DbConnection::connect(
+        &suprnova::DatabaseConfig::builder()
+            .url("sqlite::memory:")
+            .max_connections(1)
+            .min_connections(1)
+            .build(),
+    )
+    .await
+    .unwrap();
+    suprnova::container::testing::TestContainer::singleton(connection.clone());
+    let db = connection.inner().clone();
+    db.execute_unprepared(
+        "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, \
+         password TEXT NOT NULL, email_verified_at TEXT)",
+    )
+    .await
+    .unwrap();
+    for (email, verified) in accounts {
+        let verified_at = if *verified {
+            "'2026-01-01T00:00:00Z'"
+        } else {
+            "NULL"
+        };
+        db.execute_unprepared(&format!(
+            "INSERT INTO users (email, password, email_verified_at) \
+             VALUES ('{email}', 'stored-hash', {verified_at})"
+        ))
+        .await
+        .unwrap();
+    }
+    OAuthServer::migrate(&db).await.unwrap();
+    AgentAuth::migrate(&db).await.unwrap();
+    agent_world_in(container, db, configure)
+}
+
+/// A provisioner that finds a verified account with the provider's address
+/// whatever its case, and creates one only when none exists, counting what
+/// it is asked. It breaks [`AgentUserProvisioner`]'s contract on purpose:
+/// it returns an existing user.
+struct FindOrCreate {
+    db: DatabaseConnection,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl AgentUserProvisioner for FindOrCreate {
+    async fn provision(
+        &self,
+        identity: &ProvidedIdentity,
+    ) -> Result<Option<String>, FrameworkError> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let Some(email) = identity.verified_email.clone() else {
+            return Ok(None);
+        };
+        let found = self
+            .db
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Sqlite,
+                "SELECT id FROM users WHERE LOWER(email) = LOWER(?) \
+                 AND email_verified_at IS NOT NULL",
+                [email.into()],
+            ))
+            .await
+            .map_err(|error| FrameworkError::internal(error.to_string()))?;
+        Ok(found
+            .and_then(|row| row.try_get::<i64>("", "id").ok())
+            .map(|id| id.to_string()))
+    }
+}
+
+#[tokio::test]
+async fn agent_008_unverified_exact_case_row_does_not_hide_the_verified_account() {
+    // Someone signed up as alice@corp.test and never verified it; Alice's
+    // verified account is Alice@Corp.test.
+    let accounts = [("Alice@Corp.test", true), ("alice@corp.test", false)];
+    let refusing = eloquent_world(&accounts, with_id_jags).await;
+    let response = present(
+        &refusing.client,
+        &refusing.id_jag(&id_jag_claims("alice-default", "alice@corp.test")),
+    )
+    .await;
+    assert_eq!(response.status(), 401, "{}", response.body_text());
+    assert_eq!(response.json()["error"], "interaction_required");
+    drop(refusing);
+
+    let world = eloquent_world(&accounts, |agent| agent).await;
+    let finder = Arc::new(FindOrCreate {
+        db: world.db.clone(),
+        asked: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let provisioning = world.node(|agent| with_id_jags(agent).provision_users(finder.clone()));
+    let response = present(
+        &provisioning,
+        &world.id_jag(&id_jag_claims("alice-finder", "alice@corp.test")),
+    )
+    .await;
+    assert_eq!(response.status(), 401, "{}", response.body_text());
+    let body = response.json();
+    assert_eq!(
+        body["error"], "interaction_required",
+        "the claim ceremony, never a silent bind"
+    );
+    assert!(body.get("identity_assertion").is_none());
+    assert_eq!(finder.asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn agent_008_two_verified_accounts_differing_in_case_are_refused() {
+    let provisioner = Arc::new(CountingProvisioner::default());
+    let counted = provisioner.clone();
+    let world = eloquent_world(
+        &[("Bob@Corp.test", true), ("bob@corp.test", true)],
+        move |agent| with_id_jags(agent).provision_users(counted),
+    )
+    .await;
+    let refused = present(
+        &world.client,
+        &world.id_jag(&id_jag_claims("bob-at-provider", "bob@corp.test")),
+    )
+    .await;
+    assert_eq!(refused.status(), 400, "{}", refused.body_text());
+    let body = refused.json();
+    assert_eq!(body["error"], "invalid_request");
+    assert!(
+        body["error_description"]
+            .as_str()
+            .is_some_and(|text| text.contains("more than one account")),
+        "{body}"
+    );
+    assert_eq!(provisioner.0.load(std::sync::atomic::Ordering::SeqCst), 0);
 }

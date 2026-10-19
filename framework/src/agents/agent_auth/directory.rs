@@ -70,22 +70,34 @@ impl AgentUserDirectory for HostAgentUsers {
         }
         let provider = guard_provider(&guard_name)?;
         // A provider sends the address in lower case; the stored one keeps
-        // whatever case the user typed. A miss here would fall to the
-        // provisioning policy and could make a second account.
-        let Some(found) = provider
-            .retrieve_by_email_ignoring_case(email)
-            .await
-            .map_err(unavailable)?
-        else {
-            return Ok(None);
+        // whatever case the user typed. Every account that holds it in any
+        // case is read: an unverified `alice@corp.test` must not hide
+        // Alice's verified `Alice@Corp.test`.
+        let candidates = match provider.retrieve_all_by_email_ignoring_case(email).await {
+            Ok(candidates) => candidates,
+            Err(error) if error.status_code() == 409 => return Err(several_accounts()),
+            Err(error) => return Err(unavailable(error)),
         };
-        // The account must hold the address as its verified one: binding a
-        // provider identity to an account that never proved the mailbox
-        // would hand the agent to whoever typed the address first.
-        Ok(self
-            .find_by_id(&found.id)
-            .await?
-            .filter(|user| user.email_verified && same_email(&user.email, email)))
+        // Only an account that holds the address as its verified one
+        // counts: binding a provider identity to an account that never
+        // proved the mailbox would hand the agent to whoever typed the
+        // address first.
+        let mut verified = Vec::new();
+        for candidate in candidates {
+            if let Some(user) = self.find_by_id(&candidate.id).await?
+                && user.email_verified
+                && same_email(&user.email, email)
+            {
+                verified.push(user);
+            }
+        }
+        match verified.len() {
+            0 => Ok(None),
+            1 => Ok(verified.pop()),
+            // Picking one would choose an account for the user, so agent
+            // auth refuses the ID-JAG instead, binding and creating nothing.
+            _ => Err(several_accounts()),
+        }
     }
 
     async fn find_by_verified_phone(&self, _phone: &str) -> magnetar::Result<Option<AgentUser>> {
@@ -103,6 +115,15 @@ fn magnetar_users() -> magnetar::Result<Arc<dyn AgentUserDirectory>> {
             dependency: "Magnetar user store".to_owned(),
             message: "the installed Magnetar engine reads no users for agent auth".to_owned(),
         })
+}
+
+/// The answer that makes agent auth refuse an address verified on more
+/// than one account.
+fn several_accounts() -> magnetar::Error {
+    magnetar::Error::Conflict {
+        resource: "user".to_owned(),
+        message: "the verified address matches more than one account".to_owned(),
+    }
 }
 
 fn guard_provider(guard_name: &str) -> magnetar::Result<Arc<dyn crate::UserProvider>> {

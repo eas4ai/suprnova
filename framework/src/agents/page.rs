@@ -55,6 +55,12 @@ pub(crate) fn guarded(response: HttpResponse) -> HttpResponse {
         .header("Referrer-Policy", "no-referrer")
 }
 
+/// `response` with an error answer guarded too: a page's failures, such as
+/// a store that cannot answer, carry the same headers as its pages.
+pub(crate) fn guard_errors(response: crate::http::Response) -> crate::http::Response {
+    response.map_err(guarded)
+}
+
 /// The session's CSRF token for a page's forms.
 pub(crate) fn csrf_token() -> Result<String, FrameworkError> {
     crate::session::get_csrf_token().ok_or_else(|| {

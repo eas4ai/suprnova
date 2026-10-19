@@ -18,7 +18,7 @@ use super::OAuthServer;
 use super::grants::{self, ClientGrant};
 use crate::agents::AgentAccount;
 use crate::agents::agent_auth::MountedAgentAuth;
-use crate::agents::page::{Html, csrf_token, guarded, notice, sign_in_redirect};
+use crate::agents::page::{Html, csrf_token, guard_errors, guarded, notice, sign_in_redirect};
 use crate::csrf::CsrfMiddleware;
 use crate::error::FrameworkError;
 use crate::http::{HttpResponse, Request, Response};
@@ -64,7 +64,7 @@ pub(super) fn mount_approval(
     Ok(router
         .try_get(path, move |request: Request| {
             let pages = Arc::clone(&pages);
-            async move { approval(pages, request).await }
+            async move { guard_errors(approval(pages, request).await) }
         })?
         .into())
 }
@@ -84,7 +84,7 @@ pub(super) fn mount_connected(
         .try_get(&path, move |request: Request| {
             let pages = Arc::clone(&list_pages);
             let path = list_path.clone();
-            async move { connected(pages, path, request).await }
+            async move { guard_errors(connected(pages, path, request).await) }
         })?
         .into();
     let revoke_path = path.clone();
@@ -95,7 +95,7 @@ pub(super) fn mount_connected(
             move |request: Request| {
                 let pages = Arc::clone(&revoke_pages);
                 let path = revoke_path.clone();
-                async move { revoke(pages, path, request).await }
+                async move { guard_errors(revoke(pages, path, request).await) }
             },
         )?
         .middleware(CsrfMiddleware::new().without_xsrf_cookie())
@@ -110,7 +110,7 @@ pub(super) fn mount_connected(
             move |request: Request| {
                 let pages = Arc::clone(&pages);
                 let path = agent_path.clone();
-                async move { revoke_agent(pages, path, request).await }
+                async move { guard_errors(revoke_agent(pages, path, request).await) }
             },
         )?
         .middleware(CsrfMiddleware::new().without_xsrf_cookie())
