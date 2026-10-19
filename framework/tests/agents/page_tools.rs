@@ -1022,3 +1022,103 @@ async fn agent_014_a_page_of_public_tools_reads_no_caller() {
         "one shared copy for every viewer"
     );
 }
+
+// ------------------------------------------- the refresh after a write ----
+
+/// The attribute `name` of the island root keyed `key` in `page`, unescaped.
+fn island_attribute(page: &str, key: &str, name: &str) -> Option<String> {
+    for root in page.split("<div").skip(1) {
+        let attributes = root.split('>').next().unwrap_or_default();
+        if !attributes.contains(&format!(" data-suprnova-live-document-key=\"{key}\"")) {
+            continue;
+        }
+        let prefix = format!(" {name}=\"");
+        let start = attributes.find(&prefix)? + prefix.len();
+        let end = start + attributes[start..].find('"')?;
+        return Some(
+            attributes[start..end]
+                .replace("&quot;", "\"")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&#39;", "'")
+                .replace("&amp;", "&"),
+        );
+    }
+    None
+}
+
+fn random_identity() -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(uuid::Uuid::new_v4().as_bytes())
+}
+
+/// The fresh render of the island keyed `key` in `page`, as the Live
+/// runtime asks for one after a write tool (AGENT-014): a seed is promoted
+/// with a browser nonce, an instance sends its snapshot.
+fn fresh_render(
+    client: &TestClient,
+    page: &str,
+    xsrf: Option<&str>,
+    key: &str,
+) -> suprnova::testing::TestRequest {
+    use base64::Engine as _;
+    let snapshot = island_attribute(page, key, "data-suprnova-live-snapshot").expect("a snapshot");
+    let snapshot: Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(snapshot)
+            .expect("a base64url snapshot"),
+    )
+    .expect("a JSON snapshot");
+    let seed =
+        island_attribute(page, key, "data-suprnova-live-snapshot-kind").as_deref() == Some("seed");
+    let snapshot = if seed {
+        json!({ "kind": "seed_promotion", "envelope": snapshot, "browser_nonce": random_identity() })
+    } else {
+        json!({ "kind": "instance", "envelope": snapshot })
+    };
+    let body = json!({
+        "protocol_version": 2,
+        "runtime_contract_version": 2,
+        "snapshot_schema_version": 1,
+        "correlation_id": random_identity(),
+        "idempotency_key": random_identity(),
+        "component": island_attribute(page, key, "data-suprnova-live-component").expect("a component"),
+        "base_revision": island_attribute(page, key, "data-suprnova-live-revision").expect("a revision"),
+        "snapshot": snapshot,
+        "child_parameters": null,
+        "model_proposals": {},
+        "operations": [{ "kind": "fresh_render" }],
+        "extensions": { "x_suprnova_live_document_key_v1": key },
+    });
+    let mut request = client
+        .post("/__live/action")
+        .json(&body)
+        .header(
+            "Content-Type",
+            "application/vnd.suprnova.live+json; charset=utf-8; version=2",
+        )
+        .header("Sec-Fetch-Site", "same-origin");
+    if let Some(token) = xsrf {
+        request = request.header("X-XSRF-TOKEN", token);
+    }
+    request
+}
+
+#[tokio::test]
+async fn agent_014_a_public_seed_island_takes_a_fresh_render() {
+    let _container = fixture::setup();
+    let client = live_fixture::live_client().acting_as(&TestUser::arc("alice"));
+    let page = client.get(live_fixture::PAGE).send().await;
+    assert_eq!(page.status(), 200, "{}", page.body_text());
+    let html = page.body_text();
+    assert_eq!(
+        island_attribute(&html, "main", "data-suprnova-live-snapshot-kind").as_deref(),
+        Some("seed")
+    );
+    let refreshed = fresh_render(&client, &html, page.cookie("XSRF-TOKEN").as_deref(), "main")
+        .send()
+        .await;
+    assert_eq!(refreshed.status(), 200, "{}", refreshed.body_text());
+    let answer = refreshed.json();
+    assert_eq!(answer["outcome"], "accepted", "{answer}");
+}

@@ -321,11 +321,66 @@ impl<'a> PromotedModelSyncRequest<'a> {
     }
 }
 
+/// Promoted public-seed authority and a fresh render that invokes no
+/// action. The browser runtime asks for one after a WebMCP write tool, so a
+/// public seed on the page shows what the tool changed (AGENT-014): the
+/// seed is promoted and rendered with its current data, as an instance's
+/// fresh render is.
+pub struct PromotedFreshRenderRequest<'a> {
+    descriptor: &'a ComponentDescriptor,
+    context: &'a TrustedLiveRequestContext,
+    browser: BrowserRenderContext,
+    promoted: PromotedInstance,
+    identity: PromotedRequestIdentity,
+    trace: &'a dyn ExecutionTracePort,
+    response_sealer: Option<AcceptedResponseSealer>,
+    response_binding: Option<AcceptedResponseRequestBinding>,
+}
+
+impl<'a> PromotedFreshRenderRequest<'a> {
+    /// Binds an internal promotion capability to one fresh render.
+    #[must_use]
+    pub fn new(
+        descriptor: &'a ComponentDescriptor,
+        context: &'a TrustedLiveRequestContext,
+        browser: BrowserRenderContext,
+        promoted: PromotedInstance,
+        identity: PromotedRequestIdentity,
+        trace: &'a dyn ExecutionTracePort,
+    ) -> Self {
+        Self {
+            descriptor,
+            context,
+            browser,
+            promoted,
+            identity,
+            trace,
+            response_sealer: None,
+            response_binding: None,
+        }
+    }
+
+    /// Supplies request-bound accepted-response sealing before durability.
+    #[must_use]
+    pub fn with_response_sealer(
+        mut self,
+        response_sealer: AcceptedResponseSealer,
+        response_binding: AcceptedResponseRequestBinding,
+    ) -> Self {
+        self.response_sealer = Some(response_sealer);
+        self.response_binding = Some(response_binding);
+        self
+    }
+}
+
 /// The first operation a promoted public seed runs.
 enum PromotedOperation<'a> {
     Action(Box<ActionExecutionRequest<'a>>),
     SyncModels {
         proposals: &'a ProposalBatch,
+        trace: &'a dyn ExecutionTracePort,
+    },
+    FreshRender {
         trace: &'a dyn ExecutionTracePort,
     },
 }
@@ -334,7 +389,7 @@ impl<'a> PromotedOperation<'a> {
     fn trace(&self) -> &'a dyn ExecutionTracePort {
         match self {
             Self::Action(action) => action.trace,
-            Self::SyncModels { trace, .. } => *trace,
+            Self::SyncModels { trace, .. } | Self::FreshRender { trace } => *trace,
         }
     }
 }
@@ -1165,6 +1220,28 @@ impl ExecutionService {
         .await
     }
 
+    /// Promotes a public seed and renders it with its current data,
+    /// invoking no action.
+    pub async fn execute_promoted_fresh_render(
+        &self,
+        request: PromotedFreshRenderRequest<'_>,
+    ) -> ExecutionResult {
+        self.execute_promoted_operation(PromotedExecution {
+            descriptor: request.descriptor,
+            context: request.context,
+            browser: request.browser,
+            promoted: request.promoted,
+            identity: request.identity,
+            operation: PromotedOperation::FreshRender {
+                trace: request.trace,
+            },
+            response_intents: None,
+            response_sealer: request.response_sealer,
+            response_binding: request.response_binding,
+        })
+        .await
+    }
+
     async fn execute_promoted_operation(&self, request: PromotedExecution<'_>) -> ExecutionResult {
         let trace = request.operation.trace();
         let response_intents = request.response_intents;
@@ -1316,6 +1393,12 @@ impl ExecutionService {
                         })?,
                 )
             }
+            PromotedOperation::FreshRender { .. } => ActionExecutionOutput::fresh_render(
+                ComponentExecutor::new()
+                    .reconstruct(descriptor, &hydration)
+                    .await
+                    .map_err(|error| execution_failed(ExecutionFailure::Lifecycle(error.kind())))?,
+            ),
         };
         Ok((output, None))
     }
