@@ -153,7 +153,7 @@ async fn refuses_case_duplicates(db: &DatabaseConnection, table: &str, collation
         indexes_of(db, table).await,
         "the second run changed nothing"
     );
-    assert!(has_index(db, table, &format!("{table}_email_lower_unique")).await);
+    assert!(has_index(db, table, &index_of(table)).await);
     insert(db, table, "alice@example.test")
         .await
         .expect("the first account");
@@ -163,6 +163,12 @@ async fn refuses_case_duplicates(db: &DatabaseConnection, table: &str, collation
         .await
         .expect("another address");
     drop_users(db, table).await;
+}
+
+/// The index the migration makes on `table`'s `email`: the table name's
+/// length closes the name, so no other table and column share it.
+fn index_of(table: &str) -> String {
+    format!("{table}_email_lower_unique_{}", table.len())
 }
 
 /// A table name no other run uses.
@@ -202,7 +208,7 @@ async fn agent_008_users_email_is_unique_ignoring_case_on_sqlite() {
     create_users(&db, "users", true, "").await;
     up(&db, "users").await.expect("up");
     down(&db, "users").await.expect("down");
-    assert!(!has_index(&db, "users", "users_email_lower_unique").await);
+    assert!(!has_index(&db, "users", &index_of("users")).await);
     insert(&db, "users", "carol@example.test")
         .await
         .expect("first");
@@ -240,7 +246,7 @@ async fn agent_008_email_index_migration_refuses_existing_case_duplicates() {
             "{email} in {message}"
         );
     }
-    assert!(!has_index(&db, "users", "users_email_lower_unique").await);
+    assert!(!has_index(&db, "users", &index_of("users")).await);
 }
 
 #[tokio::test]
@@ -282,7 +288,7 @@ async fn agent_008_users_email_on_mariadb_relies_on_its_ci_collation() {
     // MariaDB has no functional index: the migration adds none, twice.
     up(&db, &table).await.expect("the first run");
     up(&db, &table).await.expect("the second run");
-    assert!(!has_index(&db, &table, &format!("{table}_email_lower_unique")).await);
+    assert!(!has_index(&db, &table, &index_of(&table)).await);
     // The column's default `_ci` collation makes its unique index compare
     // without case.
     insert(&db, &table, "alice@example.test")
@@ -292,4 +298,31 @@ async fn agent_008_users_email_on_mariadb_relies_on_its_ci_collation() {
     assert!(duplicate.is_err(), "the _ci unique index refuses it");
     down(&db, &table).await.expect("down changes nothing");
     drop_users(&db, &table).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable MariaDB at MARIADB_TEST_URL"]
+async fn agent_008_users_email_on_mariadb_refuses_a_bin_column() {
+    let db = engine("MARIADB_TEST_URL").await;
+    // A binary collation compares case: the column's unique index would
+    // take a case-only duplicate, so the migration refuses it.
+    let binary = unique_table();
+    create_users(&db, &binary, true, "COLLATE utf8mb4_bin").await;
+    let refused = up(&db, &binary)
+        .await
+        .expect_err("a binary collation is refused");
+    let message = refused.to_string();
+    assert!(message.contains(&format!("{binary}.email")), "{message}");
+    assert!(message.contains("utf8mb4_bin"), "{message}");
+    drop_users(&db, &binary).await;
+    // A column without a unique index takes any duplicate.
+    let plain = unique_table();
+    create_users(&db, &plain, false, "").await;
+    let refused = up(&db, &plain)
+        .await
+        .expect_err("a column without a unique index is refused");
+    let message = refused.to_string();
+    assert!(message.contains(&format!("{plain}.email")), "{message}");
+    assert!(message.contains("unique index"), "{message}");
+    drop_users(&db, &plain).await;
 }

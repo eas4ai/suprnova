@@ -25,7 +25,9 @@ use sea_orm_migration::prelude::*;
 /// - **MariaDB, and MySQL before 8.0.13:** no index. They have no functional
 ///   indexes, and a column under their default `_ci` collations already
 ///   compares without case, so a unique index on the column itself refuses
-///   the duplicate. The migration logs that it relies on it.
+///   the duplicate. The migration checks that the column has both, a
+///   unique index of its own and a `_ci` collation, and fails naming what
+///   is missing; with both, it logs that it relies on them.
 ///
 /// When the table already holds addresses that differ only in case, the
 /// migration fails and says how many there are, so they can be merged
@@ -54,9 +56,18 @@ impl UniqueEmailIgnoringCase {
         }
     }
 
-    /// The index's name: `{table}_{column}_lower_unique`.
+    /// The index's name, the same on every engine:
+    /// `{table}_{column}_lower_unique_{n}`, where `n` is the table name's
+    /// length. The length tells where the table name ends, so `a_b` and `c`
+    /// never share a name with `a` and `b_c`, whatever underscores either
+    /// holds.
     fn index_name(&self) -> String {
-        format!("{}_{}_lower_unique", self.table, self.column)
+        format!(
+            "{}_{}_lower_unique_{}",
+            self.table,
+            self.column,
+            self.table.len()
+        )
     }
 
     /// The table and column, checked to be identifiers the SQL can carry.
@@ -95,6 +106,18 @@ impl MigrationTrait for UniqueEmailIgnoringCase {
             }
             DbBackend::MySql => {
                 if !has_functional_indexes(db).await? {
+                    // No functional index here: the column's own unique
+                    // index refuses a case-only duplicate only under a
+                    // case-insensitive collation. Check both, so the
+                    // migration never reports success while such a
+                    // duplicate can still be stored.
+                    let collation = mysql_column_collation(db, table, column).await?;
+                    let unique = mysql_has_unique_column_index(db, table, column).await?;
+                    if let Some(refusal) =
+                        case_insensitive_refusal(table, column, collation.as_deref(), unique)
+                    {
+                        return Err(DbErr::Migration(refusal));
+                    }
                     tracing::info!(
                         table,
                         column,
@@ -140,6 +163,82 @@ impl MigrationTrait for UniqueEmailIgnoringCase {
         };
         db.execute_unprepared(&sql).await.map(|_| ())
     }
+}
+
+/// Why the column `table`.`column` cannot be left to its own unique index
+/// on a server with no functional index: it needs a unique index on the
+/// column alone and a case-insensitive (`_ci`) collation, or a case-only
+/// duplicate can be stored. `None` when it has both.
+fn case_insensitive_refusal(
+    table: &str,
+    column: &str,
+    collation: Option<&str>,
+    unique: bool,
+) -> Option<String> {
+    let case_insensitive =
+        collation.is_some_and(|collation| collation.to_ascii_lowercase().ends_with("_ci"));
+    let mut missing = Vec::new();
+    if !unique {
+        missing.push("a unique index on the column alone".to_owned());
+    }
+    if !case_insensitive {
+        missing.push(format!(
+            "a case-insensitive (_ci) collation, where it has {}",
+            collation.unwrap_or("none")
+        ));
+    }
+    if missing.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "UniqueEmailIgnoringCase: this server has no functional indexes, so {table}.{column} \
+         must refuse addresses that differ only in case by itself, and it lacks {}. Add them \
+         to the column, then run the migration again.",
+        missing.join(" and ")
+    ))
+}
+
+/// The collation of `table`.`column` in the current MySQL-family database,
+/// `None` for a column that has none.
+async fn mysql_column_collation<C: ConnectionTrait + ?Sized>(
+    db: &C,
+    table: &str,
+    column: &str,
+) -> Result<Option<String>, DbErr> {
+    let backend = db.get_database_backend();
+    let row = db
+        .query_one_raw(Statement::from_sql_and_values(
+            backend,
+            "SELECT COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = \
+             DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+            [table.into(), column.into()],
+        ))
+        .await?
+        .ok_or_else(|| {
+            DbErr::Migration(format!(
+                "UniqueEmailIgnoringCase: {table}.{column} does not exist"
+            ))
+        })?;
+    row.try_get_by_index::<Option<String>>(0)
+}
+
+/// Whether `table` has a unique index whose only column is `column`.
+async fn mysql_has_unique_column_index<C: ConnectionTrait + ?Sized>(
+    db: &C,
+    table: &str,
+    column: &str,
+) -> Result<bool, DbErr> {
+    let backend = db.get_database_backend();
+    Ok(db
+        .query_one_raw(Statement::from_sql_and_values(
+            backend,
+            "SELECT INDEX_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = \
+             DATABASE() AND TABLE_NAME = ? AND NON_UNIQUE = 0 GROUP BY INDEX_NAME \
+             HAVING COUNT(*) = 1 AND MAX(COLUMN_NAME) = ? LIMIT 1",
+            [table.into(), column.into()],
+        ))
+        .await?
+        .is_some())
 }
 
 /// Whether `value` is a plain SQL identifier, which needs no escaping
@@ -265,7 +364,55 @@ mod tests {
             migration.name(),
             "m20261019_000003_users_email_unique_ignoring_case"
         );
-        assert_eq!(migration.index_name(), "users_email_lower_unique");
+        assert_eq!(migration.index_name(), "users_email_lower_unique_5");
+    }
+
+    #[test]
+    fn agent_008_no_two_tables_and_columns_share_an_index_name() {
+        let pairs = [
+            ("a_b", "c"),
+            ("a", "b_c"),
+            ("a_", "_b"),
+            ("a", "__b"),
+            ("a__", "b"),
+            ("users", "email"),
+            ("users_email", "x"),
+            ("users", "email_x"),
+        ];
+        let mut names: Vec<String> = pairs
+            .iter()
+            .map(|(table, column)| UniqueEmailIgnoringCase::on(*table, *column).index_name())
+            .collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), pairs.len(), "{names:?}");
+    }
+
+    #[test]
+    fn agent_008_a_case_insensitive_server_needs_a_unique_ci_column() {
+        assert_eq!(
+            case_insensitive_refusal("users", "email", Some("utf8mb4_unicode_ci"), true),
+            None
+        );
+        assert_eq!(
+            case_insensitive_refusal("users", "email", Some("uca1400_ai_ci"), true),
+            None
+        );
+        let binary = case_insensitive_refusal("users", "email", Some("utf8mb4_bin"), true)
+            .expect("a binary collation compares case");
+        assert!(binary.contains("users.email"), "{binary}");
+        assert!(binary.contains("utf8mb4_bin"), "{binary}");
+        assert!(binary.contains("_ci"), "{binary}");
+        let plain = case_insensitive_refusal("users", "email", Some("utf8mb4_general_ci"), false)
+            .expect("a column without a unique index takes duplicates");
+        assert!(plain.contains("users.email"), "{plain}");
+        assert!(plain.contains("unique index"), "{plain}");
+        let neither = case_insensitive_refusal("users", "email", None, false)
+            .expect("a column with no collation and no unique index");
+        assert!(
+            neither.contains("unique index") && neither.contains("_ci"),
+            "{neither}"
+        );
     }
 
     #[test]
