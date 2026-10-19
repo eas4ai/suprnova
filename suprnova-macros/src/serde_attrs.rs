@@ -154,8 +154,9 @@ enum Unknown<'a> {
 }
 
 /// Consumes a serde attribute this module does not read: `name`,
-/// `name = value` or `name(...)`.
-fn skip_meta(meta: &ParseNestedMeta<'_>) -> syn::Result<()> {
+/// `name = value` or `name(...)`. The WebAssembly `#[tool_input]` skips the
+/// `#[validate(...)]` rules it does not read with it too.
+pub(crate) fn skip_meta(meta: &ParseNestedMeta<'_>) -> syn::Result<()> {
     if meta.input.peek(syn::Token![=]) {
         let _: syn::Expr = meta.value()?.parse()?;
     } else if meta.input.peek(syn::token::Paren) {
