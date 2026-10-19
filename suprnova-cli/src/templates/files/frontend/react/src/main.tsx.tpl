@@ -1,6 +1,7 @@
-import { createInertiaApp } from '@inertiajs/react'
+import { createInertiaApp, router } from '@inertiajs/react'
 import type { ErrorInfo } from 'react'
 import { createRoot, hydrateRoot } from 'react-dom/client'
+import { installPageTools } from './lib/agents'
 import { layout, title } from './lib/app'
 
 // Exception text can include copied URLs or credentials even without request context.
@@ -136,6 +137,11 @@ void loadReporting()
 // attribute's value from `getAttribute` once the document has loaded.
 const nonce =
   document.querySelector<HTMLMetaElement>('meta[property="csp-nonce"]')?.nonce || undefined
+
+// The server tools each page lists register with the browser's WebMCP
+// `document.modelContext` while the page is shown. Installed before
+// `createInertiaApp`, so the first page's `navigate` event is heard.
+installPageTools(router)
 
 createInertiaApp({
   // The Inertia Vite plugin replaces `pages` with a resolver that loads

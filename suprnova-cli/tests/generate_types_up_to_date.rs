@@ -180,6 +180,8 @@ fn intt_every_kit_ships_the_types_generate_types_writes_for_it() {
         let project = root.path().join(&name);
         let types = project.join("frontend/src/types/inertia-props.ts");
         let shipped = fs::read_to_string(&types).expect("read the shipped types");
+        let schemas = project.join("frontend/src/types/tool-schemas.ts");
+        let shipped_schemas = fs::read_to_string(&schemas).expect("read the shipped schemas");
         assert!(
             shipped.contains("highlight: NoteHighlight | null;"),
             "{frontend}: search highlights must be typed"
@@ -203,6 +205,25 @@ fn intt_every_kit_ships_the_types_generate_types_writes_for_it() {
             fs::read_to_string(&types).expect("read the regenerated types"),
             shipped,
             "{frontend}: the shipped inertia-props.ts differs from what \
+             generate-types writes for the scaffold"
+        );
+        // AGENT-015: the form request schemas, for the same reason.
+        assert!(
+            text.contains("./frontend/src/types/tool-schemas.ts is up to date"),
+            "{frontend}: generate-types rewrote the shipped tool-schemas.ts; got: {text}"
+        );
+        assert!(
+            !text.contains("No tool schema for"),
+            "{frontend}: a kit form request has no schema; got: {text}"
+        );
+        assert!(
+            shipped_schemas.contains("  StoreNoteRequest: {"),
+            "{frontend}: the note form's request type has a schema:\n{shipped_schemas}"
+        );
+        assert_eq!(
+            fs::read_to_string(&schemas).expect("read the regenerated schemas"),
+            shipped_schemas,
+            "{frontend}: the shipped tool-schemas.ts differs from what \
              generate-types writes for the scaffold"
         );
     }
