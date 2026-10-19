@@ -1075,8 +1075,14 @@ fn ended() -> FrameworkError {
   lapsed or belongs to another user.
 - `ApprovalDecision::Redirect` sends the browser to the client's redirect
   URI, usually on another origin. The security headers' `form-action 'self'`
-  blocks a redirect there after a native form post, so leave by a location
-  visit, `Inertia::location`, or by a page of your own that navigates there.
+  blocks a redirect there after a native form post. On an Inertia page,
+  answer with `Inertia::location(url)`: the visit is a script request, so
+  the browser leaves by `window.location`, which `form-action` does not
+  govern. A page that posts a native form gets a plain redirect from
+  `Inertia::location` too, which the browser blocks, so answer it with a
+  short page of your own that navigates there: a link to the address and
+  `<meta http-equiv="refresh" content="0; url=...">`, with the address
+  escaped for an attribute.
 - `SignIn` means no user is signed in, or the session predates the user's
   last password change or "sign out everywhere".
 
