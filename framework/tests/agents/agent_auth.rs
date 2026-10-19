@@ -574,6 +574,124 @@ async fn agent_007_identity_assertion_agent_registers_and_calls_an_agent_tool() 
     assert_eq!(created["client"], PROVIDER, "the provider it came through");
 }
 
+/// The application's public root in the path prefix tests.
+const PREFIXED: &str = "https://example.test/billing";
+
+/// Name a public URL with a path prefix, before a world is built. Only in
+/// a test with its own process: the configuration is process-wide.
+fn serve_under_a_path_prefix() {
+    suprnova::Config::register(
+        suprnova::AppConfig::builder()
+            .url(PREFIXED)
+            .debug(false)
+            .build(),
+    );
+}
+
+#[tokio::test]
+async fn agent_007_flow_under_a_path_prefix() {
+    if crate::own_process_async::delegate(module_path!(), "agent_007_flow_under_a_path_prefix")
+        .await
+    {
+        return;
+    }
+    serve_under_a_path_prefix();
+    let world = agent_world(|agent| agent).await;
+    let client = &world.client;
+    let resource = format!("{PREFIXED}/mcp");
+
+    let registration = anonymous(client).await;
+    assert_eq!(
+        registration["claim_url"],
+        format!("{PREFIXED}/agent/identity/claim")
+    );
+    let assertion = registration["identity_assertion"].as_str().unwrap();
+    assert_eq!(jwt_part(assertion, 1)["iss"], PREFIXED);
+    let tokens = client
+        .post("/oauth/token")
+        .form(&[
+            ("grant_type", JWT_BEARER),
+            ("assertion", assertion),
+            ("resource", resource.as_str()),
+        ])
+        .send()
+        .await;
+    assert_eq!(tokens.status(), 200, "{}", tokens.body_text());
+    let token = tokens.json()["access_token"].as_str().unwrap().to_owned();
+    let (status, shown) = call(client, &token, "posts.show", json!({ "post": "3" })).await;
+    assert_eq!(status, 200, "{shown}");
+
+    let metadata = client
+        .get("/.well-known/oauth-authorization-server")
+        .send()
+        .await
+        .json();
+    assert_eq!(
+        metadata["agent_auth"]["skill"],
+        format!("{PREFIXED}/auth.md")
+    );
+
+    // The verification URI is the claim page under the prefix; a guest is
+    // sent to sign in there and comes back to the page, its address
+    // relative to the public root as the framework's redirects take one.
+    let user = new_account("prefixed-claim");
+    let registration = service_auth(client, &account_email(&user)).await;
+    let uri = registration["claim"]["verification_uri"].as_str().unwrap();
+    assert!(
+        uri.starts_with(&format!("{PREFIXED}/agent/claim?claim_attempt_token=")),
+        "{uri}"
+    );
+    let local = path_of(uri).replacen("/billing", "", 1);
+    let guest = client.get(&local).send().await;
+    let sign_in_at = location(&guest);
+    assert!(
+        sign_in_at.starts_with(&format!("{PREFIXED}/login?return_to=")),
+        "{sign_in_at}"
+    );
+    assert_eq!(query_param(&sign_in_at, "return_to").unwrap(), local);
+    sign_in(client, &user).await;
+    let page = client.get(&local).send().await;
+    assert_eq!(page.status(), 200, "{}", page.body_text());
+    assert!(
+        page.body_text()
+            .contains(&format!("action=\"{PREFIXED}/agent/claim\"")),
+        "{}",
+        page.body_text()
+    );
+    let done = confirm(
+        client,
+        &page,
+        registration["claim"]["user_code"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(done.status(), 200, "{}", done.body_text());
+}
+
+#[tokio::test]
+async fn agent_011_auth_md_under_a_path_prefix() {
+    if crate::own_process_async::delegate(module_path!(), "agent_011_auth_md_under_a_path_prefix")
+        .await
+    {
+        return;
+    }
+    serve_under_a_path_prefix();
+    let world = agent_world(with_id_jags).await;
+    let text = world.client.get("/auth.md").send().await.body_text();
+    for endpoint in [
+        "/agent/identity",
+        "/agent/identity/claim",
+        "/agent/event/notify",
+        "/oauth/token",
+        "/oauth/revoke",
+    ] {
+        assert!(
+            text.contains(&format!("{PREFIXED}{endpoint}")),
+            "{endpoint} under the prefix in {text}"
+        );
+    }
+    assert!(!text.contains("http://localhost"), "{text}");
+}
+
 #[tokio::test]
 async fn agent_007_metadata_carries_the_agent_auth_block() {
     let world = agent_world(with_id_jags).await;
