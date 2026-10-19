@@ -149,6 +149,7 @@ test('agent_016_wasm_registers_a_typed_tool', async ({ page }) => {
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: false,
+    debugging: false,
   });
 
   // A call reaches the typed handler; input that breaks a rule comes back
@@ -186,6 +187,7 @@ test('agent_016_wasm_server_tool_call_carries_session_csrf_and_header', async ({
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: false,
+    debugging: false,
   });
   await page.request.get('/test/reset');
 

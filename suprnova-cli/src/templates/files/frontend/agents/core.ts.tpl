@@ -26,11 +26,16 @@ export type ToolResult = {
 /** What WebMCP hands `execute` beside the input: the agent's abort signal. */
 export type ToolClient = { signal?: AbortSignal }
 
-/** The three hints every registration carries, from the tool's markings. */
+/**
+ * The four hints every registration carries, from the tool's markings.
+ * `debugging` marks a tool meant for debugging and developer tooling, not
+ * end users.
+ */
 export type ToolAnnotations = {
   readOnlyHint: boolean
   untrustedContentHint: boolean
   consequentialHint: boolean
+  debugging: boolean
 }
 
 /** A JSON Schema whose root is an object, as a tool's input must be. */
@@ -425,7 +430,7 @@ export type PageToolLimits = { maxResultBytes: number; callTimeoutMs: number }
 export type PageTools = { limits: PageToolLimits; tools: PageTool[] }
 
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
-const HINTS = ['consequentialHint', 'readOnlyHint', 'untrustedContentHint']
+const HINTS = ['consequentialHint', 'debugging', 'readOnlyHint', 'untrustedContentHint']
 
 function exactKeys(value: Record<string, unknown>, required: string[], optional: string[] = []): boolean {
   const keys = Object.keys(value)
@@ -500,6 +505,7 @@ function parseTool(tool: unknown, names: Set<string>): PageTool | null {
       readOnlyHint: annotations.readOnlyHint as boolean,
       untrustedContentHint: annotations.untrustedContentHint as boolean,
       consequentialHint: annotations.consequentialHint as boolean,
+      debugging: annotations.debugging as boolean,
     },
     method: method as PageTool['method'],
     path: pieces as PathPiece[],
@@ -811,6 +817,8 @@ export type PageToolOptions<TInput = Record<string, unknown>> = {
   readOnly?: boolean
   untrustedContent?: boolean
   consequential?: boolean
+  /** Meant for debugging and developer tooling, not end users. */
+  debugging?: boolean
   /**
    * Answers a call: a {@link ToolResult}, or any JSON value, which becomes
    * the result's text and, for an object, its structured content. A thrown
@@ -858,6 +866,7 @@ export function componentTool<TInput>(
       readOnlyHint: options.readOnly === true,
       untrustedContentHint: options.untrustedContent === true,
       consequentialHint: options.consequential === true,
+      debugging: options.debugging === true,
     },
     execute: async (input, client) => {
       const signal = client?.signal
@@ -905,6 +914,8 @@ export type FormToolOptions = {
    * `DELETE` action, whatever this says.
    */
   destructive?: boolean
+  /** Meant for debugging and developer tooling, not end users. */
+  debugging?: boolean
 }
 
 /** The callbacks of the Inertia visit a form tool submits with. */
@@ -956,6 +967,7 @@ export function formTool(options: FormToolOptions, driver: () => FormDriver): To
       readOnlyHint: method === 'get',
       untrustedContentHint: false,
       consequentialHint: destructive,
+      debugging: options.debugging === true,
     },
     execute: async (input, client) => {
       const signal = client?.signal

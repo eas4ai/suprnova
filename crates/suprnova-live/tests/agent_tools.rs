@@ -558,6 +558,26 @@ mod metadata {
             ],
         );
         assert_ne!(headless.contract_digest(), with_tool.contract_digest());
+        // The debugging hint is in the digest when set, and a tool that does
+        // not set it keeps the digest it had before the hint existed.
+        let debugging = component(
+            vec![field("count", FieldCategory::State)],
+            vec![
+                action("increment", ModelCodec::I64)
+                    .with_tool(tool("counter.increment").with_debugging(true))
+                    .expect("tool"),
+            ],
+        );
+        assert_ne!(debugging.contract_digest(), with_tool.contract_digest());
+        let unset = component(
+            vec![field("count", FieldCategory::State)],
+            vec![
+                action("increment", ModelCodec::I64)
+                    .with_tool(tool("counter.increment").with_debugging(false))
+                    .expect("tool"),
+            ],
+        );
+        assert_eq!(unset.contract_digest(), with_tool.contract_digest());
     }
 
     #[test]
@@ -897,6 +917,7 @@ mod root {
                 "readOnlyHint": false,
                 "untrustedContentHint": true,
                 "consequentialHint": true,
+                "debugging": false,
             })
         );
         assert_eq!(tool["inputSchema"]["required"], json!(["amount"]));
@@ -910,6 +931,20 @@ mod root {
             tools_attribute(&html).expect("tools")["tools"][0]["name"],
             "trace.execute.side-2"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_012_root_carries_the_debugging_hint() {
+        // WebMCP's fourth hint marks a tool for debugging and developer
+        // tooling; the root always carries it, true when the tool sets it.
+        let html = mount(
+            trace_metadata(Some(browser_tool().with_debugging(true)), true),
+            "main",
+        )
+        .await
+        .expect("mount");
+        let tools = tools_attribute(&html).expect("the root carries the tool contract");
+        assert_eq!(tools["tools"][0]["annotations"]["debugging"], true);
     }
 
     #[tokio::test]

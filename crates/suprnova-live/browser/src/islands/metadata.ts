@@ -16,7 +16,12 @@ const MAX_AGENT_FIELDS = 512;
 const AGENT_TOOL_NAME = /^[A-Za-z0-9_.-]{1,128}$/u;
 const AGENT_TOOL_INSTANCE = /^[A-Za-z0-9_-]{1,63}$/u;
 const AGENT_FIELD_NAME = /^[A-Za-z0-9_]{1,128}$/u;
-const AGENT_ANNOTATIONS = ["consequentialHint", "readOnlyHint", "untrustedContentHint"] as const;
+const AGENT_ANNOTATIONS = [
+  "consequentialHint",
+  "debugging",
+  "readOnlyHint",
+  "untrustedContentHint",
+] as const;
 const ACTION_PARAMETER_ENTRY =
   /^([A-Za-z0-9._:/-]{1,128})\(([A-Za-z0-9._:/-]{1,128}(?:,[A-Za-z0-9._:/-]{1,128}){0,127})\)$/u;
 const REQUIRED_ATTRIBUTES = [
@@ -65,11 +70,15 @@ export interface IslandMetadata {
   readonly agentTools?: AgentToolContract;
 }
 
-/** The WebMCP hints a Live tool carries, all three always present. */
+/**
+ * The WebMCP hints a Live tool carries, all four always present. `debugging`
+ * marks a tool meant for debugging and developer tooling, not end users.
+ */
 export interface AgentToolAnnotations {
   readonly readOnlyHint: boolean;
   readonly untrustedContentHint: boolean;
   readonly consequentialHint: boolean;
+  readonly debugging: boolean;
 }
 
 /** One Live action the page registers as a WebMCP tool. */
@@ -251,6 +260,7 @@ export function parseAgentTools(value: string, documentKey: string): AgentToolCo
         readOnlyHint: annotations["readOnlyHint"] as boolean,
         untrustedContentHint: annotations["untrustedContentHint"] as boolean,
         consequentialHint: annotations["consequentialHint"] as boolean,
+        debugging: annotations["debugging"] as boolean,
       }),
     });
   });

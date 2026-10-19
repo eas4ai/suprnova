@@ -157,6 +157,7 @@ const TOOL: ServerToolDefinition = Object.freeze({
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: false,
+    debugging: false,
   }),
   method: "POST",
   path: Object.freeze([Object.freeze({ text: "/posts" })]),
@@ -169,6 +170,7 @@ const READ: ServerToolDefinition = Object.freeze({
     readOnlyHint: true,
     untrustedContentHint: true,
     consequentialHint: false,
+    debugging: true,
   }),
   method: "GET",
   path: Object.freeze([
@@ -231,6 +233,23 @@ describe("the server tools element", () => {
         v: 1,
         limits: { maxResultBytes: 1, callTimeoutMs: 1 },
         tools: [{ ...TOOL, annotations: { readOnlyHint: true, untrustedContentHint: false } }],
+      },
+    ],
+    [
+      "the three hints without debugging",
+      {
+        v: 1,
+        limits: { maxResultBytes: 1, callTimeoutMs: 1 },
+        tools: [
+          {
+            ...TOOL,
+            annotations: {
+              readOnlyHint: false,
+              untrustedContentHint: false,
+              consequentialHint: false,
+            },
+          },
+        ],
       },
     ],
     [
@@ -679,6 +698,15 @@ describe("the runtime's server tools", () => {
       readOnlyHint: false,
       untrustedContentHint: false,
       consequentialHint: false,
+      debugging: false,
+    });
+    // `debugging` is WebMCP's fourth hint, sent as the server set it.
+    const debugging = context.registered.find((entry) => entry.tool.name === "notes.show");
+    expect(debugging?.tool.annotations).toEqual({
+      readOnlyHint: true,
+      untrustedContentHint: true,
+      consequentialHint: false,
+      debugging: true,
     });
     runtime.suspend();
     expect(context.live()).toEqual([]);

@@ -86,6 +86,15 @@ where
         self
     }
 
+    /// Marks the tool as meant for debugging and developer tooling rather
+    /// than end users, WebMCP's `debugging` hint, so an agent acting for an
+    /// end user can leave it aside. The server's `#[tool]` sets it with
+    /// `annotations(debugging)`.
+    pub fn debugging(mut self, debugging: bool) -> Self {
+        self.annotations.debugging = debugging;
+        self
+    }
+
     /// Register the tool with `document.modelContext`, with `handler`
     /// answering each call. The tool stays registered until the returned
     /// handle is dropped.
@@ -210,7 +219,7 @@ impl fmt::Debug for ToolHandle {
     }
 }
 
-/// The three WebMCP hints, always all sent, so an agent never falls back
+/// The four WebMCP hints, always all sent, so an agent never falls back
 /// on a default the marking did not choose.
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -218,6 +227,7 @@ pub(crate) struct Annotations {
     pub(crate) read_only_hint: bool,
     pub(crate) untrusted_content_hint: bool,
     pub(crate) consequential_hint: bool,
+    pub(crate) debugging: bool,
 }
 
 /// Whether `name` follows the AGENT-001 grammar: 1 to 128 ASCII letters,
@@ -250,6 +260,7 @@ pub(crate) fn descriptor(
             "readOnlyHint": annotations.read_only_hint,
             "untrustedContentHint": annotations.untrusted_content_hint,
             "consequentialHint": annotations.consequential_hint,
+            "debugging": annotations.debugging,
         }),
     );
     Value::Object(tool)

@@ -18,6 +18,7 @@ const TOOL: AgentToolDefinition = Object.freeze({
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: true,
+    debugging: false,
   }),
 });
 

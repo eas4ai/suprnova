@@ -36,7 +36,12 @@ const TOOL = {
   title: "Increment",
   description: "Add one to the counter.",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
-  annotations: { readOnlyHint: false, untrustedContentHint: false, consequentialHint: true },
+  annotations: {
+    readOnlyHint: false,
+    untrustedContentHint: false,
+    consequentialHint: true,
+    debugging: false,
+  },
 };
 
 function contract(
@@ -67,7 +72,12 @@ describe("the island root's tool contract", () => {
       name: "counter.increment.main",
       title: "Increment",
       description: "Add one to the counter.",
-      annotations: { readOnlyHint: false, untrustedContentHint: false, consequentialHint: true },
+      annotations: {
+        readOnlyHint: false,
+        untrustedContentHint: false,
+        consequentialHint: true,
+        debugging: false,
+      },
     });
     expect(Object.isFrozen(parsed.tools[0])).toBe(true);
   });
@@ -85,6 +95,20 @@ describe("the island root's tool contract", () => {
     invalid(contract([{ ...TOOL, inputSchema: [] }]));
     invalid(contract([{ ...TOOL, annotations: { readOnlyHint: true } }]));
     invalid(contract([{ ...TOOL, annotations: { ...TOOL.annotations, destructiveHint: true } }]));
+    // The three hints before WebMCP added `debugging`.
+    invalid(
+      contract([
+        {
+          ...TOOL,
+          annotations: {
+            readOnlyHint: false,
+            untrustedContentHint: false,
+            consequentialHint: true,
+          },
+        },
+      ]),
+    );
+    invalid(contract([{ ...TOOL, annotations: { ...TOOL.annotations, debugging: "yes" } }]));
     invalid(contract([{ ...TOOL, extra: true }]));
     invalid(contract([TOOL, TOOL]));
     invalid(contract([]));

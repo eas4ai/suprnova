@@ -55,7 +55,8 @@ fn path_case(case: &Value) -> Result<(), String> {
             "annotations": {
                 "readOnlyHint": false,
                 "untrustedContentHint": false,
-                "consequentialHint": false
+                "consequentialHint": false,
+                "debugging": false
             },
             "method": case["method"],
             "path": case["path"],
@@ -186,7 +187,8 @@ fn element() -> Value {
             "annotations": {
                 "readOnlyHint": false,
                 "untrustedContentHint": false,
-                "consequentialHint": false
+                "consequentialHint": false,
+                "debugging": false
             },
             "method": "POST",
             "path": [{ "text": "/app/posts/" }, { "param": "post", "optional": false, "catchAll": false }]
@@ -264,6 +266,18 @@ fn agent_016_server_tools_element_is_read_strictly() {
         (
             "an extra hint",
             Box::new(|e| e["tools"][0]["annotations"]["destructiveHint"] = json!(true)),
+        ),
+        (
+            "the three hints without debugging",
+            Box::new(|e| {
+                if let Some(hints) = e["tools"][0]["annotations"].as_object_mut() {
+                    hints.remove("debugging");
+                }
+            }),
+        ),
+        (
+            "a debugging hint that is not a boolean",
+            Box::new(|e| e["tools"][0]["annotations"]["debugging"] = json!("yes")),
         ),
         (
             "a hint that is not a boolean",
@@ -387,12 +401,13 @@ struct AddTodo {
 }
 
 #[test]
-fn agent_016_page_tool_descriptor_carries_the_derived_schema_and_all_three_hints() {
+fn agent_016_page_tool_descriptor_carries_the_derived_schema_and_all_four_hints() {
     let descriptor = PageTool::<AddTodo>::new("todos.add", "Add an item to the todo list.")
         .title("Add todo")
         .read_only(false)
         .untrusted_content(true)
         .consequential(true)
+        .debugging(true)
         .descriptor()
         .expect("a valid tool has a descriptor");
     assert_eq!(
@@ -405,7 +420,8 @@ fn agent_016_page_tool_descriptor_carries_the_derived_schema_and_all_three_hints
             "annotations": {
                 "readOnlyHint": false,
                 "untrustedContentHint": true,
-                "consequentialHint": true
+                "consequentialHint": true,
+                "debugging": true
             }
         })
     );
@@ -427,7 +443,8 @@ fn agent_016_page_tool_descriptor_carries_the_derived_schema_and_all_three_hints
         json!({
             "readOnlyHint": false,
             "untrustedContentHint": false,
-            "consequentialHint": false
+            "consequentialHint": false,
+            "debugging": false
         })
     );
 }

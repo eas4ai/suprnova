@@ -210,16 +210,19 @@ test('agent_014_live_server_tool_annotations_follow_the_markings', async ({ page
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: false,
+    debugging: false,
   });
   expect(hints('posts.clear')).toEqual({
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: true,
+    debugging: false,
   });
   expect(hints('notes.show')).toEqual({
     readOnlyHint: true,
     untrustedContentHint: true,
     consequentialHint: false,
+    debugging: false,
   });
   // What Chromium kept.
   const kept = await page.evaluate(async () => {

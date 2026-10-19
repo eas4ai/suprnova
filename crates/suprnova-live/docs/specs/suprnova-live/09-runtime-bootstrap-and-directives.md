@@ -248,7 +248,7 @@ attribute otherwise. Its value is canonical JSON:
 {"fields":["count"],
  "integers":["count"],
  "tools":[{"action":"increment","annotations":{"consequentialHint":false,
-   "readOnlyHint":false,"untrustedContentHint":false},
+   "debugging":false,"readOnlyHint":false,"untrustedContentHint":false},
    "description":"Add one to the counter.","inputSchema":{},
    "name":"counter.increment.main","title":"Increment"}],
  "v":1}
@@ -258,7 +258,7 @@ attribute otherwise. Its value is canonical JSON:
 them with a 64-bit integer codec, the only fields whose lossless tags a tool
 result unwraps (spec 05); each tool names its
 action, its full name `{base}.{documentKey}`, its optional title, its
-description, its input schema (spec 04) and the three WebMCP hints. The
+description, its input schema (spec 04) and the four WebMCP hints. The
 attribute is built from the generated metadata, narrowed by the host to the
 tools the request's viewer may call (AGENT-014): a guest sees the tools that
 accept the public, a session user those that accept users or the public, a
@@ -286,7 +286,9 @@ Acceptance criteria:
   digits, `_`, `-` and `.` that ends in a `.` and the island's document key
   and is longer than it, an action identity, a non-blank description, an
   optional non-blank title, an object input schema, and annotations of
-  exactly the three boolean hints. Anything else marks the island invalid.
+  exactly the four boolean hints: `readOnlyHint`, `untrustedContentHint`,
+  `consequentialHint` and `debugging`. Anything else marks the island
+  invalid.
 - A page offers a tool only where the tool's checks run. A router installs
   the Live tool gate, which checks the caller of every request to a Live
   tool's action and counts each tool call against a budget (spec 07),
@@ -365,7 +367,7 @@ id="suprnova-agent-tools">` element:
  "tools":[{"name":"posts.create","title":"Create a post",
    "description":"Create a draft post.","inputSchema":{"type":"object"},
    "annotations":{"readOnlyHint":false,"untrustedContentHint":false,
-     "consequentialHint":false},
+     "consequentialHint":false,"debugging":false},
    "method":"POST","path":[{"text":"/posts"}]}]}
 ```
 
@@ -381,7 +383,7 @@ Acceptance criteria:
   as it. It accepts only exactly the keys `v`, `limits` and `tools`; `v` is
   1; both limits are positive whole numbers; `tools` holds 1 to 64 tools,
   each with a unique name in the tool grammar, an optional non-blank title,
-  a non-blank description, an object input schema, exactly the three boolean
+  a non-blank description, an object input schema, exactly the four boolean
   hints, a method of `GET`, `POST`, `PUT`, `PATCH` or `DELETE`, and a path of
   `{text}` and `{param, optional, catchAll}` pieces starting with text. An
   element it does not accept registers nothing and records

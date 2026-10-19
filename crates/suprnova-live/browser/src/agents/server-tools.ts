@@ -24,7 +24,7 @@ const MAX_SERVER_TOOLS = 64;
 const TOOL_NAME = /^[A-Za-z0-9_.-]{1,128}$/u;
 const PARAM_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/u;
 const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
-const HINTS = ["consequentialHint", "readOnlyHint", "untrustedContentHint"] as const;
+const HINTS = ["consequentialHint", "debugging", "readOnlyHint", "untrustedContentHint"] as const;
 /** How many invalid fields a validation result names; the rest are counted. */
 const MAX_REPORTED = 20;
 /** The longest field path a validation result shows, in characters. */
@@ -114,6 +114,7 @@ function annotations(value: unknown): AgentToolAnnotations {
     readOnlyHint: value["readOnlyHint"] as boolean,
     untrustedContentHint: value["untrustedContentHint"] as boolean,
     consequentialHint: value["consequentialHint"] as boolean,
+    debugging: value["debugging"] as boolean,
   });
 }
 
@@ -161,7 +162,7 @@ function tool(value: unknown, names: Set<string>): ServerToolDefinition {
  * Read the element's payload, strictly: exactly `v`, `limits` and `tools`;
  * `v` is 1; both limits are positive whole numbers; 1 to 64 tools, each with
  * a unique name in the tool grammar, an optional non-blank title, a
- * non-blank description, an object input schema, the three boolean hints,
+ * non-blank description, an object input schema, the four boolean hints,
  * a method and a path of text and parameter pieces that starts with text.
  * Anything else is refused whole, so the page registers nothing it did not
  * understand.

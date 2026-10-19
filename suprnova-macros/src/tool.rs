@@ -54,6 +54,7 @@ pub(crate) struct Annotations {
     idempotent: Option<bool>,
     open_world: Option<bool>,
     pub(crate) untrusted_content: Option<bool>,
+    pub(crate) debugging: Option<bool>,
 }
 
 /// One parsed `#[tool(...)]`.
@@ -322,6 +323,7 @@ pub(crate) fn meta_tokens(spec: &ToolSpec) -> TokenStream {
     let idempotent = hint(spec.annotations.idempotent);
     let open_world = hint(spec.annotations.open_world);
     let untrusted_content = hint(spec.annotations.untrusted_content);
+    let debugging = hint(spec.annotations.debugging);
     quote! {
         ::suprnova::agents::__ToolMeta {
             name: #name,
@@ -335,6 +337,7 @@ pub(crate) fn meta_tokens(spec: &ToolSpec) -> TokenStream {
                 #idempotent,
                 #open_world,
                 #untrusted_content,
+                #debugging,
             ),
             guard: #guard,
         }
@@ -489,10 +492,11 @@ pub(crate) fn parse_spec(attr: TokenStream, site: ToolSite) -> syn::Result<ToolS
                     "idempotent" => &mut annotations.idempotent,
                     "open_world" => &mut annotations.open_world,
                     "untrusted_content" => &mut annotations.untrusted_content,
+                    "debugging" => &mut annotations.debugging,
                     _ => {
                         return Err(hint.error(
                             "unknown tool annotation; expected `read_only`, `destructive`, \
-                             `idempotent`, `open_world` or `untrusted_content`",
+                             `idempotent`, `open_world`, `untrusted_content` or `debugging`",
                         ));
                     }
                 };

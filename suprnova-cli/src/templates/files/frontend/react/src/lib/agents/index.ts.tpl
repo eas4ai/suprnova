@@ -43,11 +43,12 @@ export {
 export function usePageTool<TInput = Record<string, unknown>>(options: PageToolOptions<TInput>): void {
   const latest = useRef(options)
   latest.current = options
-  const { name, title, description, readOnly, untrustedContent, consequential } = options
+  const { name, title, description, readOnly, untrustedContent, consequential, debugging } =
+    options
   const schema = JSON.stringify(options.inputSchema)
   useEffect(
     () => registerTool(componentTool(latest.current, () => latest.current.execute)),
-    [name, title, description, schema, readOnly, untrustedContent, consequential],
+    [name, title, description, schema, readOnly, untrustedContent, consequential, debugging],
   )
 }
 
@@ -67,7 +68,7 @@ export function useFormTool<TForm extends Record<string, unknown>>(
   latest.current = form
   const settings = useRef(options)
   settings.current = options
-  const { name, title, description, destructive } = options
+  const { name, title, description, destructive, debugging } = options
   const { method, url } = options.action
   const schema = JSON.stringify(options.schema)
   useEffect(
@@ -81,6 +82,6 @@ export function useFormTool<TForm extends Record<string, unknown>>(
           cancel: () => latest.current.cancel(),
         })),
       ),
-    [name, title, description, schema, method, url, destructive],
+    [name, title, description, schema, method, url, destructive, debugging],
   )
 }

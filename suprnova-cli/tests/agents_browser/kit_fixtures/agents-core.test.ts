@@ -21,7 +21,12 @@ type ResultCase = (typeof cases.results)[number]
 
 const LIMITS = { maxResultBytes: 8_388_608, callTimeoutMs: 30_000 }
 const SCHEMA = { type: 'object' as const, properties: {} }
-const HINTS = { readOnlyHint: false, untrustedContentHint: false, consequentialHint: false }
+const HINTS = {
+  readOnlyHint: false,
+  untrustedContentHint: false,
+  consequentialHint: false,
+  debugging: false,
+}
 
 function serverTool(overrides: Partial<PageTool> = {}): PageTool {
   return {
@@ -146,7 +151,7 @@ const search = serverTool({
   description: 'Search the posts.',
   method: 'GET',
   path: [{ text: '/posts' }],
-  annotations: { readOnlyHint: true, untrustedContentHint: true, consequentialHint: false },
+  annotations: { readOnlyHint: true, untrustedContentHint: true, consequentialHint: false, debugging: true },
 })
 const create = serverTool({
   name: 'posts.create',
@@ -159,7 +164,7 @@ const destroy = serverTool({
   description: 'Delete a post.',
   method: 'DELETE',
   path: [{ text: '/posts/' }, { param: 'post', optional: false, catchAll: false }],
-  annotations: { readOnlyHint: false, untrustedContentHint: false, consequentialHint: true },
+  annotations: { readOnlyHint: false, untrustedContentHint: false, consequentialHint: true, debugging: false },
 })
 const help = serverTool({ name: 'help.search', description: 'Search the help.', path: [{ text: '/help' }] })
 
@@ -173,11 +178,13 @@ test('agent_014_page_tools_register_with_their_annotations', () => {
     readOnlyHint: true,
     untrustedContentHint: true,
     consequentialHint: false,
+    debugging: true,
   })
   expect(descriptor('posts.delete').annotations).toEqual({
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: true,
+    debugging: false,
   })
   expect(descriptor('posts.create').title).toBe('Create a post')
   expect(descriptor('posts.create').description).toBe('Create a draft post.')
@@ -224,6 +231,13 @@ test('agent_014_invalid_page_tools_register_nothing', () => {
   router.navigate({ component: 'Posts/Index', agentTools: { v: 1, limits: LIMITS, tools: [search, broken] } })
   expect(context.names()).toEqual([])
   router.navigate({ component: 'Posts/Index', agentTools: { v: 2, limits: LIMITS, tools: [search] } })
+  expect(context.names()).toEqual([])
+  // The three hints before WebMCP added `debugging`.
+  const older = {
+    ...create,
+    annotations: { readOnlyHint: false, untrustedContentHint: false, consequentialHint: false },
+  }
+  router.navigate({ component: 'Posts/Index', agentTools: { v: 1, limits: LIMITS, tools: [older] } })
   expect(context.names()).toEqual([])
   expect(error).toHaveBeenCalled()
   stop()

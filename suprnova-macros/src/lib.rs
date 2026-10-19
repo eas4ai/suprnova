@@ -857,7 +857,9 @@ pub fn request(attr: TokenStream, input: TokenStream) -> TokenStream {
 /// - `output`: a type whose JSON Schema is the tool's output schema, usually
 ///   a [`macro@tool_output`] struct.
 /// - `annotations(...)`: hints for clients: `read_only`, `destructive`,
-///   `idempotent`, `open_world`, `untrusted_content`.
+///   `idempotent`, `open_world`, `untrusted_content`, and `debugging`, which
+///   marks a tool for debugging and developer tooling and reaches only a
+///   page's WebMCP registration.
 /// - `title`: a display name.
 /// - `route`: the route name, when the handler serves more than one route.
 /// - `guard`: the auth guard a user caller is signed into for the call.

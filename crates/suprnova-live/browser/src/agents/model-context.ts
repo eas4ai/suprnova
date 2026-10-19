@@ -108,6 +108,7 @@ export function registerAgentTools<Tool extends WebMcpToolDefinition>(
         readOnlyHint: tool.annotations.readOnlyHint,
         untrustedContentHint: tool.annotations.untrustedContentHint,
         consequentialHint: tool.annotations.consequentialHint,
+        debugging: tool.annotations.debugging,
       }),
       execute: (input: unknown, client?: ModelContextClient) => execute(tool, input, client),
     });

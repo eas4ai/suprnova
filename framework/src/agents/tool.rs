@@ -27,6 +27,7 @@ pub struct ToolAnnotations {
     idempotent: Option<bool>,
     open_world: Option<bool>,
     untrusted_content: Option<bool>,
+    debugging: Option<bool>,
 }
 
 impl ToolAnnotations {
@@ -38,6 +39,7 @@ impl ToolAnnotations {
         idempotent: Option<bool>,
         open_world: Option<bool>,
         untrusted_content: Option<bool>,
+        debugging: Option<bool>,
     ) -> Self {
         Self {
             read_only,
@@ -45,6 +47,7 @@ impl ToolAnnotations {
             idempotent,
             open_world,
             untrusted_content,
+            debugging,
         }
     }
 
@@ -72,6 +75,13 @@ impl ToolAnnotations {
     /// Whether the tool's result may carry content from untrusted sources.
     pub fn untrusted_content(&self) -> Option<bool> {
         self.untrusted_content
+    }
+
+    /// Whether the tool is meant for debugging and developer tooling rather
+    /// than for end users: WebMCP's `debugging` hint. MCP's annotations have
+    /// no such hint, so it reaches only a page's WebMCP registration.
+    pub fn debugging(&self) -> Option<bool> {
+        self.debugging
     }
 
     /// The MCP `annotations` object, or `None` when no hint is set.

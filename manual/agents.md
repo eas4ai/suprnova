@@ -339,8 +339,13 @@ risky call. A bare key means `true`:
 | `idempotent` | `idempotentHint` | not sent |
 | `open_world` | `openWorldHint` | not sent |
 | `untrusted_content` | not sent | `untrustedContentHint` |
+| `debugging` | not sent | `debugging` |
 
-Over MCP only the hints you set are sent. A page sends WebMCP's three hints
+`debugging` marks a tool meant for debugging and developer tooling rather than
+for end users, such as one that dumps the page's state, so an agent acting for
+a user can leave it aside. MCP's annotations have no such hint.
+
+Over MCP only the hints you set are sent. A page sends WebMCP's four hints
 always, `false` where you set nothing. After a tool that is not marked
 `read_only`, the page refreshes its data, so mark tools that only read.
 Annotations are hints. They never replace the route's policies.
@@ -1188,6 +1193,10 @@ export default function Cart({ items }: { items: string[] }) {
 }
 ```
 
+`readOnly`, `untrustedContent`, `consequential` and `debugging` set the
+tool's four WebMCP hints, as the `#[tool]` annotations above do. `useFormTool`
+takes `destructive` and `debugging`.
+
 `useFormTool` makes a kit form a tool. The input schema comes from the
 form's server request type: `suprnova generate-types` writes every form
 request's schema to `frontend/src/types/tool-schemas.ts`, keyed by the
@@ -1259,7 +1268,9 @@ the session, the CSRF token and the tool-call header, and its validation
 errors name each field as the server's do. The crate's `#[tool_input]`
 brings its own copies of `serde`, `schemars` and `validator`, so the front
 end needs none of them. An enum or another type nested in the input takes
-`#[suprnova_webmcp::tool_schema]`, as on the server.
+`#[suprnova_webmcp::tool_schema]`, as on the server. `PageTool` sets the
+WebMCP hints with `read_only`, `untrusted_content`, `consequential` and
+`debugging`.
 
 Every function compiles on every target, so a crate shared with the server
 builds natively too. Outside the browser, registering or calling a tool
