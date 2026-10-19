@@ -1766,7 +1766,10 @@ async fn agent_014_live_notes_page_offers_the_notes_tools(world: &World, email: 
     for path in ["/", "/login", "/register"] {
         let shown = page(client, path).send().await;
         assert_eq!(shown.status(), 200, "{path}: {}", shown.body_text());
-        assert!(shown.page_tools().is_empty(), "{path} offers a guest a tool");
+        assert!(
+            shown.page_tools().is_empty(),
+            "{path} offers a guest a tool"
+        );
     }
     assert_eq!(sign_in(client, "/login", email).await, "/dashboard");
 }
@@ -1912,7 +1915,10 @@ async fn agent_002_live_notes_tools_act_for_the_caller_only(world: &World, email
         ["Ada's shared plan"]
     );
     let refused = reader
-        .call("notes.create", json!({"title": "Not the client's to write"}))
+        .call(
+            "notes.create",
+            json!({"title": "Not the client's to write"}),
+        )
         .await;
     assert_eq!(refused.status(), 403, "{}", refused.text());
     assert!(

@@ -1603,7 +1603,10 @@ async fn agent_014_inertia_notes_page_offers_the_notes_tools() {
     for path in ["/", "/login", "/register"] {
         let shown = guest.open(path).await;
         assert_eq!(shown.status(), 200, "{path}: {}", shown.body_text());
-        assert!(shown.page_tools().is_empty(), "{path} offers a guest a tool");
+        assert!(
+            shown.page_tools().is_empty(),
+            "{path} offers a guest a tool"
+        );
     }
 }
 
@@ -1621,7 +1624,9 @@ async fn agent_001_notes_search_is_matched_before_a_note_id() {
         .await;
     assert_eq!(plain.status(), 200, "{}", plain.body_text());
     assert_eq!(titles(&plain.json()), ["Wendy's list"]);
-    let id = plain.json()["notes"][0]["id"].as_u64().expect("the note's id");
+    let id = plain.json()["notes"][0]["id"]
+        .as_u64()
+        .expect("the note's id");
     let note = wendy.visit(&format!("/notes/{id}")).await;
     assert_eq!(note.status(), 200, "{}", note.body_text());
     assert_eq!(note.inertia_page()["component"], "Notes/Show");
@@ -1746,7 +1751,10 @@ async fn agent_002_notes_tools_act_for_the_caller_only() {
         ["Uma's shared plan"]
     );
     let refused = client
-        .call("notes.create", json!({ "title": "Not the client's to write" }))
+        .call(
+            "notes.create",
+            json!({ "title": "Not the client's to write" }),
+        )
         .await;
     assert_eq!(refused.status(), 403, "{}", refused.text());
     assert!(
@@ -1792,12 +1800,18 @@ async fn agent_002_notes_tools_act_for_the_caller_only() {
     let theirs = search_in_browser(&vic, json!({ "query": "nobody" })).await;
     assert_eq!(titles(&theirs.json()), ["Written by an agent"]);
     let not_hers = search_in_browser(&uma, json!({ "query": "nobody" })).await;
-    assert!(titles(&not_hers.json()).is_empty(), "{}", not_hers.body_text());
+    assert!(
+        titles(&not_hers.json()).is_empty(),
+        "{}",
+        not_hers.body_text()
+    );
     let listed = vic.visit("/notes").await.inertia_page();
     assert!(
         listed["props"]["notes"]
             .as_array()
-            .is_some_and(|notes| notes.iter().any(|note| note["title"] == "Written by an agent")),
+            .is_some_and(|notes| notes
+                .iter()
+                .any(|note| note["title"] == "Written by an agent")),
         "{listed}"
     );
 

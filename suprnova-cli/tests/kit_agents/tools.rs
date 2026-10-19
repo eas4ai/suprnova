@@ -256,7 +256,11 @@ fn agent_017_inertia_tool_schemas_carry_the_notes_tools() {
         ),
         (
             "CreateNoteInput",
-            &["\"minLength\": 1", "\"maxLength\": 255", "\"maxLength\": 10000"][..],
+            &[
+                "\"minLength\": 1",
+                "\"maxLength\": 255",
+                "\"maxLength\": 10000",
+            ][..],
         ),
     ] {
         let start = schemas
