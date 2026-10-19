@@ -1,7 +1,8 @@
 //! AGENT-017 for the Live kit in Chromium: a scaffolded Live kit, served
 //! under its default security headers, takes an MCP client's approval to
 //! the client's redirect URI, claims an agent, refuses a wrong code and
-//! revokes from its connected-agents page.
+//! revokes from its connected-agents page. AGENT-014 too: its notes page
+//! registers the two notes tools, and a write renders the list again.
 //!
 //! The decision is the case a browser has to prove. The kit's policy
 //! carries `form-action 'self'`, under which Chromium blocks a redirect
@@ -29,11 +30,12 @@ use super::{Host, prepare_suite, run, target, workspace};
 const NAME: &str = "agent_browser_live";
 
 /// The cases `live-kit.spec.ts` holds, each of which must run and pass.
-const CASES: [&str; 4] = [
+const CASES: [&str; 5] = [
     "agent_017_live_kit_approval_reaches_the_client_under_the_default_security_headers",
     "agent_017_live_kit_claim_round_trip",
     "agent_017_live_kit_wrong_claim_code_shows_the_attempts_left",
     "agent_017_live_kit_connected_page_revokes",
+    "agent_014_live_kit_notes_page_offers_the_notes_tools",
 ];
 
 /// Scaffold the Live kit into `work`, pointed at the in-tree framework
@@ -210,7 +212,7 @@ fn agent_017_live_kit_consent_pages_in_chromium() {
                 "test",
                 "--reporter=list,json",
                 "--grep",
-                " agent_017_live_kit_",
+                " agent_01[47]_live_kit_",
             ])
             .current_dir(&suite)
             .env("AGENTS_BASE_URL", &url)

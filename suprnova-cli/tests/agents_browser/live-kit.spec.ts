@@ -8,6 +8,9 @@ import { expect, test, type APIRequestContext, type Page, type Response } from '
 // security headers. `live_kit.rs` scaffolds the kit, builds and starts it
 // with mail written to its log, and sets AGENTS_BASE_URL and
 // LIVE_KIT_SERVER_LOG.
+//
+// AGENT-014: the notes page's two notes tools, called through WebMCP as a
+// built-in agent calls them.
 
 const serverLog = process.env.LIVE_KIT_SERVER_LOG ?? '';
 const password = 'agents-kit-password-42';
@@ -234,4 +237,86 @@ test('agent_017_live_kit_connected_page_revokes', async ({ page, baseURL }) => {
   } finally {
     await client.close();
   }
+});
+
+// ---------------------------------------------------- the notes tools ----
+
+/** Every tool the browser holds for the page, sorted. */
+async function everyTool(page: Page): Promise<string[]> {
+  return page.evaluate(async () => {
+    const context = (document as unknown as { modelContext: { getTools(): Promise<{ name: string }[]> } })
+      .modelContext;
+    return (await context.getTools()).map((tool) => tool.name).sort();
+  });
+}
+
+interface ToolResponse {
+  readonly output?: {
+    readonly structuredContent?: Record<string, unknown>;
+    readonly isError?: boolean;
+  };
+}
+
+/** An agent in the browser, through the DevTools `WebMCP` domain: it calls a tool the page registered and waits for the answer. */
+async function browserAgent(page: Page) {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('WebMCP.enable' as never);
+  const responses = new Map<string, ToolResponse>();
+  let frameId = '';
+  cdp.on('WebMCP.toolsAdded' as never, (event: { tools: { frameId: string }[] }) => {
+    for (const tool of event.tools) frameId = tool.frameId;
+  });
+  cdp.on('WebMCP.toolResponded' as never, (event: ToolResponse & { invocationId: string }) => {
+    responses.set(event.invocationId, event);
+  });
+  return async (toolName: string, input: Record<string, unknown>): Promise<ToolResponse> => {
+    const { invocationId } = (await cdp.send('WebMCP.invokeTool' as never, {
+      frameId,
+      toolName,
+      input,
+    } as never)) as { invocationId: string };
+    await expect.poll(() => responses.has(invocationId)).toBe(true);
+    return responses.get(invocationId) as ToolResponse;
+  };
+}
+
+test('agent_014_live_kit_notes_page_offers_the_notes_tools', async ({ page }) => {
+  const invoke = await browserAgent(page);
+  // A guest is sent to sign in, and no page a guest sees offers a tool.
+  await page.goto('/notes');
+  await expect(page).toHaveURL(/\/login$/);
+  expect(await everyTool(page)).toEqual([]);
+
+  await page.goto('/register');
+  await registerThroughTheForm(page, 'Note Taker', freshEmail('notes'));
+  await page.waitForURL('**/verify-email');
+  await page.goto('/notes');
+  await liveForm(page, 'notes-list');
+  await expect.poll(() => everyTool(page)).toEqual(['notes.create', 'notes.search']);
+  const kept = await page.evaluate(async () => {
+    const context = (document as unknown as {
+      modelContext: { getTools(): Promise<{ name: string; annotations: Record<string, boolean> }[]> };
+    }).modelContext;
+    return (await context.getTools()).find((tool) => tool.name === 'notes.search')?.annotations;
+  });
+  expect(kept).toMatchObject({ readOnlyHint: true, untrustedContentHint: true });
+
+  // The agent writes a note, and the runtime renders the page's islands
+  // again, so the list shows it with no document load.
+  let loads = 0;
+  page.on('load', () => {
+    loads += 1;
+  });
+  const title = `Agent note ${Date.now()}`;
+  const created = await invoke('notes.create', { title, body: 'Written through WebMCP.' });
+  expect(created.output?.isError, JSON.stringify(created)).toBe(false);
+  expect(created.output?.structuredContent).toMatchObject({ title });
+  await expect(page.getByRole('link', { name: title })).toBeVisible();
+  expect(loads).toBe(0);
+
+  // The search reads its input from the query the page sends.
+  const found = await invoke('notes.search', { query: 'WebMCP', limit: 5 });
+  expect(found.output?.isError, JSON.stringify(found)).toBe(false);
+  const notes = (found.output?.structuredContent?.notes ?? []) as { title: string }[];
+  expect(notes.map((note) => note.title)).toEqual([title]);
 });
