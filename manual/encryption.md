@@ -658,7 +658,7 @@ automatically once `APP_KEY` is configured.
 - **Cursor pagination** - `CursorPaginator` encodes the cursor under
   `CryptPurpose::Cursor` so the on-wire `?cursor=…` value cannot be
   forged or replayed across surfaces. See
-  [eloquent.md](eloquent.md#cursor-pagination).
+  [eloquent.md](eloquent.md#cursor-paginate-keyset).
 - **2FA secrets** - the encrypted base32 TOTP secret on
   `two_factor_authentications.secret` uses
   `CryptPurpose::TwoFactorSecret`; recovery codes use

@@ -1178,7 +1178,7 @@ it into shape.
   the lower layer everything sits on.
 - [Migrations](migrations.md) - the schema side of the FK columns these
   relations need to exist.
-- [Query Builder](eloquent.md#query-builder-dual-api) - the dual-API
+- [Query Builder](eloquent.md#query-builder---dual-api) - the dual-API
   surface that relation wrappers forward into.
 - [Eloquent Resources](eloquent-resources.md) - turning loaded
   relations into JSON:API payloads for the wire.

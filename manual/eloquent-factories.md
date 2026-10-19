@@ -625,7 +625,7 @@ immediately available.
 
 **2. Model observers - react on the model lifecycle, not the factory:**
 
-Use [Model Observers](eloquent.md#observers) to wire post-insert
+Use [Model Observers](eloquent.md#observers-and-lifecycle-events) to wire post-insert
 behaviour to the model itself rather than the factory. The observer
 fires for `User::create(...)`, `UserFactory::new().create()`, and any
 other persistence path - exactly what you want when the behaviour is
@@ -790,7 +790,7 @@ primitives:
   can drop one into a request id generator, a workflow step counter,
   or a test harness without explaining what it is.
 - **After-creating is wired to the model, not the factory.** The
-  framework already has [Model Observers](eloquent.md#observers) for
+  framework already has [Model Observers](eloquent.md#observers-and-lifecycle-events) for
   exactly that purpose. Adding a parallel mechanism on the factory
   would make test-time behaviour and production-time behaviour diverge
   by construction.
