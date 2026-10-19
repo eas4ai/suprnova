@@ -531,19 +531,24 @@ pub fn same_origin_path(candidate: &str) -> Option<String> {
 /// application, and it outlives the code that wrote it: a session written by
 /// an earlier release, or by a handler that stored an unchecked
 /// `return_to`, can hold anything. So it is checked when it is read, and
-/// only two kinds of value pass:
+/// only three kinds of value pass:
 ///
 /// - a path on this application, as [`same_origin_path`] accepts it, so a
 ///   value such as `//evil.example/x`, `/\evil.example` or
 ///   `/<TAB>/evil.example` is not followed;
-/// - an absolute `http` or `https` URL, on any origin, with no surrounding
-///   whitespace, no control byte and no backslash: an application may send
-///   a user to another site after sign-in, as Laravel's `intended` does.
+/// - an absolute `http` or `https` URL, on any origin: an application may
+///   send a user to another site after sign-in, as Laravel's `intended`
+///   does;
+/// - a relative reference with no scheme, such as `?tab=2`, `#top` or
+///   `page?x=1`, which a browser resolves against the page it is on, so it
+///   never leaves the origin, and which Laravel follows too.
 ///
-/// Anything else, another scheme such as `javascript:` or `data:`, a
-/// relative reference (`x`, `?q`, `#f`) or a network-path reference with
-/// or without leading whitespace (`//host`, ` //host`), is `None`, and the
-/// caller's fallback applies.
+/// The last two take no surrounding whitespace, control byte or backslash,
+/// which a browser would trim, strip or read as `/` before it resolves the
+/// value. Anything else, an empty value, another scheme such as `javascript:`, `data:` or
+/// `mailto:`, or a network-path reference with or without leading
+/// whitespace (`//host`, ` //host`), is `None`, and the caller's fallback
+/// applies.
 pub(crate) fn stored_destination_or_none(candidate: &str) -> Option<String> {
     if candidate.starts_with('/') {
         return same_origin_path(candidate);
@@ -551,11 +556,19 @@ pub(crate) fn stored_destination_or_none(candidate: &str) -> Option<String> {
     // A browser trims whitespace, strips tab and newline, and reads `\` as
     // `/` before it resolves a URL; a value that needs any of that is not
     // one the application wrote, and could be read as another address.
-    if candidate.trim() != candidate || has_control_byte(candidate) || candidate.contains('\\') {
+    if candidate.is_empty()
+        || candidate.trim() != candidate
+        || has_control_byte(candidate)
+        || candidate.contains('\\')
+    {
         return None;
     }
-    let url = url::Url::parse(candidate).ok()?;
-    matches!(url.scheme(), "http" | "https").then(|| candidate.to_string())
+    match url::Url::parse(candidate) {
+        Ok(url) => matches!(url.scheme(), "http" | "https").then(|| candidate.to_string()),
+        // No scheme: it resolves against the page it is followed from.
+        Err(url::ParseError::RelativeUrlWithoutBase) => Some(candidate.to_string()),
+        Err(_) => None,
+    }
 }
 
 /// True when `s` contains an ASCII control byte: C0 (`0x00..=0x1F`) or
@@ -930,7 +943,7 @@ mod tests {
     // ---- stored_destination_or_none: what an intended URL may be on read ----
 
     #[test]
-    fn agent_017_a_stored_destination_is_a_same_origin_path_or_an_absolute_web_url() {
+    fn agent_017_a_stored_destination_is_a_same_origin_path_an_absolute_web_url_or_relative() {
         for refused in [
             "",
             " //evil.test/x",
@@ -945,9 +958,12 @@ mod tests {
             " https://app.test/x",
             "https://app.test/x ",
             "https://app.test/\tx",
-            "x",
-            "?page=2",
-            "#top",
+            "mailto:x",
+            "x:y",
+            " x",
+            "x ",
+            "x\\y",
+            "?page=2\n",
         ] {
             assert_eq!(stored_destination_or_none(refused), None, "{refused:?}");
         }
@@ -965,6 +981,15 @@ mod tests {
             "https://app.test:8443/x",
             "https://app.test.evil.test/x",
             "https://sso.example/x",
+            // A scheme-relative spelling is still an absolute https URL.
+            "https:evil.test",
+            // A relative reference resolves on the page's own origin, as
+            // Laravel follows one.
+            "x",
+            "?page=2",
+            "#top",
+            "page?x=1",
+            "./a",
         ] {
             assert_eq!(
                 stored_destination_or_none(kept).as_deref(),
