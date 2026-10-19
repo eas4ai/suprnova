@@ -1995,6 +1995,38 @@ impl Auth {
     pub fn magic_link() -> crate::magnetar_integration::magic_link::MagicLinkAuth {
         crate::magnetar_integration::magic_link::MagicLinkAuth
     }
+
+    #[cfg(any(
+        feature = "database-sqlite",
+        feature = "database-postgres",
+        feature = "database-mysql"
+    ))]
+    /// Access email verification through the installed Magnetar engine: a
+    /// single-use link, mailed by the application, that verifies the
+    /// address of the user signed in where it opens.
+    ///
+    /// The user must be signed in, by bearer token or session, because a
+    /// link that verified whoever opened it would verify an account someone
+    /// registered with another person's address. Verifying changes no
+    /// credential and starts no session. See
+    /// [`EmailVerificationAuth`](crate::EmailVerificationAuth).
+    ///
+    /// ```rust,no_run
+    /// use suprnova::{Auth, EmailVerificationIssue, EmailVerificationOutcome};
+    ///
+    /// # async fn ex(token: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// if let EmailVerificationIssue::Issued(link) = Auth::email_verification().issue().await? {
+    ///     // Mail a link that carries link.token to link.email.
+    /// }
+    /// // Later, on the page the link opens, for the user signed in there:
+    /// if Auth::email_verification().verify(token).await? == EmailVerificationOutcome::Verified {
+    ///     // The address is verified.
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub fn email_verification() -> crate::EmailVerificationAuth {
+        crate::EmailVerificationAuth
+    }
 }
 
 #[cfg(test)]

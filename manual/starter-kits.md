@@ -319,6 +319,157 @@ and optional props, cursor scrolling, a JSON form, and flashed toasts each
 have a working server to talk to. No handler lists accounts: a directory of
 users would show every member the name and email of every other member.
 
+### Agents in the API kit
+
+`suprnova new my-api --api` serves agents from `src/agents.rs`: the MCP
+endpoint at `/mcp`, the OAuth server that MCP clients sign users in through,
+and agent accounts under auth.md. For what each of these does, see
+[Agents](agents.md). The kit has no frontend, so it serves the framework's
+own pages, which are plain HTML with no script:
+
+| Page | Path | What the signed-in user does there |
+|---|---|---|
+| Approval | `/oauth/approve` | Allows or denies an MCP client |
+| Claim | `/agent/claim` | Enters the code an agent gives them |
+| Connected agents | `/oauth/connected` | Sees and revokes the clients and agents that act for them |
+
+`src/agents.rs` names each path once, as a constant, and gives the same
+constants to the OAuth server, agent auth, the sign-in page and the session.
+
+#### The consent sign-in
+
+A person approves a client or claims an agent in a browser, so these pages
+act for the user of a browser session. The kit signs a browser in at
+`/login` (`src/controllers/sign_in.rs`) for them:
+
+1. A guest who opens the approval or claim page is sent to
+   `/login?return_to=...`.
+2. The guest signs in with their email address and password, through
+   `Auth::password()`.
+3. The page continues to the address in `return_to`. Only a path on this
+   application is kept: an address such as `//evil.example` or
+   `https://evil.example` sends the user to `/oauth/connected` instead.
+
+The page is fixed markup with one value in it, the session's CSRF token. Its
+routes carry `ConsentPageHeaders`, so it is never framed, cached, or sent as
+a referrer, and its form posts through the route's `CsrfMiddleware`. An
+account with a second factor is told that the page does not offer one, and
+stays signed out. To let those users approve clients, add the factor
+challenge to the page.
+
+#### Email verification
+
+A claim needs the user's email address verified, so the kit verifies it with
+a link, through `Auth::email_verification()`
+(`src/controllers/email_verification.rs`):
+
+1. Registration mails a new account the link, once. Registering an address
+   that already has an account mails nothing. `POST /api/auth/register`
+   takes six requests a minute from one client address, and answers `429`
+   past that.
+2. A signed-in client asks for a new link with
+   `POST /api/email/verification-notification`. It answers `202` when it
+   mails one, and `204` when the address is already verified. The route
+   takes six requests a minute, and one address gets at most three links
+   an hour, the registration's included; past either it answers `429`.
+3. The link opens `/email/verify?token=...` in a browser. A guest is sent
+   to `/login` and comes back, and the page then verifies the address of
+   the user signed in there.
+
+The link works once and expires after 24 hours. It verifies only for the
+account's own user: anyone can register another person's address with a
+password of their own, and a link that verified whoever opened it would
+verify that account. It also proves only the address it was mailed to: once
+the account's address is another, the page answers `409` and verifies
+nothing, and the user asks for a new link. Verifying with one link spends
+the account's other links. Verifying changes no credential and starts no
+session. The mail comes from `MAIL_FROM`, and names the application as
+`APP_NAME`.
+
+A new API project's `.env` mails as the other kits' does: through a local
+SMTP catcher on port 1025 (maildev, mailpit or mailhog), from
+`hello@example.com`. Set a real relay and sender for production, which
+refuses an unencrypted connection. When the link cannot be mailed,
+registration still answers `202` and logs the failure, and the resend
+route answers `500`.
+
+#### Sessions on the consent pages only
+
+`bootstrap.rs` registers `agents::ConsentSession`, which runs the session
+middleware on these paths and no others:
+
+- `/login`, the sign-in page, and its form.
+- `/logout`, where the sign-out form posts.
+- `/oauth/authorize`, `/oauth/approve` and `/oauth/authorizations/{id}`,
+  where a user approves a client.
+- `/oauth/connected` and the revoke forms under it.
+- `/agent/claim` and its form.
+- `/email/verify`, the page the verification link opens.
+
+Every other route serves a client of the JSON API, an MCP client, or an
+agent, which sign in with a bearer token: `/api/*`, `/mcp`, the
+`/.well-known/*` documents, the token, registration and revocation
+endpoints, and agent auth's JSON routes. None of them starts a session or
+sets a cookie, so no client or agent can create a session row per request,
+and the JSON sign-in at `POST /api/auth/login` returns a token and nothing
+else. The migrator creates the `sessions` table, and the session settings
+are the `SESSION_*` variables in [Environment variables](env-vars.md), with
+two exceptions. A consent session ends after 15 minutes without a request
+(`agents::CONSENT_SESSION_IDLE`), and its cookie has no expiry, so the
+browser drops it when it closes. The kit adds no global CSRF middleware, so
+the JSON API still takes no token.
+
+A signed-in user ends the session at once with the **Sign out** form, which
+posts to `/logout` with the session's CSRF token. The form is on the email
+verification page, the page a signed-in user sees: `/login` sends a user who
+is already signed in straight on. Signing out ends the session, and the next
+approval or claim asks for a sign-in again.
+
+`bootstrap.rs` also registers a `DatabaseUserProvider` over `app_users`, so
+`Auth::user()` finds the user a bearer token or a consent page's session
+signed in.
+
+#### Connected agents over JSON
+
+A client of the JSON API lists and revokes the same connections as the
+connected-agents page. The routes sit behind `AuthMiddleware` beside the
+user directory, and act for the user of the bearer token from
+`POST /api/auth/login`:
+
+| Route | Answer |
+|---|---|
+| `GET /api/connected-agents` | `200` with `{"clients": [...], "agents": [...]}`, each newest first |
+| `DELETE /api/connected-agents/clients/{grant}` | `204`, or `404` with `{"message": "No such connected app."}` |
+| `DELETE /api/connected-agents/agents/{registration}` | `204`, or `404` with `{"message": "No such connected agent."}` |
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" \
+  http://localhost:8765/api/connected-agents
+```
+
+An id that belongs to another user answers `404`. An MCP access token is
+not a sign-in to this API, so it gets `401` here. Revoking takes `DELETE`,
+never `POST`: a plain form on another site can send `POST`, and the JSON
+API runs no CSRF check. For the fields of each entry, see
+[Connected agents](agents.md#connected-agents).
+
+#### The signing key in production
+
+`suprnova new` writes a signing key for agent auth into `.env` as
+`AGENT_AUTH_KEY_ID` and `AGENT_AUTH_PRIVATE_KEY`. A deploy that does not
+copy `.env` must set both variables, and the application does not start
+without them. To print a new pair, run `cargo run -- agents:key`. Outside
+the local and testing environments, also set `APP_URL`: it is the OAuth
+server's issuer. For more about keys, see
+[Keys and operations](agents.md#keys-and-operations).
+
+#### Why the kit ships no browser helpers
+
+The Inertia kits ship browser helpers that offer a page's tools to an agent
+in the browser (see [Tools in the browser](agents.md#tools-in-the-browser)).
+The API kit has no pages of its own to offer tools on, so it ships none. An
+application that adds a frontend adds the helpers with it.
+
 ## The Live starter kit
 
 `suprnova new my-app --frontend live` scaffolds the same application as the

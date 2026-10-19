@@ -6,6 +6,7 @@
 
 pub mod abuse_limiter;
 pub mod default_engine;
+pub mod email_verification;
 /// Magnetar host-engine composition and installed dispatch support.
 pub mod engine;
 pub mod magic_link;
@@ -149,7 +150,7 @@ pub use magnetar::storage::{
     DeviceStore, IssueToken, IssuedToken, LinkedAccountInitializer, LinkedAccountRecord,
     LinkedAccountStore, LockoutStore, MethodStore, NewCeremony, NewLinkedAccount, NewProviderToken,
     NewUser, PasskeyRow, PasskeyStore, PasswordResetCommit, PasswordResetInput, PasswordResetStore,
-    PresentedToken, ProviderTokenRow, ProviderTokenStore, SeaOrmStorage, TokenStore,
+    PresentedToken, ProviderTokenRow, ProviderTokenStore, SeaOrmStorage, TokenState, TokenStore,
     TransitionAndConsume, UserRecord, UserStore,
 };
 /// The two-factor configuration a [`MagnetarConfig`] carries, and the

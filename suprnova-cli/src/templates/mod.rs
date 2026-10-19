@@ -1611,6 +1611,11 @@ pub mod api {
     pub fn lib_rs() -> &'static str {
         include_str!("files/api/src/lib.rs.tpl")
     }
+    /// `src/agents.rs`: the MCP endpoint and both plugins, with the
+    /// framework's default approval, claim and connected-agents pages.
+    pub fn agents_rs() -> &'static str {
+        include_str!("files/api/src/agents.rs.tpl")
+    }
     /// The template's "switching databases" doc comment names the project's
     /// own database, so it carries a `{package_name}` placeholder and must
     /// be substituted rather than emitted verbatim. It was emitted verbatim
@@ -1632,6 +1637,20 @@ pub mod api {
     pub fn controllers_users_rs() -> &'static str {
         include_str!("files/api/src/controllers/users.rs.tpl")
     }
+    /// `src/controllers/email_verification.rs`: the link that verifies an
+    /// account's address.
+    pub fn controllers_email_verification_rs() -> &'static str {
+        include_str!("files/api/src/controllers/email_verification.rs.tpl")
+    }
+    /// `src/controllers/agents.rs`: connected agents over JSON.
+    pub fn controllers_agents_rs() -> &'static str {
+        include_str!("files/api/src/controllers/agents.rs.tpl")
+    }
+    /// `src/controllers/sign_in.rs`: the browser sign-in the default
+    /// approval and claim pages send a guest to.
+    pub fn controllers_sign_in_rs() -> &'static str {
+        include_str!("files/api/src/controllers/sign_in.rs.tpl")
+    }
     pub fn resources_mod_rs() -> &'static str {
         include_str!("files/api/src/resources/mod.rs.tpl")
     }
@@ -1650,8 +1669,10 @@ pub mod api {
     pub fn migrations_create_users_rs() -> &'static str {
         include_str!("files/api/src/migrations/create_users_table.rs.tpl")
     }
-    /// The API starter's `.env`: the template, then the agent auth signing
-    /// key minted for this project ([`super::with_agent_key`]).
+    /// The API starter's `.env`: the template, the mail settings every
+    /// kit's `.env` starts with ([`super::with_mail_settings`]), then the
+    /// agent auth signing key minted for this project
+    /// ([`super::with_agent_key`]).
     pub fn env(
         package_name: &str,
         project_name: &str,
@@ -1659,10 +1680,12 @@ pub mod api {
         agent_key: &AgentAuthKey,
     ) -> String {
         super::with_agent_key(
-            include_str!("files/api/.env.tpl")
-                .replace("{package_name}", package_name)
-                .replace("{project_name}", project_name)
-                .replace("{app_key}", app_key),
+            super::with_mail_settings(
+                include_str!("files/api/.env.tpl")
+                    .replace("{package_name}", package_name)
+                    .replace("{project_name}", project_name)
+                    .replace("{app_key}", app_key),
+            ),
             agent_key,
         )
     }
@@ -1674,7 +1697,9 @@ pub mod api {
 /// Scaffold a JSON:API-only project under `project_path`.
 ///
 /// No Inertia, no frontend. Registers `BearerTokenMiddleware` and
-/// `IncludeMiddleware` globally; includes example `UserResource` with
+/// `IncludeMiddleware` globally, and a session on the consent pages only;
+/// serves agents with the framework's default pages and a browser sign-in
+/// for them; includes example `UserResource` with
 /// `#[derive(Data)] #[json_resource("users")]`.
 pub fn scaffold_api(
     project_path: &Path,
@@ -1722,6 +1747,7 @@ pub fn scaffold_api(
         ),
         (commands.join("mod.rs"), api::commands_mod_rs().to_string()),
         (src.join("lib.rs"), api::lib_rs().to_string()),
+        (src.join("agents.rs"), api::agents_rs().to_string()),
         (src.join("email_address.rs"), email_address_rs().to_string()),
         (src.join("bootstrap.rs"), api::bootstrap_rs(package_name)),
         (src.join("routes.rs"), api::routes_rs().to_string()),
@@ -1733,6 +1759,18 @@ pub fn scaffold_api(
         (
             controllers.join("users.rs"),
             api::controllers_users_rs().to_string(),
+        ),
+        (
+            controllers.join("agents.rs"),
+            api::controllers_agents_rs().to_string(),
+        ),
+        (
+            controllers.join("email_verification.rs"),
+            api::controllers_email_verification_rs().to_string(),
+        ),
+        (
+            controllers.join("sign_in.rs"),
+            api::controllers_sign_in_rs().to_string(),
         ),
         (
             resources.join("mod.rs"),
@@ -1912,6 +1950,61 @@ const AGENT_KEY_COMMENT: &str = "\
 # own: `cargo run -- agents:key` prints one. A literal \\n in the key is a
 # line break. The application does not start without a key.
 ";
+
+/// The mail settings every kit's `.env` starts with, by name. Their lines
+/// come from the other kits' template, so the API kit's cannot drift from
+/// them.
+const MAIL_SETTINGS: [&str; 8] = [
+    "MAIL_DRIVER",
+    "MAIL_SMTP_HOST",
+    "MAIL_SMTP_PORT",
+    "MAIL_SMTP_USER",
+    "MAIL_SMTP_PASS",
+    "MAIL_SMTP_ENCRYPTION",
+    "MAIL_FROM",
+    "MAIL_FROM_NAME",
+];
+
+/// The comment above the mail settings [`with_mail_settings`] adds.
+const MAIL_COMMENT: &str = "\
+# Mail, as every kit's .env starts: a local catcher (maildev, mailpit or
+# mailhog, which listen on 1025) and a sender. The auth flows and the email
+# verification link refuse to send without MAIL_FROM. Production refuses an
+# unencrypted connection: set a real relay and sender there.
+";
+
+/// The line of `text` that assigns `key`, if any.
+fn assignment<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines().find(|line| {
+        line.strip_prefix(key)
+            .is_some_and(|rest| rest.starts_with('='))
+    })
+}
+
+/// `env`, a rendered environment file, followed by each mail setting it does
+/// not assign yet, as the other kits' template assigns it. A setting the
+/// file already assigns is left as it is, so none is assigned twice.
+fn with_mail_settings(mut env: String) -> String {
+    let template = include_str!("files/root/env.tpl");
+    let missing: Vec<&str> = MAIL_SETTINGS
+        .iter()
+        .filter(|key| assignment(&env, key).is_none())
+        .filter_map(|key| assignment(template, key))
+        .collect();
+    if missing.is_empty() {
+        return env;
+    }
+    if !env.ends_with('\n') {
+        env.push('\n');
+    }
+    env.push('\n');
+    env.push_str(MAIL_COMMENT);
+    for line in missing {
+        env.push_str(line);
+        env.push('\n');
+    }
+    env
+}
 
 /// `env`, a rendered environment file, followed by `agent_key` as the two
 /// lines `agents:key` prints. The key is added here rather than through a
@@ -2704,6 +2797,38 @@ impl Task for {struct_name} {{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mail_settings_are_every_kits_template_lines() {
+        let template = include_str!("files/root/env.tpl");
+        for key in MAIL_SETTINGS {
+            assert!(
+                assignment(template, key).is_some(),
+                "the kits' env.tpl assigns {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn mail_settings_keep_an_assignment_the_file_has() {
+        let env = with_mail_settings("APP_NAME=\"x\"\nMAIL_FROM=ops@example.org\n".to_owned());
+        for key in MAIL_SETTINGS {
+            let count = env
+                .lines()
+                .filter(|line| {
+                    line.strip_prefix(key)
+                        .is_some_and(|rest| rest.starts_with('='))
+                })
+                .count();
+            assert_eq!(count, 1, "{key} is assigned once:\n{env}");
+        }
+        assert!(env.contains("MAIL_FROM=ops@example.org\n"), "{env}");
+        assert_eq!(
+            with_mail_settings(env.clone()),
+            env,
+            "nothing is added twice"
+        );
+    }
 
     #[test]
     fn escape_rust_string_leaves_plain_names_alone() {

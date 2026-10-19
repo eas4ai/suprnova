@@ -79,6 +79,7 @@ entity_common!(tokens, "auth_tokens", {
     pub used_at: Option<ChronoDateTime<ChronoUtc>>,
     pub created_at: Option<ChronoDateTime<ChronoUtc>>,
     pub updated_at: Option<ChronoDateTime<ChronoUtc>>,
+    pub address_digest: Option<String>,
 });
 entity_common!(ceremonies, "auth_ceremonies", {
     #[sea_orm(primary_key)] pub id: i64,
@@ -560,6 +561,13 @@ impl TokenFields for tokens::Entity {
     }
     fn write_expires_at(m: &mut Self::ActiveModel, v: DateTime<Utc>) {
         m.expires_at = Set(v);
+    }
+    fn read_address_digest(m: &Self::Model) -> Option<String> {
+        m.address_digest.clone()
+    }
+    fn write_address_digest(m: &mut Self::ActiveModel, v: &str) -> bool {
+        m.address_digest = Set(Some(v.to_owned()));
+        true
     }
 }
 impl CeremonyFields for ceremonies::Entity {
@@ -1962,6 +1970,16 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
         .await?;
     add_optional_timestamp_column(db, "auth_tokens", "updated_at", tokens::Column::UpdatedAt)
         .await?;
+    // The digest of the address a token was issued for, which an email
+    // verification link must still match when it is presented. Tokens
+    // issued before the column existed hold none and prove no address.
+    add_optional_string_column(
+        db,
+        "auth_tokens",
+        "address_digest",
+        tokens::Column::AddressDigest,
+    )
+    .await?;
     add_optional_timestamp_column(
         db,
         "auth_two_factor",

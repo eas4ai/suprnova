@@ -10,12 +10,15 @@ use secrecy::SecretString;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::schema::AuthSchema;
 use crate::{Error, Result};
 
 pub mod accounts;
 pub mod ceremonies;
+mod conflict;
 pub(crate) mod credential_writes;
 pub mod device;
 pub mod lockout;
@@ -36,6 +39,7 @@ pub use accounts::{
 pub use ceremonies::{
     CeremonyRecord, CeremonyRef, CeremonyStore, NewCeremony, TransitionAndConsume,
 };
+pub(crate) use conflict::in_retried_transaction;
 pub use credential_writes::{CredentialActor, fenced_credential_write};
 pub use device::{DeviceRecord, DeviceStore};
 pub use lockout::{AttemptFinalization, AttemptReservation, AttemptStats, LockoutStore};
@@ -47,7 +51,7 @@ pub use provider_tokens::{
 pub use seaorm::SeaOrmStorage;
 pub use tokens::{
     ConsumedToken, IssueToken, IssuedToken, PASSWORD_RESET_PURPOSE, PasswordResetCommit,
-    PasswordResetInput, PasswordResetStore, PresentedToken, TokenStore,
+    PasswordResetInput, PasswordResetStore, PresentedToken, TokenState, TokenStore, address_digest,
 };
 pub use users::{NewUser, UserRecord, UserStore};
 pub(crate) use users::{SignUpAccount, create_or_find_existing};
@@ -59,17 +63,60 @@ pub(crate) use users::{SignUpAccount, create_or_find_existing};
 /// only borrows this value and never starts or commits it.
 pub struct AuthTransaction<'a> {
     pub(crate) transaction: &'a mut DatabaseTransaction,
+    /// Set when a statement failed because the database ended the
+    /// transaction in a conflict with a concurrent one, for
+    /// [`in_retried_transaction`] to run it again. `None` for a transaction
+    /// nothing runs again.
+    conflict: Option<Arc<AtomicBool>>,
 }
 
 impl<'a> AuthTransaction<'a> {
     /// Borrow a SeaORM transaction for a composite operation.
     pub fn new(transaction: &'a mut DatabaseTransaction) -> Self {
-        Self { transaction }
+        Self {
+            transaction,
+            conflict: None,
+        }
+    }
+
+    /// Borrow a transaction whose conflicts `conflict` records.
+    fn noting_conflicts(
+        transaction: &'a mut DatabaseTransaction,
+        conflict: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            transaction,
+            conflict: Some(conflict),
+        }
     }
 
     /// Access the underlying transaction for application-owned operations.
     pub fn connection(&self) -> &DatabaseTransaction {
         self.transaction
+    }
+
+    /// The crate's error for a failed statement of this transaction, as
+    /// [`db_error`] gives it, after noting whether the database ended the
+    /// transaction in a conflict with a concurrent one
+    /// ([`conflict::is_transaction_conflict`]). Under
+    /// [`in_retried_transaction`] such a failure runs the transaction again;
+    /// elsewhere it is an error like any other.
+    pub(crate) fn database_error(&self, error: DbErr) -> Error {
+        if let Some(conflict) = &self.conflict
+            && conflict::is_transaction_conflict(&error)
+        {
+            conflict.store(true, Ordering::Relaxed);
+        }
+        db_error(error)
+    }
+
+    /// Record a conflict as a failed statement would, for the tests of
+    /// [`in_retried_transaction`], which cannot make a database report one.
+    #[cfg(test)]
+    pub(crate) fn note_conflict(&self) {
+        if let Some(conflict) = &self.conflict {
+            conflict.store(true, Ordering::Relaxed);
+        }
     }
 }
 

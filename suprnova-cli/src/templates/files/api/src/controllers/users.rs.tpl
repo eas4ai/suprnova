@@ -5,13 +5,17 @@
 //! bodies are form requests that fold the address before their rules run
 //! (`crate::email_address`), so the rules check what is stored, and an
 //! address over 254 characters, longer than any deliverable one, gets a
-//! `422` naming the field.
+//! `422` naming the field. Registration asks for a password of eight
+//! characters, as the other kits do, and mails a new account the link that
+//! verifies its address (`controllers::email_verification`).
 
 use serde::Deserialize;
 use suprnova::{
-    Auth, FormRequest, FrameworkError, HttpResponse, Request, Resource, Response, Validate, handler,
+    Auth, FormRequest, FrameworkError, HttpResponse, Log, Registration, Request, Resource,
+    Response, Validate, handler,
 };
 
+use crate::controllers::email_verification;
 use crate::email_address;
 use crate::models::user::User;
 use crate::resources::user_resource::UserResource;
@@ -61,6 +65,7 @@ pub struct RegisterRequest {
         length(max = 254, message = "Email must be at most 254 characters")
     )]
     pub email: String,
+    #[validate(length(min = 8, message = "Password must be at least 8 characters"))]
     pub password: String,
 }
 
@@ -78,9 +83,21 @@ pub async fn register(body: RegisterRequest) -> Response {
     // its account is neither changed nor returned. Both outcomes get the
     // same answer, so this endpoint does not reveal which addresses are
     // registered. The client signs in through `POST /api/auth/login`.
-    let _registration = Auth::password()
+    let registration = Auth::password()
         .register(&body.email, &body.password)
         .await?;
+    // A new account is mailed the link that verifies its address, once. A
+    // failure to mail it is logged rather than answered, so the answer stays
+    // the one every registration gets; the user asks for a new link once
+    // signed in.
+    if let Registration::Created(user) = registration
+        && let Err(error) = email_verification::mail_new_account(&user).await
+    {
+        Log::error_with(
+            "the email verification link for a new account was not mailed",
+            serde_json::json!({ "error": error.to_string() }),
+        );
+    }
 
     Ok(HttpResponse::json(serde_json::json!({
         "message": "Registration received. Sign in with your email and password."

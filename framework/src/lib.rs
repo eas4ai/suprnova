@@ -256,6 +256,9 @@ pub use magnetar::{
         oauth_x::{XOAuthProvider, XProviderConfig},
     },
 };
+pub use magnetar_integration::email_verification::{
+    EmailVerificationAuth, EmailVerificationIssue, EmailVerificationLink, EmailVerificationOutcome,
+};
 pub use magnetar_integration::engine::MagnetarPasswordAuthEngine;
 #[cfg(any(
     feature = "database-sqlite",

@@ -61,6 +61,32 @@ pub trait UserStore: Send + Sync {
     async fn set_password_hash(&self, actor: &CredentialActor, password_hash: &str) -> Result<()>;
     /// Stamp the email-verification timestamp.
     async fn mark_email_verified(&self, user_id: &str, at: DateTime<Utc>) -> Result<()>;
+    /// Stamp the email-verification timestamp only while the user's
+    /// address is still `email`, as stored: `Ok(true)` when it stamped,
+    /// `Ok(false)`, with nothing written, when the address changed or the
+    /// user is gone.
+    ///
+    /// A flow reads the address, checks that the proof it holds is for
+    /// that address, and then stamps. The address can change in between,
+    /// and a stamp that ignored it would verify an address the proof never
+    /// reached. So the check and the write are one storage operation here,
+    /// a conditional update.
+    ///
+    /// The default refuses, which keeps existing stores source-compatible;
+    /// a flow that needs it then fails closed.
+    async fn mark_email_verified_for(
+        &self,
+        user_id: &str,
+        email: &str,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let _ = (user_id, email, at);
+        Err(Error::DependencyUnavailable {
+            dependency: "user store".to_owned(),
+            message: "this user store does not stamp an address on condition that it is unchanged"
+                .to_owned(),
+        })
+    }
     /// Atomically stamp the lock timestamp when the matching user is either
     /// unlocked or still carries a lock from a window older than
     /// `window_start`. Returns true only for the caller that won the current
@@ -272,6 +298,30 @@ where
             });
         }
         Ok(())
+    }
+
+    async fn mark_email_verified_for(
+        &self,
+        user_id: &str,
+        email: &str,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        if user_id.is_empty() {
+            return Err(empty("user_id"));
+        }
+        if email.is_empty() {
+            return Err(empty("email"));
+        }
+        let mut model = <S::User as EntityBinding>::ActiveModel::default();
+        S::User::write_email_verified_at(&mut model, Some(at));
+        let update = <S::User as EntityBinding>::Entity::update_many()
+            .set(model)
+            .filter(S::User::user_id_column().eq(S::User::user_id_value(user_id)))
+            .filter(S::User::email_column().eq(email.to_owned()))
+            .exec(self.database())
+            .await
+            .map_err(db_error)?;
+        Ok(update.rows_affected == 1)
     }
 
     async fn lock_if_unlocked_by_email(
