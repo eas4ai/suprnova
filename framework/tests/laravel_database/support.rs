@@ -128,8 +128,6 @@ impl Db {
 
 static SQLITE_FILES: AtomicU64 = AtomicU64::new(0);
 
-/// An empty database on `engine`.
-
 /// Drops what the tests created in `public`, and nothing an extension owns.
 ///
 /// Dropping the schema itself would take the database's extensions with it,
@@ -187,6 +185,7 @@ BEGIN
     END LOOP;
 END
 $$"#;
+/// An empty database on `engine`.
 pub async fn empty(engine: Engine) -> Db {
     match engine {
         Engine::Sqlite => {
