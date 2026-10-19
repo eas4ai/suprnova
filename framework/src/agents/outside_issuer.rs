@@ -56,26 +56,48 @@ const MAX_TOKEN_LENGTH: usize = 16 * 1024;
 ///
 /// # Finding the user
 ///
-/// By default the user is the one whose identifier is the token's `sub`.
-/// That fits only an issuer that mints this application's own user ids,
-/// such as one the application runs itself: an outside identity provider's
-/// `sub` is its own identifier, which means nothing here.
+/// The token names its user in one claim, found one of three ways. Each
+/// claim's value is the user's identifier, as the default guard's provider
+/// looks a user up by id, or, with [`match_user_on`](Self::match_user_on),
+/// the value of a field the provider looks the user up by.
 ///
-/// To link users by that identifier, keep `sub` and match it against the
-/// field the application stores it in: `.match_user_on("<provider>_sub")`.
-/// The issuer assigns `sub` and never lets a user choose it, so this needs
-/// no verified flag; no issuer sends a `sub_verified`.
+/// - **By `sub`**, the default. The issuer assigns it and no user can
+///   choose it, so no verified flag is read. As the user's own id it fits
+///   only an issuer that mints this application's user ids, such as one
+///   the application runs itself; with `.match_user_on("<provider>_sub")`
+///   it links users by the issuer's id, but only where the issuer gives a
+///   user the same `sub` for every client application.
+/// - **By an issuer-assigned id**, with [`id_claim`](Self::id_claim): a
+///   claim the issuer assigns and the user can neither choose nor change.
+///   It needs no verified flag, and `id_claim` refuses a claim a user can
+///   set or that can change, such as `email`, `preferred_username` or
+///   `upn`.
+/// - **By a verified claim**, with [`user_claim`](Self::user_claim): any
+///   other claim, which the token must say the issuer verified, in a flag
+///   claim set to JSON `true`: `<claim>_verified`, as OpenID Connect's
+///   `email_verified` and `phone_number_verified` are, or the one
+///   [`verified_by`](Self::verified_by) names. A missing, `false` or
+///   non-boolean flag refuses the token. Without it, an issuer that lets
+///   users set their own address would let anyone claim
+///   `victim@example.com` and be signed in as that user here. There is no
+///   way to turn the check off.
 ///
-/// Matching on any claim other than `sub`, chosen with
-/// [`user_claim`](Self::user_claim), by identifier or with
-/// [`match_user_on`](Self::match_user_on), requires the token to say the
-/// issuer verified that claim: a flag claim, `<claim>_verified` as
-/// OpenID Connect's `email_verified` and `phone_number_verified` are, or the
-/// one [`verified_by`](Self::verified_by) names, set to JSON `true`. A
-/// missing, `false` or non-boolean flag refuses the token. Without it, an
-/// issuer that lets users set their own address would let anyone claim
-/// `victim@example.com` and be signed in as that user here. There is no way
-/// to turn the check off.
+/// **Microsoft Entra ID.** Entra's `sub` is pairwise: two client
+/// applications get two different values for the same user, and every MCP
+/// client is its own application, so a `sub` saved from one client does not
+/// match the next. Match on `oid`, the user's object id, which Microsoft
+/// recommends as the stable key, and name the tenant's own issuer,
+/// `https://login.microsoftonline.com/<tenant id>/v2.0`, which pins tokens
+/// to that tenant:
+///
+/// ```rust,ignore
+/// let issuer = OutsideIssuer::new(
+///     "https://login.microsoftonline.com/<tenant id>/v2.0",
+///     "https://login.microsoftonline.com/<tenant id>/discovery/v2.0/keys",
+/// )?
+/// .id_claim("oid")?
+/// .match_user_on("entra_oid");
+/// ```
 ///
 /// # What is checked
 ///
@@ -92,11 +114,39 @@ pub struct OutsideIssuer {
     issuer: String,
     audience: Option<String>,
     user_claim: String,
+    /// Whether the user claim is one the issuer assigns, `sub` or an
+    /// [`id_claim`](Self::id_claim), which needs no verified flag.
+    claim_is_issuer_id: bool,
     match_field: Option<String>,
     verified_flag: Option<String>,
     leeway: Duration,
     keys: KeySet,
 }
+
+/// The standard claims a user can set, or that can change, which
+/// [`OutsideIssuer::id_claim`] refuses: the OpenID Connect profile claims,
+/// and Entra's sign-in names and email variants. Any claim ending in
+/// `_verified` is refused too. Compared without case.
+const USER_SET_CLAIMS: &[&str] = &[
+    "email",
+    "phone_number",
+    "preferred_username",
+    "name",
+    "nickname",
+    "given_name",
+    "family_name",
+    "middle_name",
+    "profile",
+    "picture",
+    "website",
+    "address",
+    "upn",
+    "unique_name",
+    "emails",
+    "mail",
+    "verified_primary_email",
+    "verified_secondary_email",
+];
 
 impl std::fmt::Debug for OutsideIssuer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -112,8 +162,9 @@ impl std::fmt::Debug for OutsideIssuer {
 impl OutsideIssuer {
     /// Accept tokens whose `iss` is exactly `issuer`, verified against the
     /// key set (RFC 7517) at `jwks_uri`. The user is the one whose
-    /// identifier is the `sub` claim, which fits only an issuer that mints
-    /// this application's user ids (see "Finding the user"); the audience is
+    /// identifier is the `sub` claim, which as an id fits only an issuer
+    /// that mints this application's user ids (see "Finding the user"); the
+    /// audience is
     /// the MCP endpoint's canonical URL; the leeway on times is one minute;
     /// keys are fetched through the system resolver and Magnetar's pinned
     /// HTTPS client within 64 KiB and 5 seconds, kept fresh 10 minutes with
@@ -150,6 +201,7 @@ impl OutsideIssuer {
             issuer,
             audience: None,
             user_claim: "sub".to_owned(),
+            claim_is_issuer_id: true,
             match_field: None,
             verified_flag: None,
             leeway: Duration::from_secs(60),
@@ -174,21 +226,69 @@ impl OutsideIssuer {
         self
     }
 
-    /// Find the user by the claim `claim` instead of `sub`: its value is
-    /// the user's identifier, as the default guard's provider looks a user
-    /// up by id, unless [`match_user_on`](Self::match_user_on) names a
+    /// Find the user by the verified claim `claim` instead of `sub`: its
+    /// value is the user's identifier, as the default guard's provider looks
+    /// a user up by id, unless [`match_user_on`](Self::match_user_on) names a
     /// field. A claim other than `sub` must come with its verified flag
-    /// (see "Finding the user").
+    /// (see "Finding the user"); for an id the issuer assigns, which has
+    /// none, use [`id_claim`](Self::id_claim).
     pub fn user_claim(mut self, claim: impl Into<String>) -> Self {
-        self.user_claim = claim.into();
+        let claim = claim.into();
+        self.claim_is_issuer_id = claim == "sub";
+        self.user_claim = claim;
         self
+    }
+
+    /// Find the user by `claim`, an identifier the issuer assigns and the
+    /// user can neither choose nor change, such as Microsoft Entra's `oid`.
+    /// It needs no verified flag, and works with
+    /// [`match_user_on`](Self::match_user_on) as `sub` does: by default its
+    /// value is the user's identifier, and with `match_user_on` it is looked
+    /// up in that field (see "Finding the user").
+    ///
+    /// # Errors
+    ///
+    /// When `claim` is empty, or names a standard claim a user can set or
+    /// that can change, compared without case: the OpenID Connect profile
+    /// claims (`email`, `phone_number`, `preferred_username`, `name`,
+    /// `nickname`, `given_name`, `family_name`, `middle_name`, `profile`,
+    /// `picture`, `website`, `address`), Entra's `upn`, `unique_name`,
+    /// `emails`, `mail`, `verified_primary_email` and
+    /// `verified_secondary_email`, and any claim ending in `_verified`. A
+    /// claim the issuer verifies for the user belongs with
+    /// [`user_claim`](Self::user_claim) and its flag.
+    pub fn id_claim(mut self, claim: impl Into<String>) -> Result<Self, FrameworkError> {
+        let claim = claim.into();
+        let lowered = claim.to_ascii_lowercase();
+        if claim.trim().is_empty() {
+            return Err(FrameworkError::internal(
+                "an outside issuer's id claim `` names no claim",
+            ));
+        }
+        if lowered.ends_with("_verified") {
+            return Err(FrameworkError::internal(format!(
+                "the claim `{claim}` is a verified flag, not an identifier the issuer assigns; \
+                 name the claim it verifies with user_claim and the flag with verified_by"
+            )));
+        }
+        if USER_SET_CLAIMS.contains(&lowered.as_str()) {
+            return Err(FrameworkError::internal(format!(
+                "the claim `{claim}` can be set by the user or can change, so it is not an \
+                 identifier the issuer assigns; match on it with user_claim, which requires its \
+                 verified flag"
+            )));
+        }
+        self.user_claim = claim;
+        self.claim_is_issuer_id = true;
+        Ok(self)
     }
 
     /// Find the user whose `field` holds the user claim's value, through
     /// the provider's credential lookup with no password, rather than by
-    /// identifier: `.match_user_on("oidc_sub")` links by the issuer's own
-    /// `sub` and needs no flag, while `.user_claim("email").match_user_on("email")`
-    /// needs the token's `email_verified` (see "Finding the user").
+    /// identifier: `.id_claim("oid")?.match_user_on("entra_oid")` links by an
+    /// id the issuer assigns and needs no flag, while
+    /// `.user_claim("email").match_user_on("email")` needs the token's
+    /// `email_verified` (see "Finding the user").
     pub fn match_user_on(mut self, field: impl Into<String>) -> Self {
         self.match_field = Some(field.into());
         self
@@ -197,9 +297,10 @@ impl OutsideIssuer {
     /// Name the flag claim that says the issuer verified the user claim,
     /// for an issuer that does not call it `<claim>_verified`: for example
     /// `.user_claim("upn").verified_by("upn_checked")`. The token must carry
-    /// it set to JSON `true` whenever the user claim is not `sub`. With the
-    /// user claim `sub`, matched by identifier or against a field, no flag
-    /// is read, since the issuer assigns `sub` itself.
+    /// it set to JSON `true` whenever the user claim was named with
+    /// [`user_claim`](Self::user_claim). With `sub` or an
+    /// [`id_claim`](Self::id_claim), matched by identifier or against a
+    /// field, no flag is read, since the issuer assigns the id itself.
     pub fn verified_by(mut self, flag: impl Into<String>) -> Self {
         self.verified_flag = Some(flag.into());
         self
@@ -333,7 +434,7 @@ impl CallerResolver for OutsideIssuer {
                 "The token was issued by another server.",
             ));
         }
-        let now = chrono::Utc::now().timestamp();
+        let now = crate::clock::now().timestamp();
         let leeway = i64::try_from(self.leeway.as_secs()).unwrap_or(i64::MAX);
         let Some(expires) = numeric_date(&claims, "exp") else {
             return Err(ResolveError::Invalid("The token has no expiry."));
@@ -362,7 +463,7 @@ impl CallerResolver for OutsideIssuer {
         else {
             return Err(ResolveError::Invalid("The token does not name its user."));
         };
-        if self.user_claim != "sub" {
+        if !self.claim_is_issuer_id {
             let flag = self
                 .verified_flag
                 .clone()
