@@ -98,7 +98,6 @@ fn start(work: &Path, project: &Path, name: &str) -> Result<(Host, String), Stri
         // The log driver writes each mail into the server log, where
         // `verification_link` reads the link registration mails.
         .env("MAIL_DRIVER", "log")
-        .env("MAIL_FROM", "ops@example.test")
         .env_remove("SECURITY_HEADERS")
         .env_remove("SECURITY_HEADERS_CSP_REPORT_ONLY")
         .stdout(log.try_clone().map_err(|error| error.to_string())?)

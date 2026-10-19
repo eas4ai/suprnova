@@ -265,6 +265,53 @@ fn agent_017_api_kit_verifies_email_through_a_mailed_link() {
     }
 }
 
+/// The mail settings every kit's `.env` starts with.
+const MAIL_SETTINGS: [&str; 8] = [
+    "MAIL_DRIVER",
+    "MAIL_SMTP_HOST",
+    "MAIL_SMTP_PORT",
+    "MAIL_SMTP_USER",
+    "MAIL_SMTP_PASS",
+    "MAIL_SMTP_ENCRYPTION",
+    "MAIL_FROM",
+    "MAIL_FROM_NAME",
+];
+
+/// AGENT-017: a new API project's `.env` mails as the other kits' does,
+/// through a local SMTP catcher and from a sender, so the link that
+/// verifies an address, which a claim needs, goes out. The file is parsed
+/// for its keys only: a failure names keys, never a value.
+#[test]
+fn agent_017_api_kit_env_carries_the_mail_settings() {
+    let project = Project::new("api");
+    let env = project.read(".env");
+    let assigned: Vec<(&str, &str)> = env
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.trim(), value.trim()))
+        .collect();
+    let mut problems = Vec::new();
+    for key in MAIL_SETTINGS {
+        let count = assigned.iter().filter(|(name, _)| *name == key).count();
+        if count != 1 {
+            problems.push(format!("{key} is assigned {count} times"));
+        }
+    }
+    let from_is_set = assigned
+        .iter()
+        .find(|(name, _)| *name == "MAIL_FROM")
+        .is_some_and(|(_, value)| !value.trim_matches('"').is_empty());
+    if !from_is_set {
+        problems.push("MAIL_FROM is not set".to_owned());
+    }
+    assert!(
+        problems.is_empty(),
+        "api: the .env mail settings: {problems:?}"
+    );
+}
+
 /// AGENT-017: `Auth::user()` reads the `app_users` table Magnetar keeps, so
 /// the framework's pages and the connected-agents routes find the
 /// signed-in user, of a session or a bearer token.

@@ -285,9 +285,14 @@ account's own user: anyone can register another person's address with a
 password of their own, and a link that verified whoever opened it would
 verify that account. Verifying changes no credential and starts no
 session. The mail comes from `MAIL_FROM`, and names the application as
-`APP_NAME`. Set `MAIL_FROM` in every environment: without it no
-verification mail goes out. Registration still answers `202` and logs the
-failure, and the resend route answers `500`.
+`APP_NAME`.
+
+A new API project's `.env` mails as the other kits' does: through a local
+SMTP catcher on port 1025 (maildev, mailpit or mailhog), from
+`hello@example.com`. Set a real relay and sender for production, which
+refuses an unencrypted connection. When the link cannot be mailed,
+registration still answers `202` and logs the failure, and the resend
+route answers `500`.
 
 #### Sessions on the consent pages only
 

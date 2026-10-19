@@ -743,7 +743,6 @@ fn agent_017_a_generated_api_application_serves_agents() {
         .env("SESSION_SECURE", "false")
         .env("SESSION_COOKIE_PREFIX", "")
         .env("MAIL_DRIVER", "log")
-        .env("MAIL_FROM", "ops@example.test")
         .output()
         .expect("cargo test in the generated project");
     let stdout = String::from_utf8_lossy(&output.stdout);
