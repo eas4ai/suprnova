@@ -114,7 +114,7 @@ route serves. It takes these keys:
 | `callers` | yes | The callers it accepts: one or more of `public`, `user` and `agent` |
 | `scopes` | no | The scopes a token caller needs, as constants `tool_scopes!` declared |
 | `input` | no | The argument type, usually a `#[tool_input]` struct. Without it, the tool takes no input |
-| `output` | no | A type whose JSON Schema is the tool's output schema |
+| `output` | no | A `#[tool_output]` struct, whose JSON Schema is the tool's output schema |
 | `annotations(...)` | no | Hints for clients, described below |
 | `title` | no | A display name |
 | `route` | no | The route name, when the handler serves more than one route |
@@ -165,22 +165,27 @@ route answers its usual validation error.
 A doc comment on a field becomes its description in the schema. A call fills
 the route's path parameters from the input's fields of the same names.
 
-`output = T` publishes `T`'s schema as the tool's output schema. `T` derives
-`JsonSchema`, which the framework re-exports. Without a `schemars` dependency
-of your own, point the derive at the framework's copy:
+`output = T` publishes `T`'s schema as the tool's output schema. Mark `T`
+with `#[tool_output]`, the output counterpart of `#[tool_input]`. It derives
+`Serialize` and `JsonSchema` through the framework, so the application needs
+no `schemars` dependency of its own:
 
 ```rust
-use serde::Serialize;
-use suprnova::JsonSchema;
+use suprnova::tool_output;
 
 /// What `reviews.create` answers.
-#[derive(Serialize, JsonSchema)]
-#[schemars(crate = "suprnova::__schemars")]
+#[tool_output]
 pub struct ReviewView {
+    /// The review.
     pub id: u64,
+    /// Its stars, 1 to 5.
     pub stars: u8,
 }
 ```
+
+The type is a struct with named fields, since MCP describes a tool's
+structured result with an object schema. A doc comment on a field becomes its
+description.
 
 ### Declare scopes
 
@@ -555,6 +560,13 @@ The scopes are the ones `tool_scopes!` declared. The server keeps its grants
 in four tables. `OAuthServer::migrate(&db)` creates them and is safe to run on
 every boot; the Magnetar default engine's migrations create them too.
 
+Every node prunes those tables every five minutes while it serves. It deletes
+pending authorizations and codes that lapsed, tokens that expired, and grants
+that ended more than 30 days ago: revoked grants, and grants with no token
+left and no use since. A live grant or token is never pruned. A spent refresh
+token stays until it expires, so a second use of it is still caught.
+`agents:prune` runs the same pass once, with or without agent auth.
+
 The token, revocation and registration endpoints are called by clients, with
 no cookie, so they get no session and need no CSRF token. The approval page
 needs the signed-in user, takes its answer by a CSRF-protected form and
@@ -899,10 +911,12 @@ cargo run -- agents:key
   every token the leaked key could have reached. In production it also asks
   you to type the environment's name at a terminal. Running it again finishes
   a run that failed partway.
-- **`agents:prune`** runs the maintenance pass once: it delivers waiting
-  claim events, expires unclaimed registrations, prunes spent replay records
-  and deletes claim events delivered more than seven days ago, and reports
-  how many events failed. `--retry-failed` puts failed events back first.
+- **`agents:prune`** runs the maintenance pass once. It prunes the OAuth
+  server's rows that can no longer be used. With agent auth on, it also
+  delivers waiting claim events, expires unclaimed registrations, prunes
+  spent replay records and deletes claim events delivered more than seven
+  days ago, and reports how many events failed. `--retry-failed` puts failed
+  events back first, and needs agent auth.
 - **Keep the nodes' clocks in sync.** Expiry, the two-minute skew on issue
   times and the delivery leases compare each node's clock.
 - **The audit log holds email addresses.** Agent auth writes one structured
