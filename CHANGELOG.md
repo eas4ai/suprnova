@@ -136,20 +136,64 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   tooling rather than end users. The MCP endpoint does not send it.
 - **New projects serve agents.** `suprnova new` writes a fresh agent auth
   signing key into `.env`, readable by its owner only (mode 0600), and
-  `.env.example` names both variables with no value. The Inertia and Live
-  kits serve the MCP endpoint, the OAuth server and agent auth from
-  `src/agents.rs`, and their migrator creates both plugins' tables and a
-  case-insensitive unique email index. Their sign-in sends a signed-in user
-  who opens a sign-in link on to a same-origin `return_to`, and keeps the
-  intended address through sign-in and registration. Every kit folds an
-  email address to ASCII lowercase before validating it, and bounds names at
-  255 characters and addresses at 254.
+  `.env.example` names both variables with no value. Every kit serves the
+  MCP endpoint, the OAuth server and agent auth from `src/agents.rs`, and its
+  migrator creates both plugins' tables. The Inertia and Live kits' migrator
+  also creates a case-insensitive unique email index, and their sign-in sends
+  a signed-in user who opens a sign-in link on to a same-origin `return_to`
+  and keeps the intended address through sign-in and registration. Every kit
+  folds an email address to ASCII lowercase before validating it, and bounds
+  names at 255 characters and addresses at 254.
 - **The agents maintenance pass prunes the OAuth server's ended rows.** The
   five-minute pass in `serve` and `agents:prune` delete lapsed pending
   authorizations and codes, expired tokens, and grants revoked longer ago
   than the retention, whenever the router mounts the OAuth server, with agent
   auth or without. A live grant or token is never pruned. `agents:prune`
   needs agent auth only for `--retry-failed`.
+- **The Inertia and Live kits ship their own approval, claim and
+  connected-agents pages.** The React, Vue and Svelte kits render
+  `Agents/Approve`, `Agents/Claim` and `Agents/Connected` at
+  `/oauth/approve`, `/agent/claim` and `/connected-agents` on the consent
+  facade, and an approval leaves for the client by a location visit. The
+  Live kit serves the same three pages as plain server-rendered documents
+  with native forms, and an approval leaves through a short page whose meta
+  refresh and link go to the client, which `form-action 'self'` allows. Every
+  route runs `ConsentPageHeaders`, no consent page offers a tool, and text a
+  client, an agent or the user chose sits in `<bdi>`. See
+  [Starter Kits](manual/starter-kits.md).
+- **The API kit serves agents, with a sign-in for consent only.** A new API
+  project serves the MCP endpoint and both plugins with the framework's
+  default pages. A browser signs in at `/login` only to approve a client or
+  claim an agent: the session runs on the consent pages alone, ends after
+  15 minutes idle, keeps its cookie for the browser session, and ends at
+  `POST /logout`. `GET /api/connected-agents` lists the user's connected
+  clients and agents, and `DELETE /api/connected-agents/clients/{grant}` and
+  `/agents/{registration}` revoke one. Registration mails a link that
+  verifies the address, which a claim needs, and
+  `POST /api/email/verification-notification` mails a new one.
+- **`Auth::email_verification()` verifies an address for its signed-in
+  owner.** `issue` mints a single-use link token for the signed-in user, and
+  `issue_for` one for an account the request just registered. The
+  application mails the link. `verify` verifies the address only for the
+  user signed in where the link opens, only while the account still holds
+  the address the link was mailed to, and answers `Verified`,
+  `AlreadyVerified`, `OtherAccount`, `AddressChanged`, `Expired`, `Unknown` or
+  `SignIn`. Anyone can register another person's address with a password of
+  their own, so a link that verified whoever opened it would verify that
+  account. Verifying changes no credential and starts no session.
+- **Consent pages refuse a form tool's submission.** A kit's form tool sends
+  the form it submits with the `Suprnova-Form-Tool` header, which
+  `suprnova::agents::FORM_TOOL_HEADER` names. `AgentApprovals::of` and
+  `AgentClaims::of` refuse it with 403, as they refuse a tool call, so a form
+  tool on an approval or claim page cannot approve or claim.
+- **New projects ship two notes tools.** The Inertia and Live kits serve
+  `notes.search` at `GET /notes/search` and `notes.create` at
+  `POST /notes/tools`, under the `notes:read` and `notes:write` scopes, each
+  acting on the caller's own notes. The notes page offers both to an agent in
+  the browser.
+- **The Live input takes `maxlength`.** The component library's input sets
+  the attribute only when a caller passes one. The Live kit's account forms
+  bound the name at 255 characters and the address at 254.
 
 ### Changed
 
@@ -182,6 +226,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   The error page set `Cache-Control: no-cache, private` on every page it
   rendered. It now sets `no-store` when the response it replaces said
   `no-store`, so a page that must not be stored stays unstored when it fails.
+- **Magnetar's `auth_tokens` table gains an `address_digest` column.** A
+  token that verifies an email address keeps the SHA-256 of the address it
+  was mailed to. Magnetar's `migrate` adds the nullable column the first time
+  it runs.
+- **A custom Magnetar engine, store or token binding refuses email
+  verification until it implements the new methods.**
+  `MagnetarPasswordAuthEngine` gains `email_verification_issue` and
+  `email_verification_verify`, `TokenStore` gains `issue_bound` and
+  `inspect`, and `UserStore` gains `mark_email_verified_for`. `TokenFields`
+  gains `read_address_digest` and `write_address_digest`. Each has a default,
+  so existing code compiles, and the defaults refuse, so
+  `Auth::email_verification()` fails closed until they are implemented.
 
 ### Fixed
 
@@ -238,6 +294,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   the fallback route included, and skips a request that sends
   `X-Requested-With: XMLHttpRequest`. A file that `StaticFiles` serves is
   never recorded.
+- **Two uses of one email verification link at once no longer answer 500 on
+  MariaDB.** MariaDB 11.8 and later end a transaction that writes a row a
+  concurrent one changed, so the second of two concurrent uses of one
+  Magnetar verification token answered 500. The losing use now reads the
+  token as already used, on every engine. A consume the database ends in a
+  deadlock or a serialization conflict runs again, up to three times, and
+  answers a conflict rather than an internal error if every run conflicts.
 
 ## 4.3.0 - 2026-10-18
 

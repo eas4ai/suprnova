@@ -101,6 +101,12 @@ the [OAuth server](#users-who-approve-a-client) or
 [agent accounts](#agent-accounts) to issue one. A `public` tool works with no
 token at all.
 
+A project made with `suprnova new` serves all of this from the first run. Its
+`notes.search` and `notes.create` tools, under the `notes:read` and
+`notes:write` scopes, are a worked example of the sections below: see
+[Agents in the Inertia kits](starter-kits.md#agents-in-the-inertia-kits) and
+[Agents in the Live kit](starter-kits.md#agents-in-the-live-kit).
+
 ## Tools
 
 ### Mark a handler
@@ -793,7 +799,10 @@ A user claims an agent to make it theirs:
 1. The agent asks to be claimed at `POST /agent/identity/claim` and hands the
    user a link to the claim page, `/agent/claim`, and a six-digit code.
 2. The user signs in. The page accepts only the user with the email the claim
-   names, and only once that email is verified.
+   names, and only once that email is verified. An application verifies an
+   address with `EmailVerification`, or with `Auth::email_verification()`
+   when its users live in Magnetar's tables; see
+   [Email Verification](auth-flows.md#email-verification).
 3. The page shows the agent and every scope it will hold. The user enters the
    code, which a CSRF-protected form posts.
 4. The agent's next poll gets a token bound to the user.
@@ -1000,7 +1009,11 @@ The OAuth server and agent auth ship plain default pages. To render the
 approval page and the claim page in your own front end, turn the defaults off
 and build the handlers on the consent facade: `AgentApprovals` for the
 approval page and `AgentClaims` for the claim page. The framework's default
-pages use the same two types, and the starter kits' pages are built on them.
+pages use the same two types, and the starter kits' pages are built on them:
+see [Agents in the Inertia kits](starter-kits.md#agents-in-the-inertia-kits)
+and [Agents in the Live kit](starter-kits.md#agents-in-the-live-kit). The API
+kit serves the framework's default pages behind a sign-in for consent only;
+see [Agents in the API kit](starter-kits.md#agents-in-the-api-kit).
 
 ```rust
 use suprnova::agents::{AgentAuth, AgentsConfig, OAuthServer};
@@ -1395,8 +1408,10 @@ and adds `public` for guests. An action no person should click lists only
 
 ### The Inertia kits
 
-The React, Vue and Svelte kits ship helpers in `src/lib/agents`. Each kit's
-entry calls `installPageTools(router)` before `createInertiaApp`. It
+The React, Vue and Svelte kits ship helpers in `src/lib/agents`, and their
+notes page uses them; see
+[Agents in the Inertia kits](starter-kits.md#agents-in-the-inertia-kits).
+Each kit's entry calls `installPageTools(router)` before `createInertiaApp`. It
 registers the server tools in the page object's `agentTools`, swaps them on
 every visit, and reloads the page's props after a write tool.
 
@@ -1696,6 +1711,7 @@ grants or its personal access tokens.
 - [Authorization](authorization.md) - policies a tool's route already runs
 - [Validation](validation.md) - the rules `#[tool_input]` publishes
 - [Live](live.md) - components, actions and snapshots
-- [Starter Kits](starter-kits.md) - what each kit wires for agents
+- [Starter Kits](starter-kits.md#agents-in-the-inertia-kits) - what each kit
+  wires for agents, its consent pages and its notes tools
 - [Security Headers](security-headers.md) - the `tools` permission and the Origin Trial
 - [Environment Variables](env-vars.md#agents) - the signing key and trial token

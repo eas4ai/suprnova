@@ -538,6 +538,68 @@ if let Some(user) = Auth::user_as::<User>().await? {
 }
 ```
 
+### Email verification through Magnetar
+
+`EmailVerification` keeps its tokens in `auth_flow_tokens` and finds the user
+through the configured provider. An application whose users live in
+Magnetar's tables, as the API kit's do, verifies through the installed
+Magnetar engine instead, with `Auth::email_verification()`:
+
+```rust
+use suprnova::{Auth, EmailVerificationIssue, EmailVerificationOutcome};
+
+// On the signed-in user's request for a link:
+if let EmailVerificationIssue::Issued(link) = Auth::email_verification().issue().await? {
+    // Mail a link that carries link.token to link.email.
+}
+
+// On the page the link opens, for the user signed in there:
+match Auth::email_verification().verify(&token).await? {
+    EmailVerificationOutcome::Verified | EmailVerificationOutcome::AlreadyVerified => {
+        // The address is verified.
+    }
+    EmailVerificationOutcome::SignIn => {
+        // Send the guest to sign in and back to this page.
+    }
+    _ => {
+        // Another account's link, a changed address, an expired or unknown
+        // link: ask for a new one.
+    }
+}
+```
+
+| Method | Does |
+|---|---|
+| `issue()` | Mints a single-use token for the signed-in user, by bearer token or session, and answers `Issued(link)` with the `email` to mail and the `token` the link carries. It answers `AlreadyVerified` when there is nothing to verify, and `SignIn` for a guest. |
+| `issue_for(&user)` | The same for an account the request just registered, which nobody has signed in to yet. |
+| `verify(token)` | Verifies the signed-in user's address when the token is theirs, unused, unexpired and mailed to the address the account holds now. |
+
+`verify` needs the account's own user signed in, because anyone can register
+another person's address with a password of their own. A link that verified
+whoever opened it would let that person's click verify the account the
+registrant holds, and a verified address is what agent auth binds an agent's
+claim to. So `verify` answers:
+
+- `Verified`, or `AlreadyVerified` when the address was verified before; the
+  token is spent either way.
+- `SignIn` for a guest, and the token stays unused, so the page can send the
+  guest to sign in and back.
+- `OtherAccount` for another account's token, which stays unused for its
+  owner.
+- `AddressChanged` when the link was mailed to an address the account no
+  longer holds. Nothing is stamped; the user asks for a new link.
+- `Expired` or `Unknown` for a token past its 24 hours, already used, or
+  never issued.
+
+A link works once, and verifying with one spends the account's other links.
+Verifying changes no credential and starts no session. `issue` and
+`issue_for` count against the address's email verification budget, three
+links an hour, and answer `429` past it. The token keeps the SHA-256 of the
+address in `auth_tokens.address_digest`, never the address. A custom Magnetar
+engine or store implements `email_verification_issue`,
+`email_verification_verify`, `TokenStore::issue_bound`, `TokenStore::inspect`
+and `UserStore::mark_email_verified_for`, or both calls fail closed.
+
 ### Why Suprnova diverges
 
 Laravel's `EnsureEmailIsVerified` redirects to the `verification.notice` route
