@@ -3,13 +3,13 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, EntityTrait, ExprTrait, IntoActiveModel, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, ExprTrait, IntoActiveModel, QueryFilter, QuerySelect};
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 
 use super::{
-    AuthTransaction, SeaOrmStorage, db_error, expose_secret, in_transaction, random_id,
-    random_token,
+    AuthTransaction, SeaOrmStorage, db_error, expose_secret, in_retried_transaction,
+    in_transaction, random_id, random_token,
 };
 use crate::schema::{
     AuthSchema, EntityBinding, SessionEpoch, SessionFields, TokenFields, UserFields,
@@ -325,11 +325,19 @@ where
     }
 
     async fn consume(&self, token: PresentedToken, purpose: &str) -> Result<ConsumedToken> {
-        // The transaction body must not borrow `self`, so it works through a
-        // handle of its own over the same connection.
-        let this = SeaOrmStorage::<S>::new(self.database().clone());
+        // Each run of the transaction works through a handle of its own over
+        // the same connection, as the body must not borrow `self`, and
+        // presents a copy of the token: a run the database ends in a
+        // conflict with a concurrent consume runs again
+        // (`in_retried_transaction`), and finds the token spent if that
+        // consume won.
+        let database = self.database().clone();
+        let secret = token.0;
         let purpose = purpose.to_owned();
-        in_transaction(self.database(), move |tx| {
+        in_retried_transaction(self.database(), move |tx| {
+            let this = SeaOrmStorage::<S>::new(database.clone());
+            let token = PresentedToken(secret.clone());
+            let purpose = purpose.clone();
             Box::pin(async move { this.consume_in(tx, token, &purpose).await })
         })
         .await
@@ -350,35 +358,55 @@ where
         let purpose_column = S::Token::purpose_column();
         let used_column = S::Token::used_at_column();
         let expires_column = S::Token::expires_at_column();
-        let rows = <S::Token as EntityBinding>::Entity::find()
-            .filter(digest_column.eq(presented_digest.clone()))
-            .filter(purpose_column.eq(purpose.to_owned()))
-            .filter(used_column.is_null())
-            .filter(expires_column.gt(now))
-            .all(tx.connection())
-            .await
-            .map_err(db_error)?;
-        let row = rows.into_iter().next().ok_or_else(|| Error::NotFound {
-            resource: "token".to_owned(),
-            identifier: purpose.to_owned(),
-        })?;
-        let id = S::Token::read_token_id(&row);
+        // The compare-and-set comes first, before any plain read in the
+        // transaction. A plain read fixes the transaction's snapshot, and
+        // under MariaDB's `innodb_snapshot_isolation` a later write to a row
+        // that a concurrent consume changed since then fails with 1020.
+        // Written first, the compare-and-set sees the committed row: a token
+        // a concurrent consume spent is no longer unused, and this consume
+        // finds no live token.
         let update = <S::Token as EntityBinding>::Entity::update_many()
             .col_expr(used_column, Expr::value(now))
-            .filter(digest_column.eq(presented_digest))
+            .filter(digest_column.eq(presented_digest.clone()))
             .filter(purpose_column.eq(purpose.to_owned()))
             .filter(used_column.is_null())
             .filter(expires_column.gt(now))
             .exec(tx.connection())
             .await
-            .map_err(db_error)?;
-        if update.rows_affected != 1 {
-            return Err(Error::Conflict {
-                resource: "token".to_owned(),
-                message: "another consumer won the token CAS".to_owned(),
-            });
+            .map_err(|error| tx.database_error(error))?;
+        match update.rows_affected {
+            0 => {
+                return Err(Error::NotFound {
+                    resource: "token".to_owned(),
+                    identifier: purpose.to_owned(),
+                });
+            }
+            1 => {}
+            _ => {
+                return Err(Error::Conflict {
+                    resource: "token".to_owned(),
+                    message: "more than one live token has this digest".to_owned(),
+                });
+            }
         }
+        // The row is this transaction's now. Reading it with a lock, rather
+        // than a plain read, keeps the transaction without a snapshot for
+        // the sibling update below too.
+        let row = <S::Token as EntityBinding>::Entity::find()
+            .filter(digest_column.eq(presented_digest))
+            .filter(purpose_column.eq(purpose.to_owned()))
+            .lock_exclusive()
+            .one(tx.connection())
+            .await
+            .map_err(|error| tx.database_error(error))?
+            .ok_or_else(|| Error::NotFound {
+                resource: "token".to_owned(),
+                identifier: purpose.to_owned(),
+            })?;
+        let id = S::Token::read_token_id(&row);
         if let Some(user_id) = S::Token::read_user_id(&row) {
+            // A deadlock with a concurrent consume of a sibling token is
+            // still possible here; `consume` runs the transaction again.
             let sibling = <S::Token as EntityBinding>::Entity::update_many()
                 .col_expr(used_column, Expr::value(now))
                 .filter(S::Token::user_id_column().eq(S::Token::user_id_value(&user_id)))
@@ -386,7 +414,7 @@ where
                 .filter(used_column.is_null())
                 .exec(tx.connection())
                 .await
-                .map_err(db_error)?;
+                .map_err(|error| tx.database_error(error))?;
             let _ = sibling.rows_affected;
         }
         Ok(ConsumedToken {
