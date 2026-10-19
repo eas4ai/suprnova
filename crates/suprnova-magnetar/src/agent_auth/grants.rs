@@ -104,7 +104,7 @@ impl GrantHandler for JwtBearerGrant {
         let entitlement = if unclaimed {
             core.config.pre_claim_scopes.clone()
         } else {
-            record.scopes.clone()
+            core.bound_scopes(&record)
         };
         let scopes = match request.param("scope") {
             None => entitlement.clone(),
@@ -394,8 +394,8 @@ impl GrantHandler for ClaimGrant {
                 issuer,
                 &record,
                 user.as_ref(),
-                record.scopes.clone(),
-                record.scopes.clone(),
+                core.bound_scopes(&record),
+                core.bound_scopes(&record),
                 resource,
             )
             .await?;

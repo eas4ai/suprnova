@@ -1,5 +1,5 @@
 {
-  "about": "Shared cases for every browser implementation of a server tool call (AGENT-014, AGENT-015, AGENT-016): the Live runtime, the three kits and the WebAssembly crate. They mirror the MCP dispatcher's path and query rules (framework/src/agents/dispatch.rs) and its result mapping (framework/src/agents/mcp/tools.rs), without resultType, plus the browser-only rows. Read it; do not edit it in a lane.",
+  "about": "Shared cases for every browser implementation of a server tool call (AGENT-014, AGENT-015, AGENT-016): the Live runtime, the three kits and the WebAssembly crate. The paths mirror the MCP dispatcher's path rules (framework/src/agents/dispatch.rs), except that a browser refuses a `.` or `..` path value, which its URL parser would resolve before the request leaves, and that a GET call sends every scalar argument, path arguments included, in the query, which a form request on GET reads. The results mirror its result mapping (framework/src/agents/mcp/tools.rs) without resultType, plus the rows only a browser meets, each marked browserOnly. Read it; do not edit it in a lane.",
   "paths": [
     {
       "name": "a number fills its segment",
@@ -186,7 +186,7 @@
       }
     },
     {
-      "name": "a segment of two dots cannot climb",
+      "name": "a segment of two dots is refused",
       "method": "POST",
       "path": [
         {
@@ -202,14 +202,19 @@
         "post": ".."
       },
       "expected": {
-        "url": "/posts/%2E%2E",
-        "body": {
-          "post": ".."
+        "error": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Invalid input: the path parameter `post` cannot be `.` or `..`, or hold one as a part, because a browser resolves it as a step of the path."
+            }
+          ],
+          "isError": true
         }
       }
     },
     {
-      "name": "a segment of one dot cannot stay",
+      "name": "a segment of one dot is refused",
       "method": "POST",
       "path": [
         {
@@ -225,9 +230,37 @@
         "post": "."
       },
       "expected": {
-        "url": "/posts/%2E",
+        "error": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Invalid input: the path parameter `post` cannot be `.` or `..`, or hold one as a part, because a browser resolves it as a step of the path."
+            }
+          ],
+          "isError": true
+        }
+      }
+    },
+    {
+      "name": "a segment of three dots is encoded",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "post": "..."
+      },
+      "expected": {
+        "url": "/posts/%2E%2E%2E",
         "body": {
-          "post": "."
+          "post": "..."
         }
       }
     },
@@ -268,12 +301,40 @@
         }
       ],
       "arguments": {
-        "path": "docs/a b/../c"
+        "path": "docs/a b/c.d"
       },
       "expected": {
-        "url": "/files/docs/a%20b/%2E%2E/c",
+        "url": "/files/docs/a%20b/c.d",
         "body": {
-          "path": "docs/a b/../c"
+          "path": "docs/a b/c.d"
+        }
+      }
+    },
+    {
+      "name": "a catch-all with a dot part is refused",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/files/"
+        },
+        {
+          "param": "path",
+          "optional": false,
+          "catchAll": true
+        }
+      ],
+      "arguments": {
+        "path": "docs/../c"
+      },
+      "expected": {
+        "error": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Invalid input: the path parameter `path` cannot be `.` or `..`, or hold one as a part, because a browser resolves it as a step of the path."
+            }
+          ],
+          "isError": true
         }
       }
     },
@@ -374,7 +435,7 @@
         "page": 3
       },
       "expected": {
-        "url": "/posts/3",
+        "url": "/posts/3?page=3",
         "body": null
       }
     },
@@ -481,7 +542,7 @@
       }
     },
     {
-      "name": "GET leaves path arguments out of the query",
+      "name": "GET sends path arguments in the query too",
       "method": "GET",
       "path": [
         {
@@ -498,12 +559,12 @@
         "q": "caf\u00e9"
       },
       "expected": {
-        "url": "/posts/3?q=caf%C3%A9",
+        "url": "/posts/3?post=3&q=caf%C3%A9",
         "body": null
       }
     },
     {
-      "name": "GET with no other argument has no query",
+      "name": "GET with only a path argument still sends it in the query",
       "method": "GET",
       "path": [
         {
@@ -519,7 +580,59 @@
         "post": 3
       },
       "expected": {
-        "url": "/posts/3",
+        "url": "/posts/3?post=3",
+        "body": null
+      }
+    },
+    {
+      "name": "GET with an absent optional sends no query",
+      "method": "GET",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "page",
+          "optional": true,
+          "catchAll": false
+        }
+      ],
+      "arguments": {},
+      "expected": {
+        "url": "/posts",
+        "body": null
+      }
+    },
+    {
+      "name": "GET sends an empty string that is not a path argument",
+      "method": "GET",
+      "path": [
+        {
+          "text": "/search"
+        }
+      ],
+      "arguments": {
+        "q": ""
+      },
+      "expected": {
+        "url": "/search?q=",
+        "body": null
+      }
+    },
+    {
+      "name": "GET leaves a null argument out",
+      "method": "GET",
+      "path": [
+        {
+          "text": "/search"
+        }
+      ],
+      "arguments": {
+        "q": "x",
+        "page": null
+      },
+      "expected": {
+        "url": "/search?q=x",
         "body": null
       }
     },
@@ -750,7 +863,8 @@
           }
         ],
         "isError": true
-      }
+      },
+      "browserOnly": true
     },
     {
       "name": "a redirect status",
@@ -787,7 +901,8 @@
           }
         ],
         "isError": true
-      }
+      },
+      "browserOnly": true
     },
     {
       "name": "validation errors name each field",
@@ -913,7 +1028,8 @@
           }
         ],
         "isError": true
-      }
+      },
+      "browserOnly": true
     },
     {
       "name": "a 422 without errors shows its message",
@@ -1147,7 +1263,8 @@
           }
         ],
         "isError": true
-      }
+      },
+      "browserOnly": true
     },
     {
       "name": "a network failure",
@@ -1163,7 +1280,8 @@
           }
         ],
         "isError": true
-      }
+      },
+      "browserOnly": true
     },
     {
       "name": "the call timer fired",
@@ -1180,7 +1298,8 @@
           }
         ],
         "isError": true
-      }
+      },
+      "browserOnly": true
     },
     {
       "name": "the call timer fired at a fraction of a second",
@@ -1197,7 +1316,8 @@
           }
         ],
         "isError": true
-      }
+      },
+      "browserOnly": true
     }
   ]
 }

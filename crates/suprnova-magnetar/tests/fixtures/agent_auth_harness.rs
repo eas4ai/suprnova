@@ -834,6 +834,9 @@ pub struct Options {
     pub server_config: Option<AuthorizationServerConfig>,
     /// One more revocation listener on the authorization server.
     pub revocation_listener: Option<Arc<dyn RevocationListener>>,
+    /// The directory agent auth finds users in, when not the Magnetar
+    /// store.
+    pub users: Option<Arc<dyn magnetar::agent_auth::AgentUserDirectory>>,
 }
 
 impl Options {
@@ -845,6 +848,7 @@ impl Options {
             faults: None,
             server_config: None,
             revocation_listener: None,
+            users: None,
         }
     }
 }
@@ -915,7 +919,9 @@ pub async fn build(db: DatabaseConnection, options: Options) -> Harness {
         options.config,
         AgentAuthServices {
             store: agent_store,
-            users: storage.clone(),
+            users: options.users.clone().unwrap_or_else(|| {
+                storage.clone() as Arc<dyn magnetar::agent_auth::AgentUserDirectory>
+            }),
             provisioning,
             limiter: limiter.clone(),
             key_sets: Arc::new(KeySetFetcher::new(

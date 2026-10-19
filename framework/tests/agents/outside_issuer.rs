@@ -23,16 +23,17 @@ const ISSUER: &str = "https://login.issuer.test";
 const JWKS: &str = "https://login.issuer.test/.well-known/jwks.json";
 const RESOURCE: &str = "http://localhost/mcp";
 
-/// One signing key of the test issuer.
-struct IssuerKey {
-    kid: String,
+/// One signing key of the test issuer, which agent auth's tests also sign
+/// ID-JAGs and Security Event Tokens with.
+pub struct IssuerKey {
+    pub kid: String,
     pkcs8: Vec<u8>,
     x: String,
     y: String,
 }
 
 impl IssuerKey {
-    fn generate(kid: &str) -> Self {
+    pub fn generate(kid: &str) -> Self {
         let random = SystemRandom::new();
         let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &random)
             .expect("generate a P-256 key");
@@ -50,7 +51,7 @@ impl IssuerKey {
         }
     }
 
-    fn jwk(&self) -> Value {
+    pub fn jwk(&self) -> Value {
         json!({
             "kty": "EC",
             "crv": "P-256",
@@ -63,7 +64,7 @@ impl IssuerKey {
     }
 
     /// `claims` signed with this key, under `kid` and `typ`.
-    fn sign_as(&self, kid: &str, typ: Option<&str>, claims: &Value) -> String {
+    pub fn sign_as(&self, kid: &str, typ: Option<&str>, claims: &Value) -> String {
         let mut header = Header::new(Algorithm::ES256);
         header.kid = Some(kid.to_owned());
         header.typ = typ.map(str::to_owned);

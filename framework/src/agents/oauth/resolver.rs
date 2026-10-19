@@ -9,6 +9,9 @@ use magnetar::authorization_server::{
     InvalidAccessReason, REFRESH_TOKEN_PREFIX, USER_GRANT_KIND,
 };
 
+use magnetar::agent_auth::{AGENT_GRANT_KIND, AGENT_TOKEN_KIND};
+
+use crate::agents::agent_auth::resolver::AgentTokens;
 use crate::agents::{
     AuthorizationServerMetadata, CallerResolver, MetadataKind, ResolveContext, ResolveError,
     ToolCaller,
@@ -16,7 +19,9 @@ use crate::agents::{
 use crate::auth::Auth;
 use crate::error::FrameworkError;
 
-/// Turns an access token of a user grant into a `user` caller.
+/// Turns an access token of this server into a caller: a user grant's
+/// into a `user` caller, and, when agent auth is mounted, an agent grant's
+/// into an `agent` caller. A token is looked up once, whichever it is.
 ///
 /// How each answer of
 /// [`verify_access_token`](AuthorizationServer::verify_access_token) maps:
@@ -27,28 +32,29 @@ use crate::error::FrameworkError;
 /// | `mrt_`, a refresh token | [`ResolveError::Invalid`], without a lookup |
 /// | `mat_`, `Unknown` to the store | [`ResolveError::Invalid`] |
 /// | `mat_`, valid, user grant | `ToolCaller::user` with the token's scopes and client |
-/// | `mat_`, valid, any other grant (agent auth's) | [`ResolveError::NotMine`] |
+/// | `mat_`, valid, agent grant, agent auth mounted | the agent caller [`AgentTokens`] gives |
+/// | `mat_`, valid, any other grant | [`ResolveError::NotMine`] |
 /// | `mat_`, `Expired`, `Revoked`, `WrongResource`, `EpochChanged` | [`ResolveError::Invalid`] |
 /// | `mat_`, storage failure | [`ResolveError::Unavailable`] |
 ///
 /// A token in this server's format is this server's to refuse: a refresh
 /// token presented as a bearer, or an access token the store does not
 /// know, never reaches another resolver, which could otherwise be handed
-/// a credential that was never meant for it. Only an agent grant's token,
-/// which agent auth issues on this server and resolves itself, is passed
-/// on.
-pub(crate) struct UserTokens {
+/// a credential that was never meant for it. Only a grant of a kind no
+/// mounted part of this server issues is passed on.
+pub(crate) struct ServerTokens {
     server: Arc<AuthorizationServer>,
+    agents: Option<AgentTokens>,
 }
 
-impl UserTokens {
-    pub(crate) fn new(server: Arc<AuthorizationServer>) -> Self {
-        Self { server }
+impl ServerTokens {
+    pub(crate) fn new(server: Arc<AuthorizationServer>, agents: Option<AgentTokens>) -> Self {
+        Self { server, agents }
     }
 }
 
 #[async_trait]
-impl CallerResolver for UserTokens {
+impl CallerResolver for ServerTokens {
     async fn resolve(
         &self,
         token: &str,
@@ -90,8 +96,14 @@ impl CallerResolver for UserTokens {
                 });
             }
         };
-        // Agent auth issues its tokens on this server too, under a grant
-        // kind of its own; its resolver decides those.
+        if access.grant_kind == AGENT_GRANT_KIND && access.token_kind == AGENT_TOKEN_KIND {
+            // Without agent auth on this router an agent grant is left to
+            // the resolvers after this one.
+            return match &self.agents {
+                Some(agents) => agents.caller(&access).await,
+                None => Err(ResolveError::NotMine),
+            };
+        }
         if access.grant_kind != USER_GRANT_KIND || access.token_kind != ACCESS_TOKEN_KIND {
             return Err(ResolveError::NotMine);
         }

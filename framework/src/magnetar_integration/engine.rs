@@ -499,6 +499,13 @@ pub struct MagnetarLifecycleEvent {
     pub kind: LifecycleEventKind,
     /// The application-owned affected user identifier.
     pub user_id: String,
+    /// What else the mutation records, by name. Agent auth events carry the
+    /// registration, the client address and the fields auth.md recommends
+    /// for each kind, so an application reads its audit trail from this one
+    /// event and [`LifecycleEventKind::audit_name`]. Empty for the other
+    /// kinds. Values an agent chose, such as `agent_platform`, are its text:
+    /// a listener that logs them logs them as fields.
+    pub attributes: std::collections::BTreeMap<String, String>,
 }
 
 impl From<&LifecycleEvent> for MagnetarLifecycleEvent {
@@ -507,6 +514,7 @@ impl From<&LifecycleEvent> for MagnetarLifecycleEvent {
             mutation_id: event.mutation_id.clone(),
             kind: event.kind,
             user_id: event.user_id.clone(),
+            attributes: event.attributes.clone(),
         }
     }
 }
@@ -1248,6 +1256,15 @@ where
         Ok(user.auth_epoch)
     }
 
+    /// This engine's user store as agent auth reads it. See
+    /// [`MagnetarFactorAuthEngine::agent_users`].
+    #[cfg(feature = "agents")]
+    pub fn agent_users(&self) -> Arc<dyn magnetar::agent_auth::AgentUserDirectory> {
+        // A storage over the binding's own connection: the store the
+        // session check and `user_auth_epoch` read.
+        Arc::new(SeaOrmStorage::<S>::new(self.binding.database().clone()))
+    }
+
     /// The user's current auth epoch, or `None` for an id that is not one
     /// of this engine's users. See
     /// [`MagnetarFactorAuthEngine::user_auth_epoch`].
@@ -1340,6 +1357,21 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
             dependency: "Magnetar session authority".to_owned(),
             message: "the user's auth epoch is unavailable".to_owned(),
         })
+    }
+
+    /// This engine's users as agent auth reads them: by identifier and by
+    /// verified email, with the email, its verification and the auth epoch
+    /// all read from the store the session check reads (AGENT-008,
+    /// AGENT-009). Where Magnetar owns the default guard's sessions, agent
+    /// auth reads users here, so the epoch a claim compares the session
+    /// against is the one the session carries.
+    ///
+    /// The default is `None`, which keeps existing custom engines
+    /// source-compatible; agent auth then answers 503 for the lookups it
+    /// cannot make, rather than read users from somewhere else.
+    #[cfg(feature = "agents")]
+    fn agent_users(&self) -> Option<Arc<dyn magnetar::agent_auth::AgentUserDirectory>> {
+        None
     }
 
     /// Whether `user_id` has a second factor in this engine, confirmed or
@@ -1613,6 +1645,21 @@ pub trait MagnetarFactorAuthEngine: Send + Sync {
         })
     }
 
+    /// This engine's users as agent auth reads them: by identifier and by
+    /// verified email, with the email, its verification and the auth epoch
+    /// all read from the store the session check reads (AGENT-008,
+    /// AGENT-009). Where Magnetar owns the default guard's sessions, agent
+    /// auth reads users here, so the epoch a claim compares the session
+    /// against is the one the session carries.
+    ///
+    /// The default is `None`, which keeps existing custom engines
+    /// source-compatible; agent auth then answers 503 for the lookups it
+    /// cannot make, rather than read users from somewhere else.
+    #[cfg(feature = "agents")]
+    fn agent_users(&self) -> Option<Arc<dyn magnetar::agent_auth::AgentUserDirectory>> {
+        None
+    }
+
     /// Whether `user_id` has a second factor in this engine, confirmed or
     /// waiting for its confirmation.
     ///
@@ -1728,6 +1775,11 @@ where
         MagnetarHostEngine::user_auth_epoch(self, user_id).await
     }
 
+    #[cfg(feature = "agents")]
+    fn agent_users(&self) -> Option<Arc<dyn magnetar::agent_auth::AgentUserDirectory>> {
+        Some(MagnetarHostEngine::agent_users(self))
+    }
+
     async fn has_second_factor(&self, user_id: &str) -> Result<bool> {
         MagnetarHostEngine::has_second_factor(self, user_id).await
     }
@@ -1774,6 +1826,11 @@ where
 
     async fn user_auth_epoch(&self, user_id: &str) -> Result<Option<u64>> {
         MagnetarHostEngine::user_auth_epoch(self, user_id).await
+    }
+
+    #[cfg(feature = "agents")]
+    fn agent_users(&self) -> Option<Arc<dyn magnetar::agent_auth::AgentUserDirectory>> {
+        Some(MagnetarHostEngine::agent_users(self))
     }
 
     async fn has_second_factor(&self, user_id: &str) -> Result<bool> {

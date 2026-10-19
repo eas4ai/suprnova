@@ -168,6 +168,63 @@ async fn agent_007_service_auth_answers_the_claim_block_and_no_assertion() {
 }
 
 #[tokio::test]
+async fn agent_009_verification_uri_is_the_claim_page_when_the_host_asks() {
+    let mut options = Options::new();
+    options.config.direct_claim_page = true;
+    let h = sqlite_harness_with(options).await;
+    let registration = h.service_auth("Person@Example.test").await;
+    let uri = registration["claim"]["verification_uri"]
+        .as_str()
+        .expect("a uri");
+    assert!(
+        uri.starts_with("https://auth.example.test/agent/claim?claim_attempt_token=cat_"),
+        "the user opens the claim page itself: {uri}"
+    );
+    assert!(query_param(uri, "return_to").is_none(), "{uri}");
+    let attempt = query_param(uri, "claim_attempt_token").expect("the attempt token");
+    let user = h.create_user("person@example.test", true).await;
+    let session = h.sign_in(&user).await;
+    let pending = h.pending(&attempt, Some(&session)).await;
+    assert_eq!(status(&pending), 200, "{:?}", body(&pending));
+
+    // A restarted attempt points at the claim page as well.
+    let claim_token = registration["claim_token"].as_str().expect("a claim token");
+    let started = h.initiate(claim_token, "person@example.test").await;
+    let restarted = body(&started)["claim_attempt"]["verification_uri"]
+        .as_str()
+        .expect("a uri")
+        .to_owned();
+    assert!(
+        restarted.starts_with("https://auth.example.test/agent/claim?claim_attempt_token=cat_"),
+        "{restarted}"
+    );
+}
+
+#[test]
+fn agent_007_generated_signing_key_reads_back_from_its_pem() {
+    use secrecy::ExposeSecret;
+    let pem = magnetar::agent_auth::SigningKey::generate_pem().expect("a new key");
+    assert!(
+        pem.expose_secret()
+            .starts_with("-----BEGIN PRIVATE KEY-----"),
+        "PKCS#8 PEM"
+    );
+    let key = magnetar::agent_auth::SigningKey::from_pem("generated-1", pem.expose_secret())
+        .expect("the PEM reads back as a P-256 signing key");
+    assert_eq!(key.kid(), "generated-1");
+    let other = magnetar::agent_auth::SigningKey::generate_pem().expect("a second key");
+    assert_ne!(
+        pem.expose_secret(),
+        other.expose_secret(),
+        "every call draws a new key"
+    );
+    assert!(
+        !format!("{pem:?}").contains("PRIVATE"),
+        "the PEM never prints"
+    );
+}
+
+#[tokio::test]
 async fn agent_007_identity_assertion_registers_and_its_token_carries_the_agent_kind() {
     let h = sqlite_harness().await;
     let response = present_subject(&h, "provider-user-1", "new.person@example.test").await;
@@ -410,6 +467,110 @@ async fn agent_007_assertions_signed_before_a_key_rotation_still_verify() {
     let refused = retired.exchange(&old_assertion).await;
     assert_eq!(status(&refused), 400);
     assert_eq!(body(&refused)["error"], "invalid_grant");
+}
+
+#[tokio::test]
+async fn agent_007_narrowed_post_claim_scopes_apply_to_a_bound_registration() {
+    let db = magnetar::default_schema::database().await;
+    let (key, _) = signing_key("narrow-key");
+    let mut options = Options::new();
+    options.config = agent_config(key.clone());
+    let wide = build(db.clone(), options).await;
+    let (registration, _) = wide.claimed_anonymous("narrow@example.test").await;
+    let claim_token = registration["claim_token"].as_str().expect("a claim token");
+
+    // The operator narrows the post-claim scopes and restarts.
+    let mut options = Options::new();
+    let mut config = agent_config(key);
+    config.post_claim_scopes = vec!["tools:read".to_owned()];
+    options.config = config;
+    let narrow = build(db, options).await;
+    let polled = narrow.poll(claim_token).await;
+    assert_eq!(status(&polled), 200, "{:?}", body(&polled));
+    let polled = body(&polled);
+    assert_eq!(polled["scope"], "tools:read", "the claim poll is cut");
+    let assertion = polled["identity_assertion"].as_str().expect("an assertion");
+    let wider = narrow
+        .exchange_with(
+            assertion,
+            &[("scope", "tools:write"), ("resource", RESOURCE)],
+        )
+        .await;
+    assert_eq!(status(&wider), 400, "{:?}", body(&wider));
+    assert_eq!(body(&wider)["error"], "invalid_scope");
+    let token = access_token(&narrow.exchange(assertion).await);
+    let (_, _, _, scopes) = agent_kind(&narrow.verify(&token).await);
+    assert_eq!(scopes, vec!["tools:read".to_owned()]);
+}
+
+/// A directory in which every verified address matches more than one
+/// account.
+struct AmbiguousDirectory;
+
+#[async_trait::async_trait]
+impl magnetar::agent_auth::AgentUserDirectory for AmbiguousDirectory {
+    async fn find_by_id(
+        &self,
+        _user_id: &str,
+    ) -> magnetar::Result<Option<magnetar::agent_auth::AgentUser>> {
+        Ok(None)
+    }
+
+    async fn find_by_verified_email(
+        &self,
+        _email: &str,
+    ) -> magnetar::Result<Option<magnetar::agent_auth::AgentUser>> {
+        Err(magnetar::Error::Conflict {
+            resource: "user".to_owned(),
+            message: "the address matches more than one account".to_owned(),
+        })
+    }
+
+    async fn find_by_verified_phone(
+        &self,
+        _phone: &str,
+    ) -> magnetar::Result<Option<magnetar::agent_auth::AgentUser>> {
+        Ok(None)
+    }
+}
+
+/// A provisioning policy that counts what it is asked and refuses.
+#[derive(Default)]
+struct CountingPolicy(std::sync::atomic::AtomicUsize);
+
+#[async_trait::async_trait]
+impl magnetar::agent_auth::ProvisioningPolicy for CountingPolicy {
+    async fn provision(
+        &self,
+        _identity: &magnetar::agent_auth::ProvidedIdentity,
+    ) -> magnetar::Result<magnetar::agent_auth::ProvisioningDecision> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(magnetar::agent_auth::ProvisioningDecision::Refused)
+    }
+}
+
+#[tokio::test]
+async fn agent_008_address_matching_several_accounts_is_refused() {
+    let policy = Arc::new(CountingPolicy::default());
+    let mut options = Options::new();
+    options.users = Some(Arc::new(AmbiguousDirectory));
+    options.provisioning = Some(policy.clone());
+    let h = sqlite_harness_with(options).await;
+    let response = present_subject(&h, "ambiguous-subject", "shared@example.test").await;
+    assert_eq!(status(&response), 400, "{:?}", body(&response));
+    let refusal = body(&response);
+    assert_eq!(refusal["error"], "invalid_request");
+    assert!(
+        refusal["error_description"]
+            .as_str()
+            .is_some_and(|text| text.contains("more than one account")),
+        "{refusal}"
+    );
+    assert_eq!(
+        policy.0.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "never provisioned"
+    );
 }
 
 /// Every authorization server grant issued to a registration, as

@@ -713,3 +713,167 @@ async fn a_password_reset_keeps_an_encrypted_column_changed_while_it_ran() {
         "the newer encrypted value survives"
     );
 }
+
+// The lookup agent auth matches a provider's verified email with: a
+// provider folds the address to lower case, and the stored one keeps the
+// case the user typed. The exact lookup the reset and verification flows
+// use is unchanged.
+#[tokio::test]
+async fn retrieve_all_by_email_ignoring_case_matches_a_mixed_case_address() {
+    let db = setup().await;
+    db.execute_unprepared(
+        "INSERT INTO users (email, password, is_admin) VALUES ('Alice@Corp.test', 'x', 0)",
+    )
+    .await
+    .unwrap();
+    let p = provider();
+
+    let found = p
+        .retrieve_all_by_email_ignoring_case("alice@corp.test")
+        .await
+        .unwrap();
+    let ids: Vec<&str> = found.iter().map(|user| user.id.as_str()).collect();
+    assert_eq!(ids, ["2"], "the mixed-case address matches");
+    assert_eq!(
+        p.verification_email("2").await.unwrap().as_deref(),
+        Some("Alice@Corp.test"),
+        "the stored address is read by the id"
+    );
+    assert!(
+        p.retrieve_by_email("alice@corp.test")
+            .await
+            .unwrap()
+            .is_none(),
+        "the exact lookup still matches the column exactly"
+    );
+    assert!(
+        p.retrieve_all_by_email_ignoring_case("nobody@corp.test")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+// Accounts whose addresses differ only in case are all answered, the exact
+// one no ahead of the others: the caller decides, so an unverified exact
+// match cannot hide a verified one.
+#[tokio::test]
+async fn retrieve_all_by_email_ignoring_case_answers_every_case_match() {
+    let db = setup().await;
+    db.execute_unprepared(
+        "INSERT INTO users (email, password, is_admin) VALUES \
+         ('Bob@Corp.test', 'x', 0), ('bob@corp.test', 'x', 0), ('robert@corp.test', 'x', 0)",
+    )
+    .await
+    .unwrap();
+    let p = provider();
+
+    let mut ids: Vec<String> = p
+        .retrieve_all_by_email_ignoring_case("BOB@CORP.TEST")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|user| user.id)
+        .collect();
+    ids.sort();
+    assert_eq!(ids, ["2", "3"]);
+}
+
+// The read is bounded: an address on more accounts than the bound is
+// refused with a 409 rather than read without end.
+#[tokio::test]
+async fn retrieve_all_by_email_ignoring_case_refuses_an_address_on_too_many_accounts() {
+    let db = setup().await;
+    for index in 0..21 {
+        let variant: String = "flood@corp.test"
+            .chars()
+            .enumerate()
+            .map(|(position, ch)| {
+                if (index >> (position % 5)) & 1 == 1 {
+                    ch.to_ascii_uppercase()
+                } else {
+                    ch
+                }
+            })
+            .collect();
+        db.execute_unprepared(&format!(
+            "INSERT INTO users (email, password, is_admin) VALUES ('{variant}', 'x', 0)"
+        ))
+        .await
+        .unwrap();
+    }
+    let refused = provider()
+        .retrieve_all_by_email_ignoring_case("flood@corp.test")
+        .await
+        .expect_err("more matches than the bound");
+    assert_eq!(refused.status_code(), 409);
+}
+
+/// The same lookup on a live engine, through a temporary `users` table on
+/// the one pooled connection, so it shadows any table of that name and
+/// leaves nothing behind. `LOWER(email) = LOWER(?)` and its placeholder
+/// must read the same on every engine (the DATA-01 class).
+async fn live_case_insensitive_lookup(url_variable: &str) {
+    use sea_orm::ConnectionTrait;
+    use suprnova::container::testing::TestContainer;
+    use suprnova::{DatabaseConfig, DbConnection};
+
+    let url = std::env::var(url_variable)
+        .unwrap_or_else(|_| panic!("set {url_variable} to a disposable database"));
+    let _guard = TestContainer::fake();
+    let database = DbConnection::connect(
+        &DatabaseConfig::builder()
+            .url(url)
+            .max_connections(1)
+            .min_connections(1)
+            .logging(false)
+            .build(),
+    )
+    .await
+    .expect("connect the test database");
+    TestContainer::singleton(database.clone());
+    let id_column = match database.inner().get_database_backend() {
+        sea_orm::DatabaseBackend::Postgres => "id BIGSERIAL PRIMARY KEY",
+        _ => "id BIGINT AUTO_INCREMENT PRIMARY KEY",
+    };
+    database
+        .inner()
+        .execute_unprepared(&format!(
+            "CREATE TEMPORARY TABLE users ({id_column}, email VARCHAR(255) NOT NULL, \
+             password VARCHAR(255) NOT NULL, email_verified_at VARCHAR(255) NULL)"
+        ))
+        .await
+        .expect("create the temporary users table");
+    database
+        .inner()
+        .execute_unprepared(
+            "INSERT INTO users (email, password) VALUES \
+             ('Alice@Corp.test', 'x'), ('alice@corp.test', 'x'), ('bob@corp.test', 'x')",
+        )
+        .await
+        .expect("insert the accounts");
+    let p = provider();
+    let found = p
+        .retrieve_all_by_email_ignoring_case("ALICE@corp.TEST")
+        .await
+        .expect("the lookup runs");
+    assert_eq!(found.len(), 2, "both case variants");
+    assert!(
+        p.retrieve_all_by_email_ignoring_case("nobody@corp.test")
+            .await
+            .expect("the lookup runs")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn postgres_retrieve_all_by_email_ignoring_case_matches_every_case() {
+    live_case_insensitive_lookup("PG_TEST_URL").await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn mysql_retrieve_all_by_email_ignoring_case_matches_every_case() {
+    live_case_insensitive_lookup("MYSQL_TEST_URL").await;
+}

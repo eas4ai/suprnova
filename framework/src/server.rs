@@ -507,6 +507,12 @@ impl Server {
 
         let router = self.router;
         let middleware = Arc::new(self.middleware);
+        // Agent auth expires unclaimed registrations and prunes spent replay
+        // records every five minutes while the server runs; the pass is
+        // idempotent across nodes, so every node runs it.
+        #[cfg(feature = "agents")]
+        let _agent_maintenance =
+            crate::agents::agent_auth::operator::spawn_maintenance(router.agent_auth());
         // SEC-07: header-read deadline applied to every accepted
         // connection below. `Duration` is `Copy`, so each spawned
         // connection task gets its own value with no `Arc` needed.

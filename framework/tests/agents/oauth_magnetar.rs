@@ -84,7 +84,7 @@ async fn agent_005_password_change_ends_the_token_under_magnetar_sessions() {
 
 /// A real password change: the reset link the user is mailed, then the
 /// reset it completes, which moves Magnetar's epoch.
-async fn reset_password(email: &str) {
+pub async fn reset_password(email: &str) {
     let mail = Mail::fake();
     let _queue = suprnova::Queue::fake();
     PasswordReset::send_link(email, "https://app.test/reset")

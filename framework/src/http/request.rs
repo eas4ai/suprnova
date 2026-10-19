@@ -158,10 +158,10 @@ type AgentMarkSlot = Option<std::sync::Arc<crate::agents::AgentMark>>;
 #[cfg(not(feature = "agents"))]
 type AgentMarkSlot = ();
 
-/// The slot [`Request`] keeps its router's OAuth server in, as
-/// [`AgentMarkSlot`] keeps the agent mark.
+/// The slot [`Request`] keeps its router's OAuth server, and agent auth
+/// with it, in, as [`AgentMarkSlot`] keeps the agent mark.
 #[cfg(feature = "agents")]
-type OAuthServerSlot = Option<std::sync::Arc<magnetar::authorization_server::AuthorizationServer>>;
+type OAuthServerSlot = Option<std::sync::Arc<crate::agents::MountedOAuth>>;
 #[cfg(not(feature = "agents"))]
 type OAuthServerSlot = ();
 
@@ -664,21 +664,18 @@ impl Request {
         self.agent = Some(std::sync::Arc::new(mark));
     }
 
-    /// Hand the request the OAuth server its router mounted. Only the
-    /// server calls this, from the router that matched the request.
+    /// Hand the request the OAuth server its router mounted, with agent
+    /// auth when it is on. Only the server calls this, from the router that
+    /// matched the request.
     #[cfg(feature = "agents")]
-    pub(crate) fn set_oauth_server(
-        &mut self,
-        server: std::sync::Arc<magnetar::authorization_server::AuthorizationServer>,
-    ) {
+    pub(crate) fn set_oauth_server(&mut self, server: std::sync::Arc<crate::agents::MountedOAuth>) {
         self.oauth = Some(server);
     }
 
-    /// The OAuth server the router that matched this request mounted.
+    /// The OAuth server, and agent auth with it, the router that matched
+    /// this request mounted.
     #[cfg(feature = "agents")]
-    pub(crate) fn oauth_server(
-        &self,
-    ) -> Option<&std::sync::Arc<magnetar::authorization_server::AuthorizationServer>> {
+    pub(crate) fn oauth_server(&self) -> Option<&std::sync::Arc<crate::agents::MountedOAuth>> {
         self.oauth.as_ref()
     }
 
