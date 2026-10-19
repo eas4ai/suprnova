@@ -1,7 +1,7 @@
 # Suprnova Live -- 05 Snapshots and Hydration
 
 Status: Normative design specification
-Last revised: 2026-10-18
+Last revised: 2026-10-19
 
 ## Scope
 
@@ -86,6 +86,10 @@ Acceptance criteria:
   authoritative component data, accepts a fresh-render outcome for the promoted
   instance, and does not apply the original proposals or execute the original
   action. The declaration therefore requires protocol v2.
+- A protocol v2 `fresh_render` on a seed promotes the seed and renders the new
+  instance from its promotion mount, invoking no action, as an instance's
+  fresh render renders it. The runtime asks for one after a WebMCP write tool
+  (spec 09), so a public island never keeps data the tool changed.
 - Promotion and abandoned-instance retention are bounded so a reusable public
   seed cannot create unbounded ledger storage.
 
@@ -367,6 +371,11 @@ owner lineage records the newly applied parent revision.
   expires as a browser snapshot does.
 
 ## Decisions and revisions
+
+- 2026-10-19 -- A `fresh_render` on a public seed promotes the seed and renders
+  it, invoking no action. The runtime renders every island fresh after a
+  WebMCP write tool (AGENT-014), and a seed refused the operation, so a public
+  island kept the data the tool had changed.
 
 - 2026-10-18 -- An argument named like a field the agent cannot see no
   longer shows that field's issue, and a keyed path is matched by its field

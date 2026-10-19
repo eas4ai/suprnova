@@ -52,8 +52,8 @@ use suprnova_live::endpoint::{
 use suprnova_live::execution::{
     ActionExecutionRequest, ExecutionResult, ExecutionService, ExecutionTracePort,
     InstancedActionRequest, InstancedFreshRenderRequest, InstancedLifecycleOperation,
-    InstancedLifecycleRequest, PromotedActionRequest, PromotedModelSyncRequest,
-    PromotedRequestIdentity, TransactionPort,
+    InstancedLifecycleRequest, PromotedActionRequest, PromotedFreshRenderRequest,
+    PromotedModelSyncRequest, PromotedRequestIdentity, TransactionPort,
 };
 use suprnova_live::identity::{
     ActionName, BrowserNonce, BrowserOperationName, ContentDigest, IdempotencyKey, InstanceId,
@@ -929,9 +929,28 @@ impl SuprnovaEndpointKernel {
                     )
                     .await);
             }
-            RequestedOperation::ParamsChanged
-            | RequestedOperation::FreshRender
-            | RequestedOperation::LazyComplete => return Err(EndpointKernelError::unavailable()),
+            // The browser runtime refreshes a public seed after a WebMCP
+            // write tool (AGENT-014): the seed is promoted and rendered with
+            // its current data, so the page shows what the tool changed.
+            RequestedOperation::FreshRender => {
+                return Ok(self
+                    .execution
+                    .execute_promoted_fresh_render(
+                        PromotedFreshRenderRequest::new(
+                            request.descriptor(),
+                            request.context(),
+                            browser,
+                            promoted,
+                            identity,
+                            self.trace.as_ref(),
+                        )
+                        .with_response_sealer(response_sealer, request.response_binding()),
+                    )
+                    .await);
+            }
+            RequestedOperation::ParamsChanged | RequestedOperation::LazyComplete => {
+                return Err(EndpointKernelError::unavailable());
+            }
         };
         let proposal_batch = self
             .prepare_proposals(request.descriptor(), Some(name), &synchronized, proposals)

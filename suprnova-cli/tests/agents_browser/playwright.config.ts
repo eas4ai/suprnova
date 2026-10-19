@@ -6,7 +6,7 @@ if (!process.env.AGENTS_BASE_URL) {
 
 export default defineConfig({
   testDir: '.',
-  testMatch: 'agents.spec.ts',
+  testMatch: '*.spec.ts',
   fullyParallel: false,
   workers: 1,
   retries: 0,

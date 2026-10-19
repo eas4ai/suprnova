@@ -104,6 +104,12 @@ async function touch(page: Page, key: string) {
 }
 
 test('agent_012_mounted_tool_actions_register_with_model_context', async ({ page }) => {
+  // `counter.add` accepts users: a guest's page lists it on no island
+  // (AGENT-014), so a signed-in user's page registers it.
+  await page.goto('/tools');
+  await page.waitForTimeout(500);
+  expect(await registered(page)).toEqual([]);
+  await signIn(page, 'alice');
   const agent = await openTools(page);
   await expect.poll(() => [...agent.added].sort()).toEqual([
     'counter.add.left',
@@ -122,6 +128,7 @@ test('agent_012_mounted_tool_actions_register_with_model_context', async ({ page
 });
 
 test('agent_012_tool_names_carry_the_live_key', async ({ page }) => {
+  await signIn(page, 'alice');
   await openTools(page);
   const keys = await page
     .locator('[data-suprnova-live-island]')
@@ -132,6 +139,7 @@ test('agent_012_tool_names_carry_the_live_key', async ({ page }) => {
 });
 
 test('agent_012_tools_leave_with_their_component', async ({ page }) => {
+  await signIn(page, 'alice');
   const agent = await openTools(page);
   await page.locator('#remove-first').click();
   await expect.poll(() => registered(page)).toEqual(['counter.add.left', 'counter.add.right']);
@@ -139,6 +147,7 @@ test('agent_012_tools_leave_with_their_component', async ({ page }) => {
 });
 
 test('agent_012_tools_leave_on_navigation', async ({ page }) => {
+  await signIn(page, 'alice');
   await openTools(page);
   await page.locator('#other').click();
   await page.waitForURL('**/other');

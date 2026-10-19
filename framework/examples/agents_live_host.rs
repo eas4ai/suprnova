@@ -1,6 +1,6 @@
-//! Real Suprnova server for the `agents_browser` suite (AGENT-012): Live
-//! islands whose actions are WebMCP tools, served the way an application
-//! serves them.
+//! Real Suprnova server for the `agents_browser` suite (AGENT-012,
+//! AGENT-014): Live islands whose actions are WebMCP tools, and server tools
+//! a Live page offers, served the way an application serves them.
 //!
 //! `suprnova-cli/tests/agents_browser.rs` starts this binary and drives it
 //! in Chromium with WebMCP enabled. It serves:
@@ -13,7 +13,15 @@
 //!   lets only `alice` add;
 //! - `/test/requests`, every Live action request since `/test/reset`: its
 //!   tool-call header, the security checks its guard saw, the execution
-//!   phases it ran and the Gate abilities it asked.
+//!   phases it ran and the Gate abilities it asked;
+//! - `/server-tools`, a Live page offering the server tools `notes.show`
+//!   (public, `GET /notes/{note}`, read-only), `posts.create` (users,
+//!   `POST /posts`) and `posts.clear` (users, `DELETE /posts`, destructive),
+//!   with an island showing how many posts exist, read at each render, and a
+//!   counter island;
+//! - `/test/tool-calls`, every request carrying the tool-call header since
+//!   `/test/reset`: its method, path and query, the CSRF header it sent,
+//!   whether it carried the session cookie, and its status.
 //!
 //! It serves agents with `Router::agents`: a router that does not check and
 //! count tool calls offers the page no tool.
@@ -81,6 +89,182 @@ impl AgentsCounter {
     /// refuses clicks to make the island an instance of its own.
     #[action]
     pub fn touch(&mut self) {}
+}
+
+/// How many posts exist: what the server tools change and the posts island
+/// shows.
+static POSTS: AtomicUsize = AtomicUsize::new(0);
+
+/// The number of posts, read at every render, so a fresh render shows what a
+/// write tool changed (AGENT-014).
+#[derive(LiveComponent)]
+#[live(
+    name = "examples.agents-posts",
+    view = "live/examples/agents-posts.html"
+)]
+pub struct AgentsPosts {
+    posts: u64,
+}
+
+#[live]
+impl AgentsPosts {
+    /// Read the store before each render.
+    #[rendering]
+    pub fn rendering(&mut self) {
+        self.posts = POSTS.load(Ordering::SeqCst) as u64;
+    }
+}
+
+/// The input of `notes.show`.
+#[suprnova::tool_input]
+pub struct NoteRef {
+    /// The note to show.
+    pub note: String,
+}
+
+/// The input of `posts.create`.
+#[suprnova::tool_input]
+pub struct CreatePost {
+    /// The post's title.
+    #[validate(length(min = 1, max = 200))]
+    pub title: String,
+}
+
+#[suprnova::tool(
+    name = "notes.show",
+    description = "Show one note.",
+    callers = [public],
+    input = NoteRef,
+    annotations(read_only, untrusted_content),
+)]
+#[suprnova::handler]
+pub async fn show_note(note: String, form: NoteRef) -> Response {
+    suprnova::json_response!({ "note": form.note, "same": note == form.note })
+}
+
+#[suprnova::tool(
+    name = "posts.create",
+    description = "Create a post for the signed-in user.",
+    title = "Create a post",
+    callers = [user],
+    input = CreatePost,
+    annotations(read_only = false, destructive = false),
+)]
+#[suprnova::handler]
+pub async fn create_post(form: CreatePost) -> Response {
+    let id = POSTS.fetch_add(1, Ordering::SeqCst) + 1;
+    suprnova::json_response!({ "id": id, "title": form.title, "user": Auth::id() })
+}
+
+#[suprnova::tool(
+    name = "posts.clear",
+    description = "Delete every post.",
+    callers = [user],
+    annotations(destructive),
+)]
+#[suprnova::handler]
+pub async fn clear_posts() -> Response {
+    POSTS.store(0, Ordering::SeqCst);
+    suprnova::json_response!({ "cleared": true })
+}
+
+/// Records every request that carries the tool-call header: outermost, so
+/// it sees the CSRF check's answer too.
+struct ToolCalls;
+
+#[async_trait]
+impl Middleware for ToolCalls {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let Some(tool) = request.header("suprnova-tool-call").map(str::to_string) else {
+            return next(request).await;
+        };
+        let csrf = if request.header("x-csrf-token").is_some() {
+            Some("X-CSRF-TOKEN")
+        } else if request.header("x-xsrf-token").is_some() {
+            Some("X-XSRF-TOKEN")
+        } else {
+            None
+        };
+        let session = request.header("cookie").is_some_and(|cookie| {
+            cookie
+                .split(';')
+                .any(|pair| pair.trim().starts_with("suprnova_session="))
+        });
+        let method = request.method().to_string();
+        let path = request.path().to_string();
+        let query = request.query().map(str::to_string);
+        let response = next(request).await;
+        let status = match &response {
+            Ok(response) | Err(response) => response.status_code(),
+        };
+        observe(|observations| {
+            observations.tool_calls.push(json!({
+                "tool": tool,
+                "method": method,
+                "path": path,
+                "query": query,
+                "csrf": csrf,
+                "session": session,
+                "status": status,
+            }));
+        });
+        response
+    }
+}
+
+#[suprnova::view(path = "live/examples/agents-server-page.html")]
+struct ServerPage<'a> {
+    bootstrap: &'a TrustedHtml,
+    summary: &'a TrustedHtml,
+    counter: &'a TrustedHtml,
+}
+
+#[derive(Clone)]
+struct ServerMounts {
+    summary: LiveMount<AgentsPosts>,
+    counter: LiveMount<AgentsCounter>,
+}
+
+async fn server_tools_page(request: Request, mounts: ServerMounts) -> Result<HttpResponse, String> {
+    let mut document = LiveDocument::from_request(&request).map_err(|error| error.to_string())?;
+    // The route offers `notes.show` and `posts.create`; the page adds
+    // `posts.clear`.
+    document
+        .with_tools(["posts.clear"])
+        .await
+        .map_err(|error| error.to_string())?;
+    let summary = document
+        .mount(
+            &mounts.summary,
+            CanonicalValue::Object(BTreeMap::new()),
+            MountFlags::empty(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let counter = document
+        .mount(
+            &mounts.counter,
+            CanonicalValue::Object(BTreeMap::new()),
+            MountFlags::empty(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let bootstrap = document
+        .bootstrap(LiveBootstrapOptions::esm())
+        .map_err(|error| error.to_string())?;
+    document
+        .render(
+            ViewName::parse("live/examples/agents-server-page.html")
+                .map_err(|error| error.to_string())?,
+            &ServerPage {
+                bootstrap: bootstrap.html(),
+                summary: summary.html(),
+                counter: counter.html(),
+            },
+            DocumentResponseIntent::html(StatusCode::OK).map_err(|error| error.to_string())?,
+            AssetSet::empty(),
+        )
+        .map_err(|error| error.to_string())
 }
 
 #[suprnova::view(path = "live/examples/agents-page.html")]
@@ -179,6 +363,7 @@ struct Observations {
     requests: Vec<Value>,
     phases: Vec<String>,
     gate: Vec<String>,
+    tool_calls: Vec<Value>,
 }
 
 fn observations() -> &'static Mutex<Observations> {
@@ -379,6 +564,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         LiveRegistry::builder()
             .register::<AgentsCounter>()
             .expect("register the counter")
+            .register::<AgentsPosts>()
+            .expect("register the posts summary")
             .build(),
     );
     Gate::define::<String, String>("live:examples.agents-counter.add", |user, _action| {
@@ -395,6 +582,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         right: LiveMount::public_seed("/tools", "counter-right", "right").expect("right mount"),
     };
     let page_mounts = mounts.clone();
+    let server_mounts = ServerMounts {
+        summary: LiveMount::public_seed("/server-tools", "posts-summary", "summary")
+            .expect("summary mount"),
+        counter: LiveMount::public_seed("/server-tools", "server-counter", "counter")
+            .expect("counter mount"),
+    };
+    let server_page_mounts = server_mounts.clone();
     let mut router: Router = Router::new()
         .get("/health", |_request: Request| async {
             Ok(HttpResponse::text("ok"))
@@ -425,16 +619,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 "agents_user=; Path=/; Max-Age=0; SameSite=Lax",
             ))
         })
+        .get("/server-tools", move |request: Request| {
+            let mounts = server_page_mounts.clone();
+            async move {
+                server_tools_page(request, mounts).await.map_err(|error| {
+                    HttpResponse::text(format!("page failed: {error}")).status(500)
+                })
+            }
+        })
+        .with_tools(["notes.show", "posts.create"])
+        .get("/notes/{note}", show_note)
+        .post("/posts", create_post)
+        .delete("/posts", clear_posts)
         .get("/test/requests", |_request: Request| async {
             let requests = observe(|observations| observations.requests.clone());
             Ok(HttpResponse::json(json!({ "requests": requests })))
+        })
+        .get("/test/tool-calls", |_request: Request| async {
+            let calls = observe(|observations| observations.tool_calls.clone());
+            Ok(HttpResponse::json(json!({ "calls": calls })))
         })
         .get("/test/reset", |_request: Request| async {
             observe(|observations| {
                 observations.requests.clear();
                 observations.phases.clear();
                 observations.gate.clear();
+                observations.tool_calls.clear();
             });
+            POSTS.store(0, Ordering::SeqCst);
             Ok(HttpResponse::text("reset"))
         })
         .into();
@@ -442,10 +654,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     for mount in [&mounts.main, &mounts.left, &mounts.right] {
         router = router.try_live_mount(mount)?;
     }
+    router = router
+        .try_live_mount(&server_mounts.summary)?
+        .try_live_mount(&server_mounts.counter)?;
     router = router.try_agents(AgentsConfig::new())?;
     let mut session = SessionConfig::default();
     session.cookie_secure = false;
     Server::new(router)
+        .middleware(ToolCalls)
         .middleware(SessionMiddleware::with_store(
             session,
             Arc::new(MemorySessionStore::default()),
