@@ -59,10 +59,16 @@ pub struct User {
 pub use user::{ActiveModel, Column, Entity};
 
 impl User {
-    /// Find a user by their email address.
+    /// Find a user by their email address, compared without case through the
+    /// database's `LOWER`, as agent auth matches addresses. Registration
+    /// stores addresses folded (`crate::email_address`), but a row written
+    /// before, or by another application on this database, may hold another
+    /// case. On SQLite, and on Postgres with the C collation, `LOWER` folds
+    /// ASCII letters only. Postgres with a Unicode collation and the `_ci`
+    /// collations of MySQL and MariaDB ignore case more widely.
     pub async fn find_by_email(email: &str) -> Result<Option<Self>, FrameworkError> {
         <Self as suprnova::eloquent::Model>::query()
-            .filter("email", email)
+            .where_raw("LOWER(email) = LOWER(?)", vec![email.into()])
             .first()
             .await
     }

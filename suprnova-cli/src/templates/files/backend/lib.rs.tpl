@@ -1,8 +1,10 @@
 pub mod actions;
+pub mod agents;
 pub mod bootstrap;
 pub mod commands;
 pub mod config;
 pub mod controllers;
+pub mod email_address;
 pub mod live;
 pub mod middleware;
 pub mod migrations;

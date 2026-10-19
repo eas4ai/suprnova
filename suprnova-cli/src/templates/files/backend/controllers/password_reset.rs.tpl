@@ -18,6 +18,7 @@ use suprnova::{
     ValidationErrors, auth_flows::PasswordReset, handler, inertia_response, redirect, url,
 };
 
+use crate::email_address;
 use crate::props::flash::Toast;
 
 /// Where the mailed link lands: the form that takes the new password.
@@ -34,11 +35,21 @@ pub struct ResetPasswordProps {
 
 #[derive(Deserialize, Validate)]
 pub struct ForgotPasswordRequest {
-    #[validate(email(message = "Please enter a valid email address"))]
+    #[validate(
+        email(message = "Please enter a valid email address"),
+        length(max = 254, message = "Email must be at most 254 characters")
+    )]
     pub email: String,
 }
 
-impl FormRequest for ForgotPasswordRequest {}
+impl FormRequest for ForgotPasswordRequest {
+    /// Fold the address before the rules run, as registration stored it
+    /// (`crate::email_address`).
+    fn prepare_for_validation(req: &mut Request) -> Result<(), FrameworkError> {
+        req.transform_input("email", |email| email_address::normalize(&email));
+        Ok(())
+    }
+}
 
 #[derive(Deserialize, Validate)]
 pub struct ResetPasswordRequest {

@@ -1,3 +1,4 @@
+pub mod agent_key;
 pub mod cargo_meta;
 pub mod console_forward;
 pub mod db_sync;

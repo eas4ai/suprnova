@@ -6,7 +6,11 @@
 use sea_orm::entity::prelude::*;
 use sea_orm::{ActiveModelTrait, EntityTrait, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
-use suprnova::{DB, FrameworkError};
+use suprnova::{DB, FrameworkError, ValidationErrors};
+
+/// The longest address an account holds, in characters. RFC 5321 delivers
+/// no longer one, and Magnetar, which shares this table, refuses one too.
+pub const MAX_EMAIL_LENGTH: usize = 254;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "app_users")]
@@ -74,11 +78,22 @@ impl Model {
             .map_err(|e| FrameworkError::database(e.to_string()))
     }
 
-    /// Insert an application user row keyed by email.
+    /// Insert an application user row keyed by email. An address longer
+    /// than [`MAX_EMAIL_LENGTH`] is refused as a validation error on
+    /// `email`, before it reaches the database.
     pub async fn create(email: impl Into<String>) -> Result<Self, FrameworkError> {
+        let email = email.into();
+        if email.chars().count() > MAX_EMAIL_LENGTH {
+            let mut errors = ValidationErrors::new();
+            errors.add(
+                "email",
+                format!("Email must be at most {MAX_EMAIL_LENGTH} characters"),
+            );
+            return Err(FrameworkError::Validation(errors));
+        }
         let conn = DB::connection()?;
         let active = ActiveModel {
-            email: Set(email.into()),
+            email: Set(email),
             created_at: Set(chrono::Utc::now()),
             ..Default::default()
         };

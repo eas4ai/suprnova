@@ -13,6 +13,15 @@ impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
         let mut migrations: Vec<Box<dyn MigrationTrait>> = vec![
             Box::new(m20240101_000001_create_users_table::Migration),
+            // One account per address, compared through `LOWER` as agent
+            // auth matches addresses. On SQLite, and on Postgres with the C
+            // collation, that ignores the case of ASCII letters only;
+            // Postgres with a Unicode collation and MySQL ignore it more
+            // widely. On MariaDB, which has no expression index, the
+            // column's unique index and `_ci` collation do this.
+            Box::new(suprnova::auth::migrations::UniqueEmailIgnoringCase::on(
+                "users", "email",
+            )),
             Box::new(m20240101_000002_create_sessions_table::Migration),
             Box::new(m20240101_000003_create_remember_tokens_table::Migration),
             Box::new(m20240101_000004_create_auth_flow_tokens_table::Migration),
@@ -35,6 +44,9 @@ impl MigratorTrait for Migrator {
         migrations.extend(suprnova::search::migrations());
         // The starter recommender's events, models and recommendations.
         migrations.extend(suprnova::recommendations::migrations());
+        // The OAuth server's clients, grants and tokens, and agent auth's
+        // registrations and claims (`src/agents.rs`).
+        migrations.extend(suprnova::agents::migrations());
         migrations
     }
 }
