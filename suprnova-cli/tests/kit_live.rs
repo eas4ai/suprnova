@@ -416,6 +416,16 @@ mod document_tests {
         }
         for part in [
             "suprnova::testing::install_test_encryption_key();",
+            // The router serves agents, as `cmd/main.rs` serves them: agent
+            // auth needs a signing key, and the OAuth server an issuer
+            // other than the development default.
+            "suprnova::testing::install_test_agent_auth_key();",
+            r#"Config::register(AppConfig::builder().url("http://localhost").build());"#,
+            "live::routes_with_render_cache(agents::serve(routes::register())",
+            r#".get("/connected-agents")"#,
+            r#".get("/oauth/approve")"#,
+            r#".get("/agent/claim?claim_attempt_token="#,
+            r#".get("/.well-known/oauth-protected-resource")"#,
             "TestDatabase::fresh::<Migrator>()",
             "prepare_live_router_for_test(&router)",
             "MiddlewareRegistry::from_global()",

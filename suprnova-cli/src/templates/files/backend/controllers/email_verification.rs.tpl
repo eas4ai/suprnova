@@ -80,8 +80,9 @@ pub async fn resend(_req: Request) -> Response {
 /// `GET /verify-email/verify?token=...` - consume the mailed link.
 ///
 /// The framework checks that the signed-in user owns the token, stamps it
-/// used, and records `email_verified_at`. An invalid, expired, reused, or
-/// foreign token is a `400`, which the Inertia error page renders.
+/// used, and records `email_verified_at`. An invalid, expired or reused
+/// token is a `400`, and another account's token is a `403`; the Inertia
+/// error page renders either.
 #[handler]
 pub async fn verify(req: Request) -> Response {
     let token = req.query_param("token").unwrap_or_default();

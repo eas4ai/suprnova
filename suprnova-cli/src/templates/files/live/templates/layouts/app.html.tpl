@@ -1,9 +1,10 @@
 {#
   The application layout: the frame of the welcome page, the dashboard, the
-  notes pages and the error page. The header bar holds the navigation, the
-  account menu holds the signed-in user and the sign-out form, and the
-  toast region shows the toast an earlier step kept. A page extends it
-  and fills the `content` block.
+  notes pages, the agent pages and the error page. The header bar holds the
+  navigation, the account menu holds the signed-in user and the sign-out
+  form, and the toast region shows the toast an earlier step kept. A page
+  extends it and fills the `content` block, and the `head` block when it
+  needs a tag of its own in the head.
 -#}
 {%- import "suprnova-ui/header-bar/header-bar.html" as header -%}
 {%- import "suprnova-ui/account-menu/account-menu.html" as menu -%}
@@ -12,6 +13,7 @@
 <html lang="{{ frame.lang }}">
 <head>
 {% include "live/layouts/head.html" %}
+{% block head %}{% endblock %}
 </head>
 <body class="kit-app" data-layout="app">
 <div class="kit-topbar">
@@ -19,6 +21,7 @@
 {% if frame.user.is_some() %}
 {% call header::header_link(frame.href("/dashboard"), "Dashboard", current=frame.is_current(Nav::Dashboard)) %}{% endcall %}
 {% call header::header_link(frame.href("/notes"), "Notes", current=frame.is_current(Nav::Notes)) %}{% endcall %}
+{% call header::header_link(frame.href("/connected-agents"), "Agents", current=frame.is_current(Nav::Agents)) %}{% endcall %}
 {% endif %}
 {% endcall %}
 <div class="kit-account">
@@ -26,6 +29,7 @@
 {% call menu::account_menu("account-menu", user.name, user.initials) %}
 {% call menu::account_link(frame.href("/dashboard"), "Dashboard") %}{% endcall %}
 {% call menu::account_link(frame.href("/notes"), "Notes") %}{% endcall %}
+{% call menu::account_link(frame.href("/connected-agents"), "Connected agents") %}{% endcall %}
 {% call menu::account_sign_out(frame.href("/logout"), frame.csrf) %}{% endcall %}
 {% endcall %}
 {% else %}
