@@ -111,7 +111,7 @@ const CORE_CASES: &[&str] = &[
     "agent_014_unanswered_call_does_not_reload",
     "agent_014_an_aborted_call_rejects_and_does_not_reload",
     "agent_015_duplicate_tool_name_is_refused",
-    "agent_015_leaving_tool_holds_until_its_pending_call_settles",
+    "agent_015_a_leaving_tool_unregisters_at_once_and_its_pending_call_still_answers",
     "agent_015_back_forward_cache_suspends_and_restores_tools",
     "agent_015_a_page_without_webmcp_registers_nothing",
 ];
@@ -283,6 +283,7 @@ const FIXTURE_ROUTES: &str = r#"    // The AGENT-014 and AGENT-015 browser fixtu
         post!("/reset", controllers::agent_fixture::reset),
         get!("/help", controllers::agent_fixture::help),
         post!("/notes", controllers::agent_fixture::store_note),
+        post!("/notes/away", controllers::agent_fixture::store_note_and_leave),
         post!("/purge", controllers::agent_fixture::purge),
         get!("/schema", controllers::agent_fixture::schema),
         get!("/requests", controllers::agent_fixture::requests),
@@ -306,6 +307,7 @@ const BROWSER_CASES: &[&str] = &[
     "agent_015_{kit}_form_tool_fills_and_submits_through_inertia",
     "agent_015_{kit}_form_tool_returns_each_invalid_field",
     "agent_015_{kit}_destructive_form_tool_leaves_the_submit_to_the_user",
+    "agent_015_{kit}_form_tool_answers_when_its_submit_leaves_the_page",
 ];
 
 /// The application process, stopped when dropped.

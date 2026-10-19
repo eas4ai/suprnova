@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use suprnova::serde_json::{Value, json};
 use suprnova::{
     HttpResponse, Inertia, InertiaProps, Middleware, Next, Request, Response, ToolCaller,
-    async_trait, handler, inertia_response, json_response, tool, tool_input,
+    async_trait, handler, inertia_response, json_response, redirect, tool, tool_input,
 };
 
 /// The number the first page shows and `fixture.bump` adds to.
@@ -61,13 +61,21 @@ fn counter() -> i64 {
 /// `fixture.mine`, beside the group's `fixture.help`.
 #[handler]
 pub async fn first(req: Request) -> Response {
-    inertia_response!(&req, "AgentFixture/First", AgentFixtureProps { counter: counter() })
+    inertia_response!(
+        &req,
+        "AgentFixture/First",
+        AgentFixtureProps { counter: counter() }
+    )
 }
 
 /// `GET /agent-fixture/second`: offers `fixture.reset` and `fixture.help`.
 #[handler]
 pub async fn second(req: Request) -> Response {
-    inertia_response!(&req, "AgentFixture/Second", AgentFixtureProps { counter: counter() })
+    inertia_response!(
+        &req,
+        "AgentFixture/Second",
+        AgentFixtureProps { counter: counter() }
+    )
 }
 
 /// `GET /agent-fixture/form`: the page with the two form tools.
@@ -152,7 +160,11 @@ pub async fn help() -> Response {
 #[tool_input]
 pub struct FixtureNoteRequest {
     /// The note's title.
-    #[validate(length(min = 3, max = 80, message = "Give the note a title of 3 to 80 characters."))]
+    #[validate(length(
+        min = 3,
+        max = 80,
+        message = "Give the note a title of 3 to 80 characters."
+    ))]
     pub title: String,
     /// What the note says.
     #[serde(default)]
@@ -166,6 +178,17 @@ pub async fn store_note(form: FixtureNoteRequest) -> Response {
         notes.push(form.title);
     }
     Inertia::back(302, Some("/agent-fixture/form")).into()
+}
+
+/// `POST /agent-fixture/notes/away`: save the note and go to the first
+/// page, so the form that sent it, and its tool, leave the page while the
+/// agent's call waits for its answer.
+#[handler]
+pub async fn store_note_and_leave(form: FixtureNoteRequest) -> Response {
+    if let Ok(mut notes) = NOTES.lock() {
+        notes.push(form.title);
+    }
+    redirect!("/agent-fixture/first").into()
 }
 
 /// The destructive form, the form tool `fixture.notes.purge` fills.
@@ -189,12 +212,17 @@ pub async fn purge(_form: PurgeRequest) -> Response {
 /// form, to compare with the one the page registered.
 #[handler]
 pub async fn schema() -> Response {
-    Ok(HttpResponse::json(suprnova::agents::__input_schema::<FixtureNoteRequest>()))
+    Ok(HttpResponse::json(suprnova::agents::__input_schema::<
+        FixtureNoteRequest,
+    >()))
 }
 
 /// `GET /agent-fixture/requests`: what the recorder saw.
 #[handler]
 pub async fn requests() -> Response {
-    let requests = REQUESTS.lock().map(|requests| requests.clone()).unwrap_or_default();
+    let requests = REQUESTS
+        .lock()
+        .map(|requests| requests.clone())
+        .unwrap_or_default();
     Ok(HttpResponse::json(json!({ "requests": requests })))
 }

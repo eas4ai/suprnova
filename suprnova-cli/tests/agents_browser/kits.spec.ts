@@ -272,7 +272,9 @@ test(`agent_015_${kit}_component_tool_registers_and_leaves_with_its_component`, 
 
 test(`agent_015_${kit}_form_tool_registers_the_generated_schema`, async ({ page }) => {
   await page.goto('/agent-fixture/form');
-  await expect.poll(() => registered(page)).toEqual(['fixture.help', 'fixture.notes.create', 'fixture.notes.purge']);
+  await expect
+    .poll(() => registered(page))
+    .toEqual(['fixture.help', 'fixture.notes.create', 'fixture.notes.create_and_leave', 'fixture.notes.purge']);
   const server = await (await page.request.get('/agent-fixture/schema')).json();
   const sent = (await descriptors(page)).find((tool) => tool.name === 'fixture.notes.create');
   // The schema `generate-types` wrote is the one the server derives.
@@ -336,4 +338,24 @@ test(`agent_015_${kit}_destructive_form_tool_leaves_the_submit_to_the_user`, asy
   await page.getByTestId('purge').click();
   await expect.poll(async () => (await purges()).length).toBe(1);
   expect((await purges())[0]).toMatchObject({ inertia: true, tool: null });
+});
+
+test(`agent_015_${kit}_form_tool_answers_when_its_submit_leaves_the_page`, async ({ page }) => {
+  const agent = await webmcp(page);
+  // The submit redirects to the first page, so the form and its tool leave
+  // the page while the agent's call still waits for its answer. Five times,
+  // so a result the browser drops at the tool's removal shows.
+  for (let round = 0; round < 5; round += 1) {
+    await page.goto('/agent-fixture/form');
+    await expect.poll(() => registered(page)).toContain('fixture.notes.create_and_leave');
+    const title = `Leaving note ${round} ${Date.now()}`;
+    const response = await agent.invoke('fixture.notes.create_and_leave', { title });
+    expect(response.output?.isError, `round ${round}: ${JSON.stringify(response)}`).toBe(false);
+    expect(response.output?.structuredContent).toMatchObject({
+      outcome: 'submitted',
+      component: 'AgentFixture/First',
+    });
+    await expect(page.getByRole('heading', { name: 'First' })).toBeVisible();
+    await expect.poll(() => registered(page)).not.toContain('fixture.notes.create_and_leave');
+  }
 });

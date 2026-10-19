@@ -11,6 +11,12 @@ export default function Form({ notes }: { notes: string[] }) {
     schema: toolSchemas.FixtureNoteRequest,
     action: { method: 'post', url: `${root}/agent-fixture/notes` },
   })
+  useFormTool(note, {
+    name: 'fixture.notes.create_and_leave',
+    description: 'Write a note on the fixture page, then go to the first page.',
+    schema: toolSchemas.FixtureNoteRequest,
+    action: { method: 'post', url: `${root}/agent-fixture/notes/away` },
+  })
   const purge = useForm<{ confirm: string }>({ confirm: '' })
   useFormTool(purge, {
     name: 'fixture.notes.purge',

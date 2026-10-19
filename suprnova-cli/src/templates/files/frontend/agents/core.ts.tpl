@@ -52,15 +52,6 @@ export type ModelContextLike = {
   registerTool(tool: ToolDefinition, options?: { signal?: AbortSignal }): unknown
 }
 
-/**
- * How long a tool that leaves the page with a call pending stays
- * registered after the call's result: the browser hands a result to the
- * agent after `execute` resolves, and Chromium has dropped a result whose
- * registration was aborted within about 10 ms of it. The Live runtime
- * holds the same 250 ms.
- */
-export const RESULT_HOLD_MS = 250
-
 /** The most tools one page lists. */
 export const MAX_PAGE_TOOLS = 64
 
@@ -137,24 +128,22 @@ function definitionProblem(tool: ToolDefinition): string | null {
 /**
  * One tool on the page. It registers under a fresh controller each time it
  * starts and keeps its definition while the page sits in the back/forward
- * cache, and when it leaves with a call pending it holds its registration
- * until that call's result has had {@link RESULT_HOLD_MS} to reach the
- * agent.
+ * cache.
+ *
+ * A tool that leaves the page unregisters at once, even with a call
+ * pending: Chromium still hands that call's answer to the agent, and an
+ * Inertia visit keeps the document, so nothing ends the call. The Live
+ * runtime holds a leaving island's tools for 250 ms because it reloads the
+ * document; a kit page does not, which the kits' browser suite checks with
+ * a form whose submit takes it off the page.
  */
 class Registration {
   readonly tool: ToolDefinition
   #controller: AbortController | null = null
-  #pending = 0
   #gone = false
-  #released = false
-  #onReleased: Array<() => void> = []
 
   constructor(tool: ToolDefinition) {
     this.tool = tool
-  }
-
-  get gone(): boolean {
-    return this.#gone
   }
 
   /** Register with the browser, unless the tool already left or is live. */
@@ -171,7 +160,9 @@ class Registration {
       description: this.tool.description,
       inputSchema: this.tool.inputSchema,
       annotations: { ...this.tool.annotations },
-      execute: (input, client) => this.#execute(input, client),
+      // A call through a registration that left is refused.
+      execute: (input, client) =>
+        this.#gone ? Promise.resolve(errorResult(LEFT)) : this.tool.execute(input, client),
     }
     const refused = (error: unknown) => {
       // An abort before the registration settled is the page's own removal.
@@ -196,51 +187,10 @@ class Registration {
     controller?.abort()
   }
 
-  /** The tool leaves the page: no new call starts, and it unregisters once
-   * every pending call has its result. */
+  /** The tool leaves the page for good. */
   leave(): void {
-    if (this.#gone) {
-      return
-    }
     this.#gone = true
-    if (this.#pending === 0) {
-      this.#release()
-    }
-  }
-
-  /** Run `callback` once the registration is gone from the browser. */
-  whenReleased(callback: () => void): void {
-    if (this.#released) {
-      callback()
-    } else {
-      this.#onReleased.push(callback)
-    }
-  }
-
-  async #execute(input: unknown, client?: ToolClient): Promise<ToolResult> {
-    if (this.#gone) {
-      return errorResult(LEFT)
-    }
-    this.#pending += 1
-    try {
-      return await this.tool.execute(input, client)
-    } finally {
-      this.#pending -= 1
-      if (this.#gone && this.#pending === 0) {
-        setTimeout(() => this.#release(), RESULT_HOLD_MS)
-      }
-    }
-  }
-
-  #release(): void {
-    if (this.#released) {
-      return
-    }
     this.stop()
-    this.#released = true
-    for (const callback of this.#onReleased.splice(0)) {
-      callback()
-    }
   }
 }
 
@@ -277,8 +227,7 @@ function installLifecycle(): void {
  * Register `tool` with the page's model context and return the function
  * that removes it. A name another tool on the page holds, or one outside
  * the framework's grammar, is not registered and is reported with
- * `console.error`. A tool of the same name that is still leaving, with a
- * call pending, hands over once it is gone.
+ * `console.error`.
  */
 export function registerTool(tool: ToolDefinition): () => void {
   if (typeof document === 'undefined' || modelContextOf(document) === null) {
@@ -289,8 +238,7 @@ export function registerTool(tool: ToolDefinition): () => void {
     console.error(`The page tool "${tool.name}" was not registered: ${problem}.`)
     return () => undefined
   }
-  const previous = registrations.get(tool.name)
-  if (previous !== undefined && !previous.gone) {
+  if (registrations.has(tool.name)) {
     console.error(
       `The page tool "${tool.name}" was not registered: another tool on the page has that name.`,
     )
@@ -299,18 +247,13 @@ export function registerTool(tool: ToolDefinition): () => void {
   installLifecycle()
   const registration = new Registration(tool)
   registrations.set(tool.name, registration)
-  const forget = () => {
+  registration.start()
+  return () => {
+    registration.leave()
     if (registrations.get(tool.name) === registration) {
       registrations.delete(tool.name)
     }
   }
-  registration.whenReleased(forget)
-  if (previous === undefined) {
-    registration.start()
-  } else {
-    previous.whenReleased(() => registration.start())
-  }
-  return () => registration.leave()
 }
 
 // ---------------------------------------------------------------------------

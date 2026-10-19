@@ -6,7 +6,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import cases from './browser-calls.json'
 import {
-  RESULT_HOLD_MS,
   TOOL_CALL_HEADER,
   callPageTool,
   registerTool,
@@ -340,9 +339,8 @@ test('agent_015_duplicate_tool_name_is_refused', () => {
   expect(context.names()).toEqual([])
 })
 
-test('agent_015_leaving_tool_holds_until_its_pending_call_settles', async () => {
-  vi.useFakeTimers()
-  let finish: (result: { content: never[]; isError: boolean }) => void = () => undefined
+test('agent_015_a_leaving_tool_unregisters_at_once_and_its_pending_call_still_answers', async () => {
+  let finish: (result: { content: { type: 'text'; text: string }[]; isError: boolean }) => void = () => undefined
   const leave = registerTool(
     tool('notes.save', () => new Promise((resolve) => {
       finish = resolve
@@ -351,19 +349,15 @@ test('agent_015_leaving_tool_holds_until_its_pending_call_settles', async () => 
   const execute = context.live.get('notes.save')?.tool.execute
   const first = context.call('notes.save', {})
   leave()
-  // Still registered while its call is pending; a new call is refused.
-  expect(context.names()).toEqual(['notes.save'])
+  // Gone from the browser at once, as the tool of a form that a submit
+  // took off the page goes: the browser still delivers the pending answer.
+  expect(context.names()).toEqual([])
   const refused = await execute?.({})
   expect(refused?.isError).toBe(true)
-  // A tool of the same name waits for the old one to go.
+  finish({ content: [{ type: 'text', text: 'saved' }], isError: false })
+  await expect(first).resolves.toEqual({ content: [{ type: 'text', text: 'saved' }], isError: false })
+  // A tool of the same name, on the page that follows, registers at once.
   const next = registerTool(tool('notes.save'))
-  finish({ content: [], isError: false })
-  await first
-  await vi.advanceTimersByTimeAsync(RESULT_HOLD_MS - 1)
-  expect(context.live.get('notes.save')?.tool).toBeDefined()
-  expect(context.descriptors.filter((each) => each.name === 'notes.save')).toHaveLength(1)
-  await vi.advanceTimersByTimeAsync(1)
-  expect(context.descriptors.filter((each) => each.name === 'notes.save')).toHaveLength(2)
   expect(context.names()).toEqual(['notes.save'])
   next()
   expect(context.names()).toEqual([])
