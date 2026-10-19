@@ -334,7 +334,7 @@ struct SerdeField {
 /// serde's `rename_all` rules, applied to a field name the way serde applies
 /// them: the name is taken to be snake_case already.
 #[derive(Debug, Clone, Copy)]
-enum RenameRule {
+pub(crate) enum RenameRule {
     Lower,
     Upper,
     Pascal,
@@ -348,7 +348,7 @@ enum RenameRule {
 impl RenameRule {
     /// `None` for a rule serde does not know; serde refuses to compile it,
     /// so the field keeps its own name here.
-    fn parse(rule: &str) -> Option<Self> {
+    pub(crate) fn parse(rule: &str) -> Option<Self> {
         Some(match rule {
             "lowercase" => Self::Lower,
             "UPPERCASE" => Self::Upper,
@@ -362,7 +362,7 @@ impl RenameRule {
         })
     }
 
-    fn apply(self, field: &str) -> String {
+    pub(crate) fn apply(self, field: &str) -> String {
         match self {
             Self::Lower | Self::Snake => field.to_owned(),
             Self::Upper | Self::ScreamingSnake => field.to_ascii_uppercase(),
@@ -421,7 +421,7 @@ fn string_literal(expr: &Expr) -> Option<String> {
 /// direction-specific `rename(serialize = "x", deserialize = "y")`, and the
 /// same two forms of `rename_all`. `direction` is `serialize` or
 /// `deserialize`.
-fn direction_value(meta: &Meta, direction: &str) -> Option<String> {
+pub(crate) fn direction_value(meta: &Meta, direction: &str) -> Option<String> {
     match meta {
         Meta::NameValue(pair) => string_literal(&pair.value),
         Meta::List(list) => list
@@ -2336,7 +2336,7 @@ pub fn generate_types_string_with(input: ScanInput, options: GenerateOptions) ->
 /// resolved target is replaced atomically and the link remains in place. A
 /// changed read-only destination is rejected, and replacement files inherit
 /// the destination's permissions.
-fn write_if_changed(path: &Path, contents: &str) -> Result<bool, String> {
+pub(crate) fn write_if_changed(path: &Path, contents: &str) -> Result<bool, String> {
     write_if_changed_with_hook(path, contents, |_| {})
 }
 
@@ -3242,6 +3242,18 @@ fn report_up_to_date(output_path: &Path) {
     ui::info(&format!("{} is up to date", output_path.display()));
 }
 
+/// Where the form request schemas go, relative to the project.
+pub(crate) const TOOL_SCHEMAS_OUTPUT: &str = "frontend/src/types/tool-schemas.ts";
+
+/// Name each form request that got no schema, and why. A form tool needs
+/// its request type's schema, so the developer must see why one is
+/// missing rather than meet an unknown key in `toolSchemas`.
+pub(crate) fn report_tool_schema_refusals(refusals: &[super::tool_schemas::Refusal]) {
+    for refusal in refusals {
+        ui::error(&refusal.to_string());
+    }
+}
+
 /// Main entry point for the generate-types command
 pub fn run(output: Option<String>, watch: bool, routes: bool, options: GenerateOptions) {
     let project_path = Path::new(".");
@@ -3298,6 +3310,28 @@ pub fn run(output: Option<String>, watch: bool, routes: bool, options: GenerateO
         }
     }
 
+    // The form request schemas the kits' form tools register (AGENT-015).
+    // Written beside `inertia-props.ts`, so a kit's form always finds its
+    // request type's schema there.
+    let tool_schemas_output = project_path.join(TOOL_SCHEMAS_OUTPUT);
+    match super::tool_schemas::generate_tool_schemas_to_file(project_path, &tool_schemas_output) {
+        Ok(outcome) => {
+            report_tool_schema_refusals(&outcome.refusals);
+            if outcome.count > 0 {
+                ui::info(&format!("Found {} form request schema(s)", outcome.count));
+            }
+            if outcome.wrote {
+                ui::success(&format!("Generated {}", tool_schemas_output.display()));
+            } else {
+                report_up_to_date(&tool_schemas_output);
+            }
+        }
+        Err(e) => {
+            ui::error(&e);
+            std::process::exit(1);
+        }
+    }
+
     // Route types are opt-in: dropping an unconsumed routes.ts into every
     // project that runs generate-types is churn, not a feature.
     if routes {
@@ -3310,6 +3344,7 @@ pub fn run(output: Option<String>, watch: bool, routes: bool, options: GenerateO
             project_path,
             &output_path,
             &lang_keys_output,
+            &tool_schemas_output,
             options,
             augmentation,
         ) {
@@ -3356,6 +3391,7 @@ fn start_watcher(
     project_path: &Path,
     output_path: &Path,
     lang_keys_output: &Path,
+    tool_schemas_output: &Path,
     options: GenerateOptions,
     mut augmentation: AugmentationNotice,
 ) -> Result<(), String> {
@@ -3393,6 +3429,7 @@ fn start_watcher(
 
     let output_path = output_path.to_path_buf();
     let lang_keys_output = lang_keys_output.to_path_buf();
+    let tool_schemas_output = tool_schemas_output.to_path_buf();
     let project_path = project_path.to_path_buf();
 
     // Same schedule `serve`'s watcher uses, for the same two reasons: the
@@ -3430,6 +3467,27 @@ fn start_watcher(
                 }
                 Err(e) => {
                     ui::error(&format!("Failed to regenerate: {}", e));
+                }
+            }
+            // A refusal is news only when the module changed; an edit that
+            // leaves it as it was says nothing new.
+            match super::tool_schemas::generate_tool_schemas_to_file(
+                &project_path,
+                &tool_schemas_output,
+            ) {
+                Ok(outcome) if outcome.wrote => {
+                    report_tool_schema_refusals(&outcome.refusals);
+                    ui::success(&format!(
+                        "Regenerated {} form request schema(s)",
+                        outcome.count
+                    ));
+                }
+                Ok(_) => report_up_to_date(&tool_schemas_output),
+                Err(e) => {
+                    ui::error(&format!(
+                        "Failed to regenerate the form request schemas: {}",
+                        e
+                    ));
                 }
             }
         }

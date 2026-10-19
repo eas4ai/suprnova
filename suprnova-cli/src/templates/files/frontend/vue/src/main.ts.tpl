@@ -1,7 +1,8 @@
-import { createInertiaApp } from '@inertiajs/vue3'
+import { createInertiaApp, router } from '@inertiajs/vue3'
 import { createApp, createSSRApp, h } from 'vue'
 import AppLayout from './layouts/AppLayout.vue'
 import GuestLayout from './layouts/GuestLayout.vue'
+import { installPageTools } from './lib/agents'
 
 // Exception text can include copied URLs or credentials even without request context.
 function redactBrowserText(text: string): string {
@@ -155,6 +156,11 @@ const appName = '{project_title}'
 // client stamps it on the progress bar and dialog styles it injects.
 const nonce =
   document.querySelector<HTMLMetaElement>('meta[property="csp-nonce"]')?.nonce || undefined
+
+// The server tools each page lists register with the browser's WebMCP
+// `document.modelContext` while the page is shown. Installed before
+// `createInertiaApp`, so the first page's `navigate` event is heard.
+installPageTools(router)
 
 createInertiaApp({
   // The Vite plugin (`@inertiajs/vite`) turns this into a resolver over
