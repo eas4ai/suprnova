@@ -115,6 +115,14 @@ impl ContentSecurityPolicy {
         Self::new(directives.join("; "))
     }
 
+    /// This policy refusing every framing ancestor, its other directives
+    /// unchanged.
+    pub(crate) fn refusing_framing(self) -> Self {
+        Self {
+            template: refuse_framing(&self.template),
+        }
+    }
+
     pub(crate) fn uses_nonce(&self) -> bool {
         self.template.contains("'nonce-{nonce}'")
     }
@@ -150,6 +158,37 @@ impl ContentSecurityPolicy {
         }
         policy
     }
+}
+
+/// `value` with every policy in it refusing every framing ancestor. One
+/// header value can hold several policies separated by commas, each
+/// enforced on its own, so each gets `frame-ancestors 'none'` at its end in
+/// place of whatever framing it named: a browser applies the first of two
+/// same-named directives, so every one is removed rather than the first.
+/// Works on a template and on a rendered header alike.
+pub(super) fn refuse_framing(value: &str) -> String {
+    value
+        .split(',')
+        .map(refuse_framing_in_one)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One policy, with no comma, refusing every framing ancestor.
+fn refuse_framing_in_one(policy: &str) -> String {
+    policy
+        .split(';')
+        .map(str::trim)
+        .filter(|directive| {
+            !directive.is_empty()
+                && !directive
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("frame-ancestors"))
+        })
+        .chain(std::iter::once(super::NO_FRAMING))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Checks that `source` is one source expression for `directive`.
@@ -257,6 +296,55 @@ mod reporting_tests {
         assert_eq!(
             policy.clone().with_reporting_dsn(None).unwrap().template,
             policy.template
+        );
+    }
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+
+    #[test]
+    fn agent_017_refusing_framing_keeps_every_other_directive_and_the_nonce() {
+        let refused = ContentSecurityPolicy::balanced().refusing_framing();
+        assert_eq!(
+            refused.template,
+            "default-src 'self'; script-src 'self' 'nonce-{nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+        );
+        assert!(refused.uses_nonce());
+    }
+
+    #[test]
+    fn agent_017_refusing_framing_removes_every_framing_directive() {
+        for policy in [
+            "frame-ancestors *; default-src 'self'; FRAME-ANCESTORS https://a.test",
+            "default-src 'self';frame-ancestors 'self';;",
+            " Frame-Ancestors 'self' https://evil.test ; default-src 'self' ",
+        ] {
+            assert_eq!(
+                refuse_framing(policy),
+                "default-src 'self'; frame-ancestors 'none'",
+                "{policy}"
+            );
+        }
+        assert_eq!(refuse_framing(""), "frame-ancestors 'none'");
+        // One header value can hold several policies, separated by commas.
+        let joined = refuse_framing("default-src 'self', frame-ancestors *");
+        let policies: Vec<&str> = joined.split(',').map(str::trim).collect();
+        assert_eq!(policies.len(), 2, "{joined}");
+        for policy in policies {
+            let framing: Vec<&str> = policy
+                .split(';')
+                .map(str::trim)
+                .filter(|directive| directive.starts_with("frame-ancestors"))
+                .collect();
+            assert_eq!(framing, ["frame-ancestors 'none'"], "{joined}");
+        }
+        assert!(!joined.contains('*'), "{joined}");
+        // A directive that only starts like it is another directive.
+        assert_eq!(
+            refuse_framing("frame-ancestors-extra x"),
+            "frame-ancestors-extra x; frame-ancestors 'none'"
         );
     }
 }

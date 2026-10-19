@@ -415,7 +415,7 @@ pub use inertia::{
     SsrResponse, VersionResolver, Visibility, ViteManifest,
 };
 pub use security_headers::{
-    ContentSecurityPolicy, CspNonce, SecurityHeaders, SecurityHeadersOverride,
+    ConsentPageHeaders, ContentSecurityPolicy, CspNonce, SecurityHeaders, SecurityHeadersOverride,
 };
 // The error response the PAR-062 callback decides, on its own line so the
 // list above stays stable.
@@ -896,8 +896,9 @@ pub use validator::Validate;
 // is pointed at this path, so an application needs no `schemars` of its own.
 #[cfg(feature = "agents")]
 pub use agents::{
-    AgentAuth, AgentClaimed, AgentsConfig, CallerKind, ConnectedAgents, LiveMountRequest,
-    OAuthServer, OutsideIssuer, PageTools, ToolCaller, WebMcpConfig,
+    AgentApprovals, AgentAuth, AgentClaimed, AgentClaims, AgentsConfig, CallerKind,
+    ConnectedAgents, LiveMountRequest, OAuthServer, OutsideIssuer, PageTools, ToolCaller,
+    WebMcpConfig,
 };
 #[cfg(feature = "agents")]
 #[doc(hidden)]

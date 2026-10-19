@@ -277,8 +277,11 @@ fn sweep(table: &mut Table) {
 /// its neighbours. So a middleware registered after `AuthMiddleware` still
 /// runs after it, whatever the list moves in front of it.
 ///
-/// Security headers always run first, followed by route security overrides,
-/// so cache hits cannot skip policy changes. An empty priority list leaves
+/// Security headers always run first, followed by route security overrides
+/// and then [`ConsentPageHeaders`](crate::ConsentPageHeaders), so cache hits
+/// cannot skip policy changes, an override cannot undo a consent page's
+/// framing refusal, and the consent headers frame every other middleware's
+/// answer, a CSRF refusal included. An empty priority list leaves
 /// every other middleware in registration order. The list starts with four entries, so a chain of
 /// two or more middleware is otherwise ranked: one lookup of its type for
 /// each middleware.
@@ -301,6 +304,8 @@ pub(crate) fn sort_by_priority(
     sort_order(&mut order, &ranks);
     // Security policy must surround short-circuiting caches and error pages.
     // Route overrides run next, before any cache can answer without the route.
+    // A consent page's headers run inside every override, so its framing
+    // refusal is the last word on the policy.
     order.sort_by_key(|index| {
         if *index < outermost {
             0
@@ -308,7 +313,8 @@ pub(crate) fn sort_by_priority(
             match type_of(&chain[*index]) {
                 Some(id) if id == TypeId::of::<crate::SecurityHeaders>() => 1,
                 Some(id) if id == TypeId::of::<crate::SecurityHeadersOverride>() => 2,
-                _ => 3,
+                Some(id) if id == TypeId::of::<crate::ConsentPageHeaders>() => 3,
+                _ => 4,
             }
         }
     });

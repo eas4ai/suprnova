@@ -473,6 +473,7 @@ async fn render_page(
         .map(|(name, value)| (name.to_string(), value.to_string()))
         .collect();
 
+    let cache_control = page_cache_control(&http);
     let status = http.status_code();
     // The document head takes the metadata `Head::errors` registered for
     // this status (PAR-160).
@@ -496,7 +497,7 @@ async fn render_page(
             .with_headers(carried)
             // Last, and unconditional: the page is per-viewer where the
             // body it replaced was not.
-            .header("Cache-Control", ERROR_PAGE_CACHE_CONTROL)
+            .header("Cache-Control", cache_control)
             // The page replaces the body, not what went wrong.
             .with_error_report_of(http),
         Err(e) => {
@@ -638,8 +639,9 @@ fn decide_page(facts: &ErrorResponseFacts<'_>) -> ErrorPageDecision {
     })
 }
 
-/// `Cache-Control` the error page always sets for itself, replacing
-/// whatever the response it stands in for carried.
+/// `Cache-Control` the error page sets for itself, replacing whatever the
+/// response it stands in for carried, unless that response said `no-store`
+/// ([`page_cache_control`]).
 ///
 /// The body being replaced said nothing about any particular viewer - the
 /// framework's JSON envelope, or a fixed `404 Not Found`. The page that
@@ -649,6 +651,23 @@ fn decide_page(facts: &ErrorResponseFacts<'_>) -> ErrorPageDecision {
 /// response permitted. Symfony and Laravel default a session-bearing
 /// response to exactly this pair, and so does this.
 const ERROR_PAGE_CACHE_CONTROL: &str = "no-cache, private";
+
+/// The `Cache-Control` the page replacing `http` sets: `no-store` when
+/// `http` already said it must not be stored, such as a consent page whose
+/// address names a pending authorization, since `no-cache` would let a
+/// browser keep the page on disk; [`ERROR_PAGE_CACHE_CONTROL`] otherwise.
+fn page_cache_control(http: &HttpResponse) -> &'static str {
+    let no_store = http.header_values("Cache-Control").any(|value| {
+        value
+            .split(',')
+            .any(|directive| directive.trim().eq_ignore_ascii_case("no-store"))
+    });
+    if no_store {
+        "no-store"
+    } else {
+        ERROR_PAGE_CACHE_CONTROL
+    }
+}
 
 /// Whether a header on the replaced response carries over onto the page.
 ///
@@ -679,7 +698,8 @@ const ERROR_PAGE_CACHE_CONTROL: &str = "no-cache, private";
 /// viewer's `auth.user` ends up served to another out of a shared cache,
 /// and inheriting its validators is how a cache revalidates the page
 /// against an entity that no longer exists. The page sets its own
-/// [`ERROR_PAGE_CACHE_CONTROL`] instead of carrying one.
+/// [`ERROR_PAGE_CACHE_CONTROL`] instead of carrying one, or `no-store` when
+/// the replaced response forbade storing ([`page_cache_control`]).
 ///
 /// **The page response is the authority on it.** `X-Inertia`.
 /// Unreachable in practice - a response already carrying it never reaches

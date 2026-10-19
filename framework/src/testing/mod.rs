@@ -64,6 +64,25 @@ pub fn install_test_encryption_key() {
     let _ = crate::crypto::_test_install_key(key);
 }
 
+/// Let every router this test process builds sign agent auth's identity
+/// assertions with a key made for the process, when the environment names
+/// none (`AGENT_AUTH_KEY_ID` and `AGENT_AUTH_PRIVATE_KEY`).
+///
+/// A router with agent auth on refuses to build without a signing key, in
+/// every environment. A test of an application that serves agents calls
+/// this once, before it builds the application's router, rather than
+/// carrying a key: the key is generated, so no private key sits in the
+/// source for a scanner to flag or anyone to sign with. It is the same key
+/// for the rest of the process, so one test's nodes verify each other's
+/// assertions. A key the environment names still wins.
+///
+/// **Test-only.** It exists with the `testing` feature, which an
+/// application's release build turns off.
+#[cfg(all(any(test, feature = "testing"), feature = "agents"))]
+pub fn install_test_agent_auth_key() {
+    crate::agents::agent_auth::install_test_key();
+}
+
 /// Install a key *ring* (current + previous fallback list) for tests
 /// that exercise `APP_KEY` rotation. Same one-shot `OnceLock` contract
 /// as [`install_test_encryption_key`] - the first installer in a test
