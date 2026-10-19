@@ -7,7 +7,8 @@
   value the client chose sits in <bdi>, so the direction marks it carries
   cannot reorder the sentence around it, and the page loads nothing the
   client named: no logo and no home page. The two forms are native and
-  post the session's CSRF token; nothing on the page runs a script.
+  post the session's CSRF token. The page loads no Live runtime: its only
+  scripts are the layout's component scripts, which register no tool.
 -#}
 {% block content %}
 <h1 class="kit-page-title">Allow <bdi>{{ approval.client_name }}</bdi> to act for you?</h1>

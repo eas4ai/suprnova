@@ -661,9 +661,10 @@ const LIVE_AGENT_PAGES: &str = include_str!("fixtures/scaffold/live_agent_pages.
 
 /// The cases `tests/agent_pages.rs` runs, each of which prints
 /// `case <name> ... ok` when it passes.
-const LIVE_AGENT_CASES: [&str; 12] = [
+const LIVE_AGENT_CASES: [&str; 16] = [
     "agent_017_live_migrator_creates_the_plugins_tables_and_the_email_index",
     "agent_017_live_serves_the_endpoint_and_both_plugins",
+    "agent_017_live_forms_hint_the_name_and_email_bounds",
     "agent_017_live_login_ignores_a_foreign_return_to",
     "agent_017_live_login_returns_to_a_same_origin_address",
     "agent_017_live_registration_continues_to_the_intended_address",
@@ -674,6 +675,9 @@ const LIVE_AGENT_CASES: [&str; 12] = [
     "agent_017_live_connected_agents_lists_and_revokes_only_the_users_own",
     "agent_017_live_consent_forms_need_the_csrf_token",
     "agent_017_live_consent_pages_refuse_framing_caching_and_referrers",
+    "agent_017_live_consent_headers_hold_on_every_refusal",
+    "agent_017_live_consent_pages_escape_what_the_client_chose",
+    "agent_017_live_consent_pages_act_for_their_own_user_only",
 ];
 
 /// AGENT-017: a fresh `--frontend live` scaffold serves the MCP endpoint,
@@ -684,8 +688,10 @@ const LIVE_AGENT_CASES: [&str; 12] = [
 /// once for both. The fixture drives the pages' native forms and the kit's
 /// Live sign-in and registration forms through the test client: the
 /// approval and claim round trips, the connected agents of two users,
-/// CSRF, the consent headers, `return_to` and the intended address across
-/// sign-in and registration, and the migrator on SQLite.
+/// CSRF, the consent headers on every answer, what another user or a guest
+/// can do, escaping, the scripts the pages load, `return_to` and the
+/// intended address across sign-in and registration, the forms' bounds, and
+/// the migrator on SQLite.
 #[test]
 #[ignore = "compile check - builds a Live kit scaffold and drives its agent pages; slow"]
 fn agent_017_a_generated_live_application_serves_the_agent_pages() {

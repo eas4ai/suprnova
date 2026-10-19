@@ -210,14 +210,125 @@ fn unescape(text: &str) -> String {
     out
 }
 
-/// The value of the first field named `name` on `html`.
-fn hidden(html: &str, name: &str) -> String {
-    let marker = format!("name=\"{name}\" value=\"");
+/// The value of the attribute `name` in the tag `tag`, unescaped, or
+/// `None` when the tag has no such attribute.
+fn attr(tag: &str, name: &str) -> Option<String> {
+    let marker = format!(" {name}=\"");
+    let start = tag.find(&marker)? + marker.len();
+    let end = tag[start..].find('"')? + start;
+    Some(unescape(&tag[start..end]))
+}
+
+/// A form a page carries: where it posts, and the name and value of each
+/// input it holds, in order.
+struct Form {
+    action: String,
+    fields: Vec<(String, String)>,
+}
+
+impl Form {
+    /// The value of the form's field `name`.
+    fn field(&self, name: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Submit the form as a browser does: every field it holds, with the
+    /// values in `typed` for what a person types or a test swaps, posted to
+    /// the form's own action.
+    async fn submit(&self, client: &TestClient, typed: &[(&str, &str)]) -> TestResponse {
+        let mut fields: Vec<(&str, &str)> = self
+            .fields
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        for &(name, value) in typed {
+            match fields.iter_mut().find(|(field, _)| *field == name) {
+                Some(field) => field.1 = value,
+                None => fields.push((name, value)),
+            }
+        }
+        post_form(client, &path_of(&self.action), &fields).await
+    }
+}
+
+/// Every form in `html`: its action, and each named input with its value.
+fn forms(html: &str) -> Vec<Form> {
+    html.split("<form")
+        .skip(1)
+        .map(|rest| {
+            let body = &rest[..rest.find("</form>").expect("a form closes")];
+            let open = &body[..body.find('>').expect("the form tag closes")];
+            let fields = body
+                .split("<input")
+                .skip(1)
+                .filter_map(|input| {
+                    let tag = &input[..input.find('>').expect("an input tag closes")];
+                    Some((attr(tag, "name")?, attr(tag, "value").unwrap_or_default()))
+                })
+                .collect();
+            Form {
+                action: attr(open, "action").unwrap_or_default(),
+                fields,
+            }
+        })
+        .collect()
+}
+
+/// The page's `<main>`, which holds its own forms. The layout's account
+/// menu, outside it, carries a sign-out form with a CSRF token too.
+fn main_of(html: &str) -> &str {
     let start = html
-        .find(&marker)
-        .unwrap_or_else(|| panic!("no `{name}` field in:\n{html}"))
+        .find("<main")
+        .unwrap_or_else(|| panic!("no <main> in:\n{html}"));
+    let end = html[start..].find("</main>").expect("<main> closes") + start;
+    &html[start..end]
+}
+
+/// The one form in the page's `<main>` that `matches`; `what` names it.
+fn main_form(html: &str, what: &str, matches: impl Fn(&Form) -> bool) -> Form {
+    let mut found: Vec<Form> = forms(main_of(html))
+        .into_iter()
+        .filter(|form| matches(form))
+        .collect();
+    assert_eq!(found.len(), 1, "the page must carry one {what}:\n{html}");
+    found.remove(0)
+}
+
+/// The approval page's form that posts `decision`.
+fn decision_form(html: &str, decision: &str) -> Form {
+    main_form(html, &format!("form deciding {decision}"), |form| {
+        form.field("decision") == Some(decision)
+    })
+}
+
+/// The claim page's form, which takes the code.
+fn claim_form(html: &str) -> Form {
+    main_form(html, "claim form", |form| {
+        form.field("claim_attempt_token").is_some()
+    })
+}
+
+/// The connected-agents page's revoke forms of `kind`, `clients` or
+/// `agents`.
+fn revoke_forms(html: &str, kind: &str) -> Vec<Form> {
+    let prefix = format!("/connected-agents/{kind}/");
+    forms(main_of(html))
+        .into_iter()
+        .filter(|form| form.action.starts_with(&prefix) && form.action.ends_with("/revoke"))
+        .collect()
+}
+
+/// The session's CSRF token, as the page's `csrf-token` meta tag names it.
+fn csrf_meta(html: &str) -> String {
+    let marker = "<meta name=\"csrf-token\" content=\"";
+    let start = html
+        .find(marker)
+        .unwrap_or_else(|| panic!("no csrf-token meta tag in:\n{html}"))
         + marker.len();
-    let end = html[start..].find('"').expect("the value ends") + start;
+    let end = html[start..].find('"').expect("the token ends") + start;
     unescape(&html[start..end])
 }
 
@@ -373,8 +484,12 @@ async fn register(client: &TestClient, name: &str, email: &str) -> Value {
 async fn sign_out(client: &TestClient) {
     let signed_in = page(client, "/connected-agents").send().await;
     assert_eq!(signed_in.status(), 200, "{}", signed_in.body_text());
-    let token = hidden(&signed_in.body_text(), "_token");
-    let out = post_form(client, "/logout", &[("_token", token.as_str())]).await;
+    let out = forms(&signed_in.body_text())
+        .into_iter()
+        .find(|form| path_of(&form.action) == "/logout")
+        .expect("the sign-out form")
+        .submit(client, &[])
+        .await;
     assert_eq!(location(&out), "/", "{}", out.body_text());
     assert_eq!(
         page(client, "/connected-agents").send().await.status(),
@@ -450,25 +565,36 @@ fn pkce() -> (String, String) {
 
 /// The authorization request the client sends the browser to.
 fn authorize_path(client_id: &str, challenge: &str) -> String {
+    authorize_path_to(client_id, challenge, CLIENT_REDIRECT, "state-123")
+}
+
+/// The authorization request of a client that returns to `redirect_uri`
+/// with `state`.
+fn authorize_path_to(client_id: &str, challenge: &str, redirect_uri: &str, state: &str) -> String {
     let mut url = Url::parse(&format!("{APP_URL}/oauth/authorize")).expect("the endpoint");
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
-        .append_pair("redirect_uri", CLIENT_REDIRECT)
+        .append_pair("redirect_uri", redirect_uri)
         .append_pair("code_challenge", challenge)
         .append_pair("code_challenge_method", "S256")
         .append_pair("resource", RESOURCE)
-        .append_pair("state", "state-123");
+        .append_pair("state", state);
     path_of(url.as_str())
 }
 
 /// Register the MCP client dynamically (RFC 7591); its id.
 async fn register_client(client: &TestClient) -> String {
+    register_client_as(client, "Example Tool", CLIENT_REDIRECT).await
+}
+
+/// Register a client named `name` that returns to `redirect_uri`; its id.
+async fn register_client_as(client: &TestClient, name: &str, redirect_uri: &str) -> String {
     let registered = client
         .post("/oauth/register")
         .json(&json!({
-            "client_name": "Example Tool",
-            "redirect_uris": [CLIENT_REDIRECT],
+            "client_name": name,
+            "redirect_uris": [redirect_uri],
             "token_endpoint_auth_method": "none",
             "grant_types": ["authorization_code"],
             "response_types": ["code"],
@@ -494,30 +620,26 @@ async fn open_approval(client: &TestClient, authorize: &str) -> (String, TestRes
     (id, approval)
 }
 
-/// Post the decision `decision` on the authorization `id` with the form
-/// the approval page carries.
+/// Submit the approval page's own form for `decision`, which names the
+/// authorization `id`, exactly as the page carries it.
 async fn decide(
     client: &TestClient,
     approval: &TestResponse,
     id: &str,
     decision: &str,
 ) -> TestResponse {
-    let token = hidden(&approval.body_text(), "_token");
-    post_form(
-        client,
-        "/oauth/approve",
-        &[
-            ("_token", token.as_str()),
-            ("authorization", id),
-            ("decision", decision),
-        ],
-    )
-    .await
+    let form = decision_form(&approval.body_text(), decision);
+    assert_eq!(
+        form.field("authorization"),
+        Some(id),
+        "the form's authorization"
+    );
+    form.submit(client, &[]).await
 }
 
-/// Where the returning page sends the browser: its meta refresh, which its
-/// link names too.
-fn returning_to(returning: &TestResponse) -> Url {
+/// Where the returning page sends the browser, decoded: its meta refresh,
+/// which its link names too.
+fn returning_target(returning: &TestResponse) -> String {
     let html = returning.body_text();
     let marker = "<meta http-equiv=\"refresh\" content=\"0; url=";
     let start = html
@@ -526,10 +648,18 @@ fn returning_to(returning: &TestResponse) -> Url {
         + marker.len();
     let end = html[start..].find('"').expect("the refresh ends") + start;
     let target = unescape(&html[start..end]);
-    assert!(
-        html.contains(&format!("href=\"{}\"", &html[start..end])),
-        "the page links where it refreshes to:\n{html}"
-    );
+    let link = main_of(&html)
+        .split("<a ")
+        .skip(1)
+        .find_map(|anchor| attr(&format!(" {anchor}"), "href"))
+        .unwrap_or_else(|| panic!("no link in:\n{html}"));
+    assert_eq!(link, target, "the page links where it refreshes to");
+    target
+}
+
+/// [`returning_target`] as a URL.
+fn returning_to(returning: &TestResponse) -> Url {
+    let target = returning_target(returning);
     Url::parse(&target).unwrap_or_else(|error| panic!("{target}: {error}"))
 }
 
@@ -554,15 +684,6 @@ fn param(url: &Url, name: &str) -> Option<String> {
         .map(|(_, value)| value.into_owned())
 }
 
-/// The ids in the revoke forms of the connected-agents page, apps first.
-fn revoke_ids(html: &str, kind: &str) -> Vec<String> {
-    let marker = format!("action=\"/connected-agents/{kind}/");
-    html.split(&marker)
-        .skip(1)
-        .map(|rest| rest[..rest.find("/revoke\"").expect("a revoke action")].to_owned())
-        .collect()
-}
-
 /// The `n` in a page's "`n` wrong entries allowed".
 fn entries_allowed(html: &str) -> u64 {
     let end = html
@@ -570,6 +691,73 @@ fn entries_allowed(html: &str) -> u64 {
         .unwrap_or_else(|| panic!("the claim page says how many wrong entries it allows:\n{html}"));
     let start = html[..end].rfind(' ').expect("a number") + 1;
     html[start..end].parse().expect("a count")
+}
+
+/// A code that differs from `code` in its first character.
+fn wrong_code(code: &str) -> String {
+    let first = if code.starts_with('1') { "2" } else { "1" };
+    format!("{first}{}", &code[1..])
+}
+
+/// The claim page of an agent that registers by `service_auth` for
+/// `email`, and the code it gives the user.
+async fn start_claim(client: &TestClient, email: &str) -> (String, String) {
+    let registration = client
+        .post("/agent/identity")
+        .json(&json!({"type": "service_auth", "login_hint": email}))
+        .send()
+        .await;
+    assert_eq!(registration.status(), 200, "{}", registration.body_text());
+    let claim = &registration.json()["claim"];
+    let page = path_of(
+        claim["verification_uri"]
+            .as_str()
+            .expect("a verification URI"),
+    );
+    let code = claim["user_code"].as_str().expect("a user code").to_owned();
+    (page, code)
+}
+
+/// A consent page offers an agent no tool: it carries no Live runtime and
+/// no inline script, and no script it loads registers a tool with WebMCP.
+/// Each script is fetched from the application, as the browser fetches it.
+async fn assert_no_tools(client: &TestClient, html: &str, what: &str) {
+    assert!(
+        !html.contains("suprnova-live-config"),
+        "{what} carries the Live runtime:\n{html}"
+    );
+    let mut loaded = 0;
+    for script in html.split("<script").skip(1) {
+        let tag = &script[..script.find('>').expect("a script tag closes")];
+        let src =
+            attr(tag, "src").unwrap_or_else(|| panic!("{what} runs an inline script:\n{html}"));
+        let served = client.get(path_of(&src)).send().await;
+        assert_eq!(served.status(), 200, "{what} loads {src}");
+        let source = served.body_text();
+        for api in ["modelContext", "registerTool"] {
+            assert!(
+                !source.contains(api),
+                "{what} loads {src}, which uses {api}"
+            );
+        }
+        loaded += 1;
+    }
+    assert!(loaded > 0, "{what} loads no script at all:\n{html}");
+}
+
+/// The text inside `<bdi>` between `before` and `after` on `html`.
+fn isolated<'a>(html: &'a str, before: &str, after: &str) -> &'a str {
+    let open = format!("{before}<bdi>");
+    let start = html
+        .find(&open)
+        .unwrap_or_else(|| panic!("no `{open}` in:\n{html}"))
+        + open.len();
+    let close = format!("</bdi>{after}");
+    let end = html[start..]
+        .find(&close)
+        .unwrap_or_else(|| panic!("no `{close}` in:\n{html}"))
+        + start;
+    &html[start..end]
 }
 
 // ---------------------------------------------------------------- cases ----
@@ -862,10 +1050,7 @@ async fn agent_017_live_approval_round_trip(world: &World, email: &str) -> Strin
             "the approval page lacks {part}:\n{html}"
         );
     }
-    assert!(
-        !html.contains("suprnova-live-config") && !html.contains("<script id"),
-        "the approval page loads no Live runtime:\n{html}"
-    );
+    assert_no_tools(client, &html, "the approval page").await;
 
     let returning = decide(client, &approval, &id, "approve").await;
     assert_eq!(returning.status(), 200, "{}", returning.body_text());
@@ -978,22 +1163,11 @@ async fn agent_017_live_claim_round_trip(world: &World, email: &str) -> String {
         assert!(html.contains(part), "the claim page lacks {part}:\n{html}");
     }
     let allowed = entries_allowed(&html);
-    let attempt = hidden(&html, "claim_attempt_token");
-    let token = hidden(&html, "_token");
+    let form = claim_form(&html);
+    assert_no_tools(client, &html, "the claim page").await;
 
-    let mut wrong = user_code.clone();
-    let first = if wrong.starts_with('1') { "2" } else { "1" };
-    wrong.replace_range(0..1, first);
-    let refused = post_form(
-        client,
-        "/agent/claim",
-        &[
-            ("_token", token.as_str()),
-            ("claim_attempt_token", attempt.as_str()),
-            ("user_code", wrong.as_str()),
-        ],
-    )
-    .await;
+    let wrong = wrong_code(&user_code);
+    let refused = form.submit(client, &[("user_code", wrong.as_str())]).await;
     assert_eq!(refused.status(), 422, "{}", refused.body_text());
     assert_consent_headers(&refused, "the claim page after a wrong code");
     let message = format!("That code is wrong. {} attempts left.", allowed - 1);
@@ -1003,16 +1177,9 @@ async fn agent_017_live_claim_round_trip(world: &World, email: &str) -> String {
         refused.body_text()
     );
 
-    let claimed = post_form(
-        client,
-        "/agent/claim",
-        &[
-            ("_token", token.as_str()),
-            ("claim_attempt_token", attempt.as_str()),
-            ("user_code", user_code.as_str()),
-        ],
-    )
-    .await;
+    let claimed = form
+        .submit(client, &[("user_code", user_code.as_str())])
+        .await;
     assert_eq!(claimed.status(), 303, "{}", claimed.body_text());
     assert_eq!(location(&claimed), "/connected-agents");
     let connected = page(client, "/connected-agents").send().await;
@@ -1064,8 +1231,8 @@ async fn agent_017_live_connected_agents_lists_and_revokes_only_the_users_own(
     assert_consent_headers(&listed, "the connected-agents page");
     let html = listed.body_text();
     assert!(html.contains("<bdi>Example Tool</bdi>"), "{html}");
-    let grants = revoke_ids(&html, "clients");
-    let registrations = revoke_ids(&html, "agents");
+    let grants = revoke_forms(&html, "clients");
+    let registrations = revoke_forms(&html, "agents");
     assert_eq!(grants.len(), 1, "{html}");
     assert_eq!(registrations.len(), 1, "{html}");
 
@@ -1076,13 +1243,13 @@ async fn agent_017_live_connected_agents_lists_and_revokes_only_the_users_own(
     assert!(html.contains("No apps can act for you."), "{html}");
     assert!(html.contains("No agents can act for you."), "{html}");
     assert!(!html.contains("Example Tool"), "{html}");
-    let token = hidden(&html, "_token");
-    for path in [
-        format!("/connected-agents/clients/{}/revoke", grants[0]),
-        format!("/connected-agents/agents/{}/revoke", registrations[0]),
-    ] {
-        let refused = post_form(&stranger, &path, &[("_token", token.as_str())]).await;
-        assert_eq!(refused.status(), 404, "{path}: {}", refused.body_text());
+    // The other user posts the owner's revoke forms with a token of their
+    // own page.
+    let token = csrf_meta(&html);
+    for form in [&grants[0], &registrations[0]] {
+        let refused = form.submit(&stranger, &[("_token", token.as_str())]).await;
+        let action = &form.action;
+        assert_eq!(refused.status(), 404, "{action}: {}", refused.body_text());
         assert_consent_headers(&refused, "a revoke of another user's");
     }
     assert_eq!(
@@ -1091,18 +1258,9 @@ async fn agent_017_live_connected_agents_lists_and_revokes_only_the_users_own(
         "another user's revoke changed nothing"
     );
 
-    let token = hidden(&listed.body_text(), "_token");
-    for (path, bearer) in [
-        (
-            format!("/connected-agents/clients/{}/revoke", grants[0]),
-            client_token,
-        ),
-        (
-            format!("/connected-agents/agents/{}/revoke", registrations[0]),
-            agent_token,
-        ),
-    ] {
-        let revoked = post_form(owner, &path, &[("_token", token.as_str())]).await;
+    for (form, bearer) in [(&grants[0], client_token), (&registrations[0], agent_token)] {
+        let revoked = form.submit(owner, &[]).await;
+        let path = &form.action;
         assert_eq!(revoked.status(), 303, "{path}: {}", revoked.body_text());
         assert_eq!(location(&revoked), "/connected-agents");
         assert_eq!(
@@ -1128,8 +1286,7 @@ async fn agent_017_live_consent_forms_need_the_csrf_token(world: &World) {
     ] {
         let refused = post_form(client, path, &[("authorization", "any")]).await;
         assert_eq!(refused.status(), 419, "{path}: {}", refused.body_text());
-        assert_eq!(refused.header("x-frame-options"), Some("DENY"), "{path}");
-        assert_eq!(refused.header("cache-control"), Some("no-store"), "{path}");
+        assert_consent_headers(&refused, path);
     }
 }
 
@@ -1171,6 +1328,208 @@ async fn agent_017_live_consent_pages_refuse_framing_caching_and_referrers(world
     }
 }
 
+/// The kit's sign-in, registration and reset forms tell the browser the
+/// bounds their rules check: 255 characters for a name and 254 for an
+/// address.
+async fn agent_017_live_forms_hint_the_name_and_email_bounds(world: &World) {
+    let client = &world.client;
+    for (path, field, bound) in [
+        ("/register", "name", "255"),
+        ("/register", "email", "254"),
+        ("/login", "email", "254"),
+        ("/forgot-password", "email", "254"),
+    ] {
+        let html = page(client, path).send().await.body_text();
+        let tag = html
+            .split("<input")
+            .skip(1)
+            .map(|input| &input[..input.find('>').expect("an input tag closes")])
+            .find(|tag| attr(tag, "id").as_deref() == Some(field))
+            .unwrap_or_else(|| panic!("{path} has no {field} input:\n{html}"));
+        assert_eq!(
+            attr(tag, "maxlength").as_deref(),
+            Some(bound),
+            "{path} {field}: {tag}"
+        );
+    }
+}
+
+/// AGENT-005 and AGENT-017: every refusal on a consent route refuses
+/// framing, caching and referrers: a claim the wrong codes ended (410), and
+/// an error the kit's error page renders, the refusal of a tool call to a
+/// route that serves no tool.
+async fn agent_017_live_consent_headers_hold_on_every_refusal(world: &World, email: &str) {
+    let client = &world.client;
+    let (claim_page, code) = start_claim(client, email).await;
+    let shown = page(client, &claim_page).send().await;
+    assert_eq!(shown.status(), 200, "{}", shown.body_text());
+    let allowed = entries_allowed(&shown.body_text());
+    let form = claim_form(&shown.body_text());
+    let wrong = wrong_code(&code);
+    for attempt in 1..=allowed {
+        let refused = form.submit(client, &[("user_code", wrong.as_str())]).await;
+        let status = if attempt < allowed { 422 } else { 410 };
+        assert_eq!(
+            refused.status(),
+            status,
+            "attempt {attempt}: {}",
+            refused.body_text()
+        );
+        assert_consent_headers(&refused, "a wrong code");
+    }
+    let ended = page(client, &claim_page).send().await;
+    assert_eq!(ended.status(), 410, "{}", ended.body_text());
+    assert_consent_headers(&ended, "an ended claim");
+    assert!(
+        ended
+            .body_text()
+            .contains("This code can no longer be used"),
+        "{}",
+        ended.body_text()
+    );
+
+    let tool_call = page(client, "/oauth/approve?authorization=any")
+        .header("Suprnova-Tool-Call", "agents.approve")
+        .send()
+        .await;
+    assert_eq!(tool_call.status(), 400, "{}", tool_call.body_text());
+    assert!(
+        tool_call.body_text().contains("id=\"error-status\">400<"),
+        "the error page renders the refusal:\n{}",
+        tool_call.body_text()
+    );
+    assert_consent_headers(&tool_call, "an error the error page renders");
+}
+
+/// AGENT-005 and AGENT-017: what a client chose reaches the pages escaped.
+/// A name with markup and quotes shows as text inside `<bdi>`, and a
+/// redirect URI and a `state` built to break out of the meta refresh come
+/// back from the returning page, decoded, as exactly the redirect the
+/// authorization server made.
+async fn agent_017_live_consent_pages_escape_what_the_client_chose(world: &World) {
+    const NAME: &str = "Tool \"<b>x</b>' & co";
+    const REDIRECT: &str = "http://127.0.0.1:9/cb;a='b\"c";
+    const STATE: &str = "st'ate\"<x>;url=javascript:alert(1)";
+    let client = &world.client;
+    let client_id = register_client_as(client, NAME, REDIRECT).await;
+    let (_, challenge) = pkce();
+    let (id, approval) = open_approval(
+        client,
+        &authorize_path_to(&client_id, &challenge, REDIRECT, STATE),
+    )
+    .await;
+    let html = approval.body_text();
+    for (before, after, chosen) in [
+        ("Allow ", " to act for you?", NAME),
+        ("<strong>", "</strong>, from", NAME),
+        ("you return to <bdi><code>", "", REDIRECT),
+    ] {
+        let shown = if before.ends_with("<code>") {
+            let start = html.find(before).expect("the redirect URI") + before.len();
+            let end = html[start..].find("</code></bdi>").expect("it closes") + start;
+            &html[start..end]
+        } else {
+            isolated(&html, before, after)
+        };
+        assert!(
+            !shown.contains(['<', '>', '"', '\'']),
+            "{chosen:?} shows unescaped as {shown:?}"
+        );
+        assert_eq!(unescape(shown), chosen, "{shown:?}");
+    }
+
+    let returning = decide(client, &approval, &id, "approve").await;
+    assert_eq!(returning.status(), 200, "{}", returning.body_text());
+    let returning_html = returning.body_text();
+    let name = isolated(&returning_html, "Returning you to ", "");
+    assert!(!name.contains(['<', '>', '"', '\'']), "{name:?}");
+    assert_eq!(unescape(name), NAME);
+    let target = returning_target(&returning);
+    let code = param(
+        &Url::parse(&target).unwrap_or_else(|error| panic!("{target}: {error}")),
+        "code",
+    )
+    .expect("a code");
+    // The authorization server's redirect: the registered URI as a URL
+    // serializes it, then the code, the client's state and the issuer.
+    let mut expected = Url::parse(REDIRECT).expect("the redirect URI");
+    expected
+        .query_pairs_mut()
+        .append_pair("code", &code)
+        .append_pair("state", STATE)
+        .append_pair("iss", APP_URL);
+    assert_eq!(target, expected.as_str());
+}
+
+/// AGENT-005, AGENT-009 and AGENT-017: the consent pages act for their own
+/// user only. Another user gets 404 for the user's authorization and 403
+/// for the user's claim, reading or posting, and a signed-out post gets
+/// 401; none of them changes either: the authorization is still pending,
+/// and the claim's attempts are as they were.
+async fn agent_017_live_consent_pages_act_for_their_own_user_only(world: &World, email: &str) {
+    let client = &world.client;
+    let client_id = register_client(client).await;
+    let (_, challenge) = pkce();
+    let (id, approval) = open_approval(client, &authorize_path(&client_id, &challenge)).await;
+    let approve = decision_form(&approval.body_text(), "approve");
+    let approval_page = format!("/oauth/approve?authorization={id}");
+    let (claim_page, code) = start_claim(client, email).await;
+    let shown = page(client, &claim_page).send().await;
+    assert_eq!(shown.status(), 200, "{}", shown.body_text());
+    let allowed = entries_allowed(&shown.body_text());
+    let claim = claim_form(&shown.body_text());
+
+    let stranger = client.clone().acting_as(&world.bea);
+    let read = page(&stranger, &approval_page).send().await;
+    assert_eq!(read.status(), 404, "{}", read.body_text());
+    assert_consent_headers(&read, "another user's authorization");
+    let posted = approve.submit(&stranger, &[]).await;
+    assert_eq!(posted.status(), 404, "{}", posted.body_text());
+    assert_consent_headers(&posted, "a decision on another user's authorization");
+    let read = page(&stranger, &claim_page).send().await;
+    assert_eq!(read.status(), 403, "{}", read.body_text());
+    assert!(
+        read.body_text().contains(OTHER_ACCOUNT),
+        "{}",
+        read.body_text()
+    );
+    assert_consent_headers(&read, "another user's claim");
+    let posted = claim
+        .submit(&stranger, &[("user_code", code.as_str())])
+        .await;
+    assert_eq!(posted.status(), 403, "{}", posted.body_text());
+    assert_consent_headers(&posted, "a code for another user's claim");
+
+    let untouched = |stage: &'static str| {
+        let approval_page = approval_page.clone();
+        let claim_page = claim_page.clone();
+        async move {
+            let still = page(client, &approval_page).send().await;
+            assert_eq!(still.status(), 200, "{stage}: {}", still.body_text());
+            let still = page(client, &claim_page).send().await;
+            assert_eq!(still.status(), 200, "{stage}: {}", still.body_text());
+            assert_eq!(entries_allowed(&still.body_text()), allowed, "{stage}");
+        }
+    };
+    untouched("after another user").await;
+
+    sign_out(client).await;
+    let guest = csrf_meta(&page(client, "/login").send().await.body_text());
+    let posted = approve.submit(client, &[("_token", guest.as_str())]).await;
+    assert_eq!(posted.status(), 401, "{}", posted.body_text());
+    assert_consent_headers(&posted, "a signed-out decision");
+    let posted = claim
+        .submit(
+            client,
+            &[("_token", guest.as_str()), ("user_code", code.as_str())],
+        )
+        .await;
+    assert_eq!(posted.status(), 401, "{}", posted.body_text());
+    assert_consent_headers(&posted, "a signed-out code");
+    assert_eq!(sign_in(client, "/login", email).await, "/dashboard");
+    untouched("after a signed-out post").await;
+}
+
 /// Run `case`, then say so on its own line, which the harness reads.
 macro_rules! case {
     ($name:ident ( $($argument:expr),* )) => {{
@@ -1188,6 +1547,7 @@ async fn agent_pages_serve_their_flows() {
         let world = boot().await;
         case!(agent_017_live_migrator_creates_the_plugins_tables_and_the_email_index(&world));
         case!(agent_017_live_serves_the_endpoint_and_both_plugins(&world));
+        case!(agent_017_live_forms_hint_the_name_and_email_bounds(&world));
         case!(agent_017_live_login_ignores_a_foreign_return_to(&world));
         case!(agent_017_live_login_returns_to_a_same_origin_address(
             &world
@@ -1213,6 +1573,15 @@ async fn agent_pages_serve_their_flows() {
         );
         case!(agent_017_live_consent_forms_need_the_csrf_token(&world));
         case!(agent_017_live_consent_pages_refuse_framing_caching_and_referrers(&world));
+        case!(agent_017_live_consent_headers_hold_on_every_refusal(
+            &world, email
+        ));
+        case!(agent_017_live_consent_pages_escape_what_the_client_chose(
+            &world
+        ));
+        case!(agent_017_live_consent_pages_act_for_their_own_user_only(
+            &world, email
+        ));
     })
     .await;
 }
