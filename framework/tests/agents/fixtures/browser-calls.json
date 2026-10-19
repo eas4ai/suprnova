@@ -1,0 +1,1203 @@
+{
+  "about": "Shared cases for every browser implementation of a server tool call (AGENT-014, AGENT-015, AGENT-016): the Live runtime, the three kits and the WebAssembly crate. They mirror the MCP dispatcher's path and query rules (framework/src/agents/dispatch.rs) and its result mapping (framework/src/agents/mcp/tools.rs), without resultType, plus the browser-only rows. Read it; do not edit it in a lane.",
+  "paths": [
+    {
+      "name": "a number fills its segment",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "post": 7
+      },
+      "expected": {
+        "url": "/posts/7",
+        "body": {
+          "post": 7
+        }
+      }
+    },
+    {
+      "name": "a boolean fills its segment",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/flags/"
+        },
+        {
+          "param": "on",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "on": true
+      },
+      "expected": {
+        "url": "/flags/true",
+        "body": {
+          "on": true
+        }
+      }
+    },
+    {
+      "name": "a decimal keeps its digits",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/rates/"
+        },
+        {
+          "param": "rate",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "rate": 1.5
+      },
+      "expected": {
+        "url": "/rates/1.5",
+        "body": {
+          "rate": 1.5
+        }
+      }
+    },
+    {
+      "name": "reserved characters are encoded",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "post": "a b/c?d#e%f"
+      },
+      "expected": {
+        "url": "/posts/a%20b%2Fc%3Fd%23e%25f",
+        "body": {
+          "post": "a b/c?d#e%f"
+        }
+      }
+    },
+    {
+      "name": "sub-delims a URI component encoder leaves alone are encoded",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "post": "it's (x)*!~"
+      },
+      "expected": {
+        "url": "/posts/it%27s%20%28x%29%2A%21~",
+        "body": {
+          "post": "it's (x)*!~"
+        }
+      }
+    },
+    {
+      "name": "gen-delims and the rest of the set are encoded",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "post": ":@[]$&+,;=\"<>\\^`{|}"
+      },
+      "expected": {
+        "url": "/posts/%3A%40%5B%5D%24%26%2B%2C%3B%3D%22%3C%3E%5C%5E%60%7B%7C%7D",
+        "body": {
+          "post": ":@[]$&+,;=\"<>\\^`{|}"
+        }
+      }
+    },
+    {
+      "name": "non-ASCII is encoded as UTF-8",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "post": "caf\u00e9 \u5de5"
+      },
+      "expected": {
+        "url": "/posts/caf%C3%A9%20%E5%B7%A5",
+        "body": {
+          "post": "caf\u00e9 \u5de5"
+        }
+      }
+    },
+    {
+      "name": "unreserved characters stay as they are",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "post": "A-z_0.9~"
+      },
+      "expected": {
+        "url": "/posts/A-z_0.9~",
+        "body": {
+          "post": "A-z_0.9~"
+        }
+      }
+    },
+    {
+      "name": "a segment of two dots cannot climb",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "post": ".."
+      },
+      "expected": {
+        "url": "/posts/%2E%2E",
+        "body": {
+          "post": ".."
+        }
+      }
+    },
+    {
+      "name": "a segment of one dot cannot stay",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "post": "."
+      },
+      "expected": {
+        "url": "/posts/%2E",
+        "body": {
+          "post": "."
+        }
+      }
+    },
+    {
+      "name": "dots inside a segment stay",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "post": "a.b"
+      },
+      "expected": {
+        "url": "/posts/a.b",
+        "body": {
+          "post": "a.b"
+        }
+      }
+    },
+    {
+      "name": "a catch-all keeps its slashes and encodes each part",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/files/"
+        },
+        {
+          "param": "path",
+          "optional": false,
+          "catchAll": true
+        }
+      ],
+      "arguments": {
+        "path": "docs/a b/../c"
+      },
+      "expected": {
+        "url": "/files/docs/a%20b/%2E%2E/c",
+        "body": {
+          "path": "docs/a b/../c"
+        }
+      }
+    },
+    {
+      "name": "an absent optional drops its slash",
+      "method": "GET",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "page",
+          "optional": true,
+          "catchAll": false
+        }
+      ],
+      "arguments": {},
+      "expected": {
+        "url": "/posts",
+        "body": null
+      }
+    },
+    {
+      "name": "a null optional drops its slash",
+      "method": "GET",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "page",
+          "optional": true,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "page": null
+      },
+      "expected": {
+        "url": "/posts",
+        "body": null
+      }
+    },
+    {
+      "name": "an empty optional drops its slash",
+      "method": "GET",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "page",
+          "optional": true,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "page": ""
+      },
+      "expected": {
+        "url": "/posts",
+        "body": null
+      }
+    },
+    {
+      "name": "a dropped optional at the root leaves the root",
+      "method": "GET",
+      "path": [
+        {
+          "text": "/"
+        },
+        {
+          "param": "page",
+          "optional": true,
+          "catchAll": false
+        }
+      ],
+      "arguments": {},
+      "expected": {
+        "url": "/",
+        "body": null
+      }
+    },
+    {
+      "name": "a present optional fills its segment",
+      "method": "GET",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "page",
+          "optional": true,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "page": 3
+      },
+      "expected": {
+        "url": "/posts/3",
+        "body": null
+      }
+    },
+    {
+      "name": "a missing required parameter is an error",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {},
+      "expected": {
+        "error": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Invalid input: the path parameter `post` is missing."
+            }
+          ],
+          "isError": true
+        }
+      }
+    },
+    {
+      "name": "an empty required parameter is an error",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "post": ""
+      },
+      "expected": {
+        "error": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Invalid input: the path parameter `post` is missing."
+            }
+          ],
+          "isError": true
+        }
+      }
+    },
+    {
+      "name": "a structured path value is an error",
+      "method": "POST",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "post": {
+          "id": 1
+        }
+      },
+      "expected": {
+        "error": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Invalid input: the path parameter `post` must be a string, a number or a boolean."
+            }
+          ],
+          "isError": true
+        }
+      }
+    },
+    {
+      "name": "GET sends the other scalars in the query, in argument order",
+      "method": "GET",
+      "path": [
+        {
+          "text": "/search"
+        }
+      ],
+      "arguments": {
+        "q": "a b&c",
+        "page": 2,
+        "draft": false
+      },
+      "expected": {
+        "url": "/search?q=a+b%26c&page=2&draft=false",
+        "body": null
+      }
+    },
+    {
+      "name": "GET leaves path arguments out of the query",
+      "method": "GET",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "post": 3,
+        "q": "caf\u00e9"
+      },
+      "expected": {
+        "url": "/posts/3?q=caf%C3%A9",
+        "body": null
+      }
+    },
+    {
+      "name": "GET with no other argument has no query",
+      "method": "GET",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "post": 3
+      },
+      "expected": {
+        "url": "/posts/3",
+        "body": null
+      }
+    },
+    {
+      "name": "GET refuses a structured argument",
+      "method": "GET",
+      "path": [
+        {
+          "text": "/search"
+        }
+      ],
+      "arguments": {
+        "q": "x",
+        "filters": {
+          "draft": true
+        }
+      },
+      "expected": {
+        "error": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Invalid input: the argument `filters` must be a string, a number or a boolean, because a GET tool sends its arguments in the query."
+            }
+          ],
+          "isError": true
+        }
+      }
+    },
+    {
+      "name": "a non-GET call sends every argument in the body",
+      "method": "PUT",
+      "path": [
+        {
+          "text": "/posts/"
+        },
+        {
+          "param": "post",
+          "optional": false,
+          "catchAll": false
+        }
+      ],
+      "arguments": {
+        "post": 3,
+        "title": "Hello",
+        "tags": [
+          "a",
+          "b"
+        ]
+      },
+      "expected": {
+        "url": "/posts/3",
+        "body": {
+          "post": 3,
+          "title": "Hello",
+          "tags": [
+            "a",
+            "b"
+          ]
+        }
+      }
+    }
+  ],
+  "csrf": [
+    {
+      "name": "the meta tag's token",
+      "meta": "meta-token",
+      "cookie": null,
+      "expected": {
+        "X-CSRF-TOKEN": "meta-token"
+      }
+    },
+    {
+      "name": "the cookie's token, decoded",
+      "meta": null,
+      "cookie": "XSRF-TOKEN=abc%3D%3D; theme=dark",
+      "expected": {
+        "X-XSRF-TOKEN": "abc=="
+      }
+    },
+    {
+      "name": "the meta tag wins over the cookie",
+      "meta": "meta-token",
+      "cookie": "XSRF-TOKEN=cookie-token",
+      "expected": {
+        "X-CSRF-TOKEN": "meta-token"
+      }
+    },
+    {
+      "name": "an empty meta tag falls back to the cookie",
+      "meta": "",
+      "cookie": "XSRF-TOKEN=cookie-token",
+      "expected": {
+        "X-XSRF-TOKEN": "cookie-token"
+      }
+    },
+    {
+      "name": "cookies are trimmed before matching",
+      "meta": null,
+      "cookie": " theme=dark;   XSRF-TOKEN=spaced",
+      "expected": {
+        "X-XSRF-TOKEN": "spaced"
+      }
+    },
+    {
+      "name": "a cookie whose name only ends in the name does not match",
+      "meta": null,
+      "cookie": "MY-XSRF-TOKEN=wrong; XSRF-TOKEN=right",
+      "expected": {
+        "X-XSRF-TOKEN": "right"
+      }
+    },
+    {
+      "name": "no meta tag and no cookie send no header",
+      "meta": null,
+      "cookie": "theme=dark",
+      "expected": {}
+    }
+  ],
+  "results": [
+    {
+      "name": "an empty 2xx answer",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 204,
+        "contentType": null,
+        "body": ""
+      },
+      "expected": {
+        "content": [],
+        "isError": false
+      }
+    },
+    {
+      "name": "a JSON answer",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 200,
+        "contentType": "application/json",
+        "body": "{\"id\":1,\"title\":\"Hello\"}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"id\":1,\"title\":\"Hello\"}"
+          }
+        ],
+        "structuredContent": {
+          "id": 1,
+          "title": "Hello"
+        },
+        "isError": false
+      }
+    },
+    {
+      "name": "a +json answer",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 201,
+        "contentType": "application/vnd.api+json; charset=utf-8",
+        "body": "{\"data\":{\"id\":\"1\"}}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"data\":{\"id\":\"1\"}}"
+          }
+        ],
+        "structuredContent": {
+          "data": {
+            "id": "1"
+          }
+        },
+        "isError": false
+      }
+    },
+    {
+      "name": "a 2xx answer that is not JSON",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 200,
+        "contentType": "text/html; charset=utf-8",
+        "body": "<p>Hello</p>"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The tool answered with a body that is not JSON."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a JSON content type with a broken body",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 200,
+        "contentType": "application/json",
+        "body": "{"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The tool answered with a body that is not JSON."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a 2xx answer over the bound",
+      "maxResultBytes": 32,
+      "response": {
+        "status": 200,
+        "contentType": "application/json",
+        "body": "{\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The tool's result is larger than the 32 bytes the page returns."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a redirect status",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 302,
+        "contentType": null,
+        "body": ""
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The tool answered with a redirect, which a tool call cannot follow."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a redirect the browser did not follow",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 0,
+        "type": "opaqueredirect",
+        "contentType": null,
+        "body": ""
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The tool answered with a redirect, which a tool call cannot follow."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "validation errors name each field",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 422,
+        "contentType": "application/json",
+        "body": "{\"message\": \"The given data was invalid.\", \"errors\": {\"title\": [\"The title is required.\"], \"body\": [\"The body is too short.\", \"The body has a banned word.\"]}}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The input is not valid:\n- title: The title is required.\n- body: The body is too short. The body has a banned word."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a validation message given as a string",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 422,
+        "contentType": "application/json",
+        "body": "{\"errors\": {\"title\": \"The title is required.\"}}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The input is not valid:\n- title: The title is required."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a validation message on one line",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 422,
+        "contentType": "application/json",
+        "body": "{\"errors\": {\"title\": [\"First line.\\nSecond line.\\tTabbed.\"]}}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The input is not valid:\n- title: First line. Second line. Tabbed."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "at most twenty fields, then a count",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 422,
+        "contentType": "application/json",
+        "body": "{\"errors\": {\"field_01\": [\"Field 1 is required.\"], \"field_02\": [\"Field 2 is required.\"], \"field_03\": [\"Field 3 is required.\"], \"field_04\": [\"Field 4 is required.\"], \"field_05\": [\"Field 5 is required.\"], \"field_06\": [\"Field 6 is required.\"], \"field_07\": [\"Field 7 is required.\"], \"field_08\": [\"Field 8 is required.\"], \"field_09\": [\"Field 9 is required.\"], \"field_10\": [\"Field 10 is required.\"], \"field_11\": [\"Field 11 is required.\"], \"field_12\": [\"Field 12 is required.\"], \"field_13\": [\"Field 13 is required.\"], \"field_14\": [\"Field 14 is required.\"], \"field_15\": [\"Field 15 is required.\"], \"field_16\": [\"Field 16 is required.\"], \"field_17\": [\"Field 17 is required.\"], \"field_18\": [\"Field 18 is required.\"], \"field_19\": [\"Field 19 is required.\"], \"field_20\": [\"Field 20 is required.\"], \"field_21\": [\"Field 21 is required.\"]}}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The input is not valid:\n- field_01: Field 1 is required.\n- field_02: Field 2 is required.\n- field_03: Field 3 is required.\n- field_04: Field 4 is required.\n- field_05: Field 5 is required.\n- field_06: Field 6 is required.\n- field_07: Field 7 is required.\n- field_08: Field 8 is required.\n- field_09: Field 9 is required.\n- field_10: Field 10 is required.\n- field_11: Field 11 is required.\n- field_12: Field 12 is required.\n- field_13: Field 13 is required.\n- field_14: Field 14 is required.\n- field_15: Field 15 is required.\n- field_16: Field 16 is required.\n- field_17: Field 17 is required.\n- field_18: Field 18 is required.\n- field_19: Field 19 is required.\n- field_20: Field 20 is required.\n(1 more fields are not valid.)"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a long message is cut at 500 characters",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 422,
+        "contentType": "application/json",
+        "body": "{\"errors\": {\"body\": [\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\"]}}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The input is not valid:\n- body: yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy..."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "the validation text is cut to the bound",
+      "maxResultBytes": 30,
+      "response": {
+        "status": 422,
+        "contentType": "application/json",
+        "body": "{\"errors\": {\"t\": [\"aaaa\"]}}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The input is not valid:\n- t..."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "an error body over the bound is too large",
+      "maxResultBytes": 30,
+      "response": {
+        "status": 422,
+        "contentType": "application/json",
+        "body": "{\"errors\": {\"title\": [\"The title is required.\"]}}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The tool's result is larger than the 30 bytes the page returns."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a 422 without errors shows its message",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 422,
+        "contentType": "application/json",
+        "body": "{\"message\": \"Pick a date in the future.\"}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Pick a date in the future."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a 422 with no body",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 422,
+        "contentType": null,
+        "body": ""
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The input is not valid."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "too many calls",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 429,
+        "contentType": "application/json",
+        "body": "{\"message\": \"Slow down.\"}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Too many calls: wait before calling the tool again."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a server error shows nothing of its body",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 500,
+        "contentType": "application/json",
+        "body": "{\"message\": \"connection to db-7 refused\"}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The tool failed."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "an unavailable server",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 503,
+        "contentType": null,
+        "body": ""
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The tool failed."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a 401 with its message",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 401,
+        "contentType": "application/json",
+        "body": "{\"message\": \"Unauthenticated.\"}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Unauthenticated."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a 401 with no body",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 401,
+        "contentType": null,
+        "body": ""
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The tool needs a signed-in user."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a 403 with no body",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 403,
+        "contentType": null,
+        "body": ""
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "This action is unauthorized."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a 403 whose message is not text",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 403,
+        "contentType": "application/json",
+        "body": "{\"message\": 7}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "This action is unauthorized."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a 404 with no body",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 404,
+        "contentType": "text/html",
+        "body": "<h1>Not Found</h1>"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Not found."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "another 4xx with its message",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 409,
+        "contentType": "application/json",
+        "body": "{\"message\": \"The post was changed by someone else.\"}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The post was changed by someone else."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "another 4xx with an empty message",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 400,
+        "contentType": "application/json",
+        "body": "{\"message\": \"\"}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The tool refused the call."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "an expired page session",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 419,
+        "contentType": "application/json",
+        "body": "{\"message\": \"CSRF token mismatch.\"}"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The page's session expired: reload the page, then call the tool again."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a network failure",
+      "maxResultBytes": 8388608,
+      "response": {
+        "failure": "network"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The tool could not be reached."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "the call timer fired",
+      "maxResultBytes": 8388608,
+      "response": {
+        "failure": "timeout",
+        "callTimeoutMs": 30000
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The tool did not finish within 30 seconds and was stopped."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "the call timer fired at a fraction of a second",
+      "maxResultBytes": 8388608,
+      "response": {
+        "failure": "timeout",
+        "callTimeoutMs": 1500
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "The tool did not finish within 1.5 seconds and was stopped."
+          }
+        ],
+        "isError": true
+      }
+    }
+  ]
+}
