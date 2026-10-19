@@ -225,6 +225,114 @@ and optional props, cursor scrolling, a JSON form, and flashed toasts each
 have a working server to talk to. No handler lists accounts: a directory of
 users would show every member the name and email of every other member.
 
+### Agents in the API kit
+
+`suprnova new my-api --api` serves agents from `src/agents.rs`: the MCP
+endpoint at `/mcp`, the OAuth server that MCP clients sign users in through,
+and agent accounts under auth.md. For what each of these does, see
+[Agents](agents.md). The kit has no frontend, so it serves the framework's
+own pages, which are plain HTML with no script:
+
+| Page | Path | What the signed-in user does there |
+|---|---|---|
+| Approval | `/oauth/approve` | Allows or denies an MCP client |
+| Claim | `/agent/claim` | Enters the code an agent gives them |
+| Connected agents | `/oauth/connected` | Sees and revokes the clients and agents that act for them |
+
+`src/agents.rs` names each path once, as a constant, and gives the same
+constants to the OAuth server, agent auth, the sign-in page and the session.
+
+#### The consent sign-in
+
+A person approves a client or claims an agent in a browser, so these pages
+act for the user of a browser session. The kit signs a browser in at
+`/login` (`src/controllers/sign_in.rs`) for them:
+
+1. A guest who opens the approval or claim page is sent to
+   `/login?return_to=...`.
+2. The guest signs in with their email address and password, through
+   `Auth::password()`.
+3. The page continues to the address in `return_to`. Only a path on this
+   application is kept: an address such as `//evil.example` or
+   `https://evil.example` sends the user to `/oauth/connected` instead.
+
+The page is fixed markup with one value in it, the session's CSRF token. Its
+routes carry `ConsentPageHeaders`, so it is never framed, cached, or sent as
+a referrer, and its form posts through the route's `CsrfMiddleware`. An
+account with a second factor is told that the page does not offer one, and
+stays signed out. To let those users approve clients, add the factor
+challenge to the page.
+
+A claim also needs the user's email address verified: agent auth reads
+`app_users.email_verified_at`. The API kit has no route that verifies an
+address, so add one before your users claim agents.
+
+#### Sessions on the consent pages only
+
+`bootstrap.rs` registers `agents::ConsentSession`, which runs the session
+middleware on these paths and no others:
+
+- `/login`, the sign-in page, and its form.
+- `/oauth/authorize`, `/oauth/approve` and `/oauth/authorizations/{id}`,
+  where a user approves a client.
+- `/oauth/connected` and the revoke forms under it.
+- `/agent/claim` and its form.
+
+Every other route serves a client of the JSON API, an MCP client, or an
+agent, which sign in with a bearer token: `/api/*`, `/mcp`, the
+`/.well-known/*` documents, the token, registration and revocation
+endpoints, and agent auth's JSON routes. None of them starts a session or
+sets a cookie, so no client or agent can create a session row per request,
+and the JSON sign-in at `POST /api/auth/login` returns a token and nothing
+else. The migrator creates the `sessions` table, and the session settings
+are the `SESSION_*` variables in [Environment variables](env-vars.md). The
+kit adds no global CSRF middleware, so the JSON API still takes no token.
+
+`bootstrap.rs` also registers a `DatabaseUserProvider` over `app_users`, so
+`Auth::user()` finds the user a bearer token or a consent page's session
+signed in.
+
+#### Connected agents over JSON
+
+A client of the JSON API lists and revokes the same connections as the
+connected-agents page. The routes sit behind `AuthMiddleware` beside the
+user directory, and act for the user of the bearer token from
+`POST /api/auth/login`:
+
+| Route | Answer |
+|---|---|
+| `GET /api/connected-agents` | `200` with `{"clients": [...], "agents": [...]}`, each newest first |
+| `DELETE /api/connected-agents/clients/{grant}` | `204`, or `404` with `{"message": "No such connected app."}` |
+| `DELETE /api/connected-agents/agents/{registration}` | `204`, or `404` with `{"message": "No such connected agent."}` |
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" \
+  http://localhost:8765/api/connected-agents
+```
+
+An id that belongs to another user answers `404`. An MCP access token is
+not a sign-in to this API, so it gets `401` here. Revoking takes `DELETE`,
+never `POST`: a plain form on another site can send `POST`, and the JSON
+API runs no CSRF check. For the fields of each entry, see
+[Connected agents](agents.md#connected-agents).
+
+#### The signing key in production
+
+`suprnova new` writes a signing key for agent auth into `.env` as
+`AGENT_AUTH_KEY_ID` and `AGENT_AUTH_PRIVATE_KEY`. A deploy that does not
+copy `.env` must set both variables, and the application does not start
+without them. To print a new pair, run `cargo run -- agents:key`. Outside
+the local and testing environments, also set `APP_URL`: it is the OAuth
+server's issuer. For more about keys, see
+[Keys and operations](agents.md#keys-and-operations).
+
+#### Why the kit ships no browser helpers
+
+The Inertia kits ship browser helpers that offer a page's tools to an agent
+in the browser (see [Tools in the browser](agents.md#tools-in-the-browser)).
+The API kit has no pages of its own to offer tools on, so it ships none. An
+application that adds a frontend adds the helpers with it.
+
 ## The Live starter kit
 
 `suprnova new my-app --frontend live` scaffolds the same application as the
