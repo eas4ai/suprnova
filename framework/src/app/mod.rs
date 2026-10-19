@@ -337,6 +337,26 @@ enum Commands {
     /// Mirrors `php artisan inertia:check-ssr`.
     #[command(name = "ssr:check")]
     SsrCheck,
+    /// Revoke every agent registration and every token issued from them,
+    /// for incident response. Running it again finishes a run that failed
+    /// partway.
+    #[cfg(feature = "agents")]
+    #[command(name = "agents:revoke-all")]
+    AgentsRevokeAll {
+        /// Required in production, alongside a typed confirmation.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Expire unclaimed agent registrations past their window and delete
+    /// spent replay records, the pass `serve` runs every five minutes.
+    #[cfg(feature = "agents")]
+    #[command(name = "agents:prune")]
+    AgentsPrune,
+    /// Print a new agent auth signing key as AGENT_AUTH_KEY_ID and
+    /// AGENT_AUTH_PRIVATE_KEY lines for the environment. Writes nothing.
+    #[cfg(feature = "agents")]
+    #[command(name = "agents:key")]
+    AgentsKey,
 }
 
 impl Commands {
@@ -373,6 +393,14 @@ impl Commands {
             | Commands::QueueForget { .. }
             | Commands::QueueFlush { .. }
             | Commands::QueuePruneFailed { .. } => ProcessBoot::Work,
+            // They build the router, whose agent auth they act on, after the
+            // process-wide hook and the runtime drivers.
+            #[cfg(feature = "agents")]
+            Commands::AgentsRevokeAll { .. } | Commands::AgentsPrune => ProcessBoot::Work,
+            // It only draws a key: like the migration commands it runs no
+            // hook and boots nothing.
+            #[cfg(feature = "agents")]
+            Commands::AgentsKey => ProcessBoot::Migrations,
         }
     }
 }
@@ -1538,6 +1566,42 @@ where
                     .await
                     .map(|code| status = code)
             }
+            #[cfg(feature = "agents")]
+            Some(Commands::AgentsRevokeAll { force }) => {
+                let env = crate::config::Environment::detect();
+                match authorize_agents_revoke_all(
+                    &env,
+                    force,
+                    std::io::IsTerminal::is_terminal(&std::io::stdin()),
+                    &mut read_confirmation_from_stdin,
+                ) {
+                    Ok(()) => {
+                        Self::run_agents_command(
+                            AgentsCommand::RevokeAll,
+                            boot,
+                            bootstrap_fn,
+                            routes_fn,
+                        )
+                        .await
+                    }
+                    Err(message) => Err(FrameworkError::internal(message)),
+                }
+            }
+            #[cfg(feature = "agents")]
+            Some(Commands::AgentsPrune) => {
+                Self::run_agents_command(AgentsCommand::Prune, boot, bootstrap_fn, routes_fn).await
+            }
+            #[cfg(feature = "agents")]
+            Some(Commands::AgentsKey) => {
+                crate::agents::agent_auth::operator::new_key().map(|(kid, pem)| {
+                    // The key goes to stdout, for the operator to store, and
+                    // nowhere else.
+                    print!(
+                        "{}",
+                        crate::agents::agent_auth::operator::environment_lines(&kid, &pem)
+                    );
+                })
+            }
         };
         // Laravel's console kernel reports what a command throws, a failure
         // of its bootstrap included, before it renders it (PAR-111), as the
@@ -1570,6 +1634,48 @@ where
         // a worker wrote before it ended may be lost.
         crate::logging::Log::flush();
         result.map(|()| status)
+    }
+
+    /// `agents:revoke-all` and `agents:prune`: boot as a worker does, build
+    /// the router `serve` would serve, and act on the agent auth it mounts.
+    ///
+    /// Only the process-wide hook runs: the router's agent auth needs
+    /// nothing the HTTP-only hook installs, and an operator may run these
+    /// on a machine that ships no frontend assets. The server itself is not
+    /// built, so no Live runtime is bound.
+    #[cfg(feature = "agents")]
+    async fn run_agents_command(
+        command: AgentsCommand,
+        boot: ProcessBoot,
+        bootstrap_fn: Option<BootstrapFn>,
+        routes_fn: Option<RoutesFn>,
+    ) -> Result<(), FrameworkError> {
+        let name = command.name();
+        Self::boot_or_fail(name, boot, bootstrap_fn).await?;
+        let router = RoutesFn::build_router(routes_fn)
+            .await
+            .map_err(|e| failed(format!("suprnova: {name}: the routes did not build: {e}")))?;
+        let Some(engine) = router.agent_auth() else {
+            return Err(failed(format!(
+                "suprnova: {name}: the application's router serves no agent auth \
+                 (AgentsConfig::agent_auth)"
+            )));
+        };
+        use crate::agents::agent_auth::operator;
+        match command {
+            AgentsCommand::RevokeAll => {
+                let revoked = operator::revoke_all(&engine).await?;
+                println!("Revoked {revoked} agent registrations and every token issued from them.");
+            }
+            AgentsCommand::Prune => {
+                let done = operator::maintain(&engine).await?;
+                println!(
+                    "Expired {} agent registrations and pruned {} replay records.",
+                    done.expired, done.pruned
+                );
+            }
+        }
+        Ok(())
     }
 
     async fn run_server_internal(
@@ -2685,6 +2791,63 @@ fn authorize_migrate_fresh(
     Ok(())
 }
 
+/// Whether `agents:revoke-all` may run: anywhere but production freely; in
+/// production only with `--force` and the environment's name typed on a
+/// terminal, the gate [`authorize_migrate_fresh`] puts on dropping the
+/// database. Revoking every agent at once ends every agent integration of
+/// every user, and is not undone.
+#[cfg(feature = "agents")]
+fn authorize_agents_revoke_all(
+    env: &crate::config::Environment,
+    force: bool,
+    stdin_is_tty: bool,
+    read_confirmation: &mut dyn FnMut() -> Result<String, String>,
+) -> Result<(), String> {
+    if !env.is_production() {
+        return Ok(());
+    }
+    let expected = env.to_string();
+    if !force {
+        return Err(format!(
+            "Refusing to run agents:revoke-all with APP_ENV={expected}: it revokes every \
+             agent registration and every agent token of every user, and it is not undone.\n  \
+             If you are certain, re-run it as `agents:revoke-all --force` from an interactive \
+             terminal and type the environment name when asked."
+        ));
+    }
+    if !stdin_is_tty {
+        return Err(format!(
+            "Refusing to run agents:revoke-all with APP_ENV={expected}: --force alone is not \
+             enough, it also needs a typed confirmation, and stdin is not a terminal."
+        ));
+    }
+    eprintln!("About to REVOKE EVERY AGENT CREDENTIAL in {expected}. This cannot be undone.");
+    eprintln!("Type `{expected}` to confirm, or anything else to abort:");
+    let typed = read_confirmation()?;
+    if typed.trim() != expected {
+        return Err("Confirmation did not match - nothing was revoked.".to_string());
+    }
+    Ok(())
+}
+
+/// The agent auth commands that act on the router's engine.
+#[cfg(feature = "agents")]
+#[derive(Clone, Copy)]
+enum AgentsCommand {
+    RevokeAll,
+    Prune,
+}
+
+#[cfg(feature = "agents")]
+impl AgentsCommand {
+    fn name(self) -> &'static str {
+        match self {
+            Self::RevokeAll => "agents:revoke-all",
+            Self::Prune => "agents:prune",
+        }
+    }
+}
+
 /// Read one line from the real stdin. Only ever called on a TTY.
 fn read_confirmation_from_stdin() -> Result<String, String> {
     let mut line = String::new();
@@ -3555,6 +3718,59 @@ mod migrate_fresh_gate_tests {
         assert!(
             err.contains("nothing was dropped"),
             "the message states nothing happened: {err}"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "agents"))]
+mod agents_revoke_all_gate_tests {
+    use super::authorize_agents_revoke_all;
+    use crate::config::Environment;
+
+    fn unreachable_reader() -> Result<String, String> {
+        panic!("the gate must refuse before prompting on this path");
+    }
+
+    #[test]
+    fn agent_010_operator_command_runs_freely_outside_production() {
+        for env in [
+            Environment::Local,
+            Environment::Testing,
+            Environment::Staging,
+        ] {
+            assert!(
+                authorize_agents_revoke_all(&env, false, false, &mut unreachable_reader).is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn agent_010_operator_command_needs_force_and_a_typed_confirmation_in_production() {
+        let err = authorize_agents_revoke_all(
+            &Environment::Production,
+            false,
+            true,
+            &mut unreachable_reader,
+        )
+        .expect_err("production without --force must refuse");
+        assert!(err.contains("--force"), "{err}");
+        let err = authorize_agents_revoke_all(
+            &Environment::Production,
+            true,
+            false,
+            &mut unreachable_reader,
+        )
+        .expect_err("--force without a terminal must refuse");
+        assert!(err.contains("not a terminal"), "{err}");
+        let mut wrong = || Ok("yes\n".to_string());
+        assert!(
+            authorize_agents_revoke_all(&Environment::Production, true, true, &mut wrong)
+                .expect_err("a wrong confirmation aborts")
+                .contains("nothing was revoked")
+        );
+        let mut right = || Ok("production\n".to_string());
+        assert!(
+            authorize_agents_revoke_all(&Environment::Production, true, true, &mut right).is_ok()
         );
     }
 }

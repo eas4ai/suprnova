@@ -78,6 +78,17 @@ pub fn remember_account(id: &str) {
         .insert(id.to_owned(), format!("$argon2id$elsewhere-{id}"));
 }
 
+/// Accounts whose email the application has not verified.
+fn unverified() -> &'static Mutex<std::collections::HashSet<String>> {
+    static UNVERIFIED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    UNVERIFIED.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Leave the account's email unverified.
+pub fn mark_unverified(id: &str) {
+    unverified().lock().unwrap().insert(id.to_owned());
+}
+
 /// Change the user's password: their stored hash is a new one.
 pub fn change_password(id: &str) {
     accounts()
@@ -136,6 +147,37 @@ impl UserProvider for Accounts {
             return Ok(None);
         };
         self.retrieve_by_id(id).await
+    }
+
+    /// The account whose address, [`account_email`] of its id, is `email`.
+    async fn retrieve_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<suprnova::AuthFlowUser>, FrameworkError> {
+        let Some(id) = email.strip_suffix("@accounts.test") else {
+            return Ok(None);
+        };
+        Ok(accounts()
+            .lock()
+            .unwrap()
+            .contains_key(id)
+            .then(|| suprnova::AuthFlowUser {
+                id: id.to_owned(),
+                email: email.to_owned(),
+                name: None,
+            }))
+    }
+
+    async fn verification_email(&self, id: &str) -> Result<Option<String>, FrameworkError> {
+        Ok(accounts()
+            .lock()
+            .unwrap()
+            .contains_key(id)
+            .then(|| account_email(id)))
+    }
+
+    async fn is_email_verified(&self, id: &str) -> Result<bool, FrameworkError> {
+        Ok(!unverified().lock().unwrap().contains(id))
     }
 }
 
@@ -282,6 +324,11 @@ pub async fn database() -> DatabaseConnection {
 /// The per-test container: the fixture's, plus a rate limiter for the
 /// registration budget and the users provider behind the default guard.
 pub fn container() -> Box<dyn Any> {
+    container_with_users(Arc::new(Accounts))
+}
+
+/// The per-test container with `users` as the default guard's provider.
+pub fn container_with_users(users: Arc<dyn UserProvider>) -> Box<dyn Any> {
     static CRYPT: OnceLock<()> = OnceLock::new();
     CRYPT.get_or_init(|| Crypt::init(EncryptionKey::generate()));
     // An application that serves the OAuth server names its public URL.
@@ -296,7 +343,7 @@ pub fn container() -> Box<dyn Any> {
     let guard = Box::new(fixture::setup());
     TestContainer::bind::<dyn RateLimiterDriver>(Arc::new(InMemoryRateLimiter::new()));
     let manager = AuthManager::new(AuthConfig::default());
-    manager.register_provider("users", Arc::new(Accounts));
+    manager.register_provider("users", users);
     TestContainer::singleton(manager);
     guard
 }
@@ -324,8 +371,41 @@ pub fn router(agents: AgentsConfig) -> Router {
                 .map_err(HttpResponse::from)?;
             Ok(HttpResponse::json(json!({ "revoked": revoked })))
         })
+        .get("/test/facade/agents", |request: Request| async move {
+            let accounts = ConnectedAgents::agent_accounts(&request)
+                .await
+                .map_err(HttpResponse::from)?;
+            Ok(HttpResponse::json(json!(accounts)))
+        })
+        .get(
+            "/test/facade/agents/revoke",
+            |request: Request| async move {
+                let registration = request.query_param("registration").unwrap_or_default();
+                let revoked = ConnectedAgents::revoke_agent_account(&request, &registration)
+                    .await
+                    .map_err(HttpResponse::from)?;
+                Ok(HttpResponse::json(json!({ "revoked": revoked })))
+            },
+        )
+        // The session's CSRF token, for a form a test builds itself.
+        .get("/test/csrf", |_request: Request| async move {
+            Ok(HttpResponse::text(
+                suprnova::session::get_csrf_token().unwrap_or_default(),
+            ))
+        })
         .into();
     routes.agents(agents)
+}
+
+/// The session middleware alone, as an application that installed no
+/// CSRF middleware of its own has it.
+pub fn session_registry() -> MiddlewareRegistry {
+    let mut config = SessionConfig::default();
+    config.cookie_secure = false;
+    MiddlewareRegistry::new().append(SessionMiddleware::with_store(
+        config,
+        Arc::new(MemorySessions::default()),
+    ))
 }
 
 /// The session and CSRF middleware every browser request passes.
