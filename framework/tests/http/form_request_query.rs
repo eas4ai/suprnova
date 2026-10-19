@@ -93,6 +93,13 @@ async fn agent_014_a_get_form_request_answers_422_naming_the_field() {
 }
 
 #[tokio::test]
+async fn agent_014_a_query_value_holding_json_stays_text_for_a_text_field() {
+    let reply = client().get("/search?q=%7B%22a%22%3A1%7D").send().await;
+    reply.assert_ok();
+    assert_eq!(reply.json()["q"], r#"{"a":1}"#);
+}
+
+#[tokio::test]
 async fn agent_014_a_head_form_request_reads_its_query() {
     let reply = client()
         .send(hyper::Method::HEAD, "/search?q=ok")

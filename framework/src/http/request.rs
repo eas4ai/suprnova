@@ -1654,7 +1654,7 @@ impl Request {
     /// with the errors. Any other failure is a 422 that words it.
     pub fn query_into<T: DeserializeOwned>(&self) -> Result<T, FrameworkError> {
         let q = self.query().unwrap_or("");
-        crate::http::input::parse_form_input(q.as_bytes())
+        crate::http::input::parse_query_input(q.as_bytes())
             .map_err(|error| error.into_framework_error("query parse"))
     }
 

@@ -322,7 +322,13 @@ pub trait FormRequest: Sized + DeserializeOwned + Validate + Send + Sync {
                     serde_json::from_slice(&bytes).unwrap_or_default()
                 };
             }
-            if route_inputs.is_empty() && is_form {
+            if reads_query && route_inputs.is_empty() {
+                super::input::parse_query_input(&bytes)
+                    .map_err(|error| error.into_framework_error("Failed to parse the query"))
+            } else if reads_query {
+                super::input::parse_query_with_route_inputs(&bytes, route_inputs)
+                    .map_err(|error| error.into_framework_error("Failed to parse the query"))
+            } else if route_inputs.is_empty() && is_form {
                 parse_form(&bytes)
             } else if is_form {
                 super::input::parse_form_with_route_inputs(&bytes, route_inputs)
