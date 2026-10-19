@@ -311,6 +311,26 @@ impl SecurityHeaders {
         self
     }
 
+    /// The policy a consent page answers under ([`ConsentPageHeaders`]):
+    /// never framed, never cached, no referrer. Every policy refuses
+    /// framing and keeps its other directives; without an enforced one,
+    /// an enforced `frame-ancestors 'none'` is the policy.
+    fn refusing_framing(mut self) -> Self {
+        for (name, value) in CONSENT_HEADERS {
+            self.headers.insert(name.into(), value.into());
+        }
+        self.csp = Some(match self.csp {
+            Some(csp) => csp.refusing_framing(),
+            None => ContentSecurityPolicy {
+                template: NO_FRAMING.into(),
+            },
+        });
+        self.csp_report_only = self
+            .csp_report_only
+            .map(ContentSecurityPolicy::refusing_framing);
+        self
+    }
+
     /// Apply the same policy to server-built responses while preserving their
     /// body, status and existing headers. A surrounding scope supplies the
     /// effective request nonce when application middleware has already run.
@@ -387,13 +407,7 @@ impl SecurityHeaders {
                     csp = widened;
                 }
             }
-            let html = response.header_value("content-type").is_some_and(|value| {
-                value
-                    .split(';')
-                    .next()
-                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/html"))
-            });
-            if !csp.uses_nonce() || html {
+            if !csp.uses_nonce() || is_html(&response) {
                 if response.header_value(name).is_none() {
                     response =
                         response.header(name, csp.render(nonce, origin, self.report_to.is_some()));
@@ -533,6 +547,121 @@ impl Middleware for SecurityHeadersOverride {
         *effective.write().unwrap_or_else(|p| p.into_inner()) = updated;
         next(request).await
     }
+}
+
+/// Route middleware for an application's own approval, claim and
+/// connected-agents pages (AGENT-005, AGENT-009, AGENT-017): every answer,
+/// errors included, refuses to be framed, is never cached and sends no
+/// referrer, and the page keeps the application's nonce policy.
+///
+/// ```rust,ignore
+/// group!("/", {
+///     get!("/oauth/approve", controllers::agents::approval),
+///     post!("/oauth/approve", controllers::agents::decide),
+/// }).middleware(ConsentPageHeaders),
+/// ```
+///
+/// - **Framing.** A consent page that another page can frame is a
+///   clickjacking target: an overlay that lines the "Allow" button up under
+///   a click. The effective policy's `frame-ancestors` becomes `'none'`,
+///   and `X-Frame-Options` becomes `DENY`. The rest of the policy, nonce
+///   sources included, stays as [`SecurityHeaders`] and any
+///   [`SecurityHeadersOverride`] made it, so the page's scripts still run.
+///   A report-only policy does not enforce framing, so under report-only
+///   an enforced `frame-ancestors 'none'` is sent beside it, and so it is
+///   under the relaxed and off presets, which send no policy.
+/// - **Caching and referrers.** The page's address carries the
+///   authorization id or the claim's attempt token: `Cache-Control:
+///   no-store` and `Referrer-Policy: no-referrer` keep it out of caches and
+///   other sites' logs.
+///
+/// A header the handler set itself gives way to these, and a policy it set
+/// itself keeps everything but its framing. Without [`SecurityHeaders`]
+/// installed the middleware sets all four headers itself.
+///
+/// It runs directly inside [`SecurityHeaders`] and the route's overrides,
+/// before every other middleware, so its answers include the CSRF
+/// middleware's refusals and no cache answers around it. A panic is
+/// answered past it, by the server, under the policy it changed.
+///
+/// It keeps the policy's `form-action 'self'`. A browser applies it to the
+/// redirects after a form post, so a page that posts a native form and is
+/// answered with a redirect to the client's origin is blocked. A consent
+/// page leaves for the client by a location visit
+/// ([`Inertia::location`](crate::Inertia::location)) or by a page of its
+/// own that navigates there.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConsentPageHeaders;
+
+/// The headers every consent answer carries, set over whatever the handler
+/// or the outer policy chose.
+const CONSENT_HEADERS: [(&str, &str); 3] = [
+    ("x-frame-options", "DENY"),
+    ("cache-control", "no-store"),
+    ("referrer-policy", "no-referrer"),
+];
+
+/// The policy a consent answer carries when nothing else frames it.
+const NO_FRAMING: &str = "frame-ancestors 'none'";
+
+#[async_trait]
+impl Middleware for ConsentPageHeaders {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        // The outer policy, which the server or `SecurityHeaders` applies
+        // once the answer is final, error pages and a panic's answer
+        // included.
+        let governed = match POLICY.try_with(Clone::clone) {
+            Ok(effective) => {
+                let updated = effective
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone()
+                    .refusing_framing();
+                *effective.write().unwrap_or_else(|p| p.into_inner()) = updated;
+                true
+            }
+            Err(_) => false,
+        };
+        match next(request).await {
+            Ok(response) => Ok(consent_answer(response, governed)),
+            Err(response) => Err(consent_answer(response, governed)),
+        }
+    }
+}
+
+/// `response` as a consent page answers it: the consent headers over the
+/// handler's, and every policy it carries refusing framing. `governed` says
+/// whether an outer policy will still decorate it.
+fn consent_answer(mut response: HttpResponse, governed: bool) -> HttpResponse {
+    for (name, value) in CONSENT_HEADERS {
+        response = response.without_header(name).header(name, value);
+    }
+    let own: Vec<String> = response
+        .header_values("content-security-policy")
+        .map(policy::refuse_framing)
+        .collect();
+    if !own.is_empty() {
+        response = response.without_header("content-security-policy");
+        for policy in own {
+            response = response.header("content-security-policy", policy);
+        }
+    } else if !governed || !is_html(&response) {
+        // Nothing else would refuse framing: no outer policy, or a nonce
+        // policy the outer one sends with HTML only.
+        response = response.header("content-security-policy", NO_FRAMING);
+    }
+    response
+}
+
+/// Whether `response` is an HTML document, the only answer a nonce policy
+/// is sent with.
+fn is_html(response: &HttpResponse) -> bool {
+    response.header_value("content-type").is_some_and(|value| {
+        value
+            .split(';')
+            .next()
+            .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/html"))
+    })
 }
 
 /// Keeps the effective policy alive across the server's panic boundary and

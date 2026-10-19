@@ -13,15 +13,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use magnetar::agent_auth::SignedInUser;
-use magnetar::plugin::WireResponse;
-use serde_json::Value;
-
+use crate::agents::consent::{
+    AgentClaims, ClaimConfirmation, ClaimLookup, ClaimRefusal, PendingClaim,
+};
 use crate::agents::page::{Html, csrf_token, guard_errors, guarded, notice, sign_in_redirect};
 use crate::csrf::CsrfMiddleware;
 use crate::error::FrameworkError;
 use crate::http::{HttpResponse, Request, Response};
-use crate::magnetar_integration::plugin_host::signed_in_session;
 use crate::routing::Router;
 
 /// The largest form the page's action reads, the bound of every agent auth
@@ -59,65 +57,47 @@ pub(super) fn mount_claim(router: Router, page: Arc<ClaimPage>) -> Result<Router
         .into())
 }
 
-/// The signed-in user as the engine compares them with the claim.
-async fn signed_in() -> Result<Option<SignedInUser>, FrameworkError> {
-    Ok(signed_in_session().await?.map(|session| SignedInUser {
-        user_id: session.user_id().to_owned(),
-        auth_epoch: Some(session.auth_epoch()),
-    }))
-}
-
 /// The page: who the agent will act as, through which provider, with which
-/// scopes, and the form that takes the code.
+/// scopes, and the form that takes the code. It reads the claim through
+/// [`AgentClaims`], as an application's own page does.
 async fn claim(page: Arc<ClaimPage>, request: Request) -> Response {
-    // The user signs in before anything about the claim is shown.
-    let Some(user) = signed_in().await? else {
-        return Ok(sign_in_redirect(
-            &page.sign_in_url,
-            &page.return_to_parameter,
-            &request,
-        ));
-    };
-    let Some(token) = request
+    let token = request
         .query_param("claim_attempt_token")
-        .filter(|token| !token.is_empty())
-    else {
-        return Ok(notice(
-            400,
-            "Nothing to claim",
-            "This link does not name a claim. Ask the agent for a new one.",
-        ));
-    };
-    let answer = Answer::of(page.engine.pending_claim(&token, Some(&user)).await);
-    match answer.status {
-        200 => Ok(guarded(HttpResponse::html(render_claim(
-            &answer.body,
-            &crate::routing::url::to(&page.path),
-            &token,
-            &csrf_token()?,
-            None,
-        )))),
+        .filter(|token| !token.is_empty());
+    // The engine refuses a guest before it reads the token, so the user
+    // signs in before anything about the claim is shown.
+    let lookup = AgentClaims::new(Arc::clone(&page.engine), request.ip())
+        .pending(token.as_deref().unwrap_or_default())
+        .await?;
+    match (lookup, token) {
         // A session from before the user's last password change no longer
-        // speaks for them.
-        401 => Ok(sign_in_redirect(
+        // speaks for them either.
+        (ClaimLookup::Refused(ClaimRefusal::SignIn), _) => Ok(sign_in_redirect(
             &page.sign_in_url,
             &page.return_to_parameter,
             &request,
         )),
-        status => refused(status),
+        (_, None) => Ok(notice(
+            400,
+            "Nothing to claim",
+            "This link does not name a claim. Ask the agent for a new one.",
+        )),
+        (ClaimLookup::Pending(claim), Some(token)) => {
+            Ok(guarded(HttpResponse::html(render_claim(
+                &claim,
+                &crate::routing::url::to(&page.path),
+                &token,
+                &csrf_token()?,
+                None,
+            ))))
+        }
+        (ClaimLookup::Refused(refusal), Some(_)) => Ok(refused(refusal)),
     }
 }
 
 /// The form's action: confirm the claim with the code the user typed.
 async fn confirm(page: Arc<ClaimPage>, request: Request) -> Response {
-    let Some(user) = signed_in().await? else {
-        return Ok(notice(
-            401,
-            "Sign in first",
-            "Sign in, then open the link the agent gave you again.",
-        ));
-    };
-    let address = request.ip();
+    let claims = AgentClaims::new(Arc::clone(&page.engine), request.ip());
     let bytes = match request.body_bytes_with_cap(MAX_FORM_BYTES).await {
         Ok((_, bytes)) => bytes,
         Err(error) if error.status_code() == 413 => {
@@ -141,93 +121,70 @@ async fn confirm(page: Arc<ClaimPage>, request: Request) -> Response {
         .cloned()
         .unwrap_or_default();
     let code = fields.get("user_code").cloned().unwrap_or_default();
-    let answer = Answer::of(
-        page.engine
-            .confirm_claim(&token, &code, Some(&user), address.as_deref())
-            .await,
-    );
-    match answer.status {
-        200 => Ok(guarded(HttpResponse::html(render_claimed(
+    match claims.confirm(&token, &code).await? {
+        ClaimConfirmation::Claimed { .. } => Ok(guarded(HttpResponse::html(render_claimed(
             page.connected_path
                 .as_deref()
                 .map(crate::routing::url::to)
                 .as_deref(),
         )))),
-        400 if answer.error() == Some("invalid_user_code") => {
-            let remaining = answer
-                .body
-                .get("attempts_remaining")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
+        ClaimConfirmation::WrongCode { attempts_remaining } => {
             // The page again, as it stands now, with the mistake named.
-            let pending = Answer::of(page.engine.pending_claim(&token, Some(&user)).await);
-            if pending.status != 200 {
-                return refused(pending.status);
+            match claims.pending(&token).await? {
+                ClaimLookup::Pending(claim) => Ok(guarded(
+                    HttpResponse::html(render_claim(
+                        &claim,
+                        &crate::routing::url::to(&page.path),
+                        &token,
+                        &csrf_token()?,
+                        Some(attempts_remaining),
+                    ))
+                    .status(400),
+                )),
+                ClaimLookup::Refused(refusal) => Ok(refused_confirmation(refusal)),
             }
-            Ok(guarded(
-                HttpResponse::html(render_claim(
-                    &pending.body,
-                    &crate::routing::url::to(&page.path),
-                    &token,
-                    &csrf_token()?,
-                    Some(remaining),
-                ))
-                .status(400),
-            ))
         }
-        401 => Ok(notice(
+        ClaimConfirmation::Refused(refusal) => Ok(refused_confirmation(refusal)),
+    }
+}
+
+/// The page for a confirmation the engine refused: a user who must sign in
+/// again opens the agent's link once signed in, since a form post cannot be
+/// replayed after sign-in.
+fn refused_confirmation(refusal: ClaimRefusal) -> HttpResponse {
+    match refusal {
+        ClaimRefusal::SignIn => notice(
             401,
             "Sign in again",
             "Your sign-in has ended. Sign in, then open the link the agent gave you again.",
-        )),
-        status => refused(status),
-    }
-}
-
-/// The engine's answer, read as status and JSON body.
-struct Answer {
-    status: u16,
-    body: Value,
-}
-
-impl Answer {
-    fn of(response: WireResponse) -> Self {
-        let effects = response.into_effects();
-        Self {
-            status: effects.status,
-            body: effects.body.unwrap_or(Value::Null),
-        }
-    }
-
-    fn error(&self) -> Option<&str> {
-        self.body.get("error").and_then(Value::as_str)
+        ),
+        refusal => refused(refusal),
     }
 }
 
 /// The page for a claim the engine refused.
-fn refused(status: u16) -> Response {
-    match status {
-        403 => Ok(notice(
+fn refused(refusal: ClaimRefusal) -> HttpResponse {
+    match refusal {
+        ClaimRefusal::OtherAccount => notice(
             403,
             "This claim is for another account",
             "Sign in with the email address the agent named, then open its link again.",
-        )),
-        404 => Ok(notice(
+        ),
+        ClaimRefusal::NotFound => notice(
             404,
             "No such claim",
             "This link does not name a claim. Ask the agent for a new one.",
-        )),
-        410 => Ok(notice(
+        ),
+        ClaimRefusal::Ended => notice(
             410,
             "This code can no longer be used",
             "It expired or was entered wrongly too often. Ask the agent for a new one.",
-        )),
-        400 => Ok(notice(
+        ),
+        ClaimRefusal::Invalid | ClaimRefusal::SignIn => notice(
             400,
             "The form is not valid",
             "Open the link the agent gave you again.",
-        )),
-        _ => Err(FrameworkError::domain("agent accounts are unavailable", 503).into()),
+        ),
     }
 }
 
@@ -246,16 +203,15 @@ fn form_fields(bytes: &[u8]) -> Option<BTreeMap<String, String>> {
     Some(fields)
 }
 
-/// The claim page from the pending claim's JSON. `remaining` is set after
-/// a wrong code.
+/// The claim page from the pending claim. `remaining` is set after a wrong
+/// code.
 fn render_claim(
-    claim: &Value,
+    claim: &PendingClaim,
     action: &str,
     attempt_token: &str,
     csrf: &str,
     remaining: Option<u64>,
 ) -> String {
-    let text = |name: &str| claim.get(name).and_then(Value::as_str).unwrap_or_default();
     let mut html = Html::default();
     html.raw("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n")
         .raw("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n")
@@ -263,11 +219,7 @@ fn render_claim(
         .raw("<h1>Let an agent act for you?</h1>\n<p>");
     // The provider's name is the application's trust list entry: the page
     // never shows a name the provider or the agent sent.
-    let provider = claim
-        .get("provider")
-        .and_then(|provider| provider.get("display_name"))
-        .and_then(Value::as_str);
-    match (text("registration_type"), provider) {
+    match (claim.registration_type.as_str(), &claim.provider) {
         (_, Some(provider)) => {
             html.raw("An agent signed in through <strong>")
                 .text(provider)
@@ -282,54 +234,35 @@ fn render_claim(
     }
     html.raw("</p>\n<p>If you allow it, the agent will use this application as you, with the permissions below, until you revoke it.</p>\n")
         .raw("<p>You are signed in as <strong>")
-        .client(text("signed_in_as"))
+        .client(&claim.signed_in_as)
         .raw("</strong>.");
-    if let Some(email) = claim.get("email").and_then(Value::as_str) {
+    if let Some(email) = &claim.email {
         html.raw(" The agent named <strong>")
             .client(email)
             .raw("</strong>.");
     }
     html.raw("</p>\n");
-    let advisories: Vec<&str> = claim
-        .get("advisories")
-        .and_then(Value::as_array)
-        .map(|list| list.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    if advisories.contains(&"first_time_account") {
+    if claim.first_time_account {
         html.raw("<p><strong>Warning:</strong> no agent has acted for your account before. Allow it only if you asked an agent to connect.</p>\n");
     }
-    if advisories.contains(&"first_time_provider") {
+    if claim.first_time_provider {
         html.raw("<p><strong>Warning:</strong> no agent from this provider has acted for you before.</p>\n");
     }
-    let scopes = claim
-        .get("scopes")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    if scopes.is_empty() {
+    if claim.scopes.is_empty() {
         html.raw("<p>It asks for no permissions: it can use only what needs none.</p>\n");
     } else {
         html.raw("<h2>It will be able to</h2>\n<ul>\n");
-        for scope in &scopes {
-            let field = |name: &str| scope.get(name).and_then(Value::as_str).unwrap_or_default();
+        for scope in &claim.scopes {
             html.raw("<li>")
-                .text(field("description"))
+                .text(&scope.description)
                 .raw(" (<code>")
-                .text(field("name"))
+                .text(&scope.name)
                 .raw("</code>)</li>\n");
         }
         html.raw("</ul>\n");
     }
-    let minutes = claim
-        .get("expires_in")
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        .div_ceil(60)
-        .to_string();
-    let attempts = remaining
-        .or_else(|| claim.get("attempts_remaining").and_then(Value::as_u64))
-        .unwrap_or(0)
-        .to_string();
+    let minutes = claim.expires_in_seconds.div_ceil(60).to_string();
+    let attempts = remaining.unwrap_or(claim.attempts_remaining).to_string();
     if remaining.is_some() {
         html.raw("<p><strong>That code is wrong.</strong> ")
             .text(&attempts)
@@ -373,24 +306,38 @@ fn render_claimed(connected: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use crate::agents::GrantScope;
+
+    fn claim(registration_type: &str, signed_in_as: &str) -> PendingClaim {
+        PendingClaim {
+            registration_type: registration_type.to_owned(),
+            provider: None,
+            signed_in_as: signed_in_as.to_owned(),
+            email: None,
+            scopes: Vec::new(),
+            expires_in_seconds: 0,
+            attempts_remaining: 0,
+            first_time_account: false,
+            first_time_provider: false,
+        }
+    }
 
     #[test]
     fn agent_008_claim_page_escapes_and_shows_only_the_trust_list_name() {
-        let claim = json!({
-            "registration_type": "identity_assertion",
-            "signed_in_as": "alice@corp.test",
-            "email": "<script>alert(1)</script>@corp.test",
-            "provider": { "display_name": "Acme & Co" },
-            "name": "Provider-Chosen Name",
-            "scopes": [{ "name": "posts:read", "description": "Read <your> posts" }],
-            "expires_in": 540,
-            "attempts_remaining": 5,
-            "advisories": ["first_time_provider"],
-        });
+        let claim = PendingClaim {
+            provider: Some("Acme & Co".to_owned()),
+            email: Some("<script>alert(1)</script>@corp.test".to_owned()),
+            scopes: vec![GrantScope {
+                name: "posts:read".to_owned(),
+                description: "Read <your> posts".to_owned(),
+            }],
+            expires_in_seconds: 540,
+            attempts_remaining: 5,
+            first_time_provider: true,
+            ..claim("identity_assertion", "alice@corp.test")
+        };
         let page = render_claim(&claim, "/agent/claim", "cat_\"x", "csrf", None);
         assert!(page.contains("<strong>Acme &amp; Co</strong>"), "{page}");
-        assert!(!page.contains("Provider-Chosen Name"));
         assert!(page.contains("<bdi>&lt;script&gt;alert(1)&lt;/script&gt;@corp.test</bdi>"));
         assert!(page.contains("Read &lt;your&gt; posts"));
         assert!(page.contains("value=\"cat_&quot;x\""));
@@ -402,12 +349,13 @@ mod tests {
     fn agent_009_signed_in_email_is_isolated() {
         // The user chose their address, so it is isolated as any text a
         // party other than the application chose.
-        let claim = json!({
-            "registration_type": "anonymous",
-            "signed_in_as": "\u{202e}me@corp.test",
-            "scopes": [],
-        });
-        let page = render_claim(&claim, "/agent/claim", "cat_1", "csrf", None);
+        let page = render_claim(
+            &claim("anonymous", "\u{202e}me@corp.test"),
+            "/agent/claim",
+            "cat_1",
+            "csrf",
+            None,
+        );
         assert!(
             page.contains("signed in as <strong><bdi>\u{202e}me@corp.test</bdi></strong>"),
             "{page}"

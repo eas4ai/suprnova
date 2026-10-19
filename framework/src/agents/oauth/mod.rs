@@ -14,9 +14,10 @@ use magnetar::authorization_server::{
     ScopeDefinition,
 };
 use magnetar::plugins::authorization_server::AuthorizationServerPlugin;
-use sea_orm::DatabaseConnection;
+use sea_orm::{ConnectionTrait, DatabaseConnection};
 
 pub use grants::{ClientGrant, ConnectedAgents, GrantScope};
+pub(crate) use grants::{mounted as mounted_server, mounted_agent_auth};
 pub(crate) use resolver::load_user;
 
 use super::agent_auth::{AgentAuth, BuiltAgentAuth, MountedAgentAuth};
@@ -241,12 +242,17 @@ impl OAuthServer {
     /// Create the authorization server's tables on `connection` if they do
     /// not exist: `auth_oauth_clients`, `auth_oauth_authorizations`,
     /// `auth_oauth_grants` and `auth_oauth_tokens`. Safe to run on every
-    /// boot. The Magnetar default engine's migrations create them too.
+    /// boot. The Magnetar default engine's migrations create them too, and
+    /// so does [`agents::migrations`](crate::agents::migrations()), which
+    /// calls this on the connection a migration runs on: any connection
+    /// works, a transaction included.
     ///
     /// # Errors
     ///
     /// When the database refuses a statement.
-    pub async fn migrate(connection: &DatabaseConnection) -> Result<(), FrameworkError> {
+    pub async fn migrate<C: ConnectionTrait + ?Sized>(
+        connection: &C,
+    ) -> Result<(), FrameworkError> {
         magnetar::authorization_server::migrate(connection)
             .await
             .map_err(|error| {

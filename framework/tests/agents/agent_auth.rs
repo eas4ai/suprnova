@@ -144,6 +144,17 @@ pub fn agent_world_in(
     db: DatabaseConnection,
     configure: impl FnOnce(AgentAuth) -> AgentAuth,
 ) -> AgentWorld {
+    agent_world_routed(container, db, configure, |router| router)
+}
+
+/// [`agent_world_in`] with the router widened by `routes`, which adds the
+/// routes a test calls an application's own pages through.
+pub fn agent_world_routed(
+    container: Box<dyn Any>,
+    db: DatabaseConnection,
+    configure: impl FnOnce(AgentAuth) -> AgentAuth,
+    routes: impl FnOnce(Router) -> Router,
+) -> AgentWorld {
     let resolver = Arc::new(FakeResolver::default());
     resolver.answer(PROVIDER_HOST, "93.184.215.14");
     let documents = Arc::new(FakeDocuments::default());
@@ -151,7 +162,7 @@ pub fn agent_world_in(
     documents.serve(PROVIDER_JWKS, &json!({ "keys": [provider.jwk()] }));
     let pem = service_pem();
     let client = TestClient::new(
-        agent_router(&db, &pem, &resolver, &documents, configure),
+        routes(agent_router(&db, &pem, &resolver, &documents, configure)),
         registry(),
     )
     .with_peer_address(PEER.parse().unwrap());
@@ -291,14 +302,14 @@ async fn register(client: &TestClient, body: Value) -> TestResponse {
 }
 
 /// Register anonymously and answer the body.
-async fn anonymous(client: &TestClient) -> Value {
+pub async fn anonymous(client: &TestClient) -> Value {
     let response = register(client, json!({ "type": "anonymous" })).await;
     assert_eq!(response.status(), 200, "{}", response.body_text());
     response.json()
 }
 
 /// Register by `service_auth` for `email` and answer the body.
-async fn service_auth(client: &TestClient, email: &str) -> Value {
+pub async fn service_auth(client: &TestClient, email: &str) -> Value {
     let response = register(
         client,
         json!({ "type": "service_auth", "login_hint": email }),
@@ -308,7 +319,7 @@ async fn service_auth(client: &TestClient, email: &str) -> Value {
     response.json()
 }
 
-async fn present(client: &TestClient, id_jag: &str) -> TestResponse {
+pub async fn present(client: &TestClient, id_jag: &str) -> TestResponse {
     register(
         client,
         json!({
@@ -340,7 +351,7 @@ async fn agent_token(client: &TestClient, assertion: &str) -> String {
     tokens.json()["access_token"].as_str().unwrap().to_owned()
 }
 
-async fn initiate(client: &TestClient, claim_token: &str, email: &str) -> TestResponse {
+pub async fn initiate(client: &TestClient, claim_token: &str, email: &str) -> TestResponse {
     client
         .post("/agent/identity/claim")
         .json(&json!({ "claim_token": claim_token, "email": email }))

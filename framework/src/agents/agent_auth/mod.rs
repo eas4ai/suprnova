@@ -22,7 +22,7 @@ use magnetar::agent_auth::{
 };
 use magnetar::authorization_server::{AuthorizationServer, HostResolver, PinnedHttpClient};
 use magnetar::plugins::agent_auth::AgentAuthPlugin;
-use sea_orm::DatabaseConnection;
+use sea_orm::{ConnectionTrait, DatabaseConnection};
 use serde::Serialize;
 
 use super::oauth::GrantScope;
@@ -651,12 +651,17 @@ impl AgentAuth {
     /// `auth_agent_registrations`, `auth_agent_grants`,
     /// `auth_agent_replays` and `auth_agent_events`, the outbox of claim
     /// events. Safe to run on every boot. The Magnetar default engine's
-    /// migrations create them too.
+    /// migrations create them too, and so does
+    /// [`agents::migrations`](crate::agents::migrations()), which calls this
+    /// on the connection a migration runs on: any connection works, a
+    /// transaction included.
     ///
     /// # Errors
     ///
     /// When the database refuses a statement.
-    pub async fn migrate(connection: &DatabaseConnection) -> Result<(), FrameworkError> {
+    pub async fn migrate<C: ConnectionTrait + ?Sized>(
+        connection: &C,
+    ) -> Result<(), FrameworkError> {
         magnetar::agent_auth::migrate(connection)
             .await
             .map_err(|error| {
@@ -921,9 +926,19 @@ fn read_key(kid: String, pem: &str) -> Result<SigningKey, String> {
     SigningKey::from_pem(kid, &pem.replace("\\n", "\n")).map_err(|error| error.to_string())
 }
 
-/// The signing key the environment names.
+/// The signing key the environment names, or, in a test process that
+/// installed one and an environment that names none, the test key.
 fn key_from_environment() -> Result<SigningKey, FrameworkError> {
-    let (Some(kid), Some(pem)) = (variable(KEY_ID_VARIABLE), variable(PRIVATE_KEY_VARIABLE)) else {
+    let named = (variable(KEY_ID_VARIABLE), variable(PRIVATE_KEY_VARIABLE));
+    // Only an environment that names no key at all falls back: half a key
+    // is a configuration error, whatever a test installed.
+    #[cfg(any(test, feature = "testing"))]
+    if matches!(named, (None, None))
+        && let Some(key) = test_key()
+    {
+        return key;
+    }
+    let (Some(kid), Some(pem)) = named else {
         return Err(FrameworkError::internal(format!(
             "agent auth signs identity assertions with a key the application configures, and \
              none is set: set {KEY_ID_VARIABLE} and {PRIVATE_KEY_VARIABLE} (a P-256 private key \
@@ -936,6 +951,46 @@ fn key_from_environment() -> Result<SigningKey, FrameworkError> {
              `app agents:key` prints a new pair"
         ))
     })
+}
+
+/// Whether a test installed the test key
+/// ([`install_test_agent_auth_key`](crate::testing::install_test_agent_auth_key)).
+#[cfg(any(test, feature = "testing"))]
+static TEST_KEY_INSTALLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The test key, made the first time a router needs it and the same for
+/// the rest of the process, so every node of a test verifies what another
+/// signed. Generated, never written in the source: a private key in the
+/// source is one a scanner flags and anyone can sign with.
+#[cfg(any(test, feature = "testing"))]
+static TEST_KEY: std::sync::OnceLock<Result<SigningKey, String>> = std::sync::OnceLock::new();
+
+/// The test key's identifier.
+#[cfg(any(test, feature = "testing"))]
+const TEST_KEY_ID: &str = "agent-test";
+
+/// Let routers of this process sign with the test key when the environment
+/// names no key.
+#[cfg(any(test, feature = "testing"))]
+pub(crate) fn install_test_key() {
+    TEST_KEY_INSTALLED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The test key, when a test installed it.
+#[cfg(any(test, feature = "testing"))]
+fn test_key() -> Option<Result<SigningKey, FrameworkError>> {
+    if !TEST_KEY_INSTALLED.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    let key = TEST_KEY.get_or_init(|| {
+        use secrecy::ExposeSecret;
+        let pem = SigningKey::generate_pem().map_err(|error| error.to_string())?;
+        SigningKey::from_pem(TEST_KEY_ID, pem.expose_secret()).map_err(|error| error.to_string())
+    });
+    Some(key.clone().map_err(|error| {
+        FrameworkError::internal(format!("make the test agent auth signing key: {error}"))
+    }))
 }
 
 /// The previous signing key the environment names, if it names one.

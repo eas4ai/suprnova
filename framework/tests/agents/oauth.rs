@@ -443,6 +443,16 @@ pub async fn world_custom(
     configure: impl FnOnce(OAuthServer) -> OAuthServer,
     agents: impl FnOnce(AgentsConfig) -> AgentsConfig,
 ) -> World {
+    world_routed(configure, agents, |router| router).await
+}
+
+/// [`world_custom`] with the router widened by `routes`, which adds the
+/// routes a test calls an application's own pages through.
+pub async fn world_routed(
+    configure: impl FnOnce(OAuthServer) -> OAuthServer,
+    agents: impl FnOnce(AgentsConfig) -> AgentsConfig,
+    routes: impl FnOnce(Router) -> Router,
+) -> World {
     let container = container();
     let db = database().await;
     let resolver = Arc::new(FakeResolver::default());
@@ -458,7 +468,7 @@ pub async fn world_custom(
             .client_metadata_fetcher(fetcher),
     );
     let client = TestClient::new(
-        router(agents(AgentsConfig::new().oauth_server(server))),
+        routes(router(agents(AgentsConfig::new().oauth_server(server)))),
         registry(),
     )
     .with_peer_address("203.0.113.9".parse().unwrap());
