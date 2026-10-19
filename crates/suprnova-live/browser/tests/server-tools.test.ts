@@ -533,7 +533,9 @@ function island(document: RuntimeDocument, key: string, seed: boolean): RuntimeE
     "data-suprnova-live-document-key": key,
     "data-suprnova-live-island": "",
     "data-suprnova-live-lazy-complete": "true",
-    "data-suprnova-live-protocol-min": "2",
+    // Mounted for protocol 1, as a component that declares no protocol 2
+    // feature is: its fresh render still goes out under protocol 2.
+    "data-suprnova-live-protocol-min": "1",
     "data-suprnova-live-revision": seed ? "0" : "1",
     "data-suprnova-live-root": slot,
     "data-suprnova-live-slot": slot,
@@ -726,17 +728,20 @@ describe("the runtime's server tools", () => {
     const renders = requests.slice(1).map((request) => {
       const body = JSON.parse(request.init.body as string) as Record<string, unknown>;
       return {
+        protocol: body["protocol_version"],
         operations: body["operations"],
         kind: (body["snapshot"] as Record<string, unknown>)["kind"],
         key: (body["extensions"] as Record<string, unknown>)["x_suprnova_live_document_key_v1"],
       };
     });
     expect(renders).toContainEqual({
+      protocol: 2,
       operations: [{ kind: "fresh_render" }],
       kind: "instance",
       key: "main0",
     });
     expect(renders).toContainEqual({
+      protocol: 2,
       operations: [{ kind: "fresh_render" }],
       kind: "seed_promotion",
       key: "seed1",

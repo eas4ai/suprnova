@@ -405,8 +405,10 @@ Acceptance criteria:
 - After a tool not marked read-only that reached the server, every connected
   island renders fresh before the call resolves, waiting at most
   `callTimeoutMs`: an instance takes a `fresh_render`, a public seed is
-  promoted by one (spec 05). The refresh's outcome does not change the
-  result.
+  promoted by one (spec 05). A `fresh_render` exists only in protocol 2, so
+  an island mounted for protocol 1 sends it under protocol 2 when the
+  server's configuration allows it. The refresh's outcome does not change
+  the result.
 
 UX flow:
 
