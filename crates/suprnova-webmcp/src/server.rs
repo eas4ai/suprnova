@@ -145,8 +145,10 @@ impl ServerTools {
 
     /// Read and check the element's JSON as strictly as the Live runtime
     /// reads an island's tools: an unknown key, a missing hint, a name
-    /// outside the grammar or a path that does not start at the page's
-    /// root refuses the whole element.
+    /// outside the grammar, a path that does not start at the page's root,
+    /// an empty tool list or a null title refuses the whole element. The
+    /// server writes none of these: it leaves the element out when a page
+    /// offers no tool, and leaves `title` out when a tool declares none.
     pub(crate) fn parse(text: &str) -> Result<Self, WebMcpError> {
         let invalid = |reason: String| WebMcpError::InvalidPage(reason);
         let page: RawPage =
@@ -160,6 +162,9 @@ impl ServerTools {
             .ok_or_else(|| invalid("maxResultBytes is not a positive size".into()))?;
         if page.limits.call_timeout_ms == 0 {
             return Err(invalid("callTimeoutMs is zero".into()));
+        }
+        if page.tools.is_empty() {
+            return Err(invalid("the element lists no tools".into()));
         }
         if page.tools.len() > MAX_TOOLS {
             return Err(invalid(format!(
@@ -337,11 +342,19 @@ struct RawLimits {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct RawTool {
     name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present_title")]
     title: Option<String>,
     description: String,
     input_schema: Map<String, Value>,
     annotations: Annotations,
     method: String,
     path: Vec<Piece>,
+}
+
+/// A `title` that is present is a string; `null` is refused, since the
+/// server leaves the key out instead.
+fn present_title<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
 }

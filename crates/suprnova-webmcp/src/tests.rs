@@ -337,6 +337,44 @@ fn agent_016_server_tools_element_is_read_strictly() {
     ));
 }
 
+#[test]
+fn agent_016_an_element_with_no_tools_is_refused() {
+    // The server leaves the element out when a page offers no tool, so an
+    // empty list is not what it writes.
+    let mut payload = element();
+    payload["tools"] = json!([]);
+    assert!(
+        matches!(
+            ServerTools::parse(&payload.to_string()),
+            Err(WebMcpError::InvalidPage(reason)) if reason.contains("no tools")
+        ),
+        "an element with no tools must not read"
+    );
+}
+
+#[test]
+fn agent_016_an_element_with_a_null_title_is_refused() {
+    // The server leaves `title` out when a tool declares none, so a null is
+    // not what it writes.
+    let mut payload = element();
+    payload["tools"][0]["title"] = Value::Null;
+    assert!(
+        matches!(
+            ServerTools::parse(&payload.to_string()),
+            Err(WebMcpError::InvalidPage(_))
+        ),
+        "a null title must not read"
+    );
+    let mut untitled = element();
+    if let Some(tool) = untitled["tools"][0].as_object_mut() {
+        tool.remove("title");
+    }
+    assert!(
+        ServerTools::parse(&untitled.to_string()).is_ok(),
+        "a tool without a title reads"
+    );
+}
+
 /// The input of a typed page tool.
 #[derive(Debug, Deserialize, JsonSchema, Validate)]
 struct AddTodo {
