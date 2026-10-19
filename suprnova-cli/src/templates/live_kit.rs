@@ -92,6 +92,11 @@ const FILES: &[(&str, &str)] = &[
         "src/controllers/notes.rs",
         include_str!("files/live/src/controllers/notes.rs.tpl"),
     ),
+    // The notes tools are JSON routes, the same in every kit with notes.
+    (
+        "src/controllers/note_tools.rs",
+        include_str!("files/backend/controllers/note_tools.rs.tpl"),
+    ),
     (
         "src/controllers/password_reset.rs",
         include_str!("files/live/src/controllers/password_reset.rs.tpl"),

@@ -1617,6 +1617,10 @@ fn scaffold_controllers() -> Vec<(&'static str, &'static str)> {
             suprnova_cli::templates::password_reset_controller(),
         ),
         ("notes.rs", suprnova_cli::templates::notes_controller()),
+        (
+            "note_tools.rs",
+            suprnova_cli::templates::note_tools_controller(),
+        ),
         ("profile.rs", suprnova_cli::templates::profile_controller()),
     ]
 }

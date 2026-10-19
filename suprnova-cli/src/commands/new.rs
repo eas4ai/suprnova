@@ -772,6 +772,14 @@ fn write_inertia_kit(
     )
     .map_err(|e| format!("Failed to write src/controllers/notes.rs: {}", e))?;
 
+    // Write src/controllers/note_tools.rs: the notes tools the notes page
+    // and the MCP endpoint offer
+    fs::write(
+        project_path.join("src/controllers/note_tools.rs"),
+        templates::note_tools_controller(),
+    )
+    .map_err(|e| format!("Failed to write src/controllers/note_tools.rs: {}", e))?;
+
     // Write src/controllers/profile.rs
     fs::write(
         project_path.join("src/controllers/profile.rs"),

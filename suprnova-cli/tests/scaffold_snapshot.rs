@@ -686,6 +686,10 @@ const AGENT_PAGES_CASES: &[&str] = &[
     "agent_008_registration_lowercases_and_refuses_a_mixed_case_duplicate",
     "kit_registration_refuses_a_name_over_255_and_an_email_over_254",
     "kit_a_signed_in_user_writes_a_note",
+    "agent_014_inertia_notes_page_offers_the_notes_tools",
+    "agent_001_notes_search_is_matched_before_a_note_id",
+    "agent_001_notes_search_reads_its_input_from_the_query",
+    "agent_002_notes_tools_act_for_the_caller_only",
 ];
 
 /// AGENT-017: a fresh Inertia application serves the MCP endpoint, the
@@ -693,7 +697,8 @@ const AGENT_PAGES_CASES: &[&str] = &[
 /// connected-agents pages, and its sign-in follows a same-origin
 /// `return_to` and nothing else. Its own test drives every page through the
 /// application's router, under the settings and the signing key
-/// `suprnova new` wrote, on SQLite with the kit's own migrator.
+/// `suprnova new` wrote, on SQLite with the kit's own migrator, and calls the
+/// two notes tools from the notes page and over MCP.
 #[test]
 #[ignore = "AGENT-017 evidence: runs the generated application's own test; builds the framework and the app; slow"]
 fn agent_017_a_generated_inertia_application_serves_the_agent_pages() {
@@ -742,7 +747,7 @@ const LIVE_AGENT_PAGES: &str = include_str!("fixtures/scaffold/live_agent_pages.
 
 /// The cases `tests/agent_pages.rs` runs, each of which prints
 /// `case <name> ... ok` when it passes.
-const LIVE_AGENT_CASES: [&str; 16] = [
+const LIVE_AGENT_CASES: [&str; 20] = [
     "agent_017_live_migrator_creates_the_plugins_tables_and_the_email_index",
     "agent_017_live_serves_the_endpoint_and_both_plugins",
     "agent_017_live_forms_hint_the_name_and_email_bounds",
@@ -759,6 +764,10 @@ const LIVE_AGENT_CASES: [&str; 16] = [
     "agent_017_live_consent_headers_hold_on_every_refusal",
     "agent_017_live_consent_pages_escape_what_the_client_chose",
     "agent_017_live_consent_pages_act_for_their_own_user_only",
+    "agent_014_live_notes_page_offers_the_notes_tools",
+    "agent_001_live_notes_search_is_matched_before_a_note_id",
+    "agent_001_live_notes_search_reads_its_input_from_the_query",
+    "agent_002_live_notes_tools_act_for_the_caller_only",
 ];
 
 /// AGENT-017: a fresh `--frontend live` scaffold serves the MCP endpoint,
@@ -771,8 +780,8 @@ const LIVE_AGENT_CASES: [&str; 16] = [
 /// approval and claim round trips, the connected agents of two users,
 /// CSRF, the consent headers on every answer, what another user or a guest
 /// can do, escaping, the scripts the pages load, `return_to` and the
-/// intended address across sign-in and registration, the forms' bounds, and
-/// the migrator on SQLite.
+/// intended address across sign-in and registration, the forms' bounds, the
+/// migrator on SQLite, and the two notes tools the notes page offers.
 #[test]
 #[ignore = "compile check - builds a Live kit scaffold and drives its agent pages; slow"]
 fn agent_017_a_generated_live_application_serves_the_agent_pages() {

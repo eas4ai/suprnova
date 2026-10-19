@@ -1,6 +1,9 @@
 //! AGENT-017 in a generated Live application: the approval, claim and
 //! connected-agents pages, the sign-in and registration that return to
-//! them, and the migrator that creates what they need.
+//! them, and the migrator that creates what they need. Then the two notes
+//! tools of `controllers::note_tools` (AGENT-001, AGENT-002, AGENT-014): on
+//! the notes page, from the browser and over MCP, for a user, a client the
+//! user approved and an agent claimed or not.
 //!
 //! Written into a fresh `suprnova new --frontend live` scaffold as
 //! `tests/agent_pages.rs` by
@@ -32,11 +35,12 @@ use suprnova::serde_json::{self, Value, json};
 use suprnova::testing::{TestClient, TestContainer, TestDatabase, TestRequest, TestResponse};
 use suprnova::{
     App, AppConfig, Auth, AuthConfig, AuthManager, CacheStore, Config, EloquentUserProvider,
-    InMemoryCache, MiddlewareRegistry, Queue, SyncQueueDriver,
+    InMemoryCache, MiddlewareRegistry, Model, Queue, SyncQueueDriver, attrs,
 };
 use url::Url;
 
 use __PACKAGE__::migrations::Migrator;
+use __PACKAGE__::models::note::Note;
 use __PACKAGE__::models::user::User;
 use __PACKAGE__::{agents, bootstrap, live, routes};
 
@@ -1530,6 +1534,461 @@ async fn agent_017_live_consent_pages_act_for_their_own_user_only(world: &World,
     untouched("after a signed-out post").await;
 }
 
+// ---------------------------------------------------------- notes tools ----
+
+/// The grant an agent exchanges its identity assertion with for an access
+/// token.
+const JWT_BEARER: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
+
+/// The id of the account `email` names.
+async fn user_id(email: &str) -> u64 {
+    User::find_by_email(email)
+        .await
+        .expect("read the user")
+        .unwrap_or_else(|| panic!("no account for {email}"))
+        .id
+}
+
+/// Write `notes` for `user_id`, each a title and a text, through the model
+/// the note form writes with, so search indexes each one.
+async fn write_notes(user_id: u64, notes: &[(&str, &str)]) {
+    // The application's bootstrap makes the notes index; this test boots
+    // services by hand. It is a no-op once the index exists.
+    Note::initialize_search()
+        .await
+        .expect("the notes search generation");
+    for (title, body) in notes {
+        <Note as Model>::create(attrs! {
+            user_id: user_id,
+            title: *title,
+            body: Some((*body).to_owned()),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("write {title}: {error}"));
+    }
+}
+
+/// The titles of the notes a `notes.search` answer holds, in its order.
+fn titles(answer: &Value) -> Vec<String> {
+    answer["notes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("an answer that lists notes: {answer}"))
+        .iter()
+        .map(|note| note["title"].as_str().expect("a title").to_owned())
+        .collect()
+}
+
+/// `names` in order.
+fn sorted(mut names: Vec<String>) -> Vec<String> {
+    names.sort();
+    names
+}
+
+/// `notes.search` as the notes page's runtime calls it for the client's
+/// session: a `GET` with the arguments in the query and the tool-call
+/// header.
+async fn search_in_browser(client: &TestClient, arguments: Value) -> TestResponse {
+    client.tool("notes.search", arguments).send().await
+}
+
+/// The `WWW-Authenticate` header of a refused MCP call.
+fn challenge_of(refused: &suprnova::agents::McpToolResult) -> String {
+    refused
+        .response()
+        .header("www-authenticate")
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// A token for an MCP client the signed-in user approves with `scope`.
+/// The approval page names the scope by the description `tool_scopes!`
+/// gave it.
+async fn user_token(world: &World, scope: &str, description: &str) -> String {
+    let client = &world.client;
+    let client_id = register_client_as(client, "Notes Client", CLIENT_REDIRECT).await;
+    let (verifier, challenge) = pkce();
+    let mut authorize = Url::parse(&format!(
+        "{APP_URL}{}",
+        authorize_path(&client_id, &challenge)
+    ))
+    .expect("the authorization request");
+    authorize.query_pairs_mut().append_pair("scope", scope);
+    let (id, approval) = open_approval(client, &path_of(authorize.as_str())).await;
+    let shown = format!("<li>{description} (<code>{scope}</code>)</li>");
+    assert!(
+        approval.body_text().contains(&shown),
+        "the approval page names the scope:\n{}",
+        approval.body_text()
+    );
+    let returning = decide(client, &approval, &id, "approve").await;
+    assert_eq!(returning.status(), 200, "{}", returning.body_text());
+    let code = param(&returning_to(&returning), "code").expect("a code");
+    let tokens = client
+        .post("/oauth/token")
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("redirect_uri", CLIENT_REDIRECT),
+            ("client_id", client_id.as_str()),
+            ("code_verifier", verifier.as_str()),
+            ("resource", RESOURCE),
+        ])
+        .send()
+        .await;
+    assert_eq!(tokens.status(), 200, "{}", tokens.body_text());
+    tokens.json()["access_token"]
+        .as_str()
+        .expect("an access token")
+        .to_owned()
+}
+
+/// The access token of a `service_auth` agent the signed-in, verified user
+/// `email` claims on the claim page.
+async fn claimed_agent_token(world: &World, email: &str) -> String {
+    let client = &world.client;
+    let registration = client
+        .post("/agent/identity")
+        .json(&json!({"type": "service_auth", "login_hint": email}))
+        .send()
+        .await;
+    assert_eq!(registration.status(), 200, "{}", registration.body_text());
+    let registration = registration.json();
+    let claim = &registration["claim"];
+    let claim_page = path_of(
+        claim["verification_uri"]
+            .as_str()
+            .expect("a verification URI"),
+    );
+    let shown = page(client, &claim_page).send().await;
+    assert_eq!(shown.status(), 200, "{}", shown.body_text());
+    let code = claim["user_code"].as_str().expect("a user code");
+    let claimed = claim_form(&shown.body_text())
+        .submit(client, &[("user_code", code)])
+        .await;
+    assert_eq!(location(&claimed), "/connected-agents");
+    let tokens = client
+        .post("/oauth/token")
+        .form(&[
+            ("grant_type", CLAIM_GRANT),
+            (
+                "claim_token",
+                registration["claim_token"].as_str().expect("a claim token"),
+            ),
+            ("resource", RESOURCE),
+        ])
+        .send()
+        .await;
+    assert_eq!(tokens.status(), 200, "{}", tokens.body_text());
+    tokens.json()["access_token"]
+        .as_str()
+        .expect("an access token")
+        .to_owned()
+}
+
+/// The access token of an agent that registered anonymously and that no
+/// user has claimed.
+async fn unclaimed_agent_token(client: &TestClient) -> String {
+    let registered = client
+        .post("/agent/identity")
+        .json(&json!({"type": "anonymous"}))
+        .send()
+        .await;
+    assert_eq!(registered.status(), 200, "{}", registered.body_text());
+    let assertion = registered.json()["identity_assertion"]
+        .as_str()
+        .expect("an identity assertion")
+        .to_owned();
+    let tokens = client
+        .post("/oauth/token")
+        .form(&[
+            ("grant_type", JWT_BEARER),
+            ("assertion", assertion.as_str()),
+            ("resource", RESOURCE),
+        ])
+        .send()
+        .await;
+    assert_eq!(tokens.status(), 200, "{}", tokens.body_text());
+    tokens.json()["access_token"]
+        .as_str()
+        .expect("an access token")
+        .to_owned()
+}
+
+/// AGENT-014: the Live notes page carries both notes tools in its
+/// `suprnova-agent-tools` element for its signed-in user, with the hints
+/// their markings give. The search only reads and hands back note text,
+/// which is user content. The write is neither, so the runtime renders the
+/// page's islands again after it. No other page offers them, and no page
+/// offers a guest either.
+async fn agent_014_live_notes_page_offers_the_notes_tools(world: &World, email: &str) {
+    let client = &world.client;
+    let notes = page(client, "/notes").send().await;
+    assert_eq!(notes.status(), 200, "{}", notes.body_text());
+    assert!(
+        notes
+            .body_text()
+            .contains("<script type=\"application/json\" id=\"suprnova-agent-tools\">"),
+        "{}",
+        notes.body_text()
+    );
+    assert_eq!(sorted(notes.page_tools()), ["notes.create", "notes.search"]);
+    let search = notes.page_tool("notes.search").expect("notes.search");
+    assert_eq!(search["method"], "GET", "{search}");
+    assert_eq!(
+        search["annotations"],
+        json!({
+            "readOnlyHint": true,
+            "untrustedContentHint": true,
+            "consequentialHint": false,
+            "debugging": false,
+        }),
+    );
+    let create = notes.page_tool("notes.create").expect("notes.create");
+    assert_eq!(create["method"], "POST", "{create}");
+    assert_eq!(
+        create["annotations"],
+        json!({
+            "readOnlyHint": false,
+            "untrustedContentHint": false,
+            "consequentialHint": false,
+            "debugging": false,
+        }),
+    );
+    for other in ["/dashboard", "/connected-agents"] {
+        let shown = page(client, other).send().await;
+        assert_eq!(shown.status(), 200, "{other}: {}", shown.body_text());
+        assert!(shown.page_tools().is_empty(), "{other} offers a tool");
+    }
+
+    sign_out(client).await;
+    let sent = page(client, "/notes").send().await;
+    assert_eq!(location(&sent), "/login");
+    for path in ["/", "/login", "/register"] {
+        let shown = page(client, path).send().await;
+        assert_eq!(shown.status(), 200, "{path}: {}", shown.body_text());
+        assert!(
+            shown.page_tools().is_empty(),
+            "{path} offers a guest a tool"
+        );
+    }
+    assert_eq!(sign_in(client, "/login", email).await, "/dashboard");
+}
+
+/// AGENT-001: `GET /notes/search` is the search, never a note: its static
+/// segment is matched before `/notes/{id}`. A plain request, a page's call
+/// and an MCP call all reach the tool's route, and the note page still
+/// answers its own ids.
+async fn agent_001_live_notes_search_is_matched_before_a_note_id(world: &World, email: &str) {
+    let client = &world.client;
+    write_notes(user_id(email).await, &[("Shopping list", "Eggs.")]).await;
+    let plain = client
+        .get("/notes/search")
+        .header("Accept", "application/json")
+        .send()
+        .await;
+    assert_eq!(plain.status(), 200, "{}", plain.body_text());
+    assert_eq!(titles(&plain.json()), ["Shopping list"]);
+    let id = plain.json()["notes"][0]["id"]
+        .as_u64()
+        .expect("the note's id");
+    let note = page(client, &format!("/notes/{id}")).send().await;
+    assert_eq!(note.status(), 200, "{}", note.body_text());
+    assert!(
+        note.body_text().contains("Shopping list"),
+        "{}",
+        note.body_text()
+    );
+
+    let called = search_in_browser(client, json!({})).await;
+    assert_eq!(called.status(), 200, "{}", called.body_text());
+    assert_eq!(titles(&called.json()), ["Shopping list"]);
+    let token = user_token(world, "notes:read", "Read your notes").await;
+    let found = client
+        .mcp()
+        .with_token(&token)
+        .call("notes.search", json!({}))
+        .await;
+    assert!(!found.is_error(), "{}", found.text());
+    assert_eq!(
+        titles(found.structured().expect("structured notes")),
+        ["Shopping list"]
+    );
+}
+
+/// AGENT-001: `notes.search` reads its input from the query of the page's
+/// `GET`, and from the arguments of an MCP call: the words to find in the
+/// titles and the text, and how many notes to answer. Out of bounds, each
+/// field is named: a 422 on the page, a tool error over MCP.
+async fn agent_001_live_notes_search_reads_its_input_from_the_query(world: &World, email: &str) {
+    let client = &world.client;
+    write_notes(
+        user_id(email).await,
+        &[
+            ("Apple pie", "With cinnamon."),
+            ("Apple tart", "With butter."),
+            ("Banana bread", "With walnuts."),
+        ],
+    )
+    .await;
+
+    let one = search_in_browser(client, json!({"query": "apple", "limit": 1})).await;
+    assert_eq!(one.status(), 200, "{}", one.body_text());
+    let found = titles(&one.json());
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].starts_with("Apple "), "{found:?}");
+    let both = search_in_browser(client, json!({"query": "apple"})).await;
+    assert_eq!(sorted(titles(&both.json())), ["Apple pie", "Apple tart"]);
+    let text = search_in_browser(client, json!({"query": "cinnamon"})).await;
+    assert_eq!(titles(&text.json()), ["Apple pie"]);
+    // No words: the newest notes first.
+    let newest = search_in_browser(client, json!({"limit": 2})).await;
+    assert_eq!(titles(&newest.json()), ["Banana bread", "Apple tart"]);
+    let refused = search_in_browser(client, json!({"query": "a".repeat(201), "limit": 51})).await;
+    assert_eq!(refused.status(), 422, "{}", refused.body_text());
+    for message in [
+        "Keep the search to 200 characters.",
+        "Ask for 1 to 50 notes.",
+    ] {
+        assert!(
+            refused.body_text().contains(message),
+            "{message}: {}",
+            refused.body_text()
+        );
+    }
+
+    let token = user_token(world, "notes:read", "Read your notes").await;
+    let mcp = client.mcp().with_token(&token);
+    let one = mcp
+        .call("notes.search", json!({"query": "apple", "limit": 1}))
+        .await;
+    assert!(!one.is_error(), "{}", one.text());
+    let found = titles(one.structured().expect("structured notes"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].starts_with("Apple "), "{found:?}");
+    let text = mcp.call("notes.search", json!({"query": "cinnamon"})).await;
+    assert_eq!(
+        titles(text.structured().expect("structured notes")),
+        ["Apple pie"]
+    );
+    let refused = mcp.call("notes.search", json!({"limit": 0})).await;
+    assert_eq!(refused.status(), 200, "a tool error, not a protocol error");
+    assert!(refused.is_error(), "{}", refused.text());
+    assert!(
+        refused.text().contains("limit"),
+        "the error names the field: {}",
+        refused.text()
+    );
+}
+
+/// AGENT-002: the notes tools act for their caller's own user only. Two
+/// users write notes with a word in common. The second user's browser
+/// session, a client the first user approved to read notes and an agent
+/// the first user claimed each find only their own user's notes. The
+/// client's token cannot write. The claimed agent holds every scope the
+/// kit declares and writes for the user it is bound to. An agent no user
+/// has claimed holds no scope: neither tool is listed for it, and each
+/// answers 403 `insufficient_scope`.
+async fn agent_002_live_notes_tools_act_for_the_caller_only(world: &World, email: &str) {
+    let client = &world.client;
+    write_notes(user_id(email).await, &[("Ada's shared plan", "Hers.")]).await;
+    write_notes(world.bea.id, &[("Bea's shared plan", "Hers too.")]).await;
+    let shared = json!({"query": "shared"});
+    let ada = search_in_browser(client, shared.clone()).await;
+    assert_eq!(titles(&ada.json()), ["Ada's shared plan"]);
+    let bea = client.clone().acting_as(&world.bea);
+    let theirs = search_in_browser(&bea, shared.clone()).await;
+    assert_eq!(titles(&theirs.json()), ["Bea's shared plan"]);
+
+    let token = user_token(world, "notes:read", "Read your notes").await;
+    let reader = client.mcp().with_token(&token);
+    let listed = reader.list().await;
+    assert_eq!(listed.status(), 200, "{listed:?}");
+    let names = listed.tool_names();
+    assert!(
+        names.contains(&"notes.search".to_owned()) && !names.contains(&"notes.create".to_owned()),
+        "{names:?}"
+    );
+    let found = reader.call("notes.search", shared.clone()).await;
+    assert!(!found.is_error(), "{}", found.text());
+    assert_eq!(
+        titles(found.structured().expect("structured notes")),
+        ["Ada's shared plan"]
+    );
+    let refused = reader
+        .call(
+            "notes.create",
+            json!({"title": "Not the client's to write"}),
+        )
+        .await;
+    assert_eq!(refused.status(), 403, "{}", refused.text());
+    assert!(
+        challenge_of(&refused).contains("error=\"insufficient_scope\""),
+        "{}",
+        challenge_of(&refused)
+    );
+
+    let agent_token = claimed_agent_token(world, email).await;
+    let agent = client.mcp().with_token(&agent_token);
+    let names = agent.list().await.tool_names();
+    for name in ["notes.search", "notes.create"] {
+        assert!(names.contains(&name.to_owned()), "{name}: {names:?}");
+    }
+    let found = agent.call("notes.search", shared.clone()).await;
+    assert!(!found.is_error(), "{}", found.text());
+    assert_eq!(
+        titles(found.structured().expect("structured notes")),
+        ["Ada's shared plan"]
+    );
+    let written = agent
+        .call(
+            "notes.create",
+            json!({"title": "  Written by an agent ", "body": "Kept from nobody."}),
+        )
+        .await;
+    assert!(!written.is_error(), "{}", written.text());
+    assert_eq!(
+        written.structured().expect("the note")["title"],
+        "Written by an agent"
+    );
+    let blank = agent.call("notes.create", json!({"title": "   "})).await;
+    assert!(blank.is_error(), "{}", blank.text());
+    assert!(blank.text().contains("title"), "{}", blank.text());
+    let hers = search_in_browser(client, json!({"query": "nobody"})).await;
+    assert_eq!(titles(&hers.json()), ["Written by an agent"]);
+    let not_theirs = search_in_browser(&bea, json!({"query": "nobody"})).await;
+    assert!(
+        titles(&not_theirs.json()).is_empty(),
+        "{}",
+        not_theirs.body_text()
+    );
+    let listed = page(client, "/notes").send().await;
+    assert!(
+        listed.body_text().contains("Written by an agent"),
+        "{}",
+        listed.body_text()
+    );
+
+    let unclaimed = unclaimed_agent_token(client).await;
+    let stranger = client.mcp().with_token(&unclaimed);
+    let names = stranger.list().await.tool_names();
+    assert!(
+        !names.iter().any(|name| name.starts_with("notes.")),
+        "{names:?}"
+    );
+    for (name, arguments) in [
+        ("notes.search", shared),
+        ("notes.create", json!({"title": "Nobody's note"})),
+    ] {
+        let refused = stranger.call(name, arguments).await;
+        assert_eq!(refused.status(), 403, "{name}: {}", refused.text());
+        assert!(
+            challenge_of(&refused).contains("error=\"insufficient_scope\""),
+            "{name}: {}",
+            challenge_of(&refused)
+        );
+    }
+}
+
 /// Run `case`, then say so on its own line, which the harness reads.
 macro_rules! case {
     ($name:ident ( $($argument:expr),* )) => {{
@@ -1580,6 +2039,19 @@ async fn agent_pages_serve_their_flows() {
             &world
         ));
         case!(agent_017_live_consent_pages_act_for_their_own_user_only(
+            &world, email
+        ));
+        // The notes tools, for the same verified user, signed in again.
+        case!(agent_014_live_notes_page_offers_the_notes_tools(
+            &world, email
+        ));
+        case!(agent_001_live_notes_search_is_matched_before_a_note_id(
+            &world, email
+        ));
+        case!(agent_001_live_notes_search_reads_its_input_from_the_query(
+            &world, email
+        ));
+        case!(agent_002_live_notes_tools_act_for_the_caller_only(
             &world, email
         ));
     })
