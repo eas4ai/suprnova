@@ -33,6 +33,10 @@ device-authorization = ["oauth"]
 # client metadata document fetch needs DNS (`tokio/net`) and a TLS client
 # that connects to the address the plugin checked.
 authorization-server = ["dep:reqwest", "dep:url", "tokio/net"]
+# Agent accounts under auth.md v0.6.0, on the authorization server: ES256
+# identity assertions and provider ID-JAG and event verification through
+# the JWT and P-256 crates the OAuth features already use.
+agent-auth = ["authorization-server", "dep:jsonwebtoken", "dep:p256"]
 seaorm-sqlite = ["sea-orm/sqlx-sqlite", "sea-orm/runtime-tokio-rustls"]
 seaorm-postgres = ["sea-orm/sqlx-postgres", "sea-orm/runtime-tokio-rustls"]
 seaorm-mysql = ["sea-orm/sqlx-mysql", "sea-orm/runtime-tokio-rustls"]

@@ -211,6 +211,7 @@ impl PinnedHttpClient for FakeDocuments {
         let Some(script) = script else {
             return Ok(PinnedResponse {
                 status: 404,
+                cache_control: None,
                 body: Box::new(ScriptBody {
                     remaining: Vec::new(),
                     endless: false,
@@ -222,6 +223,7 @@ impl PinnedHttpClient for FakeDocuments {
         }
         Ok(PinnedResponse {
             status: script.status,
+            cache_control: None,
             body: Box::new(ScriptBody {
                 remaining: script.body,
                 endless: script.endless,

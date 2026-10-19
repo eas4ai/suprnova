@@ -1891,6 +1891,8 @@ pub async fn migrate(db: &DatabaseConnection) -> crate::Result<()> {
     // database.
     #[cfg(feature = "authorization-server")]
     crate::authorization_server::migrate(db).await?;
+    #[cfg(feature = "agent-auth")]
+    crate::agent_auth::migrate(db).await?;
     add_session_auth_epoch_column(db).await?;
     add_remember_auth_epoch_column(db).await?;
     add_two_factor_enrollment_snapshot_columns(db).await?;

@@ -276,6 +276,17 @@ pub struct IssueTokens {
     pub access_lifetime: Option<Duration>,
 }
 
+/// What [`TokenIssuer::issue_grant`] created: the grant's identifier, so an
+/// extension can end the grant later through
+/// [`TokenIssuer::revoke_grant`], and the response to answer with.
+#[derive(Debug)]
+pub struct IssuedGrant {
+    /// The identifier of the grant the tokens belong to.
+    pub grant_id: String,
+    /// The token response for the client.
+    pub response: TokenResponse,
+}
+
 /// A grant type the token endpoint does not answer itself.
 #[async_trait]
 pub trait GrantHandler: Send + Sync {

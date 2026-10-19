@@ -345,7 +345,11 @@ impl AuthorizationServerPlugin {
             Ok(params) => params,
             Err(reason) => return token_error(&TokenError::invalid_request(reason)),
         };
-        match self.server.revoke(&params).await {
+        match self
+            .server
+            .revoke_from(&params, client_address(request))
+            .await
+        {
             Ok(()) => respond(200, None, &NO_STORE),
             Err(error) => token_error(&error),
         }

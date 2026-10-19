@@ -45,7 +45,9 @@ mod token;
 
 pub use client::{ClientMetadata, ClientSource, ResolvedClient};
 pub use flow::{AuthorizeOutcome, AuthorizeRequest, DecisionOutcome, PendingAuthorizationView};
-pub use grants::{GrantHandler, IssueTokens, NewGrant, TokenError, TokenRequest, TokenResponse};
+pub use grants::{
+    GrantHandler, IssueTokens, IssuedGrant, NewGrant, TokenError, TokenRequest, TokenResponse,
+};
 pub use metadata_document::{
     ClientMetadataError, ClientMetadataFetcher, ClientMetadataPolicy, HostResolver,
     PinnedHttpClient, PinnedResponse, ReqwestPinnedClient, ResponseBody, SystemResolver,
@@ -144,6 +146,9 @@ pub struct AuthorizationServerConfig {
     /// How long [`AuthorizationServer::prune_expired`] keeps a grant that
     /// was revoked, or that has no token left, before deleting it.
     pub grant_retention: Duration,
+    /// How long the revocation endpoint waits for each
+    /// [`RevocationListener`] before it answers anyway.
+    pub revocation_listener_timeout: Duration,
 }
 
 impl AuthorizationServerConfig {
@@ -151,7 +156,8 @@ impl AuthorizationServerConfig {
     /// everything else: routes under `/oauth`, sign-in at `/login`, the
     /// approval page at `/oauth/approve`, one-hour access tokens, 30-day
     /// refresh tokens, one-minute codes, a 16 KiB request bound, 20 pending
-    /// authorizations per user and 30 days of grant retention.
+    /// authorizations per user, 30 days of grant retention and five
+    /// seconds for each revocation listener.
     #[must_use]
     pub fn new(issuer: impl Into<String>, resources: Vec<String>) -> Self {
         Self {
@@ -177,6 +183,7 @@ impl AuthorizationServerConfig {
             },
             max_pending_per_user: 20,
             grant_retention: Duration::from_secs(30 * 24 * 3600),
+            revocation_listener_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -266,6 +273,31 @@ pub struct ClientGrantSummary {
     pub last_used_at: Option<DateTime<Utc>>,
 }
 
+/// A token the revocation endpoint ended, as a [`RevocationListener`]
+/// receives it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevokedToken {
+    /// The grant the token belongs to.
+    pub grant_id: String,
+    /// The grant family, so a listener can pick out its own grants.
+    pub grant_kind: String,
+    /// The client or agent registration the grant was issued to.
+    pub client_id: String,
+    /// The kind of the token that was presented.
+    pub token_kind: String,
+    /// The address the revocation request came from, when the host set it.
+    pub client_address: Option<String>,
+}
+
+/// Told about every token the revocation endpoint ends, so an extension
+/// such as agent auth can record it in its audit trail.
+#[async_trait]
+pub trait RevocationListener: Send + Sync {
+    /// One token was revoked. Called after the revocation is stored; a
+    /// listener cannot undo or fail it.
+    async fn token_revoked(&self, revoked: RevokedToken);
+}
+
 /// The authorization server engine.
 pub struct AuthorizationServer {
     config: AuthorizationServerConfig,
@@ -277,6 +309,7 @@ pub struct AuthorizationServer {
     fetcher: Arc<ClientMetadataFetcher>,
     grant_handlers: BTreeMap<String, Arc<dyn GrantHandler>>,
     metadata_fields: Map<String, Value>,
+    revocation_listeners: Vec<Arc<dyn RevocationListener>>,
 }
 
 /// Metadata members the server writes itself, which an extension may not
@@ -450,6 +483,7 @@ impl AuthorizationServer {
             fetcher,
             grant_handlers: BTreeMap::new(),
             metadata_fields: Map::new(),
+            revocation_listeners: Vec::new(),
         })
     }
 
@@ -492,6 +526,21 @@ impl AuthorizationServer {
         }
         self.metadata_fields.insert(name, value);
         Ok(self)
+    }
+
+    /// Tell `listener` about every token the revocation endpoint ends.
+    #[must_use]
+    pub fn with_revocation_listener(mut self, listener: Arc<dyn RevocationListener>) -> Self {
+        self.revocation_listeners.push(listener);
+        self
+    }
+
+    /// The handle an extension issues and revokes tokens through outside a
+    /// token request, as agent auth does when a claim or a revocation event
+    /// ends a registration's grants.
+    #[must_use]
+    pub fn token_issuer(&self) -> TokenIssuer<'_> {
+        TokenIssuer { server: self }
     }
 
     /// The configuration the server was built with.
@@ -800,6 +849,17 @@ struct MintedTokens {
     response: TokenResponse,
 }
 
+/// The grant an extension expects to extend: its family and the client it
+/// was issued to, so [`TokenIssuer::issue_on_grant`] never extends anyone
+/// else's grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GrantOwner<'a> {
+    /// The grant family, such as `agent`.
+    pub kind: &'a str,
+    /// The client or registration the grant was issued to.
+    pub client_id: &'a str,
+}
+
 /// The handle a [`GrantHandler`] issues tokens through.
 pub struct TokenIssuer<'a> {
     server: &'a AuthorizationServer,
@@ -821,7 +881,54 @@ impl TokenIssuer<'_> {
         grant: NewGrant,
         tokens: IssueTokens,
     ) -> std::result::Result<TokenResponse, TokenError> {
+        self.issue_grant(grant, tokens)
+            .await
+            .map(|issued| issued.response)
+    }
+
+    /// [`issue`](Self::issue), answering the new grant's identifier too, so
+    /// the extension can revoke the grant when its own state ends it.
+    ///
+    /// # Errors
+    ///
+    /// As [`issue`](Self::issue).
+    pub async fn issue_grant(
+        &self,
+        grant: NewGrant,
+        tokens: IssueTokens,
+    ) -> std::result::Result<IssuedGrant, TokenError> {
+        self.issue_grant_as(new_id(), grant, tokens, None).await
+    }
+
+    /// [`issue_grant`](Self::issue_grant) under an identifier the extension
+    /// chose, so it can record the grant before the grant exists and never
+    /// hold a live grant it has no record of. `access_scopes` narrows the
+    /// first access token to a subset of the grant's scopes; `None` gives
+    /// it all of them.
+    ///
+    /// # Errors
+    ///
+    /// As [`issue`](Self::issue), `invalid_request` for an identifier that
+    /// is empty, longer than 64 characters or not letters, digits, `-` and
+    /// `_`, and `invalid_scope` for access scopes outside the grant's.
+    pub async fn issue_grant_as(
+        &self,
+        grant_id: String,
+        grant: NewGrant,
+        tokens: IssueTokens,
+        access_scopes: Option<&[String]>,
+    ) -> std::result::Result<IssuedGrant, TokenError> {
         let server = self.server;
+        if grant_id.is_empty()
+            || grant_id.len() > 64
+            || !grant_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return Err(TokenError::invalid_request(
+                "a grant identifier is 1 to 64 letters, digits, - and _",
+            ));
+        }
         if grant.kind.trim().is_empty() || grant.client_id.trim().is_empty() {
             return Err(TokenError::invalid_request(
                 "an issued grant needs a kind and a client",
@@ -855,20 +962,36 @@ impl TokenIssuer<'_> {
         let access_lifetime = tokens
             .access_lifetime
             .unwrap_or(server.config.access_token_lifetime);
-        let minted = server
+        let access_scopes = access_scopes.unwrap_or(&grant.scopes);
+        if let Some(outside) = access_scopes
+            .iter()
+            .find(|scope| !grant.scopes.contains(scope))
+        {
+            return Err(TokenError::invalid_scope(format!(
+                "scope {outside:?} is not in the grant"
+            )));
+        }
+        let mut minted = server
             .mint_tokens(
-                &grant.scopes,
+                access_scopes,
                 &tokens.access_kind,
                 access_lifetime,
                 tokens.refresh,
                 now,
             )
             .map_err(token_storage_error)?;
+        // A refresh token keeps the grant's full scopes, as RFC 6749
+        // section 6 asks.
+        for record in &mut minted.records {
+            if record.kind == REFRESH_TOKEN_KIND {
+                record.scopes = grant.scopes.clone();
+            }
+        }
         server
             .store
             .create_grant(
                 GrantRecord {
-                    id: new_id(),
+                    id: grant_id.clone(),
                     kind: grant.kind,
                     user_id: grant.user_id,
                     client_id: grant.client_id,
@@ -889,7 +1012,94 @@ impl TokenIssuer<'_> {
             )
             .await
             .map_err(token_storage_error)?;
-        Ok(minted.response)
+        Ok(IssuedGrant {
+            grant_id,
+            response: minted.response,
+        })
+    }
+
+    /// Mint an access token on an existing grant, for an extension that
+    /// keeps one grant per party. `Ok(None)` when the grant is gone, is of
+    /// another family or client than `expected`, is revoked or ended with
+    /// its user's epoch, acts for another user, is bound to another
+    /// resource, or lacks a requested scope, or when the server no longer
+    /// offers that scope or resource.
+    ///
+    /// # Errors
+    ///
+    /// Returns `server_error` when storage fails.
+    pub async fn issue_on_grant(
+        &self,
+        grant_id: &str,
+        expected: &GrantOwner<'_>,
+        user_id: Option<&str>,
+        scopes: &[String],
+        resource: &str,
+    ) -> std::result::Result<Option<TokenResponse>, TokenError> {
+        let server = self.server;
+        let Some(grant) = server
+            .store
+            .find_grant(grant_id)
+            .await
+            .map_err(token_storage_error)?
+        else {
+            return Ok(None);
+        };
+        // Only the extension's own grant, still live, for what the server
+        // still offers: a caller can never extend someone else's grant or
+        // mint a scope or resource the configuration dropped.
+        let declared = server.declared_scopes();
+        let fits = grant.kind == expected.kind
+            && grant.client_id == expected.client_id
+            && grant.revoked_at.is_none()
+            && grant.user_id.as_deref() == user_id
+            && server.accepted_resource(resource).as_deref() == Some(grant.resource.as_str())
+            && scopes
+                .iter()
+                .all(|scope| grant.scopes.contains(scope) && declared.contains(scope));
+        if !fits
+            || !server
+                .epoch_is_current(&grant)
+                .await
+                .map_err(token_storage_error)?
+        {
+            return Ok(None);
+        }
+        let now = Utc::now();
+        let lifetime = grant
+            .access_lifetime
+            .unwrap_or(server.config.access_token_lifetime);
+        let minted = server
+            .mint_tokens(scopes, &grant.access_kind, lifetime, false, now)
+            .map_err(token_storage_error)?;
+        if server
+            .store
+            .add_tokens(&grant.id, minted.records, now)
+            .await
+            .map_err(token_storage_error)?
+        {
+            Ok(Some(minted.response))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Revoke one access token of `grant_id` by its value, as an extension
+    /// does when it issued a token it must not hand out after all. A token
+    /// of any other grant is left alone. Returns whether a live token was
+    /// revoked.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage fails.
+    pub async fn revoke_token(&self, grant_id: &str, token: &str) -> Result<bool> {
+        let store = &self.server.store;
+        match store.find_token(&token_digest(token)).await? {
+            Some(record) if record.grant_id == grant_id => {
+                store.revoke_token(&record.id, Utc::now()).await
+            }
+            _ => Ok(false),
+        }
     }
 
     /// Revoke a grant and all of its tokens by its identifier, as an

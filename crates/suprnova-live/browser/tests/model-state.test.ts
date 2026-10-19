@@ -278,7 +278,9 @@ describe("validation issue text", () => {
     });
     state.setValidation("full_name", [{ message: "validation.length", text: "Enter your name." }]);
     expect(notified).toBe(0);
-    state.setValidation("full_name", [{ message: "validation.length", text: "Enter a longer name." }]);
+    state.setValidation("full_name", [
+      { message: "validation.length", text: "Enter a longer name." },
+    ]);
     expect(notified).toBe(1);
   });
 

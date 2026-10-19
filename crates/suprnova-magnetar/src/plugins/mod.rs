@@ -6,6 +6,8 @@
 //! of minting [`crate::auth::VerifiedPrincipal`] at their primary-auth
 //! boundaries.
 
+#[cfg(feature = "agent-auth")]
+pub mod agent_auth;
 #[cfg(feature = "authorization-server")]
 pub mod authorization_server;
 #[cfg(feature = "device-authorization")]
