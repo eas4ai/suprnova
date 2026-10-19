@@ -9,5 +9,7 @@
 //! Nothing here compiles a scaffold. The `agents` mechanism runs this binary
 //! with `-E 'test(/agent_017_/)'`.
 
+#[path = "kit_agents/inertia.rs"]
+mod inertia;
 #[path = "kit_agents/shared.rs"]
 mod shared;
