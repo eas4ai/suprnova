@@ -5,7 +5,9 @@
 //   usePageTool({ name, description, inputSchema, execute })
 //     a tool that lives while the component is mounted
 //   useFormTool(form, { name, description, schema, action })
-//     a `useForm` form as a tool, its schema from `../types/tool-schemas`
+//     a `useForm` form as a tool, its schema from `src/types/tool-schemas.ts`,
+//     which a page under `pages/Notes/` imports as
+//     `import { toolSchemas } from '../../types/tool-schemas'`
 //
 // Call them while the component initializes. Tool names and descriptions
 // are what an agent reads as instructions: write them as code literals,

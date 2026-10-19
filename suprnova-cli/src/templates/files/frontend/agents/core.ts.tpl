@@ -919,7 +919,7 @@ export type FormToolOptions = {
   /**
    * The form's server request type's schema, from `suprnova
    * generate-types`: `toolSchemas.StoreNoteRequest` in
-   * `@/types/tool-schemas`.
+   * `src/types/tool-schemas.ts`.
    */
   schema: ToolInputSchema
   action: FormAction
