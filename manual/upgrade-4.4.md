@@ -35,9 +35,9 @@ new tables.
    ```
 
 2. If your `Cargo.toml` lists the framework's features, as a scaffolded
-   project's does, decide whether to add `"agents"` and `"search-media"`, as
-   the [default features](#new-projects-get-every-default-feature-of-the-framework)
-   section describes.
+   project's does, add `"agents"` and `"search-media"` to the list, as the
+   [default features](#new-projects-get-every-default-feature-of-the-framework)
+   section shows. A version bump does not add them for you.
 3. On MySQL or MariaDB, plan the first boot as the Magnetar section
    describes.
 4. Run your tests.
@@ -297,9 +297,10 @@ features off and listed the ones it kept, and the list left out
 
 **Now:** a new project lists `search-media` and `agents` too.
 
-**Do:** an application scaffolded before 4.4 keeps its list. Add
-`"search-media"` to it if you index media for search, and `"agents"` if you
-adopt agent tools:
+**Do:** an application scaffolded before 4.4 keeps its list when you change
+the tag, so add both to it to match a new project. Without `"agents"`,
+`#[tool]`, `Router::agents` and the agent auth plugin do not compile; without
+`"search-media"`, search cannot prepare uploaded media:
 
 ```toml
 suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.4.0", default-features = false, features = [
