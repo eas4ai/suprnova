@@ -524,7 +524,7 @@ pub fn same_origin_path(candidate: &str) -> Option<String> {
 }
 
 /// Accept a redirect destination read back from the session, or reject
-/// one that would leave the application.
+/// one a browser would read differently from how it reads here.
 ///
 /// The intended URL is written by [`crate::Redirect::guest`] from the
 /// request, and by [`crate::Redirect::set_intended_url`] from the
@@ -536,32 +536,26 @@ pub fn same_origin_path(candidate: &str) -> Option<String> {
 /// - a path on this application, as [`same_origin_path`] accepts it, so a
 ///   value such as `//evil.example/x`, `/\evil.example` or
 ///   `/<TAB>/evil.example` is not followed;
-/// - an absolute `http` or `https` URL on the application's own origin
-///   (`APP_URL`), for an application that stores its full URLs, as
-///   Laravel's do.
+/// - an absolute `http` or `https` URL, on any origin, with no surrounding
+///   whitespace, no control byte and no backslash: an application may send
+///   a user to another site after sign-in, as Laravel's `intended` does.
 ///
-/// Anything else, another origin, another scheme such as `javascript:`, a
-/// relative reference or a value with surrounding whitespace, is `None`, and
-/// the caller's fallback applies.
+/// Anything else, another scheme such as `javascript:` or `data:`, a
+/// relative reference (`x`, `?q`, `#f`) or a network-path reference with
+/// or without leading whitespace (`//host`, ` //host`), is `None`, and the
+/// caller's fallback applies.
 pub(crate) fn stored_destination_or_none(candidate: &str) -> Option<String> {
-    stored_destination_for(candidate, &app_url())
-}
-
-/// [`stored_destination_or_none`] for an application whose public URL is
-/// `app_url`.
-pub(crate) fn stored_destination_for(candidate: &str, app_url: &str) -> Option<String> {
     if candidate.starts_with('/') {
         return same_origin_path(candidate);
     }
-    // A browser trims whitespace and reads `\` as `/` before it resolves a
-    // URL; a value that needs either is not one the application wrote.
+    // A browser trims whitespace, strips tab and newline, and reads `\` as
+    // `/` before it resolves a URL; a value that needs any of that is not
+    // one the application wrote, and could be read as another address.
     if candidate.trim() != candidate || has_control_byte(candidate) || candidate.contains('\\') {
         return None;
     }
     let url = url::Url::parse(candidate).ok()?;
-    let own = url::Url::parse(app_url).ok()?;
-    let web = matches!(url.scheme(), "http" | "https");
-    (web && url.origin() == own.origin()).then(|| candidate.to_string())
+    matches!(url.scheme(), "http" | "https").then(|| candidate.to_string())
 }
 
 /// True when `s` contains an ASCII control byte: C0 (`0x00..=0x1F`) or
@@ -933,11 +927,10 @@ mod tests {
         );
     }
 
-    // ---- stored_destination_for: what an intended URL may be on read ----
+    // ---- stored_destination_or_none: what an intended URL may be on read ----
 
     #[test]
-    fn agent_017_a_stored_destination_is_a_same_origin_path_or_the_apps_own_url() {
-        const APP: &str = "https://app.test/root";
+    fn agent_017_a_stored_destination_is_a_same_origin_path_or_an_absolute_web_url() {
         for refused in [
             "",
             " //evil.test/x",
@@ -947,18 +940,16 @@ mod tests {
             "/\t/evil.test",
             "javascript:alert(1)",
             "data:text/html,<script>alert(1)</script>",
-            "https://evil.test/x",
-            "http://app.test/x",
-            "https://app.test:8443/x",
-            "https://app.test.evil.test/x",
+            "ftp://files.test/x",
             "https://app.test\\@evil.test/",
             " https://app.test/x",
             "https://app.test/x ",
+            "https://app.test/\tx",
             "x",
             "?page=2",
             "#top",
         ] {
-            assert_eq!(stored_destination_for(refused, APP), None, "{refused:?}");
+            assert_eq!(stored_destination_or_none(refused), None, "{refused:?}");
         }
         for kept in [
             "/",
@@ -967,22 +958,20 @@ mod tests {
             "https://app.test/root/billing?tab=2#x",
             "https://app.test",
             "https://APP.test/elsewhere",
+            // An application may send a user to another site after sign-in,
+            // as Laravel's `intended` does.
+            "https://evil.test/x",
+            "http://app.test/x",
+            "https://app.test:8443/x",
+            "https://app.test.evil.test/x",
+            "https://sso.example/x",
         ] {
             assert_eq!(
-                stored_destination_for(kept, APP).as_deref(),
+                stored_destination_or_none(kept).as_deref(),
                 Some(kept),
                 "{kept:?}"
             );
         }
-        // The application's own origin, whatever its scheme and port.
-        assert_eq!(
-            stored_destination_for("http://localhost:8765/x", "http://localhost:8765").as_deref(),
-            Some("http://localhost:8765/x")
-        );
-        assert_eq!(
-            stored_destination_for("http://localhost/x", "http://localhost:8765"),
-            None
-        );
     }
 
     #[test]

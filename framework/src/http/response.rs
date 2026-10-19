@@ -1085,10 +1085,10 @@ impl Redirect {
     ///
     /// The stored value is checked when it is read, as
     /// [`Self::intended_url`] says: only a path on this application or an
-    /// absolute `http`/`https` URL on its own origin is followed, and
-    /// anything else counts as no intended URL, so `default` applies. A
-    /// session written by an earlier release, or by a handler that stored
-    /// an unchecked address, can hold one.
+    /// absolute `http`/`https` URL is followed, and anything else counts as
+    /// no intended URL, so `default` applies. A session written by an
+    /// earlier release, or by a handler that stored an unchecked address,
+    /// can hold one.
     pub fn intended(default: impl Into<String>) -> Self {
         let dest = crate::session::session_mut(|s| s.pull::<String>("url.intended"))
             .flatten()
@@ -1111,13 +1111,15 @@ impl Redirect {
     ///   [`url::same_origin_path`](crate::url::same_origin_path) accepts
     ///   it: rooted at a single `/`, with no control byte, so neither
     ///   `//evil.example/x` nor `/\evil.example` passes;
-    /// - an absolute `http` or `https` URL whose origin is the
-    ///   application's own (`APP_URL`), for an application that stores its
-    ///   full URLs, as Laravel's do.
+    /// - an absolute `http` or `https` URL, on any origin, with no
+    ///   surrounding whitespace, no control byte and no backslash, for an
+    ///   application that sends a user to another site after sign-in, as
+    ///   Laravel's `intended` does.
     ///
-    /// Anything else, an address on another origin, another scheme such as
-    /// `javascript:`, a relative reference or a value with surrounding
-    /// whitespace, reads as `None`. Outside a session it is `None`.
+    /// Anything else, another scheme such as `javascript:` or `data:`, a
+    /// relative reference (`x`, `?q`, `#f`) or a network-path reference
+    /// (`//host`, with or without leading whitespace), reads as `None`.
+    /// Outside a session it is `None`.
     pub fn intended_url() -> Option<String> {
         crate::session::session()
             .and_then(|session| session.get::<String>("url.intended"))
@@ -1130,10 +1132,12 @@ impl Redirect {
     /// `SessionMiddleware` scope.
     ///
     /// Any value is stored, and checked when it is read
-    /// ([`Self::intended_url`]): an address on another origin is never
-    /// followed. Check a `return_to` from a query with
-    /// [`url::same_origin_path`](crate::url::same_origin_path) before
-    /// storing it, so a foreign one leaves the previous intended URL alone.
+    /// ([`Self::intended_url`]): only a path on this application or an
+    /// absolute `http`/`https` URL is followed. An absolute URL on another
+    /// site is followed, so a `return_to` from a query, which anyone can
+    /// write into a link, is an open redirect unless it is checked with
+    /// [`url::same_origin_path`](crate::url::same_origin_path) before it is
+    /// stored.
     pub fn set_intended_url(url: impl Into<String>) {
         // The session records the URL the browser will be sent to, root
         // included (PFX-004).
@@ -2414,7 +2418,7 @@ mod intended_url_tests {
                 "/\t/evil.test",
                 "\\evil",
                 "javascript:alert(1)",
-                "https://evil.test/x",
+                "?page=2",
             ] {
                 session_mut(|session| session.put("url.intended", foreign));
                 assert_eq!(Redirect::intended_url(), None, "{foreign:?}");
@@ -2424,12 +2428,16 @@ mod intended_url_tests {
                     "{foreign:?}"
                 );
             }
-            // An absolute URL on the application's own origin passes, as
+            // An absolute `http` or `https` URL passes, on any origin, as
             // `intended` follows it, and so does a root path.
-            let own = format!("{}/billing", crate::routing::url::app_url());
-            session_mut(|session| session.put("url.intended", own.as_str()));
-            assert_eq!(Redirect::intended_url().as_deref(), Some(own.as_str()));
-            assert_eq!(Redirect::intended("/dashboard").location, own);
+            for absolute in [
+                format!("{}/billing", crate::routing::url::app_url()),
+                "https://sso.example/x".to_owned(),
+            ] {
+                session_mut(|session| session.put("url.intended", absolute.as_str()));
+                assert_eq!(Redirect::intended_url().as_deref(), Some(absolute.as_str()));
+                assert_eq!(Redirect::intended("/dashboard").location, absolute);
+            }
             session_mut(|session| session.put("url.intended", "/billing?tab=2"));
             assert_eq!(Redirect::intended_url().as_deref(), Some("/billing?tab=2"));
         })

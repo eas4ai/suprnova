@@ -385,12 +385,14 @@ async fn pfx_004_a_request_target_naming_another_host_never_leaves_the_origin() 
         signed_in.header("location").as_deref(),
         Some("http://localhost/elsewhere")
     );
-    // One on another origin is never followed, whoever stored it: the
-    // intended URL comes back from the session, which outlives the code
-    // that wrote it.
+    // An external intended URL the application sets itself is kept too
+    // (PFX-010).
     support::get_raw(address, "/want-external", &[("cookie", cookie.as_str())]).await;
     let signed_in = support::get_raw(address, "/signed-in", &[("cookie", cookie.as_str())]).await;
-    assert_eq!(signed_in.header("location").as_deref(), Some("/home"));
+    assert_eq!(
+        signed_in.header("location").as_deref(),
+        Some("https://sso.example/x")
+    );
 }
 
 /// The user type the RBAC middleware checks; no request here signs one in.
