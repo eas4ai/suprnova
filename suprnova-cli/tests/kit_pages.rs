@@ -880,6 +880,21 @@ mod backend {
                     "store",
                     r#"Inertia::flash("toast", Toast::success("Note saved."))?;"#,
                 ),
+                (
+                    "agents.rs",
+                    "confirm",
+                    r#"Inertia::flash("toast", Toast::success("The agent is connected."))?;"#,
+                ),
+                (
+                    "agents.rs",
+                    "revoke_client",
+                    r#"Toast::success("The app can no longer act for you.")"#,
+                ),
+                (
+                    "agents.rs",
+                    "revoke_agent",
+                    r#"Toast::success("The agent can no longer act for you.")"#,
+                ),
             ] {
                 let body = function(body_of(file), function_name);
                 assert!(
@@ -896,8 +911,9 @@ mod backend {
                 })
                 .sum();
             assert_eq!(
-                flashes, 8,
-                "{}: the scaffold flashes exactly the eight toasts PAR-078 names",
+                flashes, 11,
+                "{}: the scaffold flashes exactly the eight toasts PAR-078 names and the three \
+                 of the agents' pages (AGENT-017)",
                 app.kit
             );
         });
@@ -1425,6 +1441,9 @@ mod svelte {
         assert_eq!(
             names,
             [
+                "Agents/Approve.svelte",
+                "Agents/Claim.svelte",
+                "Agents/Connected.svelte",
                 "Dashboard.svelte",
                 "Error.svelte",
                 "Home.svelte",
@@ -1586,7 +1605,7 @@ mod react {
     ];
 
     /// Every page the kit ships, by component name.
-    const PAGES: [&str; 10] = [
+    const PAGES: [&str; 13] = [
         "Home",
         "Dashboard",
         "Notes/Index",
@@ -1597,6 +1616,9 @@ mod react {
         "auth/ForgotPassword",
         "auth/ResetPassword",
         "auth/VerifyEmail",
+        "Agents/Approve",
+        "Agents/Claim",
+        "Agents/Connected",
     ];
 
     /// A scaffolded React project: the temporary directory that owns it and
@@ -1923,8 +1945,8 @@ mod react {
             }
         }
         assert_eq!(
-            scanned, 14,
-            "ten pages, two layouts, the account links and the toast"
+            scanned, 17,
+            "thirteen pages, two layouts, the account links and the toast"
         );
         assert!(
             offenders.is_empty(),
@@ -2133,7 +2155,7 @@ mod vue {
     }
 
     /// The pages the kit ships, by component name.
-    const PAGES: [&str; 10] = [
+    const PAGES: [&str; 13] = [
         "Home",
         "Dashboard",
         "Notes/Index",
@@ -2144,6 +2166,9 @@ mod vue {
         "auth/ForgotPassword",
         "auth/ResetPassword",
         "auth/VerifyEmail",
+        "Agents/Approve",
+        "Agents/Claim",
+        "Agents/Connected",
     ];
 
     /// The auth pages, each with the route its form posts to.

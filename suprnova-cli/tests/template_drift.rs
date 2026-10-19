@@ -1602,6 +1602,7 @@ fn every_frontend_vite_config_gives_the_ssr_build_its_own_outdir() {
 fn scaffold_controllers() -> Vec<(&'static str, &'static str)> {
     vec![
         ("home.rs", suprnova_cli::templates::home_controller()),
+        ("agents.rs", suprnova_cli::templates::agents_controller()),
         ("auth.rs", suprnova_cli::templates::auth_controller()),
         (
             "dashboard.rs",
@@ -2433,8 +2434,9 @@ fn pfx_012_scaffold_pages_build_every_url_from_the_root_prop() {
         });
     }
     assert_eq!(
-        pages, 27,
-        "nine pages for each of the three kits, Notes/Index and Notes/Show among them"
+        pages, 36,
+        "twelve pages for each of the three kits, Notes/Index, Notes/Show and the three \
+         agents' pages among them"
     );
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
 }
@@ -2666,8 +2668,8 @@ fn intt_no_kit_page_types_root_by_hand() {
         "these kit pages pass usePage a type argument: {offenders:?}"
     );
     assert_eq!(
-        readers, 27,
-        "the nine pages of each kit that build URLs read `root` through usePage()"
+        readers, 36,
+        "the twelve pages of each kit that build URLs read `root` through usePage()"
     );
 }
 

@@ -33,10 +33,14 @@ if [[ "${1-}" == "--live" ]]; then
     run_live_test test agent_auth_live agent_007_postgres_registration_flows_and_tokens
     run_live_test test agent_auth_live agent_008_postgres_a_replayed_jti_is_refused_across_two_nodes
     run_live_test test agent_auth_live agent_009_postgres_one_time_steps_are_guarded_in_the_database
+    run_live_test test agent_auth_live agent_009_postgres_claim_rolls_back_on_a_duplicate_event_id
+    run_live_test test agent_auth_live agent_009_postgres_claim_outbox_is_written_and_delivered_once
     run_live_test test agent_auth_live agent_010_postgres_security_events_and_revoke_all
     run_live_test test agent_auth_live agent_007_mysql_registration_flows_and_tokens
     run_live_test test agent_auth_live agent_008_mysql_a_replayed_jti_is_refused_across_two_nodes
     run_live_test test agent_auth_live agent_009_mysql_one_time_steps_are_guarded_in_the_database
+    run_live_test test agent_auth_live agent_009_mysql_claim_rolls_back_on_a_duplicate_event_id
+    run_live_test test agent_auth_live agent_009_mysql_claim_outbox_is_written_and_delivered_once
     run_live_test test agent_auth_live agent_010_mysql_security_events_and_revoke_all
     run_live_test test authorization_server_live agent_005_postgres_code_flow_rotation_and_revocation
     run_live_test test authorization_server_live agent_005_postgres_refresh_rotation_is_guarded_in_the_database

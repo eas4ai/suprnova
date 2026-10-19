@@ -545,6 +545,67 @@ async fn agent_017_a_decision_without_the_csrf_token_is_refused() {
     assert_eq!(lookup_approval(client, &id).await["lookup"], "pending");
 }
 
+/// The header a kit's form tool submits with: an agent filling and sending
+/// a page's own form.
+const FORM_TOOL: &str = "Suprnova-Form-Tool";
+
+#[tokio::test]
+async fn agent_017_consent_refuses_a_form_tool_submission() {
+    let world = approval_world().await;
+    let client = &world.client;
+    let user = new_account("facade-form-tool");
+    let client_id = register(client, LOOPBACK_REDIRECT).await;
+    sign_in(client, &user).await;
+    let (_, challenge) = pkce();
+    let id = authorize(client, &client_id, &challenge).await;
+    // The user's own session and CSRF token, as a form tool on one of the
+    // application's pages sends them: only the header tells it apart.
+    let token = csrf(client).await;
+    let refused = client
+        .post("/test/consent/decide")
+        .header(FORM_TOOL, "1")
+        .form(&[
+            ("_token", token.as_str()),
+            ("authorization", id.as_str()),
+            ("decision", "approve"),
+        ])
+        .send()
+        .await;
+    assert_eq!(refused.status(), 403, "{}", refused.body_text());
+    assert!(
+        refused.body_text().contains("person"),
+        "{}",
+        refused.body_text()
+    );
+    assert_consent_headers(&refused, "a form tool's refusal");
+    assert_eq!(lookup_approval(client, &id).await["lookup"], "pending");
+    // The framework names the header, and the kits send that name.
+    assert_eq!(suprnova::agents::FORM_TOOL_HEADER, FORM_TOOL);
+}
+
+#[tokio::test]
+async fn agent_017_claims_refuse_a_form_tool_submission() {
+    let world = claim_world(|agent| agent).await;
+    let client = &world.client;
+    let user = new_account("facade-claim-form-tool");
+    let registration = service_auth(client, &account_email(&user)).await;
+    let (token, code) = attempt_of(&registration);
+    sign_in(client, &user).await;
+    let csrf = csrf(client).await;
+    let refused = client
+        .post("/test/consent/confirm")
+        .header(FORM_TOOL, "1")
+        .form(&[
+            ("_token", csrf.as_str()),
+            ("claim_attempt_token", token.as_str()),
+            ("user_code", code.as_str()),
+        ])
+        .send()
+        .await;
+    assert_eq!(refused.status(), 403, "{}", refused.body_text());
+    assert_eq!(lookup_claim(client, &token).await["lookup"], "pending");
+}
+
 // ------------------------------------------------------------- claims ----
 
 #[tokio::test]

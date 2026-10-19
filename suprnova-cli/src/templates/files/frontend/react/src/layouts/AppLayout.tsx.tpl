@@ -46,6 +46,13 @@ export default function AppLayout({ children, heading }: AppLayoutProps) {
             >
               Notes
             </Link>
+            <Link
+              href={`${root}/connected-agents`}
+              className={component.startsWith('Agents/') ? activeClass : idleClass}
+              aria-current={component.startsWith('Agents/') ? 'page' : undefined}
+            >
+              Agents
+            </Link>
           </div>
           <div className="flex items-center gap-4">
             <AccountLinks className={idleClass} />
