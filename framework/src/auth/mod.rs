@@ -63,6 +63,7 @@ pub mod generic_user;
 pub mod guard;
 pub mod manager;
 pub mod middleware;
+pub mod migrations;
 pub mod must_verify_email;
 pub mod provider;
 pub mod remember;

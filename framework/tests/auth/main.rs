@@ -20,6 +20,8 @@ pub mod custom_guard;
 pub mod database_provider;
 pub mod dummy_verify_timing;
 pub mod eloquent_provider;
+/// AGENT-008: a users table refuses an address differing only in case.
+pub mod email_ignoring_case;
 /// HRD-007: the authentication epoch of every provider-backed sign-in,
 /// observed by the `hardening` mechanism with the `hardening_` tests of
 /// `remember_me`.

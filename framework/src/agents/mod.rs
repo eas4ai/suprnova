@@ -41,6 +41,7 @@
 pub(crate) mod agent_auth;
 mod auth;
 mod caller;
+mod consent;
 mod dispatch;
 mod input;
 mod limit;
@@ -48,6 +49,7 @@ mod mark;
 mod mcp;
 mod metadata;
 mod middleware;
+pub mod migrations;
 mod oauth;
 pub(crate) mod origin_trial;
 mod outside_issuer;
@@ -66,11 +68,19 @@ use crate::error::FrameworkError;
 use crate::routing::Router;
 use hyper::Method;
 
+/// Route middleware for an application's own approval, claim and
+/// connected-agents pages. It lives with the security headers, whose
+/// policy it changes.
+pub use crate::security_headers::ConsentPageHeaders;
 pub use agent_auth::{AgentAccount, AgentAuth, AgentClaimed, AgentUserProvisioner, IdentityType};
 pub use auth::{
     AuthorizationServerMetadata, CallerResolver, MetadataKind, ResolveContext, ResolveError,
 };
 pub use caller::{AgentRegistration, CallerChannel, CallerKind, ToolCaller};
+pub use consent::{
+    AgentApprovals, AgentClaims, ApprovalDecision, ApprovalLookup, ClaimConfirmation, ClaimLookup,
+    ClaimRefusal, PendingApproval, PendingClaim,
+};
 pub(crate) use limit::address_bucket;
 /// The parts of the Magnetar agent auth plugin an application names in its
 /// configuration: a provider on the trust list, the user agent auth reads
@@ -95,6 +105,7 @@ pub use magnetar::authorization_server::{
 pub use magnetar::{Error as MagnetarError, Result as MagnetarResult};
 pub(crate) use mark::AgentMark;
 pub(crate) use middleware::{BrowserToolRefusal, LiveToolGate, no_tool};
+pub use migrations::migrations;
 pub(crate) use oauth::MountedOAuth;
 pub use oauth::{ClientGrant, ConnectedAgents, GrantScope, OAuthServer};
 pub use origin_trial::WebMcpConfig;

@@ -1083,11 +1083,12 @@ impl Redirect {
     /// The intended URL is consumed (pulled from the session) so a
     /// subsequent call falls back to `default`.
     ///
-    /// The stored value is checked when it is read, as the previous URL
-    /// is: a path a browser would read as another host, such as
-    /// `//evil.example/x` or `/\evil.example`, counts as no intended URL.
-    /// A session written by an earlier release can hold one. An intended
-    /// URL that leaves the application is written as an absolute URL.
+    /// The stored value is checked when it is read, as
+    /// [`Self::intended_url`] says: only a path on this application or an
+    /// absolute `http`/`https` URL is followed, and anything else counts as
+    /// no intended URL, so `default` applies. A session written by an
+    /// earlier release, or by a handler that stored an unchecked address,
+    /// can hold one.
     pub fn intended(default: impl Into<String>) -> Self {
         let dest = crate::session::session_mut(|s| s.pull::<String>("url.intended"))
             .flatten()
@@ -1096,10 +1097,47 @@ impl Redirect {
         Self::to(dest)
     }
 
+    /// The "intended" URL [`Self::intended`] would follow now, without
+    /// spending it. Mirrors Laravel's `Redirector::getIntendedUrl()`.
+    ///
+    /// A sign-in that ends where the user was going reads it to choose how
+    /// to leave: an Inertia visit cannot follow a redirect to a page the
+    /// SPA does not render, such as a plugin route or a client's redirect
+    /// URI, so it leaves by a location visit when an address is waiting.
+    /// Only two kinds of stored value are read, and [`Self::intended`]
+    /// follows the same two:
+    ///
+    /// - a path on this application, as
+    ///   [`url::same_origin_path`](crate::url::same_origin_path) accepts
+    ///   it: rooted at a single `/`, with no control byte, so neither
+    ///   `//evil.example/x` nor `/\evil.example` passes;
+    /// - an absolute `http` or `https` URL, on any origin, with no
+    ///   surrounding whitespace, no control byte and no backslash, for an
+    ///   application that sends a user to another site after sign-in, as
+    ///   Laravel's `intended` does.
+    ///
+    /// Anything else, another scheme such as `javascript:` or `data:`, a
+    /// relative reference (`x`, `?q`, `#f`) or a network-path reference
+    /// (`//host`, with or without leading whitespace), reads as `None`.
+    /// Outside a session it is `None`.
+    pub fn intended_url() -> Option<String> {
+        crate::session::session()
+            .and_then(|session| session.get::<String>("url.intended"))
+            .and_then(|stored| crate::routing::url::stored_destination_or_none(&stored))
+    }
+
     /// Record the current URL as the session's "intended" target.
     /// Subsequent calls to [`Redirect::intended`] use it. Mirrors
     /// Laravel's `Redirector::setIntendedUrl($url)`. No-op outside a
     /// `SessionMiddleware` scope.
+    ///
+    /// Any value is stored, and checked when it is read
+    /// ([`Self::intended_url`]): only a path on this application or an
+    /// absolute `http`/`https` URL is followed. An absolute URL on another
+    /// site is followed, so a `return_to` from a query, which anyone can
+    /// write into a link, is an open redirect unless it is checked with
+    /// [`url::same_origin_path`](crate::url::same_origin_path) before it is
+    /// stored.
     pub fn set_intended_url(url: impl Into<String>) {
         // The session records the URL the browser will be sent to, root
         // included (PFX-004).
@@ -2329,5 +2367,85 @@ mod rate_limited_retry_after_tests {
         let err = FrameworkError::param("user_id");
         let resp: HttpResponse = err.into();
         assert_eq!(resp.header_value("Retry-After"), None);
+    }
+}
+
+#[cfg(test)]
+mod intended_url_tests {
+    use super::*;
+    use crate::session::{new_session_slot_for_test, session, session_mut, session_scope_for_test};
+
+    /// What the session holds under Laravel's intended-URL key.
+    fn stored() -> Option<String> {
+        session().and_then(|session| session.get::<String>("url.intended"))
+    }
+
+    #[tokio::test]
+    async fn agent_017_intended_url_reads_without_pulling() {
+        session_scope_for_test(new_session_slot_for_test(), async {
+            assert_eq!(Redirect::intended_url(), None, "nothing stored yet");
+            Redirect::set_intended_url("/agent/claim?claim_attempt_token=cat_1");
+            // Read twice: the address stays for the redirect that follows.
+            for _ in 0..2 {
+                assert_eq!(
+                    Redirect::intended_url().as_deref(),
+                    Some("/agent/claim?claim_attempt_token=cat_1")
+                );
+            }
+            assert_eq!(
+                stored().as_deref(),
+                Some("/agent/claim?claim_attempt_token=cat_1")
+            );
+            // `intended` then follows it and spends it.
+            assert_eq!(
+                Redirect::intended("/dashboard").location,
+                "/agent/claim?claim_attempt_token=cat_1"
+            );
+            assert_eq!(Redirect::intended_url(), None);
+            assert_eq!(stored(), None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn agent_017_intended_url_refuses_what_intended_would_not_follow() {
+        session_scope_for_test(new_session_slot_for_test(), async {
+            // A value an earlier release, or another writer, stored.
+            for foreign in [
+                "//evil.test/x",
+                " //evil.test/x",
+                "/\\evil.test",
+                "/\t/evil.test",
+                "\\evil",
+                "javascript:alert(1)",
+                "?page=2",
+            ] {
+                session_mut(|session| session.put("url.intended", foreign));
+                assert_eq!(Redirect::intended_url(), None, "{foreign:?}");
+                assert_eq!(
+                    Redirect::intended("/dashboard").location,
+                    "/dashboard",
+                    "{foreign:?}"
+                );
+            }
+            // An absolute `http` or `https` URL passes, on any origin, as
+            // `intended` follows it, and so does a root path.
+            for absolute in [
+                format!("{}/billing", crate::routing::url::app_url()),
+                "https://sso.example/x".to_owned(),
+            ] {
+                session_mut(|session| session.put("url.intended", absolute.as_str()));
+                assert_eq!(Redirect::intended_url().as_deref(), Some(absolute.as_str()));
+                assert_eq!(Redirect::intended("/dashboard").location, absolute);
+            }
+            session_mut(|session| session.put("url.intended", "/billing?tab=2"));
+            assert_eq!(Redirect::intended_url().as_deref(), Some("/billing?tab=2"));
+        })
+        .await;
+    }
+
+    #[test]
+    fn agent_017_intended_url_is_none_outside_a_session() {
+        assert_eq!(Redirect::intended_url(), None);
     }
 }
