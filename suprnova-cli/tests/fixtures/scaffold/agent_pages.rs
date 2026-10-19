@@ -1,7 +1,10 @@
 //! AGENT-017 in a generated Inertia application: the MCP endpoint, the
 //! OAuth server and agent auth that `src/agents.rs` serves, the approval,
 //! claim and connected-agents pages of `controllers::agents`, the return
-//! address a sign-in link carries, and the kit's migrator on SQLite.
+//! address a sign-in link carries, and the kit's migrator on SQLite. Then
+//! the two notes tools of `controllers::note_tools` (AGENT-001, AGENT-002,
+//! AGENT-014): on the notes page, from the browser and over MCP, for a user,
+//! a client the user approved and an agent claimed or not.
 //!
 //! Written into a freshly scaffolded Vue project by `scaffold_snapshot.rs`
 //! (`agent_017_a_generated_inertia_application_serves_the_agent_pages`),
@@ -1427,6 +1430,404 @@ async fn kit_registration_refuses_a_name_over_255_and_an_email_over_254() {
     assert_eq!(redirect_path(&registered), "/verify-email");
 }
 
+// ---------------------------------------------------------- notes tools ----
+
+/// The grant an agent exchanges its identity assertion with for an access
+/// token.
+const JWT_BEARER: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
+
+/// A new verified user who signs in and writes `notes`, each a title and a
+/// text, through the notes form; their browser, signed in.
+async fn writer(name: &str, email: &str, notes: &[(&str, &str)]) -> Browser {
+    verified_user(name, email).await;
+    let mut browser = Browser::new();
+    browser.sign_in(email).await;
+    assert_eq!(browser.open("/notes").await.status(), 200);
+    for (title, body) in notes {
+        let saved = browser
+            .submit("/notes", json!({ "title": title, "body": body }))
+            .await;
+        assert_eq!(redirect_path(&saved), "/notes", "{}", saved.body_text());
+    }
+    browser
+}
+
+/// The titles of the notes a `notes.search` answer holds, in its order.
+fn titles(answer: &Value) -> Vec<String> {
+    answer["notes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("an answer that lists notes: {answer}"))
+        .iter()
+        .map(|note| note["title"].as_str().expect("a title").to_owned())
+        .collect()
+}
+
+/// `names` in order.
+fn sorted(mut names: Vec<String>) -> Vec<String> {
+    names.sort();
+    names
+}
+
+/// `notes.search` as the notes page's script calls it for the signed-in
+/// `browser`: a `GET` with the arguments in the query, the session's
+/// cookie and the tool-call header.
+async fn search_in_browser(browser: &Browser, arguments: Value) -> TestResponse {
+    browser.client.tool("notes.search", arguments).send().await
+}
+
+/// The `WWW-Authenticate` header of a refused MCP call.
+fn challenge_of(refused: &suprnova::agents::McpToolResult) -> String {
+    refused
+        .response()
+        .header("www-authenticate")
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// A token for an MCP client the signed-in `browser`'s user approves with
+/// `scope`. The approval page names the scope by the description
+/// `tool_scopes!` gave it.
+async fn user_token(
+    browser: &mut Browser,
+    machine: &mut Browser,
+    scope: &str,
+    description: &str,
+) -> String {
+    let client_id = register_client(machine, "Notes Client").await;
+    let authorize = format!("{}&scope={}", authorize_path(&client_id), encode(scope));
+    let authorized = browser.open(&authorize).await;
+    assert_eq!(authorized.status(), 302, "{}", authorized.body_text());
+    let approval = path_of(&destination(&authorized));
+    let id = query_param(&approval, "authorization").expect("the approval page's id");
+    let page = browser.visit(&approval).await;
+    assert_eq!(page.status(), 200, "{}", page.body_text());
+    assert_eq!(
+        page.inertia_page()["props"]["approval"]["scopes"],
+        json!([{ "name": scope, "description": description }]),
+    );
+    let decided = browser
+        .submit(
+            "/oauth/approve",
+            json!({ "authorization": id, "decision": "approve" }),
+        )
+        .await;
+    let back = location_visit(&decided);
+    let code = query_param(&back, "code").expect("the code");
+    exchange(machine, &client_id, &code).await
+}
+
+/// The access token of an agent that registered anonymously and that no
+/// user has claimed.
+async fn unclaimed_agent_token(machine: &mut Browser) -> String {
+    let registered = machine
+        .client
+        .post("/agent/identity")
+        .json(&json!({ "type": "anonymous" }))
+        .send()
+        .await;
+    assert_eq!(registered.status(), 200, "{}", registered.body_text());
+    let assertion = registered.json()["identity_assertion"]
+        .as_str()
+        .expect("an identity assertion")
+        .to_owned();
+    let tokens = machine
+        .client
+        .post("/oauth/token")
+        .form(&[
+            ("grant_type", JWT_BEARER),
+            ("assertion", assertion.as_str()),
+            ("resource", RESOURCE),
+        ])
+        .send()
+        .await;
+    assert_eq!(tokens.status(), 200, "{}", tokens.body_text());
+    tokens.json()["access_token"]
+        .as_str()
+        .expect("an access token")
+        .to_owned()
+}
+
+/// AGENT-014: the notes page offers both notes tools to its signed-in user,
+/// on the first visit's document and on every Inertia visit, with the
+/// hints their markings give. The search only reads and hands back note
+/// text, which is user content. The write is neither, so the page reloads
+/// its props after it. No other page offers them, and no page offers a
+/// guest either.
+async fn agent_014_inertia_notes_page_offers_the_notes_tools() {
+    let mut nora = writer("Nora", "nora@example.test", &[]).await;
+    let first = nora.open("/notes").await;
+    assert_eq!(first.status(), 200, "{}", first.body_text());
+    assert_eq!(sorted(first.page_tools()), ["notes.create", "notes.search"]);
+    let page = nora.visit("/notes").await;
+    assert_eq!(page.status(), 200, "{}", page.body_text());
+    assert_eq!(sorted(page.page_tools()), ["notes.create", "notes.search"]);
+
+    let search = page.page_tool("notes.search").expect("notes.search");
+    assert_eq!(search["method"], "GET", "{search}");
+    assert_eq!(
+        search["annotations"],
+        json!({
+            "readOnlyHint": true,
+            "untrustedContentHint": true,
+            "consequentialHint": false,
+            "debugging": false,
+        }),
+    );
+    assert_eq!(
+        search["inputSchema"]["properties"]["limit"]["maximum"], 50,
+        "{search}"
+    );
+    let create = page.page_tool("notes.create").expect("notes.create");
+    assert_eq!(create["method"], "POST", "{create}");
+    assert_eq!(
+        create["annotations"],
+        json!({
+            "readOnlyHint": false,
+            "untrustedContentHint": false,
+            "consequentialHint": false,
+            "debugging": false,
+        }),
+    );
+    assert_eq!(
+        create["inputSchema"]["properties"]["title"]["maxLength"], 255,
+        "{create}"
+    );
+
+    for other in ["/dashboard", "/connected-agents"] {
+        let visited = nora.visit(other).await;
+        assert_eq!(visited.status(), 200, "{other}: {}", visited.body_text());
+        assert!(visited.page_tools().is_empty(), "{other} offers a tool");
+    }
+    let mut guest = Browser::new();
+    assert_eq!(redirect_path(&guest.open("/notes").await), "/login");
+    for path in ["/", "/login", "/register"] {
+        let shown = guest.open(path).await;
+        assert_eq!(shown.status(), 200, "{path}: {}", shown.body_text());
+        assert!(shown.page_tools().is_empty(), "{path} offers a guest a tool");
+    }
+}
+
+/// AGENT-001: `GET /notes/search` is the search, never a note: its static
+/// segment is matched before `/notes/{id}`. A plain request, a page's call
+/// and an MCP call all reach the tool's route, and the note page still
+/// answers its own ids.
+async fn agent_001_notes_search_is_matched_before_a_note_id() {
+    let mut wendy = writer("Wendy", "wendy@example.test", &[("Wendy's list", "Eggs.")]).await;
+    let plain = wendy
+        .client
+        .get("/notes/search")
+        .header("Accept", "application/json")
+        .send()
+        .await;
+    assert_eq!(plain.status(), 200, "{}", plain.body_text());
+    assert_eq!(titles(&plain.json()), ["Wendy's list"]);
+    let id = plain.json()["notes"][0]["id"].as_u64().expect("the note's id");
+    let note = wendy.visit(&format!("/notes/{id}")).await;
+    assert_eq!(note.status(), 200, "{}", note.body_text());
+    assert_eq!(note.inertia_page()["component"], "Notes/Show");
+
+    let called = search_in_browser(&wendy, json!({})).await;
+    assert_eq!(called.status(), 200, "{}", called.body_text());
+    assert_eq!(titles(&called.json()), ["Wendy's list"]);
+    let mut machine = Browser::new();
+    let token = user_token(&mut wendy, &mut machine, "notes:read", "Read your notes").await;
+    let found = machine
+        .client
+        .mcp()
+        .with_token(&token)
+        .call("notes.search", json!({}))
+        .await;
+    assert!(!found.is_error(), "{}", found.text());
+    assert_eq!(
+        titles(found.structured().expect("structured notes")),
+        ["Wendy's list"]
+    );
+}
+
+/// AGENT-001: `notes.search` reads its input from the query of the page's
+/// `GET`, and from the arguments of an MCP call: the words to find in the
+/// titles and the text, and how many notes to answer. Out of bounds, each
+/// field is named: a 422 on the page, a tool error over MCP.
+async fn agent_001_notes_search_reads_its_input_from_the_query() {
+    let mut xena = writer(
+        "Xena",
+        "xena@example.test",
+        &[
+            ("Apple pie", "With cinnamon."),
+            ("Apple tart", "With butter."),
+            ("Banana bread", "With walnuts."),
+        ],
+    )
+    .await;
+
+    let one = search_in_browser(&xena, json!({ "query": "apple", "limit": 1 })).await;
+    assert_eq!(one.status(), 200, "{}", one.body_text());
+    let found = titles(&one.json());
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].starts_with("Apple "), "{found:?}");
+    let both = search_in_browser(&xena, json!({ "query": "apple" })).await;
+    assert_eq!(sorted(titles(&both.json())), ["Apple pie", "Apple tart"]);
+    let text = search_in_browser(&xena, json!({ "query": "cinnamon" })).await;
+    assert_eq!(titles(&text.json()), ["Apple pie"]);
+    // No words: the newest notes first.
+    let newest = search_in_browser(&xena, json!({ "limit": 2 })).await;
+    assert_eq!(titles(&newest.json()), ["Banana bread", "Apple tart"]);
+    let refused = search_in_browser(&xena, json!({ "query": "a".repeat(201), "limit": 51 })).await;
+    assert_eq!(refused.status(), 422, "{}", refused.body_text());
+    for message in [
+        "Keep the search to 200 characters.",
+        "Ask for 1 to 50 notes.",
+    ] {
+        assert!(
+            refused.body_text().contains(message),
+            "{message}: {}",
+            refused.body_text()
+        );
+    }
+
+    let mut machine = Browser::new();
+    let token = user_token(&mut xena, &mut machine, "notes:read", "Read your notes").await;
+    let mcp = machine.client.mcp().with_token(&token);
+    let one = mcp
+        .call("notes.search", json!({ "query": "apple", "limit": 1 }))
+        .await;
+    assert!(!one.is_error(), "{}", one.text());
+    let found = titles(one.structured().expect("structured notes"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].starts_with("Apple "), "{found:?}");
+    let text = mcp
+        .call("notes.search", json!({ "query": "cinnamon" }))
+        .await;
+    assert_eq!(
+        titles(text.structured().expect("structured notes")),
+        ["Apple pie"]
+    );
+    let refused = mcp.call("notes.search", json!({ "limit": 0 })).await;
+    assert_eq!(refused.status(), 200, "a tool error, not a protocol error");
+    assert!(refused.is_error(), "{}", refused.text());
+    assert!(
+        refused.text().contains("limit"),
+        "the error names the field: {}",
+        refused.text()
+    );
+}
+
+/// AGENT-002: the notes tools act for their caller's own user only. Two
+/// users write notes with a word in common. Each one's browser session, a
+/// client the first user approved to read notes and an agent the second
+/// user claimed each find only their own user's notes. The client's token
+/// cannot write. The claimed agent holds every scope the kit declares and
+/// writes for the user it is bound to. An agent no user has claimed holds
+/// no scope: neither tool is listed for it, and each answers 403
+/// `insufficient_scope`.
+async fn agent_002_notes_tools_act_for_the_caller_only() {
+    let mut uma = writer("Uma", "uma@example.test", &[("Uma's shared plan", "Hers.")]).await;
+    let mut vic = writer("Vic", "vic@example.test", &[("Vic's shared plan", "His.")]).await;
+    let shared = json!({ "query": "shared" });
+    let hers = search_in_browser(&uma, shared.clone()).await;
+    assert_eq!(titles(&hers.json()), ["Uma's shared plan"]);
+    let his = search_in_browser(&vic, shared.clone()).await;
+    assert_eq!(titles(&his.json()), ["Vic's shared plan"]);
+
+    let mut machine = Browser::new();
+    let token = user_token(&mut uma, &mut machine, "notes:read", "Read your notes").await;
+    let client = machine.client.mcp().with_token(&token);
+    let listed = client.list().await;
+    assert_eq!(listed.status(), 200, "{listed:?}");
+    let names = listed.tool_names();
+    assert!(
+        names.contains(&"notes.search".to_owned()) && !names.contains(&"notes.create".to_owned()),
+        "{names:?}"
+    );
+    let found = client.call("notes.search", shared.clone()).await;
+    assert!(!found.is_error(), "{}", found.text());
+    assert_eq!(
+        titles(found.structured().expect("structured notes")),
+        ["Uma's shared plan"]
+    );
+    let refused = client
+        .call("notes.create", json!({ "title": "Not the client's to write" }))
+        .await;
+    assert_eq!(refused.status(), 403, "{}", refused.text());
+    assert!(
+        challenge_of(&refused).contains("error=\"insufficient_scope\""),
+        "{}",
+        challenge_of(&refused)
+    );
+
+    let agent_token = claim_agent(&mut vic, &mut machine, "vic@example.test").await;
+    let agents = connected(&mut vic).await["agents"].clone();
+    let held: Vec<&str> = agents[0]["scopes"]
+        .as_array()
+        .expect("the agent's scopes")
+        .iter()
+        .map(|scope| scope["name"].as_str().expect("a scope name"))
+        .collect();
+    assert_eq!(sorted_strs(held), ["notes:read", "notes:write"], "{agents}");
+    let agent = machine.client.mcp().with_token(&agent_token);
+    let names = agent.list().await.tool_names();
+    for name in ["notes.search", "notes.create"] {
+        assert!(names.contains(&name.to_owned()), "{name}: {names:?}");
+    }
+    let found = agent.call("notes.search", shared.clone()).await;
+    assert!(!found.is_error(), "{}", found.text());
+    assert_eq!(
+        titles(found.structured().expect("structured notes")),
+        ["Vic's shared plan"]
+    );
+    let written = agent
+        .call(
+            "notes.create",
+            json!({ "title": "  Written by an agent ", "body": "Kept from nobody." }),
+        )
+        .await;
+    assert!(!written.is_error(), "{}", written.text());
+    assert_eq!(
+        written.structured().expect("the note")["title"],
+        "Written by an agent"
+    );
+    let blank = agent.call("notes.create", json!({ "title": "   " })).await;
+    assert!(blank.is_error(), "{}", blank.text());
+    assert!(blank.text().contains("title"), "{}", blank.text());
+    let theirs = search_in_browser(&vic, json!({ "query": "nobody" })).await;
+    assert_eq!(titles(&theirs.json()), ["Written by an agent"]);
+    let not_hers = search_in_browser(&uma, json!({ "query": "nobody" })).await;
+    assert!(titles(&not_hers.json()).is_empty(), "{}", not_hers.body_text());
+    let listed = vic.visit("/notes").await.inertia_page();
+    assert!(
+        listed["props"]["notes"]
+            .as_array()
+            .is_some_and(|notes| notes.iter().any(|note| note["title"] == "Written by an agent")),
+        "{listed}"
+    );
+
+    let unclaimed = unclaimed_agent_token(&mut machine).await;
+    let stranger = machine.client.mcp().with_token(&unclaimed);
+    let names = stranger.list().await.tool_names();
+    assert!(
+        !names.iter().any(|name| name.starts_with("notes.")),
+        "{names:?}"
+    );
+    for (name, arguments) in [
+        ("notes.search", shared),
+        ("notes.create", json!({ "title": "Nobody's note" })),
+    ] {
+        let refused = stranger.call(name, arguments).await;
+        assert_eq!(refused.status(), 403, "{name}: {}", refused.text());
+        assert!(
+            challenge_of(&refused).contains("error=\"insufficient_scope\""),
+            "{name}: {}",
+            challenge_of(&refused)
+        );
+    }
+}
+
+/// `names` in order.
+fn sorted_strs(mut names: Vec<&str>) -> Vec<&str> {
+    names.sort_unstable();
+    names
+}
+
 macro_rules! cases {
     ($($case:ident),* $(,)?) => {
         $(
@@ -1456,5 +1857,9 @@ async fn agent_pages() {
         agent_008_registration_lowercases_and_refuses_a_mixed_case_duplicate,
         kit_registration_refuses_a_name_over_255_and_an_email_over_254,
         kit_a_signed_in_user_writes_a_note,
+        agent_014_inertia_notes_page_offers_the_notes_tools,
+        agent_001_notes_search_is_matched_before_a_note_id,
+        agent_001_notes_search_reads_its_input_from_the_query,
+        agent_002_notes_tools_act_for_the_caller_only,
     );
 }
