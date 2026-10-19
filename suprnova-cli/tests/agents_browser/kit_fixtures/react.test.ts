@@ -66,6 +66,7 @@ test('agent_015_react_component_tool_registers_while_mounted', async () => {
         description: 'Add an amount to the cart total.',
         inputSchema: SCHEMA,
         consequential: true,
+        debugging: true,
         execute: ({ amount }) => ({ total: total + amount }),
       }),
     { total: 1 },
@@ -75,6 +76,7 @@ test('agent_015_react_component_tool_registers_while_mounted', async () => {
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: true,
+    debugging: true,
   })
   expect(context.descriptors[0].title).toBe('Add to the cart')
   expect(await context.call('cart.add', { amount: 2 })).toEqual({

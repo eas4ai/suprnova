@@ -161,11 +161,13 @@ test(`agent_014_${kit}_server_tool_annotations_follow_the_markings`, async ({ pa
     readOnlyHint: true,
     untrustedContentHint: true,
     consequentialHint: false,
+    debugging: false,
   });
   expect(sentFor('fixture.bump')?.annotations).toEqual({
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: false,
+    debugging: false,
   });
   expect(sentFor('fixture.bump')?.title).toBe('Bump');
   expect(sentFor('fixture.bump')?.description).toBe('Add to the counter the first page shows.');
@@ -185,6 +187,7 @@ test(`agent_014_${kit}_server_tool_annotations_follow_the_markings`, async ({ pa
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: true,
+    debugging: false,
   });
 });
 
@@ -283,6 +286,7 @@ test(`agent_015_${kit}_form_tool_registers_the_generated_schema`, async ({ page 
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: false,
+    debugging: false,
   });
 });
 

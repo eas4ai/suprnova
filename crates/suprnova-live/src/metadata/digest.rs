@@ -401,7 +401,7 @@ fn action_value(action: &ActionMetadata) -> CanonicalValue {
 }
 
 fn tool_value(tool: &ActionToolMetadata) -> CanonicalValue {
-    CanonicalValue::Object(BTreeMap::from([
+    let mut value = BTreeMap::from([
         ("browser".to_owned(), CanonicalValue::Bool(tool.browser())),
         (
             "consequential".to_owned(),
@@ -433,7 +433,13 @@ fn tool_value(tool: &ActionToolMetadata) -> CanonicalValue {
             "untrusted_content".to_owned(),
             CanonicalValue::Bool(tool.untrusted_content()),
         ),
-    ]))
+    ]);
+    // Encoded only when set, so the digest of every tool declared before
+    // WebMCP added the hint stays the one it had.
+    if tool.debugging() {
+        value.insert("debugging".to_owned(), CanonicalValue::Bool(true));
+    }
+    CanonicalValue::Object(value)
 }
 
 fn validation_selection_value(selection: &ValidationSelection) -> CanonicalValue {

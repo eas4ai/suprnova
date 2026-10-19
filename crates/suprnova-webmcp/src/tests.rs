@@ -55,7 +55,8 @@ fn path_case(case: &Value) -> Result<(), String> {
             "annotations": {
                 "readOnlyHint": false,
                 "untrustedContentHint": false,
-                "consequentialHint": false
+                "consequentialHint": false,
+                "debugging": false
             },
             "method": case["method"],
             "path": case["path"],
@@ -152,7 +153,7 @@ fn agent_016_path_csrf_and_results_match_the_browser_fixture() {
     let lists: [(&str, CaseCheck, usize); 3] = [
         ("paths", path_case, 30),
         ("csrf", csrf_case, 7),
-        ("results", result_case, 31),
+        ("results", result_case, 32),
     ];
     for (list, check, count) in lists {
         let cases = cases(&fixture, list);
@@ -186,7 +187,8 @@ fn element() -> Value {
             "annotations": {
                 "readOnlyHint": false,
                 "untrustedContentHint": false,
-                "consequentialHint": false
+                "consequentialHint": false,
+                "debugging": false
             },
             "method": "POST",
             "path": [{ "text": "/app/posts/" }, { "param": "post", "optional": false, "catchAll": false }]
@@ -217,7 +219,6 @@ fn agent_016_server_tools_element_is_read_strictly() {
     duplicate["tools"] = json!([one.clone(), one.clone()]);
 
     let broken: Vec<(&str, Breakage)> = vec![
-        ("an unknown key", Box::new(|e| e["extra"] = json!(1))),
         ("another version", Box::new(|e| e["v"] = json!(2))),
         ("no limits", Box::new(|e| e["limits"] = Value::Null)),
         (
@@ -227,14 +228,6 @@ fn agent_016_server_tools_element_is_read_strictly() {
         (
             "a zero timeout",
             Box::new(|e| e["limits"]["callTimeoutMs"] = json!(0)),
-        ),
-        (
-            "an unknown limit",
-            Box::new(|e| e["limits"]["retries"] = json!(1)),
-        ),
-        (
-            "an unknown tool key",
-            Box::new(|e| e["tools"][0]["outputSchema"] = json!({})),
         ),
         (
             "a name outside the grammar",
@@ -253,17 +246,8 @@ fn agent_016_server_tools_element_is_read_strictly() {
             Box::new(|e| e["tools"][0]["inputSchema"] = json!([])),
         ),
         (
-            "a missing hint",
-            Box::new(|e| {
-                e["tools"][0]["annotations"] = json!({
-                    "readOnlyHint": false,
-                    "untrustedContentHint": false
-                });
-            }),
-        ),
-        (
-            "an extra hint",
-            Box::new(|e| e["tools"][0]["annotations"]["destructiveHint"] = json!(true)),
+            "a debugging hint that is not a boolean",
+            Box::new(|e| e["tools"][0]["annotations"]["debugging"] = json!("yes")),
         ),
         (
             "a hint that is not a boolean",
@@ -297,10 +281,6 @@ fn agent_016_server_tools_element_is_read_strictly() {
             Box::new(|e| e["tools"][0]["path"][1] = json!({ "text": "" })),
         ),
         (
-            "a parameter piece with an unknown key",
-            Box::new(|e| e["tools"][0]["path"][1]["pattern"] = json!(".*")),
-        ),
-        (
             "a parameter without a name",
             Box::new(|e| e["tools"][0]["path"][1]["param"] = json!("")),
         ),
@@ -308,18 +288,107 @@ fn agent_016_server_tools_element_is_read_strictly() {
             "a tool list that is not a list",
             Box::new(|e| e["tools"] = json!({})),
         ),
+        // A known key of the wrong type, or a required one missing.
+        (
+            "a description that is not text",
+            Box::new(|e| e["tools"][0]["description"] = json!(7)),
+        ),
+        (
+            "annotations that are not an object",
+            Box::new(|e| e["tools"][0]["annotations"] = json!([])),
+        ),
+        (
+            "a limit that is not a number",
+            Box::new(|e| e["limits"]["maxResultBytes"] = json!("1024")),
+        ),
+        (
+            "a missing limit",
+            Box::new(|e| {
+                if let Some(limits) = e["limits"].as_object_mut() {
+                    limits.remove("callTimeoutMs");
+                }
+            }),
+        ),
+        (
+            "a tool without a method",
+            Box::new(|e| {
+                if let Some(tool) = e["tools"][0].as_object_mut() {
+                    tool.remove("method");
+                }
+            }),
+        ),
+        (
+            "a text piece that is not text",
+            Box::new(|e| e["tools"][0]["path"][0] = json!({ "text": 5 })),
+        ),
+        (
+            "a piece that is both text and a parameter",
+            Box::new(|e| e["tools"][0]["path"][1]["text"] = json!("/x")),
+        ),
+        (
+            "a parameter piece without its flags",
+            Box::new(|e| e["tools"][0]["path"][1] = json!({ "param": "post" })),
+        ),
+        (
+            "a text piece with a null parameter",
+            Box::new(|e| e["tools"][0]["path"][0]["param"] = Value::Null),
+        ),
+        // serde's derive also reads a struct from an array of its fields in
+        // order, which no page sends.
+        (
+            "an element that is not an object",
+            Box::new(|e| {
+                let positional =
+                    Value::Array(vec![json!(1), e["limits"].clone(), e["tools"].clone()]);
+                *e = positional;
+            }),
+        ),
+        (
+            "limits that are not an object",
+            Box::new(|e| e["limits"] = json!([8_388_608, 30_000])),
+        ),
+        (
+            "a tool that is not an object",
+            Box::new(|e| {
+                let tool = e["tools"][0].clone();
+                e["tools"][0] = Value::Array(
+                    [
+                        "name",
+                        "title",
+                        "description",
+                        "inputSchema",
+                        "annotations",
+                        "method",
+                        "path",
+                    ]
+                    .iter()
+                    .map(|key| tool[*key].clone())
+                    .collect(),
+                );
+            }),
+        ),
+        (
+            "hints that are not an object",
+            Box::new(|e| e["tools"][0]["annotations"] = json!([true, false, false, false])),
+        ),
+        (
+            "a path piece that is not an object",
+            Box::new(|e| e["tools"][0]["path"][0] = json!(["/app/posts/"])),
+        ),
     ];
-    for (why, change) in broken {
-        let mut payload = element();
-        change(&mut payload);
-        assert!(
-            matches!(
+    let read: Vec<&str> = broken
+        .iter()
+        .filter(|(_, change)| {
+            let mut payload = element();
+            change(&mut payload);
+            !matches!(
                 ServerTools::parse(&payload.to_string()),
                 Err(WebMcpError::InvalidPage(_))
-            ),
-            "{why} must not read"
-        );
-    }
+            )
+        })
+        .map(|(why, _)| *why)
+        .collect();
+    assert!(read.is_empty(), "these must not read: {read:?}");
     for (why, payload) in [("sixty-five tools", too_many), ("a name twice", duplicate)] {
         assert!(
             matches!(
@@ -333,6 +402,66 @@ fn agent_016_server_tools_element_is_read_strictly() {
         ServerTools::parse("not json"),
         Err(WebMcpError::InvalidPage(_))
     ));
+}
+
+#[test]
+fn agent_016_an_element_from_another_release_reads_the_keys_it_knows() {
+    // A later release may add a key anywhere in the element; a front end
+    // compiled earlier still reads its tools, and registers only the keys it
+    // knows. A change it must not ignore bumps `v`.
+    let mut later = element();
+    later["later"] = json!(true);
+    later["limits"]["retries"] = json!(3);
+    later["tools"][0]["outputSchema"] = json!({ "type": "object" });
+    later["tools"][0]["annotations"]["futureHint"] = json!(true);
+    later["tools"][0]["path"][1]["pattern"] = json!(".*");
+    let tools = ServerTools::parse(&later.to_string()).expect("unknown keys are ignored");
+    let tool = tools.tool("posts.create").expect("the tool reads");
+    assert_eq!(
+        tool.descriptor(),
+        json!({
+            "name": "posts.create",
+            "title": "Create a post",
+            "description": "Create a draft post for the signed-in user.",
+            "inputSchema": element()["tools"][0]["inputSchema"],
+            "annotations": {
+                "readOnlyHint": false,
+                "untrustedContentHint": false,
+                "consequentialHint": false,
+                "debugging": false
+            }
+        })
+    );
+    let plan = server::plan(tool, &json!({ "post": 7 })).expect("the path reads");
+    assert_eq!(plan.target, "/app/posts/7");
+}
+
+#[test]
+fn agent_016_a_missing_hint_reads_as_false() {
+    let mut older = element();
+    older["tools"][0]["annotations"] = json!({ "readOnlyHint": true });
+    let tools = ServerTools::parse(&older.to_string()).expect("a missing hint reads");
+    let tool = tools.tool("posts.create").expect("the tool reads");
+    assert_eq!(
+        tool.descriptor()["annotations"],
+        json!({
+            "readOnlyHint": true,
+            "untrustedContentHint": false,
+            "consequentialHint": false,
+            "debugging": false
+        })
+    );
+    let mut bare = element();
+    if let Some(tool) = bare["tools"][0].as_object_mut() {
+        tool.remove("annotations");
+    }
+    let tools = ServerTools::parse(&bare.to_string()).expect("no annotations read");
+    assert_eq!(
+        tools
+            .tool("posts.create")
+            .map(|tool| tool.descriptor()["annotations"]["debugging"].clone()),
+        Some(json!(false))
+    );
 }
 
 #[test]
@@ -387,12 +516,13 @@ struct AddTodo {
 }
 
 #[test]
-fn agent_016_page_tool_descriptor_carries_the_derived_schema_and_all_three_hints() {
+fn agent_016_page_tool_descriptor_carries_the_derived_schema_and_all_four_hints() {
     let descriptor = PageTool::<AddTodo>::new("todos.add", "Add an item to the todo list.")
         .title("Add todo")
         .read_only(false)
         .untrusted_content(true)
         .consequential(true)
+        .debugging(true)
         .descriptor()
         .expect("a valid tool has a descriptor");
     assert_eq!(
@@ -405,7 +535,8 @@ fn agent_016_page_tool_descriptor_carries_the_derived_schema_and_all_three_hints
             "annotations": {
                 "readOnlyHint": false,
                 "untrustedContentHint": true,
-                "consequentialHint": true
+                "consequentialHint": true,
+                "debugging": true
             }
         })
     );
@@ -427,7 +558,8 @@ fn agent_016_page_tool_descriptor_carries_the_derived_schema_and_all_three_hints
         json!({
             "readOnlyHint": false,
             "untrustedContentHint": false,
-            "consequentialHint": false
+            "consequentialHint": false,
+            "debugging": false
         })
     );
 }
@@ -595,5 +727,55 @@ fn agent_016_validation_messages_take_the_servers_english_text() {
             }],
             "isError": true
         })
+    );
+}
+
+/// How to order the todo list, an enum nested in a page tool input.
+#[crate::tool_schema]
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TodoOrder {
+    /// Newest first.
+    Newest,
+    /// Oldest first.
+    Oldest,
+}
+
+/// Sorting the todo list.
+#[tool_input]
+struct SortTodos {
+    /// The order to show the list in.
+    order: TodoOrder,
+}
+
+async fn sort_todos(input: SortTodos) -> Result<ToolResult, ToolError> {
+    Ok(ToolResult::text(format!("{:?}", input.order)))
+}
+
+#[test]
+fn agent_016_a_nested_enum_takes_tool_schema() {
+    // The enum names no schemars path: `#[tool_schema]` points its derive
+    // at the crate's copy, and its schema is part of the tool's.
+    let descriptor = PageTool::<SortTodos>::new("todos.sort", "Sort the todo list.")
+        .descriptor()
+        .expect("a valid tool has a descriptor");
+    let schema = &descriptor["inputSchema"];
+    assert_eq!(
+        schema["properties"]["order"]["$ref"], "#/$defs/TodoOrder",
+        "{schema:#}"
+    );
+    // Documented variants are described one by one, each a `const`.
+    let variants: Vec<&Value> = schema["$defs"]["TodoOrder"]["oneOf"]
+        .as_array()
+        .map(|variants| variants.iter().map(|variant| &variant["const"]).collect())
+        .unwrap_or_default();
+    assert_eq!(variants, [&json!("newest"), &json!("oldest")], "{schema:#}");
+    let sorted = ready(crate::tool::run(&sort_todos, r#"{"order":"oldest"}"#));
+    assert_eq!(shown(&sorted)["content"][0]["text"], "Oldest");
+    let refused = ready(crate::tool::run(&sort_todos, r#"{"order":"sideways"}"#));
+    assert!(refused.is_error, "{refused:?}");
+    assert!(
+        matches!(&refused.content[..], [crate::Content::Text { text }] if text.starts_with("Invalid input: unknown variant `sideways`")),
+        "{refused:?}"
     );
 }

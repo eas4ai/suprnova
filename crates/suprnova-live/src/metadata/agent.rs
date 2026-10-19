@@ -39,6 +39,7 @@ pub struct ActionToolMetadata {
     read_only: bool,
     untrusted_content: bool,
     consequential: bool,
+    debugging: bool,
     browser: bool,
     headless: bool,
 }
@@ -69,6 +70,7 @@ impl ActionToolMetadata {
             read_only: false,
             untrusted_content: false,
             consequential: false,
+            debugging: false,
             browser: false,
             headless: false,
         })
@@ -101,6 +103,14 @@ impl ActionToolMetadata {
         self.read_only = read_only;
         self.untrusted_content = untrusted_content;
         self.consequential = consequential;
+        self
+    }
+
+    /// The same tool marked for debugging and developer tooling rather than
+    /// end users: WebMCP's `debugging` hint.
+    #[must_use]
+    pub const fn with_debugging(mut self, debugging: bool) -> Self {
+        self.debugging = debugging;
         self
     }
 
@@ -155,6 +165,12 @@ impl ActionToolMetadata {
     #[must_use]
     pub const fn consequential(&self) -> bool {
         self.consequential
+    }
+
+    /// Whether the tool is meant for debugging and developer tooling.
+    #[must_use]
+    pub const fn debugging(&self) -> bool {
+        self.debugging
     }
 
     /// Whether the browser registers the tool.

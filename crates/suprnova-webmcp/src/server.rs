@@ -7,7 +7,8 @@ use std::fmt;
 use std::future::Future;
 use std::rc::Rc;
 
-use serde::Deserialize;
+use serde::de::{DeserializeOwned, Error as _};
+use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
 use crate::error::WebMcpError;
@@ -143,16 +144,22 @@ impl ServerTools {
         self.tools.iter().find(|tool| tool.name == name)
     }
 
-    /// Read and check the element's JSON as strictly as the Live runtime
-    /// reads an island's tools: an unknown key, a missing hint, a name
-    /// outside the grammar, a path that does not start at the page's root,
-    /// an empty tool list or a null title refuses the whole element. The
-    /// server writes none of these: it leaves the element out when a page
-    /// offers no tool, and leaves `title` out when a tool declares none.
+    /// Read and check the element's JSON as the Live runtime and the kits
+    /// read it. A key this reader does not know is ignored at every level,
+    /// so a later release can add one without breaking a front end compiled
+    /// earlier, and it never reaches a registration; a missing hint reads as
+    /// `false`. A change an older reader must not ignore bumps `v`, so a `v`
+    /// other than 1 refuses the element. So do a known key of the wrong
+    /// type, a missing required key, a name outside the grammar, a path that
+    /// does not start at the page's root, an empty tool list and a null
+    /// title. The server writes none of these: it leaves the element out
+    /// when a page offers no tool, and leaves `title` out when a tool
+    /// declares none.
     pub(crate) fn parse(text: &str) -> Result<Self, WebMcpError> {
         let invalid = |reason: String| WebMcpError::InvalidPage(reason);
-        let page: RawPage =
-            serde_json::from_str(text).map_err(|error| invalid(error.to_string()))?;
+        let page = serde_json::from_str::<Map<String, Value>>(text)
+            .and_then(|fields| RawPage::deserialize(Value::Object(fields)))
+            .map_err(|error| invalid(error.to_string()))?;
         if page.v != 1 {
             return Err(invalid(format!("version {} is not 1", page.v)));
         }
@@ -322,39 +329,62 @@ fn check_path(pieces: &[Piece]) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// The element's JSON, as the contract writes it.
+/// The element's JSON, as the contract writes it. Keys this reader does
+/// not know are ignored here and in the structs below; a change an older
+/// reader must not ignore bumps `v`.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawPage {
     v: u64,
+    #[serde(deserialize_with = "object")]
     limits: RawLimits,
+    #[serde(deserialize_with = "objects")]
     tools: Vec<RawTool>,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct RawLimits {
     max_result_bytes: u64,
     call_timeout_ms: u64,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct RawTool {
     name: String,
     #[serde(default, deserialize_with = "present_title")]
     title: Option<String>,
     description: String,
     input_schema: Map<String, Value>,
+    // Missing annotations read as four `false` hints.
+    #[serde(default, deserialize_with = "object")]
     annotations: Annotations,
     method: String,
     path: Vec<Piece>,
 }
 
+/// `T` read only from a JSON object. serde's derive also reads a struct
+/// from an array of its fields in order, which no page sends, so an array
+/// where the contract has an object is a value of the wrong type.
+pub(crate) fn object<'de, D: Deserializer<'de>, T: DeserializeOwned>(
+    deserializer: D,
+) -> Result<T, D::Error> {
+    let fields = Map::<String, Value>::deserialize(deserializer)?;
+    T::deserialize(Value::Object(fields)).map_err(D::Error::custom)
+}
+
+/// A list of `T`, each read only from a JSON object, as [`object`] reads one.
+fn objects<'de, D: Deserializer<'de>, T: DeserializeOwned>(
+    deserializer: D,
+) -> Result<Vec<T>, D::Error> {
+    Vec::<Map<String, Value>>::deserialize(deserializer)?
+        .into_iter()
+        .map(|fields| T::deserialize(Value::Object(fields)).map_err(D::Error::custom))
+        .collect()
+}
+
 /// A `title` that is present is a string; `null` is refused, since the
 /// server leaves the key out instead.
-fn present_title<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<String>, D::Error> {
+fn present_title<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
     String::deserialize(deserializer).map(Some)
 }

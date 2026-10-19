@@ -105,6 +105,8 @@ const CORE_CASES: &[&str] = &[
     "agent_014_inertia_visit_replaces_the_page_tools",
     "agent_014_history_back_restores_that_pages_tools",
     "agent_014_invalid_page_tools_register_nothing",
+    "agent_014_page_tools_ignore_keys_they_do_not_know",
+    "agent_014_a_missing_hint_reads_as_false",
     "agent_014_server_tool_call_carries_session_csrf_and_header",
     "agent_014_write_tool_reloads_the_page_props",
     "agent_014_read_only_tool_does_not_reload",
