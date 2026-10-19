@@ -1,5 +1,5 @@
 {
-  "about": "Shared cases for every browser implementation of a server tool call (AGENT-014, AGENT-015, AGENT-016): the Live runtime, the three kits and the WebAssembly crate. They mirror the MCP dispatcher's path and query rules (framework/src/agents/dispatch.rs), except that a browser refuses a `.` or `..` path value, which its URL parser would resolve before the request leaves and its result mapping (framework/src/agents/mcp/tools.rs), without resultType, plus the browser-only rows. Read it; do not edit it in a lane.",
+  "about": "Shared cases for every browser implementation of a server tool call (AGENT-014, AGENT-015, AGENT-016): the Live runtime, the three kits and the WebAssembly crate. The paths mirror the MCP dispatcher's path and query rules (framework/src/agents/dispatch.rs), except that a browser refuses a `.` or `..` path value, which its URL parser would resolve before the request leaves. The results mirror its result mapping (framework/src/agents/mcp/tools.rs) without resultType, plus the rows only a browser meets, each marked browserOnly. Read it; do not edit it in a lane.",
   "paths": [
     {
       "name": "a number fills its segment",
@@ -811,7 +811,8 @@
           }
         ],
         "isError": true
-      }
+      },
+      "browserOnly": true
     },
     {
       "name": "a redirect status",
@@ -848,7 +849,8 @@
           }
         ],
         "isError": true
-      }
+      },
+      "browserOnly": true
     },
     {
       "name": "validation errors name each field",
@@ -974,7 +976,8 @@
           }
         ],
         "isError": true
-      }
+      },
+      "browserOnly": true
     },
     {
       "name": "a 422 without errors shows its message",
@@ -1208,7 +1211,8 @@
           }
         ],
         "isError": true
-      }
+      },
+      "browserOnly": true
     },
     {
       "name": "a network failure",
@@ -1224,7 +1228,8 @@
           }
         ],
         "isError": true
-      }
+      },
+      "browserOnly": true
     },
     {
       "name": "the call timer fired",
@@ -1241,7 +1246,8 @@
           }
         ],
         "isError": true
-      }
+      },
+      "browserOnly": true
     },
     {
       "name": "the call timer fired at a fraction of a second",
@@ -1258,7 +1264,8 @@
           }
         ],
         "isError": true
-      }
+      },
+      "browserOnly": true
     }
   ]
 }
