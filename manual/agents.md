@@ -560,6 +560,13 @@ The scopes are the ones `tool_scopes!` declared. The server keeps its grants
 in four tables. `OAuthServer::migrate(&db)` creates them and is safe to run on
 every boot; the Magnetar default engine's migrations create them too.
 
+Every node prunes those tables every five minutes while it serves. It deletes
+pending authorizations and codes that lapsed, tokens that expired, and grants
+that ended more than 30 days ago: revoked grants, and grants with no token
+left and no use since. A live grant or token is never pruned. A spent refresh
+token stays until it expires, so a second use of it is still caught.
+`agents:prune` runs the same pass once, with or without agent auth.
+
 The token, revocation and registration endpoints are called by clients, with
 no cookie, so they get no session and need no CSRF token. The approval page
 needs the signed-in user, takes its answer by a CSRF-protected form and
@@ -904,10 +911,12 @@ cargo run -- agents:key
   every token the leaked key could have reached. In production it also asks
   you to type the environment's name at a terminal. Running it again finishes
   a run that failed partway.
-- **`agents:prune`** runs the maintenance pass once: it delivers waiting
-  claim events, expires unclaimed registrations, prunes spent replay records
-  and deletes claim events delivered more than seven days ago, and reports
-  how many events failed. `--retry-failed` puts failed events back first.
+- **`agents:prune`** runs the maintenance pass once. It prunes the OAuth
+  server's rows that can no longer be used. With agent auth on, it also
+  delivers waiting claim events, expires unclaimed registrations, prunes
+  spent replay records and deletes claim events delivered more than seven
+  days ago, and reports how many events failed. `--retry-failed` puts failed
+  events back first, and needs agent auth.
 - **Keep the nodes' clocks in sync.** Expiry, the two-minute skew on issue
   times and the delivery leases compare each node's clock.
 - **The audit log holds email addresses.** Agent auth writes one structured
