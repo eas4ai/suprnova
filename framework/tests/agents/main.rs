@@ -6,6 +6,8 @@
 //! header (AGENT-014, `page_tools` and `origin_trial`). The `agents`
 //! mechanism runs this binary. Agent accounts under auth.md
 //! (AGENT-007 to AGENT-011) are `agent_auth` and `agent_auth_magnetar`.
+//! What an application's own consent pages are built on, and the plugins'
+//! migrations (AGENT-017), are `consent` and `migrations`.
 
 #[path = "../support/env_lock.rs"]
 mod env_lock;
@@ -23,11 +25,14 @@ mod agent_auth_magnetar;
 mod auth;
 mod build;
 mod callers;
+mod consent;
 mod dispatch;
 mod endpoint;
 mod live_browser;
 mod live_headless;
+mod manual;
 mod marker;
+mod migrations;
 mod oauth;
 mod oauth_magnetar;
 mod origin_trial;
@@ -36,6 +41,7 @@ mod page_tools;
 mod registry;
 mod schema;
 mod surface;
+mod tool_output;
 #[cfg(feature = "localization")]
 mod wasm_messages;
 mod wasm_schema;

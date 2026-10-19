@@ -10,7 +10,11 @@ export type RuntimeFeatureRegistrationOutcome =
   "registered" | "already_registered" | "incompatible" | "conflict" | "registry_full";
 export type RuntimeFeatureDiagnosticDetail =
   "contract_mismatch" | "operation_rejected" | "resource_exhausted";
-export type FreshRenderReason = "poll" | "stream";
+/**
+ * Why an island renders fresh: a poll, a stream event, or an agent's write
+ * tool the page called (AGENT-014), which only the runtime itself asks for.
+ */
+export type FreshRenderReason = "poll" | "stream" | "agent";
 export type FreshRenderDisposition = "queued" | "coalesced" | "retired" | "exhausted";
 export type FreshRenderCompletion = "succeeded" | "failed" | "canceled" | "retired";
 export type FreshRenderCompletionObserver = (completion: FreshRenderCompletion) => void;

@@ -12,12 +12,13 @@
 
 use std::sync::Arc;
 
-use magnetar::authorization_server::{AuthorizationServer, PendingAuthorizationView};
+use magnetar::authorization_server::AuthorizationServer;
 
 use super::OAuthServer;
 use super::grants::{self, ClientGrant};
 use crate::agents::AgentAccount;
 use crate::agents::agent_auth::MountedAgentAuth;
+use crate::agents::consent::{AgentApprovals, ApprovalLookup, PendingApproval};
 use crate::agents::page::{Html, csrf_token, guard_errors, guarded, notice, sign_in_redirect};
 use crate::csrf::CsrfMiddleware;
 use crate::error::FrameworkError;
@@ -119,32 +120,34 @@ pub(super) fn mount_connected(
 
 /// The approval page: the client, its host and every scope it asks for,
 /// and a form that posts the user's decision to the authorization server.
+/// It reads the pending authorization through [`AgentApprovals`], as an
+/// application's own page does.
 async fn approval(pages: Arc<Pages>, request: Request) -> Response {
-    // The user signs in before anything about the request is shown.
-    let Some(session) = signed_in_session().await? else {
-        return Ok(pages.sign_in(&request));
-    };
-    let Some(id) = request
+    let id = request
         .query_param("authorization")
-        .filter(|id| !id.is_empty())
-    else {
-        return Ok(notice(
-            400,
-            "Nothing to approve",
-            "This link does not name an authorization request.",
-        ));
-    };
-    let pending = pages
-        .server
-        .pending_authorization(&id, &session)
-        .await
-        .map_err(unavailable)?;
-    let Some(pending) = pending else {
-        return Ok(notice(
-            404,
-            "This request has ended",
-            "It expired or was already answered. Start again from the app that asked.",
-        ));
+        .filter(|id| !id.is_empty());
+    // The facade answers a guest before it reads the id, so the user signs
+    // in before anything about the request is shown.
+    let lookup = AgentApprovals::new(Arc::clone(&pages.server))
+        .pending(id.as_deref().unwrap_or_default())
+        .await?;
+    let pending = match (lookup, id) {
+        (ApprovalLookup::SignIn, _) => return Ok(pages.sign_in(&request)),
+        (_, None) => {
+            return Ok(notice(
+                400,
+                "Nothing to approve",
+                "This link does not name an authorization request.",
+            ));
+        }
+        (ApprovalLookup::Ended, Some(_)) => {
+            return Ok(notice(
+                404,
+                "This request has ended",
+                "It expired or was already answered. Start again from the app that asked.",
+            ));
+        }
+        (ApprovalLookup::Pending(pending), Some(_)) => pending,
     };
     let token = csrf_token()?;
     let action = crate::routing::url::to(&format!(
@@ -156,7 +159,7 @@ async fn approval(pages: Arc<Pages>, request: Request) -> Response {
     ))))
 }
 
-fn render_approval(pending: &PendingAuthorizationView, action: &str, token: &str) -> String {
+fn render_approval(pending: &PendingApproval, action: &str, token: &str) -> String {
     let mut html = Html::default();
     html.raw("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n")
         // The title holds no markup to isolate a name in, so it names none.

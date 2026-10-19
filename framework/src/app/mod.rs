@@ -348,10 +348,13 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Deliver waiting claim events, expire unclaimed agent registrations
+    /// Prune the OAuth server's lapsed authorizations, expired tokens and
+    /// grants ended longer ago than their retention, and, with agent auth,
+    /// deliver waiting claim events, expire unclaimed agent registrations
     /// past their window and delete spent replay records and old delivered
-    /// claim events: the pass `serve` runs every five minutes. Reports how
-    /// many claim events failed after their twelve delivery attempts.
+    /// claim events: the pass `serve` runs every five minutes. Reports what
+    /// it pruned, and how many claim events failed after their twelve
+    /// delivery attempts.
     #[cfg(feature = "agents")]
     #[command(name = "agents:prune")]
     AgentsPrune {
@@ -1651,7 +1654,8 @@ where
     }
 
     /// `agents:revoke-all` and `agents:prune`: boot as a worker does, build
-    /// the router `serve` would serve, and act on the agent auth it mounts.
+    /// the router `serve` would serve, and act on the agent auth or the
+    /// OAuth server it mounts.
     ///
     /// Only the process-wide hook runs: the router's agent auth needs
     /// nothing the HTTP-only hook installs, and an operator may run these
@@ -1669,35 +1673,36 @@ where
         let router = RoutesFn::build_router(routes_fn)
             .await
             .map_err(|e| failed(format!("suprnova: {name}: the routes did not build: {e}")))?;
-        let Some(engine) = router.agent_auth() else {
-            return Err(failed(format!(
+        let no_agent_auth = || {
+            failed(format!(
                 "suprnova: {name}: the application's router serves no agent auth \
                  (AgentsConfig::agent_auth)"
-            )));
+            ))
         };
         use crate::agents::agent_auth::operator;
         match command {
             AgentsCommand::RevokeAll => {
+                let engine = router.agent_auth().ok_or_else(no_agent_auth)?;
                 let revoked = operator::revoke_all(&engine).await?;
                 println!("Revoked {revoked} agent registrations and every token issued from them.");
             }
             AgentsCommand::Prune { retry_failed } => {
+                // The OAuth server's rows are pruned with or without agent
+                // auth; its claim events need agent auth.
+                let Some(mounted) = router.oauth_server() else {
+                    return Err(failed(format!(
+                        "suprnova: {name}: the application's router serves no OAuth server \
+                         (AgentsConfig::oauth_server)"
+                    )));
+                };
                 if retry_failed {
+                    let engine = router.agent_auth().ok_or_else(no_agent_auth)?;
                     let put_back = operator::retry_failed(&engine).await?;
                     println!("Put {put_back} failed claim events back for delivery.");
                 }
-                let done = operator::maintain(&engine).await;
-                println!(
-                    "Delivered {} claim events, expired {} agent registrations, and pruned {} \
-                     replay records and {} delivered claim events.",
-                    done.delivered, done.expired, done.pruned, done.events_pruned
-                );
-                if done.failed > 0 {
-                    println!(
-                        "{} claim events failed after their last delivery attempt; fix what \
-                         refused them, then run `agents:prune --retry-failed`.",
-                        done.failed
-                    );
+                let done = operator::maintain(&mounted).await;
+                for line in operator::report(&done) {
+                    println!("{line}");
                 }
                 // Every step ran; one that failed still fails the command,
                 // so the operator sees it.

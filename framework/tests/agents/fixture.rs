@@ -12,7 +12,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::Serialize;
 use suprnova::agents::AgentsConfig;
 use suprnova::auth::Authenticatable;
 use suprnova::cache::{CacheStore, InMemoryCache};
@@ -20,7 +19,7 @@ use suprnova::container::testing::TestContainer;
 use suprnova::rate_limit::ThrottleRequestsMiddleware;
 use suprnova::{
     Gate, HttpResponse, JsonSchema, Middleware, MiddlewareRegistry, Next, Request, Response,
-    Router, ToolCaller, Validate, handler, json_response, tool, tool_input,
+    Router, ToolCaller, Validate, handler, json_response, tool, tool_input, tool_output,
 };
 
 suprnova::tool_scopes! {
@@ -78,8 +77,7 @@ pub struct CreatePost {
 }
 
 /// What `posts.create` answers.
-#[derive(Serialize, JsonSchema)]
-#[schemars(crate = "suprnova::__schemars")]
+#[tool_output]
 pub struct PostView {
     pub id: u64,
     pub title: String,

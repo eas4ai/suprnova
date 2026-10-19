@@ -355,7 +355,7 @@ Neither form edits `.env` for you - copy the printed key into your
 `.env` (or your secrets manager) yourself.
 
 For key rotation (where old encrypted data must still decrypt during
-the migration window), see [Encryption](encryption.md#key-rotation).
+the migration window), see [Encryption](encryption.md#key-rotation---the-keyring).
 
 ## Configuration in tests
 

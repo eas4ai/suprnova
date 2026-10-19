@@ -153,11 +153,18 @@ pub mod tokens {
 /// missing. Running it again changes nothing, and two processes running it
 /// at once both succeed.
 ///
+/// It takes any connection, a transaction included, so a SeaORM migration
+/// can run it on the connection its `SchemaManager` hands it, which is a
+/// transaction on PostgreSQL. A failed statement aborts a PostgreSQL
+/// transaction, so there the check that tolerates another process creating
+/// an index at the same moment cannot run, and the second of two
+/// concurrent migrations fails instead.
+///
 /// # Errors
 ///
 /// Returns an error for a backend other than SQLite, PostgreSQL or MySQL,
 /// or when the database refuses a statement.
-pub async fn migrate(db: &DatabaseConnection) -> Result<()> {
+pub async fn migrate<C: ConnectionTrait + ?Sized>(db: &C) -> Result<()> {
     let backend = db.get_database_backend();
     if !matches!(
         backend,
@@ -266,8 +273,8 @@ pub async fn migrate(db: &DatabaseConnection) -> Result<()> {
 /// Create an index unless it exists. When the create fails because another
 /// process created the index between the check and the create, the index
 /// is there and the failure is not one.
-async fn ensure_index(
-    db: &DatabaseConnection,
+async fn ensure_index<C: ConnectionTrait + ?Sized>(
+    db: &C,
     table: &str,
     name: &str,
     columns: &[&'static str],

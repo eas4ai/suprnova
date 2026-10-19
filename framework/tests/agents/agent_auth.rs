@@ -144,6 +144,17 @@ pub fn agent_world_in(
     db: DatabaseConnection,
     configure: impl FnOnce(AgentAuth) -> AgentAuth,
 ) -> AgentWorld {
+    agent_world_routed(container, db, configure, |router| router)
+}
+
+/// [`agent_world_in`] with the router widened by `routes`, which adds the
+/// routes a test calls an application's own pages through.
+pub fn agent_world_routed(
+    container: Box<dyn Any>,
+    db: DatabaseConnection,
+    configure: impl FnOnce(AgentAuth) -> AgentAuth,
+    routes: impl FnOnce(Router) -> Router,
+) -> AgentWorld {
     let resolver = Arc::new(FakeResolver::default());
     resolver.answer(PROVIDER_HOST, "93.184.215.14");
     let documents = Arc::new(FakeDocuments::default());
@@ -151,7 +162,7 @@ pub fn agent_world_in(
     documents.serve(PROVIDER_JWKS, &json!({ "keys": [provider.jwk()] }));
     let pem = service_pem();
     let client = TestClient::new(
-        agent_router(&db, &pem, &resolver, &documents, configure),
+        routes(agent_router(&db, &pem, &resolver, &documents, configure)),
         registry(),
     )
     .with_peer_address(PEER.parse().unwrap());
@@ -291,14 +302,14 @@ async fn register(client: &TestClient, body: Value) -> TestResponse {
 }
 
 /// Register anonymously and answer the body.
-async fn anonymous(client: &TestClient) -> Value {
+pub async fn anonymous(client: &TestClient) -> Value {
     let response = register(client, json!({ "type": "anonymous" })).await;
     assert_eq!(response.status(), 200, "{}", response.body_text());
     response.json()
 }
 
 /// Register by `service_auth` for `email` and answer the body.
-async fn service_auth(client: &TestClient, email: &str) -> Value {
+pub async fn service_auth(client: &TestClient, email: &str) -> Value {
     let response = register(
         client,
         json!({ "type": "service_auth", "login_hint": email }),
@@ -308,7 +319,7 @@ async fn service_auth(client: &TestClient, email: &str) -> Value {
     response.json()
 }
 
-async fn present(client: &TestClient, id_jag: &str) -> TestResponse {
+pub async fn present(client: &TestClient, id_jag: &str) -> TestResponse {
     register(
         client,
         json!({
@@ -340,7 +351,7 @@ async fn agent_token(client: &TestClient, assertion: &str) -> String {
     tokens.json()["access_token"].as_str().unwrap().to_owned()
 }
 
-async fn initiate(client: &TestClient, claim_token: &str, email: &str) -> TestResponse {
+pub async fn initiate(client: &TestClient, claim_token: &str, email: &str) -> TestResponse {
     client
         .post("/agent/identity/claim")
         .json(&json!({ "claim_token": claim_token, "email": email }))
@@ -3670,4 +3681,44 @@ async fn agent_008_two_verified_accounts_differing_in_case_are_refused() {
         "{body}"
     );
     assert_eq!(provisioner.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn agent_010_agents_prune_prunes_ended_oauth_grants_with_agent_auth_on() {
+    alone(
+        "agent_010_agents_prune_prunes_ended_oauth_grants_with_agent_auth_on",
+        async {
+            let world = agent_world(|agent| agent).await;
+            let live =
+                crate::oauth::connect(&world.client, &new_account("pass-live"), "posts:read").await;
+            let ended =
+                crate::oauth::connect(&world.client, &new_account("pass-ended"), "posts:read")
+                    .await;
+            let live_grant = crate::oauth::grant_of(&world.db, &live.access).await;
+            let ended_grant = crate::oauth::grant_of(&world.db, &ended.access).await;
+            crate::oauth::revoke_grant_days_ago(&world.db, &ended_grant, 40).await;
+            agents_prune(&world, |agent| agent, &[]).await;
+            assert!(
+                crate::oauth::grant_row(&world.db, &ended_grant)
+                    .await
+                    .is_none(),
+                "the same pass prunes the OAuth server's ended grants"
+            );
+            assert!(
+                crate::oauth::token_row(&world.db, &ended.refresh)
+                    .await
+                    .is_none()
+            );
+            assert!(
+                crate::oauth::grant_row(&world.db, &live_grant)
+                    .await
+                    .is_some()
+            );
+            assert!(
+                crate::oauth::token_row(&world.db, &live.access)
+                    .await
+                    .is_some()
+            );
+        },
+    );
 }

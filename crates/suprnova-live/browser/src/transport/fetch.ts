@@ -263,9 +263,16 @@ export class LiveTransportCoordinator {
     if (work === undefined) return;
     const connectionEpoch = record.connectionEpoch();
     try {
+      // A fresh render exists only in protocol 2: an island mounted for
+      // protocol 1 asks for one, as the runtime does after a WebMCP write
+      // tool (AGENT-014), under protocol 2 when the server speaks it.
+      const freshRender = ticket.intent.operations.some(
+        (operation) => operation.kind === "fresh_render",
+      );
       const protocolVersion = Math.max(
         this.#config.protocol.minimum,
         record.metadata.protocolMinimum,
+        freshRender ? Math.min(2, this.#config.protocol.maximum) : 1,
       ) as 1 | 2;
       const request = await this.#builder.build({
         intent: ticket.intent,

@@ -834,7 +834,8 @@ pub fn request(attr: TokenStream, input: TokenStream) -> TokenStream {
 ///   `tool_scopes!` declared. An undeclared scope fails the build.
 /// - `input`: the argument type, usually a `#[tool_input]` struct. Its JSON
 ///   Schema (draft 2020-12) is the tool's input schema.
-/// - `output`: a type whose JSON Schema is the tool's output schema.
+/// - `output`: a type whose JSON Schema is the tool's output schema, usually
+///   a [`macro@tool_output`] struct.
 /// - `annotations(...)`: hints for clients: `read_only`, `destructive`,
 ///   `idempotent`, `open_world`, `untrusted_content`.
 /// - `title`: a display name.
@@ -874,6 +875,36 @@ pub fn tool(attr: TokenStream, input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn tool_input(attr: TokenStream, input: TokenStream) -> TokenStream {
     request::tool_input_attr_impl(attr, input)
+}
+
+/// Define a tool's output: the type named in `#[tool(output = ...)]`, whose
+/// JSON Schema (draft 2020-12) is the tool's output schema (AGENT-001).
+///
+/// It derives `Serialize` and `JsonSchema` through the framework's own
+/// copies of `serde` and `schemars`, so an application depends on neither
+/// to declare one. The type is a struct with named fields, since MCP
+/// describes a tool's structured result with an object schema. A doc
+/// comment on a field becomes its description, and the field attributes
+/// are serde's and schemars' own.
+///
+/// ```
+/// /// What `reviews.create` answers.
+/// #[suprnova::tool_output]
+/// pub struct ReviewView {
+///     /// The review.
+///     pub id: u64,
+///     /// Its stars, 1 to 5.
+///     pub stars: u8,
+/// }
+///
+/// fn has_schema<T: suprnova::JsonSchema>() {}
+/// has_schema::<ReviewView>();
+/// let json = suprnova::serde_json::to_string(&ReviewView { id: 1, stars: 5 }).unwrap();
+/// assert_eq!(json, r#"{"id":1,"stars":5}"#);
+/// ```
+#[proc_macro_attribute]
+pub fn tool_output(attr: TokenStream, input: TokenStream) -> TokenStream {
+    request::tool_output_attr_impl(attr, input)
 }
 
 /// Attribute macro for database-enabled tests

@@ -211,6 +211,59 @@ pub fn tool_input_attr_impl(_attr: TokenStream, input: TokenStream) -> TokenStre
     request_attr_tokens(input, true).into()
 }
 
+/// The `JsonSchema` derive of a tool's input or output type, and the
+/// attribute pointing it at the framework's copy of `schemars`, so an
+/// application needs no `schemars` of its own. `#[tool_input]` and
+/// `#[tool_output]` both derive a tool's schema with it.
+fn json_schema_derive() -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    (
+        quote!(::suprnova::JsonSchema),
+        quote!(#[schemars(crate = "::suprnova::__schemars")]),
+    )
+}
+
+/// Implementation of the `#[tool_output]` attribute macro: the type whose
+/// JSON Schema is a tool's output schema (AGENT-001). It derives
+/// `Serialize` and `JsonSchema` through the framework's own copies of
+/// `serde` and `schemars`, so an application names neither crate.
+///
+/// The type is a struct with named fields, because MCP describes a tool's
+/// structured result with an object schema.
+pub fn tool_output_attr_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
+    if !attr.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "#[tool_output] takes no arguments",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let input = parse_macro_input!(input as DeriveInput);
+    let named = matches!(
+        &input.data,
+        syn::Data::Struct(data) if matches!(data.fields, syn::Fields::Named(_))
+    );
+    if !named {
+        return syn::Error::new_spanned(
+            &input.ident,
+            "#[tool_output] needs a struct with named fields: a tool's output schema is a JSON \
+             object",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let (json_schema, schemars_crate) = json_schema_derive();
+    // The derives come first, so the user's `#[serde(...)]` attributes
+    // follow the derive that introduces them (`legacy_derive_helpers`).
+    quote! {
+        #[derive(::suprnova::serde::Serialize, #json_schema)]
+        #[serde(crate = "::suprnova::serde")]
+        #schemars_crate
+        #input
+    }
+    .into()
+}
+
 /// The struct with its derives, the `FormRequest` impl and the input-name
 /// registration; with `schema`, the `JsonSchema` derive as well.
 fn request_attr_tokens(input: DeriveInput, schema: bool) -> proc_macro2::TokenStream {
@@ -281,13 +334,14 @@ fn request_attr_tokens(input: DeriveInput, schema: bool) -> proc_macro2::TokenSt
     // refuses a derive helper placed before the derive that introduces it
     // (`legacy_derive_helpers`).
     let derives = if schema {
+        let (json_schema, schemars_crate) = json_schema_derive();
         quote! {
             #[derive(
                 ::suprnova::serde::Deserialize,
                 ::suprnova::validator::Validate,
-                ::suprnova::JsonSchema
+                #json_schema
             )]
-            #[schemars(crate = "::suprnova::__schemars")]
+            #schemars_crate
         }
     } else {
         quote! {

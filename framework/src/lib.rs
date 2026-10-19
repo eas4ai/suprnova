@@ -415,7 +415,7 @@ pub use inertia::{
     SsrResponse, VersionResolver, Visibility, ViteManifest,
 };
 pub use security_headers::{
-    ContentSecurityPolicy, CspNonce, SecurityHeaders, SecurityHeadersOverride,
+    ConsentPageHeaders, ContentSecurityPolicy, CspNonce, SecurityHeaders, SecurityHeadersOverride,
 };
 // The error response the PAR-062 callback decides, on its own line so the
 // list above stays stable.
@@ -896,16 +896,23 @@ pub use validator::Validate;
 // is pointed at this path, so an application needs no `schemars` of its own.
 #[cfg(feature = "agents")]
 pub use agents::{
-    AgentAuth, AgentClaimed, AgentsConfig, CallerKind, ConnectedAgents, LiveMountRequest,
-    OAuthServer, OutsideIssuer, PageTools, ToolCaller, WebMcpConfig,
+    AgentApprovals, AgentAuth, AgentClaimed, AgentClaims, AgentsConfig, CallerKind,
+    ConnectedAgents, LiveMountRequest, OAuthServer, OutsideIssuer, PageTools, ToolCaller,
+    WebMcpConfig,
 };
 #[cfg(feature = "agents")]
 #[doc(hidden)]
 pub use schemars as __schemars;
 /// Derive or implement the JSON Schema (draft 2020-12) of a tool's input or
-/// output type. `#[tool_input]` derives it for you.
+/// output type. `#[tool_input]` and `#[tool_output]` derive it for you.
 #[cfg(feature = "agents")]
 pub use schemars::JsonSchema;
+/// Mark a tool's output type, the one `#[tool(output = ...)]` names: it
+/// derives `Serialize` and `JsonSchema` through the framework, so an
+/// application needs no `serde` or `schemars` of its own to publish the
+/// tool's output schema.
+#[cfg(feature = "agents")]
+pub use suprnova_macros::tool_output;
 #[cfg(feature = "agents")]
 pub use suprnova_macros::{tool, tool_input};
 

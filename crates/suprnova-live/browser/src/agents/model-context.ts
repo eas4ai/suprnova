@@ -1,19 +1,33 @@
 /**
- * WebMCP registration of a Live island's tool actions (AGENT-012).
+ * WebMCP registration of a page's tools: a Live island's tool actions
+ * (AGENT-012) and the server tools the page offers (AGENT-014).
  *
- * The page registers each tool the island root lists with
- * `document.modelContext.registerTool`, each with its own abort signal, and
- * aborts it when the island leaves the page, the document is suspended into
- * the back/forward cache, or the runtime is disposed. A browser without
- * WebMCP registers nothing: the runtime never depends on the API.
+ * The page registers each tool with `document.modelContext.registerTool`,
+ * each with its own abort signal, and aborts it when its island or page
+ * leaves, the document is suspended into the back/forward cache, or the
+ * runtime is disposed. A browser without WebMCP registers nothing: the
+ * runtime never depends on the API.
  */
-import type { AgentToolDefinition } from "../islands/metadata.js";
+import type { AgentToolAnnotations } from "../islands/metadata.js";
 
-/** What a WebMCP tool's `execute` resolves to. */
+/**
+ * What a WebMCP tool's `execute` resolves to. A server tool's result
+ * carries structured content only when its route answered with JSON, as
+ * the MCP endpoint's result does.
+ */
 export interface ModelContextToolResult {
   readonly content: readonly Readonly<{ type: "text"; text: string }>[];
-  readonly structuredContent: Readonly<Record<string, unknown>>;
+  readonly structuredContent?: unknown;
   readonly isError: boolean;
+}
+
+/** The part of a tool that WebMCP registers: a Live tool and a server tool alike. */
+export interface WebMcpToolDefinition {
+  readonly name: string;
+  readonly title?: string;
+  readonly description: string;
+  readonly inputSchema: Readonly<Record<string, unknown>>;
+  readonly annotations: AgentToolAnnotations;
 }
 
 /** The client WebMCP passes `execute`, when it passes one. */
@@ -71,11 +85,11 @@ export type RegistrationFailure = "rejected" | "unavailable";
  * call of one tool; `onFailure` hears of a registration the browser refused,
  * a duplicate or invalid name above all.
  */
-export function registerAgentTools(
+export function registerAgentTools<Tool extends WebMcpToolDefinition>(
   context: ModelContextLike,
-  tools: readonly AgentToolDefinition[],
+  tools: readonly Tool[],
   execute: (
-    tool: AgentToolDefinition,
+    tool: Tool,
     input: unknown,
     client?: ModelContextClient,
   ) => Promise<ModelContextToolResult>,
@@ -90,7 +104,11 @@ export function registerAgentTools(
       ...(tool.title === undefined ? {} : { title: tool.title }),
       description: tool.description,
       inputSchema: tool.inputSchema,
-      annotations: Object.freeze({ ...tool.annotations }),
+      annotations: Object.freeze({
+        readOnlyHint: tool.annotations.readOnlyHint,
+        untrustedContentHint: tool.annotations.untrustedContentHint,
+        consequentialHint: tool.annotations.consequentialHint,
+      }),
       execute: (input: unknown, client?: ModelContextClient) => execute(tool, input, client),
     });
     try {
