@@ -740,9 +740,11 @@ mod root {
     use suprnova_live::validation::ValidationSelection;
     use suprnova_live::view::{RenderLimits, ViewRenderer};
 
+    use suprnova_live::host::TrustedLiveRequestContext;
+
     use crate::component_support::{
         FailurePoint, FixtureControl, ManualClock, SequenceGenerator, install, key_ring,
-        snapshot_limits, trusted_context_for,
+        snapshot_limits, trusted_context_for, trusted_context_offering_agent_tools,
     };
 
     /// The trace fixture's component, its one action made a tool as asked.
@@ -800,9 +802,24 @@ mod root {
             .for_browser(true)
     }
 
+    /// The island `key` of a mount whose host checks and counts tool calls.
     async fn mount(
         metadata: &'static ComponentMetadata,
         key: &str,
+    ) -> Result<String, MountErrorKind> {
+        mount_in(
+            metadata,
+            key,
+            &trusted_context_offering_agent_tools(metadata),
+        )
+        .await
+    }
+
+    /// The island `key` of `metadata`, mounted under `context`.
+    async fn mount_in(
+        metadata: &'static ComponentMetadata,
+        key: &str,
+        context: &TrustedLiveRequestContext,
     ) -> Result<String, MountErrorKind> {
         let control = FixtureControl::new_with_metadata(FailurePoint::None, metadata);
         let clock = Arc::new(ManualClock::new(1_000));
@@ -839,7 +856,7 @@ mod root {
                     CanonicalValue::Object(BTreeMap::new()),
                     MountFlags::empty(),
                 ),
-                &trusted_context_for(metadata, None),
+                context,
             )
             .await
             .map_err(|error| error.kind())?;
@@ -893,6 +910,19 @@ mod root {
             tools_attribute(&html).expect("tools")["tools"][0]["name"],
             "trace.execute.side-2"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_012_root_lists_tools_only_for_a_mount_that_offers_them() {
+        let metadata = trace_metadata(Some(browser_tool()), true);
+        // A host that does not check and count tool calls registers its
+        // mounts without agent tools: the root offers WebMCP nothing.
+        let html = mount_in(metadata, "main", &trusted_context_for(metadata, None))
+            .await
+            .expect("mount");
+        assert!(!html.contains("data-suprnova-live-tools"), "{html}");
+        let html = mount(metadata, "main").await.expect("mount");
+        assert!(tools_attribute(&html).is_some(), "{html}");
     }
 
     #[tokio::test]

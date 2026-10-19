@@ -14,6 +14,9 @@
 //! - `/test/requests`, every Live action request since `/test/reset`: its
 //!   tool-call header, the security checks its guard saw, the execution
 //!   phases it ran and the Gate abilities it asked.
+//!
+//! It serves agents with `Router::agents`: a router that does not check and
+//! count tool calls offers the page no tool.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,6 +25,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use suprnova::agents::AgentsConfig;
 use suprnova::auth::Authenticatable;
 use suprnova::live::testing::{LiveSecurityCheck, inspect_request_attestation};
 use suprnova::live::{
@@ -438,6 +442,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     for mount in [&mounts.main, &mounts.left, &mounts.right] {
         router = router.try_live_mount(mount)?;
     }
+    router = router.try_agents(AgentsConfig::new())?;
     let mut session = SessionConfig::default();
     session.cookie_secure = false;
     Server::new(router)

@@ -65,6 +65,7 @@ pub struct MountCatalogEntry {
     expected_seed: ExpectedSeedV1,
     requirements: MountScopeRequirements,
     document_key: Option<DocumentMountKey>,
+    agent_tools: bool,
 }
 
 impl MountCatalogEntry {
@@ -75,6 +76,7 @@ impl MountCatalogEntry {
             expected_seed,
             requirements,
             document_key: None,
+            agent_tools: false,
         }
     }
 
@@ -82,6 +84,17 @@ impl MountCatalogEntry {
     #[must_use]
     pub fn with_document_key(mut self, document_key: DocumentMountKey) -> Self {
         self.document_key = Some(document_key);
+        self
+    }
+
+    /// Lets the island roots this mount renders list the component's
+    /// browser tools for WebMCP (AGENT-012). Only a host that checks each
+    /// tool call's caller and counts it against a budget sets this: a mount
+    /// without it offers no tool, so a page never offers a tool nothing
+    /// checks.
+    #[must_use]
+    pub const fn with_agent_tools(mut self) -> Self {
+        self.agent_tools = true;
         self
     }
 }
@@ -167,6 +180,7 @@ pub struct VerifiedMountCatalogMatch {
     minimum_protocol: u16,
     protocol: u16,
     requirements: MountScopeRequirements,
+    agent_tools: bool,
 }
 
 impl VerifiedMountCatalogMatch {
@@ -219,6 +233,14 @@ impl VerifiedMountCatalogMatch {
     pub(crate) const fn requirements(&self) -> MountScopeRequirements {
         self.requirements
     }
+
+    /// Whether the island roots of this mount list the component's browser
+    /// tools: the host declared that it checks and counts their calls
+    /// ([`MountCatalogEntry::with_agent_tools`]).
+    #[must_use]
+    pub const fn agent_tools(&self) -> bool {
+        self.agent_tools
+    }
 }
 
 impl fmt::Debug for VerifiedMountCatalogMatch {
@@ -254,6 +276,7 @@ impl MountCatalogBuilder {
             expected_seed,
             requirements,
             document_key,
+            agent_tools,
         } = entry;
         let component = expected_seed.component.name();
         let descriptor = registry
@@ -287,6 +310,7 @@ impl MountCatalogBuilder {
             minimum_protocol: descriptor.metadata().versions().minimum_protocol(),
             protocol: descriptor.metadata().versions().minimum_protocol(),
             requirements,
+            agent_tools,
         };
         if self.entries.insert(key, verified).is_some() {
             return Err(HostContextError::new(HostContextErrorKind::CatalogConflict));

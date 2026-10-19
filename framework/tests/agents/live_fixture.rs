@@ -283,6 +283,12 @@ pub struct AgentPage<'a> {
 /// The fixture's routes, the counter's page, and Live installed behind
 /// [`guard`], serving agents with `config`.
 pub fn live_router_with(config: AgentsConfig) -> Router {
+    live_router().agents(config)
+}
+
+/// [`live_router_with`] without the agents: no MCP endpoint, no tool
+/// access check and no tool budget.
+pub fn live_router() -> Router {
     crate::fixture::define_policies();
     let mount = LiveMount::<AgentCounter>::public_seed(PAGE, "counter", "main")
         .expect("declare the counter's mount");
@@ -302,7 +308,6 @@ pub fn live_router_with(config: AgentsConfig) -> Router {
         .expect("register the counter's mount")
         .try_live_mount(&side)
         .expect("register the quota's mount")
-        .agents(config)
 }
 
 async fn render_page(
@@ -426,6 +431,16 @@ pub fn live_client_with(config: AgentsConfig, policies: bool) -> TestClient {
         define_live_policies();
     }
     let router = live_router_with(config);
+    prepare_live_router_for_test(&router).expect("prepare the Live runtime");
+    TestClient::new(router, browser_middleware())
+}
+
+/// A test client of [`live_router`], which serves no agents, with its Live
+/// runtime prepared and the counter's policies defined.
+pub fn live_client_without_agents() -> TestClient {
+    register_components();
+    define_live_policies();
+    let router = live_router();
     prepare_live_router_for_test(&router).expect("prepare the Live runtime");
     TestClient::new(router, browser_middleware())
 }

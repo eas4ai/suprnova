@@ -160,6 +160,16 @@ pub(crate) struct LiveMountRegistration {
 }
 
 impl LiveMountRegistration {
+    /// This registration on a router that serves agents: its island roots
+    /// list the component's browser tools (AGENT-012).
+    #[cfg(feature = "agents")]
+    pub(crate) fn with_agent_tools(self) -> Self {
+        Self {
+            entry: self.entry.with_agent_tools(),
+            ..self
+        }
+    }
+
     pub(crate) const fn new(
         entry: MountCatalogEntry,
         selection: MountSelection,

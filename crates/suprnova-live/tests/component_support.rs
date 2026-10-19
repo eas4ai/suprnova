@@ -774,11 +774,38 @@ pub(crate) fn trusted_context_with_view_values(
         .expect("trusted context")
 }
 
+/// A trusted context for `component_metadata` whose mount lets its island
+/// roots list the component's browser tools, as a host that checks and
+/// counts tool calls registers it.
+pub(crate) fn trusted_context_offering_agent_tools(
+    component_metadata: &'static ComponentMetadata,
+) -> TrustedLiveRequestContext {
+    let (catalog, selection) = trace_catalog_with(component_metadata, schema_set(), true);
+    SyntheticLiveRequestContextBuilder::new(
+        catalog,
+        selection,
+        fixture_host_scope(),
+        UnixMillis::new(1_000),
+        UnixMillis::new(2_000),
+    )
+    .build()
+    .expect("trusted context")
+}
+
 /// The mount catalog holding the trace fixture's one slot, and the
 /// selection of that slot.
 fn trace_catalog(
     component_metadata: &'static ComponentMetadata,
     schemas: SnapshotSchemaSet,
+) -> (MountCatalog, MountSelection) {
+    trace_catalog_with(component_metadata, schemas, false)
+}
+
+/// [`trace_catalog`], its mount offering agent tools when `agent_tools`.
+fn trace_catalog_with(
+    component_metadata: &'static ComponentMetadata,
+    schemas: SnapshotSchemaSet,
+    agent_tools: bool,
 ) -> (MountCatalog, MountSelection) {
     let descriptor = ComponentDescriptor::new(component_metadata.clone());
     let contract = ComponentContract::new(
@@ -795,24 +822,27 @@ fn trace_catalog(
         .build();
     let route = snapshot_support::route(0x30);
     let slot = IslandSlot::parse("trace").expect("slot identity");
+    let entry = MountCatalogEntry::new(
+        ExpectedSeedV1::new(
+            contract,
+            BuildId::parse("build-lifecycle-tests").expect("build identity"),
+            route.clone(),
+            slot.clone(),
+            schemas,
+        ),
+        MountScopeRequirements::new(
+            ScopeRequirement::Required,
+            ScopeRequirement::Required,
+            ScopeRequirement::Required,
+        ),
+    );
+    let entry = if agent_tools {
+        entry.with_agent_tools()
+    } else {
+        entry
+    };
     let catalog = MountCatalogBuilder::new()
-        .register(
-            &registry,
-            MountCatalogEntry::new(
-                ExpectedSeedV1::new(
-                    contract,
-                    BuildId::parse("build-lifecycle-tests").expect("build identity"),
-                    route.clone(),
-                    slot.clone(),
-                    schemas,
-                ),
-                MountScopeRequirements::new(
-                    ScopeRequirement::Required,
-                    ScopeRequirement::Required,
-                    ScopeRequirement::Required,
-                ),
-            ),
-        )
+        .register(&registry, entry)
         .expect("mount catalog entry")
         .build();
     let selection = MountSelection::new(

@@ -322,6 +322,13 @@ pub(crate) struct RouterAgents {
 }
 
 impl RouterAgents {
+    /// Whether the router serves agents: `Router::agents` installed the MCP
+    /// endpoint and with it the tool access check and budget of every
+    /// browser tool call.
+    pub(crate) fn serves(&self) -> bool {
+        self.config.is_some()
+    }
+
     /// The MCP endpoint's path, when the router serves one.
     #[cfg(feature = "testing")]
     pub(crate) fn config_path(&self) -> Option<String> {

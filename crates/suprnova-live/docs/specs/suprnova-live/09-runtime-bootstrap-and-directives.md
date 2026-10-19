@@ -241,7 +241,7 @@ and nothing else in the runtime depends on it.
 
 Every island root a mount, a public seed or a successor render assembles
 carries `data-suprnova-live-tools` when the component offers the browser a
-tool, and no such attribute otherwise. Its value is canonical JSON:
+tool and the application serves agents, and no such attribute otherwise. Its value is canonical JSON:
 
 ```json
 {"fields":["count"],
@@ -278,6 +278,13 @@ Acceptance criteria:
   and is longer than it, an action identity, a non-blank description, an
   optional non-blank title, an object input schema, and annotations of
   exactly the three boolean hints. Anything else marks the island invalid.
+- A page offers a tool only where the tool's checks run. A router serves
+  agents when `Router::agents` installed the MCP endpoint and with it the
+  access check and budget of every browser tool call (spec 07); it marks
+  each of its mounts (`MountCatalogEntry::with_agent_tools`), and the engine
+  lists tools only in a root of a marked mount. On a router without
+  `Router::agents` no root carries the attribute, so WebMCP registers
+  nothing.
 - The attribute counts toward the root's configured size bound.
 - On connect, when `document.modelContext` offers `registerTool`, or else
   `navigator.modelContext` does, the runtime registers each tool with its
@@ -343,6 +350,11 @@ UX flow:
 
 ## Decisions and revisions
 
+- 2026-10-18 -- A page offers no tool on a router that does not serve
+  agents. The attribute came from the component's metadata alone, so an
+  application without `Router::agents` registered WebMCP tools whose calls
+  nothing checked or counted. The router now marks its mounts when it
+  serves agents, and only a marked mount's roots list tools.
 - 2026-10-18 -- A response that ends an island waits for the island's
   pending WebMCP results. Answering the call and yielding one task was not
   enough: Chromium dropped a result when the page reloaded within about

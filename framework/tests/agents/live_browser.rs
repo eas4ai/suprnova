@@ -145,6 +145,38 @@ fn outcome(body: &str) -> Value {
 }
 
 #[tokio::test]
+async fn agent_012_a_router_without_agents_offers_no_tool() {
+    let _container = fixture::setup();
+    // Without `.agents(config)` nothing would check a tool call's caller or
+    // count it, so the page offers WebMCP no tool at all.
+    let client = live_fixture::live_client_without_agents();
+    let page = page(&client).await;
+    assert!(
+        page.html.contains("data-suprnova-live-island"),
+        "{}",
+        page.html
+    );
+    assert!(
+        !page.html.contains("data-suprnova-live-tools"),
+        "{}",
+        page.html
+    );
+}
+
+#[tokio::test]
+async fn agent_012_a_router_serving_agents_offers_its_tools() {
+    let _container = fixture::setup();
+    let client = live_fixture::live_client();
+    let page = page(&client).await;
+    assert!(
+        page.html.contains("data-suprnova-live-tools"),
+        "{}",
+        page.html
+    );
+    assert!(page.html.contains("counter.peek.main"), "{}", page.html);
+}
+
+#[tokio::test]
 async fn agent_002_live_tool_action_checks_the_caller_without_the_header() {
     let _container = fixture::setup();
     let client = live_fixture::live_client();

@@ -261,6 +261,10 @@ Acceptance criteria:
   checked before the endpoint; one without it is checked by the action
   kernel once the snapshot is verified and the action it invokes is known,
   before anything of the action runs.
+- A tool is offered only where its checks run: on a router without
+  `Router::agents`, which installs no tool access check and no budget, no
+  island root lists a tool and the page registers none with WebMCP
+  (spec 09).
 - A browser tool call, a request carrying the header, counts against the
   caller's tool budget, per user or, for a guest, per address bucket, in the
   one bucket MCP calls of the same caller count in. A used budget is
@@ -371,6 +375,10 @@ production feature or public convenience constructor.
 
 ## Decisions and revisions
 
+- 2026-10-18 -- Never offer a tool without its checks. A router that does
+  not serve agents runs no tool caller check and no budget, so its pages
+  list no tool for WebMCP; the router's own mounts carry the decision, not
+  a global setting.
 - 2026-10-18 -- A tool's caller check runs on every request to its action.
   It ran only for a request with the tool-call header, so a guest who left
   the header off invoked a `callers = [user]` tool's action. The budget

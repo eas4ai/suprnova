@@ -972,13 +972,25 @@ impl Router {
     pub(crate) fn take_live_mount_entries(
         &self,
     ) -> Result<Vec<crate::live::LiveMountRegistration>, FrameworkError> {
-        self.live_mounts
+        let entries = self
+            .live_mounts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or_else(|| {
                 FrameworkError::internal("Live mount declarations were consumed more than once")
-            })
+            })?;
+        // A page lists its components' browser tools for WebMCP only on a
+        // router that checks each tool call's caller and counts it: without
+        // `Router::agents` nothing would, so no mount offers a tool.
+        #[cfg(feature = "agents")]
+        if self.agents.serves() {
+            return Ok(entries
+                .into_iter()
+                .map(crate::live::LiveMountRegistration::with_agent_tools)
+                .collect());
+        }
+        Ok(entries)
     }
 
     pub(crate) fn preflight_live_installation(&self, version: u16) -> Result<(), FrameworkError> {
