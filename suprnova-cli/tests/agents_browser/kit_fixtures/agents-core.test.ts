@@ -6,9 +6,12 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import cases from './browser-calls.json'
 import {
+  FORM_TOOL_HEADER,
   TOOL_CALL_HEADER,
   callPageTool,
+  formTool,
   registerTool,
+  type FormVisit,
   type PageTool,
   type ToolDefinition,
 } from './src/lib/agents/core'
@@ -426,4 +429,33 @@ test('agent_015_a_page_without_webmcp_registers_nothing', () => {
   const leave = registerTool(tool('notes.save'))
   leave()
   expect(Reflect.get(document, 'modelContext')).toBeUndefined()
+})
+
+// AGENT-017: a form tool marks the form it submits, so a consent page
+// refuses it however an application wired the tool: an agent filling the
+// approval or claim form must not approve or claim.
+test('agent_017_a_form_tool_submission_carries_the_form_tool_header', async () => {
+  const sent: { method: string; url: string; visit: FormVisit }[] = []
+  const tool = formTool(
+    {
+      name: 'fixture.consent.approve',
+      description: 'Approve the pending authorization.',
+      schema: { type: 'object', properties: { authorization: { type: 'string' } } },
+      action: { method: 'post', url: '/oauth/approve' },
+    },
+    () => ({
+      fill: () => {},
+      submit: (method, url, visit) => {
+        sent.push({ method, url, visit })
+        visit.onSuccess({ component: 'Error', url: '/oauth/approve' })
+      },
+      cancel: () => {},
+    }),
+  )
+  const result = await tool.execute({ authorization: 'auth_1' }, undefined)
+  expect(result.isError).toBe(false)
+  expect(FORM_TOOL_HEADER).toBe('Suprnova-Form-Tool')
+  expect(sent).toHaveLength(1)
+  expect(sent[0].visit.headers).toEqual({ [FORM_TOOL_HEADER]: '1' })
+  expect(sent[0].visit.headers).not.toHaveProperty(TOOL_CALL_HEADER)
 })

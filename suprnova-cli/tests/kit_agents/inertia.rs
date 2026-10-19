@@ -353,18 +353,31 @@ fn agent_017_consent_pages_offer_no_tools() {
 /// them, the form request schemas `generate-types` writes for the kit, and
 /// an entry that installs the page tools before the application starts.
 /// The hooks name the schemas by a path the kit resolves: the kits define
-/// no `@` alias.
+/// no `@` alias. A form tool's submission carries the header a consent page
+/// refuses.
 #[test]
 fn agent_017_inertia_kits_ship_the_browser_helpers() {
     for kit in INERTIA_KITS {
         let project = Project::new(kit);
         let file = |relative: &str| project.read(&format!("frontend/src/{relative}"));
 
+        let core = file("lib/agents/core.ts");
         assert_eq!(
-            file("lib/agents/core.ts"),
+            core,
             template("frontend/agents/core.ts.tpl"),
             "{kit}: core.ts"
         );
+        // A form tool marks its submission with the header the consent
+        // pages refuse, by the framework's own name for it.
+        for needle in [
+            format!(
+                "export const FORM_TOOL_HEADER = '{}'",
+                suprnova::agents::FORM_TOOL_HEADER
+            ),
+            "headers: { [FORM_TOOL_HEADER]: '1' },".to_owned(),
+        ] {
+            assert!(core.contains(&needle), "{kit}: core.ts lacks {needle}");
+        }
         assert_eq!(
             file("lib/agents/inertia.ts"),
             template("frontend/agents/inertia.ts.tpl"),
