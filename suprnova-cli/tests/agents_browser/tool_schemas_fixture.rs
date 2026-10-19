@@ -166,6 +166,8 @@ pub struct Documented {
     pub explicit: bool,
     ///   Leading spaces beyond the first are kept.
     pub spaced: u32,
+    // An empty doc comment, which writes no description.
+    #[allow(clippy::empty_docs)]
     ///
     pub empty: String,
 }

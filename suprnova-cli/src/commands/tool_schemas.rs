@@ -718,33 +718,59 @@ enum Shape {
     Vec(Box<Shape>),
 }
 
-/// The integer and float types and their schemas' `format`, with the
-/// bounds `schemars` writes for the types narrower than 32 bits.
-const NUMBERS: &[(&str, &str, &str, Option<(i128, i128)>)] = &[
-    (
+/// A number type and the schema `schemars` writes for it.
+#[derive(Clone, Copy)]
+struct Number {
+    /// The Rust type's name.
+    rust: &'static str,
+    /// The schema's `type`: `integer` or `number`.
+    json: &'static str,
+    format: &'static str,
+    /// The `minimum` and `maximum` written for the types narrower than 32
+    /// bits.
+    bounds: Option<(i128, i128)>,
+}
+
+const fn number(
+    rust: &'static str,
+    json: &'static str,
+    format: &'static str,
+    bounds: Option<(i128, i128)>,
+) -> Number {
+    Number {
+        rust,
+        json,
+        format,
+        bounds,
+    }
+}
+
+/// The integer and float types.
+const NUMBERS: &[Number] = &[
+    number(
         "i8",
         "integer",
         "int8",
         Some((i8::MIN as i128, i8::MAX as i128)),
     ),
-    (
+    number(
         "i16",
         "integer",
         "int16",
         Some((i16::MIN as i128, i16::MAX as i128)),
     ),
-    ("i32", "integer", "int32", None),
-    ("i64", "integer", "int64", None),
-    ("i128", "integer", "int128", None),
-    ("isize", "integer", "int", None),
-    ("u8", "integer", "uint8", Some((0, u8::MAX as i128))),
-    ("u16", "integer", "uint16", Some((0, u16::MAX as i128))),
-    ("u32", "integer", "uint32", None),
-    ("u64", "integer", "uint64", None),
-    ("u128", "integer", "uint128", None),
-    ("usize", "integer", "uint", None),
-    ("f32", "number", "float", None),
-    ("f64", "number", "double", None),
+    number("i32", "integer", "int32", None),
+    number("i64", "integer", "int64", None),
+    number("i128", "integer", "int128", None),
+    number("isize", "integer", "int", None),
+    number("u8", "integer", "uint8", Some((0, u8::MAX as i128))),
+    number("u16", "integer", "uint16", Some((0, u16::MAX as i128))),
+    number("u32", "integer", "uint32", None),
+    number("u64", "integer", "uint64", None),
+    number("u128", "integer", "uint128", None),
+    number("usize", "integer", "uint", None),
+    number("f32", "number", "float", None),
+    number("f64", "number", "double", None),
 ];
 
 impl Shape {
@@ -766,7 +792,7 @@ impl Shape {
         match &segment.arguments {
             PathArguments::None => ["String", "bool"]
                 .into_iter()
-                .chain(NUMBERS.iter().map(|(ty, ..)| *ty))
+                .chain(NUMBERS.iter().map(|number| number.rust))
                 .find(|known| *known == name)
                 .map(Self::Base),
             PathArguments::AngleBracketed(arguments) if arguments.args.len() == 1 => {
@@ -794,21 +820,25 @@ impl Shape {
             Self::Base("String") => Json::Object(vec![("type".into(), Json::str("string"))]),
             Self::Base("bool") => Json::Object(vec![("type".into(), Json::str("boolean"))]),
             Self::Base(name) => {
-                let (_, ty, format, bounds) = NUMBERS
+                // `Shape::of` makes a `Base` only of `String`, `bool` and a
+                // name in `NUMBERS`, so the fallback is never reached.
+                let number = NUMBERS
                     .iter()
-                    .find(|(number, ..)| number == name)
+                    .find(|number| number.rust == *name)
                     .copied()
-                    .unwrap_or(("", "number", "double", None));
+                    .unwrap_or(number("f64", "number", "double", None));
                 let mut schema = Json::Object(vec![
-                    ("type".into(), Json::str(ty)),
-                    ("format".into(), Json::str(format)),
+                    ("type".into(), Json::str(number.json)),
+                    ("format".into(), Json::str(number.format)),
                 ]);
-                match bounds {
+                match number.bounds {
                     Some((min, max)) => {
                         schema.insert("minimum", Json::Int(min));
                         schema.insert("maximum", Json::Int(max));
                     }
-                    None if format.starts_with("uint") => schema.insert("minimum", Json::Int(0)),
+                    None if number.format.starts_with("uint") => {
+                        schema.insert("minimum", Json::Int(0))
+                    }
                     None => {}
                 }
                 schema

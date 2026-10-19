@@ -572,10 +572,11 @@ fn collect_passed(suites: &serde_json::Value, passed: &mut Vec<String>) {
                 .flatten()
                 .flat_map(|test| test["results"].as_array().into_iter().flatten())
                 .collect();
-            if !results.is_empty() && results.iter().all(|result| result["status"] == "passed") {
-                if let Some(title) = spec["title"].as_str() {
-                    passed.push(title.to_string());
-                }
+            if !results.is_empty()
+                && results.iter().all(|result| result["status"] == "passed")
+                && let Some(title) = spec["title"].as_str()
+            {
+                passed.push(title.to_string());
             }
         }
         collect_passed(&suite["suites"], passed);
