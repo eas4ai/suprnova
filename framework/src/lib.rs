@@ -903,7 +903,8 @@ pub use agents::{
 #[doc(hidden)]
 pub use schemars as __schemars;
 /// Derive or implement the JSON Schema (draft 2020-12) of a tool's input or
-/// output type. `#[tool_input]` and `#[tool_output]` derive it for you.
+/// output type. `#[tool_input]`, `#[tool_output]` and `#[tool_schema]`
+/// derive it for you.
 #[cfg(feature = "agents")]
 pub use schemars::JsonSchema;
 /// Mark a tool's output type, the one `#[tool(output = ...)]` names: it
@@ -912,6 +913,12 @@ pub use schemars::JsonSchema;
 /// tool's output schema.
 #[cfg(feature = "agents")]
 pub use suprnova_macros::tool_output;
+/// Give a type nested in a tool's input or output, an enum field or a
+/// struct that is not a form request, its JSON Schema through the
+/// framework, so an application needs no `schemars` of its own. It derives
+/// `JsonSchema` alone; the type's serde derives stay the application's.
+#[cfg(feature = "agents")]
+pub use suprnova_macros::tool_schema;
 #[cfg(feature = "agents")]
 pub use suprnova_macros::{tool, tool_input};
 

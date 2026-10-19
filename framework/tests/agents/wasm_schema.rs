@@ -6,13 +6,13 @@
 use serde::Deserialize;
 use serde_json::Value;
 use suprnova::agents::__input_schema;
-use suprnova::{JsonSchema, Validate, tool_input};
+use suprnova::{Validate, tool_input, tool_schema};
 
 use crate::fixture::CreatePost;
 
 /// How a task is filed.
-#[derive(Deserialize, JsonSchema)]
-#[schemars(crate = "suprnova::__schemars")]
+#[tool_schema]
+#[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Priority {
     Low,

@@ -165,10 +165,44 @@ route answers its usual validation error.
 A doc comment on a field becomes its description in the schema. A call fills
 the route's path parameters from the input's fields of the same names.
 
+#### Nested types
+
+A field's type needs a JSON Schema too. A nested struct can be a
+`#[tool_input]` of its own. An enum, or a struct that should not be a form
+request, takes `#[tool_schema]`, which derives the schema through the
+framework and leaves the type's serde derives to you:
+
+```rust
+use serde::Deserialize;
+use suprnova::{tool_input, tool_schema};
+
+/// How to order the reviews.
+#[tool_schema]
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewOrder {
+    /// Newest first.
+    Newest,
+    /// Highest rated first.
+    TopRated,
+}
+
+/// The input of `reviews.list`.
+#[tool_input]
+pub struct ListReviews {
+    /// The order to list the reviews in.
+    pub order: ReviewOrder,
+}
+```
+
+The enum's schema becomes part of the tool's input schema, so an agent sees the
+values it may send, and a value outside them is refused as invalid input.
+
 `output = T` publishes `T`'s schema as the tool's output schema. Mark `T`
 with `#[tool_output]`, the output counterpart of `#[tool_input]`. It derives
 `Serialize` and `JsonSchema` through the framework, so the application needs
-no `schemars` dependency of its own:
+no `schemars` dependency of its own. A type nested in the output takes
+`#[tool_output]` or `#[tool_schema]`:
 
 ```rust
 use suprnova::tool_output;
@@ -183,9 +217,14 @@ pub struct ReviewView {
 }
 ```
 
-The type is a struct with named fields, since MCP describes a tool's
-structured result with an object schema. A doc comment on a field becomes its
-description.
+`T` is any struct or enum, and a doc comment on a field becomes its
+description. A JSON object answer reaches every client as structured data. A
+list, a scalar or another non-object answer, and a non-object output schema,
+are structured data for clients on revision 2026-07-28, which takes any JSON
+value. Clients on 2025-06-18 and 2025-11-25 get such an answer as text, and
+see the tool without its output schema, because those revisions take an
+object only. Wrap a list in a struct field, such as `{ "items": [...] }`, when
+those clients should get it as structured data too.
 
 ### Declare scopes
 
@@ -1219,7 +1258,8 @@ the tool. `ServerTools::from_document` reads the
 the session, the CSRF token and the tool-call header, and its validation
 errors name each field as the server's do. The crate's `#[tool_input]`
 brings its own copies of `serde`, `schemars` and `validator`, so the front
-end needs none of them.
+end needs none of them. An enum or another type nested in the input takes
+`#[suprnova_webmcp::tool_schema]`, as on the server.
 
 Every function compiles on every target, so a crate shared with the server
 builds natively too. Outside the browser, registering or calling a tool

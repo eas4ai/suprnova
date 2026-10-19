@@ -36,8 +36,10 @@ mod outside_issuer;
 mod page_tools;
 mod registry;
 mod schema;
+mod structured;
 mod surface;
 mod tool_output;
+mod tool_schema;
 #[cfg(feature = "localization")]
 mod wasm_messages;
 mod wasm_schema;

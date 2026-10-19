@@ -12,30 +12,50 @@
 //! path the output names is in `suprnova_webmcp::__private`, so a front end
 //! needs no `serde`, `schemars` or `validator` dependency of its own.
 
-use proc_macro2::{Span, TokenStream};
+use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{DeriveInput, Field, parse_macro_input};
 
 use crate::input_names::{lenient_fields, peel};
+use crate::request::{json_schema_derive_at, no_arguments, schema_only};
 
 /// Implementation of `#[suprnova_webmcp::tool_input]`.
 pub fn tool_input_attr_impl(
     attr: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
-    if !attr.is_empty() {
-        return syn::Error::new(
-            Span::call_site(),
-            "#[suprnova_webmcp::tool_input] takes no arguments",
-        )
-        .to_compile_error()
-        .into();
+    if let Err(error) = no_arguments(&attr, "#[suprnova_webmcp::tool_input]") {
+        return error.to_compile_error().into();
     }
     let input = parse_macro_input!(input as DeriveInput);
     match tool_input_tokens(&input) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }
+}
+
+/// Implementation of `#[suprnova_webmcp::tool_schema]`: a type nested in a
+/// page tool's input, a struct or an enum, which gets its JSON Schema
+/// through the crate's copy of `schemars`, as the framework's
+/// `#[tool_schema]` does through the framework's.
+pub fn tool_schema_attr_impl(
+    attr: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    schema_only(
+        attr,
+        input,
+        "#[suprnova_webmcp::tool_schema]",
+        json_schema_derive(),
+    )
+}
+
+/// The `JsonSchema` derive through `suprnova-webmcp`'s copy of `schemars`.
+fn json_schema_derive() -> (TokenStream, TokenStream) {
+    json_schema_derive_at(
+        quote!(::suprnova_webmcp::__private::schemars::JsonSchema),
+        "::suprnova_webmcp::__private::schemars",
+    )
 }
 
 /// The struct with its three derives, pointed at the crate's own copies of
@@ -89,16 +109,17 @@ fn tool_input_tokens(input: &DeriveInput) -> syn::Result<TokenStream> {
         }
     });
     let name = &input.ident;
+    let (json_schema, schemars_crate) = json_schema_derive();
     Ok(quote! {
         #validate_in_scope
         #[derive(
             #private::serde::Deserialize,
             #private::validator::Validate,
-            #private::schemars::JsonSchema
+            #json_schema
         )]
         #[serde(crate = "::suprnova_webmcp::__private::serde")]
         #[validate(crate = "::suprnova_webmcp::__private::validator")]
-        #[schemars(crate = "::suprnova_webmcp::__private::schemars")]
+        #schemars_crate
         #input
 
         impl #private::InputNames for #name {

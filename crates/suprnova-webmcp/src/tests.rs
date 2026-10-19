@@ -152,7 +152,7 @@ fn agent_016_path_csrf_and_results_match_the_browser_fixture() {
     let lists: [(&str, CaseCheck, usize); 3] = [
         ("paths", path_case, 30),
         ("csrf", csrf_case, 7),
-        ("results", result_case, 31),
+        ("results", result_case, 32),
     ];
     for (list, check, count) in lists {
         let cases = cases(&fixture, list);
@@ -595,5 +595,55 @@ fn agent_016_validation_messages_take_the_servers_english_text() {
             }],
             "isError": true
         })
+    );
+}
+
+/// How to order the todo list, an enum nested in a page tool input.
+#[crate::tool_schema]
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TodoOrder {
+    /// Newest first.
+    Newest,
+    /// Oldest first.
+    Oldest,
+}
+
+/// Sorting the todo list.
+#[tool_input]
+struct SortTodos {
+    /// The order to show the list in.
+    order: TodoOrder,
+}
+
+async fn sort_todos(input: SortTodos) -> Result<ToolResult, ToolError> {
+    Ok(ToolResult::text(format!("{:?}", input.order)))
+}
+
+#[test]
+fn agent_016_a_nested_enum_takes_tool_schema() {
+    // The enum names no schemars path: `#[tool_schema]` points its derive
+    // at the crate's copy, and its schema is part of the tool's.
+    let descriptor = PageTool::<SortTodos>::new("todos.sort", "Sort the todo list.")
+        .descriptor()
+        .expect("a valid tool has a descriptor");
+    let schema = &descriptor["inputSchema"];
+    assert_eq!(
+        schema["properties"]["order"]["$ref"], "#/$defs/TodoOrder",
+        "{schema:#}"
+    );
+    // Documented variants are described one by one, each a `const`.
+    let variants: Vec<&Value> = schema["$defs"]["TodoOrder"]["oneOf"]
+        .as_array()
+        .map(|variants| variants.iter().map(|variant| &variant["const"]).collect())
+        .unwrap_or_default();
+    assert_eq!(variants, [&json!("newest"), &json!("oldest")], "{schema:#}");
+    let sorted = ready(crate::tool::run(&sort_todos, r#"{"order":"oldest"}"#));
+    assert_eq!(shown(&sorted)["content"][0]["text"], "Oldest");
+    let refused = ready(crate::tool::run(&sort_todos, r#"{"order":"sideways"}"#));
+    assert!(refused.is_error, "{refused:?}");
+    assert!(
+        matches!(&refused.content[..], [crate::Content::Text { text }] if text.starts_with("Invalid input: unknown variant `sideways`")),
+        "{refused:?}"
     );
 }

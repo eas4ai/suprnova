@@ -18,8 +18,8 @@ use suprnova::cache::{CacheStore, InMemoryCache};
 use suprnova::container::testing::TestContainer;
 use suprnova::rate_limit::ThrottleRequestsMiddleware;
 use suprnova::{
-    Gate, HttpResponse, JsonSchema, Middleware, MiddlewareRegistry, Next, Request, Response,
-    Router, ToolCaller, Validate, handler, json_response, tool, tool_input, tool_output,
+    Gate, HttpResponse, Middleware, MiddlewareRegistry, Next, Request, Response, Router,
+    ToolCaller, Validate, handler, json_response, tool, tool_input, tool_output, tool_schema,
 };
 
 suprnova::tool_scopes! {
@@ -347,8 +347,8 @@ pub async fn slow_bytes(form: Wait) -> Response {
 }
 
 /// A postal address, nested in [`UpdateProfile`].
-#[derive(serde::Deserialize, Validate, JsonSchema)]
-#[schemars(crate = "suprnova::__schemars")]
+#[tool_schema]
+#[derive(serde::Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct Address {
     /// The street.
@@ -462,8 +462,8 @@ pub async fn api_profile() -> Response {
 /// A recursive, internally tagged expression: every variant holds the
 /// same field, so a checker that tries every branch of each level does
 /// work exponential in the depth.
-#[derive(serde::Deserialize, JsonSchema)]
-#[schemars(crate = "suprnova::__schemars")]
+#[tool_schema]
+#[derive(serde::Deserialize)]
 #[serde(tag = "op")]
 pub enum Expr {
     /// One variant.

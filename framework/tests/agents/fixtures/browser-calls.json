@@ -812,6 +812,28 @@
       }
     },
     {
+      "name": "a JSON array answer",
+      "maxResultBytes": 8388608,
+      "response": {
+        "status": 200,
+        "contentType": "application/json",
+        "body": "[1,2]"
+      },
+      "expected": {
+        "content": [
+          {
+            "type": "text",
+            "text": "[1,2]"
+          }
+        ],
+        "structuredContent": [
+          1,
+          2
+        ],
+        "isError": false
+      }
+    },
+    {
       "name": "a 2xx answer that is not JSON",
       "maxResultBytes": 8388608,
       "response": {

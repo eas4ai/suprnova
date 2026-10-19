@@ -13,8 +13,8 @@ use suprnova::live::{CanonicalValue, LiveBootstrapOptions, LiveDocument, LiveMou
 use suprnova::testing::{TestClient, TestResponse};
 use suprnova::view::{AssetSet, DocumentResponseIntent, ViewName};
 use suprnova::{
-    FrameworkError, HttpResponse, InertiaResponse, JsonSchema, MiddlewareRegistry, PageTools,
-    Request, Response, Router, StatusCode, Validate, handler, json_response, tool, tool_input,
+    FrameworkError, HttpResponse, InertiaResponse, MiddlewareRegistry, PageTools, Request,
+    Response, Router, StatusCode, Validate, handler, json_response, tool, tool_input, tool_schema,
 };
 
 use crate::fixture::{self, TestUser};
@@ -74,8 +74,8 @@ pub async fn show_note(note: String, form: NoteRef) -> Response {
 }
 
 /// What `notes.filter` narrows the notes by.
-#[derive(serde::Deserialize, Validate, JsonSchema)]
-#[schemars(crate = "suprnova::__schemars")]
+#[tool_schema]
+#[derive(serde::Deserialize, Validate)]
 pub struct NoteFilters {
     /// Whether to list drafts.
     pub drafts: bool,
