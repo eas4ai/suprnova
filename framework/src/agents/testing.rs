@@ -147,8 +147,9 @@ impl TestClient {
     /// with `arguments` as a JSON body, its path parameters filled from the
     /// arguments, the [`TOOL_CALL_HEADER`](super::TOOL_CALL_HEADER) the
     /// browser helpers send, this client's cookies and the user it acts as.
-    /// A `GET` tool sends the arguments that fill no path parameter in the
-    /// query instead, with no body, as a page does.
+    /// A `GET` tool sends its scalar arguments in the query instead, path
+    /// arguments included, with no body, as a page does: a null argument
+    /// stays out, and so does a path argument that filled no segment.
     ///
     /// When the client holds the session's `XSRF-TOKEN` cookie, the request
     /// sends it back as `X-XSRF-TOKEN`, as a page's script does; visit a page
@@ -170,9 +171,11 @@ impl TestClient {
         let object = arguments.as_object().cloned().unwrap_or_default();
         let path = fill_path(tool.pattern(), &object)
             .unwrap_or_else(|error| panic!("TestClient::tool(`{name}`): {error}"));
-        // A browser cannot send a body with GET: a GET tool's arguments
-        // that fill no path parameter go in the query, as the page sends
-        // them (AGENT-014).
+        // A browser cannot send a body with GET: a GET tool's scalar
+        // arguments go in the query, path arguments too, so its form
+        // request reads them all, as the page sends them (AGENT-014). A
+        // null argument stays out, and so does a path argument that filled
+        // no segment.
         let request = if *tool.method() == hyper::Method::GET {
             let in_path: Vec<String> = crate::routing::binding::placeholders(tool.pattern())
                 .into_iter()
@@ -181,10 +184,8 @@ impl TestClient {
             let mut query = url::form_urlencoded::Serializer::new(String::new());
             let mut any = false;
             for (key, value) in &object {
-                if in_path.contains(key) {
-                    continue;
-                }
                 let text = match value {
+                    Value::Null => continue,
                     Value::String(text) => text.clone(),
                     Value::Number(number) => number.to_string(),
                     Value::Bool(flag) => flag.to_string(),
@@ -193,6 +194,9 @@ impl TestClient {
                          number or a boolean, because a GET tool sends its arguments in the query"
                     ),
                 };
+                if text.is_empty() && in_path.contains(key) {
+                    continue;
+                }
                 query.append_pair(key, &text);
                 any = true;
             }

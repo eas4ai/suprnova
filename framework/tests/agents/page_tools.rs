@@ -51,6 +51,28 @@ pub async fn lookup_notes(form: NoteQuery) -> Response {
     json_response!({ "q": form.q })
 }
 
+/// The input of `notes.show`: its path parameter, and a scalar beside it.
+#[tool_input]
+pub struct NoteRef {
+    /// The note.
+    pub note: String,
+    /// How to show it.
+    pub format: Option<String>,
+}
+
+#[tool(
+    name = "notes.show",
+    description = "Show one note.",
+    callers = [public],
+    input = NoteRef,
+    annotations(read_only),
+)]
+#[handler]
+pub async fn show_note(note: String, form: NoteRef) -> Response {
+    // The path value and the argument the query carried agree.
+    json_response!({ "note": form.note, "format": form.format, "same": note == form.note })
+}
+
 /// What `notes.filter` narrows the notes by.
 #[derive(serde::Deserialize, Validate, JsonSchema)]
 #[schemars(crate = "suprnova::__schemars")]
@@ -139,10 +161,13 @@ fn page_routes() -> Router {
         .get("/notes/search", search_notes)
         .get("/notes/lookup", lookup_notes)
         .get("/notes/filter", filter_notes)
+        .get("/notes/{note}", show_note)
         .post("/audit", export_audit)
         .get("/inertia/posts", inertia_page)
         .with_tools(["echo", "users.profile", "posts.create", "posts.delete"])
         .middleware(StandInToken)
+        .get("/inertia/notes", inertia_page)
+        .with_tools(["notes.show"])
         .get("/plain/posts", plain_page)
         .with_tools(["echo", "users.profile", "posts.create"])
         .middleware(StandInToken)
@@ -428,6 +453,7 @@ fn boot_with_route_tool(name: &'static str) -> Result<(), FrameworkError> {
         .get("/notes/search", search_notes)
         .get("/notes/lookup", lookup_notes)
         .get("/notes/filter", filter_notes)
+        .get("/notes/{note}", show_note)
         .post("/audit", export_audit)
         .get("/offering", plain_page)
         .with_tools([name])
@@ -441,6 +467,7 @@ fn boot_with_shared_tool(name: &'static str) -> Result<(), FrameworkError> {
         .get("/notes/search", search_notes)
         .get("/notes/lookup", lookup_notes)
         .get("/notes/filter", filter_notes)
+        .get("/notes/{note}", show_note)
         .post("/audit", export_audit)
         .into();
     router
@@ -547,6 +574,38 @@ async fn agent_014_a_get_tool_call_reads_its_input_from_the_query() {
         .await;
     call.assert_ok();
     assert_eq!(call.json(), json!({ "q": "café & co" }));
+}
+
+#[tokio::test]
+async fn agent_014_a_get_tool_on_a_path_parameter_reads_it_from_the_query() {
+    let _container = fixture::setup();
+    let client = page_client();
+    // The page offers it: its input holds scalars only.
+    let page = visit(client.clone(), "/inertia/notes").await;
+    assert!(
+        page.page_tools().contains(&"notes.show".to_string()),
+        "{:?}",
+        page.page_tools()
+    );
+    let call = client
+        .tool("notes.show", json!({ "note": "n/7", "format": "short" }))
+        .send()
+        .await;
+    call.assert_ok();
+    assert_eq!(
+        call.json(),
+        json!({ "note": "n/7", "format": "short", "same": true })
+    );
+    // A null argument stays out of the query.
+    let call = client
+        .tool("notes.show", json!({ "note": "8", "format": null }))
+        .send()
+        .await;
+    call.assert_ok();
+    assert_eq!(
+        call.json(),
+        json!({ "note": "8", "format": null, "same": true })
+    );
 }
 
 #[tokio::test]
