@@ -658,12 +658,35 @@ recover the originally-requested URL:
 suprnova::Redirect::set_intended_url("/admin/users");
 ```
 
-`Redirect::intended` follows a stored path that starts with a single `/`,
-or an absolute URL. It ignores a stored value that starts with `//`, `/\`
-or `\`, or that holds a control character, and redirects to its fallback
-instead, because a browser reads `//host/x` as another host. To send a
-user to another site after sign-in, store the absolute URL
-(`https://example.com/x`).
+`Redirect::intended` follows three kinds of stored value: a path that
+starts with a single `/`, an absolute `http` or `https` URL, and a relative
+reference such as `?tab=2`. It ignores anything else and redirects to its
+fallback instead:
+
+- a value that starts with `//`, `/\` or `\`;
+- a value with surrounding whitespace, a control character or a
+  backslash;
+- another scheme, such as `javascript:` or `mailto:`.
+
+A browser trims whitespace, reads `\` as `/` and reads `//host/x` as
+another host, so each of these could leave the application.
+`Redirect::intended_url()` reads the same value by the same rules without
+consuming it.
+
+To send a user to another site after sign-in, store the absolute URL
+(`https://example.com/x`). Check an address that comes from a query, such
+as a `return_to` parameter, with `url::same_origin_path` before you store
+it. Otherwise anyone can write a link that sends your users to another
+site after they sign in:
+
+```rust
+if let Some(path) = request
+    .query_param("return_to")
+    .and_then(|candidate| suprnova::url::same_origin_path(&candidate))
+{
+    suprnova::Redirect::set_intended_url(path);
+}
+```
 
 ## Aborting from a handler
 
