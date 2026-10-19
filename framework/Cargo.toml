@@ -595,6 +595,9 @@ wiremock = "0.6"
 # Generates the outside issuer's signing keys in the AGENT-006 tests. The
 # version rustls already builds, so the lock gains nothing.
 ring = "0.17"
+# The WebAssembly crate's schema derivation, checked against the server's
+# for the same input type (AGENT-016).
+suprnova-webmcp = { path = "../crates/suprnova-webmcp" }
 
 # On-demand RenderCache workload measurement, run by
 # `crates/suprnova-live/scripts/run-render-cache-budget.sh` and never by a

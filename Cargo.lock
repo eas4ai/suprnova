@@ -8929,6 +8929,7 @@ dependencies = [
  "suprnova-macros",
  "suprnova-magnetar",
  "suprnova-web-push",
+ "suprnova-webmcp",
  "tempfile",
  "tera",
  "thiserror 2.0.20",

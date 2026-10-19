@@ -26,3 +26,4 @@ mod outside_issuer;
 mod registry;
 mod schema;
 mod surface;
+mod wasm_schema;
