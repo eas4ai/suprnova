@@ -253,20 +253,22 @@ type nested in a tool's input or output.
 no case-insensitive email index, and its sign-in page did not follow a
 `return_to`.
 
-**Now:** a new project gets a signing key in `.env`. The Inertia and Live
-kits serve agents from `src/agents.rs` and create the agents tables and the
-email index. Their sign-in follows a same-origin `return_to` and keeps the
-intended address through registration. Every kit folds an address to ASCII
-lowercase before it validates it, and bounds names at 255 characters and
-addresses at 254.
+**Now:** a new project gets a signing key in `.env`, and every kit serves
+agents from `src/agents.rs` and creates the agents tables. The Inertia and
+Live kits also create the email index, and their sign-in follows a
+same-origin `return_to` and keeps the intended address through
+registration. Every kit folds an address to ASCII lowercase before it
+validates it, and bounds names at 255 characters and addresses at 254.
 
 **Do:** an application scaffolded before 4.4 keeps its files. To serve agents
 as a new project does, scaffold a new project of the same kit and copy:
 
 - `src/agents.rs`, its `pub mod agents;` line in `src/lib.rs`, and the
   `agents::serve(...)` call around `routes::register()` in `cmd/main.rs`;
-- `suprnova::agents::migrations()` and
-  `UniqueEmailIgnoringCase::on("users", "email")` in your migrator;
+- the consent pages `src/agents.rs` names, with their controller and routes,
+  as the next sections describe;
+- `suprnova::agents::migrations()`, and in the Inertia and Live kits
+  `UniqueEmailIgnoringCase::on("users", "email")`, in your migrator;
 - a signing key in `.env` from the `agents:key` command, and its two names in
   `.env.example`;
 - `src/email_address.rs`, and its `normalize` call wherever your sign-in,
@@ -280,6 +282,72 @@ as a new project does, scaffold a new project of the same kit and copy:
 lapsed and revoked rows whenever the router mounts it.
 
 **Do:** Nothing unless you adopt the OAuth server.
+
+### The Inertia and Live kits ship their own approval, claim and connected-agents pages.
+
+**Before:** 4.3's kits had no consent pages.
+
+**Now:** a new Inertia or Live project renders the approval, claim and
+connected-agents pages itself, on the consent facade, behind
+`ConsentPageHeaders`.
+
+**Do:** Nothing unless you adopt agents. To adopt the pages, copy
+`src/controllers/agents.rs`, the consent routes and the pages from a new
+project of the same kit, as
+[Agents in the Inertia kits](starter-kits.md#agents-in-the-inertia-kits) and
+[Agents in the Live kit](starter-kits.md#agents-in-the-live-kit) list them.
+
+### The API kit serves agents, with a sign-in for consent only.
+
+**Before:** 4.3's API kit served no agents and started no browser session.
+
+**Now:** a new API project serves agents with the framework's default pages,
+signs a browser in at `/login` for consent only, lists and revokes connected
+agents over JSON, and verifies an address by a mailed link.
+
+**Do:** Nothing unless you adopt agents. To adopt them as a new project does,
+see [Agents in the API kit](starter-kits.md#agents-in-the-api-kit). The
+session runs only on the consent pages, so your JSON API still starts none.
+
+### `Auth::email_verification()` verifies an address for its signed-in owner.
+
+**Before:** 4.3 had no `Auth::email_verification()`.
+
+**Now:** `Auth::email_verification()` issues and verifies Magnetar-backed
+links for the signed-in user, bound to the address each link was mailed to.
+
+**Do:** Nothing unless you adopt it. See
+[Email verification through Magnetar](auth-flows.md#email-verification-through-magnetar).
+
+### Consent pages refuse a form tool's submission.
+
+**Before:** 4.3 had no form tools or consent pages.
+
+**Now:** a kit's form tool sends `Suprnova-Form-Tool`
+(`suprnova::agents::FORM_TOOL_HEADER`), and `AgentApprovals::of` and
+`AgentClaims::of` refuse it with 403.
+
+**Do:** Nothing. A form tool of your own that posts a page's form sends the
+header as the kits' does.
+
+### New projects ship two notes tools.
+
+**Before:** 4.3's kits shipped no tools.
+
+**Now:** the Inertia and Live kits serve `notes.search` and `notes.create`
+under the `notes:read` and `notes:write` scopes.
+
+**Do:** Nothing. They are a worked example for your own tools; see
+[Agents in the Inertia kits](starter-kits.md#agents-in-the-inertia-kits).
+
+### The Live input takes `maxlength`.
+
+**Before:** the Live library's input had no `maxlength` parameter.
+
+**Now:** it sets the attribute when a caller passes one.
+
+**Do:** Nothing unless you adopt it. The attribute is a hint for the
+browser; keep the length rule on the server.
 
 ## Changed entries
 
@@ -376,6 +444,35 @@ and `no-cache, private` otherwise.
 
 **Do:** nothing. A test that expected `no-cache, private` on the error page
 of a `no-store` response expects `no-store` now.
+
+### Magnetar's `auth_tokens` table gains an `address_digest` column.
+
+**Before:** `auth_tokens` had no column for the address a token was mailed
+to.
+
+**Now:** it has a nullable `address_digest` string column, which holds the
+SHA-256 of the address an email verification link was mailed to. Magnetar's
+`migrate` adds it the first time it runs, which the framework does at boot
+unless `MagnetarConfig` was built with `.apply_migrations(false)`.
+
+**Do:** nothing if Magnetar migrates at boot. If you manage Magnetar's schema
+yourself, add a nullable string column `address_digest` to `auth_tokens`, or
+run Magnetar's `migrate` once, before you deploy.
+
+### A custom Magnetar engine, store or token binding refuses email verification until it implements the new methods.
+
+**Before:** `MagnetarPasswordAuthEngine`, `TokenStore`, `UserStore` and
+`TokenFields` had the methods 4.3 documented.
+
+**Now:** `MagnetarPasswordAuthEngine` has `email_verification_issue` and
+`email_verification_verify`, `TokenStore` has `issue_bound` and `inspect`,
+`UserStore` has `mark_email_verified_for`, and `TokenFields` has
+`read_address_digest` and `write_address_digest`. Each default refuses.
+
+**Do:** nothing unless you implement one of these traits yourself and call
+`Auth::email_verification()`. Then implement the new methods, as Magnetar's
+SeaORM store does, or every issue and verify fails closed. Code that does not
+call it compiles and runs unchanged.
 
 ## Fixed entries that change behaviour
 
@@ -484,6 +581,11 @@ text. Type the field as the struct or map it holds.
 - **Two servers migrating Magnetar's tables at once no longer collide.** Nothing to change.
 - **Session metadata stays within its columns.** Nothing to change.
 - **An `Option` Live mount parameter can be left out.** Nothing to change.
+- **A page's scripts and styles no longer become the previous URL.** Nothing to change.
+  `Redirect::back()` without a `Referer` returns to the last page a route
+  answered.
+- **Two uses of one email verification link at once no longer answer 500 on
+  MariaDB.** Nothing to change.
 
 ## Next
 
