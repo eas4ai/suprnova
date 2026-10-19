@@ -621,6 +621,11 @@ impl engine::MagnetarFactorAuthEngine for PasswordFactorEngine {
         self.password.user_auth_epoch(user_id).await
     }
 
+    #[cfg(feature = "agents")]
+    fn agent_users(&self) -> Option<Arc<dyn magnetar::agent_auth::AgentUserDirectory>> {
+        self.password.agent_users()
+    }
+
     async fn has_second_factor(&self, user_id: &str) -> magnetar::Result<bool> {
         self.password.has_second_factor(user_id).await
     }
