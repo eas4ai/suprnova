@@ -7,6 +7,7 @@ import type { RuntimeDiagnosticSink } from "../runtime/diagnostics.js";
 import { DelegatedListenerRegistry } from "../runtime/listeners.js";
 import type { RuntimeClock, RuntimeRandomness, RuntimeScheduler } from "../runtime/ports.js";
 import type { JsonValue } from "../canonical.js";
+import type { SchedulerTicket } from "../scheduler/types.js";
 import {
   createServerIntent,
   type IntentSource,
@@ -161,6 +162,61 @@ export class EventRouter {
       detailCode: "operation_rejected",
     });
     return false;
+  }
+
+  /**
+   * Schedule a WebMCP call of `tool`, the island's action `action`, as an
+   * action directive schedules its action: with the island's pending model
+   * edits, promoting a public seed, through the island's own scheduler and
+   * transport. The intent names the tool, so its request carries the
+   * tool-call header the server counts and checks it by (AGENT-012).
+   * Returns the scheduled intent and its ticket, or null when the island
+   * refused it.
+   */
+  scheduleAgentAction(
+    island: IslandRecord,
+    action: string,
+    tool: string,
+    input: Readonly<Record<string, JsonValue>>,
+  ): Readonly<{ intent: ServerIntent; ticket: SchedulerTicket }> | null {
+    const source: IntentSource = Object.freeze({
+      island,
+      element: island.element,
+      directive: null,
+      eventType: "agent_tool",
+      trusted: false,
+      agentTool: tool,
+    });
+    try {
+      const batch = this.#models.prepareIslandAction(island);
+      const operations: ServerOperation[] = [
+        ...batch.operations,
+        { kind: "invoke_action", name: action, arguments: input },
+      ];
+      const intent = createServerIntent(
+        source,
+        operations,
+        this.#randomness,
+        island.metadata.snapshotForm === "seed",
+        batch.proposals,
+        batch.editSequences,
+      );
+      const ticket = island.enqueueTicket(intent);
+      if (ticket !== null) {
+        this.#models.trackIntent(island, batch, intent);
+        return Object.freeze({ intent, ticket });
+      }
+      intent.finish("rejected");
+    } catch {
+      // The caller receives one closed scheduling failure.
+    }
+    this.#diagnostics.record({
+      code: "scheduler_rejected",
+      severity: "error",
+      phase: "schedule",
+      detailCode: "operation_rejected",
+    });
+    return null;
   }
 
   scanInsertion(record: IslandRecord, node: Node, trusted: boolean): readonly OwnedDirective[] {

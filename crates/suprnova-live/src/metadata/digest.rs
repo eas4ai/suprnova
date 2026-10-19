@@ -20,8 +20,8 @@ use crate::upload::{
 use crate::validation::ValidationSelection;
 
 use super::{
-    ActionMetadata, ContractVersions, EffectMetadata, EventMetadata, FieldMetadata, MetadataError,
-    MetadataErrorKind,
+    ActionMetadata, ActionToolMetadata, ContractVersions, EffectMetadata, EventMetadata,
+    FieldMetadata, MetadataError, MetadataErrorKind,
 };
 
 const CONTRACT_DIGEST_DOMAIN: &[u8] = b"suprnova-live/component-contract/v1";
@@ -101,7 +101,7 @@ fn version_entry(name: &str, version: u16) -> (String, CanonicalValue) {
 }
 
 fn field_value(field: &FieldMetadata) -> CanonicalValue {
-    CanonicalValue::Object(BTreeMap::from([
+    let mut value = BTreeMap::from([
         (
             "binding_timing".to_owned(),
             timing_value(field.binding_timing()),
@@ -166,7 +166,13 @@ fn field_value(field: &FieldMetadata) -> CanonicalValue {
                 .upload_policy()
                 .map_or(CanonicalValue::Null, upload_policy_value),
         ),
-    ]))
+    ]);
+    // Encoded only when marked, so the digest of every component that
+    // marks nothing stays the one it had before agent tools existed.
+    if field.agent_visible() {
+        value.insert("agent_visible".to_owned(), CanonicalValue::Bool(true));
+    }
+    CanonicalValue::Object(value)
 }
 
 fn upload_policy_value(policy: &UploadFieldPolicy) -> CanonicalValue {
@@ -330,7 +336,7 @@ fn model_codec_value(codec: &ModelCodec) -> CanonicalValue {
 }
 
 fn action_value(action: &ActionMetadata) -> CanonicalValue {
-    CanonicalValue::Object(BTreeMap::from([
+    let mut value = BTreeMap::from([
         (
             "arguments".to_owned(),
             CanonicalValue::Array(
@@ -384,6 +390,48 @@ fn action_value(action: &ActionMetadata) -> CanonicalValue {
         (
             "version".to_owned(),
             CanonicalValue::String(action.version().to_string()),
+        ),
+    ]);
+    // Encoded only when declared, so the digest of every component without
+    // a tool stays the one it had before agent tools existed.
+    if let Some(tool) = action.tool() {
+        value.insert("tool".to_owned(), tool_value(tool));
+    }
+    CanonicalValue::Object(value)
+}
+
+fn tool_value(tool: &ActionToolMetadata) -> CanonicalValue {
+    CanonicalValue::Object(BTreeMap::from([
+        ("browser".to_owned(), CanonicalValue::Bool(tool.browser())),
+        (
+            "consequential".to_owned(),
+            CanonicalValue::Bool(tool.consequential()),
+        ),
+        (
+            "description".to_owned(),
+            CanonicalValue::String(tool.description().to_owned()),
+        ),
+        (
+            "headless".to_owned(),
+            CanonicalValue::Bool(tool.is_headless()),
+        ),
+        (
+            "name".to_owned(),
+            CanonicalValue::String(tool.name().to_owned()),
+        ),
+        (
+            "read_only".to_owned(),
+            CanonicalValue::Bool(tool.read_only()),
+        ),
+        (
+            "title".to_owned(),
+            tool.title().map_or(CanonicalValue::Null, |title| {
+                CanonicalValue::String(title.to_owned())
+            }),
+        ),
+        (
+            "untrusted_content".to_owned(),
+            CanonicalValue::Bool(tool.untrusted_content()),
         ),
     ]))
 }

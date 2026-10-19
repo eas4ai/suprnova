@@ -730,6 +730,7 @@ impl ViewCheck<'_, '_, '_> {
             let component_position = located.attribute("live:component");
             owner =
                 self.resolve_component(component, &attributes, component_position, &prior_owner);
+            self.validate_tool_component_key(facts, &owner, &attributes, &positions);
             island = self.next_island;
             self.next_island += 1;
             facts.freshness.insert(
@@ -964,6 +965,45 @@ impl ViewCheck<'_, '_, '_> {
             );
         }
         metadata.identity().clone()
+    }
+
+    /// A component the browser registers tools of carries its `live:key` in
+    /// every tool name, so the key must be one literal in the tool instance
+    /// grammar and outside any loop: a key built from data, or repeated per
+    /// item, would put data into a name an agent reads as an instruction
+    /// (AGENT-012). A missing key is already `InvalidKey`, and a repeated
+    /// literal `DuplicateKey`.
+    fn validate_tool_component_key(
+        &mut self,
+        facts: &HtmlFacts,
+        component: &ComponentName,
+        attributes: &[(String, String)],
+        positions: &[Position],
+    ) {
+        let offers_tools = self
+            .registry
+            .resolve(component)
+            .is_ok_and(|descriptor| descriptor.metadata().has_browser_tools());
+        if !offers_tools {
+            return;
+        }
+        for ((_, key), position) in attributes
+            .iter()
+            .zip(positions.iter().copied())
+            .filter(|((name, _), _)| name == "live:key")
+        {
+            let literal = !key.contains(DYNAMIC_MARKER)
+                && !key.contains(CHECKED_KEY_MARKER)
+                && !key.contains(CHECKED_DIGEST_MARKER);
+            if !literal || !facts.loops.is_empty() || !crate::metadata::is_tool_instance_key(key) {
+                self.push(
+                    DiagnosticCode::ToolComponentKey,
+                    DiagnosticSeverity::Error,
+                    position,
+                    component,
+                );
+            }
+        }
     }
 
     fn validate_keys(

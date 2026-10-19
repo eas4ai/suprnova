@@ -66,6 +66,7 @@ pub use auth::{
     AuthorizationServerMetadata, CallerResolver, MetadataKind, ResolveContext, ResolveError,
 };
 pub use caller::{AgentRegistration, CallerChannel, CallerKind, ToolCaller};
+pub(crate) use limit::address_bucket;
 /// The parts of Magnetar's fenced HTTPS fetch an application or a test
 /// hands to [`OAuthServer::client_metadata_fetcher`] and
 /// [`OutsideIssuer::key_fetch`]: the resolver, whose every answer is
@@ -79,12 +80,17 @@ pub use magnetar::authorization_server::{
 /// answer with.
 pub use magnetar::{Error as MagnetarError, Result as MagnetarResult};
 pub(crate) use mark::AgentMark;
+pub(crate) use middleware::{BrowserToolRefusal, LiveToolGate};
 pub use oauth::{ClientGrant, ConnectedAgents, GrantScope, OAuthServer};
 pub use outside_issuer::OutsideIssuer;
 pub use scope::{Scope, ScopeRecord, declared_scopes};
 #[cfg(feature = "testing")]
 pub use testing::{AgentsFake, McpResponse, McpTestClient, McpToolResult};
-pub use tool::{__ToolDeclaration, RegisteredTool, ToolAnnotations, ToolRecord, ToolRegistry};
+pub(crate) use tool::LiveTarget;
+pub use tool::{
+    __LiveResolver, __LiveToolDeclaration, __ResolverFuture, __ToolDeclaration, __ToolMeta,
+    LiveToolRecord, RegisteredTool, ToolAnnotations, ToolRecord, ToolRegistry,
+};
 
 /// The default path of the MCP endpoint.
 pub const DEFAULT_MCP_PATH: &str = "/mcp";
@@ -516,6 +522,15 @@ impl Router {
             .get_or_init(|| ToolRegistry::build(self).map(Arc::new))
     }
 
+    /// Whether the router installs the Live tool gate on its Live action
+    /// route: whenever any Live tool exists, with or without
+    /// `Router::agents`. A page offers its tools for WebMCP only then.
+    pub(crate) fn installs_live_tool_gate(&self) -> bool {
+        self.checked_tools()
+            .as_ref()
+            .is_ok_and(|registry| registry.has_live_tools())
+    }
+
     /// The tool access check of the route `(method, pattern)`, when a tool's
     /// handler serves it.
     pub(crate) fn tool_access(
@@ -524,6 +539,20 @@ impl Router {
         pattern: &str,
     ) -> Option<crate::middleware::BoxedMiddleware> {
         let registry = self.checked_tools().as_ref().ok()?;
+        // The Live action route serves every island's actions; a call of a
+        // Live tool is one of them, marked by the tool-call header when a
+        // browser's WebMCP makes it (AGENT-012). Any Live tool needs the
+        // gate, an agent-only one too: a browser click on its action is
+        // refused by the same caller check.
+        if *method == Method::POST
+            && pattern == crate::live::LIVE_UPDATE_PATH
+            && registry.has_live_tools()
+        {
+            return Some(middleware::live_access(
+                Arc::clone(registry),
+                self.agents_config(),
+            ));
+        }
         if registry.tools().is_empty() {
             return None;
         }
@@ -564,5 +593,137 @@ fn schema_of<T: schemars::JsonSchema>() -> serde_json::Value {
         .to_value()
 }
 
+/// A value a `#[resolve(...)]` resolver returned, encoded with its mount
+/// parameter's codec so the mount reads it as if a page had sent it.
+///
+/// # Errors
+///
+/// A 500 naming the property when the value does not fit the codec: the
+/// resolver and the `#[mount]` parameter disagree, an application defect.
+#[doc(hidden)]
+pub fn __encode_resolved<T: serde::Serialize + 'static>(
+    property: &str,
+    value: &T,
+    codec: &suprnova_live::state::ModelCodec,
+) -> Result<suprnova_live::canonical::CanonicalValue, FrameworkError> {
+    codec
+        .encode(value, &suprnova_live::limits::InputLimits::default())
+        .map_err(|issue| {
+            FrameworkError::internal(format!(
+                "the resolver of the Live mount property `{property}` returned a value its \
+                 codec refuses: {issue}"
+            ))
+        })
+}
+
+/// What a headless Live tool call asks to mount, as the Gate policy of
+/// `live:{component}.mount` reads it (AGENT-013): the component and the
+/// mount properties the agent sent, after their codecs accepted them and
+/// before anything is loaded. Properties the application fills itself with
+/// `#[resolve(...)]` are not among them: they are filled after the policy
+/// allows the mount.
+///
+/// Each property holds the one JSON form its codec decodes, whatever form
+/// the agent wrote: a 64-bit integer is a JSON integer whether the agent
+/// sent a number or a decimal string, a UUID is hyphenated in lower case,
+/// and a date-time is in RFC 3339. Write a policy so a property it cannot
+/// read refuses the mount:
+///
+/// ```rust,ignore
+/// Gate::define::<ToolCaller, LiveMountRequest>("live:app.counter.mount", |caller, mount| {
+///     caller.is_user()
+///         && mount
+///             .property("start")
+///             .and_then(|v| v.as_u64())
+///             .is_some_and(|start| start < 100)
+/// });
+/// ```
+#[derive(Debug, Clone)]
+pub struct LiveMountRequest {
+    component: String,
+    properties: serde_json::Map<String, serde_json::Value>,
+}
+
+impl LiveMountRequest {
+    pub(crate) fn new(
+        component: impl Into<String>,
+        properties: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        Self {
+            component: component.into(),
+            properties,
+        }
+    }
+
+    /// The component's registered name, `app.counter`.
+    pub fn component(&self) -> &str {
+        &self.component
+    }
+
+    /// Every mount property the agent sent, each in its codec's one form.
+    pub fn properties(&self) -> &serde_json::Map<String, serde_json::Value> {
+        &self.properties
+    }
+
+    /// The mount property `name`, in its codec's one form, or `None` when
+    /// the agent did not send it.
+    pub fn property(&self, name: &str) -> Option<&serde_json::Value> {
+        self.properties.get(name)
+    }
+}
+
 /// The `Agents` facade: test helpers for tool calls.
 pub struct Agents;
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use hyper::Method;
+
+    use super::CallerKind;
+    use super::tool::test_support::live_registry;
+    use crate::routing::Router;
+
+    /// A router whose checked tool registry is `registry`.
+    fn router_with(registry: super::ToolRegistry) -> Router {
+        let router = Router::new();
+        assert!(router.agents.registry.set(Ok(Arc::new(registry))).is_ok());
+        router
+    }
+
+    #[test]
+    fn agent_002_an_agent_only_live_tool_installs_the_live_tool_gate() {
+        // The only Live tool accepts agents and runs headless: no browser
+        // registers it, but a click on its action still needs the caller
+        // check that refuses a browser caller.
+        let router = router_with(live_registry(
+            "audit.run",
+            "tests.audit",
+            "run",
+            &[CallerKind::Agent],
+            false,
+        ));
+        assert!(
+            router
+                .tool_access(&Method::POST, crate::live::LIVE_UPDATE_PATH)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn agent_002_a_browser_live_tool_installs_the_live_tool_gate() {
+        let router = router_with(live_registry(
+            "counter.peek",
+            "tests.counter",
+            "peek",
+            &[CallerKind::Public],
+            true,
+        ));
+        assert!(
+            router
+                .tool_access(&Method::POST, crate::live::LIVE_UPDATE_PATH)
+                .is_some()
+        );
+    }
+}

@@ -1,7 +1,7 @@
 # Suprnova Live -- 19 Developer Tooling and Testing
 
 Status: Normative design specification
-Last revised: 2026-10-04
+Last revised: 2026-10-18
 
 ## Scope
 
@@ -259,6 +259,34 @@ UX flow:
 2. Regression exceeds policy -> release gate reports the workload and metric
    instead of hiding it behind aggregate throughput.
 
+### Tool component keys
+
+The checker shall refuse a tool component key that data could build
+(AGENT-012). A component whose actions the browser registers as tools
+carries its `live:key` in every tool name, and an agent reads a tool name as
+an instruction, so the key of each such component in a template must be one
+literal the template fixes.
+
+Acceptance criteria:
+
+- `tool_component_key` reports a `live:component` element whose component
+  offers the browser a tool when its `live:key` is dynamic or a checked loop
+  key, when it sits inside a loop, or when it is outside the tool instance
+  grammar `[A-Za-z0-9_-]{1,63}`.
+- A missing key stays `invalid_key` and a repeated literal key stays
+  `duplicate_key`, so two unkeyed or same-keyed instances of a tool
+  component fail as any component's do.
+- A component that offers the browser no tool, including one whose only
+  tools are headless, is judged by the ordinary key rules alone.
+- Distinctly keyed literal instances of a tool component check clean.
+
+UX flow:
+
+1. Application developer renders a tool component in a loop or with a key
+   from data -> checking fails with `tool_component_key` at the key.
+2. Application developer gives each instance its own literal key -> the
+   template checks clean and each instance's tools carry their own names.
+
 ## Iteration 001 and 002 harness placement
 
 The shared v1 corpus lives at repository-root `fixtures/v1/` and is documented
@@ -465,9 +493,14 @@ unbounded framework memory, queues, connections, or diagnostic retention.
   hello-world theater.
 - Explicit runtime, morph, protocol, cache, and server budgets provide
   reproducible on-demand measurements outside the correctness gate.
+- The checker refuses a tool component key data could build.
 
 ## Decisions and revisions
 
+- 2026-10-18 -- Added the `tool_component_key` checker diagnostic
+  (AGENT-012). The key of a component the browser registers tools of must be
+  one literal in the tool instance grammar outside any loop, because it
+  becomes part of each tool name.
 - 2026-10-04 -- The checker renders templates the way Askama 0.16 does in
   four more places. A macro called as an expression, `{{ show(x) }}` or
   `{{ ui::show(x) }}`, is expanded there. Caller content is expanded at

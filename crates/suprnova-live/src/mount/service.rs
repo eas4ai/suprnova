@@ -286,6 +286,11 @@ impl PrivateMountService {
                     action_parameters: crate::view::declared_action_parameters(
                         descriptor.metadata(),
                     ),
+                    agent_tools: context
+                        .mount()
+                        .agent_tools()
+                        .then(|| crate::view::declared_agent_tools(descriptor.metadata()))
+                        .flatten(),
                 },
                 self.limits.max_metadata_bytes,
             )

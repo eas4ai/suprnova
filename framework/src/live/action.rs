@@ -281,7 +281,18 @@ pub(crate) async fn handle(request: Request) -> Response {
         Ok(request) => request,
         Err(error) => return failure_response(error.kind(), &error),
     };
-    let (service, completion) = runtime.endpoint_service(upload_context);
+    let tool_claim = request.live_tool_claim().cloned();
+    #[cfg(feature = "agents")]
+    let tool_admission = ToolAdmission::of(&request);
+    let (service, completion) = runtime.endpoint_service_with(
+        upload_context,
+        KernelExtras {
+            refresh_observer: None,
+            tool_claim,
+            #[cfg(feature = "agents")]
+            tool_admission: tool_admission.clone(),
+        },
+    );
     // Session-only fields the request's components staged reach the
     // session only once the outcome is accepted, below.
     let (((response, failure), staged_session), panic_reported) =
@@ -289,6 +300,15 @@ pub(crate) async fn handle(request: Request) -> Response {
             service.handle_reported(endpoint_request),
         ))
         .await;
+    // A tool action the browser caller may not invoke was refused before
+    // anything ran; it is answered as the tool's own check answers.
+    #[cfg(feature = "agents")]
+    if let Some(refusal) = tool_admission
+        .as_ref()
+        .and_then(ToolAdmission::take_refusal)
+    {
+        return Err(refusal.into_response());
+    }
     let completed = response.status.is_success();
     let projected = project_response(response);
     if let Some(error) = failure {
@@ -410,6 +430,120 @@ pub(crate) struct SuprnovaEndpointKernel {
     upload_operation_locks: Arc<super::upload::UploadOperationLocks>,
     upload_provider: Arc<super::ports::upload_provider::SuprnovaUploadProviderRouter>,
     upload_context: Option<suprnova_live::host::TrustedLiveRequestContext>,
+    refresh_observer: Option<RefreshObserver>,
+    tool_claim: Option<LiveToolClaim>,
+    #[cfg(feature = "agents")]
+    tool_admission: Option<ToolAdmission>,
+}
+
+/// What a request's kernel is given beyond the browser's ordinary action.
+#[derive(Default)]
+pub(crate) struct KernelExtras {
+    /// Where to leave the cause of a refresh, for a headless tool call.
+    pub(crate) refresh_observer: Option<RefreshObserver>,
+    /// The browser tool the request was admitted as, if it carries the
+    /// tool-call header.
+    pub(crate) tool_claim: Option<LiveToolClaim>,
+    /// The browser caller check of a tool action invoked without the
+    /// tool-call header, when the application serves agents.
+    #[cfg(feature = "agents")]
+    pub(crate) tool_admission: Option<ToolAdmission>,
+}
+
+/// The browser caller check a Live action request without the tool-call
+/// header passes when its action is a tool's (AGENT-002, AGENT-012), and
+/// where the kernel leaves a refusal for the handler to answer: the
+/// kernel's own errors are closed and answer no 401 or 403.
+#[cfg(feature = "agents")]
+#[derive(Clone)]
+pub(crate) struct ToolAdmission {
+    gate: crate::agents::LiveToolGate,
+    address: Option<std::net::IpAddr>,
+    refusal: Arc<std::sync::Mutex<Option<crate::agents::BrowserToolRefusal>>>,
+}
+
+#[cfg(feature = "agents")]
+impl ToolAdmission {
+    /// The check of `request`, when the Live action route's tool access
+    /// gave it one.
+    fn of(request: &Request) -> Option<Self> {
+        request.live_tool_gate().map(|gate| Self {
+            gate: gate.clone(),
+            address: request.ip().and_then(|ip| ip.parse().ok()),
+            refusal: Arc::default(),
+        })
+    }
+
+    /// Whether the browser caller may invoke `action` of `component`; a
+    /// refusal is kept for [`Self::take_refusal`].
+    async fn admit(
+        &self,
+        component: &suprnova_live::identity::ComponentName,
+        action: &str,
+    ) -> bool {
+        match self.gate.admit(component, action, self.address).await {
+            Ok(()) => true,
+            Err(refusal) => {
+                *self
+                    .refusal
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(refusal);
+                false
+            }
+        }
+    }
+
+    /// The refusal the kernel left, if it refused the request.
+    fn take_refusal(&self) -> Option<crate::agents::BrowserToolRefusal> {
+        self.refusal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+
+/// The browser tool a Live action request was admitted as (AGENT-012): the
+/// request carried the tool-call header, and the tool access check ran the
+/// tool's caller check and counted the call against the caller's tool
+/// budget. The kernel then requires the request to invoke exactly that
+/// tool's action on that tool's island, so a counted name cannot cover
+/// another component's or another action's call.
+#[derive(Clone, Debug)]
+pub(crate) struct LiveToolClaim {
+    /// The tool's component.
+    pub(crate) component: suprnova_live::identity::ComponentName,
+    /// The tool's action.
+    pub(crate) action: &'static str,
+    /// The island's document key, the last segment of the tool's name.
+    pub(crate) instance: String,
+}
+
+/// Where the kernel leaves the closed cause of an operation it ended with a
+/// refresh, for a caller that must tell the causes apart. The browser is
+/// only told to refresh the island, whatever the cause; a headless tool call
+/// has to tell an agent that its action was not authorized rather than that
+/// its handle is stale (AGENT-013).
+#[derive(Clone, Default)]
+pub(crate) struct RefreshObserver(
+    Arc<std::sync::Mutex<Option<suprnova_live::execution::ExecutionFailure>>>,
+);
+
+impl RefreshObserver {
+    /// The cause the kernel recorded, if the operation ended with a refresh
+    /// that has one.
+    pub(crate) fn cause(&self) -> Option<suprnova_live::execution::ExecutionFailure> {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn record(&self, cause: suprnova_live::execution::ExecutionFailure) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cause);
+    }
 }
 
 struct PreparedProposalBatch {
@@ -447,6 +581,7 @@ impl SuprnovaEndpointKernel {
         upload_finalization: Arc<UploadFinalizationService>,
         upload_context: Option<suprnova_live::host::TrustedLiveRequestContext>,
         completion: Arc<super::ports::response::PreparedResponseCompletion>,
+        extras: KernelExtras,
     ) -> Self {
         Self {
             promotion,
@@ -463,6 +598,10 @@ impl SuprnovaEndpointKernel {
             upload_operation_locks: Arc::clone(&ports.uploads.operation_locks),
             upload_provider: Arc::clone(&ports.uploads.provider_adapter),
             upload_context,
+            refresh_observer: extras.refresh_observer,
+            tool_claim: extras.tool_claim,
+            #[cfg(feature = "agents")]
+            tool_admission: extras.tool_admission,
         }
     }
 
@@ -479,6 +618,28 @@ impl SuprnovaEndpointKernel {
             .map_err(|_| EndpointKernelError::context_inconsistent())?;
 
         let operation = requested_operation(request.request())?;
+        if let Some(claim) = &self.tool_claim {
+            let claimed = request.component() == &claim.component
+                && browser.document_key().as_str() == claim.instance
+                && matches!(
+                    &operation,
+                    RequestedOperation::Action { name, .. } if name.as_str() == claim.action
+                );
+            if !claimed {
+                return Err(EndpointKernelError::context_inconsistent());
+            }
+        }
+        // A tool action without the header runs the tool's browser caller
+        // check before anything of it runs: a promotion, a lock, the
+        // action itself.
+        #[cfg(feature = "agents")]
+        if self.tool_claim.is_none()
+            && let Some(admission) = &self.tool_admission
+            && let RequestedOperation::Action { name, .. } = &operation
+            && !admission.admit(request.component(), name.as_str()).await
+        {
+            return Err(EndpointKernelError::context_inconsistent());
+        }
         let result = match request.snapshot() {
             VerifiedEndpointSnapshot::Instance(snapshot) => {
                 let digest =
@@ -520,6 +681,12 @@ impl SuprnovaEndpointKernel {
         // The browser is only told to refresh the island, so the closed cause of a failed
         // operation is recorded here for an operator. A refresh without a cause, such as a
         // stale revision or a duplicate, is an ordinary outcome and is not a fault.
+        if let ExecutionResult::RefreshRequired(refresh) = &result
+            && let Some(cause) = refresh.cause()
+            && let Some(observer) = &self.refresh_observer
+        {
+            observer.record(cause);
+        }
         if let ExecutionResult::RefreshRequired(refresh) = &result
             && let Some(cause) = refresh.cause()
         {

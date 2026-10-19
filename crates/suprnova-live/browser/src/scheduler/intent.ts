@@ -12,6 +12,11 @@ export interface IntentSource {
   readonly directive: ParsedDirective | null;
   readonly eventType: string;
   readonly trusted: boolean;
+  /**
+   * The WebMCP tool the intent calls, for an action an agent invoked: its
+   * request carries the tool-call header (AGENT-012).
+   */
+  readonly agentTool?: string;
 }
 
 export type ServerOperation =

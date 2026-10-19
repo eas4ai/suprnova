@@ -5,6 +5,10 @@
 //! shipped browser runtime.
 
 pub mod action;
+#[cfg(feature = "agents")]
+mod agent;
+#[cfg(feature = "agents")]
+pub(crate) use agent::RESULT_MEDIA_TYPE as LIVE_TOOL_RESULT_MEDIA_TYPE;
 /// Exact reviewed browser artifacts, their catalog, and document bootstrap markup.
 pub mod assets;
 mod async_transport;
@@ -22,6 +26,7 @@ mod replay;
 mod response;
 pub(crate) mod revocation;
 mod routes;
+pub(crate) use routes::{LIVE_AGENT_PATH, LIVE_UPDATE_PATH};
 mod runtime;
 pub(crate) mod session_state;
 mod ui_assets;
@@ -91,6 +96,13 @@ pub mod metadata {
     pub use suprnova_live::metadata::{
         ActionMetadata, ComponentMetadata, ContractVersions, EffectMetadata, EventMetadata,
         FieldMetadata, MetadataError, MetadataErrorKind, PayloadContractIdentity,
+    };
+    /// What `#[tool]` declares on an action, the grammar a tool
+    /// component's island key follows, and the agent-visible fields a tool
+    /// result copies from a component's state (AGENT-012, AGENT-013).
+    pub use suprnova_live::metadata::{
+        ActionToolMetadata, MAX_TOOL_BASE_BYTES, MAX_TOOL_INSTANCE_BYTES, agent_fields,
+        is_tool_instance_key,
     };
     pub use suprnova_live::metadata::{EffectPayloadMetadata, EventPayloadMetadata};
 }
@@ -301,6 +313,11 @@ pub use suprnova_live::state::{
     BindingIssue, BindingIssueKind, BindingTiming, ModelCodec, TimingError, TimingErrorKind,
     UrlBinding, UrlBindingMode, UrlError, UrlErrorKind,
 };
+/// A field of an object an agent sent that a codec, an action's arguments
+/// or a component's mount parameters would refuse, with its closed reason,
+/// and the JSON Schema dialect their schemas name: what a headless Live
+/// tool reports field by field (AGENT-013).
+pub use suprnova_live::state::{FieldIssue, FieldIssueKind, JSON_SCHEMA_DIALECT};
 /// A batch of browser model proposals and what applying it involves: the
 /// binding schema and its fields, the limits, each raw and proposed value,
 /// the result of applying one, and the failure, with its closed reason, a

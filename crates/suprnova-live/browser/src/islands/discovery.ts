@@ -54,9 +54,22 @@ import {
   ISLAND_STATUS_ATTRIBUTE,
   IslandMetadataError,
   parseIslandMetadata,
+  type AgentToolDefinition,
   type IslandMetadata,
 } from "./metadata.js";
 import { LazyCoordinator } from "./lazy.js";
+import {
+  AgentToolHost,
+  type AgentToolRegistration,
+  type PendingAgentCall,
+} from "../agents/host.js";
+import {
+  modelContextOf,
+  type ModelContextClient,
+  type ModelContextToolResult,
+} from "../agents/model-context.js";
+import { agentToolError, agentToolResult, argumentNames } from "../agents/result.js";
+import type { ServerIntent } from "../scheduler/intent.js";
 import { IslandRecord } from "./record.js";
 import {
   RegisteredEventAuthority,
@@ -101,6 +114,19 @@ function base64UrlText(value: string): string {
 
 const SUPERSEDED_APPLICATIONS: ReadonlySet<string> = new Set(["canceled", "stale", "superseded"]);
 const NO_RENDER: ValidatedRender = Object.freeze({ kind: "no_render" });
+/** The application results after which an island is no longer on the page. */
+const LEFT_PAGE: ReadonlySet<string> = new Set([
+  "navigated",
+  "fresh_island",
+  "stopped",
+  "disconnected",
+]);
+
+/** A WebMCP call an island is running, by its intent. */
+interface AgentCall {
+  readonly pending: PendingAgentCall;
+  readonly answer: (response: ValidatedResponse, applied: boolean) => ModelContextToolResult;
+}
 
 export class DocumentRuntime {
   readonly #document: Document;
@@ -133,6 +159,9 @@ export class DocumentRuntime {
   readonly #transitionCompletion = new BrowserTransitionCompletion();
   readonly #navigation: NativeDocumentNavigation;
   readonly #resourceLedger: ResourceLedger | undefined;
+  readonly #agentHost: AgentToolHost<IslandRecord>;
+  readonly #agentCalls = new WeakMap<ServerIntent, AgentCall>();
+  readonly #agentTickets = new WeakMap<PendingAgentCall, SchedulerTicket>();
   #featureDriver: InspectedRuntimeFeatureDriver | null = null;
   #featureDriverState: 0 | 1 | 2 = 0;
   #state: DocumentRuntimeState = "idle";
@@ -182,6 +211,7 @@ export class DocumentRuntime {
       this.#observer.disconnect();
     });
     this.#navigation = new NativeDocumentNavigation(document, ports);
+    this.#agentHost = new AgentToolHost(ports.scheduler);
   }
 
   start(): void {
@@ -199,6 +229,9 @@ export class DocumentRuntime {
     if (this.#state !== "running") return;
     this.#state = "suspended";
     this.#observer.disconnect();
+    // A page kept in the back/forward cache is out of the agent's view: its
+    // tools leave with it and come back on resume.
+    this.#agentHost.suspend();
     this.#driveFeatureDriver(2, null);
     this.#listeners.suspend();
     this.#events.suspend();
@@ -225,6 +258,7 @@ export class DocumentRuntime {
     this.#startFeatureDriver();
     this.#observe();
     this.#discover(this.#document.querySelectorAll(ISLAND_ROOT_SELECTOR));
+    this.#agentHost.resume();
   }
 
   async runEffect(
@@ -376,6 +410,34 @@ export class DocumentRuntime {
       const response: ValidatedResponse = authorityOnly
         ? Object.freeze({ ...(parsed as ValidatedCommittedResponse), render: NO_RENDER })
         : parsed;
+      const call = this.#agentCalls.get(ticket.intent);
+      this.#agentCalls.delete(ticket.intent);
+      // A navigation, or a refusal recovered by reloading the page, ends
+      // every island's WebMCP calls; a refusal that stops the island ends
+      // its own. Before either, each pending call is answered, the tools
+      // leave so no new call starts, and the recovery waits until the
+      // results can reach the agent. A refused click with no call pending
+      // recovers at once.
+      const pageLevel =
+        response.kind === "navigation" ||
+        response.kind === "recovery" ||
+        (response.kind === "fatal" && response.recovery === "navigate");
+      const islandLevel = response.kind === "fatal" && !pageLevel;
+      const answer = (pending: PendingAgentCall, island: IslandRecord): ModelContextToolResult =>
+        pending === call?.pending
+          ? call.answer(response, true)
+          : agentToolError(this.#endedCallMessage(island, pending));
+      const after = (pending: PendingAgentCall, island: IslandRecord): void => {
+        const other = this.#agentTickets.get(pending);
+        if (pending !== call?.pending && other !== undefined) {
+          island.scheduler.cancel(other, { abortTransport: false });
+        }
+      };
+      if (pageLevel) await this.#agentHost.releaseAll(answer, after);
+      else if (islandLevel) await this.#agentHost.release(record, answer, after);
+      else if (response.kind !== "committed") {
+        call?.pending.settle(call.answer(response, true));
+      }
       const machine = new ResponseApplicationMachine(
         this.#applicationPorts(record, completed.connectionEpoch),
       );
@@ -401,6 +463,13 @@ export class DocumentRuntime {
         }),
       );
       const accepted = result.disposition === "committed" || result.disposition === "navigated";
+      if (response.kind === "committed") call?.pending.settle(call.answer(response, accepted));
+      // Islands released for a response that did not end them, a stale
+      // one, offer their tools again.
+      if (!LEFT_PAGE.has(result.disposition)) {
+        if (pageLevel) this.#agentHost.restoreAll();
+        else if (islandLevel) this.#agentHost.restore(record);
+      }
       record.scheduler.finish(ticket, accepted ? "accepted" : "rejected");
     } catch {
       record.scheduler.finish(ticket, "rejected");
@@ -749,7 +818,8 @@ export class DocumentRuntime {
       metadata.snapshotForm !== "instance" ||
       metadata.instanceId !== response.snapshotView.instanceId ||
       metadata.revision !== response.acceptedRevision ||
-      canonicalize(metadata.snapshot as JsonValue) !== canonicalize(response.snapshot)
+      canonicalize(metadata.snapshot as JsonValue) !== canonicalize(response.snapshot) ||
+      !sameAgentTools(metadata, record.metadata)
     ) {
       throw new Error("successor_metadata_disagreement");
     }
@@ -762,7 +832,8 @@ export class DocumentRuntime {
       expected.documentKey !== actual.documentKey ||
       expected.instanceId !== actual.instanceId ||
       expected.revision !== actual.revision ||
-      canonicalize(expected.snapshot as JsonValue) !== canonicalize(actual.snapshot as JsonValue)
+      canonicalize(expected.snapshot as JsonValue) !== canonicalize(actual.snapshot as JsonValue) ||
+      !sameAgentTools(expected, actual)
     ) {
       throw new Error("morph_metadata_disagreement");
     }
@@ -837,6 +908,114 @@ export class DocumentRuntime {
     );
   }
 
+  /**
+   * The registration of the island's tool actions with the page's model
+   * context, when the browser has one, the runtime runs and the island
+   * lists tools (AGENT-012). Each call is bound to the connection it was
+   * registered under; the host builds it again on each resume.
+   */
+  #agentRegistration(record: IslandRecord): AgentToolRegistration | null {
+    const tools = record.metadata.agentTools?.tools;
+    if (tools === undefined || this.#state !== "running" || !record.active()) return null;
+    const context = modelContextOf(this.#document);
+    if (context === null) return null;
+    const connectionEpoch = record.connectionEpoch();
+    return {
+      context,
+      tools,
+      execute: (tool, input, client) =>
+        this.#executeAgentTool(record, connectionEpoch, tool, input, client),
+      onFailure: () => {
+        this.#diagnostics.record({
+          code: "agent_tool_rejected",
+          severity: "warning",
+          phase: "lifecycle",
+          detailCode: "operation_rejected",
+        });
+      },
+    };
+  }
+
+  /**
+   * What a pending call of the island hears when a refusal or a navigation
+   * ends the island before the call's own response: a call still queued
+   * never ran; one already sent may have, and only the page that follows
+   * can tell.
+   */
+  #endedCallMessage(record: IslandRecord, pending: PendingAgentCall): string {
+    const ticket = this.#agentTickets.get(pending);
+    return ticket !== undefined && record.scheduler.phase(ticket) === "pending"
+      ? "The component is reloading or leaving the page, so this call did not run."
+      : "The component is reloading or leaving the page before this call's result arrived: read the page before calling again.";
+  }
+
+  /**
+   * Run a WebMCP call of `tool` as a click of its action: scheduled with
+   * the island's pending model edits, sent with the island's snapshot, the
+   * session and the CSRF proof, and applied to the island like any
+   * response, then answered with the outcome and the agent-visible fields.
+   */
+  #executeAgentTool(
+    record: IslandRecord,
+    connectionEpoch: number,
+    tool: AgentToolDefinition,
+    input: unknown,
+    client?: ModelContextClient,
+  ): Promise<ModelContextToolResult> {
+    const fields = record.metadata.agentTools?.fields ?? [];
+    const integers = record.metadata.agentTools?.integers ?? [];
+    const signal = client?.signal;
+    if (signal?.aborted === true) {
+      return Promise.reject(new DOMException("The tool call was aborted.", "AbortError"));
+    }
+    if (!this.#current(record, connectionEpoch)) {
+      return Promise.resolve(agentToolError("The component has left the page."));
+    }
+    if (typeof input !== "object" || input === null || Array.isArray(input)) {
+      return Promise.resolve(agentToolError("The input must be an object."));
+    }
+    const scheduled = this.#events.scheduleAgentAction(
+      record,
+      tool.action,
+      tool.name,
+      input as Readonly<Record<string, JsonValue>>,
+    );
+    if (scheduled === null) {
+      return Promise.resolve(agentToolError("The call could not be scheduled."));
+    }
+    return new Promise((resolve, reject) => {
+      const pending = this.#agentHost.track(record, (result) => {
+        signal?.removeEventListener("abort", onAbort);
+        this.#agentCalls.delete(scheduled.intent);
+        resolve(result);
+      });
+      const onAbort = (): void => {
+        pending?.withdraw();
+        this.#agentCalls.delete(scheduled.intent);
+        record.scheduler.cancel(scheduled.ticket, { abortTransport: true });
+        reject(new DOMException("The tool call was aborted.", "AbortError"));
+      };
+      if (pending === null) {
+        record.scheduler.cancel(scheduled.ticket, { abortTransport: true });
+        resolve(agentToolError("The component has left the page."));
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.#agentTickets.set(pending, scheduled.ticket);
+      this.#agentCalls.set(scheduled.intent, {
+        pending,
+        answer: (response, applied) =>
+          applied
+            ? agentToolResult(response, { fields, integers, arguments: argumentNames(tool) })
+            : agentToolError("The island did not apply the call's response."),
+      });
+      scheduled.intent.onFinish((reason) => {
+        if (reason !== "accepted")
+          pending.settle(agentToolError(`The call ended without a result: ${reason}.`));
+      });
+    });
+  }
+
   #discover(candidates: Iterable<Element>): void {
     for (const element of candidates) this.#connect(element);
   }
@@ -871,6 +1050,10 @@ export class DocumentRuntime {
       this.#lazy.connect(record, directives);
       this.#teleports.mount(record.element);
       this.#connectFeatureDriver(record);
+      record.onDispose(() => {
+        this.#agentHost.disconnect(record);
+      });
+      this.#agentHost.connect(record, () => this.#agentRegistration(record));
     } catch (error: unknown) {
       this.#retire(element);
       const kind = error instanceof IslandMetadataError ? error.kind : "invalid";
@@ -1227,4 +1410,12 @@ export class DocumentRuntime {
       }
     }
   }
+}
+
+/** Whether two metadata list the same tools: a morph never changes them. */
+function sameAgentTools(expected: IslandMetadata, actual: IslandMetadata): boolean {
+  return (
+    canonicalize((expected.agentTools ?? null) as unknown as JsonValue) ===
+    canonicalize((actual.agentTools ?? null) as unknown as JsonValue)
+  );
 }

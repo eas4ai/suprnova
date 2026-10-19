@@ -187,6 +187,16 @@ impl<C: ComponentContract> LiveMount<C> {
             .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidDeclaration))?;
         let document_key = DocumentMountKey::parse(document_key)
             .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidDeclaration))?;
+        // A browser registers the component's tools under names ending in
+        // the island's key, which allows neither `:` nor a second `.`
+        // (AGENT-012): refused at declaration, before any page renders.
+        if descriptor.metadata().has_browser_tools()
+            && !suprnova_live::metadata::is_tool_instance_key(document_key.as_str())
+        {
+            return Err(LiveDocumentError::new(
+                LiveDocumentErrorKind::InvalidDeclaration,
+            ));
+        }
         let component = descriptor.metadata().identity().clone();
         let contract = descriptor.contract_digest().clone();
         let versions = descriptor.metadata().versions();
@@ -954,7 +964,7 @@ fn validate_stitch_failure_policy(policy: &StitchFailurePolicy) -> Result<(), Li
     Ok(())
 }
 
-fn route_identity(pattern: &str) -> Result<RouteIdentity, LiveDocumentError> {
+pub(crate) fn route_identity(pattern: &str) -> Result<RouteIdentity, LiveDocumentError> {
     let mut digest = Sha256::new();
     digest.update(b"suprnova-live/route-identity/v1\0");
     digest.update(pattern.as_bytes());

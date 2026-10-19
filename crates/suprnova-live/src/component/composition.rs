@@ -69,6 +69,24 @@ impl ChildParameterField {
         }
     }
 
+    /// The parameter's registered name.
+    #[must_use]
+    pub const fn name(&self) -> &ModelField {
+        &self.name
+    }
+
+    /// The parameter's registered codec.
+    #[must_use]
+    pub const fn codec(&self) -> &ModelCodec {
+        &self.codec
+    }
+
+    /// Whether a mount must supply the parameter.
+    #[must_use]
+    pub const fn required(&self) -> bool {
+        self.required
+    }
+
     fn snapshot_field(&self) -> Result<FieldSpec, SnapshotError> {
         let codec = match self.codec {
             ModelCodec::I64 => StateCodec::I64Decimal,
@@ -189,6 +207,14 @@ impl ChildParameterSchema {
                 .fields
                 .get(&name)
                 .ok_or_else(|| CompositionError::new(CompositionErrorKind::InvalidParameters))?;
+            if matches!(value, CanonicalValue::Null) {
+                if field.required {
+                    return Err(CompositionError::new(
+                        CompositionErrorKind::InvalidParameters,
+                    ));
+                }
+                continue;
+            }
             field
                 .codec
                 .validate(value, limits)
@@ -204,6 +230,178 @@ impl ChildParameterSchema {
             ));
         }
         Ok(())
+    }
+
+    /// The JSON Schema (draft 2020-12) of the mount parameters an agent may
+    /// send, leaving out `excluding`: the parameters the application fills
+    /// itself, which the agent cannot set. `None` when a parameter the agent
+    /// sends has a codec with no schema ([`ModelCodec::json_schema`]).
+    ///
+    /// The object follows the schema's own validation: the required
+    /// parameters listed, an optional one also accepting `null`, and no
+    /// other field.
+    #[must_use]
+    pub fn json_schema(&self, excluding: &[&str]) -> Option<serde_json::Value> {
+        let mut properties = serde_json::Map::new();
+        let mut required = Vec::new();
+        for field in self.fields.values() {
+            if excluding.contains(&field.name.as_str()) {
+                continue;
+            }
+            let schema = field.codec.json_schema()?;
+            let schema = if field.required {
+                required.push(serde_json::Value::String(field.name.as_str().to_owned()));
+                schema
+            } else {
+                serde_json::json!({ "anyOf": [schema, { "type": "null" }] })
+            };
+            properties.insert(field.name.as_str().to_owned(), schema);
+        }
+        Some(crate::state::object_schema(properties, required))
+    }
+
+    /// Every field of `value` that the schema's validation would
+    /// refuse, and why, in field-name order, treating `excluding` as fields
+    /// the agent may not send: an unknown name, a missing or `null`
+    /// required field, or a value its codec refuses.
+    #[must_use]
+    pub fn field_issues(
+        &self,
+        value: &CanonicalValue,
+        excluding: &[&str],
+        limits: &InputLimits,
+    ) -> Vec<crate::state::FieldIssue> {
+        use crate::state::{FieldIssue, FieldIssueKind};
+
+        let CanonicalValue::Object(values) = value else {
+            return vec![FieldIssue::new("", FieldIssueKind::NotAnObject)];
+        };
+        let mut issues = Vec::new();
+        for (name, value) in values {
+            let field = ModelField::parse(name)
+                .ok()
+                .and_then(|parsed| self.fields.get(&parsed))
+                .filter(|field| !excluding.contains(&field.name.as_str()));
+            let Some(field) = field else {
+                issues.push(FieldIssue::new(name.clone(), FieldIssueKind::Unknown));
+                continue;
+            };
+            if matches!(value, CanonicalValue::Null) {
+                if field.required {
+                    issues.push(FieldIssue::new(name.clone(), FieldIssueKind::Null));
+                }
+            } else if let Err(issue) = field.codec.validate(value, limits) {
+                issues.push(FieldIssue::new(
+                    name.clone(),
+                    FieldIssueKind::Invalid(issue.kind()),
+                ));
+            }
+        }
+        for field in self.fields.values() {
+            if field.required
+                && !excluding.contains(&field.name.as_str())
+                && !values.contains_key(field.name.as_str())
+            {
+                issues.push(FieldIssue::new(
+                    field.name.as_str(),
+                    FieldIssueKind::Missing,
+                ));
+            }
+        }
+        issues.sort_by(|left, right| left.field().cmp(right.field()));
+        issues
+    }
+
+    /// `value` with each parameter in the encoding a signed snapshot
+    /// carries: a 64-bit integer, which the schema's validation takes
+    /// as a number or a decimal string, as its lossless tag, and every other
+    /// value, `null` for an optional parameter included, as it is. A mount whose parameters an agent wrote, not a
+    /// template, passes them through this before the snapshot schema checks
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositionErrorKind::InvalidParameters`] for a value that is not
+    /// an object, an unknown parameter, or an integer its codec refuses.
+    pub fn snapshot_parameters(
+        &self,
+        value: &CanonicalValue,
+        limits: &InputLimits,
+    ) -> Result<CanonicalValue, CompositionError> {
+        let invalid = || CompositionError::new(CompositionErrorKind::InvalidParameters);
+        let CanonicalValue::Object(values) = value else {
+            return Err(invalid());
+        };
+        let mut encoded = BTreeMap::new();
+        for (name, value) in values {
+            let field = ModelField::parse(name)
+                .ok()
+                .and_then(|parsed| self.fields.get(&parsed))
+                .ok_or_else(invalid)?;
+            let value = match field.codec {
+                _ if matches!(value, CanonicalValue::Null) && !field.required => {
+                    CanonicalValue::Null
+                }
+                ModelCodec::I64 => crate::snapshot::state::encode_i64(
+                    field
+                        .codec
+                        .decode::<i64>(value, limits)
+                        .map_err(|_| invalid())?,
+                ),
+                ModelCodec::U64 => crate::snapshot::state::encode_u64(
+                    field
+                        .codec
+                        .decode::<u64>(value, limits)
+                        .map_err(|_| invalid())?,
+                ),
+                _ => value.clone(),
+            };
+            encoded.insert(name.clone(), value);
+        }
+        Ok(CanonicalValue::Object(encoded))
+    }
+
+    /// `value` with each parameter in the one JSON form its codec decodes
+    /// ([`ModelCodec::normalize`]), and `null` for an optional parameter
+    /// left `null`: what a policy deciding on parameters an agent wrote
+    /// reads, so a 64-bit integer reaches it as a JSON integer whether the
+    /// agent sent a number or a decimal string.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositionErrorKind::InvalidParameters`] for a value that is not
+    /// an object, an unknown parameter, or a value its codec refuses.
+    pub fn normalized_parameters(
+        &self,
+        value: &CanonicalValue,
+        limits: &InputLimits,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, CompositionError> {
+        let invalid = || CompositionError::new(CompositionErrorKind::InvalidParameters);
+        let CanonicalValue::Object(values) = value else {
+            return Err(invalid());
+        };
+        let mut normalized = serde_json::Map::new();
+        for (name, value) in values {
+            let field = ModelField::parse(name)
+                .ok()
+                .and_then(|parsed| self.fields.get(&parsed))
+                .ok_or_else(invalid)?;
+            let value = if matches!(value, CanonicalValue::Null) && !field.required {
+                serde_json::Value::Null
+            } else {
+                field
+                    .codec
+                    .normalize(value, limits)
+                    .map_err(|_| invalid())?
+            };
+            normalized.insert(name.clone(), value);
+        }
+        Ok(normalized)
+    }
+
+    /// The registered parameters, in name order.
+    pub fn fields(&self) -> impl ExactSizeIterator<Item = &ChildParameterField> {
+        self.fields.values()
     }
 
     pub(crate) fn validate_and_digest(

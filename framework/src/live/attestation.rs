@@ -29,6 +29,9 @@ pub(crate) enum LiveOperation {
     Upload,
     SseControl,
     WebSocketHandshake,
+    /// A headless Live tool call the MCP endpoint dispatched (AGENT-013).
+    #[cfg(feature = "agents")]
+    AgentAction,
 }
 
 impl LiveOperation {
@@ -39,6 +42,8 @@ impl LiveOperation {
             Self::Upload => b"upload",
             Self::SseControl => b"sse-control",
             Self::WebSocketHandshake => b"websocket-handshake",
+            #[cfg(feature = "agents")]
+            Self::AgentAction => b"agent-action",
         }
     }
 }

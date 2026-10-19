@@ -199,6 +199,20 @@ export class ModelFormRuntime {
     );
   }
 
+  /**
+   * The model edits a WebMCP tool call of the island's action carries: the
+   * deferred bindings a click on any control of the island sends with its
+   * action, and the typed proposals, as a click does (AGENT-012).
+   */
+  prepareIslandAction(record: IslandRecord): ModelBatch {
+    const bindings = this.#byIsland.get(record);
+    const selected =
+      bindings === undefined
+        ? []
+        : [...bindings].filter((binding) => binding.timing.kind === "action");
+    return mergeModelBatches(this.#sampleBatch(record, selected, true), this.#typedBatch(record));
+  }
+
   proposeTyped(record: IslandRecord, field: string, value: JsonValue): ModelEditResult {
     let fields = this.#typedFields.get(record);
     if (fields === undefined) {
