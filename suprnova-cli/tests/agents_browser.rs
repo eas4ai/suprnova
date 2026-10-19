@@ -21,6 +21,9 @@ mod wasm;
 #[path = "agents_browser/consent.rs"]
 mod consent;
 
+#[path = "agents_browser/api_kit.rs"]
+mod api_kit;
+
 #[path = "agents_browser/live_kit.rs"]
 mod live_kit;
 
