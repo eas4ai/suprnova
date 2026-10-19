@@ -649,6 +649,10 @@ fn agent_017_a_generated_inertia_application_serves_the_agent_pages() {
     let tmp = account_flows_harness::scratch_dir();
     let project = account_flows_harness::scaffold(tmp.path(), "agent_pages");
     account_flows_harness::patch_manifest(&project);
+    // What `npm run build` would leave behind: a script every page loads.
+    let assets = project.join("public/assets");
+    std::fs::create_dir_all(&assets).expect("create public/assets");
+    std::fs::write(assets.join("app-agents.js"), "console.log('built')\n").expect("write asset");
     // The OAuth server's issuer is the application's URL, which must be
     // HTTPS or a loopback host.
     let output = account_flows_harness::run_project_test(

@@ -19,7 +19,9 @@
 //! (`Redirect::guest`). A decision leaves for the client's redirect URI by
 //! a location visit (`Inertia::location`): the browser navigates there
 //! itself, which the page's `form-action 'self'` policy does not govern,
-//! while a redirect answering the form's post would be blocked.
+//! while a redirect answering the form's post would be blocked. The pages
+//! send no referrer, so every answer here names the page it returns to
+//! rather than going back.
 
 use serde::Deserialize;
 use suprnova::agents::{
@@ -227,6 +229,21 @@ pub struct ClaimCodeRequest {
 
 impl FormRequest for ClaimCodeRequest {}
 
+/// The form of a consent page's `POST`. Every consent page sends no
+/// referrer, so a validation redirect could not find the page the form came
+/// from, and would land on whatever page the session last recorded. A
+/// consent form's fields are hidden, or bounded in the page, so a form that
+/// fails its rules was not one the page sent: it gets an error page that
+/// says what to do instead.
+async fn consent_form<T: FromRequest>(req: Request, message: &str) -> Result<T, FrameworkError> {
+    T::from_request(req).await.map_err(|error| match error {
+        FrameworkError::Validation(_) | FrameworkError::ValidationRedirect { .. } => {
+            FrameworkError::domain(message, 400)
+        }
+        error => error,
+    })
+}
+
 /// The answer for an authorization that is not the signed-in user's to
 /// decide: it lapsed, was answered, or is someone else's.
 fn approval_ended() -> FrameworkError {
@@ -296,7 +313,8 @@ pub async fn approval(req: Request) -> Response {
 pub async fn decide(req: Request) -> Response {
     // Taken before the form reads the body.
     let approvals = AgentApprovals::of(&req)?;
-    let form = <ApprovalDecisionRequest as FromRequest>::from_request(req).await?;
+    let form: ApprovalDecisionRequest =
+        consent_form(req, "Start again from the app that asked.").await?;
     match approvals
         .decide(&form.authorization, form.decision == "approve")
         .await?
@@ -351,7 +369,8 @@ pub async fn claim(req: Request) -> Response {
 pub async fn confirm(req: Request) -> Response {
     // Taken before the form reads the body.
     let claims = AgentClaims::of(&req)?;
-    let form = <ClaimCodeRequest as FromRequest>::from_request(req).await?;
+    let form: ClaimCodeRequest =
+        consent_form(req, "Open the link the agent gave you again.").await?;
     match claims
         .confirm(&form.claim_attempt_token, &form.user_code)
         .await?
@@ -363,14 +382,15 @@ pub async fn confirm(req: Request) -> Response {
             Inertia::flash("toast", Toast::success("The agent is connected."))?;
             Redirect::to(CONNECTED).status(303).into()
         }
-        ClaimConfirmation::WrongCode { attempts_remaining } => {
-            let mut errs = ValidationErrors::new();
-            errs.add(
+        // Back to the page by name: it sends no referrer to go back by.
+        ClaimConfirmation::WrongCode { attempts_remaining } => Redirect::route("agents.claim")
+            .query("claim_attempt_token", form.claim_attempt_token)
+            .status(303)
+            .with_errors([(
                 "user_code",
                 format!("That code is wrong. {attempts_remaining} attempts left."),
-            );
-            Err(FrameworkError::Validation(errs).into())
-        }
+            )])
+            .into(),
         // A form post cannot be replayed after sign-in: the user signs in
         // and opens the agent's link again.
         ClaimConfirmation::Refused(ClaimRefusal::SignIn) => Redirect::to(SIGN_IN).into(),
@@ -405,7 +425,7 @@ pub async fn revoke_client(req: Request, grant: String) -> Response {
         "toast",
         Toast::success("The app can no longer act for you."),
     )?;
-    Inertia::back(303, Some(CONNECTED)).into()
+    Redirect::to(CONNECTED).status(303).into()
 }
 
 /// `POST /connected-agents/agents/{registration}/revoke` - end one of the
@@ -421,5 +441,5 @@ pub async fn revoke_agent(req: Request, registration: String) -> Response {
         "toast",
         Toast::success("The agent can no longer act for you."),
     )?;
-    Inertia::back(303, Some(CONNECTED)).into()
+    Redirect::to(CONNECTED).status(303).into()
 }

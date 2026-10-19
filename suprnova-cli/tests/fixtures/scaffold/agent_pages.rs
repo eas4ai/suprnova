@@ -34,6 +34,9 @@ const VERIFIER: &str = "kit-agent-pages-verifier-0123456789-abcdefghijklmnopqrst
 const CHALLENGE: &str = "P7iaGGMa6Y5nSTrWAxNQfIwnwsSaBJZkwT3UeiTntw8";
 /// Every account's password.
 const PASSWORD: &str = "agent-pages-password-42";
+/// The built script the harness puts under `public/`, which every page
+/// loads after its document.
+const SCRIPT: &str = "/assets/app-agents.js";
 
 /// Boot the generated application the way `cmd/main.rs` does, minus the
 /// listener, with every migration of its own migrator, and capture mail.
@@ -106,6 +109,19 @@ impl Browser {
             .send()
             .await;
         self.keep(response)
+    }
+
+    /// A script the page loads, as the browser fetches it after the page:
+    /// the session may record it as the previous URL, and a consent page
+    /// sends no referrer, so nothing here may go back to it.
+    async fn load_script(&mut self) {
+        let script = self
+            .client
+            .get(SCRIPT)
+            .header("Accept", "*/*")
+            .send()
+            .await;
+        assert_eq!(script.status(), 200, "GET {SCRIPT}");
     }
 
     /// An Inertia visit.
@@ -608,7 +624,8 @@ async fn agent_017_inertia_approval_round_trip() {
         "{to_client}"
     );
 
-    // Another word decides nothing.
+    // Another word decides nothing. The page sends no referrer, so the
+    // answer is an error page rather than a way back.
     let id = open_approval(&mut alice, &client_id).await;
     let refused = alice
         .submit(
@@ -616,11 +633,7 @@ async fn agent_017_inertia_approval_round_trip() {
             json!({ "authorization": id, "decision": "maybe" }),
         )
         .await;
-    assert!(
-        matches!(refused.status(), 302 | 303),
-        "{}",
-        refused.body_text()
-    );
+    assert_eq!(refused.status(), 400, "{}", refused.body_text());
     assert_eq!(
         alice
             .visit(&format!("/oauth/approve?authorization={}", encode(&id)))
@@ -674,6 +687,7 @@ async fn agent_017_inertia_claim_round_trip() {
 
     let first = bob.open(&page_path).await;
     assert_eq!(first.status(), 200, "{}", first.body_text());
+    bob.load_script().await;
     let page = bob.visit(&page_path).await;
     let page = page.inertia_page();
     assert_eq!(page["component"], "Agents/Claim");
@@ -807,6 +821,8 @@ async fn agent_017_inertia_connected_agents_lists_and_revokes_only_the_users_own
     assert_eq!(mcp_status(&machine, &client_token).await, 200);
     assert_eq!(mcp_status(&machine, &agent_token).await, 200);
 
+    connected(&mut dave).await;
+    dave.load_script().await;
     let revoked = dave
         .submit(
             &format!("/connected-agents/clients/{}/revoke", encode(&grant)),
