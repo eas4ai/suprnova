@@ -546,6 +546,26 @@ async fn agent_005_client_metadata_document_must_name_its_own_url() {
 }
 
 #[tokio::test]
+async fn agent_005_registration_refuses_a_redirect_uri_outside_printable_ascii() {
+    let h = sqlite_harness().await;
+    let refused = h
+        .post_json(
+            "/oauth/register",
+            json!({ "redirect_uris": ["https://evil.test/cb\u{202E}x"] }),
+        )
+        .await;
+    assert_eq!(status(&refused), 400, "{:?}", body(&refused));
+    assert_eq!(body(&refused)["error"], "invalid_redirect_uri");
+    let encoded = h
+        .post_json(
+            "/oauth/register",
+            json!({ "redirect_uris": ["https://evil.test/cb%E2%80%AEx"] }),
+        )
+        .await;
+    assert_eq!(status(&encoded), 201, "{:?}", body(&encoded));
+}
+
+#[tokio::test]
 async fn agent_005_registration_stores_client_text_without_control_or_format_characters() {
     use magnetar::authorization_server::{AuthorizationStore, SqlAuthorizationStore};
     let h = sqlite_harness().await;
