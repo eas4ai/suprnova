@@ -277,6 +277,9 @@ enum TypesArtifact {
     /// `frontend/src/types/lang-keys.ts`, from `.ftl` catalogs under
     /// `lang/`.
     LangKeys,
+    /// `frontend/src/types/tool-schemas.ts`, the JSON Schemas of the form
+    /// requests under `src/` that the kits' form tools register.
+    ToolSchemas,
 }
 
 /// One `--json` NDJSON event: exactly one of these, serialized as a
@@ -1460,6 +1463,29 @@ pub fn run(
                 ui::warning(&format!("Failed to generate lang-keys: {} (continuing)", e));
             }
         }
+
+        // The form request schemas the kits' form tools register.
+        let tool_schemas_output = project_path.join(super::generate_types::TOOL_SCHEMAS_OUTPUT);
+        match super::tool_schemas::generate_tool_schemas_to_file(project_path, &tool_schemas_output)
+        {
+            Ok(outcome) => {
+                if !json {
+                    super::generate_types::report_tool_schema_refusals(&outcome.refusals);
+                    report_startup_generation(
+                        outcome.count,
+                        "form request schema(s)",
+                        &tool_schemas_output,
+                        outcome.wrote,
+                    );
+                }
+            }
+            Err(e) => {
+                ui::warning(&format!(
+                    "Failed to generate the form request schemas: {} (continuing)",
+                    e
+                ));
+            }
+        }
         if !json {
             ui::br();
         }
@@ -2245,6 +2271,7 @@ fn start_type_watcher(
     let project_path = Path::new(".");
     let output_path = project_path.join("frontend/src/types/inertia-props.ts");
     let lang_keys_output = project_path.join("frontend/src/types/lang-keys.ts");
+    let tool_schemas_output = project_path.join(super::generate_types::TOOL_SCHEMAS_OUTPUT);
 
     let mut schedule = RegenerationSchedule::new(REGEN_QUIET);
 
@@ -2304,6 +2331,42 @@ fn start_type_watcher(
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("{} Failed to regenerate: {}", style("[types]").yellow(), e);
+                }
+            }
+
+            // A refusal is news only when the module changed.
+            match super::tool_schemas::generate_tool_schemas_to_file(
+                project_path,
+                &tool_schemas_output,
+            ) {
+                Ok(outcome) if outcome.wrote => {
+                    if mode.is_json() {
+                        emit_event(
+                            mode,
+                            DevEvent::TypesRegenerated {
+                                ts: now_ts(),
+                                artifact: TypesArtifact::ToolSchemas,
+                                count: outcome.count as u32,
+                            },
+                        );
+                    } else {
+                        for refusal in &outcome.refusals {
+                            eprintln!("{} {}", style("[types]").yellow(), refusal);
+                        }
+                        println!(
+                            "{} Regenerated {} form request schema(s)",
+                            style("[types]").blue(),
+                            outcome.count
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!(
+                        "{} Failed to regenerate the form request schemas: {}",
+                        style("[types]").yellow(),
+                        e
+                    );
                 }
             }
         }
@@ -3192,6 +3255,16 @@ mod dev_event_json_tests {
         assert_eq!(
             serde_json::to_string(&lang_keys).unwrap(),
             r#"{"type":"types_regenerated","ts":"2026-08-18T10:15:23.456-07:00","artifact":"lang_keys","count":12}"#
+        );
+
+        let tool_schemas = DevEvent::TypesRegenerated {
+            ts: "2026-08-18T10:15:23.456-07:00".to_string(),
+            artifact: TypesArtifact::ToolSchemas,
+            count: 2,
+        };
+        assert_eq!(
+            serde_json::to_string(&tool_schemas).unwrap(),
+            r#"{"type":"types_regenerated","ts":"2026-08-18T10:15:23.456-07:00","artifact":"tool_schemas","count":2}"#
         );
     }
 

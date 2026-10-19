@@ -893,6 +893,27 @@ pub fn stream_core() -> &'static str {
     include_str!("files/frontend/stream/core.ts.tpl")
 }
 
+/// `src/lib/agents/core.ts`, the same in every Inertia kit: WebMCP
+/// registration, server tool calls and the form tool engine the kit's
+/// `src/lib/agents/index.ts` hooks build on (AGENT-014, AGENT-015).
+pub fn agents_core() -> &'static str {
+    include_str!("files/frontend/agents/core.ts.tpl")
+}
+
+/// `src/lib/agents/inertia.ts`, the same in every Inertia kit:
+/// `installPageTools`, which keeps the registered server tools equal to
+/// the current Inertia page's `agentTools` (AGENT-014).
+pub fn agents_inertia() -> &'static str {
+    include_str!("files/frontend/agents/inertia.ts.tpl")
+}
+
+/// `src/types/tool-schemas.ts`, the same in every Inertia kit: what
+/// `suprnova generate-types` writes for the kits' shared backend, so the
+/// first regeneration leaves it as it is.
+pub fn tool_schemas_types() -> &'static str {
+    include_str!("files/frontend/types/tool-schemas.ts.tpl")
+}
+
 pub mod react {
     pub fn package_json(project_name: &str) -> String {
         include_str!("files/frontend/react/package.json.tpl")
@@ -946,6 +967,11 @@ pub mod react {
     /// `useEventStream` and `useJsonEventStream` over [`super::stream_core`].
     pub fn stream_hooks() -> &'static str {
         include_str!("files/frontend/react/src/lib/stream/index.ts.tpl")
+    }
+    /// `src/lib/agents/index.ts`: `usePageTool` and `useFormTool` over
+    /// [`super::agents_core`], and `installPageTools`.
+    pub fn agent_hooks() -> &'static str {
+        include_str!("files/frontend/react/src/lib/agents/index.ts.tpl")
     }
     pub fn app_css() -> &'static str {
         include_str!("files/frontend/react/src/app.css.tpl")
@@ -1006,6 +1032,11 @@ pub mod svelte {
     /// [`super::stream_core`].
     pub fn stream_hooks() -> &'static str {
         include_str!("files/frontend/svelte/src/lib/stream/index.ts.tpl")
+    }
+    /// `src/lib/agents/index.ts`: `usePageTool` and `useFormTool` over
+    /// [`super::agents_core`], and `installPageTools`.
+    pub fn agent_hooks() -> &'static str {
+        include_str!("files/frontend/svelte/src/lib/agents/index.ts.tpl")
     }
     pub fn app_css() -> &'static str {
         include_str!("files/frontend/svelte/src/app.css.tpl")
@@ -1180,6 +1211,11 @@ pub mod vue {
     pub fn stream_hooks() -> &'static str {
         include_str!("files/frontend/vue/src/lib/stream/index.ts.tpl")
     }
+    /// `src/lib/agents/index.ts`: `usePageTool` and `useFormTool` over
+    /// [`super::agents_core`], and `installPageTools`.
+    pub fn agent_hooks() -> &'static str {
+        include_str!("files/frontend/vue/src/lib/agents/index.ts.tpl")
+    }
     pub fn app_css() -> &'static str {
         include_str!("files/frontend/vue/src/app.css.tpl")
     }
@@ -1323,6 +1359,27 @@ pub fn scaffold_frontend(
     for (path, content) in [
         (stream.join("core.ts"), stream_core()),
         (stream.join("index.ts"), stream_hooks),
+    ] {
+        fs::write(&path, content)
+            .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    }
+
+    // Agent tools: one shared engine, the page tools installer the entry
+    // calls, the kit's hooks, and the form request schemas the form tools
+    // register (AGENT-014, AGENT-015).
+    let agents = lib.join("agents");
+    fs::create_dir_all(&agents)
+        .map_err(|e| format!("Failed to create {}: {}", agents.display(), e))?;
+    let agent_hooks = match kit {
+        InertiaKit::React => react::agent_hooks(),
+        InertiaKit::Svelte => svelte::agent_hooks(),
+        InertiaKit::Vue => vue::agent_hooks(),
+    };
+    for (path, content) in [
+        (agents.join("core.ts"), agents_core()),
+        (agents.join("inertia.ts"), agents_inertia()),
+        (agents.join("index.ts"), agent_hooks),
+        (types.join("tool-schemas.ts"), tool_schemas_types()),
     ] {
         fs::write(&path, content)
             .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;

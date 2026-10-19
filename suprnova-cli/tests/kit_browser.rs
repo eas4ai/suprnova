@@ -1,19 +1,20 @@
 //! Behavioural half of `par-starter-kits`: fresh scaffolds in Chromium.
 //! Run: cargo test -p suprnova-cli --test kit_browser -- --ignored --test-threads=1
 
+#[path = "kit_support/mod.rs"]
+mod kit_support;
+
 use std::fs;
 use std::net::TcpListener;
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::process::Command as AsyncCommand;
 
-const CLI: &str = env!("CARGO_BIN_EXE_suprnova");
+use kit_support::{CLI, KITS, copy_tree, read, run};
+
 const NAME: &str = "kit_browser_app";
-const KITS: [&str; 3] = ["svelte", "react", "vue"];
 static BACKEND: OnceLock<Result<Backend, String>> = OnceLock::new();
 // Serialises asset swaps even when a caller omits --test-threads=1.
 static KIT_LOCK: Mutex<()> = Mutex::new(());
@@ -25,76 +26,9 @@ struct Backend {
     suite: PathBuf,
 }
 
-fn read(path: &Path) -> String {
-    fs::read_to_string(path).unwrap_or_else(|error| format!("read {}: {error}", path.display()))
-}
-
-/// Keep stdout/stderr together in a durable file, including on timeout.
-fn run(command: &mut AsyncCommand, log: &Path, timeout: Duration) -> Result<(), String> {
-    let description = format!("{command:?}");
-    eprintln!("kit browser: {description}; log {}", log.display());
-    let file = fs::File::create(log).map_err(|error| error.to_string())?;
-    command.stdout(file.try_clone().map_err(|error| error.to_string())?);
-    command.stderr(file);
-    let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
-    #[cfg(unix)]
-    command.as_std_mut().process_group(0);
-    command.kill_on_drop(true);
-    runtime.block_on(async {
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("{description}: {error}"))?;
-        #[cfg(unix)]
-        let process_group = child.id();
-        match tokio::time::timeout(timeout, child.wait()).await {
-            Ok(Ok(status)) if status.success() => {
-                eprintln!("kit browser: {description}: {status}\n{}", read(log));
-                Ok(())
-            }
-            result => {
-                // Stop descendants too (Cargo, npm and npx start children).
-                #[cfg(unix)]
-                if let Some(pid) = process_group {
-                    let _ = nix::sys::signal::killpg(
-                        nix::unistd::Pid::from_raw(pid as i32),
-                        nix::sys::signal::Signal::SIGKILL,
-                    );
-                }
-                // Reap a timed-out child before reading the final log.
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                Err(format!("{description}: {result:?}\n{}", read(log)))
-            }
-        }
-    })
-}
-
 /// As in live_generated_app.rs: use the in-tree facade and detach the scaffold.
 fn patch_local_suprnova(project: &Path) -> Result<(), String> {
-    let framework = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .ok_or("workspace root")?
-        .join("framework");
-    let manifest = project.join("Cargo.toml");
-    let original = fs::read_to_string(&manifest).map_err(|error| error.to_string())?;
-    let mut replaced = false;
-    let mut rewritten = String::new();
-    for line in original.lines() {
-        if line.trim_start().starts_with("suprnova = ") {
-            rewritten.push_str(&format!("suprnova = {{ path = {:?} }}\n", framework));
-            replaced = true;
-        } else {
-            rewritten.push_str(line);
-            rewritten.push('\n');
-        }
-    }
-    if !replaced {
-        return Err("scaffold has no suprnova dependency".into());
-    }
-    if !original.lines().any(|line| line.trim() == "[workspace]") {
-        rewritten.push_str("\n[workspace]\n");
-    }
-    fs::write(manifest, rewritten).map_err(|error| error.to_string())?;
+    kit_support::patch_local_suprnova(project)?;
 
     // The sole backend difference between kits is the frontend enum in
     // bootstrap. Select that configuration at boot to share this build;
@@ -173,24 +107,6 @@ fn prepare() -> Result<Backend, String> {
         project,
         suite,
     })
-}
-
-fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
-    fs::create_dir_all(destination).map_err(|error| error.to_string())?;
-    for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let target = destination.join(entry.file_name());
-        if entry
-            .file_type()
-            .map_err(|error| error.to_string())?
-            .is_dir()
-        {
-            copy_tree(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), target).map_err(|error| error.to_string())?;
-        }
-    }
-    Ok(())
 }
 
 struct Server(Child);

@@ -1,7 +1,8 @@
-import { createInertiaApp } from '@inertiajs/svelte'
+import { createInertiaApp, router } from '@inertiajs/svelte'
 import { hydrate, mount } from 'svelte'
 import AppLayout from './layouts/AppLayout.svelte'
 import GuestLayout from './layouts/GuestLayout.svelte'
+import { installPageTools } from './lib/agents'
 import { pageTitle } from './lib/title'
 
 // Exception text can include copied URLs or credentials even without request context.
@@ -146,6 +147,11 @@ void loadReporting()
 // read from the element's `nonce` property.
 const nonce =
   document.querySelector<HTMLMetaElement>('meta[property="csp-nonce"]')?.nonce || undefined
+
+// The server tools each page lists register with the browser's WebMCP
+// `document.modelContext` while the page is shown. Installed before
+// `createInertiaApp`, so the first page's `navigate` event is heard.
+installPageTools(router)
 
 createInertiaApp({
   // `@inertiajs/vite` turns this into the page resolver: `Notes/Index`
