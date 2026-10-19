@@ -6,6 +6,107 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## 4.4.0 - 2026-10-18
 
+### Added
+
+- **Handlers become agent tools with `#[tool]`.** A routed `#[handler]` marked
+  `#[tool]` is a tool agents can call. `#[tool_input]` derives the input's
+  JSON Schema (draft 2020-12) from the struct and its `serde` and `validator`
+  attributes, so an agent is told what the server enforces. `tool_scopes!`
+  declares scopes, and a `ToolCaller` argument tells the handler and its
+  policies who is calling: a `public` guest, a `user` or an `agent` account.
+  A tool call runs the route's middleware, validation, policies and rate
+  limits, under per-caller and per-address budgets. An invalid or duplicate
+  name, a missing description or an undeclared scope fails the build. See
+  [Agents](manual/agents.md).
+- **An MCP endpoint serves the application's tools.**
+  `Router::agents(AgentsConfig::new())` serves `POST /mcp` over MCP's
+  Streamable HTTP transport, revision 2026-07-28, and to `initialize`-based
+  clients of revisions 2025-06-18 and 2025-11-25, without sessions. It serves
+  protected resource and authorization server metadata at the well-known
+  locations under the application's root, lists only the tools a token may
+  call, answers 401 and 403 with the scopes a call needs, refuses a foreign
+  `Origin`, and bounds the body, the answer and the run time.
+- **Users approve MCP clients through a built-in OAuth server.**
+  `AgentsConfig::oauth_server(OAuthServer::new())` mounts the new Magnetar
+  authorization server plugin: OAuth 2.1 with the authorization code grant and
+  PKCE `S256`, clients identified by a client ID metadata document or dynamic
+  registration, exact redirect URIs, tokens bound to the MCP endpoint and the
+  approved scopes, refresh tokens rotated on every use, revocation, and tokens
+  stored only as digests. Default approval and connected-agents pages ship,
+  and `ConnectedAgents` lists and revokes a user's grants. Its issuer is
+  `APP_URL`.
+- **Tokens from an outside identity provider sign users in.** `OutsideIssuer`,
+  added with `AgentsConfig::resolver`, accepts the user tokens a provider you
+  name signs, checked against its published keys for issuer, audience, expiry
+  and scope. It finds the user by `sub`, by an id the issuer assigns
+  (`id_claim`, such as Microsoft Entra's `oid`) or by a claim the token marks
+  verified.
+- **Agents hold accounts of their own under auth.md.**
+  `AgentsConfig::agent_auth(AgentAuth::new())` serves auth.md v0.6.0 from the
+  new Magnetar agent auth plugin: anonymous, `service_auth` and ID-JAG
+  registration, the `/auth.md` document, a claim page with a six-digit code,
+  revocation by token and by Security Event Token, registration rate limits
+  and audit events. A claim dispatches `AgentClaimed`, delivered at least once
+  with a stable `event_id`. The `agents:key`, `agents:revoke-all` and
+  `agents:prune` commands print a signing key, revoke every agent credential
+  and run the maintenance pass.
+- **Live actions can be agent tools, in the browser and headless.** `#[tool]`
+  on a Live action offers it to agents, with fields marked `#[agent_visible]`
+  as the result. The Live runtime registers a mounted component's tools with
+  WebMCP. An action marked `headless` is also callable over MCP with no
+  browser, through a sealed state handle bound to the caller; the Gate
+  ability `live:{component}.mount` checks the mount properties an agent sends,
+  and `#[resolve(...)]` fills a property from the caller instead.
+- **Pages offer server tools to agents in the browser.**
+  `Router::share_tools`, `with_tools` on a route, a group, an Inertia response
+  or a Live document, and `PageTools::add` choose the tools each page
+  registers with WebMCP. A page lists only the tools its viewer may call, a
+  page of public tools stays shared in RenderCache, and the page refreshes its
+  data after a write tool. With `WEBMCP_ORIGIN_TRIAL_TOKEN` set, every HTML
+  response carries the `Origin-Trial` header.
+- **The React, Vue and Svelte kits register page and form tools.** New
+  projects call `installPageTools(router)` and ship `usePageTool`, for a tool
+  that lives while its component is mounted, and `useFormTool`, which makes a
+  form a tool that fills and submits it through Inertia. A destructive form is
+  filled and left for the user to submit. `suprnova generate-types` writes
+  each form request's input schema to `frontend/src/types/tool-schemas.ts`.
+- **Rust front ends compiled to WebAssembly register WebMCP tools.** The new
+  `suprnova-webmcp` crate registers typed page tools, with the input schema
+  the server derives, for as long as their handles live, and calls the
+  application's server tools with the session and the CSRF token. Built for a
+  target without a browser it compiles and answers unsupported.
+- **Tests call tools as any caller.** `TestClient::tool` and
+  `TestClient::live_tool` call a tool as a page does, and `TestClient::mcp`
+  calls the MCP endpoint as a guest, a user with chosen scopes or an agent,
+  claimed or not, without an OAuth or auth.md ceremony. `Agents::fake` mints
+  a token for a chosen caller, and `TestResponse::page_tools` reads the tools
+  a page offers.
+- **Test requests can come from an address and carry any body.**
+  `TestClient::with_peer_address` sends requests as if from that TCP peer, so
+  `Request::ip()` and limits keyed by the client address see it.
+  `TestRequest::body` sends a body of any content type as it is.
+
+### Changed
+
+- **`MagnetarLifecycleEvent` and `LifecycleEvent` carry an `attributes`
+  map.** Agent auth events record the registration, the client address and
+  the fields auth.md names for each kind in it; it is empty for the other
+  kinds. Code that builds either struct field by field, or destructures it
+  without `..`, no longer compiles.
+- **Three public enums have new variants.** `LifecycleEventKind` gains the
+  nine agent auth audit kinds, from `AgentRegistrationCreated` to
+  `AgentRegistrationRevoked`. `CryptPurpose` gains `LiveAgentHandle` and
+  `HandlerArgKind` gains `Context`. A `match` over one of them without a
+  wildcard arm no longer compiles.
+- **The `agents` feature is on by default.** An application that keeps the
+  framework's default features compiles the agent tools, the OAuth server and
+  agent auth, and Magnetar's `migrate` creates their eight tables when it next
+  runs. Nothing is served until the router calls `Router::agents`.
+- **`generate-types` and `serve` write `frontend/src/types/tool-schemas.ts`.**
+  The file holds the input schema of each form request, or an empty list,
+  beside the Inertia props types. Each run brings it up to date and names
+  each request it cannot describe exactly as the server does.
+
 ### Fixed
 
 - **Magnetar's tables hold long values on MySQL and MariaDB.** Byte
@@ -33,6 +134,25 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Session metadata stays within its columns.** A session keeps at most
   1,024 characters of the user agent. A lockout records the client address
   only when it parses as an IP address.
+- **New projects get every default feature of the framework.** A new
+  project's `Cargo.toml` turns the framework's default features off and lists
+  the ones it keeps. The list lacked `search-media` and `agents`, so a new
+  project had neither media search nor agent tools. It now lists both.
+- **A form request on GET or HEAD reads its query.** As Laravel validates the
+  query of a GET, a form request on a GET or HEAD request without a body
+  reads its query string as it reads a url-encoded body: it decodes,
+  validates and names its fields as `request.query_into()` does. Such a
+  request was refused with 415. A request with a body still reads the body,
+  and other methods are unchanged.
+- **Precognition and the real request read a query alike.** A query value
+  holding a JSON object reads as that object where a struct or a map belongs,
+  and stays text everywhere else, in Precognition, a GET form request and
+  `request.query_into()`. Precognition decoded the object wherever it stood,
+  so a route could pass Precognition and fail the real submission.
+- **An `Option` Live mount parameter can be left out.** Every mount parameter
+  was registered as required, and no codec decodes null, so an `Option<T>`
+  parameter could never be `None`. It is now optional: left out or null, it
+  mounts as `None`.
 
 ## 4.3.0 - 2026-10-18
 
