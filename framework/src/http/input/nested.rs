@@ -37,10 +37,17 @@ const MAX_DEPTH: usize = 64;
 
 /// The value one name holds.
 pub(super) enum Node<'a> {
-    /// A JSON body value or a JSON-encoded query object.
+    /// A JSON body value.
     Json(serde_json::Value),
     /// A value as sent. An empty one is `null`.
     Text(Cow<'a, str>),
+    /// A query string value as sent. It reads as [`Self::Text`] does,
+    /// except where an object belongs: a value that holds a JSON object,
+    /// as the official Precognition client sends one, reads as that object
+    /// there. A text field keeps the text, so a search for `{"a":1}` is
+    /// still a search. Precognition and the real request read a query
+    /// through it alike (AGENT-014).
+    Query(Cow<'a, str>),
     /// A multipart text part whose bytes are not UTF-8, which no type
     /// reads.
     NotUtf8,
@@ -158,17 +165,16 @@ impl<'a> Array<'a> {
 }
 
 impl<'a> Node<'a> {
-    /// Decode the objects the official Precognition client puts in query values.
-    pub(super) fn decode_query_objects(&mut self) {
+    /// Mark this value, and every value under it, as a query value
+    /// ([`Self::Query`]).
+    pub(super) fn mark_query(&mut self) {
         match self {
             Self::Text(text) => {
-                if let Ok(value @ serde_json::Value::Object(_)) = serde_json::from_str(text) {
-                    *self = Self::Json(value);
-                }
+                *self = Self::Query(std::mem::take(text));
             }
             Self::Array(array) => {
                 for node in array.entries.values_mut() {
-                    node.decode_query_objects();
+                    node.mark_query();
                 }
             }
             _ => {}
@@ -182,7 +188,7 @@ impl<'a> Node<'a> {
         }
         match self {
             Self::Array(array) => Some(array),
-            Self::Text(_) | Self::NotUtf8 | Self::File(_) | Self::Json(_) => None,
+            Self::Text(_) | Self::Query(_) | Self::NotUtf8 | Self::File(_) | Self::Json(_) => None,
         }
     }
 }
@@ -222,6 +228,15 @@ impl<'a> Nested<'a> {
         let mut nested = Self::new(fields);
         for (name, value) in form_urlencoded::parse(bytes) {
             nested.insert(name, Node::Text(value));
+        }
+        nested
+    }
+
+    /// The pairs of a query string, each a query value ([`Node::Query`]).
+    pub(super) fn from_query(bytes: &'a [u8], fields: Option<&'static [&'static str]>) -> Self {
+        let mut nested = Self::from_urlencoded(bytes, fields);
+        for node in nested.names.values_mut() {
+            node.mark_query();
         }
         nested
     }

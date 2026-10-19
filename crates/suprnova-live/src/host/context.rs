@@ -1,5 +1,6 @@
 //! Validation-only construction of request-scoped Live authority.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use crate::identity::{IslandSlot, RouteIdentity, ScopeFingerprint, UnixMillis};
@@ -103,7 +104,37 @@ impl LiveRequestContextValidator {
             checks,
             capabilities: candidate.capabilities,
             expires_at,
+            agent_tools: AgentToolFilter::All,
         })
+    }
+}
+
+/// Which of a component's browser tools the island roots of one request
+/// list (AGENT-014).
+///
+/// The host narrows the list to the tools the request's viewer may call, so
+/// a page never offers a tool its viewer cannot use. It only narrows: a root
+/// never lists a tool its component does not declare, and the mount's
+/// catalog entry still decides whether a root lists tools at all. Who may
+/// call a tool is checked again on every call.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum AgentToolFilter {
+    /// Every browser tool the component declares, the list a root carries
+    /// when every one of its tools accepts every viewer.
+    #[default]
+    All,
+    /// Only the tools of these base names.
+    Only(BTreeSet<String>),
+}
+
+impl AgentToolFilter {
+    /// Whether a root lists the tool whose base name is `base`.
+    #[must_use]
+    pub fn admits(&self, base: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(bases) => bases.contains(base),
+        }
     }
 }
 
@@ -114,6 +145,7 @@ pub struct TrustedLiveRequestContext {
     checks: RequiredChecks,
     capabilities: HostCapabilities,
     expires_at: UnixMillis,
+    agent_tools: AgentToolFilter,
 }
 
 impl TrustedLiveRequestContext {
@@ -133,6 +165,21 @@ impl TrustedLiveRequestContext {
     #[must_use]
     pub const fn mount(&self) -> &VerifiedMountCatalogMatch {
         &self.mount
+    }
+
+    /// Narrows the browser tools this request's island roots list to the
+    /// ones `filter` admits: the host passes the tools its viewer may call.
+    /// It can only remove tools, so it grants no authority.
+    #[must_use]
+    pub fn with_agent_tool_filter(mut self, filter: AgentToolFilter) -> Self {
+        self.agent_tools = filter;
+        self
+    }
+
+    /// Returns which browser tools this request's island roots list.
+    #[must_use]
+    pub const fn agent_tool_filter(&self) -> &AgentToolFilter {
+        &self.agent_tools
     }
 
     /// Returns all exact validated check dispositions.

@@ -421,7 +421,12 @@ impl PublicSeedMountService {
                 action_parameters: crate::view::declared_action_parameters(descriptor.metadata()),
                 agent_tools: catalog
                     .agent_tools()
-                    .then(|| crate::view::declared_agent_tools(descriptor.metadata()))
+                    .then(|| {
+                        crate::view::declared_agent_tools(
+                            descriptor.metadata(),
+                            context.agent_tool_filter(),
+                        )
+                    })
                     .flatten(),
             },
             self.max_metadata_bytes,

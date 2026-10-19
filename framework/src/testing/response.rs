@@ -561,6 +561,74 @@ impl TestResponse {
         self.assert_inertia().to_page()
     }
 
+    /// The names of the server tools this page offers its viewer, in the
+    /// order it lists them (AGENT-014): the Inertia page's `agentTools`, or
+    /// the `suprnova-agent-tools` element of a Live page or plain view.
+    /// Empty when the page offers none.
+    #[cfg(feature = "agents")]
+    pub fn page_tools(&self) -> Vec<String> {
+        self.page_tools_payload()
+            .and_then(|payload| {
+                payload
+                    .get("tools")
+                    .and_then(|tools| tools.as_array())
+                    .cloned()
+            })
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The server tool `name` as this page carries it: what WebMCP
+    /// registers, plus the method and path the browser calls (AGENT-014).
+    /// `None` when the page does not offer it.
+    #[cfg(feature = "agents")]
+    pub fn page_tool(&self, name: &str) -> Option<serde_json::Value> {
+        self.page_tools_payload()?
+            .get("tools")?
+            .as_array()?
+            .iter()
+            .find(|tool| tool.get("name").and_then(serde_json::Value::as_str) == Some(name))
+            .cloned()
+    }
+
+    /// The whole page tools payload, `limits` included, when the page
+    /// carries one (AGENT-014).
+    #[cfg(feature = "agents")]
+    pub fn page_tools_payload(&self) -> Option<serde_json::Value> {
+        let body = self.body_text();
+        let open = "<script type=\"application/json\" id=\"suprnova-agent-tools\">";
+        if let Some(start) = body.find(open) {
+            let rest = &body[start + open.len()..];
+            let end = rest.find("</script>")?;
+            return serde_json::from_str(&rest[..end]).ok();
+        }
+        if let Ok(page) = serde_json::from_str::<serde_json::Value>(&body) {
+            return page.get("agentTools").cloned();
+        }
+        // The first visit's document embeds the page JSON in its
+        // `data-page` element, attributes in either order.
+        let mut rest = body.as_str();
+        while let Some(start) = rest.find("<script") {
+            rest = &rest[start..];
+            let tag_end = rest.find('>')?;
+            let tag = &rest[..tag_end];
+            let after = &rest[tag_end + 1..];
+            if tag.contains("data-page") && tag.contains("application/json") {
+                let end = after.find("</script>")?;
+                let page: serde_json::Value = serde_json::from_str(&after[..end]).ok()?;
+                return page.get("agentTools").cloned();
+            }
+            rest = after;
+        }
+        None
+    }
+
     /// The props of this response's Inertia page: all of them for `None`,
     /// the value at a dot-separated path for `Some` (`Null` when the path
     /// resolves to nothing). Laravel's `inertiaProps($propName)`.

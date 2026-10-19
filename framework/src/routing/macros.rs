@@ -373,6 +373,13 @@ where
         self.middleware(crate::view::head::HeadLayer::route(f))
     }
 
+    /// Offer the tools `names` on this route's pages (AGENT-014). See
+    /// [`RouteBuilder::with_tools`](crate::routing::RouteBuilder::with_tools).
+    #[cfg(feature = "agents")]
+    pub fn with_tools<I: IntoIterator<Item = &'static str>>(self, names: I) -> Self {
+        self.middleware(crate::agents::page_tools::PageToolsLayer::new(names))
+    }
+
     /// Add middleware to this route
     pub fn middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.middlewares.push(boxed_as(middleware));
@@ -846,6 +853,13 @@ where
         f: impl FnOnce(crate::view::head::HeadBuilder) -> crate::view::head::HeadBuilder,
     ) -> Self {
         self.middleware(crate::view::head::HeadLayer::route(f))
+    }
+
+    /// Offer the tools `names` on this route's pages (AGENT-014). See
+    /// [`RouteBuilder::with_tools`](crate::routing::RouteBuilder::with_tools).
+    #[cfg(feature = "agents")]
+    pub fn with_tools<I: IntoIterator<Item = &'static str>>(self, names: I) -> Self {
+        self.middleware(crate::agents::page_tools::PageToolsLayer::new(names))
     }
 
     /// Attach middleware that runs for every method the `any!` route
@@ -1413,6 +1427,14 @@ impl GroupDef {
         f: impl FnOnce(crate::view::head::HeadBuilder) -> crate::view::head::HeadBuilder,
     ) -> Self {
         self.middleware(crate::view::head::HeadLayer::group(f))
+    }
+
+    /// Offer the tools `names` on the pages of every route in this group
+    /// (AGENT-014). See
+    /// [`RouteBuilder::with_tools`](crate::routing::RouteBuilder::with_tools).
+    #[cfg(feature = "agents")]
+    pub fn with_tools<I: IntoIterator<Item = &'static str>>(self, names: I) -> Self {
+        self.middleware(crate::agents::page_tools::PageToolsLayer::new(names))
     }
 
     /// Add middleware to all routes in this group

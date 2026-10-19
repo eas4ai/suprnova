@@ -85,6 +85,14 @@ impl GroupBuilder {
         self.middleware(crate::view::head::HeadLayer::group(f))
     }
 
+    /// Offer the tools `names` on the pages of every route in this group,
+    /// beside the ones each route and [`Router::share_tools`] offer
+    /// (AGENT-014). See [`RouteBuilder::with_tools`].
+    #[cfg(feature = "agents")]
+    pub fn with_tools<I: IntoIterator<Item = &'static str>>(self, names: I) -> Self {
+        self.middleware(crate::agents::page_tools::PageToolsLayer::new(names))
+    }
+
     /// Apply middleware to all routes in this group
     ///
     /// # Example

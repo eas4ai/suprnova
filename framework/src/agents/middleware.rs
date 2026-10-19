@@ -176,6 +176,45 @@ pub(crate) fn live_access(
     into_boxed(LiveToolAccess { registry, config })
 }
 
+/// The browser caller of the current request, which came from `address`:
+/// who the route's guard signed in, if anyone. What a page's tool list is
+/// filtered by (AGENT-014), and what a browser tool call is checked as.
+pub(crate) async fn browser_caller(
+    address: Option<std::net::IpAddr>,
+) -> Result<ToolCaller, FrameworkError> {
+    ToolAccess::caller_at(address).await
+}
+
+/// The refusal of a request that carries the
+/// [`TOOL_CALL_HEADER`](super::TOOL_CALL_HEADER) to a route that serves no
+/// tool, naming the tool it claims (AGENT-014).
+///
+/// A browser fills a tool's path from the agent's arguments and cannot see
+/// which route the path reached: `post = "new"` on `/posts/{post}` would
+/// reach a literal `/posts/new`. The server refuses such a call rather than
+/// serve another route as the tool.
+pub(crate) fn no_tool(name: String) -> BoxedMiddleware {
+    into_boxed(NoTool { name })
+}
+
+struct NoTool {
+    name: String,
+}
+
+#[async_trait]
+impl Middleware for NoTool {
+    async fn handle(&self, _request: Request, _next: Next) -> Response {
+        Err(FrameworkError::domain(
+            format!(
+                "The tool call names the tool `{}`, but this route serves no tool.",
+                self.name
+            ),
+            400,
+        )
+        .into())
+    }
+}
+
 /// The access check for `tool`'s route.
 pub(crate) fn access(tool: &RegisteredTool, config: Arc<AgentsConfig>) -> BoxedMiddleware {
     into_boxed(ToolAccess {
@@ -229,6 +268,22 @@ impl Middleware for ToolAccess {
                 .into());
             }
             return next(request).await;
+        }
+        // A browser tool call names the tool it calls; reaching another
+        // tool's route means its path reached a route other than the
+        // tool's, which the browser cannot see (AGENT-014).
+        if let Some(claimed) = request.header(TOOL_CALL_HEADER)
+            && claimed != self.name
+        {
+            return Err(FrameworkError::domain(
+                format!(
+                    "The tool call names the tool `{claimed}`, but this route serves the tool \
+                     `{}`.",
+                    self.name
+                ),
+                400,
+            )
+            .into());
         }
         let caller = Self::caller_of(&request).await?;
         if !self.accepts(caller.kind()) {

@@ -67,7 +67,8 @@ impl Config {
     /// Live limit (`LIVE_MAX_REQUEST_BYTES` and the other `LIVE_*` limit keys)
     /// is not a whole number or breaks its rule, or when a second-factor
     /// lockout key (`TWO_FACTOR_MAX_ATTEMPTS`, `TWO_FACTOR_LOCKOUT_MINUTES`)
-    /// is not a whole number of at least 1.
+    /// is not a whole number of at least 1, or when
+    /// `WEBMCP_ORIGIN_TRIAL_TOKEN` holds a value that is not a token.
     /// Missing `.env` files are not an error. A failed call registers no
     /// config.
     ///
@@ -151,9 +152,16 @@ impl Config {
         // bad value must stop boot, not weaken the lockout or fail the first
         // sign-in.
         crate::auth_flows::two_factor::TwoFactorLockout::from_env()?;
+        // The WebMCP Origin Trial token (`WEBMCP_ORIGIN_TRIAL_TOKEN`), checked
+        // here so a mistyped token stops boot instead of silently disabling
+        // the trial on every page.
+        #[cfg(feature = "agents")]
+        let web_mcp = crate::agents::WebMcpConfig::from_env()?;
 
         repository::register(app);
         repository::register(server);
+        #[cfg(feature = "agents")]
+        repository::register(web_mcp);
         Ok(env)
     }
 

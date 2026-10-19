@@ -897,7 +897,7 @@ pub use validator::Validate;
 #[cfg(feature = "agents")]
 pub use agents::{
     AgentAuth, AgentClaimed, AgentsConfig, CallerKind, ConnectedAgents, LiveMountRequest,
-    OAuthServer, OutsideIssuer, ToolCaller,
+    OAuthServer, OutsideIssuer, PageTools, ToolCaller, WebMcpConfig,
 };
 #[cfg(feature = "agents")]
 #[doc(hidden)]

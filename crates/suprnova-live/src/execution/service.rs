@@ -801,8 +801,9 @@ struct SuccessorPresentation {
     protocol_minimum: u16,
     protocol_version: u16,
     context_expires_at: UnixMillis,
-    /// Whether the successor root lists the component's browser tools.
-    agent_tools: bool,
+    /// The browser tools the successor root lists, narrowed to the ones
+    /// the request's viewer may call, or `None` when the mount lists none.
+    agent_tools: Option<crate::host::AgentToolFilter>,
 }
 
 impl ExecutionService {
@@ -917,7 +918,11 @@ impl ExecutionService {
                 protocol_minimum: request.context.mount().minimum_protocol(),
                 protocol_version: request.context.mount().protocol(),
                 context_expires_at: request.context.expires_at(),
-                agent_tools: request.context.mount().agent_tools(),
+                agent_tools: request
+                    .context
+                    .mount()
+                    .agent_tools()
+                    .then(|| request.context.agent_tool_filter().clone()),
             },
             request.context.mount().expected_seed().schemas(),
             output,
@@ -995,7 +1000,11 @@ impl ExecutionService {
                 protocol_minimum: request.context.mount().minimum_protocol(),
                 protocol_version: request.context.mount().protocol(),
                 context_expires_at: request.context.expires_at(),
-                agent_tools: request.context.mount().agent_tools(),
+                agent_tools: request
+                    .context
+                    .mount()
+                    .agent_tools()
+                    .then(|| request.context.agent_tool_filter().clone()),
             },
             request.context.mount().expected_seed().schemas(),
             output,
@@ -1094,7 +1103,11 @@ impl ExecutionService {
                 protocol_minimum: request.context.mount().minimum_protocol(),
                 protocol_version: request.context.mount().protocol(),
                 context_expires_at: request.context.expires_at(),
-                agent_tools: request.context.mount().agent_tools(),
+                agent_tools: request
+                    .context
+                    .mount()
+                    .agent_tools()
+                    .then(|| request.context.agent_tool_filter().clone()),
             },
             request.context.mount().expected_seed().schemas(),
             output,
@@ -1224,7 +1237,11 @@ impl ExecutionService {
                 protocol_minimum: request.context.mount().minimum_protocol(),
                 protocol_version: request.context.mount().protocol(),
                 context_expires_at: request.context.expires_at(),
-                agent_tools: request.context.mount().agent_tools(),
+                agent_tools: request
+                    .context
+                    .mount()
+                    .agent_tools()
+                    .then(|| request.context.agent_tool_filter().clone()),
             },
             schemas,
             output,
@@ -1633,10 +1650,9 @@ impl ExecutionService {
                         action_parameters: crate::view::declared_action_parameters(
                             descriptor.metadata(),
                         ),
-                        agent_tools: presentation
-                            .agent_tools
-                            .then(|| crate::view::declared_agent_tools(descriptor.metadata()))
-                            .flatten(),
+                        agent_tools: presentation.agent_tools.as_ref().and_then(|filter| {
+                            crate::view::declared_agent_tools(descriptor.metadata(), filter)
+                        }),
                     },
                     // The configured island size, the bound a mount's root
                     // gets too, not a fixed 1 MiB: the root carries the

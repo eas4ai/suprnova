@@ -703,6 +703,38 @@ impl<'a> LiveDocument<'a> {
         })
     }
 
+    /// Offer the server tools `names` on this page, beside the ones its
+    /// route, its group and [`Router::share_tools`] offer (AGENT-014). The
+    /// page lists only the tools its viewer may call, in the
+    /// `<script type="application/json" id="suprnova-agent-tools">` element
+    /// [`bootstrap`](Self::bootstrap) writes, and the Live runtime registers
+    /// them with WebMCP.
+    ///
+    /// Async because a tool that does not accept every viewer makes the
+    /// list depend on who the viewer is, which is read here.
+    ///
+    /// # Errors
+    ///
+    /// `ToolsAfterBootstrap` after [`bootstrap`](Self::bootstrap), whose
+    /// element is already written; `ToolsRejected` when the viewer cannot
+    /// be read. A name that is not a routed tool a browser can call fails
+    /// the bootstrap with `ToolsRejected`, naming it in the log.
+    #[cfg(feature = "agents")]
+    pub async fn with_tools<I>(&mut self, names: I) -> Result<(), LiveDocumentError>
+    where
+        I: IntoIterator<Item = &'static str>,
+    {
+        if self.bootstrapped {
+            return Err(LiveDocumentError::new(
+                LiveDocumentErrorKind::ToolsAfterBootstrap,
+            ));
+        }
+        crate::agents::PageTools::add(names).await.map_err(|error| {
+            tracing::error!(error = %error, "a Live page could not offer its tools");
+            LiveDocumentError::new(LiveDocumentErrorKind::ToolsRejected)
+        })
+    }
+
     /// Runs the declared mount policy and returns checked SSR island markup.
     pub async fn mount<C: ComponentContract>(
         &mut self,
@@ -732,6 +764,7 @@ impl<'a> LiveDocument<'a> {
             .validate_request_context(self.request, selection)
             .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::ContextRejected))?;
         let key = declaration.document_key.clone();
+        let component = declaration.component.clone();
         // Recorded here, at the mount that just succeeded, not later at
         // `render`: `MountedIsland::html()` is `pub` and `TrustedHtml`
         // implements `Display`, so a handler can take the returned island
@@ -741,6 +774,10 @@ impl<'a> LiveDocument<'a> {
         // must exist regardless of whether `render` is ever reached.
         let (html, metadata) = match declaration.kind {
             LiveMountKind::PublicSeed => {
+                // The island lists the tools its viewer may call. A seed whose
+                // tools all accept the public reads no viewer and stays the
+                // same for everybody (AGENT-014).
+                let context = with_island_filter(context, &component).await?;
                 let output = self
                     .runtime
                     .mount_public_component(
@@ -799,16 +836,30 @@ impl<'a> LiveDocument<'a> {
                 // something the shared shell depends on.
                 // Session-only fields the mount staged are written only once
                 // the mount succeeds.
-                let (output, staged_session) =
-                    super::session_state::scope(crate::render_cache::collector::slot_scope(
-                        self.runtime.mount_private_component(
-                            &mut self.scope,
-                            PrivateMountRequest::new(key, parameters, flags)
-                                .with_document_path(document_path),
-                            &context,
-                        ),
-                    ))
-                    .await;
+                //
+                // The viewer its tool list reads is read in the slot bucket
+                // too, so a stitched hit lists the tools of its own viewer.
+                let runtime = &self.runtime;
+                let scope = &mut self.scope;
+                let (output, staged_session) = super::session_state::scope(
+                    crate::render_cache::collector::slot_scope(async move {
+                        let context =
+                            with_island_filter(context, &component).await.map_err(|_| {
+                                FrameworkError::internal(
+                                    "a Live island could not read its viewer for its tools",
+                                )
+                            })?;
+                        runtime
+                            .mount_private_component(
+                                scope,
+                                PrivateMountRequest::new(key, parameters, flags)
+                                    .with_document_path(document_path),
+                                &context,
+                            )
+                            .await
+                    }),
+                )
+                .await;
                 let output = output.map_err(|error| {
                     LiveDocumentError::new(LiveDocumentErrorKind::InvalidMount).with_reported_panic(
                         crate::reporting::already_reported_engine_error(&error),
@@ -898,6 +949,19 @@ impl<'a> LiveDocument<'a> {
                     BootstrapFailure::MarkupRejected => LiveDocumentErrorKind::RenderRejected,
                 })
             })?;
+        // The page's server tools, an inert JSON element the head carries
+        // beside the runtime that registers them (AGENT-014).
+        #[cfg(feature = "agents")]
+        let bootstrap = match crate::agents::page_tools::payload_now(&[]) {
+            Ok(Some(payload)) => bootstrap
+                .with_element(&crate::agents::page_tools::element_html(&payload))
+                .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::RenderRejected))?,
+            Ok(None) => bootstrap,
+            Err(error) => {
+                tracing::error!(error = %error, "a Live page could not offer its tools");
+                return Err(LiveDocumentError::new(LiveDocumentErrorKind::ToolsRejected));
+            }
+        };
         // After `render_bootstrap` accepted the options, so the recorded
         // value is the nonce the emitted script elements actually carry.
         crate::render_cache::live::record_bootstrap_nonce(options.nonce());
@@ -944,6 +1008,29 @@ impl<'a> LiveDocument<'a> {
         crate::render_cache::live::record_document_intent(&render.response);
         document_response(render)
             .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::RenderRejected))
+    }
+}
+
+/// `context` narrowed to the Live tools of `component` its viewer may call
+/// (AGENT-014).
+async fn with_island_filter(
+    context: suprnova_live::host::TrustedLiveRequestContext,
+    component: &ComponentName,
+) -> Result<suprnova_live::host::TrustedLiveRequestContext, LiveDocumentError> {
+    #[cfg(feature = "agents")]
+    {
+        let filter = crate::agents::page_tools::island_filter(component)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "a Live island could not read its viewer for its tools");
+                LiveDocumentError::new(LiveDocumentErrorKind::ToolsRejected)
+            })?;
+        Ok(context.with_agent_tool_filter(filter))
+    }
+    #[cfg(not(feature = "agents"))]
+    {
+        let _ = component;
+        Ok(context)
     }
 }
 
@@ -999,6 +1086,13 @@ pub enum LiveDocumentErrorKind {
     BootstrapRepeated,
     /// An island was mounted after the bootstrap markup was already emitted.
     MountAfterBootstrap,
+    /// Page tools were offered after the bootstrap markup, which carries
+    /// them, was already emitted (AGENT-014).
+    ToolsAfterBootstrap,
+    /// A page tool could not be offered: a name is not a routed tool a
+    /// browser can call, or the viewer could not be read. The log names the
+    /// cause (AGENT-014).
+    ToolsRejected,
     /// A declared stitch fallback fragment exceeded the stored entry's bound.
     StitchFallbackTooLarge,
     /// An identity-bound nested segment's declared includer route pattern
@@ -1056,6 +1150,8 @@ impl fmt::Display for LiveDocumentError {
             LiveDocumentErrorKind::InvalidBootstrap => "invalid_live_bootstrap",
             LiveDocumentErrorKind::BootstrapRepeated => "live_bootstrap_repeated",
             LiveDocumentErrorKind::MountAfterBootstrap => "live_mount_after_bootstrap",
+            LiveDocumentErrorKind::ToolsAfterBootstrap => "live_tools_after_bootstrap",
+            LiveDocumentErrorKind::ToolsRejected => "live_page_tools_rejected",
             LiveDocumentErrorKind::StitchFallbackTooLarge => "live_stitch_fallback_too_large",
             LiveDocumentErrorKind::DynamicIncluderPath => {
                 "live_nested_segment_dynamic_includer_path"

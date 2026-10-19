@@ -158,16 +158,29 @@ impl AgentAccount {
 /// A signed-in user claimed an agent registration (AGENT-009), so the
 /// application can move what the agent created to that user.
 ///
-/// It is dispatched after the claim commits, best effort: a listener's
-/// error is logged and never undoes the claim. A process that stops
-/// between the commit and the dispatch loses the event. So keep the
+/// It is delivered at least once. The claim's own transaction writes the
+/// event to agent auth's outbox, so a committed claim always has it; it is
+/// dispatched right after the commit, and an event whose dispatch failed or
+/// whose process stopped first is dispatched by the maintenance pass `serve`
+/// runs every five minutes and by `agents:prune`. A listener's error never
+/// undoes the claim; it leaves the event for the next pass.
+///
+/// So the event can arrive more than once, after a crash or a retry, and a
+/// listener must be idempotent, keyed on [`event_id`](Self::event_id): do
+/// the move once per id, or make doing it again change nothing.
+///
+/// A listener that keeps failing gets twelve attempts, about an hour of
+/// passes. The event then fails: it is logged once at error level, kept,
+/// and delivered again only after `agents:prune --retry-failed` puts it
+/// back, which an operator runs once the listener is fixed. Keep the
 /// registration id on every row an agent creates (a tool reads it as
-/// `ToolCaller::registration().id()`), make a listener idempotent or
-/// queue its work, and reconcile from
-/// [`ConnectedAgents::agent_accounts`](super::ConnectedAgents::agent_accounts),
-/// which lists every registration bound to a user.
+/// `ToolCaller::registration().id()`), so the move is a query by that id;
+/// [`ConnectedAgents::agent_accounts`](super::ConnectedAgents::agent_accounts)
+/// lists every registration bound to a user.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentClaimed {
+    /// The event's stable identifier, the same on every delivery of it.
+    pub event_id: String,
     /// The registration the user claimed.
     pub registration_id: String,
     /// How the agent registered: `anonymous`, `service_auth` or
@@ -242,16 +255,22 @@ impl crate::events::Event for AgentClaimed {
 ///   "Agents" section listing and revoking the user's registrations;
 /// - **audit**: one structured log record per auth.md audit event, a
 ///   [`MagnetarLifecycleEvent`](crate::magnetar_integration::engine::MagnetarLifecycleEvent)
-///   carrying its attributes, and [`AgentClaimed`] for a claim;
+///   carrying its attributes, and [`AgentClaimed`] for a claim, delivered
+///   at least once through an outbox written in the claim's transaction;
 /// - **rate limits** through the framework's rate limiter: 5 anonymous and
 ///   5 `service_auth` registrations an hour per client address and 100 per
 ///   application, 60 and 1000 for ID-JAGs;
-/// - **maintenance**: `serve` expires unclaimed registrations past their
-///   window and prunes spent replay records every five minutes; the
-///   `agents:prune` command runs the same pass once, and every node may run
-///   it;
+/// - **maintenance**: every five minutes `serve` delivers claim events a
+///   failed dispatch or a stopped process left, expires unclaimed
+///   registrations past their window, prunes spent replay records and
+///   deletes claim events delivered more than seven days ago; the
+///   `agents:prune` command runs the same pass once and reports how many
+///   claim events failed, and every node may run it. A claim event whose
+///   listener refused it twelve times fails, is logged once at error level
+///   and is never delivered again or pruned until
+///   `agents:prune --retry-failed` puts it back with a fresh count;
 /// - **storage**: the OAuth server's connection, or
-///   [`connection`](Self::connection). Its three tables come from
+///   [`connection`](Self::connection). Its four tables come from
 ///   [`AgentAuth::migrate`], or from the Magnetar default engine's
 ///   migrations.
 ///
@@ -332,6 +351,7 @@ pub struct AgentAuth {
     audit_channel: Option<String>,
     key_fetch: Option<(Arc<dyn HostResolver>, Arc<dyn PinnedHttpClient>)>,
     key_cache: Option<(Duration, Duration)>,
+    event_delivery_timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for AgentAuth {
@@ -403,6 +423,7 @@ impl AgentAuth {
             audit_channel: None,
             key_fetch: None,
             key_cache: None,
+            event_delivery_timeout: None,
         }
     }
 
@@ -616,10 +637,21 @@ impl AgentAuth {
         self
     }
 
+    /// How long one delivery of a claim event may take before it counts as
+    /// a refused attempt with "the delivery timed out": 60 seconds unless
+    /// set. A claim confirmation waits at most this long for its event's
+    /// first delivery, and a slow listener cannot stall the maintenance
+    /// pass. Each delivery's lease is twice as long.
+    pub fn event_delivery_timeout(mut self, timeout: Duration) -> Self {
+        self.event_delivery_timeout = Some(timeout);
+        self
+    }
+
     /// Create agent auth's tables on `connection` if they do not exist:
-    /// `auth_agent_registrations`, `auth_agent_grants` and
-    /// `auth_agent_replays`. Safe to run on every boot. The Magnetar default
-    /// engine's migrations create them too.
+    /// `auth_agent_registrations`, `auth_agent_grants`,
+    /// `auth_agent_replays` and `auth_agent_events`, the outbox of claim
+    /// events. Safe to run on every boot. The Magnetar default engine's
+    /// migrations create them too.
     ///
     /// # Errors
     ///
@@ -699,6 +731,9 @@ impl AgentAuth {
         }
         if let Some(lifetime) = self.assertion_lifetime {
             config.assertion_lifetime = lifetime;
+        }
+        if let Some(timeout) = self.event_delivery_timeout {
+            config.event_delivery_timeout = timeout;
         }
         for (identity_type, per_address, per_application) in &self.limits {
             let limit = RegistrationLimit {

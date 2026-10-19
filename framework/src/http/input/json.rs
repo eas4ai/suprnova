@@ -481,6 +481,25 @@ impl<'de, S: DeserializeSeed<'de>> DeserializeSeed<'de> for Within<'_, S> {
     }
 }
 
+/// A deserializer of `value`, the value at `path`, with the same path
+/// tracking and recovery as a buffered JSON field: what a query value that
+/// holds a JSON object reads through where an object belongs.
+pub(super) fn value_reader<'de, 'p, 'c>(
+    value: serde_json::Value,
+    path: &'p str,
+    collector: &'c Collector,
+) -> impl de::Deserializer<'de, Error = FieldError> + use<'de, 'p, 'c> {
+    Tracked {
+        inner: RecoverValue {
+            value,
+            path,
+            collector,
+        },
+        path: path.to_owned(),
+        collector,
+    }
+}
+
 /// Read a buffered JSON field with the same path tracking as a JSON body.
 pub(super) fn read_value<'de, S: DeserializeSeed<'de>>(
     seed: S,

@@ -1646,7 +1646,11 @@ impl Request {
     /// it, so `?filters[status]=x` fills a `filters` struct's `status`,
     /// `?tags[]=a&tags[]=b` fills a `tags: Vec<String>` field, and
     /// `?ids[1]=b&ids[0]=a` is a list in index order. This is how the
-    /// Inertia client sends a `GET` visit's data.
+    /// Inertia client sends a `GET` visit's data. A value that holds a JSON
+    /// object, as the official Precognition client sends one, reads as that
+    /// object where a struct or a map belongs, and stays text everywhere
+    /// else. A form request on a `GET` and Precognition read a query the
+    /// same way.
     ///
     /// A field that is missing or does not parse answers as a form
     /// request's does: a validation failure whose `errors` names each such
@@ -1654,7 +1658,7 @@ impl Request {
     /// with the errors. Any other failure is a 422 that words it.
     pub fn query_into<T: DeserializeOwned>(&self) -> Result<T, FrameworkError> {
         let q = self.query().unwrap_or("");
-        crate::http::input::parse_form_input(q.as_bytes())
+        crate::http::input::parse_query_input(q.as_bytes())
             .map_err(|error| error.into_framework_error("query parse"))
     }
 

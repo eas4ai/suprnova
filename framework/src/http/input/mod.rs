@@ -36,7 +36,7 @@ use crate::error::{FrameworkError, ValidationErrors};
 use crate::http::upload::{FieldFailure, add_field_failure};
 use crate::validation::message::ValidationMessage;
 
-pub(crate) use form::parse_form_input;
+pub(crate) use form::{parse_form_input, parse_query_input};
 pub(crate) use json::json_field_failures;
 pub(crate) use multipart::parse_multipart_input;
 pub(crate) use nested::{NamePath, name_path, php_integer};
@@ -52,6 +52,20 @@ pub(crate) fn parse_form_with_route_inputs<T: DeserializeOwned>(
     let fields = struct_field_names::<T>();
     read_with_route_inputs(
         nested::Nested::from_urlencoded(bytes, fields),
+        fields,
+        route_inputs,
+    )
+}
+
+/// Read a query string with trusted path values, as
+/// [`parse_query_input`] reads one.
+pub(crate) fn parse_query_with_route_inputs<T: DeserializeOwned>(
+    bytes: &[u8],
+    route_inputs: serde_json::Map<String, serde_json::Value>,
+) -> Result<T, InputError> {
+    let fields = struct_field_names::<T>();
+    read_with_route_inputs(
+        nested::Nested::from_query(bytes, fields),
         fields,
         route_inputs,
     )

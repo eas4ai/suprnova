@@ -33,6 +33,14 @@ pub(crate) fn parse_form_input<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, I
     read_nested(Nested::from_urlencoded(bytes, fields), fields)
 }
 
+/// Read a query string into `T`, failing field by field: as a url-encoded
+/// body reads, with each value a query value ([`Node::Query`]), the one
+/// reading Precognition and the real request share.
+pub(crate) fn parse_query_input<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, InputError> {
+    let fields = struct_field_names::<T>();
+    read_nested(Nested::from_query(bytes, fields), fields)
+}
+
 /// Read nested form data into `T`, failing field by field. `fields` are
 /// the names `form` was read for, `T`'s field names.
 pub(super) fn read_nested<T: DeserializeOwned>(
@@ -216,11 +224,20 @@ fn read_node<'de, S: DeserializeSeed<'de>>(
 ) -> Result<S::Value, FieldError> {
     match node {
         Node::Json(value) => super::json::read_value(seed, value, path, collector),
-        Node::Text(text) if text.is_empty() => seed.deserialize(FormNull { path, collector }),
+        Node::Text(text) | Node::Query(text) if text.is_empty() => {
+            seed.deserialize(FormNull { path, collector })
+        }
         Node::Text(text) => seed.deserialize(FormValue {
             text: &text,
             path: Some(path),
             collector,
+            objects: false,
+        }),
+        Node::Query(text) => seed.deserialize(FormValue {
+            text: &text,
+            path: Some(path),
+            collector,
+            objects: true,
         }),
         Node::NotUtf8 => seed.deserialize(FormNotUtf8 { path, collector }),
         Node::File(file) => seed.deserialize(FormFile {
@@ -319,6 +336,9 @@ pub(super) struct FormValue<'v, 'c> {
     text: &'v str,
     path: Option<&'v str>,
     collector: &'c Collector,
+    /// Whether a JSON object in the text reads as that object where an
+    /// object belongs: a query value's ([`Node::Query`]).
+    objects: bool,
 }
 
 impl<'v, 'c> FormValue<'v, 'c> {
@@ -328,6 +348,17 @@ impl<'v, 'c> FormValue<'v, 'c> {
             text,
             path: None,
             collector,
+            objects: false,
+        }
+    }
+
+    /// The JSON object a query value's text holds, with its path, when
+    /// this is one.
+    fn query_object(&self) -> Option<(serde_json::Value, &'v str)> {
+        let path = self.path.filter(|_| self.objects)?;
+        match serde_json::from_str(self.text) {
+            Ok(value @ serde_json::Value::Object(_)) => Some((value, path)),
+            _ => None,
         }
     }
 
@@ -433,8 +464,45 @@ impl<'de> de::Deserializer<'de> for FormValue<'_, '_> {
         deserialize_seq();
         deserialize_tuple(len: usize);
         deserialize_tuple_struct(name: &'static str, len: usize);
-        deserialize_map();
-        deserialize_struct(name: &'static str, fields: &'static [&'static str]);
+    }
+
+    /// A map from a query value that holds a JSON object reads that object;
+    /// any other text cannot be a map.
+    fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        if let Some((value, path)) = self.query_object() {
+            return de::Deserializer::deserialize_map(
+                super::json::value_reader(value, path, self.collector),
+                visitor,
+            );
+        }
+        if self.record(FieldFailure::Format) {
+            de::Deserializer::deserialize_map(Placeholder, visitor)
+        } else {
+            de::Deserializer::deserialize_any(self, visitor)
+        }
+    }
+
+    /// A struct from a query value that holds a JSON object reads that
+    /// object; any other text cannot be a struct.
+    fn deserialize_struct<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        if let Some((value, path)) = self.query_object() {
+            return de::Deserializer::deserialize_struct(
+                super::json::value_reader(value, path, self.collector),
+                name,
+                fields,
+                visitor,
+            );
+        }
+        if self.record(FieldFailure::Format) {
+            de::Deserializer::deserialize_struct(Placeholder, name, fields, visitor)
+        } else {
+            de::Deserializer::deserialize_any(self, visitor)
+        }
     }
 
     fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {

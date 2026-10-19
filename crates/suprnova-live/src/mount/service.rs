@@ -289,7 +289,12 @@ impl PrivateMountService {
                     agent_tools: context
                         .mount()
                         .agent_tools()
-                        .then(|| crate::view::declared_agent_tools(descriptor.metadata()))
+                        .then(|| {
+                            crate::view::declared_agent_tools(
+                                descriptor.metadata(),
+                                context.agent_tool_filter(),
+                            )
+                        })
                         .flatten(),
                 },
                 self.limits.max_metadata_bytes,

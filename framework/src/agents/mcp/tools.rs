@@ -288,6 +288,43 @@ mod tests {
         assert_eq!(result["content"][0]["text"], "The tool failed.");
     }
 
+    /// The shared browser fixture's result cases the server maps too: every
+    /// case but the rows marked `browserOnly`, which only a browser meets
+    /// (its own refusals and failures, and the size bound the MCP
+    /// dispatcher words for the endpoint).
+    #[test]
+    fn agent_014_answer_result_matches_the_browser_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/agents/fixtures/browser-calls.json"
+        ))
+        .expect("the shared fixture is JSON");
+        let cases = fixture["results"].as_array().expect("the results cases");
+        let mut compared = 0;
+        for case in cases {
+            if case["browserOnly"] == true {
+                continue;
+            }
+            let name = case["name"].as_str().unwrap_or_default();
+            let response = &case["response"];
+            let max = case["maxResultBytes"].as_u64().expect("a bound") as usize;
+            let body = response["body"].as_str().unwrap_or_default();
+            let mut result = answer_result(
+                &RouteAnswer {
+                    status: response["status"].as_u64().expect("a status") as u16,
+                    content_type: response["contentType"].as_str().map(str::to_string),
+                    body: Bytes::from(body.to_string()),
+                },
+                max,
+            );
+            if let Some(object) = result.as_object_mut() {
+                object.remove("resultType");
+            }
+            assert_eq!(result, case["expected"], "the case {name:?}");
+            compared += 1;
+        }
+        assert!(compared > 0, "no case was compared");
+    }
+
     #[test]
     fn agent_003_json_success_is_structured_content() {
         let result = answer_result(&answer(201, r#"{"id":7}"#), usize::MAX);

@@ -147,6 +147,9 @@ impl TestClient {
     /// with `arguments` as a JSON body, its path parameters filled from the
     /// arguments, the [`TOOL_CALL_HEADER`](super::TOOL_CALL_HEADER) the
     /// browser helpers send, this client's cookies and the user it acts as.
+    /// A `GET` tool sends its scalar arguments in the query instead, path
+    /// arguments included, with no body, as a page does: a null argument
+    /// stays out, and so does a path argument that filled no segment.
     ///
     /// When the client holds the session's `XSRF-TOKEN` cookie, the request
     /// sends it back as `X-XSRF-TOKEN`, as a page's script does; visit a page
@@ -154,9 +157,9 @@ impl TestClient {
     ///
     /// # Panics
     ///
-    /// Panics when the application has no tool named `name`, or its path
-    /// parameters are missing from `arguments`: the test asked for a call
-    /// that cannot be made.
+    /// Panics when the application has no tool named `name`, its path
+    /// parameters are missing from `arguments`, or a `GET` tool is given a
+    /// structured argument: the test asked for a call that cannot be made.
     pub fn tool(&self, name: &str, arguments: Value) -> TestRequest {
         let registry = self
             .router()
@@ -168,9 +171,46 @@ impl TestClient {
         let object = arguments.as_object().cloned().unwrap_or_default();
         let path = fill_path(tool.pattern(), &object)
             .unwrap_or_else(|error| panic!("TestClient::tool(`{name}`): {error}"));
-        let mut request = self
-            .send(tool.method().clone(), path)
-            .json(&Value::Object(object))
+        // A browser cannot send a body with GET: a GET tool's scalar
+        // arguments go in the query, path arguments too, so its form
+        // request reads them all, as the page sends them (AGENT-014). A
+        // null argument stays out, and so does a path argument that filled
+        // no segment.
+        let request = if *tool.method() == hyper::Method::GET {
+            let in_path: Vec<String> = crate::routing::binding::placeholders(tool.pattern())
+                .into_iter()
+                .map(|placeholder| placeholder.name)
+                .collect();
+            let mut query = url::form_urlencoded::Serializer::new(String::new());
+            let mut any = false;
+            for (key, value) in &object {
+                let text = match value {
+                    Value::Null => continue,
+                    Value::String(text) => text.clone(),
+                    Value::Number(number) => number.to_string(),
+                    Value::Bool(flag) => flag.to_string(),
+                    _ => panic!(
+                        "TestClient::tool(`{name}`): the argument `{key}` must be a string, a \
+                         number or a boolean, because a GET tool sends its arguments in the query"
+                    ),
+                };
+                if text.is_empty() && in_path.contains(key) {
+                    continue;
+                }
+                query.append_pair(key, &text);
+                any = true;
+            }
+            let target = if any {
+                format!("{path}?{}", query.finish())
+            } else {
+                path
+            };
+            self.send(tool.method().clone(), target)
+        } else {
+            self.send(tool.method().clone(), path)
+                .json(&Value::Object(object))
+        };
+        let mut request = request
             .header("Accept", "application/json")
             .header(super::TOOL_CALL_HEADER, name);
         if let Some(token) = self.cookie("XSRF-TOKEN") {

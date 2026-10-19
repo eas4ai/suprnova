@@ -219,10 +219,11 @@ pub use suprnova_live::component::{
 };
 /// The trusted host context a Live request runs in: the request context a
 /// [`RenderContext`] carries, the host capabilities bound to its scope, the
-/// fingerprints of that scope, the authenticity checks the request passed
-/// and the registry-verified mount it renders.
+/// fingerprints of that scope, the authenticity checks the request passed,
+/// the registry-verified mount it renders and the browser tools its island
+/// roots list for the viewer.
 pub use suprnova_live::host::{
-    CheckDisposition, CheckKind, HostCapabilities, HostScopeFacts, PolicyReason,
+    AgentToolFilter, CheckDisposition, CheckKind, HostCapabilities, HostScopeFacts, PolicyReason,
     PrincipalFingerprint, RequiredChecks, SessionFingerprint, TenantFingerprint,
     TrustedLiveRequestContext, VerifiedMountCatalogMatch,
 };

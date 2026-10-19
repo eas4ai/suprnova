@@ -27,10 +27,8 @@ pub(crate) async fn parse_precognitive<T: DeserializeOwned>(
     } else {
         query
     };
-    let mut input = Nested::from_urlencoded(&query, fields);
-    for node in input.names.values_mut() {
-        node.decode_query_objects();
-    }
+    // The query reads as the real request reads it (AGENT-014).
+    let mut input = Nested::from_query(&query, fields);
     let body = read_body(request, max_body_bytes, fields).await?;
     input.names.extend(body.names);
     input.untracked = body.untracked.or(input.untracked);

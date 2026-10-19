@@ -666,6 +666,33 @@ impl ToolRegistry {
             .any(|tool| tool.live_target().is_some())
     }
 
+    /// Whether the application has any tool at all, routed or Live: the
+    /// server stamps page tools on its requests only then (AGENT-014).
+    pub(crate) fn has_tools(&self) -> bool {
+        !self.tools.is_empty() || !self.browser_tools.is_empty()
+    }
+
+    /// The Live tools of `component` a browser registers on its islands,
+    /// sorted by name.
+    pub(crate) fn live_tools_of(
+        &self,
+        component: &suprnova_live::identity::ComponentName,
+    ) -> Vec<&RegisteredTool> {
+        let mut tools: Vec<&RegisteredTool> = self
+            .tools
+            .iter()
+            .chain(&self.browser_tools)
+            .filter(|tool| {
+                offers_browser(tool.meta)
+                    && tool
+                        .live_target()
+                        .is_some_and(|target| &target.component == component)
+            })
+            .collect();
+        tools.sort_by(|a, b| a.name().cmp(b.name()));
+        tools
+    }
+
     /// Every scope the application declared, sorted by name.
     pub fn scopes(&self) -> &[Scope] {
         &self.scopes

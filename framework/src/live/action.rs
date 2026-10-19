@@ -267,9 +267,18 @@ pub(crate) async fn handle(request: Request) -> Response {
     {
         return error_response(EndpointErrorKind::ContextInconsistent);
     }
+    #[cfg(feature = "agents")]
+    let component = selection.component().clone();
     let context = match runtime.validate_request_context(&request, selection) {
         Ok(context) => context,
         Err(_) => return error_response(EndpointErrorKind::ContextInconsistent),
+    };
+    // The island root the response renders lists the Live tools its viewer
+    // may call, as the page's did (AGENT-014).
+    #[cfg(feature = "agents")]
+    let context = match crate::agents::page_tools::island_filter(&component).await {
+        Ok(filter) => context.with_agent_tool_filter(filter),
+        Err(error) => return failure_response(EndpointErrorKind::KernelUnavailable, &error),
     };
     let endpoint_request = match LiveEndpointRequest::try_new(
         request.method().clone(),

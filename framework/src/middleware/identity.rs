@@ -56,6 +56,10 @@ struct Known {
     /// route named it.
     alias: Option<String>,
     security_headers: Option<crate::SecurityHeaders>,
+    /// The tools a `with_tools` layer offers, which the router checks at
+    /// boot (AGENT-014).
+    #[cfg(feature = "agents")]
+    page_tools: Option<Arc<[&'static str]>>,
 }
 
 #[derive(Default)]
@@ -84,6 +88,10 @@ pub(crate) fn boxed_as<M: Middleware + 'static>(middleware: M) -> BoxedMiddlewar
     let security_headers = (&middleware as &dyn std::any::Any)
         .downcast_ref::<crate::SecurityHeaders>()
         .cloned();
+    #[cfg(feature = "agents")]
+    let page_tools = (&middleware as &dyn std::any::Any)
+        .downcast_ref::<crate::agents::page_tools::PageToolsLayer>()
+        .map(crate::agents::page_tools::PageToolsLayer::names);
     let boxed = into_boxed(middleware);
     // A poisoned table is recovered, as the registries beside it are: a
     // panic elsewhere must not stop middleware from being registered.
@@ -96,6 +104,8 @@ pub(crate) fn boxed_as<M: Middleware + 'static>(middleware: M) -> BoxedMiddlewar
             type_id: Some(TypeId::of::<M>()),
             alias: None,
             security_headers,
+            #[cfg(feature = "agents")]
+            page_tools,
         },
     );
     boxed
@@ -121,6 +131,8 @@ pub(crate) fn name_as(boxed: &BoxedMiddleware, identity: String) {
                     type_id: None,
                     alias: Some(identity),
                     security_headers: None,
+                    #[cfg(feature = "agents")]
+                    page_tools: None,
                 },
             );
         }
@@ -131,30 +143,23 @@ pub(crate) fn name_as(boxed: &BoxedMiddleware, identity: String) {
 /// Only wrappers of known boxes write; weak entries are swept like registrations.
 pub(crate) fn inherit_identity(source: &BoxedMiddleware, wrapper: &BoxedMiddleware) {
     let mut table = table().write().unwrap_or_else(|p| p.into_inner());
-    let Some((type_id, alias, security_headers)) = table
+    let Some(inherited) = table
         .known
         .get(&key(source))
         .filter(|known| is_entry_of(known, source))
-        .map(|known| {
-            (
-                known.type_id,
-                known.alias.clone(),
-                known.security_headers.clone(),
-            )
+        .map(|known| Known {
+            middleware: Arc::downgrade(wrapper),
+            type_id: known.type_id,
+            alias: known.alias.clone(),
+            security_headers: known.security_headers.clone(),
+            #[cfg(feature = "agents")]
+            page_tools: known.page_tools.clone(),
         })
     else {
         return;
     };
     sweep(&mut table);
-    table.known.insert(
-        key(wrapper),
-        Known {
-            middleware: Arc::downgrade(wrapper),
-            type_id,
-            alias,
-            security_headers,
-        },
-    );
+    table.known.insert(key(wrapper), inherited);
 }
 
 /// The alias `boxed` was resolved from, when an alias produced it.
@@ -173,6 +178,16 @@ pub(crate) fn security_headers_of(boxed: &BoxedMiddleware) -> Option<crate::Secu
     let known = table.known.get(&key(boxed))?;
     is_entry_of(known, boxed)
         .then(|| known.security_headers.clone())
+        .flatten()
+}
+
+/// The tools `boxed` offers, when it is a `with_tools` layer.
+#[cfg(feature = "agents")]
+pub(crate) fn page_tools_of(boxed: &BoxedMiddleware) -> Option<Arc<[&'static str]>> {
+    let table = table().read().unwrap_or_else(|p| p.into_inner());
+    let known = table.known.get(&key(boxed))?;
+    is_entry_of(known, boxed)
+        .then(|| known.page_tools.clone())
         .flatten()
 }
 

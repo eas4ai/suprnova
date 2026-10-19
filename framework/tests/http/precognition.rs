@@ -486,6 +486,70 @@ async fn precognition_get_and_delete_validate_query_lists_and_encoded_objects() 
     assert_eq!(BODY_CALLS.load(Ordering::SeqCst), 0);
 }
 
+/// One query decoder serves Precognition and the real `GET` (AGENT-014): a
+/// route cannot pass Precognition and then fail the real submission, nor
+/// the other way round, with a JSON-encoded object in a query value
+/// included.
+#[tokio::test]
+async fn agent_014_precognition_and_the_real_get_read_a_query_alike() {
+    let _counter_guard = COUNTERS.lock().await;
+    let valid =
+        "/query?email=ada%40example.com&tags[]=a&tags[]=b&profile=%7B%22name%22%3A%22Ada%22%7D";
+    let precognitive = send_method(
+        data_routes::register(),
+        "GET",
+        valid,
+        &[("Precognition", "true")],
+        "",
+    )
+    .await;
+    assert_success(&precognitive);
+    let real = send_method(
+        data_routes::register(),
+        "GET",
+        valid,
+        &[("Accept", "application/json")],
+        "",
+    )
+    .await;
+    assert_eq!(
+        real.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(real.body())
+    );
+    assert_eq!(real.body().as_ref(), b"ada@example.com Ada");
+
+    let invalid =
+        "/query?email=ada%40example.com&tags[]=a&tags[]=b&profile=%7B%22name%22%3A%22A%22%7D";
+    let precognitive = send_method(
+        data_routes::register(),
+        "GET",
+        invalid,
+        &[("Precognition", "true")],
+        "",
+    )
+    .await;
+    let real = send_method(
+        data_routes::register(),
+        "GET",
+        invalid,
+        &[("Accept", "application/json")],
+        "",
+    )
+    .await;
+    assert_eq!(error_keys(&precognitive), ["profile.name"]);
+    assert_eq!(
+        real.status(),
+        422,
+        "{}",
+        String::from_utf8_lossy(real.body())
+    );
+    let body: serde_json::Value = serde_json::from_slice(real.body()).unwrap();
+    let keys: Vec<&String> = body["errors"].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["profile.name"]);
+}
+
 #[tokio::test]
 async fn precognition_query_body_wins_and_selection_is_shared() {
     let response = send_method(
