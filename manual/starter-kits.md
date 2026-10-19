@@ -325,6 +325,69 @@ away before the redirect lands. The kit also turns session blocking on
 (`SESSION_BLOCK=true` in `.env`), so the requests of one session run one
 at a time and a refresh cannot write over the toast a save just kept.
 
+### Agents in the Live kit
+
+The kit serves the MCP endpoint, the OAuth server that MCP clients sign
+users in through, and agent accounts under auth.md, all from
+`src/agents.rs` (see [Agents](agents.md)). Three pages of its own let the
+person decide what acts for them:
+
+| Page | Route | What it shows |
+|---|---|---|
+| Approve an app | `/oauth/approve` | The client, its host, each permission it asks for and where the user returns, with **Allow** and **Deny** |
+| Claim an agent | `/agent/claim` | The agent that asks to act as the user, the account it would act for, and a form that takes the code the agent gave them |
+| Connected agents | `/connected-agents` | Every MCP client and agent that acts for the signed-in user, each with a **Revoke** button |
+
+The header and the account menu link the connected-agents page. The paths
+are the framework's defaults, so a link a client or an agent holds opens the
+same page with or without the kit.
+
+These pages are plain server-rendered documents with native forms, not
+Live documents. They mount no island and load no Live runtime, so no agent
+in the browser is offered a tool that approves or claims: consent comes
+from the person. Each form posts the session's CSRF token.
+`src/controllers/agents.rs` reads and records each decision with
+`AgentApprovals`, `AgentClaims` and `ConnectedAgents`, which act for the
+signed-in user only. Another user's authorization reads as ended, and
+their grants as unknown.
+
+A guest who opens the approval or the claim page signs in and comes back
+to it. A guest who registers instead comes back too, in the same browser
+session. The address is not carried across email verification, and the
+claim page asks an unverified address to verify first. A Live action can
+only redirect to a named route, so the sign-in and registration forms
+continue through `/login/continue` (`login.continue`), which follows the
+address the session holds. A `return_to` that names another host is
+ignored.
+
+The routes run `ConsentPageHeaders`. No page or refusal here is framed,
+cached or named in a referrer, since their addresses carry the
+authorization id or the claim's attempt token. The kit's other security
+headers stay, nonce policy included. That policy carries
+`form-action 'self'`, under which a browser blocks a redirect that answers
+a form post on another origin. So **Allow** and **Deny** answer with a page
+that sends the browser on to the client's redirect URI by a meta refresh,
+with a link beside it. Every name, host and address a client, an agent or
+the user chose sits in `<bdi>`, and no page shows a logo or links a page
+the client chose.
+
+`suprnova new` writes a signing key for agent auth into `.env`:
+`AGENT_AUTH_KEY_ID` and `AGENT_AUTH_PRIVATE_KEY`. The application does not
+start without them. `.dockerignore` keeps `.env` out of the image, so every
+deployed environment sets both itself, each with a key of its own, and
+names its public URL in `APP_URL`, which is the OAuth server's issuer. This
+command prints a new pair and writes nothing:
+
+```bash
+cargo run -- agents:key
+```
+
+`tests/documents.rs` renders the connected-agents page and the approval
+page's refusal. A test process loads no `.env`, so the test calls
+`suprnova::testing::install_test_agent_auth_key()` for a key made for the
+process, and registers an `AppConfig` with a URL of its own. See
+[Agents](agents.md#keys-and-operations) for rotating the key.
+
 ### Add a page
 
 To add a page, give it a route, a view, and a controller:
