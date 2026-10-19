@@ -558,8 +558,7 @@ impl Router {
 /// Check every tool the router offers on its pages, once, at boot: the
 /// shared tools and every route's `with_tools`. Each must be a routed tool
 /// a browser can call, a route offers at most [`MAX_PAGE_TOOLS`], and a
-/// `GET` tool must not read its input from a request body, which a browser
-/// cannot send with `GET`.
+/// `GET` tool's input must hold only fields a query can carry.
 pub(crate) fn check(router: &Router, registry: &ToolRegistry) -> Result<(), FrameworkError> {
     let shared = &router.agents.shared_tools;
     for name in shared {
@@ -597,62 +596,90 @@ pub(crate) fn check(router: &Router, registry: &ToolRegistry) -> Result<(), Fram
     checked.dedup();
     for name in checked {
         if let Some(tool) = registry.get(name) {
-            check_get_input(router, tool)?;
+            check_get_input(tool)?;
         }
     }
     Ok(())
 }
 
-/// Refuse a `GET` page tool whose handler reads its input type from the
-/// request body: a browser sends a `GET` tool's arguments in the query, so
-/// the call would always fail. A handler that reads the query takes the
-/// `Request` and calls [`Request::query_into`]. Warn where another argument
-/// may read the body and the router cannot tell.
-fn check_get_input(router: &Router, tool: &RegisteredTool) -> Result<(), FrameworkError> {
+/// Refuse a `GET` page tool whose input has a field the query cannot
+/// carry. A form request on a `GET` reads its query, and a browser sends a
+/// `GET` tool's arguments there as scalars only, so an object or a list
+/// would never arrive.
+fn check_get_input(tool: &RegisteredTool) -> Result<(), FrameworkError> {
     if *tool.method() != Method::GET {
         return Ok(());
     }
-    let Some(record) = router
-        .bindings
-        .handler_record(tool.method(), tool.pattern())
-    else {
-        tracing::warn!(
-            tool = tool.name(),
-            "a GET page tool's handler is not a #[handler], so the router cannot tell whether \
-             it reads a request body; a browser sends a GET tool's arguments in the query, so \
-             read them with request.query_into()"
-        );
+    let root = tool.input_schema();
+    let Some(properties) = root.get("properties").and_then(Value::as_object) else {
         return Ok(());
     };
-    let input = tool
-        .input_schema()
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    for arg in record.args() {
-        if !matches!(arg.kind(), crate::routing::HandlerArgKind::Body) {
-            continue;
-        }
-        let type_name = arg.type_name().trim();
-        let last = type_name.rsplit("::").next().unwrap_or(type_name).trim();
-        if last == "Request" {
-            continue;
-        }
-        if !input.is_empty() && last == input {
+    for (field, schema) in properties {
+        if !query_carries(root, schema, 0) {
             return Err(FrameworkError::internal(format!(
-                "the GET tool `{}` is offered on a page, but its handler reads its input \
-                 `{input}` from the request body, which a browser cannot send with GET; read it \
-                 from the query with request.query_into::<{input}>(), or serve the tool on POST",
+                "the GET tool `{}` is offered on a page, but its input field `{field}` is an \
+                 object or a list, which a browser cannot send in a GET tool's query; make it \
+                 a scalar, or serve the tool on POST",
                 tool.name()
             )));
         }
-        tracing::warn!(
-            tool = tool.name(),
-            argument = arg.name(),
-            "a GET page tool's handler takes an argument that may read the request body; a \
-             browser sends a GET tool's arguments in the query, so read them with \
-             request.query_into()"
-        );
     }
     Ok(())
+}
+
+/// Whether a query can carry a value of `schema`: a string, a number, an
+/// integer, a boolean or null, or a choice among them. A schema that says
+/// nothing of its type is taken at its word.
+fn query_carries(root: &Value, schema: &Value, depth: usize) -> bool {
+    // A schema that refers to itself would loop; nothing a query carries
+    // nests that deep.
+    if depth > 16 {
+        return false;
+    }
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let target = reference
+            .strip_prefix("#/")
+            .map(|path| {
+                path.split('/')
+                    .try_fold(root, |value, key| value.get(key))
+                    .cloned()
+            })
+            .unwrap_or_default();
+        return match target {
+            Some(target) => query_carries(root, &target, depth + 1),
+            None => false,
+        };
+    }
+    let scalar = |kind: &str| matches!(kind, "string" | "number" | "integer" | "boolean" | "null");
+    match schema.get("type") {
+        Some(Value::String(kind)) if !scalar(kind) => return false,
+        Some(Value::Array(kinds)) if !kinds.iter().filter_map(Value::as_str).all(scalar) => {
+            return false;
+        }
+        _ => {}
+    }
+    for choice in ["anyOf", "oneOf", "allOf"] {
+        if let Some(branches) = schema.get(choice).and_then(Value::as_array)
+            && !branches
+                .iter()
+                .all(|branch| query_carries(root, branch, depth + 1))
+        {
+            return false;
+        }
+    }
+    for values in [
+        schema.get("enum").and_then(Value::as_array).cloned(),
+        schema.get("const").cloned().map(|value| vec![value]),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if values
+            .iter()
+            .any(|value| value.is_object() || value.is_array())
+        {
+            return false;
+        }
+    }
+    true
 }

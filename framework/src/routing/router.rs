@@ -2687,9 +2687,9 @@ impl RouteBuilder {
     ///
     /// Each name must be a routed `#[tool]` that accepts the public or
     /// users: the server refuses to start otherwise, naming the tool and the
-    /// route. A browser sends a `GET` tool's arguments in the query, so its
-    /// handler reads them with [`Request::query_into`](crate::Request::query_into);
-    /// one that reads its input from the body is refused at boot.
+    /// route. A browser sends a `GET` tool's arguments in the query, which
+    /// its form request reads on a `GET`; an input with an object or a list
+    /// field, which a query cannot carry, is refused at boot.
     ///
     /// ```rust,ignore
     /// Router::new()

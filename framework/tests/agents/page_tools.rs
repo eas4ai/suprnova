@@ -13,8 +13,8 @@ use suprnova::live::{CanonicalValue, LiveBootstrapOptions, LiveDocument, LiveMou
 use suprnova::testing::{TestClient, TestResponse};
 use suprnova::view::{AssetSet, DocumentResponseIntent, ViewName};
 use suprnova::{
-    FrameworkError, HttpResponse, InertiaResponse, MiddlewareRegistry, PageTools, Request,
-    Response, Router, StatusCode, handler, json_response, tool, tool_input,
+    FrameworkError, HttpResponse, InertiaResponse, JsonSchema, MiddlewareRegistry, PageTools,
+    Request, Response, Router, StatusCode, Validate, handler, json_response, tool, tool_input,
 };
 
 use crate::fixture::{self, TestUser};
@@ -49,6 +49,34 @@ pub async fn search_notes(request: Request) -> Response {
 #[handler]
 pub async fn lookup_notes(form: NoteQuery) -> Response {
     json_response!({ "q": form.q })
+}
+
+/// What `notes.filter` narrows the notes by.
+#[derive(serde::Deserialize, Validate, JsonSchema)]
+#[schemars(crate = "suprnova::__schemars")]
+pub struct NoteFilters {
+    /// Whether to list drafts.
+    pub drafts: bool,
+}
+
+/// The input of `notes.filter`: a structured field, which a query cannot
+/// carry.
+#[tool_input]
+pub struct NoteFilter {
+    /// The filters.
+    #[validate(nested)]
+    pub filters: NoteFilters,
+}
+
+#[tool(
+    name = "notes.filter",
+    description = "Filter the notes.",
+    callers = [public],
+    input = NoteFilter,
+)]
+#[handler]
+pub async fn filter_notes(form: NoteFilter) -> Response {
+    json_response!({ "drafts": form.filters.drafts })
 }
 
 #[tool(
@@ -110,6 +138,7 @@ fn page_routes() -> Router {
     let router: Router = fixture::routes()
         .get("/notes/search", search_notes)
         .get("/notes/lookup", lookup_notes)
+        .get("/notes/filter", filter_notes)
         .post("/audit", export_audit)
         .get("/inertia/posts", inertia_page)
         .with_tools(["echo", "users.profile", "posts.create", "posts.delete"])
@@ -398,6 +427,7 @@ fn boot_with_route_tool(name: &'static str) -> Result<(), FrameworkError> {
     let router: Router = fixture::routes()
         .get("/notes/search", search_notes)
         .get("/notes/lookup", lookup_notes)
+        .get("/notes/filter", filter_notes)
         .post("/audit", export_audit)
         .get("/offering", plain_page)
         .with_tools([name])
@@ -410,6 +440,7 @@ fn boot_with_shared_tool(name: &'static str) -> Result<(), FrameworkError> {
     let router: Router = fixture::routes()
         .get("/notes/search", search_notes)
         .get("/notes/lookup", lookup_notes)
+        .get("/notes/filter", filter_notes)
         .post("/audit", export_audit)
         .into();
     router
@@ -447,12 +478,15 @@ async fn agent_014_unknown_live_or_agent_only_page_tool_fails_boot() {
 }
 
 #[tokio::test]
-async fn agent_014_a_get_page_tool_reading_its_input_from_the_body_fails_boot() {
+async fn agent_014_a_get_page_tool_whose_input_has_an_object_field_fails_boot() {
     let _container = fixture::setup();
-    let error = boot_with_route_tool("notes.lookup").expect_err("a GET tool reading the body");
+    let error = boot_with_route_tool("notes.filter").expect_err("an object field on GET");
     let text = message(&error);
-    assert!(text.contains("notes.lookup"), "{text}");
+    assert!(text.contains("notes.filter"), "{text}");
+    assert!(text.contains("`filters`"), "the field is named: {text}");
     assert!(text.contains("query"), "{text}");
+    // A GET tool whose input holds scalars reads it from the query.
+    boot_with_route_tool("notes.lookup").expect("a GET tool with a scalar input");
 }
 
 // ---------------------------------------------------- the call's checks ----
@@ -501,6 +535,18 @@ async fn agent_014_tool_call_header_on_a_route_without_a_tool_is_refused() {
     // Without the header the routes answer as before.
     client.get("/posts/new").send().await.assert_ok();
     client.post("/plain").send().await.assert_ok();
+}
+
+#[tokio::test]
+async fn agent_014_a_get_tool_call_reads_its_input_from_the_query() {
+    let _container = fixture::setup();
+    let client = page_client();
+    let call = client
+        .tool("notes.lookup", json!({ "q": "café & co" }))
+        .send()
+        .await;
+    call.assert_ok();
+    assert_eq!(call.json(), json!({ "q": "café & co" }));
 }
 
 #[tokio::test]

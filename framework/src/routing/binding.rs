@@ -1383,19 +1383,6 @@ impl RouterBindings {
         routes
     }
 
-    /// The `#[handler]` record of the route `(method, pattern)`, when its
-    /// handler has one.
-    #[cfg(feature = "agents")]
-    pub(crate) fn handler_record(
-        &self,
-        method: &Method,
-        pattern: &str,
-    ) -> Option<&'static HandlerRecord> {
-        self.routes
-            .get(&(method.clone(), pattern.to_owned()))
-            .and_then(|entry| entry.handler.record())
-    }
-
     /// The type name of the handler of the route `(method, pattern)`.
     pub(crate) fn handler_name(&self, method: &Method, pattern: &str) -> Option<&'static str> {
         self.routes
