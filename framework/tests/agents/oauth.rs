@@ -1935,5 +1935,61 @@ async fn agent_005_plain_http_app_url_fails_the_build() {
         .err()
         .map(|error| error.to_string())
         .unwrap_or_default();
-    assert!(refused.contains("issuer"), "{refused:?}");
+    // Magnetar's own refusal of an http issuer, not any refusal that
+    // mentions the issuer.
+    assert!(
+        refused.contains(
+            "invalid input for issuer: must be an https URL (http only on a loopback host)"
+        ),
+        "{refused:?}"
+    );
+}
+
+// ------------------------------------------------------ fix round 2 ----
+
+#[tokio::test]
+async fn agent_017_redirect_uris_are_ascii_on_the_approval_page() {
+    let world = world().await;
+    let client = &world.client;
+    let raw = client
+        .post("/oauth/register")
+        .json(&json!({
+            "client_name": "Bidi Redirect",
+            "redirect_uris": ["http://127.0.0.1:7777/cb\u{202E}x"],
+            "token_endpoint_auth_method": "none",
+        }))
+        .send()
+        .await;
+    assert_eq!(raw.status(), 400, "{}", raw.body_text());
+    assert_eq!(raw.json()["error"], "invalid_redirect_uri");
+    let encoded_redirect = "http://127.0.0.1:7777/cb%E2%80%AEx";
+    let client_id = register(client, encoded_redirect).await;
+    let user = new_account("ascii-redirect");
+    sign_in(client, &user).await;
+    let (_, challenge) = pkce();
+    let (_, page) = open_approval(
+        client,
+        &client_id,
+        encoded_redirect,
+        &challenge,
+        "posts:read",
+    )
+    .await;
+    assert_eq!(page.status(), 200, "{}", page.body_text());
+    let html = page.body_text();
+    assert!(html.contains("cb%E2%80%AEx"), "{html}");
+    assert!(!html.contains('\u{202E}'), "{html}");
+    // The same path spelled raw, on another loopback port, is no match for
+    // the registered one.
+    let raw_variant = client
+        .get(authorize_path(
+            &client_id,
+            "http://127.0.0.1:9999/cb\u{202E}x",
+            &challenge,
+            "posts:read",
+        ))
+        .send()
+        .await;
+    assert_eq!(raw_variant.status(), 400, "{}", raw_variant.body_text());
+    assert!(!raw_variant.body_text().contains('\u{202E}'));
 }
