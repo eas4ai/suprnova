@@ -631,10 +631,15 @@ const AGENT_PAGES_CASES: &[&str] = &[
     "agent_017_inertia_connected_agents_lists_and_revokes_only_the_users_own",
     "agent_017_inertia_consent_forms_need_the_csrf_token",
     "agent_017_inertia_consent_pages_refuse_framing_caching_and_referrers",
+    "agent_017_inertia_another_user_cannot_decide_or_confirm",
+    "agent_017_inertia_a_guest_decides_and_confirms_nothing",
+    "agent_017_inertia_a_native_form_post_decides",
+    "agent_017_inertia_the_last_wrong_code_ends_the_claim",
     "agent_017_login_returns_to_a_same_origin_address",
     "agent_017_login_ignores_a_foreign_return_to",
     "agent_008_registration_lowercases_and_refuses_a_mixed_case_duplicate",
     "kit_registration_refuses_a_name_over_255_and_an_email_over_254",
+    "kit_a_signed_in_user_writes_a_note",
 ];
 
 /// AGENT-017: a fresh Inertia application serves the MCP endpoint, the

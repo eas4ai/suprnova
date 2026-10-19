@@ -61,6 +61,9 @@ async fn setup() -> suprnova::mail::MailFake {
     suprnova::App::bind_if_absent::<dyn suprnova::CacheStore>(std::sync::Arc::new(
         suprnova::InMemoryCache::new(),
     ));
+    // The queue the server's service boot installs, which a saved note's
+    // search indexing is dispatched to after its transaction commits.
+    suprnova::Queue::set_driver(std::sync::Arc::new(suprnova::SyncQueueDriver::new()));
     suprnova::rate_limit::bootstrap_default().await;
     __PACKAGE__::bootstrap::register_http_stack();
     suprnova::Mail::fake()
@@ -115,12 +118,7 @@ impl Browser {
     /// the session may record it as the previous URL, and a consent page
     /// sends no referrer, so nothing here may go back to it.
     async fn load_script(&mut self) {
-        let script = self
-            .client
-            .get(SCRIPT)
-            .header("Accept", "*/*")
-            .send()
-            .await;
+        let script = self.client.get(SCRIPT).header("Accept", "*/*").send().await;
         assert_eq!(script.status(), 200, "GET {SCRIPT}");
     }
 
@@ -151,6 +149,44 @@ impl Browser {
     /// site's page would send it.
     async fn submit_without_token(&mut self, path: &str, body: Value) -> TestResponse {
         let response = self.client.post(path).inertia().json(&body).send().await;
+        self.keep(response)
+    }
+
+    /// An Inertia form submission a kit's form tool makes: the form-tool
+    /// header beside the user's own session and CSRF token.
+    async fn submit_as_form_tool(&mut self, path: &str, body: Value) -> TestResponse {
+        let token = self
+            .xsrf
+            .clone()
+            .expect("a page set the XSRF-TOKEN cookie first");
+        let response = self
+            .client
+            .post(path)
+            .inertia()
+            .header("X-XSRF-TOKEN", token)
+            .header(suprnova::agents::FORM_TOOL_HEADER, "1")
+            .json(&body)
+            .send()
+            .await;
+        self.keep(response)
+    }
+
+    /// A native form's submission, with no script: the fields as a form
+    /// body, the CSRF token among them as `_token`.
+    async fn post_form(&mut self, path: &str, fields: &[(&str, &str)]) -> TestResponse {
+        let token = self
+            .xsrf
+            .clone()
+            .expect("a page set the XSRF-TOKEN cookie first");
+        let mut body = vec![("_token", token.as_str())];
+        body.extend_from_slice(fields);
+        let response = self
+            .client
+            .post(path)
+            .header("Accept", "text/html")
+            .form(&body)
+            .send()
+            .await;
         self.keep(response)
     }
 
@@ -466,6 +502,28 @@ async fn claim_agent(browser: &mut Browser, machine: &mut Browser, email: &str) 
     .await
 }
 
+/// Every consent page's answer refuses framing, caching and referrers.
+fn assert_consent_headers(what: &str, response: &TestResponse) {
+    let csp = response
+        .header("content-security-policy")
+        .unwrap_or_else(|| panic!("{what}: no Content-Security-Policy"));
+    assert!(csp.contains("frame-ancestors 'none'"), "{what}: {csp}");
+    assert!(!csp.contains("frame-ancestors 'self'"), "{what}: {csp}");
+    assert_eq!(response.header("x-frame-options"), Some("DENY"), "{what}");
+    assert!(
+        response
+            .header("cache-control")
+            .is_some_and(|value| value.contains("no-store")),
+        "{what}: {:?}",
+        response.header("cache-control")
+    );
+    assert_eq!(
+        response.header("referrer-policy"),
+        Some("no-referrer"),
+        "{what}"
+    );
+}
+
 /// The signed-in `browser`'s connected agents page props.
 async fn connected(browser: &mut Browser) -> Value {
     let page = browser.visit("/connected-agents").await;
@@ -599,7 +657,9 @@ async fn agent_017_inertia_approval_round_trip() {
     let list = machine.client.mcp().with_token(&token).list().await;
     assert_eq!(list.status(), 200, "{list:?}");
 
-    // The next page clears the browser's history of the approval page.
+    // The next page carries `clearHistory`, which drops the history
+    // encryption key of an application that turns on `encryptHistory`. The
+    // kit encrypts no history, so the flag is all there is to check.
     let connected = alice.visit("/connected-agents").await.inertia_page();
     assert_eq!(connected["clearHistory"], true, "{connected}");
     assert_eq!(
@@ -880,47 +940,69 @@ async fn agent_017_inertia_consent_forms_need_the_csrf_token() {
 /// framing rule.
 async fn agent_017_inertia_consent_pages_refuse_framing_caching_and_referrers() {
     verified_user("Grace", "grace.headers@example.test").await;
+    let mut machine = Browser::new();
+    let client_id = register_client(&mut machine, "Header Tool").await;
     let mut grace = Browser::new();
     grace.sign_in("grace.headers@example.test").await;
-    let check = |what: &str, response: &TestResponse| {
-        let csp = response
-            .header("content-security-policy")
-            .unwrap_or_else(|| panic!("{what}: no Content-Security-Policy"));
-        assert!(csp.contains("frame-ancestors 'none'"), "{what}: {csp}");
-        assert!(!csp.contains("frame-ancestors 'self'"), "{what}: {csp}");
-        assert_eq!(response.header("x-frame-options"), Some("DENY"), "{what}");
-        assert!(
-            response
-                .header("cache-control")
-                .is_some_and(|value| value.contains("no-store")),
-            "{what}: {:?}",
-            response.header("cache-control")
-        );
-        assert_eq!(
-            response.header("referrer-policy"),
-            Some("no-referrer"),
-            "{what}"
-        );
-    };
-    let first = grace.open("/connected-agents").await;
+
+    // The approval page, as a first visit, with its nonce and form policy.
+    let id = open_approval(&mut grace, &client_id).await;
+    let page = format!("/oauth/approve?authorization={}", encode(&id));
+    let first = grace.open(&page).await;
     assert_eq!(first.status(), 200);
-    check("a first visit", &first);
+    assert_consent_headers("the approval page", &first);
     let csp = first.header("content-security-policy").unwrap_or_default();
     assert!(csp.contains("'nonce-"), "the nonce policy stays: {csp}");
     assert!(
         csp.contains("form-action 'self'"),
         "the form policy stays: {csp}"
     );
+    // A form tool's submission: 403, and the authorization stays pending.
+    let refused = grace
+        .submit_as_form_tool(
+            "/oauth/approve",
+            json!({ "authorization": id, "decision": "approve" }),
+        )
+        .await;
+    assert_eq!(refused.status(), 403, "{}", refused.body_text());
+    assert_consent_headers("a form tool's refusal", &refused);
+    assert_eq!(grace.visit(&page).await.status(), 200);
+    // A submission without the CSRF token: 419.
+    let refused = grace
+        .submit_without_token(
+            "/oauth/approve",
+            json!({ "authorization": id, "decision": "approve" }),
+        )
+        .await;
+    assert_eq!(refused.status(), 419, "{}", refused.body_text());
+    assert_consent_headers("a CSRF refusal", &refused);
+    // The decision: a 409 location visit.
+    let decided = grace
+        .submit(
+            "/oauth/approve",
+            json!({ "authorization": id, "decision": "approve" }),
+        )
+        .await;
+    assert_eq!(decided.status(), 409, "{}", decided.body_text());
+    assert_consent_headers("the location visit", &decided);
+
     let visit = grace.visit("/connected-agents").await;
     assert_eq!(visit.status(), 200);
-    check("an Inertia visit", &visit);
+    assert_consent_headers("an Inertia visit", &visit);
     let error = grace.open("/oauth/approve").await;
     assert_eq!(error.status(), 400);
-    check("an error", &error);
+    assert_consent_headers("an error", &error);
+    let error = grace.visit("/oauth/approve?authorization=nope").await;
+    assert_eq!(error.status(), 404);
+    assert_consent_headers("an error to an Inertia visit", &error);
     let claim = grace
         .open("/agent/claim?claim_attempt_token=cat_nope")
         .await;
-    check("a refused claim", &claim);
+    assert_consent_headers("a refused claim", &claim);
+    let mut guest = Browser::new();
+    let sent = guest.open(&page).await;
+    assert_eq!(redirect_path(&sent), "/login");
+    assert_consent_headers("the guest's redirect", &sent);
 
     let dashboard = grace.open("/dashboard").await;
     assert_eq!(dashboard.status(), 200);
@@ -930,6 +1012,202 @@ async fn agent_017_inertia_consent_pages_refuse_framing_caching_and_referrers() 
             .is_some_and(|csp| csp.contains("frame-ancestors 'self'")),
         "the dashboard keeps the preset's framing rule: {:?}",
         dashboard.header("content-security-policy")
+    );
+}
+
+/// Another user can neither decide your authorization nor confirm your
+/// claim: the authorization reads as ended to them, the claim as another
+/// account's, and both stay pending for you.
+async fn agent_017_inertia_another_user_cannot_decide_or_confirm() {
+    verified_user("Olga", "olga@example.test").await;
+    verified_user("Peter", "peter@example.test").await;
+    let mut machine = Browser::new();
+    let client_id = register_client(&mut machine, "Olga's Tool").await;
+    let mut olga = Browser::new();
+    olga.sign_in("olga@example.test").await;
+    let id = open_approval(&mut olga, &client_id).await;
+    let approval = format!("/oauth/approve?authorization={}", encode(&id));
+    let registration = service_auth(&mut machine, "olga@example.test").await;
+    let claim = path_of(
+        registration["claim"]["verification_uri"]
+            .as_str()
+            .expect("a verification URI"),
+    );
+    let attempt = query_param(&claim, "claim_attempt_token").expect("an attempt token");
+    let code = registration["claim"]["user_code"]
+        .as_str()
+        .expect("a user code")
+        .to_owned();
+
+    let mut peter = Browser::new();
+    peter.sign_in("peter@example.test").await;
+    let refused = peter
+        .submit(
+            "/oauth/approve",
+            json!({ "authorization": id, "decision": "approve" }),
+        )
+        .await;
+    assert_eq!(refused.status(), 404, "{}", refused.body_text());
+    assert_consent_headers("another user's decision", &refused);
+    let refused = peter
+        .submit(
+            "/agent/claim",
+            json!({ "claim_attempt_token": attempt, "user_code": code }),
+        )
+        .await;
+    assert_eq!(refused.status(), 403, "{}", refused.body_text());
+    assert_consent_headers("another user's confirmation", &refused);
+
+    assert_eq!(olga.visit(&approval).await.status(), 200);
+    let pending = olga.visit(&claim).await;
+    assert_eq!(pending.status(), 200, "{}", pending.body_text());
+    assert_eq!(pending.inertia_page()["component"], "Agents/Claim");
+}
+
+/// A form posted with no user signed in, a session that has ended, is sent
+/// to sign in, and decides and confirms nothing.
+async fn agent_017_inertia_a_guest_decides_and_confirms_nothing() {
+    verified_user("Quinn", "quinn@example.test").await;
+    let mut machine = Browser::new();
+    let client_id = register_client(&mut machine, "Quinn's Tool").await;
+    let mut quinn = Browser::new();
+    quinn.sign_in("quinn@example.test").await;
+    let id = open_approval(&mut quinn, &client_id).await;
+    let approval = format!("/oauth/approve?authorization={}", encode(&id));
+    let registration = service_auth(&mut machine, "quinn@example.test").await;
+    let claim = path_of(
+        registration["claim"]["verification_uri"]
+            .as_str()
+            .expect("a verification URI"),
+    );
+    let attempt = query_param(&claim, "claim_attempt_token").expect("an attempt token");
+    let code = registration["claim"]["user_code"]
+        .as_str()
+        .expect("a user code")
+        .to_owned();
+
+    let mut guest = Browser::new();
+    assert_eq!(guest.open("/login").await.status(), 200);
+    let sent = guest
+        .submit(
+            "/oauth/approve",
+            json!({ "authorization": id, "decision": "approve" }),
+        )
+        .await;
+    assert_eq!(redirect_path(&sent), "/login");
+    let sent = guest
+        .submit(
+            "/agent/claim",
+            json!({ "claim_attempt_token": attempt, "user_code": code }),
+        )
+        .await;
+    assert_eq!(redirect_path(&sent), "/login");
+
+    assert_eq!(quinn.visit(&approval).await.status(), 200);
+    assert_eq!(quinn.visit(&claim).await.status(), 200);
+}
+
+/// The approval page's form posted with no script, as a browser without
+/// JavaScript sends it: the decision answers with an ordinary redirect to
+/// the client.
+async fn agent_017_inertia_a_native_form_post_decides() {
+    verified_user("Rita", "rita@example.test").await;
+    let mut machine = Browser::new();
+    let client_id = register_client(&mut machine, "Rita's Tool").await;
+    let mut rita = Browser::new();
+    rita.sign_in("rita@example.test").await;
+    let id = open_approval(&mut rita, &client_id).await;
+    let decided = rita
+        .post_form(
+            "/oauth/approve",
+            &[("authorization", id.as_str()), ("decision", "approve")],
+        )
+        .await;
+    assert!(
+        matches!(decided.status(), 302 | 303) && decided.header("x-inertia-location").is_none(),
+        "{} {}",
+        decided.status(),
+        decided.body_text()
+    );
+    let to_client = destination(&decided);
+    assert!(
+        to_client.starts_with(&format!("{LOOPBACK}?")),
+        "{to_client}"
+    );
+    assert!(query_param(&to_client, "code").is_some(), "{to_client}");
+    assert_consent_headers("a native form's decision", &decided);
+}
+
+/// The last wrong code ends the claim: the page it returns to answers 410,
+/// and so does the right code after it.
+async fn agent_017_inertia_the_last_wrong_code_ends_the_claim() {
+    verified_user("Sam", "sam@example.test").await;
+    let mut machine = Browser::new();
+    let registration = service_auth(&mut machine, "sam@example.test").await;
+    let page = path_of(
+        registration["claim"]["verification_uri"]
+            .as_str()
+            .expect("a verification URI"),
+    );
+    let attempt = query_param(&page, "claim_attempt_token").expect("an attempt token");
+    let code = registration["claim"]["user_code"]
+        .as_str()
+        .expect("a user code")
+        .to_owned();
+    let wrong = if code == "000000" { "111111" } else { "000000" };
+
+    let mut sam = Browser::new();
+    sam.sign_in("sam@example.test").await;
+    let props = sam.visit(&page).await.inertia_page()["props"].clone();
+    let attempts = props["claim"]["attempts_remaining"]
+        .as_u64()
+        .expect("the attempts left");
+    for left in (0..attempts).rev() {
+        let refused = sam
+            .submit(
+                "/agent/claim",
+                json!({ "claim_attempt_token": attempt, "user_code": wrong }),
+            )
+            .await;
+        assert_eq!(redirect_path(&refused), page, "{left} left");
+        if left > 0 {
+            let again = sam.visit(&page).await.inertia_page();
+            assert_eq!(
+                again["props"]["errors"]["user_code"],
+                format!("That code is wrong. {left} attempts left."),
+                "{again}"
+            );
+        }
+    }
+    let ended = sam.open(&page).await;
+    assert_eq!(ended.status(), 410, "{}", ended.body_text());
+    assert_consent_headers("an ended claim", &ended);
+    let refused = sam
+        .submit(
+            "/agent/claim",
+            json!({ "claim_attempt_token": attempt, "user_code": code }),
+        )
+        .await;
+    assert_eq!(refused.status(), 410, "{}", refused.body_text());
+}
+
+/// A signed-in user writes a note through the kit's notes page.
+async fn kit_a_signed_in_user_writes_a_note() {
+    verified_user("Tara", "tara@example.test").await;
+    let mut tara = Browser::new();
+    tara.sign_in("tara@example.test").await;
+    assert_eq!(tara.open("/notes").await.status(), 200);
+    let saved = tara
+        .submit(
+            "/notes",
+            json!({ "title": "A note from the fixture", "body": "Written here." }),
+        )
+        .await;
+    assert_eq!(redirect_path(&saved), "/notes", "{}", saved.body_text());
+    let listed = tara.visit("/notes").await.inertia_page();
+    assert_eq!(
+        listed["props"]["notes"][0]["title"], "A note from the fixture",
+        "{listed}"
     );
 }
 
@@ -1169,9 +1447,14 @@ async fn agent_pages() {
         agent_017_inertia_connected_agents_lists_and_revokes_only_the_users_own,
         agent_017_inertia_consent_forms_need_the_csrf_token,
         agent_017_inertia_consent_pages_refuse_framing_caching_and_referrers,
+        agent_017_inertia_another_user_cannot_decide_or_confirm,
+        agent_017_inertia_a_guest_decides_and_confirms_nothing,
+        agent_017_inertia_a_native_form_post_decides,
+        agent_017_inertia_the_last_wrong_code_ends_the_claim,
         agent_017_login_returns_to_a_same_origin_address,
         agent_017_login_ignores_a_foreign_return_to,
         agent_008_registration_lowercases_and_refuses_a_mixed_case_duplicate,
         kit_registration_refuses_a_name_over_255_and_an_email_over_254,
+        kit_a_signed_in_user_writes_a_note,
     );
 }
