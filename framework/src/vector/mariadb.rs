@@ -210,8 +210,16 @@ impl MariaDbVectorDriver {
     /// nowhere, that operation surfaces the failure, not registration.
     ///
     /// The URL may use the `mysql://` or the `mariadb://` scheme.
+    ///
+    /// Each connection the pool opens runs with MySQL's concurrency
+    /// semantics, as every connection the framework opens to MariaDB does;
+    /// `manual/database.md` explains why. A pool handed to
+    /// [`Self::from_pool`] keeps whatever its builder set.
     pub fn from_url(url: &str) -> Result<Self, FrameworkError> {
         let pool = MySqlPoolOptions::new()
+            .after_connect(|connection, _metadata| {
+                crate::database::connection::mysql_semantics(connection)
+            })
             .connect_lazy(crate::database::config::driver_url(url).as_ref())
             // The URL carries the password, so the error names the fault
             // and not the URL.

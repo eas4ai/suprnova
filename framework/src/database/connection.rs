@@ -167,6 +167,13 @@ impl DbConnection {
         {
             opt.map_sqlx_mysql_opts(move |options| options.charset(&charset).collation(&collation));
         }
+        // A `customize` that replaces the MySQL pool options replaces this
+        // hook too, so it must run `mysql_semantics` itself, as the test
+        // transaction's does.
+        #[cfg(feature = "database-mysql")]
+        opt.map_sqlx_mysql_pool_opts(|pool| {
+            pool.after_connect(|connection, _metadata| mysql_semantics(connection))
+        });
         customize(&mut opt);
 
         let conn = Database::connect(opt)
@@ -287,6 +294,62 @@ impl DbConnection {
             None => false,
         }
     }
+}
+
+/// The statement that gives a MariaDB session MySQL's concurrency
+/// semantics. See [`mysql_semantics`].
+#[cfg(feature = "database-mysql")]
+const MYSQL_SEMANTICS: &str = "SET SESSION innodb_snapshot_isolation = OFF";
+
+/// `ER_UNKNOWN_SYSTEM_VARIABLE`, MySQL's and MariaDB's answer to a `SET` of
+/// a variable the server does not have.
+#[cfg(feature = "database-mysql")]
+const UNKNOWN_SYSTEM_VARIABLE: u16 = 1193;
+
+/// Gives a new MySQL-family connection MySQL 8.4's concurrency semantics.
+/// Runs once, when the pool opens the connection, never per query.
+///
+/// MariaDB 11.8 and later turn `innodb_snapshot_isolation` on by default.
+/// Under it, an UPDATE, a DELETE or a locking read in a REPEATABLE READ
+/// transaction fails with error 1020, "Record has changed since last read",
+/// when another transaction committed a change to the row after this one's
+/// first read. MySQL instead waits for the row and works on its latest
+/// committed version. The framework's read-then-write sequences, such as
+/// spending a single-use token and advancing the RenderCache ledger, are
+/// written for MySQL's behavior, so every connection the framework opens
+/// turns the setting off for its own session. The server's global value
+/// stays as it is for its other clients.
+///
+/// The server is not asked what it is. MySQL, older MariaDB releases and
+/// other MySQL-compatible servers have no such variable and refuse the
+/// statement with error 1193, which means there is nothing to turn off.
+/// Telling MariaDB apart by its version would cost a round trip of its own
+/// on every server, since sqlx keeps only the numbers of the version and
+/// not the `MariaDB` in it, and would need a list of the releases that have
+/// the variable.
+/// Any other refusal fails the connection: a session that cannot be given
+/// MySQL's semantics is not one to hand out.
+#[cfg(feature = "database-mysql")]
+pub(crate) fn mysql_semantics(
+    connection: &mut sea_orm::sqlx::mysql::MySqlConnection,
+) -> futures::future::BoxFuture<'_, Result<(), sea_orm::sqlx::Error>> {
+    Box::pin(async move {
+        match sea_orm::sqlx::Executor::execute(connection, MYSQL_SEMANTICS).await {
+            Ok(_) => Ok(()),
+            Err(error) if refused_as_unknown_variable(&error) => Ok(()),
+            Err(error) => Err(error),
+        }
+    })
+}
+
+/// Whether the server refused a statement because it has no such system
+/// variable.
+#[cfg(feature = "database-mysql")]
+fn refused_as_unknown_variable(error: &sea_orm::sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|error| error.try_downcast_ref::<sea_orm::sqlx::mysql::MySqlDatabaseError>())
+        .is_some_and(|error| error.number() == UNKNOWN_SYSTEM_VARIABLE)
 }
 
 /// Map a seconds value onto the `Option<Duration>` sqlx wants for the
