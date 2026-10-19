@@ -316,12 +316,13 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
             .map(|parameter| {
                 let name = &parameter.name;
                 let codec = model_codec_tokens(&parameter.ty);
+                let required = option_inner(&parameter.ty).is_none();
                 quote! {
                     ::suprnova::live::__private::component::composition::ChildParameterField::new(
                         ::suprnova::live::__private::identity::ModelField::parse(#name)
                             .expect("macro-validated Live mount parameter identity"),
                         #codec,
-                        true,
+                        #required,
                     )
                 }
             });
@@ -847,24 +848,51 @@ fn take_resolvers(method: &mut ImplItemFn) -> syn::Result<BTreeMap<String, syn::
     Ok(resolvers)
 }
 
+/// Decodes the mount parameter `parameter` from `parameters` into `local`.
+/// A required parameter must be present; an `Option<T>` parameter that is
+/// absent or `null` is `None`, whatever its codec, since no codec decodes
+/// `null` itself.
+fn mount_parameter_decode(parameter: &MountParameter, local: &syn::Ident) -> TokenStream2 {
+    let name = &parameter.name;
+    let ty = &parameter.ty;
+    let codec = model_codec_tokens(ty);
+    if option_inner(ty).is_some() {
+        quote! {
+            let #local: #ty = match parameters.get(#name) {
+                ::std::option::Option::None
+                | ::std::option::Option::Some(
+                    ::suprnova::live::__private::canonical::CanonicalValue::Null,
+                ) => ::std::option::Option::None,
+                ::std::option::Option::Some(value) => {
+                    ::suprnova::live::__private::component::generated::decode_model_field(
+                        value,
+                        &#codec,
+                    )?
+                }
+            };
+        }
+    } else {
+        quote! {
+            let #local: #ty =
+                ::suprnova::live::__private::component::generated::decode_model_field(
+                    parameters.get(#name).ok_or_else(
+                        ::suprnova::live::__private::component::ComponentError::contract_failure,
+                    )?,
+                    &#codec,
+                )?;
+        }
+    }
+}
+
 fn generate_mount_runtime(mount: &Option<RegisteredMount>) -> TokenStream2 {
     let (expected, decodes, invocation) = if let Some(mount) = mount {
         let expected = mount.parameters.len();
         let decoded = generated_locals("__snv_live_mount", mount.parameters.len());
-        let decodes = mount.parameters.iter().zip(&decoded).map(|(parameter, local)| {
-            let name = &parameter.name;
-            let ty = &parameter.ty;
-            let codec = model_codec_tokens(ty);
-            quote! {
-                let #local: #ty =
-                    ::suprnova::live::__private::component::generated::decode_model_field(
-                        parameters.get(#name).ok_or_else(
-                            ::suprnova::live::__private::component::ComponentError::contract_failure,
-                        )?,
-                        &#codec,
-                    )?;
-            }
-        });
+        let decodes = mount
+            .parameters
+            .iter()
+            .zip(&decoded)
+            .map(|(parameter, local)| mount_parameter_decode(parameter, local));
         let method = &mount.method;
         let arguments = decoded.iter();
         let invocation = if mount.asynchronous {
@@ -912,7 +940,7 @@ fn generate_mount_runtime(mount: &Option<RegisteredMount>) -> TokenStream2 {
                         ::suprnova::live::__private::component::ComponentError::contract_failure(),
                     );
                 };
-                if parameters.len() != #expected {
+                if parameters.len() > #expected {
                     return ::std::result::Result::Err(
                         ::suprnova::live::__private::component::ComponentError::contract_failure(),
                     );
@@ -970,19 +998,8 @@ fn generate_params_changed_hook(
     let expected_parameters = mount.as_ref().map_or(0, |mount| mount.parameters.len());
     let decoded_parameters = mount.iter().flat_map(|mount| {
         mount.parameters.iter().map(|parameter| {
-            let name = &parameter.name;
-            let ty = &parameter.ty;
-            let codec = model_codec_tokens(ty);
             let decoded = format_ident!("__snv_live_parameter_{}", parameter.ident.unraw());
-            quote! {
-                let #decoded: #ty =
-                    ::suprnova::live::__private::component::generated::decode_model_field(
-                        parameters.get(#name).ok_or_else(
-                            ::suprnova::live::__private::component::ComponentError::contract_failure,
-                        )?,
-                        &#codec,
-                    )?;
-            }
+            mount_parameter_decode(parameter, &decoded)
         })
     });
     let parameter_assignments = mount.iter().flat_map(|mount| {
@@ -1039,7 +1056,7 @@ fn generate_params_changed_hook(
                         ::suprnova::live::__private::component::ComponentError::contract_failure(),
                     );
                 };
-                if parameters.len() != #expected_parameters {
+                if parameters.len() > #expected_parameters {
                     return ::std::result::Result::Err(
                         ::suprnova::live::__private::component::ComponentError::contract_failure(),
                     );

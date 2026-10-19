@@ -207,6 +207,14 @@ impl ChildParameterSchema {
                 .fields
                 .get(&name)
                 .ok_or_else(|| CompositionError::new(CompositionErrorKind::InvalidParameters))?;
+            if matches!(value, CanonicalValue::Null) {
+                if field.required {
+                    return Err(CompositionError::new(
+                        CompositionErrorKind::InvalidParameters,
+                    ));
+                }
+                continue;
+            }
             field
                 .codec
                 .validate(value, limits)
@@ -230,8 +238,8 @@ impl ChildParameterSchema {
     /// sends has a codec with no schema ([`ModelCodec::json_schema`]).
     ///
     /// The object follows the schema's own validation: the required
-    /// parameters listed, no other field, and no `null`, which no codec
-    /// accepts.
+    /// parameters listed, an optional one also accepting `null`, and no
+    /// other field.
     #[must_use]
     pub fn json_schema(&self, excluding: &[&str]) -> Option<serde_json::Value> {
         let mut properties = serde_json::Map::new();
@@ -240,18 +248,22 @@ impl ChildParameterSchema {
             if excluding.contains(&field.name.as_str()) {
                 continue;
             }
-            properties.insert(field.name.as_str().to_owned(), field.codec.json_schema()?);
-            if field.required {
+            let schema = field.codec.json_schema()?;
+            let schema = if field.required {
                 required.push(serde_json::Value::String(field.name.as_str().to_owned()));
-            }
+                schema
+            } else {
+                serde_json::json!({ "anyOf": [schema, { "type": "null" }] })
+            };
+            properties.insert(field.name.as_str().to_owned(), schema);
         }
         Some(crate::state::object_schema(properties, required))
     }
 
     /// Every field of `value` that the schema's validation would
     /// refuse, and why, in field-name order, treating `excluding` as fields
-    /// the agent may not send: an unknown name, a missing required field,
-    /// or a value its codec refuses.
+    /// the agent may not send: an unknown name, a missing or `null`
+    /// required field, or a value its codec refuses.
     #[must_use]
     pub fn field_issues(
         &self,
@@ -274,7 +286,11 @@ impl ChildParameterSchema {
                 issues.push(FieldIssue::new(name.clone(), FieldIssueKind::Unknown));
                 continue;
             };
-            if let Err(issue) = field.codec.validate(value, limits) {
+            if matches!(value, CanonicalValue::Null) {
+                if field.required {
+                    issues.push(FieldIssue::new(name.clone(), FieldIssueKind::Null));
+                }
+            } else if let Err(issue) = field.codec.validate(value, limits) {
                 issues.push(FieldIssue::new(
                     name.clone(),
                     FieldIssueKind::Invalid(issue.kind()),
@@ -299,7 +315,7 @@ impl ChildParameterSchema {
     /// `value` with each parameter in the encoding a signed snapshot
     /// carries: a 64-bit integer, which the schema's validation takes
     /// as a number or a decimal string, as its lossless tag, and every other
-    /// value as it is. A mount whose parameters an agent wrote, not a
+    /// value, `null` for an optional parameter included, as it is. A mount whose parameters an agent wrote, not a
     /// template, passes them through this before the snapshot schema checks
     /// them.
     ///
@@ -323,6 +339,9 @@ impl ChildParameterSchema {
                 .and_then(|parsed| self.fields.get(&parsed))
                 .ok_or_else(invalid)?;
             let value = match field.codec {
+                _ if matches!(value, CanonicalValue::Null) && !field.required => {
+                    CanonicalValue::Null
+                }
                 ModelCodec::I64 => crate::snapshot::state::encode_i64(
                     field
                         .codec
@@ -343,9 +362,10 @@ impl ChildParameterSchema {
     }
 
     /// `value` with each parameter in the one JSON form its codec decodes
-    /// ([`ModelCodec::normalize`]): what a policy deciding on parameters an
-    /// agent wrote reads, so a 64-bit integer reaches it as a JSON integer
-    /// whether the agent sent a number or a decimal string.
+    /// ([`ModelCodec::normalize`]), and `null` for an optional parameter
+    /// left `null`: what a policy deciding on parameters an agent wrote
+    /// reads, so a 64-bit integer reaches it as a JSON integer whether the
+    /// agent sent a number or a decimal string.
     ///
     /// # Errors
     ///
@@ -366,10 +386,14 @@ impl ChildParameterSchema {
                 .ok()
                 .and_then(|parsed| self.fields.get(&parsed))
                 .ok_or_else(invalid)?;
-            let value = field
-                .codec
-                .normalize(value, limits)
-                .map_err(|_| invalid())?;
+            let value = if matches!(value, CanonicalValue::Null) && !field.required {
+                serde_json::Value::Null
+            } else {
+                field
+                    .codec
+                    .normalize(value, limits)
+                    .map_err(|_| invalid())?
+            };
             normalized.insert(name.clone(), value);
         }
         Ok(normalized)

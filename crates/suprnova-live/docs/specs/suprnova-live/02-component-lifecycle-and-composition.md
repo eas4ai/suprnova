@@ -1,7 +1,7 @@
 # Suprnova Live -- 02 Component Lifecycle and Composition
 
 Status: Normative design specification
-Last revised: 2026-09-01
+Last revised: 2026-10-18
 
 ## Scope
 
@@ -78,6 +78,10 @@ Acceptance criteria:
   position is not identity.
 - A key collision within an ownership scope is detected and diagnosed.
 - Parameter change behavior distinguishes remount, update, and no-op.
+- An `Option<T>` mount parameter is optional: a parent, a template or an
+  agent may leave it out or pass `null`, and the mount receives `None`,
+  whatever the codec of `T`. Every other parameter is required and never
+  `null`.
 - An exact-delivery child-parameter update uses envelope schema v2, bound to the
   issuing parent scope and instance, accepted parent revision, child key, child
   component contract, exact child instance, parameter schema, and parameter
@@ -206,6 +210,12 @@ remain iteration 003 behavior.
 
 ## Decisions and revisions
 
+- 2026-10-18 -- Made `Option<T>` mount parameters optional. Every mount
+  parameter was required and no codec decodes `null`, so an optional
+  parameter could never be `None`: a headless tool whose `#[resolve]`
+  returned `None` for an `Option<u64>` property failed every mount. An
+  optional parameter now accepts `null` or absence, in the parameter schema,
+  the snapshot's mount schema and the generated mount, and is `None`.
 - 2026-09-01 -- Completed exact-child delivery through the engine, browser, and
   real Suprnova endpoint. Parent output prepares and seals every changed-child
   delivery before host commit and ledger acceptance; the browser pairs each

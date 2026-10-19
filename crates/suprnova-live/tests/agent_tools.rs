@@ -318,6 +318,54 @@ fn agent_013_normalized_parameters_take_one_form_per_codec() {
 }
 
 #[test]
+fn agent_013_an_optional_parameter_accepts_null() {
+    let schema = ChildParameterSchema::new(
+        1,
+        vec![
+            ChildParameterField::new(field("limit"), ModelCodec::U64, false),
+            ChildParameterField::new(field("label"), ModelCodec::String, true),
+        ],
+    )
+    .expect("parameter schema");
+    let limits = InputLimits::default();
+    let parameters = schema.json_schema(&[]).expect("every codec has a schema");
+    assert_eq!(
+        parameters["properties"],
+        json!({
+            "label": { "type": "string" },
+            "limit": { "anyOf": [
+                {
+                    "anyOf": [
+                        { "type": "integer", "minimum": 0, "maximum": 9_007_199_254_740_991_i64 },
+                        { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+                    ],
+                },
+                { "type": "null" },
+            ] },
+        })
+    );
+    assert_eq!(parameters["required"], json!(["label"]));
+    let null_limit = object(&[("limit", CanonicalValue::Null), ("label", text("Main"))]);
+    assert!(schema.field_issues(&null_limit, &[], &limits).is_empty());
+    assert_eq!(
+        schema.snapshot_parameters(&null_limit, &limits).as_ref(),
+        Ok(&null_limit)
+    );
+    assert_eq!(
+        schema
+            .normalized_parameters(&null_limit, &limits)
+            .map(serde_json::Value::Object),
+        Ok(json!({ "limit": null, "label": "Main" }))
+    );
+    // A required parameter is never null.
+    let null_label = object(&[("label", CanonicalValue::Null)]);
+    let issues = schema.field_issues(&null_label, &[], &limits);
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(issues[0].field(), "label");
+    assert_eq!(issues[0].kind(), FieldIssueKind::Null);
+}
+
+#[test]
 fn agent_013_parameter_schema_and_issues_exclude_resolver_properties() {
     let schema = ChildParameterSchema::new(
         1,
@@ -333,7 +381,10 @@ fn agent_013_parameter_schema_and_issues_exclude_resolver_properties() {
     assert_eq!(json["additionalProperties"], false);
     assert_eq!(json["required"], json!(["title"]));
     assert!(json["properties"].get("team").is_none(), "{json}");
-    assert_eq!(json["properties"]["note"], json!({ "type": "string" }));
+    assert_eq!(
+        json["properties"]["note"],
+        json!({ "anyOf": [{ "type": "string" }, { "type": "null" }] })
+    );
 
     let limits = InputLimits::default();
     assert!(
@@ -346,7 +397,7 @@ fn agent_013_parameter_schema_and_issues_exclude_resolver_properties() {
         &object(&[
             ("title", number(3.0)),
             ("team", number(9.0)),
-            ("note", CanonicalValue::Null),
+            ("note", CanonicalValue::Bool(true)),
         ]),
         &["team"],
         &limits,

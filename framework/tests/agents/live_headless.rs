@@ -349,6 +349,65 @@ async fn agent_013_mount_gate_never_sees_the_decimal_string_form() {
 }
 
 #[tokio::test]
+async fn agent_013_an_optional_mount_property_mounts_with_none() {
+    let _container = fixture::setup();
+    let client = live_fixture::live_client();
+    // The resolver gives a guest no limit and the agent leaves the note
+    // null: the component mounts with None for both.
+    let guest = client
+        .mcp()
+        .call("quota.read", json!({ "mount": { "note": null } }))
+        .await;
+    assert!(!guest.is_error(), "{:?}", guest.response());
+    let structured = guest.structured().expect("structured content");
+    assert_eq!(structured["fields"]["limit"], Value::Null, "{structured}");
+    assert_eq!(structured["fields"]["note"], Value::Null, "{structured}");
+    assert_eq!(structured["fields"]["reads"], "1", "{structured}");
+    // A property left out is None too, and a value is Some.
+    let user = client
+        .mcp()
+        .as_caller(alice())
+        .call("quota.read", json!({ "mount": {} }))
+        .await;
+    assert!(!user.is_error(), "{:?}", user.response());
+    let structured = user.structured().expect("structured content");
+    assert_eq!(structured["fields"]["limit"], 10, "{structured}");
+    assert_eq!(structured["fields"]["note"], Value::Null, "{structured}");
+    let noted = client
+        .mcp()
+        .as_caller(alice())
+        .call("quota.read", json!({ "mount": { "note": "hi" } }))
+        .await;
+    assert!(!noted.is_error(), "{:?}", noted.response());
+    let structured = noted.structured().expect("structured content");
+    assert_eq!(structured["fields"]["note"], "hi", "{structured}");
+    // An optional property the agent may send is optional in the schema
+    // and may be null; the resolved one is left out.
+    let listed = client.mcp().as_caller(alice()).list().await;
+    let tools = listed
+        .result()
+        .and_then(|result| result["tools"].as_array())
+        .cloned()
+        .unwrap_or_default();
+    let quota = tools
+        .iter()
+        .find(|tool| tool["name"] == "quota.read")
+        .expect("the quota tool is listed");
+    let mount = &quota["inputSchema"]["properties"]["mount"];
+    assert_eq!(
+        mount["properties"],
+        json!({ "note": { "anyOf": [{ "type": "string" }, { "type": "null" }] } }),
+        "{mount}"
+    );
+    assert!(
+        mount["required"]
+            .as_array()
+            .is_none_or(|required| required.is_empty()),
+        "{mount}"
+    );
+}
+
+#[tokio::test]
 async fn agent_013_mount_without_a_policy_is_refused() {
     let _container = fixture::setup();
     let client = live_fixture::live_client_with(AgentsConfig::new(), false);

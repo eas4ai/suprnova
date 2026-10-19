@@ -192,7 +192,11 @@ which accepts any canonical JSON its Serde type reads, has no schema.
 `#[resolve(path)]` on a `#[mount]` parameter names an
 `async fn(&ToolCaller) -> Result<T, FrameworkError>` that fills that mount
 property for a headless call from the caller. The generated adapter encodes
-the value with the parameter's codec.
+the value with the parameter's codec, and an `Option<T>` resolver that
+returns `None` mounts the component with `None` (spec 02). The mount
+properties an agent sends follow the same schema rules as arguments: the
+required ones listed, and an optional `Option<T>` one also accepting
+`null`.
 
 Acceptance criteria:
 - `#[tool]` on a method with no `#[action]` fails to compile, and so does a
@@ -308,6 +312,8 @@ facility rather than relying on a fallible reporting hook.
 
 ## Decisions and revisions
 
+- 2026-10-18 -- An optional mount property resolved to `None`, or left
+  `null` by the agent, mounts with `None` instead of failing the call.
 - 2026-10-18 -- Added actions as agent tools (AGENT-012, AGENT-013).
   `#[tool]` beside `#[action]` records `ActionToolMetadata`; the input schema
   comes from the argument codecs, and an argument with the Json codec is

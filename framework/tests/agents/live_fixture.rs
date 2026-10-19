@@ -99,6 +99,50 @@ impl AgentCounter {
     }
 }
 
+/// A quota anyone can read: its limit comes from the caller, and a guest
+/// has none; the note is the agent's to leave out.
+#[derive(LiveComponent)]
+#[live(name = "tests.agent-quota", view = "live/tests/agent-quota.html")]
+pub struct AgentQuota {
+    #[agent_visible]
+    limit: Option<u64>,
+    #[agent_visible]
+    note: Option<String>,
+    #[agent_visible]
+    reads: u64,
+}
+
+#[live]
+impl AgentQuota {
+    #[mount]
+    pub fn mount(
+        #[resolve(crate::live_fixture::limit_of)] limit: Option<u64>,
+        note: Option<String>,
+    ) -> Self {
+        Self {
+            limit,
+            note,
+            reads: 0,
+        }
+    }
+
+    #[tool(
+        name = "quota.read",
+        description = "Read the quota.",
+        callers = [public, user],
+        headless,
+    )]
+    #[action]
+    pub fn read(&mut self) {
+        self.reads += 1;
+    }
+}
+
+/// The quota's limit for the caller: ten for a user, none for a guest.
+pub async fn limit_of(caller: &ToolCaller) -> Result<Option<u64>, FrameworkError> {
+    Ok(caller.user_id().map(|_| 10))
+}
+
 /// How many times [`owner_of`] ran.
 pub static RESOLVED: AtomicUsize = AtomicUsize::new(0);
 
@@ -152,8 +196,8 @@ pub fn guard(guard: LiveRouteGuard) -> LiveRouteGuard {
         ))
 }
 
-/// Lets everyone but mallory mount a counter starting below 1000, and
-/// lets only alice add to one.
+/// Lets everyone but mallory mount a counter starting below 1000, lets
+/// only alice add to one, and lets anyone mount a quota.
 pub fn define_live_policies() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
@@ -170,6 +214,10 @@ pub fn define_live_policies() {
         Gate::define::<String, String>("live:tests.agent-counter.add", |user, _action| {
             user == "alice"
         });
+        Gate::define::<ToolCaller, LiveMountRequest>(
+            "live:tests.agent-quota.mount",
+            |_caller, _mount| true,
+        );
     });
 }
 
@@ -183,6 +231,8 @@ pub fn register_components() {
         LiveRegistry::builder()
             .register::<AgentCounter>()
             .expect("register the agent counter")
+            .register::<AgentQuota>()
+            .expect("register the agent quota")
             .build(),
     );
 }
