@@ -1,0 +1,55 @@
+[package]
+name = "suprnova-webmcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WebMCP page tools and server tool calls for Rust front ends compiled to WebAssembly, for the Suprnova framework"
+repository = "https://github.com/eas4ai/suprnova"
+homepage = "https://github.com/eas4ai/suprnova"
+keywords = ["webmcp", "wasm", "agents", "suprnova"]
+categories = ["wasm", "web-programming"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# `preserve_order` keeps a validation answer's fields in the order the
+# server wrote them, so a result's text matches the server's line for line.
+serde_json = { version = "1", features = ["preserve_order"] }
+# The framework's own spelling, so a typed tool's schema is derived exactly
+# as a `#[tool]`'s is.
+schemars = { version = "1.2.1", default-features = false, features = ["derive", "std"] }
+validator = { version = "0.20", features = ["derive"] }
+thiserror = "2"
+# A path segment and a GET query are encoded as the framework's MCP
+# dispatcher encodes them; it uses these two crates, which the lock already
+# holds.
+percent-encoding = "2.3.2"
+form_urlencoded = "1.2.2"
+
+# The browser half. Every other target compiles without it and answers
+# `Unsupported::Target`.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen = "0.2.122"
+wasm-bindgen-futures = "0.4.72"
+js-sys = "0.3.99"
+web-sys = { version = "0.3.99", features = [
+    "AbortController",
+    "AbortSignal",
+    "Document",
+    "DomException",
+    "Element",
+    "EventTarget",
+    "Headers",
+    "HtmlDocument",
+    "Location",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "RequestCache",
+    "RequestCredentials",
+    "RequestInit",
+    "RequestRedirect",
+    "Response",
+    "ResponseType",
+    "Url",
+    "Window",
+] }

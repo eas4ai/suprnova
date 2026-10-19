@@ -9206,6 +9206,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "suprnova-webmcp"
+version = "4.3.0"
+dependencies = [
+ "form_urlencoded",
+ "js-sys",
+ "percent-encoding",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "validator",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"

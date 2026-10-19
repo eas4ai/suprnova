@@ -6,6 +6,7 @@ members = [
     "suprnova-cli",
     "suprnova-macros",
     "crates/suprnova-web-push",
+    "crates/suprnova-webmcp",
     "crates/suprnova-payments-stripe",
     "crates/suprnova-payments-paddle",
     "crates/suprnova-payments-nowpayments",
