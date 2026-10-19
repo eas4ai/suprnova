@@ -16,8 +16,9 @@ use suprnova::agents::{
 };
 use suprnova::testing::{TestClient, TestResponse};
 use suprnova::{
-    ContentSecurityPolicy, FrameworkError, HttpResponse, MiddlewareRegistry, Request, Router,
-    SecurityHeaders, SecurityHeadersOverride,
+    ContentSecurityPolicy, FrameworkError, HttpResponse, Inertia, Middleware, MiddlewareRegistry,
+    Next, Request, Response, Router, SecurityHeaders, SecurityHeadersOverride, ToolCaller, handler,
+    tool,
 };
 
 use crate::agent_auth::{
@@ -114,6 +115,9 @@ fn consent_routes(router: Router) -> Router {
                 .map_err(failed)?;
             Ok(HttpResponse::json(decision_json(decision)))
         })
+        // As a kit routes its consent pages.
+        .middleware(ConsentPageHeaders)
+        .post("/test/consent/approve-tool", approve_as_tool)
         .get("/test/consent/claim", |request: Request| async move {
             let token = request
                 .query_param("claim_attempt_token")
@@ -137,6 +141,29 @@ fn consent_routes(router: Router) -> Router {
             Ok(HttpResponse::text("signed out"))
         })
         .into()
+}
+
+/// The pending authorization the tool below approves. The tool takes no
+/// input, since a tool's input is a form request and a decision handler
+/// reads the request itself, so the test names its target here.
+static TOOL_TARGET: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// An application that declares a decision route as a tool, which no
+/// application should: an agent's call of it must never approve.
+#[tool(
+    name = "consent.approve",
+    description = "Approve a pending authorization.",
+    callers = [user],
+)]
+#[handler]
+pub async fn approve_as_tool(request: Request) -> Response {
+    let approvals = AgentApprovals::of(&request)?;
+    let id = TOOL_TARGET
+        .lock()
+        .map(|target| target.clone())
+        .unwrap_or_default();
+    let decision = approvals.decide(&id, true).await?;
+    Ok(HttpResponse::json(decision_json(decision)))
 }
 
 // ------------------------------------------------------------ steps ----
@@ -460,6 +487,62 @@ async fn agent_017_facade_needs_the_plugins_mounted() {
         .send()
         .await;
     assert_eq!(claim.status(), 500, "{}", claim.body_text());
+}
+
+#[tokio::test]
+async fn agent_017_consent_refuses_an_agents_tool_call() {
+    let world = approval_world().await;
+    let client = &world.client;
+    let user = new_account("facade-tool");
+    let client_id = register(client, LOOPBACK_REDIRECT).await;
+    sign_in(client, &user).await;
+    let (_, challenge) = pkce();
+    let id = authorize(client, &client_id, &challenge).await;
+
+    if let Ok(mut target) = TOOL_TARGET.lock() {
+        *target = id.clone();
+    }
+
+    // A browser tool call, with the user's session.
+    let browser = client.tool("consent.approve", json!({})).send().await;
+    assert_eq!(browser.status(), 403, "{}", browser.body_text());
+    assert!(
+        browser.body_text().contains("person"),
+        "{}",
+        browser.body_text()
+    );
+
+    // A call through the MCP endpoint, as the same user.
+    let mcp = client
+        .mcp()
+        .as_caller(ToolCaller::user(crate::fixture::TestUser::arc(&user)))
+        .call("consent.approve", json!({}))
+        .await;
+    // The endpoint reports the route's refusal as a failed call.
+    assert!(mcp.is_error(), "{:?}", mcp.response());
+    assert!(mcp.text().contains("person"), "{}", mcp.text());
+
+    // Neither touched the pending authorization.
+    assert_eq!(lookup_approval(client, &id).await["lookup"], "pending");
+}
+
+#[tokio::test]
+async fn agent_017_a_decision_without_the_csrf_token_is_refused() {
+    let world = approval_world().await;
+    let client = &world.client;
+    let user = new_account("facade-csrf");
+    let client_id = register(client, LOOPBACK_REDIRECT).await;
+    sign_in(client, &user).await;
+    let (_, challenge) = pkce();
+    let id = authorize(client, &client_id, &challenge).await;
+    let refused = client
+        .post("/test/consent/decide")
+        .form(&[("authorization", id.as_str()), ("decision", "approve")])
+        .send()
+        .await;
+    assert_eq!(refused.status(), 419, "{}", refused.body_text());
+    assert_consent_headers(&refused, "a CSRF refusal");
+    assert_eq!(lookup_approval(client, &id).await["lookup"], "pending");
 }
 
 // ------------------------------------------------------------- claims ----
@@ -888,6 +971,103 @@ async fn agent_017_consent_headers_guard_error_answers() {
             assert_eq!(panicked.header("referrer-policy"), Some("no-referrer"));
         }
     }
+}
+
+/// A middleware registered before the Inertia layer that refuses the
+/// request, as a throttle or an auth guard does: its answer reaches the
+/// server's error decision, which renders the error page after the chain.
+struct Throttled;
+
+#[async_trait::async_trait]
+impl Middleware for Throttled {
+    async fn handle(&self, _request: Request, _next: Next) -> Response {
+        Err(HttpResponse::from(FrameworkError::domain(
+            "Too many requests.",
+            429,
+        )))
+    }
+}
+
+/// Render the error page the server decides for every error answer.
+fn render_error_pages() {
+    Inertia::handle_exceptions_using(|error| {
+        let status = error.status();
+        Some(error.render("Error", json!({ "status": status })))
+    });
+}
+
+/// The `content-type` of an answer, without its parameters.
+fn media_type(response: &TestResponse) -> String {
+    response
+        .header("content-type")
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn agent_017_consent_error_page_rendered_after_the_chain_keeps_the_policy() {
+    let _container = container();
+    render_error_pages();
+    let client = TestClient::new(
+        Router::new()
+            .get("/consent/page", nonce_page)
+            .middleware(ConsentPageHeaders),
+        MiddlewareRegistry::new()
+            .append(SecurityHeaders::balanced())
+            .append(Throttled),
+    );
+    let page = client
+        .get("/consent/page?authorization=a1b2")
+        .header("Accept", "text/html")
+        .send()
+        .await;
+    assert_eq!(page.status(), 429, "{}", page.body_text());
+    assert_eq!(
+        media_type(&page),
+        "text/html",
+        "the error page: {}",
+        page.body_text()
+    );
+    assert_consent_headers(&page, "the error page");
+    let policy = page.header("content-security-policy").unwrap_or_default();
+    assert!(policy.contains("'nonce-"), "the nonce policy: {policy}");
+    assert!(policy.contains("form-action 'self'"), "{policy}");
+    assert!(policy.contains("object-src 'none'"), "{policy}");
+}
+
+#[tokio::test]
+async fn agent_017_error_page_keeps_a_no_store_the_answer_carried() {
+    // No consent middleware here: the page renderer itself keeps what the
+    // answer said about storing it.
+    let _container = container();
+    render_error_pages();
+    let client = TestClient::new(
+        Router::new().get("/private", |_request: Request| async move {
+            Err(
+                HttpResponse::from(FrameworkError::domain("Not yours.", 403))
+                    .header("Cache-Control", "no-store"),
+            )
+        }),
+        MiddlewareRegistry::new(),
+    );
+    let page = client
+        .get("/private")
+        .header("Accept", "text/html")
+        .send()
+        .await;
+    assert_eq!(page.status(), 403, "{}", page.body_text());
+    assert_eq!(
+        media_type(&page),
+        "text/html",
+        "the error page: {}",
+        page.body_text()
+    );
+    let cache = page.header("cache-control").unwrap_or_default();
+    assert!(cache.contains("no-store"), "{cache}");
 }
 
 #[tokio::test]

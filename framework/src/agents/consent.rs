@@ -151,8 +151,12 @@ impl AgentApprovals {
     ///
     /// # Errors
     ///
-    /// 500 when the router that served the request mounts no OAuth server.
+    /// 403 for a tool call, one the MCP endpoint dispatched or one a page
+    /// made with the [`TOOL_CALL_HEADER`](crate::agents::TOOL_CALL_HEADER):
+    /// consent comes from the person, never an agent acting as them. 500
+    /// when the router that served the request mounts no OAuth server.
     pub fn of(request: &Request) -> Result<Self, FrameworkError> {
+        refuse_agents(request)?;
         super::oauth::mounted_server(request).map(Self::new)
     }
 
@@ -220,6 +224,26 @@ impl AgentApprovals {
             },
         )
     }
+}
+
+/// Refuse a request an agent makes: a tool call the MCP endpoint
+/// dispatched, which carries the agent mark, or one from the browser,
+/// which carries the [`TOOL_CALL_HEADER`](super::TOOL_CALL_HEADER).
+///
+/// A tool call runs as the user its caller acts for, so a route an
+/// application declared a tool by mistake would otherwise let an agent
+/// approve its own authorization or claim itself. Consent comes from the
+/// person, so both halves refuse here, before anything is read, whatever
+/// the route.
+fn refuse_agents(request: &Request) -> Result<(), FrameworkError> {
+    if request.is_agent_traffic() || request.header(super::TOOL_CALL_HEADER).is_some() {
+        return Err(FrameworkError::domain(
+            "Consent must come from the person: an agent's tool call cannot approve, deny or \
+             claim.",
+            403,
+        ));
+    }
+    Ok(())
 }
 
 fn approvals_unavailable(error: magnetar::Error) -> FrameworkError {
@@ -388,8 +412,10 @@ impl AgentClaims {
     ///
     /// # Errors
     ///
-    /// 500 when the router that served the request mounts no agent auth.
+    /// 403 for a tool call, as [`AgentApprovals::of`] refuses one. 500
+    /// when the router that served the request mounts no agent auth.
     pub fn of(request: &Request) -> Result<Self, FrameworkError> {
+        refuse_agents(request)?;
         let agent = super::oauth::mounted_agent_auth(request)?;
         Ok(Self::new(Arc::clone(&agent.engine), request.ip()))
     }
