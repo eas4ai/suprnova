@@ -486,6 +486,7 @@ test(`agent_017_${kit}_approval_page_round_trip`, async ({ page, request, baseUR
     expect(csp).toContain("frame-ancestors 'none'");
     expect(document.headers()['x-frame-options']).toBe('DENY');
     expect(document.headers()['referrer-policy']).toBe('no-referrer');
+    expect(document.headers()['cache-control']).toContain('no-store');
     await expect(page.getByRole('heading', { name: 'Allow Kit Browser Tool to act for you?' })).toBeVisible();
     await expect(page.getByText(client.redirectUri)).toBeVisible();
     expect(await everyTool(page)).toEqual([]);
@@ -565,4 +566,46 @@ test(`agent_017_${kit}_wrong_claim_code_shows_the_attempts_left`, async ({ page,
   await expect(page.getByText(`That code is wrong. ${attempts - 1} attempts left.`)).toBeVisible();
   await expect(page).toHaveURL(/\/agent\/claim\?claim_attempt_token=/);
   await expect(page.getByText(`${attempts - 1} wrong entries allowed`)).toBeVisible();
+});
+
+test(`agent_017_${kit}_form_tool_cannot_approve`, async ({ page, request, baseURL }) => {
+  const client = await startLoopbackClient();
+  try {
+    const clientId = await registerClient(request, client.redirectUri);
+    await signUp(page);
+    const query = new URLSearchParams({
+      response_type: 'code',
+      client_id: clientId,
+      redirect_uri: client.redirectUri,
+      code_challenge: createHash('sha256').update(randomBytes(32).toString('base64url')).digest('base64url'),
+      code_challenge_method: 'S256',
+      resource: `${baseURL}/mcp`,
+      state: 'state-123',
+    });
+    await page.goto(`/oauth/authorize?${query}`);
+    await expect(page).toHaveURL(/\/oauth\/approve\?authorization=/);
+    const approval = new URL(page.url());
+    const id = approval.searchParams.get('authorization') ?? '';
+
+    // An application's page with a form tool that posts the approval form,
+    // with the user's own session and CSRF token.
+    const agent = await webmcp(page);
+    await page.goto('/agent-fixture/consent');
+    await expect.poll(() => registered(page)).toContain('fixture.consent.approve');
+    const posted = page.waitForResponse(
+      (response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/oauth/approve',
+    );
+    await agent.invoke('fixture.consent.approve', { authorization: id, decision: 'approve' });
+    const refused = await posted;
+    expect(refused.request().headers()['suprnova-form-tool']).toBe('1');
+    expect(refused.status()).toBe(403);
+
+    // The authorization is still the user's to decide, and the client got
+    // nothing.
+    expect(client.hits).toHaveLength(0);
+    const pending = await page.request.get(`${approval.pathname}${approval.search}`, { headers: { Accept: 'text/html' } });
+    expect(pending.status(), await pending.text()).toBe(200);
+  } finally {
+    await client.close();
+  }
 });

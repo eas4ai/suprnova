@@ -1,8 +1,9 @@
 //! The AGENT-014 and AGENT-015 browser fixture, copied into a scaffolded
 //! kit as `src/controllers/agent_fixture.rs`: two pages that offer server
 //! tools, a page with two form tools, the form requests those tools submit,
-//! a recorder of every request the fixture's routes see, and a route that
-//! verifies the signed-in user's address for the agents' claim page.
+//! a recorder of every request the fixture's routes see, a route that
+//! verifies the signed-in user's address for the agents' claim page, and a
+//! page whose form tool posts the approval form.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -88,6 +89,17 @@ pub async fn form(req: Request) -> Response {
     let notes = NOTES.lock().map(|notes| notes.clone()).unwrap_or_default();
     inertia_response!(&req, "AgentFixture/Form", AgentFixtureFormProps { notes })
 }
+
+/// `GET /agent-fixture/consent`: a page with a form tool that posts the
+/// approval form, which the approval route must refuse.
+#[handler]
+pub async fn consent(req: Request) -> Response {
+    inertia_response!(&req, "AgentFixture/Consent", AgentFixtureConsentProps {})
+}
+
+/// The consent fixture page's props: none.
+#[derive(InertiaProps)]
+pub struct AgentFixtureConsentProps {}
 
 /// What `fixture.bump` adds.
 #[tool_input]

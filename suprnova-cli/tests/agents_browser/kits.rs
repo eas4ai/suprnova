@@ -118,6 +118,7 @@ const CORE_CASES: &[&str] = &[
     "agent_015_a_leaving_tool_unregisters_at_once_and_its_pending_call_still_answers",
     "agent_015_back_forward_cache_suspends_and_restores_tools",
     "agent_015_a_page_without_webmcp_registers_nothing",
+    "agent_017_a_form_tool_submission_carries_the_form_tool_header",
 ];
 
 /// The kit's own vitest cases, each named `agent_015_<kit>_<case>`.
@@ -282,6 +283,7 @@ const FIXTURE_ROUTES: &str = r#"    // The AGENT-014 and AGENT-015 browser fixtu
             .with_tools(["fixture.bump", "fixture.peek", "fixture.mine"]),
         get!("/second", controllers::agent_fixture::second).with_tools(["fixture.reset"]),
         get!("/form", controllers::agent_fixture::form),
+        get!("/consent", controllers::agent_fixture::consent),
         post!("/bump", controllers::agent_fixture::bump),
         get!("/peek", controllers::agent_fixture::peek),
         post!("/mine", controllers::agent_fixture::mine),
@@ -319,6 +321,7 @@ const BROWSER_CASES: &[&str] = &[
     "agent_017_{kit}_approval_page_round_trip",
     "agent_017_{kit}_claim_page_round_trip",
     "agent_017_{kit}_wrong_claim_code_shows_the_attempts_left",
+    "agent_017_{kit}_form_tool_cannot_approve",
 ];
 
 /// The application process, stopped when dropped.
@@ -383,7 +386,7 @@ fn add_fixture(project: &Path, kit: &str, work: &Path) -> Result<(), String> {
     };
     let pages = project.join("frontend/src/pages/AgentFixture");
     std::fs::create_dir_all(&pages).map_err(|error| error.to_string())?;
-    for page in ["First", "Second", "Form"] {
+    for page in ["First", "Second", "Form", "Consent"] {
         std::fs::copy(
             app.join(kit).join(format!("{page}.{ext}")),
             pages.join(format!("{page}.{ext}")),
