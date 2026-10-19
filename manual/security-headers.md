@@ -347,6 +347,85 @@ and its nonce intact. A route override can change or turn off any middleware hea
 a header the handler already set still wins. Review frame permissions together:
 `X-Frame-Options` and CSP's `frame-ancestors` should describe the same access.
 
+## WebMCP and Permissions-Policy
+
+WebMCP, the browser API through which [agents](agents.md) call a page's
+tools, is gated by the `tools` permission. The WebMCP specification makes
+`tools` a policy-controlled feature whose default allowlist is `'self'`, and
+`document.modelContext.registerTool()` rejects with `NotAllowedError` in a
+document that may not use it. Chrome's origin trial follows the same rule.
+
+No preset names `tools` in its `Permissions-Policy`, so the default applies
+under every preset: the application's own pages, and frames of the same
+origin, register tools. A frame from another origin does not, unless the page
+that embeds it delegates the permission. Nothing needs to change for WebMCP
+to work on your own pages.
+
+To let one of your tool pages run inside an iframe on another site, two
+things must hold:
+
+1. The embedding page delegates the permission on its iframe:
+
+   ```html
+   <iframe src="https://app.example.com/orders" allow="tools"></iframe>
+   ```
+
+   If the embedding page sends a `Permissions-Policy` header that names
+   `tools`, its allowlist must also include your origin, for example
+   `tools=(self "https://app.example.com")`.
+
+2. Your page lets that site frame it. Strict sends `X-Frame-Options: DENY`
+   and `frame-ancestors 'none'`, and balanced sends `SAMEORIGIN` and
+   `frame-ancestors 'self'`, so both refuse a frame from another origin. Add
+   the embedding origin to `frame-ancestors` and drop `X-Frame-Options`, which
+   cannot name another origin:
+
+   ```rust,ignore
+   use suprnova::{FrameworkError, SecurityHeaders};
+
+   fn headers() -> Result<SecurityHeaders, FrameworkError> {
+       SecurityHeaders::balanced()
+           .csp_source("frame-ancestors", "https://portal.example.com")?
+           .header("x-frame-options", None)
+   }
+   ```
+
+   To open only some routes to framing, give them a `SecurityHeadersOverride`
+   with their own policy instead, as [Override a route or
+   group](#override-a-route-or-group) shows.
+
+The framework's OAuth approval, connected-agents and claim pages always refuse
+to be framed, whatever the preset.
+
+To turn WebMCP off for the whole application, add `tools=()` to the preset's
+list:
+
+```rust,ignore
+let headers = suprnova::SecurityHeaders::balanced().header(
+    "permissions-policy",
+    Some("camera=(), microphone=(), geolocation=(), usb=(), accelerometer=(), gyroscope=(), magnetometer=(), browsing-topics=(), display-capture=(), tools=()"),
+)?;
+```
+
+### The Origin Trial
+
+Chrome runs WebMCP for real users as an origin trial from Chrome 149. Register
+your origin for the trial and set `WEBMCP_ORIGIN_TRIAL_TOKEN` to the token it
+issues. Every HTML response then carries the token:
+
+```text
+Origin-Trial: <token>
+```
+
+The server adds the header as each response leaves, after all middleware, so
+error pages, static `.html` files and plain views carry it, as Inertia and
+Live pages do. JSON, redirects, assets and tool answers do not, because only a
+document enables a trial. A response that already carries the same token keeps
+it once. The header does not depend on `SecurityHeaders`: it is sent whether or
+not the middleware is registered. A value that is not base64 stops boot,
+naming the variable, and an empty value sends nothing. A test registers a
+token with `Config::register(WebMcpConfig::new().with_origin_trial_token(token)?)`.
+
 ## Cache nonce pages
 
 A Complete page under a nonce CSP renders on every request. RenderCache never
@@ -372,3 +451,4 @@ start with a browser policy.
 - [Middleware](middleware.md) covers global order and route middleware.
 - [Inertia Responses](frontend-inertia-responses.md) covers application root documents.
 - [Environment Variables](env-vars.md) lists every configuration setting.
+- [Agents](agents.md) covers the tools WebMCP registers.
