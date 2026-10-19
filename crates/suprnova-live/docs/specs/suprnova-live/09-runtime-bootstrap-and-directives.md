@@ -1,7 +1,7 @@
 # Suprnova Live -- 09 Runtime Bootstrap and Directives
 
 Status: Normative design specification
-Last revised: 2026-10-18
+Last revised: 2026-10-19
 
 ## Scope
 
@@ -259,9 +259,14 @@ them with a 64-bit integer codec, the only fields whose lossless tags a tool
 result unwraps (spec 05); each tool names its
 action, its full name `{base}.{documentKey}`, its optional title, its
 description, its input schema (spec 04) and the three WebMCP hints. The
-attribute is built from the generated metadata alone, so it is the same for
-every viewer: a public seed's bytes stay shareable and do not change when the
-seed is promoted, and who may call a tool is decided when it is called.
+attribute is built from the generated metadata, narrowed by the host to the
+tools the request's viewer may call (AGENT-014): a guest sees the tools that
+accept the public, a session user those that accept users or the public, a
+user signed in another way only the user tools with no scope, and no viewer
+an agent-only tool. When every tool of the component accepts the public the
+host reads no viewer, so the attribute is the same for every viewer and a
+public seed's bytes stay shareable. Who may call a tool is still decided when
+it is called.
 
 Acceptance criteria:
 
@@ -342,6 +347,75 @@ UX flow:
    its tools leave the agent's view; a call the island refuses answers the
    agent with an error before the page recovers.
 
+### WebMCP server tools
+
+The runtime shall register the server tools a page offers with the page's
+WebMCP model context, beside its islands' tools, and call each through the
+tool's own route with the page's session and CSRF token (AGENT-014). The
+server decides which tools a page offers and lists only those its viewer may
+call, in the head's `<script type="application/json"
+id="suprnova-agent-tools">` element:
+
+```json
+{"v":1,
+ "limits":{"maxResultBytes":8388608,"callTimeoutMs":30000},
+ "tools":[{"name":"posts.create","title":"Create a post",
+   "description":"Create a draft post.","inputSchema":{"type":"object"},
+   "annotations":{"readOnlyHint":false,"untrustedContentHint":false,
+     "consequentialHint":false},
+   "method":"POST","path":[{"text":"/posts"}]}]}
+```
+
+The call, its path, query and CSRF rules and its result follow the shared
+cases every browser implementation reads,
+`framework/tests/agents/fixtures/browser-calls.json`, which mirror the MCP
+endpoint's own rules.
+
+Acceptance criteria:
+
+- The runtime reads the element once at start, only as a direct child of
+  `<head>` with that exact `id` and `type`, so markup in the body cannot pose
+  as it. It accepts only exactly the keys `v`, `limits` and `tools`; `v` is
+  1; both limits are positive whole numbers; `tools` holds 1 to 64 tools,
+  each with a unique name in the tool grammar, an optional non-blank title,
+  a non-blank description, an object input schema, exactly the three boolean
+  hints, a method of `GET`, `POST`, `PUT`, `PATCH` or `DELETE`, and a path of
+  `{text}` and `{param, optional, catchAll}` pieces starting with text. An
+  element it does not accept registers nothing and records
+  `agent_tool_rejected` at warning severity in the discovery phase with the
+  `invalid_shape` detail.
+- The page's server tools are one more entry of the runtime's WebMCP host:
+  they register on start, leave on suspend and register again on resume,
+  leave on dispose, and a navigation unloads them with the document. A
+  response that reloads or navigates the page answers their pending calls
+  first, as it answers every island's.
+- A call refuses an input that is not a plain object, fills the path from the
+  arguments, refusing `.` and `..` values, sends a `GET` tool's scalar
+  arguments in the query and any other method's argument object as its JSON
+  body, and checks the URL stays on the page's origin before any credential
+  is attached. It sends `Accept: application/json`, the `Suprnova-Tool-Call`
+  header and the CSRF header (`X-CSRF-TOKEN` from the `csrf-token` meta tag,
+  else `X-XSRF-TOKEN` from the `XSRF-TOKEN` cookie), with same-origin
+  credentials, no redirect followed and no cache.
+- The answer is read under `maxResultBytes` and the call is stopped at
+  `callTimeoutMs`. A redirect, a body over the bound, a network failure, an
+  expired page session (419) and the timer each give their error result; any
+  other answer maps as the MCP endpoint maps a route's answer. An abort the
+  agent's signal raises rejects the call with `AbortError`.
+- After a tool not marked read-only that reached the server, every connected
+  island renders fresh before the call resolves, waiting at most
+  `callTimeoutMs`: an instance takes a `fresh_render`, a public seed is
+  promoted by one (spec 05). The refresh's outcome does not change the
+  result.
+
+UX flow:
+
+1. A page offering server tools loads in a browser with WebMCP -> each tool
+   the server listed for the viewer is registered and the agent can call it.
+2. The agent calls a write tool -> the route runs with the user's session
+   and CSRF token, every island renders fresh, and the agent then reads a
+   page that shows what it did.
+
 ## Acceptance criteria
 
 - The runtime loads independently of client frameworks and never owns initial
@@ -353,9 +427,18 @@ UX flow:
   monkey-patching.
 - Tool islands register exactly the tools their roots list with WebMCP and
   remove them when they leave, and a tool call runs as a click.
+- A page registers exactly the server tools its head element lists, calls
+  each through its route with the session and CSRF token, and renders every
+  island fresh after a write tool.
 
 ## Decisions and revisions
 
+- 2026-10-19 -- Added WebMCP server tools (AGENT-014). The runtime registers
+  the tools the head's `suprnova-agent-tools` element lists beside the
+  islands' tools, calls each through its route with the session and CSRF
+  token by the shared browser call cases, and renders every island fresh
+  after a write tool. An island root's tools are now narrowed to those the
+  viewer may call, reading no viewer when every tool accepts the public.
 - 2026-10-18 -- A page-level reload answers every island's WebMCP calls
   first. Recovery reloads the whole page, but only the refused island's
   calls were answered and held for, so a refused click on one island ended
