@@ -32,6 +32,11 @@ use crate::eloquent::{EagerLoadDispatch, Model};
 use crate::error::FrameworkError;
 use crate::hashing;
 
+/// How many users a lookup by email ignoring case reads at most. A real
+/// address is on one account, or two that differ only in case; more than
+/// this is refused rather than read without end.
+const MAX_CASE_MATCHES: u64 = 20;
+
 /// The default id binder: numeric ids bind as integers (matching integer
 /// primary keys), everything else binds as a string. See
 /// [`DatabaseUserProvider::with_id_parser`](super::database_provider::DatabaseUserProvider::with_id_parser)
@@ -290,36 +295,41 @@ where
         }))
     }
 
-    async fn retrieve_by_email_ignoring_case(
+    async fn retrieve_all_by_email_ignoring_case(
         &self,
         email: &str,
-    ) -> Result<Option<AuthFlowUser>, FrameworkError> {
-        if let Some(exact) = self.retrieve_by_email(email).await? {
-            return Ok(Some(exact));
-        }
+    ) -> Result<Vec<AuthFlowUser>, FrameworkError> {
         // `LOWER` on both sides compares the same way on SQLite, PostgreSQL,
-        // MySQL and MariaDB. Two rows are enough to tell one match from
-        // several, and several with no exact one name no one.
-        let mut users = M::query()
+        // MySQL and MariaDB. The read is bounded: an address on more
+        // accounts than that is refused rather than read without end.
+        let users = M::query()
             .where_raw(
                 "LOWER(email) = LOWER(?)",
                 vec![Value::String(email.to_owned())],
             )
-            .limit(2)
+            .limit(MAX_CASE_MATCHES + 1)
             .get()
-            .await?
-            .into_iter();
-        let (Some(user), None) = (users.next(), users.next()) else {
-            return Ok(None);
-        };
-        // As `retrieve_by_email`, the carrier echoes the address the user
+            .await?;
+        if users.len() as u64 > MAX_CASE_MATCHES {
+            return Err(FrameworkError::domain(
+                format!(
+                    "more than {MAX_CASE_MATCHES} accounts share this email address whatever \
+                     its case"
+                ),
+                409,
+            ));
+        }
+        // As `retrieve_by_email`, each carrier echoes the address the user
         // was looked up by; a caller that needs the stored one reads
         // `verification_email` by the id.
-        Ok(Some(AuthFlowUser {
-            id: user.get_auth_identifier(),
-            email: email.to_owned(),
-            name: user.name().map(str::to_string),
-        }))
+        Ok(users
+            .into_iter()
+            .map(|user| AuthFlowUser {
+                id: user.get_auth_identifier(),
+                email: email.to_owned(),
+                name: user.name().map(str::to_string),
+            })
+            .collect())
     }
 
     fn supports_password_reset(&self) -> bool {
