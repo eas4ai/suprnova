@@ -21,6 +21,9 @@ mod wasm;
 #[path = "agents_browser/consent.rs"]
 mod consent;
 
+#[path = "agents_browser/api_kit.rs"]
+mod api_kit;
+
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
