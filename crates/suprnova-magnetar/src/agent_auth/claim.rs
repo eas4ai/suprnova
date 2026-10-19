@@ -171,7 +171,7 @@ impl Core {
                 "email": record.claim_email,
                 "provider": provider.unwrap_or(Value::Null),
                 "scopes": self
-                    .describe(&record.scopes)
+                    .describe(&self.bound_scopes(&record))
                     .into_iter()
                     .map(|scope| json!({"name": scope.name, "description": scope.description}))
                     .collect::<Vec<_>>(),

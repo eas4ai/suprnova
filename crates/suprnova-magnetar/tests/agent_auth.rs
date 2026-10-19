@@ -469,6 +469,110 @@ async fn agent_007_assertions_signed_before_a_key_rotation_still_verify() {
     assert_eq!(body(&refused)["error"], "invalid_grant");
 }
 
+#[tokio::test]
+async fn agent_007_narrowed_post_claim_scopes_apply_to_a_bound_registration() {
+    let db = magnetar::default_schema::database().await;
+    let (key, _) = signing_key("narrow-key");
+    let mut options = Options::new();
+    options.config = agent_config(key.clone());
+    let wide = build(db.clone(), options).await;
+    let (registration, _) = wide.claimed_anonymous("narrow@example.test").await;
+    let claim_token = registration["claim_token"].as_str().expect("a claim token");
+
+    // The operator narrows the post-claim scopes and restarts.
+    let mut options = Options::new();
+    let mut config = agent_config(key);
+    config.post_claim_scopes = vec!["tools:read".to_owned()];
+    options.config = config;
+    let narrow = build(db, options).await;
+    let polled = narrow.poll(claim_token).await;
+    assert_eq!(status(&polled), 200, "{:?}", body(&polled));
+    let polled = body(&polled);
+    assert_eq!(polled["scope"], "tools:read", "the claim poll is cut");
+    let assertion = polled["identity_assertion"].as_str().expect("an assertion");
+    let wider = narrow
+        .exchange_with(
+            assertion,
+            &[("scope", "tools:write"), ("resource", RESOURCE)],
+        )
+        .await;
+    assert_eq!(status(&wider), 400, "{:?}", body(&wider));
+    assert_eq!(body(&wider)["error"], "invalid_scope");
+    let token = access_token(&narrow.exchange(assertion).await);
+    let (_, _, _, scopes) = agent_kind(&narrow.verify(&token).await);
+    assert_eq!(scopes, vec!["tools:read".to_owned()]);
+}
+
+/// A directory in which every verified address matches more than one
+/// account.
+struct AmbiguousDirectory;
+
+#[async_trait::async_trait]
+impl magnetar::agent_auth::AgentUserDirectory for AmbiguousDirectory {
+    async fn find_by_id(
+        &self,
+        _user_id: &str,
+    ) -> magnetar::Result<Option<magnetar::agent_auth::AgentUser>> {
+        Ok(None)
+    }
+
+    async fn find_by_verified_email(
+        &self,
+        _email: &str,
+    ) -> magnetar::Result<Option<magnetar::agent_auth::AgentUser>> {
+        Err(magnetar::Error::Conflict {
+            resource: "user".to_owned(),
+            message: "the address matches more than one account".to_owned(),
+        })
+    }
+
+    async fn find_by_verified_phone(
+        &self,
+        _phone: &str,
+    ) -> magnetar::Result<Option<magnetar::agent_auth::AgentUser>> {
+        Ok(None)
+    }
+}
+
+/// A provisioning policy that counts what it is asked and refuses.
+#[derive(Default)]
+struct CountingPolicy(std::sync::atomic::AtomicUsize);
+
+#[async_trait::async_trait]
+impl magnetar::agent_auth::ProvisioningPolicy for CountingPolicy {
+    async fn provision(
+        &self,
+        _identity: &magnetar::agent_auth::ProvidedIdentity,
+    ) -> magnetar::Result<magnetar::agent_auth::ProvisioningDecision> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(magnetar::agent_auth::ProvisioningDecision::Refused)
+    }
+}
+
+#[tokio::test]
+async fn agent_008_address_matching_several_accounts_is_refused() {
+    let policy = Arc::new(CountingPolicy::default());
+    let mut options = Options::new();
+    options.users = Some(Arc::new(AmbiguousDirectory));
+    options.provisioning = Some(policy.clone());
+    let h = sqlite_harness_with(options).await;
+    let response = present_subject(&h, "ambiguous-subject", "shared@example.test").await;
+    assert_eq!(status(&response), 400, "{:?}", body(&response));
+    let refusal = body(&response);
+    assert_eq!(refusal["error"], "invalid_request");
+    assert!(
+        refusal["error_description"]
+            .as_str()
+            .is_some_and(|text| text.contains("more than one account")),
+        "{refusal}"
+    );
+    assert_eq!(
+        policy.0.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "never provisioned"
+    );
+}
+
 /// Every authorization server grant issued to a registration, as
 /// `(grant id, revoked)`.
 async fn grants_of(h: &Harness, registration_id: &str) -> Vec<(String, bool)> {

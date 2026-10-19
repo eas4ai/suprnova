@@ -105,9 +105,13 @@ pub struct AgentUser {
 pub trait AgentUserDirectory: Send + Sync {
     /// The user with this identifier.
     async fn find_by_id(&self, user_id: &str) -> Result<Option<AgentUser>>;
-    /// The user whose verified email is `email`.
+    /// The user whose verified email is `email`. When the address is
+    /// verified on more than one user, answer [`Error::Conflict`]: the
+    /// ID-JAG is then refused, and no user is bound or created.
     async fn find_by_verified_email(&self, email: &str) -> Result<Option<AgentUser>>;
-    /// The user whose verified phone number is `phone`.
+    /// The user whose verified phone number is `phone`, answering
+    /// [`Error::Conflict`] as [`find_by_verified_email`](Self::find_by_verified_email)
+    /// does when it is verified on more than one user.
     async fn find_by_verified_phone(&self, phone: &str) -> Result<Option<AgentUser>>;
 }
 
@@ -554,7 +558,7 @@ impl AgentAuth {
                     .as_deref()
                     .and_then(|issuer| self.core.config.trusted(issuer))
                     .map(|entry| entry.display_name.clone()),
-                scopes: self.core.describe(&record.scopes),
+                scopes: self.core.describe(&self.core.bound_scopes(&record)),
                 registration_id: record.id,
                 registration_type: record.kind,
                 created_at: record.created_at,
@@ -1240,6 +1244,19 @@ impl Core {
     /// nothing to compare.
     pub(crate) fn epoch_moved(record: &RegistrationRecord, user: &AgentUser) -> bool {
         user.auth_epoch.is_some() && user.auth_epoch != record.auth_epoch
+    }
+
+    /// The scopes a bound registration holds now: those it was granted that
+    /// the configuration still grants after a claim. A narrowed
+    /// [`post_claim_scopes`](AgentAuthConfig::post_claim_scopes) applies at
+    /// once, to registrations claimed before the change as to new ones.
+    pub(crate) fn bound_scopes(&self, record: &RegistrationRecord) -> Vec<String> {
+        record
+            .scopes
+            .iter()
+            .filter(|scope| self.config.post_claim_scopes.contains(scope))
+            .cloned()
+            .collect()
     }
 
     /// Whether a registration is bound to a user and holds its full scopes.

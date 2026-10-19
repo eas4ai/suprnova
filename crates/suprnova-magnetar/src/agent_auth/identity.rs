@@ -597,13 +597,28 @@ impl Core {
         now: DateTime<Utc>,
     ) -> Result<WireResponse> {
         let matched = match &checked.verified_email {
-            Some(email) => self.users.find_by_verified_email(email).await?,
-            None => None,
+            Some(email) => self.users.find_by_verified_email(email).await,
+            None => Ok(None),
         };
         let matched = match (matched, &checked.verified_phone) {
-            (Some(user), _) => Some(user),
-            (None, Some(phone)) => self.users.find_by_verified_phone(phone).await?,
-            (None, None) => None,
+            (Ok(Some(user)), _) => Ok(Some(user)),
+            (Ok(None), Some(phone)) => self.users.find_by_verified_phone(phone).await,
+            (other, _) => other,
+        };
+        let matched = match matched {
+            Ok(matched) => matched,
+            // The address is verified on more than one account: binding or
+            // creating one would pick an account for the user, so neither
+            // happens.
+            Err(Error::Conflict { .. }) => {
+                return Ok(agent_error(
+                    400,
+                    "invalid_request",
+                    "the provider's verified address matches more than one account at this \
+                     service; sign in at the service and use another registration type",
+                ));
+            }
+            Err(error) => return Err(error),
         };
         if let Some(user) = matched {
             return self
@@ -685,7 +700,7 @@ impl Core {
                     "registration_type": IDENTITY_ASSERTION,
                     "identity_assertion": assertion,
                     "assertion_expires": timestamp(expires),
-                    "scopes": existing.scopes,
+                    "scopes": self.bound_scopes(&existing),
                 })),
                 &NO_STORE,
             ));
