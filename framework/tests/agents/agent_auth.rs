@@ -3671,3 +3671,43 @@ async fn agent_008_two_verified_accounts_differing_in_case_are_refused() {
     );
     assert_eq!(provisioner.0.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
+
+#[test]
+fn agent_010_agents_prune_prunes_ended_oauth_grants_with_agent_auth_on() {
+    alone(
+        "agent_010_agents_prune_prunes_ended_oauth_grants_with_agent_auth_on",
+        async {
+            let world = agent_world(|agent| agent).await;
+            let live =
+                crate::oauth::connect(&world.client, &new_account("pass-live"), "posts:read").await;
+            let ended =
+                crate::oauth::connect(&world.client, &new_account("pass-ended"), "posts:read")
+                    .await;
+            let live_grant = crate::oauth::grant_of(&world.db, &live.access).await;
+            let ended_grant = crate::oauth::grant_of(&world.db, &ended.access).await;
+            crate::oauth::revoke_grant_days_ago(&world.db, &ended_grant, 40).await;
+            agents_prune(&world, |agent| agent, &[]).await;
+            assert!(
+                crate::oauth::grant_row(&world.db, &ended_grant)
+                    .await
+                    .is_none(),
+                "the same pass prunes the OAuth server's ended grants"
+            );
+            assert!(
+                crate::oauth::token_row(&world.db, &ended.refresh)
+                    .await
+                    .is_none()
+            );
+            assert!(
+                crate::oauth::grant_row(&world.db, &live_grant)
+                    .await
+                    .is_some()
+            );
+            assert!(
+                crate::oauth::token_row(&world.db, &live.access)
+                    .await
+                    .is_some()
+            );
+        },
+    );
+}
