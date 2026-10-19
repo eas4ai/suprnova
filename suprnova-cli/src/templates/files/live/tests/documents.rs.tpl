@@ -1,14 +1,14 @@
 //! Every document of the kit renders, as its visitor sees it: the guest
 //! pages for a visitor, the account pages for a signed-in user with a note
-//! of their own, the profile endpoint over JSON, and the error page for a
-//! path no route matches or a method no route takes.
+//! of their own, the agent pages, the profile endpoint over JSON, and the
+//! error page for a path no route matches or a method no route takes.
 //!
 //! The test boots what `cmd/main.rs` boots, without a port: a fresh SQLite
 //! database with every migration, the auth provider, the Live registry and
-//! its gate, the HTTP stack, the Live routes with the render cache, and the
-//! Live runtime. `TestClient` sends each request through the pipeline a
-//! browser's request takes, so a document that fails to mount, to read its
-//! user or to query its notes fails here.
+//! its gate, the HTTP stack, the routes with agents served, the Live routes
+//! with the render cache, and the Live runtime. `TestClient` sends each
+//! request through the pipeline a browser's request takes, so a document
+//! that fails to mount, to read its user or to query its notes fails here.
 
 use std::sync::Arc;
 
@@ -16,14 +16,14 @@ use suprnova::live::testing::prepare_live_router_for_test;
 use suprnova::serde_json::json;
 use suprnova::testing::{TestClient, TestContainer, TestDatabase};
 use suprnova::{
-    App, Auth, AuthConfig, AuthManager, CacheStore, EloquentUserProvider, InMemoryCache,
-    MiddlewareRegistry, Model, Queue, SyncQueueDriver, attrs,
+    App, AppConfig, Auth, AuthConfig, AuthManager, CacheStore, Config, EloquentUserProvider,
+    InMemoryCache, MiddlewareRegistry, Model, Queue, SyncQueueDriver, attrs,
 };
 
 use {package_name}::migrations::Migrator;
 use {package_name}::models::note::Note;
 use {package_name}::models::user::User;
-use {package_name}::{bootstrap, live, routes};
+use {package_name}::{agents, bootstrap, live, routes};
 
 /// The attribute the document marks a mounted island with.
 fn island(component: &str) -> String {
@@ -49,6 +49,12 @@ async fn every_document_renders_for_its_visitor() {
         // The key `.env` holds for the server; a test process loads no `.env`,
         // and the Live runtime, the session and the CSRF cookie all need one.
         suprnova::testing::install_test_encryption_key();
+        // Agent auth signs with the key `.env` names, and the OAuth server's
+        // issuer is the application's URL: outside local and testing it may
+        // not be the development default, and it is HTTPS or a loopback
+        // host. A test gets a key made for its process and a URL of its own.
+        suprnova::testing::install_test_agent_auth_key();
+        Config::register(AppConfig::builder().url("http://localhost").build());
         let _db = TestDatabase::fresh::<Migrator>()
             .await
             .expect("a fresh database with every migration");
@@ -69,9 +75,11 @@ async fn every_document_renders_for_its_visitor() {
         App::singleton(live::registry().expect("Live component registry"));
         live::authorize();
         bootstrap::register_http_stack();
-        let router = live::routes_with_render_cache(routes::register())
-            .await
-            .expect("the routes with the render cache");
+        let router = live::routes_with_render_cache(
+            agents::serve(routes::register()).expect("the routes with agents served"),
+        )
+        .await
+        .expect("the routes with the render cache");
         let runtime = prepare_live_router_for_test(&router).expect("the Live runtime");
         App::singleton(runtime);
         let guest = TestClient::new(router, MiddlewareRegistry::from_global());
@@ -106,8 +114,22 @@ async fn every_document_renders_for_its_visitor() {
             .await
             .assert_ok()
             .assert_see(r#"data-layout="app""#);
-        // A page that needs a user sends a guest to sign in.
+        // A page that needs a user sends a guest to sign in, the claim page
+        // an agent links included.
         guest.get("/dashboard").send().await.assert_status(302);
+        guest
+            .get("/agent/claim?claim_attempt_token=an-agent-link")
+            .send()
+            .await
+            .assert_status(302)
+            .assert_header("Location", "/login");
+        // The MCP endpoint's protected resource metadata, which a client
+        // reads first.
+        guest
+            .get("/.well-known/oauth-protected-resource")
+            .send()
+            .await
+            .assert_ok();
 
         let user = User::create("Ada Lovelace", "ada@example.com", "correct horse battery")
             .await
@@ -203,6 +225,25 @@ async fn every_document_renders_for_its_visitor() {
             .assert_ok()
             .assert_see("First note")
             .assert_see("Written in the test.");
+
+        // The connected-agents page, with nothing connected yet, and an
+        // approval link that names no request, a 400 in the error layout.
+        client
+            .get("/connected-agents")
+            .send()
+            .await
+            .assert_ok()
+            .assert_see(r#"data-layout="app""#)
+            .assert_see("No apps can act for you.")
+            .assert_see("No agents can act for you.");
+        client
+            .get("/oauth/approve")
+            .header("Accept", "text/html")
+            .send()
+            .await
+            .assert_status(400)
+            .assert_see(r#"id="error-status">400<"#)
+            .assert_see("This link does not name an authorization request.");
 
         // An id the user does not own is the same 404 as one that does not
         // exist; a path no route matches is the error page; a method no route

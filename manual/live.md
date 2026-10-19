@@ -898,6 +898,10 @@ number as `authority=`, and the next render passes none:
 {% call checkbox::checkbox_group("topics", "Topics", topic_options, topics) %}{% endcall %}
 ```
 
+An input also takes `maxlength=`, the most characters the browser lets the
+user type, such as `maxlength="254"` on an email address. It is a hint for
+the browser: the action's own rule still checks the length.
+
 The overlay family ships on the same foundations: tooltip, collapsible and
 accordion, popover, a single-level dropdown menu, dialog, sheet, and drawer.
 Each one owns its open state through the browser's own primitive before any

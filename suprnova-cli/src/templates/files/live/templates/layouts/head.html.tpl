@@ -1,5 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{# The session's CSRF token: the Live runtime's server tools send it before falling back to the XSRF-TOKEN cookie. #}
+<meta name="csrf-token" content="{{ frame.csrf }}">
 <title>{% if frame.title.is_empty() %}{{ frame.app_name }}{% else %}{{ frame.title }} - {{ frame.app_name }}{% endif %}</title>
 {% if let Some(bootstrap) = frame.bootstrap %}{{ bootstrap|trusted_html }}{% endif %}
 {# The library components the pages use, served from templates/suprnova-ui/ by try_live_ui_assets(). #}

@@ -9,9 +9,13 @@
 //! else its template shows. `#[suprnova::view]` checks each template against its
 //! struct when the crate compiles, so a name a template reads that the
 //! struct lacks fails the build.
+//!
+//! The agent pages are not Live documents: they mount no island and load no
+//! Live runtime, so [`render_plain`] renders them.
 
+use suprnova::agents::{GrantScope, PendingApproval, PendingClaim};
 use suprnova::live::{LiveBootstrapOptions, LiveDocument};
-use suprnova::view::{AssetSet, DocumentResponseIntent, TrustedHtml, ViewName};
+use suprnova::view::{AssetSet, DocumentResponseIntent, TrustedHtml, ViewName, ViewTemplate};
 use suprnova::{Auth, FrameworkError, HttpResponse, StatusCode};
 
 use crate::flash::Toast;
@@ -35,6 +39,8 @@ pub enum Nav {
     Dashboard,
     /// The notes pages.
     Notes,
+    /// The connected-agents page and the agent consent pages.
+    Agents,
 }
 
 /// The signed-in user as the layouts show them: never the password or a
@@ -105,7 +111,8 @@ impl Frame {
     }
 
     /// The frame of a document that is not a Live document: the error
-    /// page, which renders for requests no Live route prepared.
+    /// page, which renders for requests no Live route prepared, and the
+    /// agent pages.
     pub async fn plain(title: &str, nav: Nav) -> Result<Self, FrameworkError> {
         let user = Auth::user_as::<User>().await?.map(FrameUser::from);
         Ok(Self {
@@ -144,6 +151,19 @@ pub fn render<T: suprnova::view::ViewTemplate>(
     let intent = DocumentResponseIntent::html(StatusCode::OK)
         .map_err(|_| FrameworkError::internal("the HTML response intent"))?;
     Ok(document.render(name, page, intent, AssetSet::empty())?)
+}
+
+/// Renders a page that is not a Live document, answering with `status`:
+/// the agent pages, which mount no island, load no Live runtime and so
+/// offer an agent no tool.
+pub fn render_plain<T: ViewTemplate>(
+    page: &T,
+    status: u16,
+) -> Result<HttpResponse, FrameworkError> {
+    let mut html = String::new();
+    page.render_view(&mut html)
+        .map_err(|error| FrameworkError::internal(format!("rendering a page: {error:?}")))?;
+    Ok(HttpResponse::html(html).status(status))
 }
 
 /// `/`: the welcome page.
@@ -235,4 +255,85 @@ pub struct ErrorDocument {
     pub reference: String,
     /// The link home, from `error-go-home`.
     pub go_home: String,
+}
+
+/// `/oauth/approve`: what an MCP client asks to do as the user, and the
+/// forms that allow or deny it.
+#[suprnova::view(path = "live/pages/agents-approve.html")]
+pub struct AgentsApprovePage {
+    pub frame: Frame,
+    /// The pending authorization. It carries no URL the client chose but
+    /// the redirect URI the user returns to: no logo and no home page.
+    pub approval: PendingApproval,
+}
+
+/// `/agent/claim`: the agent that asks to act as the user, and the form
+/// that takes the code it gave them.
+#[suprnova::view(path = "live/pages/agents-claim.html")]
+pub struct AgentsClaimPage {
+    pub frame: Frame,
+    /// The pending claim, as the signed-in user may see it.
+    pub claim: PendingClaim,
+    /// The attempt token the form posts back.
+    pub claim_attempt_token: String,
+    /// How long the code works from now, in whole minutes.
+    pub minutes: u64,
+    /// The message under the code after a wrong or empty one, or nothing.
+    pub code_error: String,
+}
+
+/// One MCP client that acts for the user, as the connected-agents page
+/// shows it.
+pub struct ConnectedClient {
+    /// The grant's id, which its revoke form names.
+    pub id: String,
+    /// The client's name, which the client chose.
+    pub client_name: String,
+    /// The host the client cannot choose freely.
+    pub client_host: String,
+    /// What the client may do.
+    pub scopes: Vec<GrantScope>,
+    /// When the user approved the client.
+    pub allowed_on: String,
+    /// When the client last used its grant, or `never`.
+    pub last_used: String,
+}
+
+/// One agent that acts for the user, as the connected-agents page shows
+/// it.
+pub struct ConnectedAgent {
+    /// The registration's id, which its revoke form names.
+    pub id: String,
+    /// The provider the agent signed in through, by the name the
+    /// application's trust list gives it.
+    pub provider: Option<String>,
+    /// How the agent registered, in words.
+    pub how: &'static str,
+    /// When the agent registered.
+    pub registered_on: String,
+    /// When the user claimed it, or `None` for an agent bound without a
+    /// claim.
+    pub claimed_on: Option<String>,
+    /// What the agent may do.
+    pub scopes: Vec<GrantScope>,
+}
+
+/// `/connected-agents`: every MCP client and agent that acts for the
+/// signed-in user, each with a form that revokes it.
+#[suprnova::view(path = "live/pages/agents-connected.html")]
+pub struct AgentsConnectedPage {
+    pub frame: Frame,
+    pub clients: Vec<ConnectedClient>,
+    pub agents: Vec<ConnectedAgent>,
+}
+
+/// The answer to an approval decision: a page that sends the browser on to
+/// the client.
+#[suprnova::view(path = "live/pages/agents-returning.html")]
+pub struct AgentsReturningPage {
+    pub frame: Frame,
+    /// The client's name, which the client chose.
+    pub client_name: String,
+    /// The client's registered redirect URI, with the code or the denial.
+    pub redirect: String,
 }
