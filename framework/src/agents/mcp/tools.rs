@@ -29,7 +29,7 @@ pub(crate) fn list(registry: &ToolRegistry, caller: &ToolCaller, object_only: bo
     registry
         .tools()
         .iter()
-        .filter(|tool| caller.is_guest() || tool.callable_by(caller))
+        .filter(|tool| tool.callable_by(caller))
         .map(|tool| {
             let mut definition = tool.definition();
             if object_only

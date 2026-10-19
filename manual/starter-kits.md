@@ -301,10 +301,12 @@ and add its endpoint, over the Streamable HTTP transport, at the URL
 claude mcp add my-app --transport http http://localhost:8765/mcp
 ```
 
-The client gets its token from the kit's OAuth server: it registers, sends
-you to the approval page to allow the scopes it asks for, and then lists
-the tools those scopes reach. A token with `notes:read` alone sees
-`notes.search` and not `notes.create`. See
+Claude Code connects without a token and lists both notes tools. Calling
+one answers 401, and Claude Code reports that the server needs you to sign
+in; run `/mcp` to sign in. The client gets its token from the kit's OAuth
+server: it registers, sends you to the approval page to allow the scopes it
+asks for, and from then on lists the tools those scopes reach. A token with
+`notes:read` alone sees `notes.search` and not `notes.create`. See
 [Users who approve a client](agents.md#users-who-approve-a-client).
 
 ### Why Suprnova diverges
@@ -668,9 +670,11 @@ and add its endpoint, over the Streamable HTTP transport, at the URL
 claude mcp add my-app --transport http http://localhost:8765/mcp
 ```
 
-The client gets its token from the kit's OAuth server: it registers, sends
-you to the approval page to allow the scopes it asks for, and then lists
-the tools those scopes reach. See
+Claude Code connects without a token and lists both notes tools. Calling
+one answers 401, and Claude Code reports that the server needs you to sign
+in; run `/mcp` to sign in. The client gets its token from the kit's OAuth
+server: it registers, sends you to the approval page to allow the scopes it
+asks for, and from then on lists the tools those scopes reach. See
 [Users who approve a client](agents.md#users-who-approve-a-client).
 
 ### Add a page

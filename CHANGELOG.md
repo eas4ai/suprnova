@@ -23,13 +23,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   Streamable HTTP transport, revision 2026-07-28, and to `initialize`-based
   clients of revisions 2025-06-18 and 2025-11-25, without sessions. It serves
   protected resource and authorization server metadata at the well-known
-  locations under the application's root, lists only the tools a token may
-  call, answers 401 and 403 with the scopes a call needs, refuses a foreign
-  `Origin`, and bounds the body, the answer and the run time. Structured
-  results follow the session's revision: on 2026-07-28 a tool's output
-  schema and result pass through as declared, and on the two older revisions
-  a non-object output schema is left out of `tools/list` and a non-object
-  result comes back as text alone.
+  locations under the application's root, lists every tool to a client
+  without a token and only the tools a token may call to one with a token,
+  runs `public` tools without a token, answers 401 and 403 with the scopes a
+  call needs, so a client's first call of a tool that needs a token sends it
+  to sign in, refuses a foreign `Origin`, and bounds the body, the answer
+  and the run time. Structured results follow the session's revision: on
+  2026-07-28 a tool's output schema and result pass through as declared, and
+  on the two older revisions a non-object output schema is left out of
+  `tools/list` and a non-object result comes back as text alone.
 - **Users approve MCP clients through a built-in OAuth server.**
   `AgentsConfig::oauth_server(OAuthServer::new())` mounts the new Magnetar
   authorization server plugin: OAuth 2.1 with the authorization code grant and
