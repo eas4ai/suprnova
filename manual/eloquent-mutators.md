@@ -1074,7 +1074,7 @@ This single declaration gives you:
 - Encrypted card-on-file storage with key-rotation support.
 
 Every cast is checked at compile time. The dual-API query builder
-(see [Eloquent - query builder](eloquent.md#query-builder--dual-api))
+(see [Eloquent - query builder](eloquent.md#query-builder---dual-api))
 runs against the typed columns; serialisation to Inertia / JSON
 applies the hidden / appends rules; and a `User::find(id).await?`
 materialises the row through eight `Cast::from_storage` calls

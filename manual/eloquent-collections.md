@@ -19,13 +19,13 @@ to `Vec<T>` instead.
 
 - [Where collections come from](#where-collections-come-from)
 - [The two impl blocks](#the-two-impl-blocks)
-- [Generic surface - works on any `Collection<T>`](#generic-surface--works-on-any-collectiont)
-- [Model-aware surface - `Collection<M>` where `M: Model`](#model-aware-surface--collectionm-where-m-model)
+- [Generic surface - works on any `Collection<T>`](#generic-surface---works-on-any-collectiont)
+- [Model-aware surface - `Collection<M>` where `M: Model`](#model-aware-surface---collectionm-where-m-model)
 - [Eager loading on a collection](#eager-loading-on-a-collection)
-- [Serialization - `to_array` vs serde](#serialization--to_array-vs-serde)
+- [Serialization - `to_array` vs serde](#serialization---to_array-vs-serde)
 - [Borrow vs consume](#borrow-vs-consume)
 - [Collection vs `Vec`](#collection-vs-vec)
-- [`LazyCollection<M>` - streaming results](#lazycollectionm--streaming-results)
+- [`LazyCollection<M>` - streaming results](#lazycollectionm---streaming-results)
 - [Why Suprnova diverges](#why-suprnova-diverges)
 - [Next](#next)
 

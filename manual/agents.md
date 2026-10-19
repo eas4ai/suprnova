@@ -30,6 +30,7 @@ chapter covers all three.
 | `OAuthServer` / `ConnectedAgents` | Let users approve MCP clients, and list and revoke what they approved |
 | `OutsideIssuer` | Accept user tokens from an identity provider you already run |
 | `AgentAuth` / `AgentClaimed` | Agent accounts under auth.md, and the event a claim dispatches |
+| `AgentApprovals` / `AgentClaims` / `ConsentPageHeaders` | Build your own approval and claim pages |
 | `Router::share_tools` / `with_tools` / `PageTools` | Choose the server tools each page offers in the browser |
 | `WebMcpConfig` | The WebMCP Origin Trial token |
 | `suprnova-webmcp` | Page tools for Rust front ends compiled to WebAssembly |
@@ -619,18 +620,9 @@ refuses to be framed.
 #### Replace the pages
 
 The default pages are plain server-rendered HTML with no script. To render
-your own approval page, name it with `custom_approval_page("/consent")`. The
-authorization endpoint sends the user there with the pending authorization's
-id in the `authorization` query parameter. Your page:
-
-- requires the signed-in user;
-- reads the pending authorization as JSON from
-  `GET /oauth/authorizations/{id}`: the client's name and host, the redirect
-  URI and every scope with its description;
-- shows the client, its host and every scope;
-- posts the decision to `POST /oauth/authorizations/{id}` as the form field
-  `decision` (`approve` or `deny`), with the CSRF token;
-- refuses to be framed.
+the approval page in your own front end, name it with
+`custom_approval_page(path)` and build it on `AgentApprovals`, as [Consent
+pages of your own](#consent-pages-of-your-own) shows.
 
 #### Connected agents
 
@@ -811,12 +803,9 @@ registration expires after 24 hours. Claiming an anonymous registration
 revokes its pre-claim tokens. Claim tokens, attempt tokens and codes are
 stored only as SHA-256 digests.
 
-To render your own claim page, call `.custom_claim_page("/agents/claim")`.
-The page receives the attempt in the `claim_attempt_token` query parameter.
-It sends a guest to sign in and back to itself, reads the pending claim as
-JSON from `GET /agent/identity/claim/attempt?claim_attempt_token=...`, shows
-the provider and every scope, and posts `claim_attempt_token` and
-`user_code` with the CSRF token to `POST /agent/identity/claim/complete`.
+To render the claim page in your own front end, name it with
+`.custom_claim_page(path)` and build it on `AgentClaims`, as [Consent pages of
+your own](#consent-pages-of-your-own) shows.
 
 #### What an agent can call
 
@@ -1004,6 +993,242 @@ route agent auth adds bounds its body to 16 KiB. Its four tables come from
 | `audit_log_channel` | The default log channel |
 | `key_set_cache(floor, ceiling)` | 10 minutes and 24 hours |
 | `event_delivery_timeout` | 60 seconds |
+
+### Consent pages of your own
+
+The OAuth server and agent auth ship plain default pages. To render the
+approval page and the claim page in your own front end, turn the defaults off
+and build the handlers on the consent facade: `AgentApprovals` for the
+approval page and `AgentClaims` for the claim page. The framework's default
+pages use the same two types, and the starter kits' pages are built on them.
+
+```rust
+use suprnova::agents::{AgentAuth, AgentsConfig, OAuthServer};
+
+let config = AgentsConfig::new()
+    .oauth_server(OAuthServer::new().custom_approval_page("/oauth/approve"))
+    .agent_auth(AgentAuth::new().custom_claim_page("/agent/claim"));
+```
+
+Both types act only for the user the default guard signed in. Another user's
+authorization reads as ended, and another user's claim as someone else's.
+`AgentApprovals::of(&request)` and `AgentClaims::of(&request)` refuse a tool
+call with 403, whether the MCP endpoint dispatched it or a page sent it with
+the `Suprnova-Tool-Call` header: consent comes from the person, never from an
+agent acting as them. Take the handle with `of` before you read the request's
+body.
+
+#### The approval page
+
+The authorization endpoint sends the user to your page with the pending
+authorization's id in the `authorization` query parameter. `pending` reads
+it, and `decide` records the user's answer:
+
+```rust
+use serde::Deserialize;
+use suprnova::agents::{AgentApprovals, ApprovalDecision, ApprovalLookup};
+use suprnova::{FrameworkError, Inertia, InertiaResponse, Redirect, Request, Response};
+
+pub async fn show_approval(request: Request) -> Response {
+    let approvals = AgentApprovals::of(&request)?;
+    let id = request.query_param("authorization").unwrap_or_default();
+    match approvals.pending(&id).await? {
+        ApprovalLookup::Pending(approval) => Ok(InertiaResponse::new("Agents/Approve")
+            .with("approval", approval)
+            .resolve(&request)
+            .await?),
+        ApprovalLookup::Ended => Err(ended().into()),
+        ApprovalLookup::SignIn => Redirect::guest(&request, "/login").into(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DecisionForm {
+    authorization: String,
+    decision: String,
+}
+
+pub async fn decide(request: Request) -> Response {
+    let approvals = AgentApprovals::of(&request)?;
+    let form: DecisionForm = request.form().await?;
+    match approvals.decide(&form.authorization, form.decision == "approve").await? {
+        ApprovalDecision::Redirect(url) => Ok(Inertia::location(url)),
+        ApprovalDecision::Ended => Err(ended().into()),
+        ApprovalDecision::SignIn => Redirect::to("/login").into(),
+    }
+}
+
+fn ended() -> FrameworkError {
+    FrameworkError::domain("This request has ended. Start again from the app.", 404)
+}
+```
+
+- `PendingApproval` holds the `id` to post the decision with, the
+  `client_name`, the `client_host`, the `redirect_uri` the user returns to,
+  every scope with its `name` and `description`, and `expires_at`. Show the
+  client's name beside its host and every scope. The client chose its name and
+  redirect URI, so isolate their direction (`<bdi>`). The type carries no
+  logo or home page on purpose: loading the logo would tell the client who
+  looked, and a link the client chose is a phishing aid on a consent screen.
+- `decide(id, approve)` spends the authorization either way, so deciding
+  again is `ApprovalDecision::Ended`. `Ended` also covers a request that
+  lapsed or belongs to another user.
+- `ApprovalDecision::Redirect` sends the browser to the client's redirect
+  URI, usually on another origin. The security headers' `form-action 'self'`
+  blocks a redirect there after a native form post. On an Inertia page,
+  answer with `Inertia::location(url)`: the visit is a script request, so
+  the browser leaves by `window.location`, which `form-action` does not
+  govern. A page that posts a native form gets a plain redirect from
+  `Inertia::location` too, which the browser blocks, so answer it with a
+  short page of your own that navigates there: a link to the address and
+  `<meta http-equiv="refresh" content="0; url=...">`, with the address
+  escaped for an attribute.
+- `SignIn` means no user is signed in, or the session predates the user's
+  last password change or "sign out everywhere".
+
+#### The claim page
+
+The verification URI an agent hands the user opens your page with the
+attempt in the `claim_attempt_token` query parameter. `pending` reads the
+claim, and `confirm` takes the code the user types:
+
+```rust
+use serde::Deserialize;
+use suprnova::agents::{AgentClaims, ClaimConfirmation, ClaimLookup, ClaimRefusal};
+use suprnova::{FrameworkError, InertiaResponse, Redirect, Request, Response};
+
+pub async fn show_claim(request: Request) -> Response {
+    let claims = AgentClaims::of(&request)?;
+    let token = request.query_param("claim_attempt_token").unwrap_or_default();
+    match claims.pending(&token).await? {
+        ClaimLookup::Pending(claim) => Ok(InertiaResponse::new("Agents/Claim")
+            .with("claim", claim)
+            .with("token", token)
+            .resolve(&request)
+            .await?),
+        ClaimLookup::Refused(ClaimRefusal::SignIn) => Redirect::guest(&request, "/login").into(),
+        ClaimLookup::Refused(refusal) => Err(refused(refusal).into()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CodeForm {
+    claim_attempt_token: String,
+    user_code: String,
+}
+
+pub async fn confirm(request: Request) -> Response {
+    let claims = AgentClaims::of(&request)?;
+    let form: CodeForm = request.form().await?;
+    match claims.confirm(&form.claim_attempt_token, &form.user_code).await? {
+        ClaimConfirmation::Claimed { .. } => Redirect::to("/dashboard").into(),
+        ClaimConfirmation::WrongCode { attempts_remaining } => Err(FrameworkError::validation(
+            "user_code",
+            format!("That code is wrong. You can try {attempts_remaining} more times."),
+        )
+        .into()),
+        ClaimConfirmation::Refused(ClaimRefusal::SignIn) => Redirect::to("/login").into(),
+        ClaimConfirmation::Refused(refusal) => Err(refused(refusal).into()),
+    }
+}
+
+fn refused(refusal: ClaimRefusal) -> FrameworkError {
+    match refusal {
+        ClaimRefusal::OtherAccount => FrameworkError::domain(
+            "Sign in with the email address the agent named to claim it.",
+            403,
+        ),
+        ClaimRefusal::NotFound | ClaimRefusal::Ended => {
+            FrameworkError::domain("This claim has ended. Ask the agent to start again.", 404)
+        }
+        ClaimRefusal::SignIn | ClaimRefusal::Invalid => {
+            FrameworkError::domain("This claim cannot be read.", 400)
+        }
+    }
+}
+```
+
+- `PendingClaim` holds the `registration_type`, the `provider` (the trust
+  list's display name, never one the provider sent), the `signed_in_as`
+  address, the `email` the agent named, every scope the agent will hold,
+  `expires_in_seconds`, `attempts_remaining`, and two warnings:
+  `first_time_account` when no agent has acted for this account before, and
+  `first_time_provider` when none from this provider has. Show both
+  warnings, and isolate every text but the scopes' words, since the user, the
+  agent or the provider chose it.
+- `confirm` counts a wrong code against the attempt and answers
+  `ClaimConfirmation::WrongCode { attempts_remaining }`. When none remain, the
+  attempt ends and the agent starts a new one.
+- `ClaimConfirmation::Claimed { registration_id }` means the registration is
+  the user's. The agent's next poll gets its tokens, and `AgentClaimed` is
+  dispatched.
+- `ClaimRefusal::OtherAccount` means the claim names another address, or the
+  signed-in user's address before it was verified. Tell the user to sign in
+  with the address the agent named, and show nothing of the claim.
+  `NotFound` means no such attempt or one already confirmed, `Ended` an
+  expired code or too many wrong ones, and `Invalid` a request the engine
+  cannot read.
+
+#### Route the pages
+
+Run every consent route behind `ConsentPageHeaders`, and the routes that
+record a decision behind the CSRF middleware, which the global CSRF
+middleware already provides:
+
+```rust
+use suprnova::agents::ConsentPageHeaders;
+use suprnova::{get, group, post, routes};
+
+use crate::controllers::consent;
+
+routes! {
+    group!("/", {
+        get!("/oauth/approve", consent::show_approval),
+        post!("/oauth/approve", consent::decide),
+        get!("/agent/claim", consent::show_claim),
+        post!("/agent/claim", consent::confirm),
+    }).middleware(ConsentPageHeaders),
+}
+```
+
+`ConsentPageHeaders` holds for every answer of those routes, errors
+included: a CSRF refusal, an error page rendered after the middleware chain
+and a panic's answer.
+
+- **No framing.** The policy's `frame-ancestors` becomes `'none'` and
+  `X-Frame-Options` becomes `DENY`, so no page can frame "Allow" under a
+  click. The rest of the policy, nonce sources included, stays as
+  `SecurityHeaders` and your overrides made it, so the page's scripts run.
+  Under report-only, relaxed or off, an enforced `frame-ancestors 'none'` is
+  sent all the same.
+- **No caching, no referrer.** `Cache-Control: no-store` and
+  `Referrer-Policy: no-referrer` keep the authorization id and the attempt
+  token in the page's address out of caches and other sites' logs.
+
+It runs inside `SecurityHeaders` and route overrides, before every other
+middleware. A header your handler sets gives way to these. Without
+`SecurityHeaders` installed, it sets all four headers on the answers that
+pass through it, but an answer the server makes after the chain, such as a
+panic's, carries only what the server set.
+
+#### Pages that fetch JSON
+
+A front end that fetches its data can use the plugins' JSON routes instead of
+handlers of its own. They act for the signed-in user only, and the routes
+that record a decision need the CSRF token.
+
+- **Approval.** Read the pending authorization from
+  `GET /oauth/authorizations/{id}`, and post the decision to
+  `POST /oauth/authorizations/{id}` as the form field `decision` (`approve` or
+  `deny`).
+- **Claim.** Read the pending claim from
+  `GET /agent/identity/claim/attempt?claim_attempt_token=...`, and post
+  `claim_attempt_token` and `user_code` to
+  `POST /agent/identity/claim/complete`.
+
+The page that hosts them still runs `ConsentPageHeaders`, sends a guest to
+sign in and back to itself, and shows the client, its host and every scope,
+or the provider and every scope.
 
 ## Tools in the browser
 
