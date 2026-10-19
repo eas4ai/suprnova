@@ -1122,3 +1122,58 @@ async fn agent_014_a_public_seed_island_takes_a_fresh_render() {
     let answer = refreshed.json();
     assert_eq!(answer["outcome"], "accepted", "{answer}");
 }
+
+/// The tools the island keyed `main` lists after a stream event, for
+/// `client`: the page's seed is promoted by a fresh render, then the
+/// instance renders fresh again, as the runtime asks when a stream event
+/// arrives. Both successor roots are read.
+async fn stream_render_tools(client: &TestClient) -> (Vec<String>, Vec<String>) {
+    let page = client.get(live_fixture::PAGE).send().await;
+    assert_eq!(page.status(), 200, "{}", page.body_text());
+    let xsrf = page.cookie("XSRF-TOKEN");
+    let promoted = fresh_render(client, &page.body_text(), xsrf.as_deref(), "main")
+        .send()
+        .await;
+    assert_eq!(promoted.status(), 200, "{}", promoted.body_text());
+    let promoted = promoted.json()["render"]["html"]
+        .as_str()
+        .expect("the successor root")
+        .to_string();
+    let streamed = fresh_render(client, &promoted, xsrf.as_deref(), "main")
+        .send()
+        .await;
+    assert_eq!(streamed.status(), 200, "{}", streamed.body_text());
+    let streamed = streamed.json()["render"]["html"]
+        .as_str()
+        .expect("the stream's successor root")
+        .to_string();
+    let mut first = island_tools(&promoted, "main");
+    first.sort();
+    let mut second = island_tools(&streamed, "main");
+    second.sort();
+    (first, second)
+}
+
+#[tokio::test]
+async fn agent_014_a_guests_stream_render_lists_no_user_tool() {
+    let _container = fixture::setup();
+    let client = live_fixture::live_client();
+    let (promoted, streamed) = stream_render_tools(&client).await;
+    assert_eq!(promoted, ["counter.peek.main"]);
+    assert_eq!(streamed, ["counter.peek.main"]);
+}
+
+#[tokio::test]
+async fn agent_014_a_signed_in_users_stream_render_lists_the_user_tools() {
+    let _container = fixture::setup();
+    let client = live_fixture::live_client().acting_as(&TestUser::arc("alice"));
+    let (promoted, streamed) = stream_render_tools(&client).await;
+    let all = [
+        "counter.add.main",
+        "counter.check.main",
+        "counter.peek.main",
+        "counter.rename.main",
+    ];
+    assert_eq!(promoted, all);
+    assert_eq!(streamed, all);
+}

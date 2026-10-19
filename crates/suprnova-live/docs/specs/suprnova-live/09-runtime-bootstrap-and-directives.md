@@ -263,10 +263,13 @@ attribute is built from the generated metadata, narrowed by the host to the
 tools the request's viewer may call (AGENT-014): a guest sees the tools that
 accept the public, a session user those that accept users or the public, a
 user signed in another way only the user tools with no scope, and no viewer
-an agent-only tool. When every tool of the component accepts the public the
-host reads no viewer, so the attribute is the same for every viewer and a
-public seed's bytes stay shareable. Who may call a tool is still decided when
-it is called.
+an agent-only tool. Every root applies it: a page's mounts and stitched
+slots, and each successor an action, a fresh render (a poll's, a stream's or
+an agent refresh's) or another lifecycle operation renders. The root of a
+headless call, which no browser registers, lists none. When every tool of the
+component accepts the public the host reads no viewer, so the attribute is
+the same for every viewer and a public seed's bytes stay shareable. Who may
+call a tool is still decided when it is called.
 
 Acceptance criteria:
 
@@ -440,7 +443,8 @@ UX flow:
   islands' tools, calls each through its route with the session and CSRF
   token by the shared browser call cases, and renders every island fresh
   after a write tool. An island root's tools are now narrowed to those the
-  viewer may call, reading no viewer when every tool accepts the public.
+  viewer may call, reading no viewer when every tool accepts the public, on
+  every path that renders a root; a headless call's root lists none.
 - 2026-10-18 -- A page-level reload answers every island's WebMCP calls
   first. Recovery reloads the whole page, but only the refused island's
   calls were answered and held for, so a refused click on one island ended
