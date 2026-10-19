@@ -76,7 +76,7 @@ becomes relevant as you opt into subsystems.
 | `APP_NAME` | `"Suprnova Application"` | `String` | Application name. Used as the TOTP issuer (2FA), the HTTP Basic `WWW-Authenticate` realm, mail subject branding, and structured-log fields. |
 | `APP_ENV` | `production` | `String` | Drives `Environment::detect()` and `.env.<suffix>` lookup. Recognised aliases (case-insensitive): `local`, `development`/`dev`, `staging`/`stage`/`stg`, `production`/`prod`, `testing`/`test`. Any other value is preserved as `Environment::Custom(...)` with original casing. Unset means production, as in Laravel: debug is off, every production check runs, and no `.env.<suffix>` file loads (`.env.local` still does). The scaffold's `.env` sets `APP_ENV=local`; a deployment that sets nothing runs as production. |
 | `APP_DEBUG` | env-aware (see Required) | `bool` | Verbose error pages + extra logs. Default is `true` in `local`/`development`/`testing` and `false` everywhere else (including `staging`, `production`, an unset `APP_ENV`, and any unrecognised custom environment). An explicit value always wins; an unparseable value falls back to the env-aware default with a `warn!`. The strict `try_from_env` variant aborts boot on a parse failure. |
-| `APP_URL` | `"http://localhost:8765"` (AppConfig) / `"http://localhost"` (URL fallback) | `String` | Base URL for absolute URL generation, signed URLs, and Inertia redirects. Trailing slashes are trimmed on read. |
+| `APP_URL` | `"http://localhost:8765"` (AppConfig) / `"http://localhost"` (URL fallback) | `String` | Base URL for absolute URL generation, signed URLs, and Inertia redirects. Trailing slashes are trimmed on read. It is also the MCP endpoint's own origin and the agents OAuth server's issuer: with `AgentsConfig::oauth_server` on, boot fails when it is unset outside the `local` and `testing` environments. |
 | `APP_KEY` | none - required in non-dev | `String` (base64-url-no-pad, 32 bytes) | AES-256-GCM key for `Crypt`, encrypted sessions, pagination cursors, signed URLs, and any other encrypt-at-rest path. Boot **fails closed** when missing or malformed outside `local`/`development`/`testing`. Generate with `suprnova key:generate`. |
 | `APP_KEY_PREVIOUS` | none | `String` (comma-separated base64 keys, max 8) | Comma-separated previous keys used during rotation. `Crypt::decrypt` tries the current `APP_KEY` first, then each entry in order. Hard cap of 8 entries - `crypto::MAX_PREVIOUS_KEYS`. A half-rotated entry that fails to decode aborts boot. See [Encryption](encryption.md#key-rotation). |
 | `APP_PREVIOUS_KEYS` | none | `String` (alias of `APP_KEY_PREVIOUS`) | Laravel-compat alias accepted so a Laravel `.env` dropped into a Suprnova deploy still graceful-decrypts legacy data. When both are set with different values, `APP_KEY_PREVIOUS` wins with a `warn!` to surface the duplicate; identical values are accepted silently. |
@@ -613,6 +613,26 @@ misconfiguration immediately instead of silently defaulting.
 Two-factor authentication uses `APP_NAME` (covered under Application)
 as the TOTP issuer string - there is no dedicated `2FA_ISSUER` env
 var. The issuer falls back to `"Suprnova"` when `APP_NAME` is unset.
+
+## Agents
+
+Agent auth reads its signing key from these variables when the application
+does not pass one to `AgentAuth::signing_key`. With agent auth on and no key,
+the server refuses to start, so a deploy without a `.env` file must set
+`AGENT_AUTH_KEY_ID` and `AGENT_AUTH_PRIVATE_KEY` in the process environment.
+The application binary's `agents:key` command prints a new pair. A key's line
+breaks can be written as a literal `\n`, as an environment file writes them.
+The OAuth server also needs `APP_URL` (see **Application**). See
+[Agents](agents.md#keys-and-operations).
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `AGENT_AUTH_KEY_ID` | none - required with agent auth on | `String` | The identifier (`kid`) of the key that signs identity assertions. |
+| `AGENT_AUTH_PRIVATE_KEY` | none - required with agent auth on | `String` (P-256 private key, PEM) | The key that signs identity assertions. A value that is not a P-256 private key in PEM form fails boot. |
+| `AGENT_AUTH_PREVIOUS_KEY_ID` | none | `String` | After a rotation, the identifier of the key that signed before. Set all three `AGENT_AUTH_PREVIOUS_*` variables or none; a partial set fails boot. |
+| `AGENT_AUTH_PREVIOUS_PRIVATE_KEY` | none | `String` (P-256 private key, PEM) | After a rotation, the previous key, which still verifies the assertions it signed until they expire. |
+| `AGENT_AUTH_PREVIOUS_ROTATED_AT` | none | RFC 3339 time | When the previous key stopped signing. |
+| `WEBMCP_ORIGIN_TRIAL_TOKEN` | none | `String` (base64) | The WebMCP Origin Trial token. When set, every HTML response carries it in an `Origin-Trial` header; JSON, redirects and assets do not. A value that is not base64 fails boot, naming the variable. An empty value is no token. See [Security Headers](security-headers.md#webmcp-and-permissions-policy). |
 
 ## Inertia / Frontend
 

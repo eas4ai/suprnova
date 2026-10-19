@@ -27,6 +27,7 @@ mod dispatch;
 mod endpoint;
 mod live_browser;
 mod live_headless;
+mod manual;
 mod marker;
 mod oauth;
 mod oauth_magnetar;
