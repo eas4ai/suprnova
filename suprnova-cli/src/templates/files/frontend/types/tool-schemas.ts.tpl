@@ -43,6 +43,27 @@ export const toolSchemas = {
     "title": "ClaimCodeRequest",
     "$schema": "https://json-schema.org/draft/2020-12/schema"
   },
+  CreateNoteInput: {
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string",
+        "description": "The note's title.",
+        "minLength": 1,
+        "maxLength": 255,
+        "default": ""
+      },
+      "body": {
+        "type": ["string", "null"],
+        "description": "The note's text, which may be left out.",
+        "maxLength": 10000,
+        "default": null
+      }
+    },
+    "description": "What `notes.create` takes: the notes form's two fields, with its rules.",
+    "title": "CreateNoteInput",
+    "$schema": "https://json-schema.org/draft/2020-12/schema"
+  },
   ForgotPasswordRequest: {
     "type": "object",
     "properties": {
@@ -118,6 +139,28 @@ export const toolSchemas = {
     },
     "required": ["token", "password", "password_confirmation"],
     "title": "ResetPasswordRequest",
+    "$schema": "https://json-schema.org/draft/2020-12/schema"
+  },
+  SearchNotesInput: {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Words to find in the titles and text of the notes. Leave it empty to\nlist the newest notes.",
+        "maxLength": 200,
+        "default": ""
+      },
+      "limit": {
+        "type": ["integer", "null"],
+        "format": "uint32",
+        "minimum": 1,
+        "description": "How many notes to answer, 1 to 50. Ten when left out.",
+        "maximum": 50,
+        "default": null
+      }
+    },
+    "description": "What `notes.search` takes. The notes page sends it in the query of a\n`GET`, and an MCP client as the call's arguments; the form request reads\neither.",
+    "title": "SearchNotesInput",
     "$schema": "https://json-schema.org/draft/2020-12/schema"
   },
   StoreNoteRequest: {

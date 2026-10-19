@@ -1814,6 +1814,13 @@ pub fn notes_controller() -> &'static str {
     include_str!("files/backend/controllers/notes.rs.tpl")
 }
 
+/// The scaffolded `src/controllers/note_tools.rs`: the `notes.search` and
+/// `notes.create` tools on the signed-in user's own notes. The Inertia and
+/// Live kits write the same file.
+pub fn note_tools_controller() -> &'static str {
+    include_str!("files/backend/controllers/note_tools.rs.tpl")
+}
+
 /// The scaffolded `src/controllers/profile.rs`: the JSON handler the
 /// dashboard's display-name form posts to (PAR-080).
 pub fn profile_controller() -> &'static str {

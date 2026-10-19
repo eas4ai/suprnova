@@ -35,8 +35,15 @@ routes! {
         get!("/dashboard", controllers::dashboard::index).name("dashboard"),
         // The signed-in user's own notes: the list and the form that writes
         // one, and one note. No route here lists accounts or another
-        // user's notes.
-        get!("/notes", controllers::notes::index).name("notes.index"),
+        // user's notes. The list offers an agent in the browser the two
+        // notes tools, the only tools a page offers.
+        get!("/notes", controllers::notes::index).name("notes.index")
+            .with_tools(["notes.search", "notes.create"]),
+        // The notes tools (`controllers::note_tools`), in JSON, for the
+        // notes page and for MCP clients and agents acting for the user.
+        // `/notes/search` is a static path, so it wins over `/notes/{id}`.
+        get!("/notes/search", controllers::note_tools::search).name("notes.search"),
+        post!("/notes/tools", controllers::note_tools::create).name("notes.create"),
         get!("/notes/{id}", controllers::notes::show).name("notes.show"),
         post!("/logout", controllers::auth::logout).name("logout"),
         // Where the sign-in and registration forms continue to when the
