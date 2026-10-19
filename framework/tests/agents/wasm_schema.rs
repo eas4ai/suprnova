@@ -67,6 +67,83 @@ fn assert_agree(server: Value, page: Value) {
     assert_eq!(page, server, "page:\n{page:#}\nserver:\n{server:#}");
 }
 
+/// The same input declared twice, once with the server's `#[tool_input]`
+/// and once with the WebAssembly crate's, as a server and its front end
+/// would each declare it.
+mod twins {
+    pub mod server {
+        use suprnova::{Validate, tool_input};
+
+        /// A line of an order.
+        #[tool_input]
+        #[serde(rename_all = "camelCase")]
+        pub struct OrderLine {
+            /// The price of one, in cents.
+            #[validate(range(min = 1))]
+            pub unit_price: u32,
+        }
+
+        /// An order.
+        #[allow(dead_code, reason = "only the schema is under test")]
+        #[tool_input]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        pub struct PlaceOrder {
+            /// Who orders.
+            #[validate(length(min = 1, max = 80))]
+            pub customer_name: String,
+            /// What is ordered.
+            #[serde(rename = "items")]
+            #[validate(nested)]
+            pub line_items: Vec<OrderLine>,
+            /// A note for the kitchen.
+            #[serde(default)]
+            pub note: Option<String>,
+        }
+    }
+
+    pub mod page {
+        /// A line of an order.
+        #[suprnova_webmcp::tool_input]
+        #[serde(rename_all = "camelCase")]
+        pub struct OrderLine {
+            /// The price of one, in cents.
+            #[validate(range(min = 1))]
+            pub unit_price: u32,
+        }
+
+        /// An order.
+        #[allow(dead_code, reason = "only the schema is under test")]
+        #[suprnova_webmcp::tool_input]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        pub struct PlaceOrder {
+            /// Who orders.
+            #[validate(length(min = 1, max = 80))]
+            pub customer_name: String,
+            /// What is ordered.
+            #[serde(rename = "items")]
+            #[validate(nested)]
+            pub line_items: Vec<OrderLine>,
+            /// A note for the kitchen.
+            #[serde(default)]
+            pub note: Option<String>,
+        }
+    }
+}
+
+#[test]
+fn agent_016_an_attributed_page_input_matches_the_server_derivation() {
+    // The attributed type itself, through both derivations.
+    assert_agree(
+        __input_schema::<twins::page::PlaceOrder>(),
+        suprnova_webmcp::input_schema::<twins::page::PlaceOrder>(),
+    );
+    // And its server twin: the attribute derives what `#[tool_input]` does.
+    assert_agree(
+        __input_schema::<twins::server::PlaceOrder>(),
+        suprnova_webmcp::input_schema::<twins::page::PlaceOrder>(),
+    );
+}
+
 #[test]
 fn agent_016_typed_tool_schema_matches_the_server_derivation() {
     assert_agree(
