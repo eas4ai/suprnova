@@ -607,3 +607,75 @@ fn live_kit_compiles_and_renders() {
 
     drop(server);
 }
+
+// ---------------------------------------------------------------------------
+// AGENT-017 in a generated Inertia application: the agents' pages, served.
+// ---------------------------------------------------------------------------
+
+/// The account-flows harness: the Vue scaffold, its manifest pointed at the
+/// in-tree framework, and its `.env` handed to the run. It builds into the
+/// account-flows target directory, so the framework builds once for both.
+#[path = "scaffold_account_flows/harness.rs"]
+mod account_flows_harness;
+
+/// The test that runs inside the generated project.
+const AGENT_PAGES_TEST: &str = include_str!("fixtures/scaffold/agent_pages.rs");
+
+/// Every case `tests/fixtures/scaffold/agent_pages.rs` runs, which must each
+/// report `ok`.
+const AGENT_PAGES_CASES: &[&str] = &[
+    "agent_017_kit_migrator_creates_the_plugins_tables_and_the_email_index_on_sqlite",
+    "agent_017_inertia_serves_the_endpoint_and_both_plugins",
+    "agent_017_inertia_approval_round_trip",
+    "agent_017_inertia_claim_round_trip",
+    "agent_017_inertia_connected_agents_lists_and_revokes_only_the_users_own",
+    "agent_017_inertia_consent_forms_need_the_csrf_token",
+    "agent_017_inertia_consent_pages_refuse_framing_caching_and_referrers",
+    "agent_017_login_returns_to_a_same_origin_address",
+    "agent_017_login_ignores_a_foreign_return_to",
+    "agent_008_registration_lowercases_and_refuses_a_mixed_case_duplicate",
+    "kit_registration_refuses_a_name_over_255_and_an_email_over_254",
+];
+
+/// AGENT-017: a fresh Inertia application serves the MCP endpoint, the
+/// OAuth server and agent auth with its own approval, claim and
+/// connected-agents pages, and its sign-in follows a same-origin
+/// `return_to` and nothing else. Its own test drives every page through the
+/// application's router, under the settings and the signing key
+/// `suprnova new` wrote, on SQLite with the kit's own migrator.
+#[test]
+#[ignore = "AGENT-017 evidence: runs the generated application's own test; builds the framework and the app; slow"]
+fn agent_017_a_generated_inertia_application_serves_the_agent_pages() {
+    let tmp = account_flows_harness::scratch_dir();
+    let project = account_flows_harness::scaffold(tmp.path(), "agent_pages");
+    account_flows_harness::patch_manifest(&project);
+    // The OAuth server's issuer is the application's URL, which must be
+    // HTTPS or a loopback host.
+    let output = account_flows_harness::run_project_test(
+        tmp.path(),
+        &project,
+        "agent_pages",
+        AGENT_PAGES_TEST,
+        "http://localhost",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the generated application's agents test failed:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let missing: Vec<&str> = AGENT_PAGES_CASES
+        .iter()
+        .copied()
+        .filter(|case| !stdout.contains(&format!("case {case} ... ok")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these cases did not run and pass: {missing:#?}\nstdout:\n{stdout}"
+    );
+    // `--nocapture` prints the cases between the test's name and its `ok`.
+    assert!(
+        stdout.contains("test result: ok. 1 passed;"),
+        "the in-project test must have run and passed:\n{stdout}"
+    );
+}
