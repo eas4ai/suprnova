@@ -145,22 +145,39 @@ fn outcome(body: &str) -> Value {
 }
 
 #[tokio::test]
-async fn agent_012_a_router_without_agents_offers_no_tool() {
+async fn agent_012_a_router_without_agents_offers_its_tools() {
     let _container = fixture::setup();
-    // Without `.agents(config)` nothing would check a tool call's caller or
-    // count it, so the page offers WebMCP no tool at all.
+    // Without `.agents(config)` the Live tool gate still checks every tool
+    // call's caller and counts it, so the page offers its tools.
     let client = live_fixture::live_client_without_agents();
     let page = page(&client).await;
     assert!(
-        page.html.contains("data-suprnova-live-island"),
+        page.html.contains("data-suprnova-live-tools"),
         "{}",
         page.html
     );
-    assert!(
-        !page.html.contains("data-suprnova-live-tools"),
-        "{}",
-        page.html
-    );
+    assert!(page.html.contains("counter.peek.main"), "{}", page.html);
+}
+
+#[tokio::test]
+async fn agent_002_a_router_without_agents_checks_the_caller() {
+    let _container = fixture::setup();
+    let client = live_fixture::live_client_without_agents();
+    let page = page(&client).await;
+    let counter = PageIsland::keyed(&page.html, "main");
+    // `add` accepts users and agents: a guest who leaves the header off is
+    // refused on a router that never called `.agents(config)`.
+    let refused = click(
+        &client,
+        &page,
+        &counter,
+        "add",
+        json!({ "amount": 1 }),
+        None,
+    )
+    .send()
+    .await;
+    assert_eq!(refused.status(), 401, "{}", refused.body_text());
 }
 
 #[tokio::test]

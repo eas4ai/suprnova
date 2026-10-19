@@ -322,13 +322,6 @@ pub(crate) struct RouterAgents {
 }
 
 impl RouterAgents {
-    /// Whether the router serves agents: `Router::agents` installed the MCP
-    /// endpoint and with it the tool access check and budget of every
-    /// browser tool call.
-    pub(crate) fn serves(&self) -> bool {
-        self.config.is_some()
-    }
-
     /// The MCP endpoint's path, when the router serves one.
     #[cfg(feature = "testing")]
     pub(crate) fn config_path(&self) -> Option<String> {
@@ -463,6 +456,15 @@ impl Router {
             .get_or_init(|| ToolRegistry::build(self).map(Arc::new))
     }
 
+    /// Whether the router installs the Live tool gate on its Live action
+    /// route: whenever any Live tool exists, with or without
+    /// `Router::agents`. A page offers its tools for WebMCP only then.
+    pub(crate) fn installs_live_tool_gate(&self) -> bool {
+        self.checked_tools()
+            .as_ref()
+            .is_ok_and(|registry| registry.has_live_tools())
+    }
+
     /// The tool access check of the route `(method, pattern)`, when a tool's
     /// handler serves it.
     pub(crate) fn tool_access(
@@ -471,12 +473,14 @@ impl Router {
         pattern: &str,
     ) -> Option<crate::middleware::BoxedMiddleware> {
         let registry = self.checked_tools().as_ref().ok()?;
-        // The Live action route serves every island's actions; a browser's
-        // call of a Live tool is one of them, marked by the tool-call
-        // header (AGENT-012).
+        // The Live action route serves every island's actions; a call of a
+        // Live tool is one of them, marked by the tool-call header when a
+        // browser's WebMCP makes it (AGENT-012). Any Live tool needs the
+        // gate, an agent-only one too: a browser click on its action is
+        // refused by the same caller check.
         if *method == Method::POST
             && pattern == crate::live::LIVE_UPDATE_PATH
-            && registry.has_browser_tools()
+            && registry.has_live_tools()
         {
             return Some(middleware::live_access(
                 Arc::clone(registry),
@@ -604,3 +608,56 @@ impl LiveMountRequest {
 
 /// The `Agents` facade: test helpers for tool calls.
 pub struct Agents;
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use hyper::Method;
+
+    use super::CallerKind;
+    use super::tool::test_support::live_registry;
+    use crate::routing::Router;
+
+    /// A router whose checked tool registry is `registry`.
+    fn router_with(registry: super::ToolRegistry) -> Router {
+        let router = Router::new();
+        assert!(router.agents.registry.set(Ok(Arc::new(registry))).is_ok());
+        router
+    }
+
+    #[test]
+    fn agent_002_an_agent_only_live_tool_installs_the_live_tool_gate() {
+        // The only Live tool accepts agents and runs headless: no browser
+        // registers it, but a click on its action still needs the caller
+        // check that refuses a browser caller.
+        let router = router_with(live_registry(
+            "audit.run",
+            "tests.audit",
+            "run",
+            &[CallerKind::Agent],
+            false,
+        ));
+        assert!(
+            router
+                .tool_access(&Method::POST, crate::live::LIVE_UPDATE_PATH)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn agent_002_a_browser_live_tool_installs_the_live_tool_gate() {
+        let router = router_with(live_registry(
+            "counter.peek",
+            "tests.counter",
+            "peek",
+            &[CallerKind::Public],
+            true,
+        ));
+        assert!(
+            router
+                .tool_access(&Method::POST, crate::live::LIVE_UPDATE_PATH)
+                .is_some()
+        );
+    }
+}

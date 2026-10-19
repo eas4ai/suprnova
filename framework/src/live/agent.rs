@@ -607,9 +607,18 @@ fn accepted(
 }
 
 /// The validation paths an agent may read: the component's agent-visible
-/// fields, and the arguments of `action`, which are the agent's own input.
+/// fields, and the arguments of `action`, which are the agent's own input,
+/// less any argument named like a field the agent cannot see. Arguments
+/// and fields share one key space, so such an argument's key may be
+/// reporting that field's issue, and fails closed.
 fn shown_paths<'a>(descriptor: &'a ComponentDescriptor, action: &str) -> BTreeSet<&'a str> {
     let metadata = descriptor.metadata();
+    let hidden: BTreeSet<&str> = metadata
+        .fields()
+        .iter()
+        .filter(|field| !field.agent_visible())
+        .map(|field| field.name().as_str())
+        .collect();
     let fields = metadata
         .fields()
         .iter()
@@ -620,8 +629,15 @@ fn shown_paths<'a>(descriptor: &'a ComponentDescriptor, action: &str) -> BTreeSe
         .iter()
         .filter(|candidate| candidate.name().as_str() == action)
         .flat_map(|candidate| candidate.arguments().fields())
-        .map(|argument| argument.name().as_str());
+        .map(|argument| argument.name().as_str())
+        .filter(|argument| !hidden.contains(argument));
     fields.chain(arguments).collect()
+}
+
+/// The field a validation path names: everything before its first `.` or
+/// `[`, so `items[k].qty` names `items`.
+fn field_root(path: &str) -> &str {
+    path.split(['.', '[']).next().unwrap_or_default()
 }
 
 /// Each validation issue the agent may read, by path, with the text the
@@ -636,8 +652,7 @@ fn validation_of(answer: &CanonicalValue, shown: &BTreeSet<&str>) -> Map<String,
     let mut validation = Map::new();
     let mut hidden = false;
     for (path, issue) in issues {
-        let root = path.split('.').next().unwrap_or_default();
-        if !shown.contains(root) {
+        if !shown.contains(field_root(path)) {
             hidden = true;
             continue;
         }
@@ -789,6 +804,19 @@ fn agent_slot(descriptor: &ComponentDescriptor) -> Result<IslandSlot, FrameworkE
 /// component's slot, the `agent` document key, the session required
 /// absent, and the principal and tenant optional, bound into the caller's
 /// scope instead.
+/// What a headless call's context must hold: no session, since agent
+/// traffic carries no cookie and the agent scope binds who the caller is,
+/// and a principal and a tenant only when the request has them. A context
+/// that carries a session is refused, even if every other check let it
+/// reach the agent entry.
+fn agent_requirements() -> MountScopeRequirements {
+    MountScopeRequirements::new(
+        ScopeRequirement::Absent,
+        ScopeRequirement::Optional,
+        ScopeRequirement::Optional,
+    )
+}
+
 pub(crate) fn register_catalog_entries(router: &mut Router) -> Result<(), FrameworkError> {
     let mut registered = std::collections::BTreeSet::new();
     for record in inventory::iter::<crate::agents::LiveToolRecord>() {
@@ -833,15 +861,7 @@ pub(crate) fn register_catalog_entries(router: &mut Router) -> Result<(), Framew
             schemas,
         );
         router.register_live_mount_entry(super::runtime::LiveMountRegistration::agent(
-            MountCatalogEntry::new(
-                expected,
-                MountScopeRequirements::new(
-                    ScopeRequirement::Absent,
-                    ScopeRequirement::Optional,
-                    ScopeRequirement::Optional,
-                ),
-            )
-            .with_document_key(key.clone()),
+            MountCatalogEntry::new(expected, agent_requirements()).with_document_key(key.clone()),
             selection,
             key,
             build,
@@ -871,4 +891,183 @@ fn failed(error: &FrameworkError) -> HttpResponse {
         "a headless Live tool call failed"
     );
     refuse(500, "The tool failed.")
+}
+
+#[cfg(test)]
+mod tests {
+    use suprnova_live::action::{
+        ActionArgumentField, ActionArgumentSchema, AuthorizationRequirement, TransactionPolicy,
+    };
+    use suprnova_live::canonical::parse_canonical_value;
+    use suprnova_live::host::{
+        CheckDisposition, CheckFact, CheckKind, HostCapabilities, HostCheckFacts,
+        HostContextErrorKind, HostScopeFacts, LiveRequestContextCandidate,
+        LiveRequestContextValidator, MountCatalogBuilder, MountCatalogEntry, PolicyReason,
+        PrincipalFingerprint, SessionFingerprint,
+    };
+    use suprnova_live::identity::{
+        ActionName, BuildId, ComponentName, ModelField, ScopeFingerprint, UnixMillis, ViewName,
+    };
+    use suprnova_live::limits::InputLimits;
+    use suprnova_live::metadata::{
+        ActionMetadata, ComponentMetadata, ContractVersions, FieldMetadata,
+    };
+    use suprnova_live::registry::{ComponentDescriptor, ComponentRegistryBuilder};
+    use suprnova_live::snapshot::state::{FieldCategory, StateCodec};
+    use suprnova_live::snapshot::{ComponentContract, ExpectedSeedV1};
+    use suprnova_live::state::ModelCodec;
+    use suprnova_live::validation::ValidationSelection;
+
+    use super::{agent_requirements, agent_selection, shown_paths, validation_of};
+
+    fn field(name: &str, codec: StateCodec, category: FieldCategory) -> FieldMetadata {
+        FieldMetadata::new(
+            ModelField::parse(name).expect("field"),
+            category,
+            codec,
+            true,
+        )
+    }
+
+    /// A component with an agent-visible `count` and `items`, a locked
+    /// `secret`, and an action `probe(secret, title)`.
+    fn descriptor() -> ComponentDescriptor {
+        let argument = |name: &str| {
+            ActionArgumentField::new(
+                ModelField::parse(name).expect("argument"),
+                ModelCodec::String,
+                true,
+            )
+            .expect("argument field")
+        };
+        let probe = ActionMetadata::new_with_contract(
+            ActionName::parse("probe").expect("action"),
+            1,
+            ActionArgumentSchema::new(vec![argument("secret"), argument("title")])
+                .expect("arguments"),
+            AuthorizationRequirement::Public,
+            ValidationSelection::None,
+            TransactionPolicy::None,
+        )
+        .expect("action");
+        let metadata = ComponentMetadata::new(
+            ComponentName::parse("tests.probe").expect("component"),
+            ViewName::parse("tests/probe.html").expect("view"),
+            ContractVersions::new(1, 1, 1, 1, 1).expect("versions"),
+            vec![
+                field("count", StateCodec::U64Decimal, FieldCategory::State)
+                    .with_agent_visible()
+                    .expect("visible"),
+                field("items", StateCodec::Json, FieldCategory::State)
+                    .with_agent_visible()
+                    .expect("visible"),
+                field("secret", StateCodec::Json, FieldCategory::Locked),
+            ],
+            vec![probe],
+        )
+        .expect("metadata");
+        ComponentDescriptor::new(metadata)
+    }
+
+    #[test]
+    fn agent_013_an_argument_named_like_a_hidden_field_shows_only_the_generic_issue() {
+        let descriptor = descriptor();
+        let answer = parse_canonical_value(
+            br#"{"validation":{"count":"validation.range","items[k].qty":{"id":"validation.range","text":"Too many."},"secret":{"id":"validation.length","text":"The secret is too long."},"title":{"id":"validation.length","text":"The title is too long."}}}"#,
+            &InputLimits::default(),
+        )
+        .expect("an answer");
+        let validation = validation_of(&answer, &shown_paths(&descriptor, "probe"));
+        assert_eq!(
+            serde_json::Value::Object(validation),
+            serde_json::json!({
+                "": [],
+                "count": ["validation.range"],
+                "items[k].qty": ["Too many."],
+                "title": ["The title is too long."],
+            })
+        );
+    }
+
+    /// Host facts with a session or without one, every check passed but
+    /// the session's.
+    fn candidate(descriptor: &ComponentDescriptor, session: bool) -> LiveRequestContextCandidate {
+        let selection = agent_selection(descriptor).expect("the agent selection");
+        let bytes = |seed: u8| [seed; 32];
+        let facts = HostScopeFacts::new(
+            ScopeFingerprint::from_bytes(&bytes(0x40)).expect("scope"),
+            session.then(|| SessionFingerprint::from_bytes(&bytes(0x41)).expect("session")),
+            Some(PrincipalFingerprint::from_bytes(&bytes(0x42)).expect("principal")),
+            None,
+        );
+        let expires_at = UnixMillis::new(2_000);
+        let mut checks = HostCheckFacts::new();
+        for kind in CheckKind::ALL {
+            let disposition = match kind {
+                CheckKind::Session if !session => {
+                    CheckDisposition::NotRequired(PolicyReason::StatelessRequest)
+                }
+                CheckKind::Tenant => CheckDisposition::NotRequired(PolicyReason::TenantlessRoute),
+                _ => CheckDisposition::Passed,
+            };
+            checks
+                .record(kind, CheckFact::new(disposition, expires_at))
+                .expect("a check fact");
+        }
+        LiveRequestContextCandidate::new(
+            selection.route().clone(),
+            selection.slot().clone(),
+            selection,
+            facts.clone(),
+            checks,
+            HostCapabilities::bound_to(facts),
+            expires_at,
+        )
+    }
+
+    #[test]
+    fn agent_013_the_agent_entry_refuses_a_context_with_a_session() {
+        let descriptor = descriptor();
+        let selection = agent_selection(&descriptor).expect("the agent selection");
+        let schemas = descriptor.snapshot_schemas().expect("schemas");
+        let contract = ComponentContract::new(
+            descriptor.metadata().identity().clone(),
+            descriptor.contract_digest().clone(),
+            schemas.state().version(),
+            schemas.memo().version(),
+            schemas.mount().version(),
+        )
+        .expect("contract");
+        let registry = ComponentRegistryBuilder::new()
+            .register(descriptor.clone())
+            .expect("the component registers")
+            .build();
+        let catalog = MountCatalogBuilder::new()
+            .register(
+                &registry,
+                MountCatalogEntry::new(
+                    ExpectedSeedV1::new(
+                        contract,
+                        BuildId::parse("build-agent-tests").expect("build"),
+                        selection.route().clone(),
+                        selection.slot().clone(),
+                        schemas,
+                    ),
+                    agent_requirements(),
+                ),
+            )
+            .expect("the agent entry")
+            .build();
+        let validator = LiveRequestContextValidator::new(300_000).expect("validator");
+        let now = UnixMillis::new(1_000);
+        assert!(
+            validator
+                .validate(&catalog, candidate(&descriptor, false), now)
+                .is_ok()
+        );
+        let refused = validator
+            .validate(&catalog, candidate(&descriptor, true), now)
+            .expect_err("a session is refused");
+        assert_eq!(refused.kind(), HostContextErrorKind::SessionRequirement);
+    }
 }

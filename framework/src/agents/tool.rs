@@ -656,12 +656,14 @@ impl ToolRegistry {
             .map(|index| &self.tools[*index])
     }
 
-    /// Whether any Live tool is registered in the browser.
-    pub(crate) fn has_browser_tools(&self) -> bool {
+    /// Whether any Live tool exists, offered to a browser, to an agent with
+    /// no browser, or both: every one of their actions needs the Live tool
+    /// gate's caller check, whoever clicks it.
+    pub(crate) fn has_live_tools(&self) -> bool {
         self.tools
             .iter()
             .chain(&self.browser_tools)
-            .any(|tool| tool.live_target().is_some() && offers_browser(tool.meta))
+            .any(|tool| tool.live_target().is_some())
     }
 
     /// Every scope the application declared, sorted by name.
@@ -1047,4 +1049,62 @@ fn route_requires_auth(router: &Router, method: &Method, pattern: &str) -> bool 
                 || crate::middleware::alias_of(middleware)
                     .is_some_and(|alias| alias == "auth" || alias.starts_with("auth:"))
         })
+}
+
+/// Registries built by hand, for unit tests of what reads one.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Arc;
+
+    use super::{
+        __ToolMeta, CallerKind, HashMap, LiveTarget, Method, RegisteredTool, ToolAnnotations,
+        ToolRegistry, ToolTarget,
+    };
+
+    /// A Live tool of `action` on `component` accepting `callers`, offered
+    /// headless; `browser` puts it among the tools only a browser registers.
+    pub(crate) fn live_registry(
+        name: &'static str,
+        component: &str,
+        action: &'static str,
+        callers: &'static [CallerKind],
+        browser: bool,
+    ) -> ToolRegistry {
+        let meta: &'static __ToolMeta = Box::leak(Box::new(__ToolMeta {
+            name,
+            description: "A test tool.",
+            title: None,
+            callers,
+            scopes: &[],
+            annotations: ToolAnnotations::default(),
+            guard: None,
+        }));
+        let tool = RegisteredTool {
+            meta,
+            origin: "tests".to_owned(),
+            target: ToolTarget::Live(Arc::new(LiveTarget {
+                tool: name,
+                component: suprnova_live::identity::ComponentName::parse(component)
+                    .expect("a component name"),
+                action,
+                headless: !browser,
+                resolvers: &[],
+            })),
+            method: Method::POST,
+            pattern: crate::live::LIVE_AGENT_PATH.to_owned(),
+            input_schema: serde_json::json!({ "type": "object" }),
+            output_schema: None,
+        };
+        let (tools, browser_tools) = if browser {
+            (Vec::new(), vec![tool])
+        } else {
+            (vec![tool], Vec::new())
+        };
+        ToolRegistry {
+            tools,
+            browser_tools,
+            by_route: HashMap::new(),
+            scopes: Vec::new(),
+        }
+    }
 }

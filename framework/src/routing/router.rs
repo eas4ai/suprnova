@@ -981,10 +981,11 @@ impl Router {
                 FrameworkError::internal("Live mount declarations were consumed more than once")
             })?;
         // A page lists its components' browser tools for WebMCP only on a
-        // router that checks each tool call's caller and counts it: without
-        // `Router::agents` nothing would, so no mount offers a tool.
+        // router whose Live tool gate checks each tool call's caller and
+        // counts it, which it installs whenever a Live tool exists, with or
+        // without `Router::agents`.
         #[cfg(feature = "agents")]
-        if self.agents.serves() {
+        if self.installs_live_tool_gate() {
             return Ok(entries
                 .into_iter()
                 .map(crate::live::LiveMountRegistration::with_agent_tools)

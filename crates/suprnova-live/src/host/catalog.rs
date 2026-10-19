@@ -88,10 +88,10 @@ impl MountCatalogEntry {
     }
 
     /// Lets the island roots this mount renders list the component's
-    /// browser tools for WebMCP (AGENT-012). Only a host that checks each
-    /// tool call's caller and counts it against a budget sets this: a mount
-    /// without it offers no tool, so a page never offers a tool nothing
-    /// checks.
+    /// browser tools for WebMCP (AGENT-012). A host sets it only where it
+    /// checks every tool call's caller and counts it against a budget, as
+    /// Suprnova's Live tool gate does: a mount without it offers no tool, so
+    /// a page never offers a tool nothing checks.
     #[must_use]
     pub const fn with_agent_tools(mut self) -> Self {
         self.agent_tools = true;

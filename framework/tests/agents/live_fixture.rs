@@ -286,8 +286,9 @@ pub fn live_router_with(config: AgentsConfig) -> Router {
     live_router().agents(config)
 }
 
-/// [`live_router_with`] without the agents: no MCP endpoint, no tool
-/// access check and no tool budget.
+/// [`live_router_with`] without the agents: no MCP endpoint, but its Live
+/// tools are still checked and counted by the Live tool gate, with the
+/// default configuration.
 pub fn live_router() -> Router {
     crate::fixture::define_policies();
     let mount = LiveMount::<AgentCounter>::public_seed(PAGE, "counter", "main")
@@ -435,8 +436,8 @@ pub fn live_client_with(config: AgentsConfig, policies: bool) -> TestClient {
     TestClient::new(router, browser_middleware())
 }
 
-/// A test client of [`live_router`], which serves no agents, with its Live
-/// runtime prepared and the counter's policies defined.
+/// A test client of [`live_router`], which serves no MCP endpoint, with
+/// its Live runtime prepared and the counter's policies defined.
 pub fn live_client_without_agents() -> TestClient {
     register_components();
     define_live_policies();
