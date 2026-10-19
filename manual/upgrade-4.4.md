@@ -586,6 +586,14 @@ text. Type the field as the struct or map it holds.
   answered.
 - **Two uses of one email verification link at once no longer answer 500 on
   MariaDB.** Nothing to change.
+- **Concurrent writes no longer fail on MariaDB 11.8 and later.** Nothing to
+  change: the framework turns off `innodb_snapshot_isolation` on its own
+  connections, and leaves the server's setting for your other clients.
+- **`DB::transaction_with_attempts` retries by the database's error code.**
+  Nothing to change.
+- **A Postgres schema dump loads where an administrator installed an
+  extension.** Nothing to change. Run `schema:dump` again to get a dump
+  without the extension comments.
 
 ## Next
 

@@ -265,6 +265,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   deadlock. It used to match the word "deadlock" in the message, so a lock
   wait timeout and MariaDB's error 1020 were never retried. An error with no
   database code is still matched by its message.
+- **A Postgres schema dump loads where an administrator installed an
+  extension.** `schema:dump` copied the comment an extension sets on
+  itself, such as `COMMENT ON EXTENSION vector`. Loading that dump as the
+  application's role failed with "must be owner of extension", because the
+  extension belongs to the role that installed it. The dump now leaves those
+  comments out, and `CREATE EXTENSION` sets them again.
 - **Magnetar's tables hold long values on MySQL and MariaDB.** Byte
   columns were limited to 255 bytes. These hold passkey and OAuth sign-in
   steps, two-factor secrets and recovery codes, and saved provider tokens.

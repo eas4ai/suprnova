@@ -717,7 +717,32 @@ async fn postgres_schema(url: &str) -> Result<String, FrameworkError> {
     ];
     args.extend(target.postgres_args());
     let out = run_tool(&tool, "pg_dump", &args, &target.postgres_env(), None).await?;
-    Ok(String::from_utf8_lossy(&out).into_owned())
+    Ok(without_extension_comments(&String::from_utf8_lossy(&out)))
+}
+
+/// `dump` without its `COMMENT ON EXTENSION` statements.
+///
+/// `pg_dump` copies the comment an extension sets on itself. Loading it
+/// needs the extension's owner, usually a superuser who installed it for the
+/// application's role, so the load fails with "must be owner of extension".
+/// `CREATE EXTENSION` sets the comment again, so the dump loses nothing.
+fn without_extension_comments(dump: &str) -> String {
+    let mut kept = String::with_capacity(dump.len());
+    let mut skipping = false;
+    for line in dump.split_inclusive('\n') {
+        if !skipping && line.starts_with("COMMENT ON EXTENSION ") {
+            skipping = true;
+        }
+        if skipping {
+            // The statement ends at the line that ends with its `;`.
+            if line.trim_end().ends_with(';') {
+                skipping = false;
+            }
+            continue;
+        }
+        kept.push_str(line);
+    }
+    kept
 }
 
 async fn mysql_schema(url: &str, engine: Engine) -> Result<String, FrameworkError> {
@@ -1273,6 +1298,38 @@ fn migration_failed(e: DbErr) -> FrameworkError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_postgres_dump_drops_the_comments_extensions_own() {
+        let dump = "CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;\n\n\
+                    --\n-- Name: EXTENSION vector; Type: COMMENT; Schema: -; Owner: -\n--\n\n\
+                    COMMENT ON EXTENSION vector IS 'vector data type and ivfflat and hnsw access methods';\n\n\
+                    COMMENT ON EXTENSION \"uuid-ossp\" IS 'generate universally unique identifiers\n\
+                    (UUIDs)';\n\
+                    CREATE TABLE public.users (id bigint);\n\
+                    COMMENT ON TABLE public.users IS 'the accounts';\n";
+        let kept = without_extension_comments(dump);
+        assert!(!kept.contains("COMMENT ON EXTENSION"), "{kept}");
+        assert!(!kept.contains("(UUIDs)"), "{kept}");
+        assert!(
+            kept.contains("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;"),
+            "{kept}"
+        );
+        assert!(
+            kept.contains("CREATE TABLE public.users (id bigint);"),
+            "{kept}"
+        );
+        assert!(
+            kept.contains("COMMENT ON TABLE public.users IS 'the accounts';"),
+            "{kept}"
+        );
+    }
+
+    #[test]
+    fn a_postgres_dump_without_extension_comments_is_unchanged() {
+        let dump = "CREATE TABLE public.users (id bigint);\n";
+        assert_eq!(without_extension_comments(dump), dump);
+    }
 
     #[test]
     fn ledger_versions_read_only_the_rows_after_the_marker() {
