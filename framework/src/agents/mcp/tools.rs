@@ -16,13 +16,44 @@ use super::super::tool::ToolRegistry;
 
 /// The tools `caller` may call, sorted by name: the tools that accept the
 /// caller's kind and, for a token caller, whose scopes the token holds.
-pub(crate) fn list(registry: &ToolRegistry, caller: &ToolCaller) -> Vec<Value> {
+///
+/// With `object_only`, for a 2025-06-18 or 2025-11-25 request, a tool whose
+/// output schema is not an object is listed without it. Those revisions
+/// type `outputSchema` as an object and make it optional, so the tool
+/// stays callable; revision 2026-07-28 takes any JSON Schema.
+pub(crate) fn list(registry: &ToolRegistry, caller: &ToolCaller, object_only: bool) -> Vec<Value> {
     registry
         .tools()
         .iter()
         .filter(|tool| tool.callable_by(caller))
-        .map(|tool| tool.definition())
+        .map(|tool| {
+            let mut definition = tool.definition();
+            if object_only
+                && let Value::Object(fields) = &mut definition
+                && fields.get("outputSchema").is_some_and(|schema| {
+                    schema.get("type").and_then(Value::as_str) != Some("object")
+                })
+            {
+                fields.remove("outputSchema");
+            }
+            definition
+        })
         .collect()
+}
+
+/// `result` for a 2025-06-18 or 2025-11-25 request. Those revisions type
+/// `structuredContent` as an object, so a result whose structured value is
+/// anything else keeps only its text, which holds the same JSON; revision
+/// 2026-07-28 takes any JSON value.
+pub(crate) fn object_only(mut result: Value) -> Value {
+    if let Value::Object(fields) = &mut result
+        && fields
+            .get("structuredContent")
+            .is_some_and(|structured| !structured.is_object())
+    {
+        fields.remove("structuredContent");
+    }
+    result
 }
 
 /// A tool result with `isError: true` and `message` as its text.

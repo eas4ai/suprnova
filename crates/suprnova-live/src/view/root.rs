@@ -103,6 +103,7 @@ struct AgentToolEntry {
     read_only: bool,
     untrusted_content: bool,
     consequential: bool,
+    debugging: bool,
 }
 
 /// The browser tools `metadata` declares that `filter` admits, or `None`
@@ -128,6 +129,7 @@ pub(crate) fn declared_agent_tools(
                 read_only: tool.read_only(),
                 untrusted_content: tool.untrusted_content(),
                 consequential: tool.consequential(),
+                debugging: tool.debugging(),
             })
         })
         .collect();
@@ -193,6 +195,7 @@ impl AgentToolsDeclaration {
                         "readOnlyHint": tool.read_only,
                         "untrustedContentHint": tool.untrusted_content,
                         "consequentialHint": tool.consequential,
+                        "debugging": tool.debugging,
                     }),
                 );
                 serde_json::Value::Object(entry)

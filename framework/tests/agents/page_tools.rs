@@ -13,8 +13,8 @@ use suprnova::live::{CanonicalValue, LiveBootstrapOptions, LiveDocument, LiveMou
 use suprnova::testing::{TestClient, TestResponse};
 use suprnova::view::{AssetSet, DocumentResponseIntent, ViewName};
 use suprnova::{
-    FrameworkError, HttpResponse, InertiaResponse, JsonSchema, MiddlewareRegistry, PageTools,
-    Request, Response, Router, StatusCode, Validate, handler, json_response, tool, tool_input,
+    FrameworkError, HttpResponse, InertiaResponse, MiddlewareRegistry, PageTools, Request,
+    Response, Router, StatusCode, Validate, handler, json_response, tool, tool_input, tool_schema,
 };
 
 use crate::fixture::{self, TestUser};
@@ -33,7 +33,7 @@ pub struct NoteQuery {
     name = "notes.search",
     description = "List the latest notes.",
     callers = [public],
-    annotations(read_only, untrusted_content),
+    annotations(read_only, untrusted_content, debugging),
 )]
 #[handler]
 pub async fn search_notes(request: Request) -> Response {
@@ -74,8 +74,8 @@ pub async fn show_note(note: String, form: NoteRef) -> Response {
 }
 
 /// What `notes.filter` narrows the notes by.
-#[derive(serde::Deserialize, Validate, JsonSchema)]
-#[schemars(crate = "suprnova::__schemars")]
+#[tool_schema]
+#[derive(serde::Deserialize, Validate)]
 pub struct NoteFilters {
     /// Whether to list drafts.
     pub drafts: bool,
@@ -399,7 +399,12 @@ async fn agent_014_page_tool_annotations_follow_the_markings() {
     );
     assert_eq!(
         create["annotations"],
-        json!({ "readOnlyHint": false, "untrustedContentHint": false, "consequentialHint": false })
+        json!({
+            "readOnlyHint": false,
+            "untrustedContentHint": false,
+            "consequentialHint": false,
+            "debugging": false,
+        })
     );
     assert_eq!(create["method"], "POST");
     assert_eq!(create["path"], json!([{ "text": "/posts" }]));
@@ -420,13 +425,23 @@ async fn agent_014_page_tool_annotations_follow_the_markings() {
     );
     assert_eq!(
         echo["annotations"],
-        json!({ "readOnlyHint": true, "untrustedContentHint": false, "consequentialHint": false })
+        json!({
+            "readOnlyHint": true,
+            "untrustedContentHint": false,
+            "consequentialHint": false,
+            "debugging": false,
+        })
     );
 
     let delete = page.page_tool("posts.delete").expect("posts.delete");
     assert_eq!(
         delete["annotations"],
-        json!({ "readOnlyHint": false, "untrustedContentHint": false, "consequentialHint": true })
+        json!({
+            "readOnlyHint": false,
+            "untrustedContentHint": false,
+            "consequentialHint": true,
+            "debugging": false,
+        })
     );
     assert_eq!(delete["method"], "DELETE");
     assert_eq!(
@@ -437,12 +452,36 @@ async fn agent_014_page_tool_annotations_follow_the_markings() {
         ])
     );
 
+    // `annotations(debugging)` marks a tool meant for debugging and developer
+    // tooling: WebMCP's fourth hint, which a page always sends.
     let search = page.page_tool("notes.search").expect("notes.search");
     assert_eq!(
         search["annotations"],
-        json!({ "readOnlyHint": true, "untrustedContentHint": true, "consequentialHint": false })
+        json!({
+            "readOnlyHint": true,
+            "untrustedContentHint": true,
+            "consequentialHint": false,
+            "debugging": true,
+        })
     );
     assert_eq!(search["method"], "GET");
+
+    // MCP's annotations are MCP's own set, which has no `debugging`.
+    let listed = page_client().mcp().list().await;
+    let search = listed
+        .result()
+        .and_then(|result| result["tools"].as_array().cloned())
+        .and_then(|tools| {
+            tools
+                .into_iter()
+                .find(|tool| tool["name"] == "notes.search")
+        })
+        .expect("notes.search is listed over MCP");
+    assert_eq!(search["annotations"]["readOnlyHint"], true, "{search:#}");
+    assert!(
+        search["annotations"].get("debugging").is_none(),
+        "{search:#}"
+    );
 }
 
 // ------------------------------------------------------- the boot check ----

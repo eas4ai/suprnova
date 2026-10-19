@@ -26,11 +26,16 @@ export type ToolResult = {
 /** What WebMCP hands `execute` beside the input: the agent's abort signal. */
 export type ToolClient = { signal?: AbortSignal }
 
-/** The three hints every registration carries, from the tool's markings. */
+/**
+ * The four hints every registration carries, from the tool's markings.
+ * `debugging` marks a tool meant for debugging and developer tooling, not
+ * end users.
+ */
 export type ToolAnnotations = {
   readOnlyHint: boolean
   untrustedContentHint: boolean
   consequentialHint: boolean
+  debugging: boolean
 }
 
 /** A JSON Schema whose root is an object, as a tool's input must be. */
@@ -425,14 +430,24 @@ export type PageToolLimits = { maxResultBytes: number; callTimeoutMs: number }
 export type PageTools = { limits: PageToolLimits; tools: PageTool[] }
 
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
-const HINTS = ['consequentialHint', 'readOnlyHint', 'untrustedContentHint']
+const HINTS = ['consequentialHint', 'debugging', 'readOnlyHint', 'untrustedContentHint']
 
-function exactKeys(value: Record<string, unknown>, required: string[], optional: string[] = []): boolean {
-  const keys = Object.keys(value)
-  return (
-    required.every((key) => keys.includes(key)) &&
-    keys.every((key) => required.includes(key) || optional.includes(key))
-  )
+/**
+ * Whether `value` has every key in `required`. Keys a reader does not know
+ * are ignored, so a later release can add one without breaking an app
+ * scaffolded earlier; a change an older reader must not ignore bumps `v`.
+ */
+function hasKeys(value: Record<string, unknown>, required: string[]): boolean {
+  return required.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+}
+
+/** A hint as the page sends it: `false` when missing, `null` when not a boolean. */
+function hint(annotations: Record<string, unknown>, key: string): boolean | null {
+  const value = annotations[key]
+  if (value === undefined) {
+    return false
+  }
+  return typeof value === 'boolean' ? value : null
 }
 
 function positiveInteger(value: unknown): value is number {
@@ -443,11 +458,15 @@ function parsePiece(piece: unknown): PathPiece | null {
   if (!plainObject(piece)) {
     return null
   }
-  if (exactKeys(piece, ['text'])) {
+  const text = hasKeys(piece, ['text'])
+  if (text === hasKeys(piece, ['param'])) {
+    return null
+  }
+  if (text) {
     return typeof piece.text === 'string' ? { text: piece.text } : null
   }
   if (
-    exactKeys(piece, ['param', 'optional', 'catchAll']) &&
+    hasKeys(piece, ['param', 'optional', 'catchAll']) &&
     typeof piece.param === 'string' &&
     piece.param !== '' &&
     typeof piece.optional === 'boolean' &&
@@ -459,13 +478,11 @@ function parsePiece(piece: unknown): PathPiece | null {
 }
 
 function parseTool(tool: unknown, names: Set<string>): PageTool | null {
-  if (
-    !plainObject(tool) ||
-    !exactKeys(tool, ['name', 'description', 'inputSchema', 'annotations', 'method', 'path'], ['title'])
-  ) {
+  if (!plainObject(tool) || !hasKeys(tool, ['name', 'description', 'inputSchema', 'method', 'path'])) {
     return null
   }
-  const { name, title, description, inputSchema, annotations, method, path } = tool
+  const { name, title, description, inputSchema, method, path } = tool
+  const annotations = tool.annotations === undefined ? {} : tool.annotations
   if (
     typeof name !== 'string' ||
     !TOOL_NAME.test(name) ||
@@ -476,8 +493,7 @@ function parseTool(tool: unknown, names: Set<string>): PageTool | null {
     !plainObject(inputSchema) ||
     inputSchema.type !== 'object' ||
     !plainObject(annotations) ||
-    !exactKeys(annotations, HINTS) ||
-    !HINTS.every((hint) => typeof annotations[hint] === 'boolean') ||
+    !HINTS.every((key) => hint(annotations, key) !== null) ||
     typeof method !== 'string' ||
     !METHODS.has(method) ||
     !Array.isArray(path) ||
@@ -497,9 +513,10 @@ function parseTool(tool: unknown, names: Set<string>): PageTool | null {
     description,
     inputSchema: inputSchema as ToolInputSchema,
     annotations: {
-      readOnlyHint: annotations.readOnlyHint as boolean,
-      untrustedContentHint: annotations.untrustedContentHint as boolean,
-      consequentialHint: annotations.consequentialHint as boolean,
+      readOnlyHint: hint(annotations, 'readOnlyHint') === true,
+      untrustedContentHint: hint(annotations, 'untrustedContentHint') === true,
+      consequentialHint: hint(annotations, 'consequentialHint') === true,
+      debugging: hint(annotations, 'debugging') === true,
     },
     method: method as PageTool['method'],
     path: pieces as PathPiece[],
@@ -507,19 +524,22 @@ function parseTool(tool: unknown, names: Set<string>): PageTool | null {
 }
 
 /**
- * The page's server tools, checked strictly: every key known and typed,
- * names unique and in the framework's grammar, at most
- * {@link MAX_PAGE_TOOLS}. Anything else is `null`, and the page registers
- * none of them rather than a guess.
+ * The page's server tools. A key this reader does not know is ignored at
+ * every level, so a later release can add one without breaking an app
+ * scaffolded earlier, and it never reaches a registration; a missing hint
+ * reads as `false`. A change an older reader must not ignore bumps `v`, so
+ * any `v` but 1 is refused, as are a known key of the wrong type, a missing
+ * required key, a name outside the framework's grammar or used twice, and
+ * more than {@link MAX_PAGE_TOOLS} tools. A refused payload is `null`, and
+ * the page registers none of its tools rather than a guess.
  */
 export function parsePageTools(value: unknown): PageTools | null {
-  if (!plainObject(value) || !exactKeys(value, ['v', 'limits', 'tools']) || value.v !== 1) {
+  if (!plainObject(value) || !hasKeys(value, ['v', 'limits', 'tools']) || value.v !== 1) {
     return null
   }
   const { limits, tools } = value
   if (
     !plainObject(limits) ||
-    !exactKeys(limits, ['maxResultBytes', 'callTimeoutMs']) ||
     !positiveInteger(limits.maxResultBytes) ||
     !positiveInteger(limits.callTimeoutMs) ||
     !Array.isArray(tools) ||
@@ -811,6 +831,8 @@ export type PageToolOptions<TInput = Record<string, unknown>> = {
   readOnly?: boolean
   untrustedContent?: boolean
   consequential?: boolean
+  /** Meant for debugging and developer tooling, not end users. */
+  debugging?: boolean
   /**
    * Answers a call: a {@link ToolResult}, or any JSON value, which becomes
    * the result's text and, for an object, its structured content. A thrown
@@ -858,6 +880,7 @@ export function componentTool<TInput>(
       readOnlyHint: options.readOnly === true,
       untrustedContentHint: options.untrustedContent === true,
       consequentialHint: options.consequential === true,
+      debugging: options.debugging === true,
     },
     execute: async (input, client) => {
       const signal = client?.signal
@@ -905,6 +928,8 @@ export type FormToolOptions = {
    * `DELETE` action, whatever this says.
    */
   destructive?: boolean
+  /** Meant for debugging and developer tooling, not end users. */
+  debugging?: boolean
 }
 
 /** The callbacks of the Inertia visit a form tool submits with. */
@@ -956,6 +981,7 @@ export function formTool(options: FormToolOptions, driver: () => FormDriver): To
       readOnlyHint: method === 'get',
       untrustedContentHint: false,
       consequentialHint: destructive,
+      debugging: options.debugging === true,
     },
     execute: async (input, client) => {
       const signal = client?.signal

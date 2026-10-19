@@ -303,6 +303,26 @@ pub fn webmcp_tool_input(attr: TokenStream, input: TokenStream) -> TokenStream {
     webmcp_input::tool_input_attr_impl(attr, input)
 }
 
+/// A type nested in a WebAssembly front end's page tool input, used as
+/// `#[suprnova_webmcp::tool_schema]`: the framework's `#[tool_schema]` for a
+/// crate that cannot depend on the framework. It derives `JsonSchema` alone,
+/// through `suprnova-webmcp`'s copy of `schemars`; the type's serde derives
+/// stay the application's. Any struct or enum.
+///
+/// ```rust,ignore
+/// #[suprnova_webmcp::tool_schema]
+/// #[derive(serde::Deserialize)]
+/// #[serde(rename_all = "snake_case")]
+/// enum Priority {
+///     Low,
+///     High,
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn webmcp_tool_schema(attr: TokenStream, input: TokenStream) -> TokenStream {
+    webmcp_input::tool_schema_attr_impl(attr, input)
+}
+
 /// Create an Inertia response with compile-time component validation.
 ///
 /// # Signature
@@ -837,7 +857,9 @@ pub fn request(attr: TokenStream, input: TokenStream) -> TokenStream {
 /// - `output`: a type whose JSON Schema is the tool's output schema, usually
 ///   a [`macro@tool_output`] struct.
 /// - `annotations(...)`: hints for clients: `read_only`, `destructive`,
-///   `idempotent`, `open_world`, `untrusted_content`.
+///   `idempotent`, `open_world`, `untrusted_content`, and `debugging`, which
+///   marks a tool for debugging and developer tooling and reaches only a
+///   page's WebMCP registration.
 /// - `title`: a display name.
 /// - `route`: the route name, when the handler serves more than one route.
 /// - `guard`: the auth guard a user caller is signed into for the call.
@@ -882,10 +904,12 @@ pub fn tool_input(attr: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// It derives `Serialize` and `JsonSchema` through the framework's own
 /// copies of `serde` and `schemars`, so an application depends on neither
-/// to declare one. The type is a struct with named fields, since MCP
-/// describes a tool's structured result with an object schema. A doc
-/// comment on a field becomes its description, and the field attributes
-/// are serde's and schemars' own.
+/// to declare one. Any struct or enum: revision 2026-07-28 takes any JSON
+/// Schema as a tool's output schema. The older revisions the endpoint
+/// serves take an object only, so for their clients a non-object schema is
+/// left out of the tool's listing and a non-object answer comes back as
+/// text. A doc comment on a field becomes its description, and the field
+/// attributes are serde's and schemars' own.
 ///
 /// ```
 /// /// What `reviews.create` answers.
@@ -905,6 +929,34 @@ pub fn tool_input(attr: TokenStream, input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn tool_output(attr: TokenStream, input: TokenStream) -> TokenStream {
     request::tool_output_attr_impl(attr, input)
+}
+
+/// Give a type nested in a tool's input or output its JSON Schema: an enum
+/// field, or a struct that is not a form request of its own (AGENT-001).
+///
+/// It derives `JsonSchema` alone, through the framework's copy of
+/// `schemars`, so an application needs no `schemars` of its own, and a
+/// version of its own could not stand in for the framework's anyway. The
+/// type's serde derives stay the application's. Any struct or enum.
+///
+/// ```
+/// /// How to order the notes.
+/// #[suprnova::tool_schema]
+/// #[derive(serde::Deserialize)]
+/// #[serde(rename_all = "snake_case")]
+/// pub enum SortOrder {
+///     /// Newest first.
+///     Newest,
+///     /// Oldest first.
+///     Oldest,
+/// }
+///
+/// fn has_schema<T: suprnova::JsonSchema>() {}
+/// has_schema::<SortOrder>();
+/// ```
+#[proc_macro_attribute]
+pub fn tool_schema(attr: TokenStream, input: TokenStream) -> TokenStream {
+    request::tool_schema_attr_impl(attr, input)
 }
 
 /// Attribute macro for database-enabled tests

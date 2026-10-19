@@ -211,46 +211,61 @@ pub fn tool_input_attr_impl(_attr: TokenStream, input: TokenStream) -> TokenStre
     request_attr_tokens(input, true).into()
 }
 
-/// The `JsonSchema` derive of a tool's input or output type, and the
-/// attribute pointing it at the framework's copy of `schemars`, so an
-/// application needs no `schemars` of its own. `#[tool_input]` and
-/// `#[tool_output]` both derive a tool's schema with it.
+/// The `JsonSchema` derive at `json_schema`, and the attribute pointing it
+/// at the copy of `schemars` at `schemars`, so an application needs no
+/// `schemars` of its own. Every attribute that derives a tool's schema, the
+/// framework's and `suprnova-webmcp`'s, takes these two.
+pub(crate) fn json_schema_derive_at(
+    json_schema: proc_macro2::TokenStream,
+    schemars: &str,
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    (json_schema, quote!(#[schemars(crate = #schemars)]))
+}
+
+/// The `JsonSchema` derive through the framework's copy of `schemars`, for
+/// `#[tool_input]`, `#[tool_output]` and `#[tool_schema]`.
 fn json_schema_derive() -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
-    (
-        quote!(::suprnova::JsonSchema),
-        quote!(#[schemars(crate = "::suprnova::__schemars")]),
-    )
+    json_schema_derive_at(quote!(::suprnova::JsonSchema), "::suprnova::__schemars")
+}
+
+/// Refuse arguments to `attribute`, which takes none.
+pub(crate) fn no_arguments(attr: &TokenStream, attribute: &str) -> Result<(), syn::Error> {
+    if attr.is_empty() {
+        Ok(())
+    } else {
+        Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("{attribute} takes no arguments"),
+        ))
+    }
+}
+
+/// Refuse anything but a struct or an enum under `attribute`: serde and
+/// schemars derive nothing else.
+pub(crate) fn struct_or_enum(input: &DeriveInput, attribute: &str) -> Result<(), syn::Error> {
+    match &input.data {
+        syn::Data::Struct(_) | syn::Data::Enum(_) => Ok(()),
+        syn::Data::Union(_) => Err(syn::Error::new_spanned(
+            &input.ident,
+            format!("{attribute} takes a struct or an enum"),
+        )),
+    }
 }
 
 /// Implementation of the `#[tool_output]` attribute macro: the type whose
 /// JSON Schema is a tool's output schema (AGENT-001). It derives
 /// `Serialize` and `JsonSchema` through the framework's own copies of
-/// `serde` and `schemars`, so an application names neither crate.
-///
-/// The type is a struct with named fields, because MCP describes a tool's
-/// structured result with an object schema.
+/// `serde` and `schemars`, so an application names neither crate. Any
+/// struct or enum: revision 2026-07-28 takes any JSON Schema as an output
+/// schema, and the endpoint leaves a non-object one out for the older
+/// revisions, which take objects only.
 pub fn tool_output_attr_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
-    if !attr.is_empty() {
-        return syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "#[tool_output] takes no arguments",
-        )
-        .to_compile_error()
-        .into();
+    if let Err(error) = no_arguments(&attr, "#[tool_output]") {
+        return error.to_compile_error().into();
     }
     let input = parse_macro_input!(input as DeriveInput);
-    let named = matches!(
-        &input.data,
-        syn::Data::Struct(data) if matches!(data.fields, syn::Fields::Named(_))
-    );
-    if !named {
-        return syn::Error::new_spanned(
-            &input.ident,
-            "#[tool_output] needs a struct with named fields: a tool's output schema is a JSON \
-             object",
-        )
-        .to_compile_error()
-        .into();
+    if let Err(error) = struct_or_enum(&input, "#[tool_output]") {
+        return error.to_compile_error().into();
     }
     let (json_schema, schemars_crate) = json_schema_derive();
     // The derives come first, so the user's `#[serde(...)]` attributes
@@ -258,6 +273,39 @@ pub fn tool_output_attr_impl(attr: TokenStream, input: TokenStream) -> TokenStre
     quote! {
         #[derive(::suprnova::serde::Serialize, #json_schema)]
         #[serde(crate = "::suprnova::serde")]
+        #schemars_crate
+        #input
+    }
+    .into()
+}
+
+/// Implementation of the `#[tool_schema]` attribute macro: a type nested in
+/// a tool's input or output, a struct or an enum, which gets its JSON
+/// Schema through the framework's copy of `schemars`. Its serde derives
+/// stay the application's own.
+pub fn tool_schema_attr_impl(attr: TokenStream, input: TokenStream) -> TokenStream {
+    schema_only(attr, input, "#[tool_schema]", json_schema_derive())
+}
+
+/// `item` with the `JsonSchema` derive `derive` names added, and nothing
+/// else: the body of `#[tool_schema]`, on the framework and on
+/// `suprnova-webmcp`.
+pub(crate) fn schema_only(
+    attr: TokenStream,
+    item: TokenStream,
+    attribute: &str,
+    derive: (proc_macro2::TokenStream, proc_macro2::TokenStream),
+) -> TokenStream {
+    if let Err(error) = no_arguments(&attr, attribute) {
+        return error.to_compile_error().into();
+    }
+    let input = parse_macro_input!(item as DeriveInput);
+    if let Err(error) = struct_or_enum(&input, attribute) {
+        return error.to_compile_error().into();
+    }
+    let (json_schema, schemars_crate) = derive;
+    quote! {
+        #[derive(#json_schema)]
         #schemars_crate
         #input
     }

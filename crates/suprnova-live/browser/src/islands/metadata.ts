@@ -16,7 +16,12 @@ const MAX_AGENT_FIELDS = 512;
 const AGENT_TOOL_NAME = /^[A-Za-z0-9_.-]{1,128}$/u;
 const AGENT_TOOL_INSTANCE = /^[A-Za-z0-9_-]{1,63}$/u;
 const AGENT_FIELD_NAME = /^[A-Za-z0-9_]{1,128}$/u;
-const AGENT_ANNOTATIONS = ["consequentialHint", "readOnlyHint", "untrustedContentHint"] as const;
+const AGENT_ANNOTATIONS = [
+  "consequentialHint",
+  "debugging",
+  "readOnlyHint",
+  "untrustedContentHint",
+] as const;
 const ACTION_PARAMETER_ENTRY =
   /^([A-Za-z0-9._:/-]{1,128})\(([A-Za-z0-9._:/-]{1,128}(?:,[A-Za-z0-9._:/-]{1,128}){0,127})\)$/u;
 const REQUIRED_ATTRIBUTES = [
@@ -65,11 +70,15 @@ export interface IslandMetadata {
   readonly agentTools?: AgentToolContract;
 }
 
-/** The WebMCP hints a Live tool carries, all three always present. */
+/**
+ * The WebMCP hints a Live tool carries, all four always present. `debugging`
+ * marks a tool meant for debugging and developer tooling, not end users.
+ */
 export interface AgentToolAnnotations {
   readonly readOnlyHint: boolean;
   readonly untrustedContentHint: boolean;
   readonly consequentialHint: boolean;
+  readonly debugging: boolean;
 }
 
 /** One Live action the page registers as a WebMCP tool. */
@@ -177,7 +186,12 @@ function plainObject(value: unknown): value is Record<string, unknown> {
  * Reads the root's `data-suprnova-live-tools` contract. Every name must end
  * in a `.` and the island's document key, and the key must fit the tool
  * instance grammar, so a page never registers a name the server did not
- * build for this island. Anything else marks the island invalid.
+ * build for this island. A key this reader does not know is ignored at
+ * every level, so a root a later release rendered, or one RenderCache kept
+ * from an earlier one, still registers its tools, and an unknown key never
+ * reaches a registration; a missing hint reads as `false`. A change an older
+ * reader must not ignore bumps `v`. Anything else, a known key of the wrong
+ * type or a missing required key among them, marks the island invalid.
  */
 export function parseAgentTools(value: string, documentKey: string): AgentToolContract {
   let parsed: unknown;
@@ -189,12 +203,10 @@ export function parseAgentTools(value: string, documentKey: string): AgentToolCo
   if (!plainObject(parsed) || parsed["v"] !== 1 || !AGENT_TOOL_INSTANCE.test(documentKey)) {
     return fail("agent_tools");
   }
-  const keys = Object.keys(parsed).sort().join(",");
   const fields = parsed["fields"];
   const integers = parsed["integers"];
   const tools = parsed["tools"];
   if (
-    keys !== "fields,integers,tools,v" ||
     !Array.isArray(fields) ||
     fields.length > MAX_AGENT_FIELDS ||
     !fields.every((field) => typeof field === "string" && AGENT_FIELD_NAME.test(field)) ||
@@ -211,17 +223,10 @@ export function parseAgentTools(value: string, documentKey: string): AgentToolCo
   const names = new Set<string>();
   const definitions = tools.map((tool: unknown): AgentToolDefinition => {
     if (!plainObject(tool)) return fail("agent_tools");
-    const { action, name, title, description, inputSchema, annotations } = tool;
-    const allowed = new Set([
-      "action",
-      "annotations",
-      "description",
-      "inputSchema",
-      "name",
-      "title",
-    ]);
+    const { action, name, title, description, inputSchema } = tool;
+    // Missing annotations, or a missing hint, read as `false`.
+    const annotations = tool["annotations"] === undefined ? {} : tool["annotations"];
     if (
-      Object.keys(tool).some((key) => !allowed.has(key)) ||
       typeof action !== "string" ||
       action.length > MAX_IDENTITY_UNITS ||
       !SAFE_TEXT_IDENTITY.test(action) ||
@@ -235,8 +240,9 @@ export function parseAgentTools(value: string, documentKey: string): AgentToolCo
       description.trim().length === 0 ||
       !plainObject(inputSchema) ||
       !plainObject(annotations) ||
-      Object.keys(annotations).sort().join(",") !== AGENT_ANNOTATIONS.join(",") ||
-      !AGENT_ANNOTATIONS.every((hint) => typeof annotations[hint] === "boolean")
+      !AGENT_ANNOTATIONS.every(
+        (hint) => annotations[hint] === undefined || typeof annotations[hint] === "boolean",
+      )
     ) {
       return fail("agent_tools");
     }
@@ -248,9 +254,10 @@ export function parseAgentTools(value: string, documentKey: string): AgentToolCo
       description,
       inputSchema: Object.freeze(inputSchema),
       annotations: Object.freeze({
-        readOnlyHint: annotations["readOnlyHint"] as boolean,
-        untrustedContentHint: annotations["untrustedContentHint"] as boolean,
-        consequentialHint: annotations["consequentialHint"] as boolean,
+        readOnlyHint: annotations["readOnlyHint"] === true,
+        untrustedContentHint: annotations["untrustedContentHint"] === true,
+        consequentialHint: annotations["consequentialHint"] === true,
+        debugging: annotations["debugging"] === true,
       }),
     });
   });

@@ -226,6 +226,9 @@ async fn serve(request: Request) -> HttpResponse {
         Err(response) => return response,
     };
 
+    // The older revisions type a structured result and an output schema as
+    // objects; 2026-07-28 takes any JSON value and any JSON Schema.
+    let object_only = matches!(era, Era::Legacy(_));
     match (era, method) {
         (Era::Legacy(version), "initialize") => protocol::respond(
             200,
@@ -235,7 +238,7 @@ async fn serve(request: Request) -> HttpResponse {
             protocol::respond(200, protocol::result(&id, discover_result(&config)))
         }
         (_, "ping") => protocol::respond(200, protocol::result(&id, complete(&config, Map::new()))),
-        (_, "tools/list") => list_tools(&endpoint, &config, &caller, &id),
+        (_, "tools/list") => list_tools(&endpoint, &config, &caller, &id, object_only),
         (_, "tools/call") => {
             call_tool(
                 endpoint,
@@ -245,6 +248,7 @@ async fn serve(request: Request) -> HttpResponse {
                 id,
                 &params,
                 wants_stream(&headers),
+                object_only,
             )
             .await
         }
@@ -507,19 +511,24 @@ async fn authenticate(
     Err(invalid_token(config, id, "The token is not recognized."))
 }
 
-/// The tools the caller may call.
+/// The tools the caller may call, each output schema as the request's
+/// revision allows.
 fn list_tools(
     endpoint: &EndpointContext,
     config: &AgentsConfig,
     caller: &ToolCaller,
     id: &Value,
+    object_only: bool,
 ) -> HttpResponse {
     let registry = match endpoint.router.tool_registry() {
         Ok(registry) => registry,
         Err(error) => return internal(id, &error),
     };
     let mut result = Map::new();
-    result.insert("tools".into(), Value::Array(tools::list(&registry, caller)));
+    result.insert(
+        "tools".into(),
+        Value::Array(tools::list(&registry, caller, object_only)),
+    );
     result.insert("ttlMs".into(), json!(0));
     result.insert("cacheScope".into(), json!("private"));
     protocol::respond(200, protocol::result(id, complete(config, result)))
@@ -527,6 +536,7 @@ fn list_tools(
 
 /// A `tools/call`: the access checks, the limit, then the call through the
 /// tool's route.
+#[allow(clippy::too_many_arguments)]
 async fn call_tool(
     endpoint: EndpointContext,
     config: Arc<AgentsConfig>,
@@ -535,6 +545,7 @@ async fn call_tool(
     id: Value,
     params: &Map<String, Value>,
     stream: bool,
+    object_only: bool,
 ) -> HttpResponse {
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return protocol::respond(
@@ -655,6 +666,7 @@ async fn call_tool(
         config,
         id,
         crate::routing::root::current(),
+        object_only,
     );
     // The call runs as the response body is polled, in both forms of the
     // answer. A client that closes the connection drops the body and the
@@ -691,6 +703,7 @@ async fn run_call(
     config: Arc<AgentsConfig>,
     id: Value,
     root: Arc<str>,
+    object_only: bool,
 ) -> Value {
     let Some(tool) = registry.get(&name) else {
         return protocol::error(
@@ -732,6 +745,11 @@ async fn run_call(
             None => tools::answer_result(&answer, config.max_result_bytes),
         },
         Err(failure) => tools::failure_result(&failure),
+    };
+    let result = if object_only {
+        tools::object_only(result)
+    } else {
+        result
     };
     let result = match result {
         Value::Object(result) => complete(&config, result),

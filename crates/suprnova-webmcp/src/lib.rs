@@ -131,6 +131,33 @@ pub use tool::{PageTool, ToolHandle};
 /// ```
 pub use suprnova_macros::webmcp_tool_input as tool_input;
 
+/// Gives a type nested in a page tool input, an enum field or a struct that
+/// is not an input of its own, its JSON Schema through this crate:
+/// `#[suprnova_webmcp::tool_schema]`.
+///
+/// It derives `JsonSchema` alone, through this crate's copy of `schemars`,
+/// so the front end needs no `schemars` of its own; the type's serde derives
+/// stay the application's. Any struct or enum.
+///
+/// ```
+/// #[suprnova_webmcp::tool_schema]
+/// #[derive(serde::Deserialize)]
+/// #[serde(rename_all = "snake_case")]
+/// enum Priority {
+///     Low,
+///     High,
+/// }
+///
+/// #[suprnova_webmcp::tool_input]
+/// struct FileTask {
+///     /// How urgent.
+///     priority: Priority,
+/// }
+/// # let schema = suprnova_webmcp::input_schema::<FileTask>();
+/// # assert_eq!(schema["$defs"]["Priority"]["enum"], serde_json::json!(["low", "high"]));
+/// ```
+pub use suprnova_macros::webmcp_tool_schema as tool_schema;
+
 /// What `#[tool_input]` expands to names, kept out of the documented
 /// surface.
 #[doc(hidden)]

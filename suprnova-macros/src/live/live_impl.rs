@@ -664,12 +664,14 @@ fn engine_tool_tokens(spec: &ToolSpec) -> TokenStream2 {
     let untrusted = spec.annotations.untrusted_content.unwrap_or(false);
     // WebMCP's consequential hint is what MCP calls destructive (AGENT-014).
     let consequential = spec.annotations.destructive.unwrap_or(false);
+    let debugging = spec.annotations.debugging.unwrap_or(false);
     let browser = spec.offered_to_browser();
     let headless = spec.headless;
     quote! {
         ::suprnova::live::__private::metadata::ActionToolMetadata::new(#name, #description)?
             #title
             .with_hints(#read_only, #untrusted, #consequential)
+            .with_debugging(#debugging)
             .for_browser(#browser)
             .headless(#headless)
     }

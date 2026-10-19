@@ -24,7 +24,7 @@ const MAX_SERVER_TOOLS = 64;
 const TOOL_NAME = /^[A-Za-z0-9_.-]{1,128}$/u;
 const PARAM_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/u;
 const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
-const HINTS = ["consequentialHint", "readOnlyHint", "untrustedContentHint"] as const;
+const HINTS = ["consequentialHint", "debugging", "readOnlyHint", "untrustedContentHint"] as const;
 /** How many invalid fields a validation result names; the rest are counted. */
 const MAX_REPORTED = 20;
 /** The longest field path a validation result shows, in characters. */
@@ -70,9 +70,13 @@ function plainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const own = Object.keys(value).sort();
-  return own.length === keys.length && [...keys].sort().every((key, index) => own[index] === key);
+/**
+ * Whether `value` has every key in `required`. Keys this reader does not
+ * know are ignored, so a later release can add one; a change an older
+ * reader must not ignore bumps `v`.
+ */
+function hasKeys(value: Record<string, unknown>, required: readonly string[]): boolean {
+  return required.every((key) => Object.prototype.hasOwnProperty.call(value, key));
 }
 
 function positiveInteger(value: unknown): value is number {
@@ -81,13 +85,16 @@ function positiveInteger(value: unknown): value is number {
 
 function pathPiece(value: unknown, first: boolean): ServerToolPathPiece {
   if (!plainObject(value)) return fail("path");
-  if (exactKeys(value, ["text"]) && typeof value["text"] === "string") {
+  const text = hasKeys(value, ["text"]);
+  if (text === hasKeys(value, ["param"])) return fail("path");
+  if (text) {
+    if (typeof value["text"] !== "string") return fail("path");
     if (first && !value["text"].startsWith("/")) return fail("path");
     return Object.freeze({ text: value["text"] });
   }
   if (
     !first &&
-    exactKeys(value, ["catchAll", "optional", "param"]) &&
+    hasKeys(value, ["catchAll", "optional", "param"]) &&
     typeof value["param"] === "string" &&
     PARAM_NAME.test(value["param"]) &&
     typeof value["optional"] === "boolean" &&
@@ -102,35 +109,28 @@ function pathPiece(value: unknown, first: boolean): ServerToolPathPiece {
   return fail("path");
 }
 
+/** The tool's hints: a missing one, or missing annotations, read as `false`. */
 function annotations(value: unknown): AgentToolAnnotations {
+  const hints = value === undefined ? {} : value;
   if (
-    !plainObject(value) ||
-    !exactKeys(value, HINTS) ||
-    !HINTS.every((hint) => typeof value[hint] === "boolean")
+    !plainObject(hints) ||
+    !HINTS.every((hint) => hints[hint] === undefined || typeof hints[hint] === "boolean")
   ) {
     return fail("annotations");
   }
   return Object.freeze({
-    readOnlyHint: value["readOnlyHint"] as boolean,
-    untrustedContentHint: value["untrustedContentHint"] as boolean,
-    consequentialHint: value["consequentialHint"] as boolean,
+    readOnlyHint: hints["readOnlyHint"] === true,
+    untrustedContentHint: hints["untrustedContentHint"] === true,
+    consequentialHint: hints["consequentialHint"] === true,
+    debugging: hints["debugging"] === true,
   });
 }
 
 function tool(value: unknown, names: Set<string>): ServerToolDefinition {
   if (!plainObject(value)) return fail("tool");
-  const allowed = new Set([
-    "annotations",
-    "description",
-    "inputSchema",
-    "method",
-    "name",
-    "path",
-    "title",
-  ]);
   const { name, title, description, inputSchema, method, path } = value;
   if (
-    Object.keys(value).some((key) => !allowed.has(key)) ||
+    !hasKeys(value, ["description", "inputSchema", "method", "name", "path"]) ||
     typeof name !== "string" ||
     !TOOL_NAME.test(name) ||
     names.has(name) ||
@@ -158,12 +158,16 @@ function tool(value: unknown, names: Set<string>): ServerToolDefinition {
 }
 
 /**
- * Read the element's payload, strictly: exactly `v`, `limits` and `tools`;
- * `v` is 1; both limits are positive whole numbers; 1 to 64 tools, each with
- * a unique name in the tool grammar, an optional non-blank title, a
- * non-blank description, an object input schema, the three boolean hints,
- * a method and a path of text and parameter pieces that starts with text.
- * Anything else is refused whole, so the page registers nothing it did not
+ * Read the element's payload: `v`, `limits` and `tools`; `v` is 1; both
+ * limits are positive whole numbers; 1 to 64 tools, each with a unique name
+ * in the tool grammar, an optional non-blank title, a non-blank description,
+ * an object input schema, boolean hints, a method and a path of text and
+ * parameter pieces that starts with text. A key this reader does not know is
+ * ignored at every level, so a later release can add one without breaking a
+ * page a RenderCache kept, and it never reaches a registration; a missing
+ * hint reads as `false`. A change an older reader must not ignore bumps `v`.
+ * Anything else, a known key of the wrong type or a missing required key
+ * among them, is refused whole, so the page registers nothing it did not
  * understand.
  */
 export function parseServerTools(text: string): ServerTools {
@@ -173,14 +177,13 @@ export function parseServerTools(text: string): ServerTools {
   } catch {
     return fail("json");
   }
-  if (!plainObject(parsed) || !exactKeys(parsed, ["limits", "tools", "v"]) || parsed["v"] !== 1) {
+  if (!plainObject(parsed) || !hasKeys(parsed, ["limits", "tools", "v"]) || parsed["v"] !== 1) {
     return fail("payload");
   }
   const limits = parsed["limits"];
   const tools = parsed["tools"];
   if (
     !plainObject(limits) ||
-    !exactKeys(limits, ["callTimeoutMs", "maxResultBytes"]) ||
     !positiveInteger(limits["maxResultBytes"]) ||
     !positiveInteger(limits["callTimeoutMs"]) ||
     !Array.isArray(tools) ||

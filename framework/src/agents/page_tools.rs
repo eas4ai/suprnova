@@ -436,6 +436,7 @@ fn definition(tool: &RegisteredTool) -> Value {
             "readOnlyHint": annotations.read_only() == Some(true),
             "untrustedContentHint": annotations.untrusted_content() == Some(true),
             "consequentialHint": annotations.destructive() == Some(true),
+            "debugging": annotations.debugging() == Some(true),
         }),
     );
     out.insert("method".into(), json!(tool.method().as_str()));

@@ -21,7 +21,12 @@ type ResultCase = (typeof cases.results)[number]
 
 const LIMITS = { maxResultBytes: 8_388_608, callTimeoutMs: 30_000 }
 const SCHEMA = { type: 'object' as const, properties: {} }
-const HINTS = { readOnlyHint: false, untrustedContentHint: false, consequentialHint: false }
+const HINTS = {
+  readOnlyHint: false,
+  untrustedContentHint: false,
+  consequentialHint: false,
+  debugging: false,
+}
 
 function serverTool(overrides: Partial<PageTool> = {}): PageTool {
   return {
@@ -146,7 +151,7 @@ const search = serverTool({
   description: 'Search the posts.',
   method: 'GET',
   path: [{ text: '/posts' }],
-  annotations: { readOnlyHint: true, untrustedContentHint: true, consequentialHint: false },
+  annotations: { readOnlyHint: true, untrustedContentHint: true, consequentialHint: false, debugging: true },
 })
 const create = serverTool({
   name: 'posts.create',
@@ -159,7 +164,7 @@ const destroy = serverTool({
   description: 'Delete a post.',
   method: 'DELETE',
   path: [{ text: '/posts/' }, { param: 'post', optional: false, catchAll: false }],
-  annotations: { readOnlyHint: false, untrustedContentHint: false, consequentialHint: true },
+  annotations: { readOnlyHint: false, untrustedContentHint: false, consequentialHint: true, debugging: false },
 })
 const help = serverTool({ name: 'help.search', description: 'Search the help.', path: [{ text: '/help' }] })
 
@@ -173,11 +178,13 @@ test('agent_014_page_tools_register_with_their_annotations', () => {
     readOnlyHint: true,
     untrustedContentHint: true,
     consequentialHint: false,
+    debugging: true,
   })
   expect(descriptor('posts.delete').annotations).toEqual({
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: true,
+    debugging: false,
   })
   expect(descriptor('posts.create').title).toBe('Create a post')
   expect(descriptor('posts.create').description).toBe('Create a draft post.')
@@ -220,12 +227,53 @@ test('agent_014_invalid_page_tools_register_nothing', () => {
   const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
   const router = fakeRouter()
   const stop = installPageTools(router)
-  const broken = { ...create, extra: true }
+  // A known key of the wrong type refuses the whole payload.
+  const broken = { ...create, description: 7 }
   router.navigate({ component: 'Posts/Index', agentTools: { v: 1, limits: LIMITS, tools: [search, broken] } })
   expect(context.names()).toEqual([])
+  const hint = { ...create, annotations: { ...HINTS, readOnlyHint: 'yes' } }
+  router.navigate({ component: 'Posts/Index', agentTools: { v: 1, limits: LIMITS, tools: [hint] } })
+  expect(context.names()).toEqual([])
+  const methodless = { name: 'posts.create', description: 'Create.', inputSchema: SCHEMA, path: [{ text: '/posts' }] }
+  router.navigate({ component: 'Posts/Index', agentTools: { v: 1, limits: LIMITS, tools: [methodless] } })
+  expect(context.names()).toEqual([])
+  // A version this reader does not know is a change it must not guess at.
   router.navigate({ component: 'Posts/Index', agentTools: { v: 2, limits: LIMITS, tools: [search] } })
   expect(context.names()).toEqual([])
   expect(error).toHaveBeenCalled()
+  stop()
+})
+
+test('agent_014_page_tools_ignore_keys_they_do_not_know', () => {
+  // A later release may add a key anywhere in the payload; an app scaffolded
+  // earlier still registers its tools, and only the keys it knows.
+  const router = fakeRouter()
+  const stop = installPageTools(router)
+  const later = {
+    ...create,
+    outputSchema: { type: 'object' },
+    annotations: { ...HINTS, futureHint: true },
+    path: [{ text: '/posts', future: 1 }],
+  }
+  router.navigate({
+    component: 'Posts/Index',
+    agentTools: { v: 1, limits: { ...LIMITS, retries: 3 }, tools: [later], later: true },
+  })
+  expect(context.names()).toEqual(['posts.create'])
+  const descriptor = context.descriptors.find((tool) => tool.name === 'posts.create') as ToolDefinition
+  expect(Object.keys(descriptor).sort()).toEqual(['annotations', 'description', 'execute', 'inputSchema', 'name', 'title'])
+  expect(descriptor.annotations).toEqual(HINTS)
+  stop()
+})
+
+test('agent_014_a_missing_hint_reads_as_false', () => {
+  const router = fakeRouter()
+  const stop = installPageTools(router)
+  const older = { ...create, annotations: { readOnlyHint: true, untrustedContentHint: false, consequentialHint: false } }
+  router.navigate({ component: 'Posts/Index', agentTools: { v: 1, limits: LIMITS, tools: [older] } })
+  expect(context.names()).toEqual(['posts.create'])
+  const descriptor = context.descriptors.find((tool) => tool.name === 'posts.create') as ToolDefinition
+  expect(descriptor.annotations).toEqual({ ...HINTS, readOnlyHint: true })
   stop()
 })
 
