@@ -22,7 +22,7 @@ use crate::plugin::{
     RequestContext, RouteDescriptor, WireResponse,
 };
 use crate::schema::AuthSchema;
-use crate::storage::{IssueToken, PresentedToken, TokenStore, UserStore};
+use crate::storage::{IssueToken, PresentedToken, TokenStore, UserStore, address_digest};
 use crate::{Error, Result};
 
 use super::{Gate, acquire, bad_request, body_string, generic_ok};
@@ -46,6 +46,10 @@ pub enum EmailVerificationOutcome {
     /// The token is live but another user's. It stays unused, for its
     /// owner.
     OtherUser,
+    /// The token is the user's and live, but was issued for an address the
+    /// user no longer holds, so it proves nothing about their address now.
+    /// Nothing is stamped.
+    AddressChanged,
     /// The token's lifetime ended before it was used.
     Expired,
     /// No such token, or it was already used.
@@ -90,16 +94,19 @@ impl EmailVerificationService {
     }
 
     /// Mint a verification token for `user_id` and return its plaintext,
-    /// for the host to put in the link it mails. The token is single-use
-    /// and lives [`EMAIL_VERIFICATION_TTL`].
-    pub async fn issue(&self, user_id: &str) -> Result<SecretString> {
+    /// for the host to put in the link it mails to `address`, the user's
+    /// address. The token is single-use, lives [`EMAIL_VERIFICATION_TTL`]
+    /// and is bound to `address`: [`Self::verify_presented`] refuses it once
+    /// the user's address is another.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::DependencyUnavailable`] when the token store cannot keep
+    /// the address ([`TokenStore::issue_bound`]).
+    pub async fn issue(&self, user_id: &str, address: &str) -> Result<SecretString> {
         let issued = self
             .tokens
-            .issue(IssueToken {
-                user_id: user_id.to_owned(),
-                purpose: EMAIL_VERIFICATION_PURPOSE.to_owned(),
-                ttl: EMAIL_VERIFICATION_TTL,
-            })
+            .issue_bound(token_request(user_id), address)
             .await?;
         Ok(issued.plaintext)
     }
@@ -115,7 +122,9 @@ impl EmailVerificationService {
                 message: "this service mails nothing: the host mails the link it issues".to_owned(),
             });
         };
-        let plaintext = self.issue(user_id).await?;
+        // Unbound, as this route has always issued: its `verify` checks the
+        // owner and not the address.
+        let plaintext = self.tokens.issue(token_request(user_id)).await?.plaintext;
         let link = links
             .url_for(
                 "verification.verify",
@@ -186,6 +195,20 @@ impl EmailVerificationService {
     /// `verify`'s: the token is single-use, it expires, and it proves the
     /// address only for the user it was minted for. A token for an address
     /// already verified is spent and stamps nothing.
+    ///
+    /// It also proves only the address it was issued for ([`Self::issue`]).
+    /// A token issued for an address the user no longer holds is refused
+    /// unspent, and a token bound to no address, which
+    /// [`Self::send_link`] issues for [`Self::verify`], is unknown here.
+    /// The stamp itself is conditional on the address
+    /// ([`UserStore::mark_email_verified_for`]), so an address that changes
+    /// between the check and the stamp is not verified either.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::DependencyUnavailable`] when the token store cannot report
+    /// a token's state ([`TokenStore::inspect`]) or the user store cannot
+    /// stamp on condition of the address; nothing is stamped then.
     pub async fn verify_presented(
         &self,
         presented_user_id: &str,
@@ -207,11 +230,15 @@ impl EmailVerificationService {
         if state.user_id.as_deref() != Some(presented_user_id) {
             return Ok(EmailVerificationOutcome::OtherUser);
         }
-        let already_verified = self
-            .users
-            .find_by_id(presented_user_id)
-            .await?
-            .is_some_and(|user| user.email_verified_at.is_some());
+        let Some(bound_address) = state.address_digest else {
+            return Ok(EmailVerificationOutcome::Unknown);
+        };
+        let Some(user) = self.users.find_by_id(presented_user_id).await? else {
+            return Ok(EmailVerificationOutcome::Unknown);
+        };
+        if address_digest(&user.email) != bound_address {
+            return Ok(EmailVerificationOutcome::AddressChanged);
+        }
         let consumed = match self
             .tokens
             .consume(PresentedToken::new(token), EMAIL_VERIFICATION_PURPOSE)
@@ -227,13 +254,29 @@ impl EmailVerificationService {
         if consumed.user_id.as_deref() != Some(presented_user_id) {
             return Ok(EmailVerificationOutcome::Unknown);
         }
-        if already_verified {
+        if user.email_verified_at.is_some() {
             return Ok(EmailVerificationOutcome::AlreadyVerified);
         }
-        self.users
-            .mark_email_verified(presented_user_id, Utc::now())
-            .await?;
+        if !self
+            .users
+            .mark_email_verified_for(presented_user_id, &user.email, Utc::now())
+            .await?
+        {
+            // The address changed after the read above. The token is spent,
+            // as a failed stamp spends it in `verify`.
+            return Ok(EmailVerificationOutcome::AddressChanged);
+        }
         Ok(EmailVerificationOutcome::Verified)
+    }
+}
+
+/// A verification token's request: the user's, for
+/// [`EMAIL_VERIFICATION_TTL`].
+fn token_request(user_id: &str) -> IssueToken {
+    IssueToken {
+        user_id: user_id.to_owned(),
+        purpose: EMAIL_VERIFICATION_PURPOSE.to_owned(),
+        ttl: EMAIL_VERIFICATION_TTL,
     }
 }
 

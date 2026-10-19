@@ -67,15 +67,30 @@ pub struct ConsumedToken {
 }
 
 /// What a token of one purpose is, read without consuming it: whose it is,
-/// and whether it was used or has expired.
+/// the address it was issued for, and whether it was used or has expired.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TokenState {
     /// Owning user identifier, if the binding stores one.
     pub user_id: Option<String>,
+    /// The [`address_digest`] of the address the token was issued for
+    /// ([`TokenStore::issue_bound`]); `None` for a token issued with none,
+    /// or by a binding that keeps none.
+    pub address_digest: Option<String>,
     /// Whether the token was consumed, or invalidated by a sibling's consume.
     pub used: bool,
     /// Whether the token's lifetime has ended.
     pub expired: bool,
+}
+
+/// The digest a token keeps of the address it was issued for: the SHA-256,
+/// in lowercase hex, of the address in lowercase.
+///
+/// A digest rather than the address, because the address is personal data
+/// and a token only has to tell whether an address is the one it was issued
+/// for. In lowercase, because the case of an address is not part of the
+/// mailbox it names.
+pub fn address_digest(address: &str) -> String {
+    digest(&address.to_lowercase())
 }
 
 /// Password-reset composite input.
@@ -140,6 +155,18 @@ pub trait TokenStore: Send + Sync {
         token: PresentedToken,
         purpose: &str,
     ) -> Result<ConsumedToken>;
+    /// Insert a digest, as [`Self::issue`] does, and keep with it the
+    /// [`address_digest`] of `address`, the address the token goes to. A
+    /// flow that must prove the token's owner still holds that address
+    /// reads it back through [`Self::inspect`].
+    ///
+    /// The default refuses, as does a store whose binding keeps no address
+    /// ([`TokenFields::write_address_digest`]): a token that must prove an
+    /// address is never stored without it.
+    async fn issue_bound(&self, input: IssueToken, address: &str) -> Result<IssuedToken> {
+        let _ = (input, address);
+        Err(address_binding_unavailable())
+    }
     /// The state of the token of `purpose` that `token` presents, read
     /// without consuming it; `None` when no token of that purpose has this
     /// value. A flow reads it to tell an expired token from an unknown one,
@@ -171,6 +198,13 @@ fn digest(value: &str) -> String {
     crate::storage::hex_lower(&hasher.finalize())
 }
 
+fn address_binding_unavailable() -> Error {
+    Error::DependencyUnavailable {
+        dependency: "token store".to_owned(),
+        message: "this token store does not keep the address a token was issued for".to_owned(),
+    }
+}
+
 fn invalid_id(field: &str) -> Error {
     Error::InvalidInput {
         field: field.to_owned(),
@@ -178,8 +212,7 @@ fn invalid_id(field: &str) -> Error {
     }
 }
 
-#[async_trait]
-impl<S> TokenStore for SeaOrmStorage<S>
+impl<S> SeaOrmStorage<S>
 where
     S: AuthSchema,
     S::Token: TokenFields,
@@ -189,7 +222,8 @@ where
         >,
     <S::Token as EntityBinding>::Column: ColumnTrait,
 {
-    async fn issue(&self, input: IssueToken) -> Result<IssuedToken> {
+    /// Insert one token row, bound to `address` when one is given.
+    async fn insert_token(&self, input: IssueToken, address: Option<&str>) -> Result<IssuedToken> {
         if input.user_id.is_empty() {
             return Err(invalid_id("user_id"));
         }
@@ -215,6 +249,11 @@ where
         S::Token::write_purpose(&mut model, &input.purpose);
         S::Token::write_digest(&mut model, &digest(&plaintext));
         S::Token::write_expires_at(&mut model, expires_at);
+        if let Some(address) = address
+            && !S::Token::write_address_digest(&mut model, &address_digest(address))
+        {
+            return Err(address_binding_unavailable());
+        }
         <S::Token as EntityBinding>::Entity::insert(model)
             .exec(self.database())
             .await
@@ -224,6 +263,29 @@ where
             token_id,
             expires_at,
         })
+    }
+}
+
+#[async_trait]
+impl<S> TokenStore for SeaOrmStorage<S>
+where
+    S: AuthSchema,
+    S::Token: TokenFields,
+    <S::Token as EntityBinding>::Entity: EntityTrait<
+            Model = <S::Token as EntityBinding>::Model,
+            ActiveModel = <S::Token as EntityBinding>::ActiveModel,
+        >,
+    <S::Token as EntityBinding>::Column: ColumnTrait,
+{
+    async fn issue(&self, input: IssueToken) -> Result<IssuedToken> {
+        self.insert_token(input, None).await
+    }
+
+    async fn issue_bound(&self, input: IssueToken, address: &str) -> Result<IssuedToken> {
+        if address.is_empty() {
+            return Err(invalid_id("address"));
+        }
+        self.insert_token(input, Some(address)).await
     }
 
     async fn check(&self, token: PresentedToken, purpose: &str) -> Result<bool> {
@@ -256,6 +318,7 @@ where
             .map_err(db_error)?;
         Ok(row.map(|row| TokenState {
             user_id: S::Token::read_user_id(&row),
+            address_digest: S::Token::read_address_digest(&row),
             used: S::Token::read_used_at(&row).is_some(),
             expired: S::Token::read_expires_at(&row) <= Utc::now(),
         }))

@@ -38,10 +38,12 @@ pub enum EmailVerificationIssue {
 
 /// The address to mail and the token the verification link carries.
 pub struct EmailVerificationLink {
-    /// The account's address, where the link goes.
+    /// The account's address, where the link goes. The token is bound to
+    /// it: it verifies the account only while the account holds this
+    /// address.
     pub email: String,
-    /// The single-use token. It belongs in the link alone: it proves the
-    /// mailbox to whoever holds it and signs in to the account.
+    /// The single-use token. It belongs in the link alone: whoever holds it
+    /// and is signed in to the account can verify the address with it.
     pub token: String,
 }
 
@@ -67,6 +69,10 @@ pub enum EmailVerificationOutcome {
     AlreadyVerified,
     /// The token is another account's. It stays unused, for its owner.
     OtherAccount,
+    /// The token is the signed-in user's, but was mailed to an address the
+    /// account no longer holds, so it proves nothing about the address it
+    /// holds now. Nothing is stamped: ask for a new link.
+    AddressChanged,
     /// The token expired before it was used.
     Expired,
     /// No such token, or it was already used.
@@ -117,7 +123,7 @@ impl EmailVerificationAuth {
 
     /// Present `token` for the signed-in user, by bearer token or by
     /// session, and verify their address when the token is theirs, unused
-    /// and unexpired.
+    /// and unexpired, and was mailed to the address the account holds now.
     ///
     /// A guest gets [`EmailVerificationOutcome::SignIn`] and the token stays
     /// unused, so the page can send them to sign in and back. Another
@@ -152,7 +158,7 @@ async fn issue_for_id(user_id: &str) -> Result<EmailVerificationIssue, Framework
     }
     check_auth_abuse(AuthAbuseRoute::EmailVerificationSend, &user.email).await?;
     let token = super::password_engine()?
-        .email_verification_issue(user_id)
+        .email_verification_issue(user_id, &user.email)
         .await
         .map_err(map_magnetar_email_verification_error)?;
     Ok(EmailVerificationIssue::Issued(EmailVerificationLink {

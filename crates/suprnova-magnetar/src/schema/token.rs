@@ -52,6 +52,23 @@ pub trait TokenFields: EntityBinding {
     fn write_digest(model: &mut Self::ActiveModel, value: &str);
     /// Set token expiry when constructing a new model.
     fn write_expires_at(model: &mut Self::ActiveModel, value: DateTime<Utc>);
+    /// Read the digest of the address the token was issued for
+    /// ([`address_digest`](crate::storage::address_digest)), or `None` when
+    /// the row has none or the binding keeps no such column.
+    fn read_address_digest(model: &Self::Model) -> Option<String> {
+        let _ = model;
+        None
+    }
+    /// Set the digest of the address the token is issued for, when
+    /// constructing a new model. Returns whether the binding keeps it. The
+    /// default keeps none and returns `false`, and
+    /// [`TokenStore::issue_bound`](crate::storage::TokenStore::issue_bound)
+    /// then refuses to issue, so a token that must prove an address is
+    /// never stored without it.
+    fn write_address_digest(model: &mut Self::ActiveModel, value: &str) -> bool {
+        let _ = (model, value);
+        false
+    }
 }
 
 /// Fields for an immutable audit/token-record row.

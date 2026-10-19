@@ -10,6 +10,16 @@
 //!
 //! Each test runs alone in its own process: it installs the process-wide
 //! Magnetar engine over a database of its own.
+//!
+//! The race of one link presented many times at once also runs on live
+//! engines, where each request holds a pool connection of its own. Those
+//! twins are ignored by default and share the database they are given, so
+//! every account has an address no other run used:
+//!
+//! ```bash
+//! PG_TEST_URL=postgres://... cargo test -p suprnova --test magnetar_integration -- --ignored _on_postgres
+//! MYSQL_TEST_URL=mysql://... cargo test -p suprnova --test magnetar_integration -- --ignored _on_mysql
+//! ```
 
 #![cfg(all(feature = "testing", feature = "database-sqlite"))]
 
@@ -32,8 +42,6 @@ const PASSWORD: &str = "correct-horse-battery";
 /// Install the default Magnetar engine over a fresh SQLite database, the
 /// framework session table and a rate limiter that counts; the database.
 async fn setup() -> DatabaseConnection {
-    Crypt::init(EncryptionKey::generate());
-    App::bind::<dyn RateLimiterDriver>(Arc::new(InMemoryRateLimiter::new()));
     let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
         "magnetar-email-verification-{}.sqlite",
         std::process::id()
@@ -45,10 +53,7 @@ async fn setup() -> DatabaseConnection {
     }
     let mut options = ConnectOptions::new(format!("sqlite://{}?mode=rwc", path.display()));
     options.max_connections(1).min_connections(1);
-    let connection = Database::connect(options).await.expect("connect SQLite");
-    init_magnetar(MagnetarConfig::from_sea_orm(connection.clone()))
-        .await
-        .expect("install the default Magnetar engine");
+    let connection = install(options).await;
     connection
         .execute_unprepared(
             "CREATE TABLE sessions (\
@@ -62,14 +67,38 @@ async fn setup() -> DatabaseConnection {
         )
         .await
         .expect("the sessions table");
+    connection
+}
+
+/// Install the default Magnetar engine over the database `options` open,
+/// with a rate limiter that counts; the connection. Magnetar creates or
+/// upgrades its own tables, so a live database shared with other tests is
+/// fine: every account here has an address of its own.
+async fn install(options: ConnectOptions) -> DatabaseConnection {
+    Crypt::init(EncryptionKey::generate());
+    App::bind::<dyn RateLimiterDriver>(Arc::new(InMemoryRateLimiter::new()));
+    let connection = Database::connect(options).await.expect("connect");
+    init_magnetar(MagnetarConfig::from_sea_orm(connection.clone()))
+        .await
+        .expect("install the default Magnetar engine");
     App::singleton(DbConnection::from_raw(connection.clone()));
     connection
+}
+
+/// An address no other run has used, so repeated runs against one live
+/// database never meet an account of an earlier run.
+fn unique(label: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_nanos();
+    format!("{label}-{}-{nanos}@example.test", std::process::id())
 }
 
 /// Register `label`'s account and sign it in through the JSON-style
 /// password sign-in: the account and its bearer token.
 async fn account(label: &str) -> (User, String) {
-    let email = format!("{label}-{}@example.test", std::process::id());
+    let email = unique(label);
     let user = Auth::password()
         .register(&email, PASSWORD)
         .await
@@ -94,6 +123,7 @@ fn outcome_name(outcome: &EmailVerificationOutcome) -> &'static str {
         EmailVerificationOutcome::Verified => "verified",
         EmailVerificationOutcome::AlreadyVerified => "already_verified",
         EmailVerificationOutcome::OtherAccount => "other_account",
+        EmailVerificationOutcome::AddressChanged => "address_changed",
         EmailVerificationOutcome::Expired => "expired",
         EmailVerificationOutcome::Unknown => "unknown",
         EmailVerificationOutcome::SignIn => "sign_in",
@@ -150,6 +180,13 @@ fn client() -> TestClient {
 /// A client that sends `token` as its bearer token.
 fn bearer(token: &str) -> TestClient {
     client().with_header("Authorization", format!("Bearer {token}"))
+}
+
+/// A client of a JSON API that sends `token` as its bearer token. The
+/// session middleware records no previous page for its requests, so it
+/// needs no session table: the live-database tests create none.
+fn api_client(token: &str) -> TestClient {
+    bearer(token).with_header("Accept", "application/json")
 }
 
 /// The JSON answer of `response`, which must be a 200.
@@ -417,7 +454,7 @@ async fn email_verification_for_a_new_account_needs_no_sign_in() {
         return;
     }
     setup().await;
-    let email = format!("new-{}@example.test", std::process::id());
+    let email = unique("new");
     let user = Auth::password()
         .register(&email, PASSWORD)
         .await
@@ -458,4 +495,254 @@ async fn email_verification_issuing_is_limited_per_address() {
     }
     let refused = client.get("/issue").send().await;
     assert_eq!(refused.status(), 429, "{}", refused.body_text());
+}
+
+/// One column of the account's newest email-verification token, as text.
+async fn token_column(db: &DatabaseConnection, user: &User, column: &str) -> Option<String> {
+    db.query_one_raw(Statement::from_string(
+        db.get_database_backend(),
+        format!(
+            "SELECT {column} FROM auth_tokens WHERE user_id = {} ORDER BY id DESC LIMIT 1",
+            user.id
+        ),
+    ))
+    .await
+    .expect("read the token")
+    .expect("the token")
+    .try_get_by_index::<Option<String>>(0)
+    .expect("a text column")
+}
+
+/// A link mailed to an address proves that address. When the account's
+/// address changes after the link went out, the link no longer proves the
+/// address the account holds, so it verifies nothing.
+#[tokio::test]
+async fn email_verification_refuses_a_token_after_the_address_changed() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "email_verification_refuses_a_token_after_the_address_changed",
+    )
+    .await
+    {
+        return;
+    }
+    let db = setup().await;
+    let (user, token) = account("moved").await;
+    let client = bearer(&token);
+    let link = issue(&client).await;
+    let moved = unique("moved-elsewhere");
+    db.execute_unprepared(&format!(
+        "UPDATE app_users SET email = '{moved}' WHERE id = {}",
+        user.id
+    ))
+    .await
+    .expect("change the address");
+    assert_eq!(verify(&client, &link).await, "address_changed");
+    assert!(
+        user_column(&db, &user, "email_verified_at").await.is_none(),
+        "nothing is stamped"
+    );
+    // A link for the address the account holds now verifies it.
+    let fresh = issue(&client).await;
+    assert_eq!(verify(&client, &fresh).await, "verified");
+    assert!(user_column(&db, &user, "email_verified_at").await.is_some());
+}
+
+/// Verifying with one link spends every other live link of the account,
+/// so an older mail cannot be used later.
+#[tokio::test]
+async fn email_verification_with_one_link_voids_the_others() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "email_verification_with_one_link_voids_the_others",
+    )
+    .await
+    {
+        return;
+    }
+    let db = setup().await;
+    let (user, token) = account("siblings").await;
+    let client = bearer(&token);
+    let first = issue(&client).await;
+    let second = issue(&client).await;
+    assert_eq!(verify(&client, &second).await, "verified");
+    assert_eq!(verify(&client, &first).await, "unknown");
+    let unused: i64 = db
+        .query_one_raw(Statement::from_string(
+            db.get_database_backend(),
+            format!(
+                "SELECT COUNT(*) FROM auth_tokens WHERE user_id = {} AND used_at IS NULL",
+                user.id
+            ),
+        ))
+        .await
+        .expect("count")
+        .expect("a row")
+        .try_get_by_index(0)
+        .expect("a number");
+    assert_eq!(unused, 0, "no live link is left");
+}
+
+/// A link for an address that was verified in the meantime is spent and
+/// answers `AlreadyVerified`; the first verification time stays.
+#[tokio::test]
+async fn email_verification_of_a_verified_address_keeps_its_first_time() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "email_verification_of_a_verified_address_keeps_its_first_time",
+    )
+    .await
+    {
+        return;
+    }
+    let db = setup().await;
+    let (user, token) = account("verified-before").await;
+    let client = bearer(&token);
+    let link = issue(&client).await;
+    db.execute_unprepared(&format!(
+        "UPDATE app_users SET email_verified_at = '2020-01-02T03:04:05+00:00' WHERE id = {}",
+        user.id
+    ))
+    .await
+    .expect("verify the address another way");
+    let first_time = user_column(&db, &user, "email_verified_at").await;
+    assert_eq!(verify(&client, &link).await, "already_verified");
+    assert_eq!(
+        user_column(&db, &user, "email_verified_at").await,
+        first_time
+    );
+    assert_eq!(verify(&client, &link).await, "unknown", "the link is spent");
+}
+
+/// A token minted for another purpose, such as a password reset, verifies
+/// nothing and is left unused.
+#[tokio::test]
+async fn email_verification_refuses_a_token_of_another_purpose() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "email_verification_refuses_a_token_of_another_purpose",
+    )
+    .await
+    {
+        return;
+    }
+    let db = setup().await;
+    let (user, token) = account("purpose").await;
+    let client = bearer(&token);
+    let link = issue(&client).await;
+    db.execute_unprepared(&format!(
+        "UPDATE auth_tokens SET purpose = 'password-reset' \
+         WHERE purpose = 'email-verification' AND user_id = {}",
+        user.id
+    ))
+    .await
+    .expect("make the token a reset token");
+    assert_eq!(verify(&client, &link).await, "unknown");
+    assert!(user_column(&db, &user, "email_verified_at").await.is_none());
+    assert!(
+        token_column(&db, &user, "used_at").await.is_none(),
+        "the other purpose's token is not spent"
+    );
+}
+
+/// Present one link from `count` requests at once: each outcome's name.
+async fn verify_at_once(client: &TestClient, token: &str, count: usize) -> Vec<String> {
+    let path = format!(
+        "/verify?token={}",
+        url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>()
+    );
+    let answers =
+        futures::future::join_all((0..count).map(|_| client.get(path.as_str()).send())).await;
+    answers
+        .iter()
+        .map(|response| {
+            answer(response)["outcome"]
+                .as_str()
+                .expect("an outcome")
+                .to_owned()
+        })
+        .collect()
+}
+
+/// Eight requests present one link at once: one verifies and the others
+/// find it spent. The address then reads as verified.
+async fn concurrent_verifies_spend_the_token_once() {
+    let (_, token) = account("race").await;
+    let client = api_client(&token);
+    let issued = answer(&client.get("/issue").send().await);
+    assert_eq!(issued["outcome"], "issued", "{issued}");
+    let link = issued["token"].as_str().expect("a token").to_owned();
+    let outcomes = verify_at_once(&client, &link, 8).await;
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| *outcome == "verified")
+            .count(),
+        1,
+        "{outcomes:?}"
+    );
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| outcome == "verified" || outcome == "unknown"),
+        "{outcomes:?}"
+    );
+    assert_eq!(
+        answer(&client.get("/issue").send().await)["outcome"],
+        "already_verified"
+    );
+}
+
+#[tokio::test]
+async fn email_verification_concurrent_verifies_spend_the_token_once() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "email_verification_concurrent_verifies_spend_the_token_once",
+    )
+    .await
+    {
+        return;
+    }
+    setup().await;
+    concurrent_verifies_spend_the_token_once().await;
+}
+
+/// The race on a live engine, where each request takes a pool connection
+/// of its own and the single spend rests on the database's conditional
+/// update.
+async fn concurrent_verifies_on(url: &str) {
+    let mut options = ConnectOptions::new(url.to_owned());
+    options.max_connections(8).min_connections(1);
+    install(options).await;
+    concurrent_verifies_spend_the_token_once().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn email_verification_concurrent_verifies_spend_the_token_once_on_postgres() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "email_verification_concurrent_verifies_spend_the_token_once_on_postgres",
+    )
+    .await
+    {
+        return;
+    }
+    let url = std::env::var("PG_TEST_URL").expect("set PG_TEST_URL");
+    concurrent_verifies_on(&url).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable MariaDB/MySQL at MYSQL_TEST_URL"]
+async fn email_verification_concurrent_verifies_spend_the_token_once_on_mysql() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "email_verification_concurrent_verifies_spend_the_token_once_on_mysql",
+    )
+    .await
+    {
+        return;
+    }
+    let url = std::env::var("MYSQL_TEST_URL").expect("set MYSQL_TEST_URL");
+    concurrent_verifies_on(&url).await;
 }

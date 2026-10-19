@@ -1218,14 +1218,15 @@ where
         }
     }
 
-    /// Mint one single-use email-verification token for `user_id`. The
-    /// returned plaintext is for app-owned delivery only.
-    pub async fn email_verification_issue(&self, user_id: &str) -> Result<String> {
+    /// Mint one single-use email-verification token for `user_id`, bound
+    /// to `email`, the address the link goes to. The returned plaintext is
+    /// for app-owned delivery only.
+    pub async fn email_verification_issue(&self, user_id: &str, email: &str) -> Result<String> {
         use secrecy::ExposeSecret;
 
         Ok(self
             .email_verification
-            .issue(user_id)
+            .issue(user_id, email)
             .await?
             .expose_secret()
             .to_owned())
@@ -1251,6 +1252,9 @@ where
                 }
                 MagnetarEmailVerificationOutcome::OtherUser => {
                     EmailVerificationOutcome::OtherAccount
+                }
+                MagnetarEmailVerificationOutcome::AddressChanged => {
+                    EmailVerificationOutcome::AddressChanged
                 }
                 MagnetarEmailVerificationOutcome::Expired => EmailVerificationOutcome::Expired,
                 MagnetarEmailVerificationOutcome::Unknown => EmailVerificationOutcome::Unknown,
@@ -1632,12 +1636,14 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
         metadata: magnetar::sessions::SessionMetadata,
     ) -> Result<HostSignInDecision>;
     /// Mint a single-use email-verification token for `user_id`, for
-    /// app-owned delivery (`Auth::email_verification`).
+    /// app-owned delivery (`Auth::email_verification`) to `email`, the
+    /// user's address. The token must prove only that address: verifying
+    /// it must fail once the user's address is another.
     ///
     /// The default refuses, which keeps existing custom engines
     /// source-compatible.
-    async fn email_verification_issue(&self, user_id: &str) -> Result<String> {
-        let _ = user_id;
+    async fn email_verification_issue(&self, user_id: &str, email: &str) -> Result<String> {
+        let _ = (user_id, email);
         Err(Error::DependencyUnavailable {
             dependency: "Magnetar password authentication engine".to_owned(),
             message: "email verification is unavailable".to_owned(),
@@ -1645,9 +1651,10 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
     }
     /// Present an email-verification token for `user_id`, the signed-in
     /// user, and stamp the address verified when the token is theirs and
-    /// live, single-use and unexpired. It must change no credential and
-    /// issue no session, and must refuse another user's live token without
-    /// spending it.
+    /// live, single-use and unexpired, and the user still holds the address
+    /// it was issued for. It must change no credential and issue no
+    /// session, and must refuse another user's live token without spending
+    /// it.
     ///
     /// The default refuses, which keeps existing custom engines
     /// source-compatible.
@@ -2158,8 +2165,8 @@ where
         MagnetarHostEngine::magic_link_consume(self, token, metadata).await
     }
 
-    async fn email_verification_issue(&self, user_id: &str) -> Result<String> {
-        MagnetarHostEngine::email_verification_issue(self, user_id).await
+    async fn email_verification_issue(&self, user_id: &str, email: &str) -> Result<String> {
+        MagnetarHostEngine::email_verification_issue(self, user_id, email).await
     }
 
     async fn email_verification_verify(
