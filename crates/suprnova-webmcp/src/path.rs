@@ -17,12 +17,12 @@
 //! steps of a path, and are encoded as the dispatcher encodes them.
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-use serde::Deserialize;
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
 /// One piece of a tool's path.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone)]
 pub(crate) enum Piece {
     /// Literal text.
     Text(Text),
@@ -30,17 +30,63 @@ pub(crate) enum Piece {
     Param(Param),
 }
 
+/// A piece as the page writes it, an object: `{text}` or
+/// `{param, optional, catchAll}`.
+/// A key this reader does not know is ignored, so a later release can add
+/// one without breaking a front end compiled earlier; a change an older
+/// reader must not ignore bumps the payload's `v`. A known key of the wrong
+/// type, a piece that is both or neither, and a parameter without its two
+/// flags are refused.
+impl<'de> Deserialize<'de> for Piece {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Raw {
+            #[serde(default, deserialize_with = "present")]
+            text: Option<String>,
+            #[serde(default, deserialize_with = "present")]
+            param: Option<String>,
+            #[serde(default, deserialize_with = "present")]
+            optional: Option<bool>,
+            #[serde(default, deserialize_with = "present")]
+            catch_all: Option<bool>,
+        }
+        let raw: Raw = crate::server::object(deserializer)?;
+        match (raw.text, raw.param) {
+            (Some(text), None) => Ok(Self::Text(Text { text })),
+            (None, Some(param)) => match (raw.optional, raw.catch_all) {
+                (Some(optional), Some(catch_all)) => Ok(Self::Param(Param {
+                    param,
+                    optional,
+                    catch_all,
+                })),
+                _ => Err(D::Error::custom(
+                    "a parameter piece needs `optional` and `catchAll`",
+                )),
+            },
+            _ => Err(D::Error::custom(
+                "a path piece is either text or a parameter",
+            )),
+        }
+    }
+}
+
+/// A key that is present, so `null` is the wrong type rather than missing.
+fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
+}
+
 /// Literal text of a path.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub(crate) struct Text {
     /// The text, already in URL form.
     pub(crate) text: String,
 }
 
 /// A parameter of a path.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub(crate) struct Param {
     /// The argument that fills it.
     pub(crate) param: String,

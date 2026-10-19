@@ -278,17 +278,21 @@ Acceptance criteria:
   tool name, which allows neither `:` nor a second `.`. `LiveMount` refuses
   such a key when it is declared, root assembly refuses it at render, and
   the runtime refuses it in the attribute.
-- `data-suprnova-live-tools` is a known root attribute. The runtime accepts
-  it only with exactly the keys `v`, `fields`, `integers` and `tools`; `v` is
-  1; `fields` holds at most 512 unique field names; `integers` holds unique
-  names each also in `fields`; `tools` holds 1 to 64 tools of
-  exactly the keys above, each with a unique name of 1 to 128 ASCII letters,
-  digits, `_`, `-` and `.` that ends in a `.` and the island's document key
-  and is longer than it, an action identity, a non-blank description, an
-  optional non-blank title, an object input schema, and annotations of
-  exactly the four boolean hints: `readOnlyHint`, `untrustedContentHint`,
-  `consequentialHint` and `debugging`. Anything else marks the island
-  invalid.
+- `data-suprnova-live-tools` is a known root attribute. The runtime reads
+  the keys `v`, `fields`, `integers` and `tools`; `v` is 1; `fields` holds at
+  most 512 unique field names; `integers` holds unique names each also in
+  `fields`; `tools` holds 1 to 64 tools, each with a unique name of 1 to 128
+  ASCII letters, digits, `_`, `-` and `.` that ends in a `.` and the island's
+  document key and is longer than it, an action identity, a non-blank
+  description, an optional non-blank title, an object input schema, and
+  annotations of the four boolean hints: `readOnlyHint`,
+  `untrustedContentHint`, `consequentialHint` and `debugging`. It ignores a
+  key it does not know at every level, so a root a later release rendered,
+  or one a RenderCache kept from an earlier deploy, still registers its
+  tools, and it never passes such a key to WebMCP. A missing hint, or
+  missing annotations, read as `false`. A change an older runtime must not
+  ignore bumps `v`. A known key of the wrong type, a missing required key or
+  a `v` other than 1 marks the island invalid.
 - A page offers a tool only where the tool's checks run. A router installs
   the Live tool gate, which checks the caller of every request to a Live
   tool's action and counts each tool call against a budget (spec 07),
@@ -380,15 +384,21 @@ Acceptance criteria:
 
 - The runtime reads the element once at start, only as a direct child of
   `<head>` with that exact `id` and `type`, so markup in the body cannot pose
-  as it. It accepts only exactly the keys `v`, `limits` and `tools`; `v` is
-  1; both limits are positive whole numbers; `tools` holds 1 to 64 tools,
-  each with a unique name in the tool grammar, an optional non-blank title,
-  a non-blank description, an object input schema, exactly the four boolean
-  hints, a method of `GET`, `POST`, `PUT`, `PATCH` or `DELETE`, and a path of
-  `{text}` and `{param, optional, catchAll}` pieces starting with text. An
-  element it does not accept registers nothing and records
-  `agent_tool_rejected` at warning severity in the discovery phase with the
-  `invalid_shape` detail.
+  as it. It reads the keys `v`, `limits` and `tools`; `v` is 1; both limits
+  are positive whole numbers; `tools` holds 1 to 64 tools, each with a
+  unique name in the tool grammar, an optional non-blank title, a non-blank
+  description, an object input schema, the four boolean hints, a method of
+  `GET`, `POST`, `PUT`, `PATCH` or `DELETE`, and a path of `{text}` and
+  `{param, optional, catchAll}` pieces starting with text. It ignores a key
+  it does not know in the payload, the limits, a tool, its annotations or a
+  path piece, so a page a later release rendered, or one a RenderCache kept
+  from an earlier deploy, still registers its tools, and it never passes
+  such a key to WebMCP. A missing hint, or missing annotations, read as
+  `false`. A change an older runtime must not ignore bumps `v`. An element
+  with a known key of the wrong type, a missing required key, a piece that
+  is both text and a parameter or neither, or a `v` other than 1 registers
+  nothing and records `agent_tool_rejected` at warning severity in the
+  discovery phase with the `invalid_shape` detail.
 - The page's server tools are one more entry of the runtime's WebMCP host:
   they register on start, leave on suspend and register again on resume,
   leave on dispose, and a navigation unloads them with the document. A

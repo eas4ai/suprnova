@@ -196,17 +196,9 @@ describe("the server tools element", () => {
   });
 
   it.each([
-    [
-      "an extra key",
-      { v: 1, limits: { maxResultBytes: 1, callTimeoutMs: 1 }, tools: [TOOL], x: 1 },
-    ],
     ["another version", { v: 2, limits: { maxResultBytes: 1, callTimeoutMs: 1 }, tools: [TOOL] }],
     ["no tool", { v: 1, limits: { maxResultBytes: 1, callTimeoutMs: 1 }, tools: [] }],
     ["a zero bound", { v: 1, limits: { maxResultBytes: 0, callTimeoutMs: 1 }, tools: [TOOL] }],
-    [
-      "a tool with an extra key",
-      { v: 1, limits: { maxResultBytes: 1, callTimeoutMs: 1 }, tools: [{ ...TOOL, x: 1 }] },
-    ],
     [
       "a name outside the grammar",
       { v: 1, limits: { maxResultBytes: 1, callTimeoutMs: 1 }, tools: [{ ...TOOL, name: "a b" }] },
@@ -228,28 +220,50 @@ describe("the server tools element", () => {
       { v: 1, limits: { maxResultBytes: 1, callTimeoutMs: 1 }, tools: [{ ...TOOL, title: null }] },
     ],
     [
-      "a missing hint",
+      "a description that is not text",
       {
         v: 1,
         limits: { maxResultBytes: 1, callTimeoutMs: 1 },
-        tools: [{ ...TOOL, annotations: { readOnlyHint: true, untrustedContentHint: false } }],
+        tools: [{ ...TOOL, description: 7 }],
       },
     ],
     [
-      "the three hints without debugging",
+      "a hint that is not a boolean",
+      {
+        v: 1,
+        limits: { maxResultBytes: 1, callTimeoutMs: 1 },
+        tools: [{ ...TOOL, annotations: { ...TOOL.annotations, readOnlyHint: "yes" } }],
+      },
+    ],
+    [
+      "annotations that are not an object",
+      {
+        v: 1,
+        limits: { maxResultBytes: 1, callTimeoutMs: 1 },
+        tools: [{ ...TOOL, annotations: [] }],
+      },
+    ],
+    [
+      "a limit that is not a number",
+      { v: 1, limits: { maxResultBytes: "1024", callTimeoutMs: 1 }, tools: [TOOL] },
+    ],
+    ["a missing limit", { v: 1, limits: { callTimeoutMs: 1 }, tools: [TOOL] }],
+    [
+      "a tool without a method",
       {
         v: 1,
         limits: { maxResultBytes: 1, callTimeoutMs: 1 },
         tools: [
-          {
-            ...TOOL,
-            annotations: {
-              readOnlyHint: false,
-              untrustedContentHint: false,
-              consequentialHint: false,
-            },
-          },
+          { name: TOOL.name, description: TOOL.description, inputSchema: {}, path: TOOL.path },
         ],
+      },
+    ],
+    [
+      "a path piece of text that is not text",
+      {
+        v: 1,
+        limits: { maxResultBytes: 1, callTimeoutMs: 1 },
+        tools: [{ ...TOOL, path: [{ text: 5 }] }],
       },
     ],
     [
@@ -293,6 +307,49 @@ describe("the server tools element", () => {
 
   it("refuses text that is not JSON", () => {
     expect(() => parseServerTools("{")).toThrow(ServerToolsError);
+  });
+
+  it("ignores keys it does not know, at every level", () => {
+    // A later release may add a key anywhere in the element; an app's page
+    // still registers its tools, and only the keys this runtime knows.
+    const parsed = parseServerTools(
+      JSON.stringify({
+        v: 1,
+        limits: { maxResultBytes: 1024, callTimeoutMs: 30_000, retries: 3 },
+        tools: [
+          {
+            ...TOOL,
+            outputSchema: { type: "object" },
+            annotations: { ...TOOL.annotations, futureHint: true },
+            path: [{ text: "/posts", future: 1 }],
+          },
+        ],
+        later: true,
+      }),
+    );
+    expect(parsed.limits).toEqual({ maxResultBytes: 1024, callTimeoutMs: 30_000 });
+    expect(parsed.tools).toEqual([TOOL]);
+  });
+
+  it("reads a missing hint as false", () => {
+    const parsed = parseServerTools(
+      payload([
+        {
+          ...TOOL,
+          annotations: {
+            readOnlyHint: true,
+            untrustedContentHint: false,
+            consequentialHint: false,
+          },
+        },
+      ]),
+    );
+    expect(parsed.tools[0]?.annotations).toEqual({
+      readOnlyHint: true,
+      untrustedContentHint: false,
+      consequentialHint: false,
+      debugging: false,
+    });
   });
 });
 
@@ -689,6 +746,40 @@ afterEach(() => {
 });
 
 describe("the runtime's server tools", () => {
+  it("registers a tool from another release with only the keys it knows", () => {
+    const { context, runtime } = page(
+      JSON.stringify({
+        v: 1,
+        limits: { maxResultBytes: 1024, callTimeoutMs: 30_000, retries: 3 },
+        tools: [
+          {
+            ...TOOL,
+            outputSchema: { type: "object" },
+            annotations: { readOnlyHint: false, untrustedContentHint: false, futureHint: true },
+          },
+        ],
+        later: true,
+      }),
+    );
+    expect(context.live()).toEqual(["posts.create"]);
+    const registered = context.registered.find((entry) => entry.tool.name === "posts.create");
+    expect(Object.keys(registered?.tool ?? {}).sort()).toEqual([
+      "annotations",
+      "description",
+      "execute",
+      "inputSchema",
+      "name",
+      "title",
+    ]);
+    expect(registered?.tool.annotations).toEqual({
+      readOnlyHint: false,
+      untrustedContentHint: false,
+      consequentialHint: false,
+      debugging: false,
+    });
+    runtime.dispose();
+  });
+
   it("registers the element's tools, and removes them on suspend and dispose", () => {
     const { context, runtime } = page(payload());
     expect(context.live()).toEqual(["notes.show", "posts.create"]);

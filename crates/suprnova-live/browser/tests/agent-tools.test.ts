@@ -93,23 +93,7 @@ describe("the island root's tool contract", () => {
     // Shapes and hints outside the contract.
     invalid(contract([{ ...TOOL, description: "  " }]));
     invalid(contract([{ ...TOOL, inputSchema: [] }]));
-    invalid(contract([{ ...TOOL, annotations: { readOnlyHint: true } }]));
-    invalid(contract([{ ...TOOL, annotations: { ...TOOL.annotations, destructiveHint: true } }]));
-    // The three hints before WebMCP added `debugging`.
-    invalid(
-      contract([
-        {
-          ...TOOL,
-          annotations: {
-            readOnlyHint: false,
-            untrustedContentHint: false,
-            consequentialHint: true,
-          },
-        },
-      ]),
-    );
     invalid(contract([{ ...TOOL, annotations: { ...TOOL.annotations, debugging: "yes" } }]));
-    invalid(contract([{ ...TOOL, extra: true }]));
     invalid(contract([TOOL, TOOL]));
     invalid(contract([]));
     invalid(
@@ -143,6 +127,100 @@ class FakeModelContext implements ModelContextLike {
 }
 
 const DEFINITION = defined(parseAgentTools(contract(), "main").tools[0]);
+
+describe("a contract from another release", () => {
+  it("agent_012 ignores keys it does not know, at every level, and registers only what it knows", () => {
+    // A later release may add a key anywhere; an island it rendered, or one
+    // RenderCache kept from it, still registers its tools here.
+    const parsed = parseAgentTools(
+      JSON.stringify({
+        v: 1,
+        fields: ["count"],
+        integers: ["count"],
+        tools: [
+          {
+            ...TOOL,
+            outputSchema: { type: "object" },
+            annotations: { ...TOOL.annotations, futureHint: true },
+          },
+        ],
+        later: true,
+      }),
+      "main",
+    );
+    expect(parsed.tools[0]).toEqual(TOOL);
+    const context = new FakeModelContext();
+    registerAgentTools(
+      context,
+      parsed.tools,
+      () => Promise.resolve(agentToolError("unused")),
+      () => {
+        throw new Error("no refusal expected");
+      },
+    );
+    const registered = context.registered[0]?.tool;
+    expect(Object.keys(registered ?? {}).sort()).toEqual([
+      "annotations",
+      "description",
+      "execute",
+      "inputSchema",
+      "name",
+      "title",
+    ]);
+    expect(registered?.annotations).toEqual(TOOL.annotations);
+  });
+
+  it("agent_012 reads a missing hint as false", () => {
+    const three = parseAgentTools(
+      contract([
+        {
+          ...TOOL,
+          annotations: { readOnlyHint: true, untrustedContentHint: false, consequentialHint: true },
+        },
+      ]),
+      "main",
+    );
+    expect(three.tools[0]?.annotations).toEqual({
+      readOnlyHint: true,
+      untrustedContentHint: false,
+      consequentialHint: true,
+      debugging: false,
+    });
+    const bare = {
+      action: TOOL.action,
+      name: TOOL.name,
+      title: TOOL.title,
+      description: TOOL.description,
+      inputSchema: TOOL.inputSchema,
+    };
+    const none = parseAgentTools(contract([bare]), "main");
+    expect(none.tools[0]?.annotations).toEqual({
+      readOnlyHint: false,
+      untrustedContentHint: false,
+      consequentialHint: false,
+      debugging: false,
+    });
+  });
+
+  it("agent_012 still refuses a known key of the wrong type, a missing one, or another version", () => {
+    invalid(contract([{ ...TOOL, description: 7 }]));
+    invalid(contract([{ ...TOOL, annotations: { ...TOOL.annotations, readOnlyHint: "yes" } }]));
+    invalid(contract([{ ...TOOL, annotations: [] }]));
+    invalid(contract([{ ...TOOL, inputSchema: "object" }]));
+    invalid(
+      contract([
+        {
+          name: TOOL.name,
+          description: TOOL.description,
+          inputSchema: TOOL.inputSchema,
+          annotations: TOOL.annotations,
+        },
+      ]),
+    );
+    invalid(JSON.stringify({ v: 1, fields: "count", integers: [], tools: [TOOL] }));
+    invalid(JSON.stringify({ v: 2, fields: ["count"], integers: [], tools: [TOOL] }));
+  });
+});
 
 describe("WebMCP registration", () => {
   it("agent_012 finds the model context only where the browser exposes registerTool", () => {

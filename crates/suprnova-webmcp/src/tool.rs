@@ -220,9 +220,11 @@ impl fmt::Debug for ToolHandle {
 }
 
 /// The four WebMCP hints, always all sent, so an agent never falls back
-/// on a default the marking did not choose.
+/// on a default the marking did not choose. Read from the page, a missing
+/// hint is `false` and a hint this reader does not know is ignored, so a
+/// later release can add one.
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub(crate) struct Annotations {
     pub(crate) read_only_hint: bool,
     pub(crate) untrusted_content_hint: bool,
