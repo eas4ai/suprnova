@@ -609,3 +609,29 @@ test(`agent_017_${kit}_form_tool_cannot_approve`, async ({ page, request, baseUR
     await client.close();
   }
 });
+
+test(`agent_017_${kit}_notes_after_a_claim_keep_their_form_errors`, async ({ page, request }) => {
+  const email = await signUp(page);
+  await verifyMe(page);
+  const registration = await serviceAuth(request, email);
+  await page.goto(registration.claim.verification_uri);
+  await page.locator('#user_code').fill(registration.claim.user_code);
+  await page.getByRole('button', { name: 'Allow', exact: true }).click();
+  await expect(page).toHaveURL(/\/connected-agents$/);
+
+  // The document came from the claim page, which sends no referrer, so the
+  // notes form posts with none: a failed rule must still return to it, not
+  // to the last script the page loaded.
+  await page.getByRole('link', { name: 'Notes', exact: true }).click();
+  await expect(page).toHaveURL(/\/notes$/);
+  await page.locator('#title').fill('   ');
+  const posted = page.waitForResponse(
+    (response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/notes',
+  );
+  await page.getByRole('button', { name: 'Save note' }).click();
+  const refused = await posted;
+  expect(refused.status()).toBe(303);
+  expect(new URL(refused.headers()['location'] ?? '', 'http://kit.test').pathname).toBe('/notes');
+  await expect(page.getByText('Give the note a title of 1 to 255 characters.')).toBeVisible();
+  await expect(page).toHaveURL(/\/notes$/);
+});

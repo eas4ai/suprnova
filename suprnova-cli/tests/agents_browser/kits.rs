@@ -322,6 +322,7 @@ const BROWSER_CASES: &[&str] = &[
     "agent_017_{kit}_claim_page_round_trip",
     "agent_017_{kit}_wrong_claim_code_shows_the_attempts_left",
     "agent_017_{kit}_form_tool_cannot_approve",
+    "agent_017_{kit}_notes_after_a_claim_keep_their_form_errors",
 ];
 
 /// The application process, stopped when dropped.
