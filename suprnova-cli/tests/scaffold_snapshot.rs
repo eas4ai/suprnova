@@ -839,3 +839,169 @@ fn agent_017_a_generated_live_application_serves_the_agent_pages() {
         "these cases did not run and pass: {missing:#?}\n{printed}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The API kit's agents (AGENT-017): compiled, and driven in-process.
+// ---------------------------------------------------------------------------
+
+/// The test written into the API scaffold as `tests/api_agents.rs`.
+/// `__PACKAGE__` is the generated crate's name.
+const API_AGENTS_TEST: &str = include_str!("fixtures/scaffold/api_agents.rs");
+
+/// Every case of the in-scaffold test. Each must run and pass.
+const API_AGENTS_CASES: &[&str] = &[
+    "agent_017_api_session_sign_in_answers_the_default_pages",
+    "agent_017_api_serves_the_endpoint_and_both_plugins",
+    "agent_017_api_default_approval_and_claim_pages_complete",
+    "agent_017_api_login_return_to_stays_on_this_origin",
+    "agent_017_api_sign_in_continues_to_the_intended_address_once",
+    "agent_017_api_migrator_creates_the_plugins_tables_on_sqlite",
+    "agent_017_api_sign_in_refuses_an_account_with_a_second_factor",
+    "agent_017_api_sign_in_refuses_wrong_credentials_with_one_message",
+    "agent_017_api_sign_in_page_refuses_framing_and_needs_the_csrf_token",
+    "agent_017_api_lists_and_revokes_client_grants_and_agent_accounts",
+    "agent_017_api_connected_agents_refuse_a_guest_and_an_mcp_token",
+    "agent_017_api_revoke_needs_delete",
+    "agent_008_api_registration_stores_the_address_lowercased",
+    "kit_api_registration_refuses_an_email_over_254",
+    "kit_api_registration_refuses_a_password_under_8_characters",
+    "agent_017_api_only_the_consent_pages_start_a_session",
+    "agent_017_api_auth_user_reads_the_session_and_the_bearer_caller",
+    "agent_017_api_existing_json_routes_behave_as_before",
+    "agent_017_api_registration_mails_a_verification_link",
+    "agent_017_api_verification_link_verifies_the_address_once",
+    "agent_017_api_claim_needs_a_verified_address",
+    "agent_017_api_consent_session_cookie_ends_with_the_browser",
+    "agent_017_api_consent_session_ends_after_fifteen_idle_minutes",
+    "agent_017_api_sign_out_ends_the_consent_session",
+    "agent_017_api_registration_is_limited_per_address",
+    "agent_017_api_session_allow_list_matches_whole_paths",
+    "agent_017_api_consent_forms_need_the_csrf_token",
+    "agent_017_api_verification_resend_is_limited",
+    "agent_017_api_registration_answers_202_when_the_mail_cannot_go",
+];
+
+/// The version the workspace lockfile resolves `name` to, among those
+/// starting with `series` (`"0.11"`), so the scaffold builds what this
+/// workspace builds.
+fn locked_version(name: &str, series: &str) -> String {
+    let lock = std::fs::read_to_string(
+        workspace_framework_dir()
+            .parent()
+            .expect("framework sits in the workspace")
+            .join("Cargo.lock"),
+    )
+    .expect("read Cargo.lock");
+    let header = format!("name = \"{name}\"\nversion = \"");
+    let versions: Vec<&str> = lock
+        .split("[[package]]")
+        .filter_map(|package| package.trim_start().strip_prefix(&header))
+        .filter_map(|rest| rest.split_once('"'))
+        .map(|(version, _)| version)
+        .filter(|version| version.starts_with(&format!("{series}.")))
+        .collect();
+    match versions.as_slice() {
+        [only] => (*only).to_owned(),
+        other => panic!("Cargo.lock resolves `{name}` {series} to {other:?}"),
+    }
+}
+
+/// The settings the scaffold wrote into `.env`, as `KEY=VALUE` pairs. The
+/// in-scaffold test loads no `.env`; the harness hands the file's settings
+/// over through the environment, then overrides the few a test run
+/// controls, so the test runs under the configuration a new project starts
+/// with, its agent auth signing key included.
+fn scaffolded_env(project: &Path) -> Vec<(String, String)> {
+    std::fs::read_to_string(project.join(".env"))
+        .expect("read the scaffolded .env")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.to_owned(), value.trim_matches('"').to_owned()))
+        .collect()
+}
+
+/// AGENT-017: a fresh `--api` scaffold compiles against the in-tree
+/// framework and serves agents: the MCP endpoint, the OAuth server and
+/// agent auth with the framework's default approval, claim and
+/// connected-agents pages, the browser sign-in those pages send a guest to,
+/// and connected agents over JSON. `tests/fixtures/scaffold/api_agents.rs`
+/// drives the generated application in-process, one case per behaviour,
+/// with the scaffold's own `.env` and a fresh SQLite database. Its output
+/// is kept in `api_agents.log` under this package's temporary target
+/// directory.
+#[test]
+#[ignore = "compile check - builds an API kit scaffold and runs its agents test; slow"]
+fn agent_017_a_generated_api_application_serves_agents() {
+    let tmp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("tempdir");
+    let name = "api_agents";
+    scaffold(&tmp, name, &["--api"]);
+    let project = tmp.path().join(name);
+
+    // The crates the in-scaffold test reads URLs and builds PKCE challenges
+    // with, at the versions the workspace builds.
+    let manifest = project.join("Cargo.toml");
+    let original = std::fs::read_to_string(&manifest).expect("read the scaffolded Cargo.toml");
+    let dev_dependencies = format!(
+        "[dev-dependencies]\nbase64 = \"={}\"\nsha2 = \"={}\"\nurl = \"={}\"\n",
+        locked_version("base64", "0.22"),
+        locked_version("sha2", "0.11"),
+        locked_version("url", "2.5"),
+    );
+    assert_eq!(original.matches("[dev-dependencies]\n").count(), 1);
+    std::fs::write(
+        &manifest,
+        original.replace("[dev-dependencies]\n", &dev_dependencies),
+    )
+    .expect("write the scaffolded Cargo.toml");
+    patch_local_suprnova(&project);
+    let workspace_lock = workspace_framework_dir()
+        .parent()
+        .expect("framework sits in the workspace")
+        .join("Cargo.lock");
+    std::fs::copy(&workspace_lock, project.join("Cargo.lock")).expect("copy Cargo.lock");
+    std::fs::create_dir_all(project.join("tests")).expect("create tests/");
+    std::fs::write(
+        project.join("tests/api_agents.rs"),
+        API_AGENTS_TEST.replace("__PACKAGE__", name),
+    )
+    .expect("write the in-scaffold test");
+
+    let database = tmp.path().join("api_agents.sqlite");
+    let output = Command::new(env!("CARGO"))
+        .args(["test", "--test", "api_agents", "--", "--test-threads=1"])
+        .current_dir(&project)
+        .envs(scaffolded_env(&project))
+        .env("CARGO_TARGET_DIR", shared_target_dir())
+        .env("APP_ENV", "test")
+        .env("APP_URL", "http://localhost")
+        .env(
+            "DATABASE_URL",
+            format!("sqlite://{}?mode=rwc", database.display()),
+        )
+        .env("SESSION_SECURE", "false")
+        .env("SESSION_COOKIE_PREFIX", "")
+        .env("MAIL_DRIVER", "log")
+        .output()
+        .expect("cargo test in the generated project");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let log = Path::new(env!("CARGO_TARGET_TMPDIR")).join("api_agents.log");
+    std::fs::write(&log, format!("stdout:\n{stdout}\nstderr:\n{stderr}"))
+        .expect("keep the in-scaffold test's output");
+    assert!(
+        output.status.success(),
+        "the generated API application's agents test failed (output in {}):\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        log.display()
+    );
+    let missing: Vec<&str> = API_AGENTS_CASES
+        .iter()
+        .copied()
+        .filter(|case| !stdout.contains(&format!("test {case} ... ok")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these cases did not run and pass: {missing:#?}\nstdout:\n{stdout}"
+    );
+}

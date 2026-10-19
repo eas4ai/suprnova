@@ -99,11 +99,14 @@ fn assert_expected_upgrade_delta(
         .filter(|table| before.get(*table) != after.get(*table))
         .collect();
     // app_users gains its email uniqueness index and auth_two_factor its
-    // pending-rotation columns, which postdate them too.
+    // pending-rotation columns, which postdate them too. auth_tokens gains
+    // `address_digest`, the digest of the address an email verification
+    // token was issued for, which a SeaORM 1.1 catalog predates.
     let mut expected = BTreeSet::from([
         "app_users",
         "auth_lockouts",
         "auth_second_factor_lockouts",
+        "auth_tokens",
         "auth_two_factor",
     ]);
     // On MySQL a SeaORM 1.1 catalog holds the byte and long-text columns as
@@ -123,9 +126,9 @@ fn assert_expected_upgrade_delta(
     assert_eq!(
         expected, changed_tables,
         "first migration pass must only add the current auth_lockouts schema, the \
-         second-factor lockout table, the app_users email index and the \
-         pending-rotation columns, and on MySQL widen the narrow byte and \
-         long-text columns"
+         second-factor lockout table, the app_users email index, the \
+         pending-rotation columns and auth_tokens.address_digest, and on MySQL \
+         widen the narrow byte and long-text columns"
     );
 }
 

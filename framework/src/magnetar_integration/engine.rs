@@ -43,6 +43,9 @@ use magnetar::{
     password::{PasswordVerifier, normalize_email, validate_password},
     plugin::{LifecycleEvent, LifecycleEventKind},
     plugins::{
+        email_verification::{
+            EmailVerificationOutcome as MagnetarEmailVerificationOutcome, EmailVerificationService,
+        },
         magic_link::{MagicLinkIssued, MagicLinkService, RegistrationPolicy},
         password::{PasswordAttempt, PasswordAuthProvider, RegisterInput, RegistrationOutcome},
         password_management::{PASSWORD_RESET_TTL, PasswordResetFlowOutcome},
@@ -66,6 +69,7 @@ use sea_orm::DatabaseConnection;
 use uuid::Uuid;
 use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential};
 
+use super::email_verification::EmailVerificationOutcome;
 use super::{LockoutStatus, Registration, Session, SessionToken, User, UserId};
 
 /// The connection and typed Magnetar storage used by an authentication engine.
@@ -809,6 +813,9 @@ pub struct MagnetarHostEngine<
     remember_store: Arc<dyn RememberStore>,
     encryptor: Arc<dyn Encryptor>,
     magic_links: MagicLinkService,
+    /// Email verification for links the application mails itself; see
+    /// [`MagnetarPasswordAuthEngine::email_verification_verify`].
+    email_verification: EmailVerificationService,
     password: Arc<P>,
     first_email_proof: Arc<dyn FirstEmailProofStore>,
     password_verifier: Arc<PasswordVerifier>,
@@ -879,6 +886,11 @@ where
             Arc::clone(&sign_in_gate),
             RegistrationPolicy::Open,
         );
+        let verification_storage = Arc::new(SeaOrmStorage::<S>::new(binding.database().clone()));
+        let email_verification = EmailVerificationService::without_delivery(
+            verification_storage.clone(),
+            verification_storage,
+        );
         let lifecycle =
             MagnetarLifecycleForwarder::new(lifecycle_deliveries, lifecycle_lease_duration)?;
         Ok(Self {
@@ -894,6 +906,7 @@ where
             remember_store,
             encryptor,
             magic_links,
+            email_verification,
             password,
             first_email_proof,
             password_verifier,
@@ -1203,6 +1216,50 @@ where
                 message: "the configured registration policy suppressed issuance".to_owned(),
             }),
         }
+    }
+
+    /// Mint one single-use email-verification token for `user_id`, bound
+    /// to `email`, the address the link goes to. The returned plaintext is
+    /// for app-owned delivery only.
+    pub async fn email_verification_issue(&self, user_id: &str, email: &str) -> Result<String> {
+        use secrecy::ExposeSecret;
+
+        Ok(self
+            .email_verification
+            .issue(user_id, email)
+            .await?
+            .expose_secret()
+            .to_owned())
+    }
+
+    /// Present an email-verification token for `user_id`, the signed-in
+    /// user: stamp the address verified when the token is theirs and live.
+    /// No credential changes and no session is issued.
+    pub async fn email_verification_verify(
+        &self,
+        user_id: &str,
+        token: &str,
+    ) -> Result<EmailVerificationOutcome> {
+        Ok(
+            match self
+                .email_verification
+                .verify_presented(user_id, token)
+                .await?
+            {
+                MagnetarEmailVerificationOutcome::Verified => EmailVerificationOutcome::Verified,
+                MagnetarEmailVerificationOutcome::AlreadyVerified => {
+                    EmailVerificationOutcome::AlreadyVerified
+                }
+                MagnetarEmailVerificationOutcome::OtherUser => {
+                    EmailVerificationOutcome::OtherAccount
+                }
+                MagnetarEmailVerificationOutcome::AddressChanged => {
+                    EmailVerificationOutcome::AddressChanged
+                }
+                MagnetarEmailVerificationOutcome::Expired => EmailVerificationOutcome::Expired,
+                MagnetarEmailVerificationOutcome::Unknown => EmailVerificationOutcome::Unknown,
+            },
+        )
     }
 
     /// Atomically consume a magic link and complete the shared factor gate.
@@ -1578,6 +1635,40 @@ pub trait MagnetarPasswordAuthEngine: Send + Sync {
         token: &str,
         metadata: magnetar::sessions::SessionMetadata,
     ) -> Result<HostSignInDecision>;
+    /// Mint a single-use email-verification token for `user_id`, for
+    /// app-owned delivery (`Auth::email_verification`) to `email`, the
+    /// user's address. The token must prove only that address: verifying
+    /// it must fail once the user's address is another.
+    ///
+    /// The default refuses, which keeps existing custom engines
+    /// source-compatible.
+    async fn email_verification_issue(&self, user_id: &str, email: &str) -> Result<String> {
+        let _ = (user_id, email);
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar password authentication engine".to_owned(),
+            message: "email verification is unavailable".to_owned(),
+        })
+    }
+    /// Present an email-verification token for `user_id`, the signed-in
+    /// user, and stamp the address verified when the token is theirs and
+    /// live, single-use and unexpired, and the user still holds the address
+    /// it was issued for. It must change no credential and issue no
+    /// session, and must refuse another user's live token without spending
+    /// it.
+    ///
+    /// The default refuses, which keeps existing custom engines
+    /// source-compatible.
+    async fn email_verification_verify(
+        &self,
+        user_id: &str,
+        token: &str,
+    ) -> Result<EmailVerificationOutcome> {
+        let _ = (user_id, token);
+        Err(Error::DependencyUnavailable {
+            dependency: "Magnetar password authentication engine".to_owned(),
+            message: "email verification is unavailable".to_owned(),
+        })
+    }
 }
 
 /// Factor challenge completion and opaque-session authority shared by every
@@ -2072,6 +2163,18 @@ where
         metadata: magnetar::sessions::SessionMetadata,
     ) -> Result<HostSignInDecision> {
         MagnetarHostEngine::magic_link_consume(self, token, metadata).await
+    }
+
+    async fn email_verification_issue(&self, user_id: &str, email: &str) -> Result<String> {
+        MagnetarHostEngine::email_verification_issue(self, user_id, email).await
+    }
+
+    async fn email_verification_verify(
+        &self,
+        user_id: &str,
+        token: &str,
+    ) -> Result<EmailVerificationOutcome> {
+        MagnetarHostEngine::email_verification_verify(self, user_id, token).await
     }
 }
 

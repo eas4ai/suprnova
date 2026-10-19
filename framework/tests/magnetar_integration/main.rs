@@ -20,6 +20,7 @@ pub mod binding;
 pub mod ceremony_store;
 pub mod default_engine;
 pub mod default_engine_inputs;
+pub mod email_verification;
 pub mod factor_completion;
 pub mod framework_login;
 pub mod host_engine;

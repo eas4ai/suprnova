@@ -5,7 +5,8 @@
 //! Middleware order matters. Requests flow through the stack top-to-bottom;
 //! responses travel back bottom-to-top:
 //!
-//!   SecurityHeaders -> TimeoutMiddleware -> BearerTokenMiddleware -> IncludeMiddleware -> handlers
+//!   SecurityHeaders -> TimeoutMiddleware -> ConsentSession -> BearerTokenMiddleware
+//!     -> IncludeMiddleware -> handlers
 //!
 //! # Switching databases
 //!
@@ -23,9 +24,12 @@
 //! extra config.
 
 use suprnova::{
-    BearerTokenMiddleware, DB, FrameworkError, IncludeMiddleware, MagnetarConfig, PasskeyConfig,
-    SecurityHeaders, boot::initialize_crypt_or_exit, global_middleware, init_magnetar,
+    BearerTokenMiddleware, DB, DatabaseUserProvider, FrameworkError, IncludeMiddleware,
+    MagnetarConfig, PasskeyConfig, SecurityHeaders, SessionConfig, UserProvider, bind,
+    boot::initialize_crypt_or_exit, global_middleware, init_magnetar,
 };
+
+use crate::agents;
 
 /// Register global middleware and services.
 ///
@@ -50,6 +54,15 @@ pub async fn register() {
         .await
         .expect("Failed to initialize Magnetar");
 
+    // The users `Auth::user()` finds, in the `app_users` table Magnetar
+    // keeps: the user a bearer token or a consent page's session signed in.
+    // The framework's approval, claim and connected-agents pages and the
+    // connected-agents routes read the signed-in user through it.
+    bind!(
+        dyn UserProvider,
+        DatabaseUserProvider::new("app_users").password_column("password_hash")
+    );
+
     register_http_stack();
 }
 
@@ -71,6 +84,14 @@ pub fn try_register_http_stack() -> Result<(), FrameworkError> {
     // `.middleware(TimeoutMiddleware::seconds(n))` tightens one endpoint; a
     // route that takes long uploads needs a longer value here.
     global_middleware!(suprnova::TimeoutMiddleware::default());
+
+    // The browser session, on the consent pages only: the sign-in page
+    // (`controllers::sign_in`) and the framework's approval, claim and
+    // connected-agents pages, which act for the user a session signed in
+    // (`agents::ConsentSession`). The JSON API, the MCP endpoint and agent
+    // auth's routes get none. There is no global CSRF middleware either;
+    // each page's form route checks its own.
+    global_middleware!(agents::ConsentSession::new(SessionConfig::from_env()));
 
     // Bearer-token authentication -- reads Authorization: Bearer <token> and
     // populates the authenticated user in request context.
