@@ -127,12 +127,18 @@ fn is_printable_ascii(value: &str) -> bool {
 }
 
 /// Compare a requested redirect URI with a registered one: exactly, except
-/// that a loopback IP literal over HTTP may use any port, because a native
+/// that a loopback redirect over HTTP may use any port, because a native
 /// app listens on whatever port the system gives it (RFC 8252 section
-/// 7.3). `localhost` gets no such allowance; it names whatever the resolver
-/// says. The parser percent-encodes a raw character in a path, so the
-/// requested URI must be printable ASCII itself: a raw spelling of a
-/// registered path is no match, and never reaches the approval page.
+/// 7.3). A loopback IP literal gets that allowance, and so does
+/// `localhost`: MCP clients such as Claude Code register
+/// `http://localhost/callback` and sign in on an ephemeral port, and MCP
+/// names `localhost` as the one plain-HTTP redirect host. Browsers resolve
+/// `localhost` to the loopback interface, so the allowance reaches no
+/// further than the user's own machine, as with the IP literals. The
+/// scheme, host, path and query must still match. The parser
+/// percent-encodes a raw character in a path, so the requested URI must be
+/// printable ASCII itself: a raw spelling of a registered path is no
+/// match, and never reaches the approval page.
 pub(crate) fn redirect_uri_matches(registered: &str, requested: &str) -> bool {
     if registered == requested {
         return true;
@@ -146,7 +152,8 @@ pub(crate) fn redirect_uri_matches(registered: &str, requested: &str) -> bool {
     let loopback = |url: &Url| match url.host() {
         Some(Host::Ipv4(address)) => address == Ipv4Addr::LOCALHOST,
         Some(Host::Ipv6(address)) => address == Ipv6Addr::LOCALHOST,
-        _ => false,
+        Some(Host::Domain(domain)) => domain == "localhost",
+        None => false,
     };
     registered.scheme() == "http"
         && requested.scheme() == "http"
@@ -160,17 +167,20 @@ pub(crate) fn redirect_uri_matches(registered: &str, requested: &str) -> bool {
 }
 
 /// Whether an error may be reported by redirecting to `redirect_uri`: only
-/// a loopback IP literal over HTTP, where a native client listens on the
-/// user's own machine. A redirect anywhere else would let any registered
-/// client turn the application's domain into a redirector to a page of its
-/// choosing (RFC 9700 section 4.11.2).
+/// a loopback redirect over HTTP, a loopback IP literal or `localhost`,
+/// where a native client listens on the user's own machine. Codes and
+/// denials already go to such a client, and without the error it waits for
+/// a callback that never comes. A redirect anywhere else would let any
+/// registered client turn the application's domain into a redirector to a
+/// page of its choosing (RFC 9700 section 4.11.2).
 pub(crate) fn is_loopback_redirect(redirect_uri: &str) -> bool {
     Url::parse(redirect_uri).is_ok_and(|url| {
         url.scheme() == "http"
             && match url.host() {
                 Some(Host::Ipv4(address)) => address == Ipv4Addr::LOCALHOST,
                 Some(Host::Ipv6(address)) => address == Ipv6Addr::LOCALHOST,
-                _ => false,
+                Some(Host::Domain(domain)) => domain == "localhost",
+                None => false,
             }
     })
 }
@@ -522,8 +532,10 @@ mod tests {
     }
 
     #[test]
-    fn agent_005_only_a_loopback_ip_literal_gets_error_redirects() {
+    fn agent_005_only_a_loopback_redirect_gets_error_redirects() {
         for accepted in [
+            "http://localhost:3000/callback",
+            "http://LOCALHOST:62514/callback",
             "http://127.0.0.1/callback",
             "http://127.0.0.1:3000/callback",
             "http://127.0.0.1:65535/any/path?x=1",
@@ -536,7 +548,10 @@ mod tests {
             );
         }
         for refused in [
-            "http://localhost:3000/callback",
+            "http://localhost./callback",
+            "http://localhost.evil.test/callback",
+            "http://localhost@evil.test/callback",
+            "https://localhost/callback",
             "http://127.0.0.1.evil.test/callback",
             "http://[::ffff:127.0.0.1]/callback",
             "https://127.0.0.1/callback",
@@ -567,10 +582,42 @@ mod tests {
             "http://127.0.0.1:3000/cb",
             "http://127.0.0.1:61000/other"
         ));
-        assert!(!redirect_uri_matches(
+        assert!(redirect_uri_matches(
             "http://localhost:3000/cb",
             "http://localhost:4000/cb"
         ));
+        assert!(redirect_uri_matches(
+            "http://localhost/callback",
+            "http://localhost:62514/callback"
+        ));
+        assert!(!redirect_uri_matches(
+            "http://localhost/callback",
+            "http://127.0.0.1:62514/callback"
+        ));
+        assert!(!redirect_uri_matches(
+            "http://localhost/callback",
+            "http://localhost.evil.test:62514/callback"
+        ));
+        assert!(!redirect_uri_matches(
+            "http://localhost/callback",
+            "http://localhost:62514/callback/other"
+        ));
+        // The parser lowercases the host and reads anything before `@` as
+        // credentials, so these pin what each spelling reaches.
+        assert!(redirect_uri_matches(
+            "http://localhost/callback",
+            "http://LOCALHOST:62514/callback"
+        ));
+        for elsewhere in [
+            "http://localhost.:62514/callback",
+            "http://localhost@evil.test/callback",
+            "http://localhost:80@evil.test/callback",
+        ] {
+            assert!(
+                !redirect_uri_matches("http://localhost/callback", elsewhere),
+                "{elsewhere}"
+            );
+        }
         assert!(!redirect_uri_matches(
             "https://127.0.0.1:3000/cb",
             "https://127.0.0.1:4000/cb"

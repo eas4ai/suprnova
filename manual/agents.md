@@ -580,8 +580,10 @@ What the server enforces:
 
 - The authorization code grant with PKCE `S256`, and no other code challenge
   method.
-- Redirect URIs compared exactly. On a loopback address any port is allowed,
-  as native clients need.
+- Redirect URIs compared exactly. On a plain HTTP loopback redirect,
+  `127.0.0.1`, `[::1]` or `localhost`, any port is allowed, as native
+  clients need: Claude Code registers `http://localhost/callback` and signs
+  in on whatever port the system gives it.
 - The `iss` parameter on every authorization response (RFC 9207).
 - Access tokens bound to the MCP endpoint (RFC 8707) and to the approved
   scopes. The endpoint refuses a token issued for another resource.

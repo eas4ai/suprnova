@@ -885,6 +885,42 @@ async fn agent_005_client_identified_by_metadata_document_signs_in() {
     assert_eq!(profile_status(client, &access).await, 200);
 }
 
+/// Claude Code's own document registers `localhost` and `127.0.0.1` without
+/// a port, and its sign-in sends the port the system gave its listener.
+#[tokio::test]
+async fn agent_005_claude_code_document_signs_in_on_an_ephemeral_localhost_port() {
+    const CLAUDE_CODE: &str = "https://claude.client.test/oauth/claude-code-client-metadata";
+    const EPHEMERAL: &str = "http://localhost:62514/callback";
+    let world = world().await;
+    let client = &world.client;
+    world.resolver.answer("claude.client.test", "93.184.215.14");
+    world.documents.serve(
+        CLAUDE_CODE,
+        &json!({
+            "client_id": CLAUDE_CODE,
+            "client_name": "Claude Code",
+            "client_uri": "https://claude.client.test",
+            "redirect_uris": ["http://localhost/callback", "http://127.0.0.1/callback"],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        }),
+    );
+    let user = new_account("claude-code");
+    sign_in(client, &user).await;
+    let (verifier, challenge) = pkce();
+    let (id, page) = open_approval(client, CLAUDE_CODE, EPHEMERAL, &challenge, "posts:read").await;
+    let html = page.body_text();
+    assert!(html.contains("Claude Code"), "{html}");
+    let back = location(&decide(client, &id, &page, "approve").await);
+    assert!(back.starts_with(EPHEMERAL), "{back}");
+    let code = query_param(&back, "code").unwrap();
+    let tokens = exchange(client, CLAUDE_CODE, EPHEMERAL, &code, &verifier).await;
+    assert_eq!(tokens.status(), 200, "{}", tokens.body_text());
+    let access = tokens.json()["access_token"].as_str().unwrap().to_owned();
+    assert_eq!(profile_status(client, &access).await, 200);
+}
+
 #[tokio::test]
 async fn agent_005_metadata_document_on_a_private_address_is_not_fetched() {
     let world = world().await;
