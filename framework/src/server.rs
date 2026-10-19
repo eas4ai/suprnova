@@ -1459,6 +1459,12 @@ async fn handle_request_inner(
                     peer_ip,
                 ));
             }
+            // The OAuth server this router mounted, for `ConnectedAgents`:
+            // a request reaches the grants of its own router's server only.
+            #[cfg(feature = "agents")]
+            if let Some(server) = router.oauth_server() {
+                request.set_oauth_server(server);
+            }
             // A tool's route checks the browser caller's kind and limit, and
             // hands the handler its caller (AGENT-002).
             #[cfg(feature = "agents")]

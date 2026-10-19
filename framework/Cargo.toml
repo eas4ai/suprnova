@@ -47,6 +47,10 @@ validator = { version = "0.20", features = ["derive"] }
 # schema generator, not an agent SDK. The lock already holds 1.2.1 through
 # `serde_with`; the derive adds `schemars_derive` and `serde_derive_internals`.
 schemars = { version = "1.2.1", optional = true, default-features = false, features = ["derive", "std"] }
+# Verifies the user tokens an outside authorization server signs (AGENT-006)
+# against the keys it publishes. The lock already holds 9.3.1 through
+# suprnova-magnetar's OAuth features, which verify their JWTs with it.
+jsonwebtoken = { version = "9", optional = true }
 serde_urlencoded = "0.7"
 chrono = { version = "0.4", features = ["serde"] }
 # Named IANA zones for per-task schedule timezones. chrono alone only offers
@@ -390,9 +394,17 @@ queue-sqs = ["filesystem", "dep:reqsign-aws-v4", "dep:reqsign-core", "dep:reqsig
 # Filesystem fakes additionally require `filesystem`.
 testing = []
 # Agent tools and the MCP endpoint (`suprnova::agents`): `#[tool]`
-# handlers, their JSON Schemas and the `/mcp` route. Default-on; a feature at
-# all so a minimal profile carries no schema generator.
-agents = ["dep:schemars"]
+# handlers, their JSON Schemas and the `/mcp` route, the Magnetar
+# authorization server MCP clients sign in through, and the outside issuer
+# driver. Default-on; a feature at all so a minimal profile carries no
+# schema generator or JWT verifier. The authorization server adds no crate
+# the framework does not already build: reqwest, url and tokio are its
+# own dependencies.
+agents = [
+    "dep:schemars",
+    "dep:jsonwebtoken",
+    "suprnova-magnetar/authorization-server",
+]
 # Upload preparation stays available without loading an inference runtime.
 search-media = ["dep:image", "image/png", "dep:zune-jpeg", "image/webp", "dep:hound"]
 # Local search inference is opt-in. ONNX Runtime binaries download at build time.
@@ -580,6 +592,9 @@ webauthn-authenticator-rs = { version = "0.5.5", default-features = false, featu
     "softpasskey",
 ] }
 wiremock = "0.6"
+# Generates the outside issuer's signing keys in the AGENT-006 tests. The
+# version rustls already builds, so the lock gains nothing.
+ring = "0.17"
 
 # On-demand RenderCache workload measurement, run by
 # `crates/suprnova-live/scripts/run-render-cache-budget.sh` and never by a

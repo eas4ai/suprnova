@@ -88,13 +88,18 @@ impl ResolvedClient {
     }
 }
 
-/// Whether a redirect URI may be registered: an absolute URI without a
-/// fragment or credentials, using HTTPS, plain HTTP on a loopback host for
-/// native apps (RFC 8252 section 7.3), or a private-use scheme in reverse
-/// domain form (RFC 8252 section 7.1). Schemes without a dot, such as
-/// `javascript:` or `data:`, are never private-use schemes.
+/// Whether a redirect URI may be registered: an absolute URI in printable
+/// ASCII without a fragment or credentials, using HTTPS, plain HTTP on a
+/// loopback host for native apps (RFC 8252 section 7.3), or a private-use
+/// scheme in reverse domain form (RFC 8252 section 7.1). Schemes without a
+/// dot, such as `javascript:` or `data:`, are never private-use schemes.
+///
+/// A URI (RFC 3986) is ASCII, and a client percent-encodes anything else.
+/// The URL parser would accept a raw U+202E in a path, and the approval
+/// page shows the redirect URI as stored, so anything outside U+0021 to
+/// U+007E is refused rather than shown.
 pub(crate) fn redirect_uri_is_acceptable(value: &str) -> bool {
-    if value.is_empty() || value.len() > MAX_REDIRECT_URI_LENGTH {
+    if value.is_empty() || value.len() > MAX_REDIRECT_URI_LENGTH || !is_printable_ascii(value) {
         return false;
     }
     let Ok(url) = Url::parse(value) else {
@@ -115,14 +120,25 @@ pub(crate) fn redirect_uri_is_acceptable(value: &str) -> bool {
     }
 }
 
+/// Whether every character of `value` is printable ASCII, U+0021 to
+/// U+007E: no space, control, or character a URI would percent-encode.
+fn is_printable_ascii(value: &str) -> bool {
+    value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+}
+
 /// Compare a requested redirect URI with a registered one: exactly, except
 /// that a loopback IP literal over HTTP may use any port, because a native
 /// app listens on whatever port the system gives it (RFC 8252 section
 /// 7.3). `localhost` gets no such allowance; it names whatever the resolver
-/// says.
+/// says. The parser percent-encodes a raw character in a path, so the
+/// requested URI must be printable ASCII itself: a raw spelling of a
+/// registered path is no match, and never reaches the approval page.
 pub(crate) fn redirect_uri_matches(registered: &str, requested: &str) -> bool {
     if registered == requested {
         return true;
+    }
+    if !is_printable_ascii(requested) {
+        return false;
     }
     let (Ok(registered), Ok(requested)) = (Url::parse(registered), Url::parse(requested)) else {
         return false;
@@ -171,10 +187,37 @@ pub(crate) fn names_metadata_document(value: &str) -> bool {
     starts_with("https://") || starts_with("http://")
 }
 
-/// A short text field a client supplied, kept only when it is within the
-/// length the server stores.
+/// A short text field a client supplied, with its control and format
+/// characters removed ([`is_hidden`]), kept only when something is left and
+/// it is within the length the server stores. Registration and fetched
+/// metadata documents both pass through here.
 pub(crate) fn bounded_text(value: Option<String>) -> Option<String> {
-    value.filter(|text| !text.trim().is_empty() && text.len() <= MAX_CLIENT_TEXT_LENGTH)
+    value
+        .map(|text| {
+            text.chars()
+                .filter(|ch| !is_hidden(*ch))
+                .collect::<String>()
+        })
+        .filter(|text| !text.trim().is_empty() && text.len() <= MAX_CLIENT_TEXT_LENGTH)
+}
+
+/// Whether `ch` is a control or format character a client's text must not
+/// carry: the C0 and C1 controls, and the marks, embeddings, overrides and
+/// isolates that reorder text. An approval page shows the client's name;
+/// a right-to-left override in it could make `moc.evil` read as
+/// `live.com`.
+fn is_hidden(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0000}'..='\u{001F}'
+            | '\u{007F}'..='\u{009F}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{061C}'
+            | '\u{FEFF}'
+    )
 }
 
 /// A link a client supplied, kept only when it is an `https` URL: an
@@ -271,7 +314,7 @@ pub(crate) fn check_public_client(
     {
         return Err(MetadataProblem::RedirectUri(format!(
             "redirect URI {bad:?} must be HTTPS, HTTP on a loopback host, or a private-use scheme, \
-             without a fragment"
+             in printable ASCII without a fragment"
         )));
     }
     if fields.client_secret.is_some() || fields.client_secret_expires_at.is_some() {
@@ -408,6 +451,75 @@ fn embedded_v4(high: u16, low: u16) -> Ipv4Addr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_005_redirect_uris_are_printable_ascii() {
+        for refused in [
+            "https://evil.test/cb\u{202E}x",
+            "https://evil.test/caf\u{e9}",
+            "https://evil.test/a b",
+            "https://evil.test/a\tb",
+            "http://127.0.0.1:7777/cb\u{0007}",
+        ] {
+            assert!(
+                !redirect_uri_is_acceptable(refused),
+                "{refused:?} is refused"
+            );
+            let problem = check_public_client(
+                ClientMetadata {
+                    redirect_uris: Some(vec![refused.to_owned()]),
+                    ..ClientMetadata::default()
+                },
+                &[],
+            );
+            assert!(
+                matches!(problem, Err(MetadataProblem::RedirectUri(_))),
+                "{refused:?} is an invalid redirect URI"
+            );
+        }
+        assert!(redirect_uri_is_acceptable("https://evil.test/cb%E2%80%AEx"));
+        // A loopback redirect on another port still compares the request
+        // as given: a non-ASCII spelling of a registered path is no match.
+        let registered = "http://127.0.0.1:7777/cb%E2%80%AEx";
+        assert!(redirect_uri_matches(
+            registered,
+            "http://127.0.0.1:9999/cb%E2%80%AEx"
+        ));
+        assert!(!redirect_uri_matches(
+            registered,
+            "http://127.0.0.1:9999/cb\u{202E}x"
+        ));
+    }
+
+    #[test]
+    fn agent_005_client_text_drops_control_and_format_characters() {
+        let hidden = [
+            '\u{0000}', '\u{0009}', '\u{001F}', '\u{007F}', '\u{0085}', '\u{009F}', '\u{200E}',
+            '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}',
+            '\u{2067}', '\u{2068}', '\u{2069}', '\u{061C}', '\u{FEFF}',
+        ];
+        let name: String = hidden.iter().fold("Tool".to_owned(), |mut name, ch| {
+            name.push(*ch);
+            name
+        });
+        let checked = check_public_client(
+            ClientMetadata {
+                client_name: Some(format!("{name} Name")),
+                redirect_uris: Some(vec!["https://client.test/cb".to_owned()]),
+                ..ClientMetadata::default()
+            },
+            &[],
+        )
+        .unwrap_or_else(|problem| panic!("{}", problem.description()));
+        assert_eq!(checked.client_name.as_deref(), Some("Tool Name"));
+        // A name of nothing but hidden characters is no name.
+        assert_eq!(bounded_text(Some("\u{202E}\u{200F}".to_owned())), None);
+        // Other text, accents and scripts included, is kept.
+        assert_eq!(
+            bounded_text(Some("Outil \u{e9}t\u{e9} \u{5de5}\u{5177}".to_owned())).as_deref(),
+            Some("Outil \u{e9}t\u{e9} \u{5de5}\u{5177}")
+        );
+    }
 
     #[test]
     fn agent_005_only_a_loopback_ip_literal_gets_error_redirects() {
