@@ -373,14 +373,18 @@ fn the_render_cache_budget_is_an_on_demand_tool_and_never_a_gate_step() {
         "the render-cache budget is an on-demand tool, not a gate phase"
     );
 
-    let steps = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/gate-steps.json"),
-    )
-    .expect("the repository gate steps exist");
-    assert!(
-        !steps.contains("render_cache_budget") && !steps.contains("render-cache-budget"),
-        "the repository gate must not run the budget"
-    );
+    // The repository gate lives in the root `scripts/`, which is gitignored
+    // and kept only in local clones, so a clean checkout such as a CI
+    // runner's has no gate to check.
+    let steps_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/gate-steps.json");
+    if steps_path.exists() {
+        let steps =
+            fs::read_to_string(&steps_path).expect("the repository gate steps are readable");
+        assert!(
+            !steps.contains("render_cache_budget") && !steps.contains("render-cache-budget"),
+            "the repository gate must not run the budget"
+        );
+    }
 
     let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
         .expect("the Live manifest exists");
