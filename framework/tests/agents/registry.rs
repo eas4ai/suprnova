@@ -185,9 +185,10 @@ pub struct BudgetInput {
     callers = [public],
     input = BudgetInput,
 )]
+#[allow(deprecated)]
 #[suprnova::handler]
-pub async fn budget_tool(_input: BudgetInput) -> suprnova::Response {
-    suprnova::json_response!({ "ok": true })
+pub async fn budget_tool(input: BudgetInput) -> suprnova::Response {
+    suprnova::json_response!({ "missing": input.missing, "described": input.described })
 }
 
 #[test]
@@ -223,7 +224,7 @@ fn agent_001_webmcp_budgets_warn_once_without_refusing_boot() {
 #[tracing_test::traced_test]
 fn agent_001_browser_only_live_tools_warn_about_their_argument_fields() {
     let _container = fixture::setup();
-    let router: Router = Router::new().into();
+    let router = Router::new();
     router.prepare_tools().expect("browser-only tools check");
     assert!(logs_contain("input field `query` has no description"));
     for (tool, field) in [

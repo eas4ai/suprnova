@@ -102,6 +102,8 @@ impl AgentCounter {
         callers = [user],
         headless,
     )]
+    // `title` stays undescribed: the boot warning test reads its warning.
+    #[allow(deprecated)]
     #[action(validate = "arguments")]
     pub fn rename(&mut self, title: String) {
         self.label = title;
@@ -124,6 +126,8 @@ impl AgentCounter {
         description = "Look for a counter label.",
         callers = [public],
     )]
+    // `query` stays undescribed: the boot warning test reads its warning.
+    #[allow(deprecated)]
     #[action]
     pub fn search(&mut self, query: String) {
         let _ = query;

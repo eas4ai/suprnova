@@ -76,6 +76,7 @@ impl AgentsCounter {
         description = "Add to the counter.",
         title = "Add",
         callers = [user],
+        arguments(amount = "How much to add."),
     )]
     #[action(authorize = "current")]
     pub fn add(&mut self, amount: u64) {

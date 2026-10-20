@@ -324,7 +324,7 @@ fn budget_warning(spec: &ToolSpec, problem: &str) -> TokenStream {
         const _: () = {
             #[deprecated(note = #note)]
             const __SUPRNOVA_TOOL_BUDGET: () = ();
-            let _ = __SUPRNOVA_TOOL_BUDGET;
+            __SUPRNOVA_TOOL_BUDGET
         };
     }
 }
