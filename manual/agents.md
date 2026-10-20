@@ -64,7 +64,7 @@ pub struct CreatePost {
 }
 
 #[tool(
-    name = "posts.create",
+    name = "create_post",
     description = "Create a draft post for the signed-in user.",
     callers = [user, agent],
     scopes = [scope::POSTS_WRITE],
@@ -96,7 +96,7 @@ Claude Code:
 claude mcp add my-app --transport http https://app.example.com/mcp --scope user
 ```
 
-`posts.create` accepts users and agents, so calling it needs a token. The
+`create_post` accepts users and agents, so calling it needs a token. The
 client sees it in `tools/list` without one, and its first call answers 401,
 which sends the client to sign in. Turn on the
 [OAuth server](#users-who-approve-a-client) or
@@ -104,7 +104,7 @@ which sends the client to sign in. Turn on the
 no token at all.
 
 A project made with `suprnova new` serves all of this from the first run. Its
-`notes.search` and `notes.create` tools, under the `notes:read` and
+`search_notes` and `create_note` tools, under the `notes:read` and
 `notes:write` scopes, are a worked example of the sections below: see
 [Agents in the Inertia kits](starter-kits.md#agents-in-the-inertia-kits) and
 [Agents in the Live kit](starter-kits.md#agents-in-the-live-kit).
@@ -118,7 +118,7 @@ route serves. It takes these keys:
 
 | Key | Required | Meaning |
 |---|---|---|
-| `name` | yes | What agents call the tool: 1 to 128 ASCII letters, digits, `_`, `-` and `.`, unique in the application |
+| `name` | yes | What agents call the tool: 1 to 64 ASCII letters, digits and `_`, unique in the application |
 | `description` | yes | A non-empty string literal. An agent reads it to decide when to call the tool |
 | `callers` | yes | The callers it accepts: one or more of `public`, `user` and `agent` |
 | `scopes` | no | The scopes a token caller needs, as constants `tool_scopes!` declared |
@@ -128,6 +128,12 @@ route serves. It takes these keys:
 | `title` | no | A display name |
 | `route` | no | The route name, when the handler serves more than one route |
 | `guard` | no | The auth guard a user caller is signed in to for the call |
+
+Use short action names such as `create_post` or `search_notes`. The build
+warns when a name exceeds 30 characters or a description exceeds 500
+characters. Boot logs the same budgets and warns about each input field
+without a description. These budgets never refuse a tool. Give every input
+field a doc comment; `#[tool_input]` carries it into the JSON Schema.
 
 Names, descriptions and schemas are fixed when the application is built. An
 agent reads them as instructions, so nothing at run time can change them. The
@@ -196,7 +202,7 @@ pub enum ReviewOrder {
     TopRated,
 }
 
-/// The input of `reviews.list`.
+/// The input of `list_reviews`.
 #[tool_input]
 pub struct ListReviews {
     /// The order to list the reviews in.
@@ -216,7 +222,7 @@ no `schemars` dependency of its own. A type nested in the output takes
 ```rust
 use suprnova::tool_output;
 
-/// What `reviews.create` answers.
+/// What `create_review` answers.
 #[tool_output]
 pub struct ReviewView {
     /// The review.
@@ -280,7 +286,7 @@ A handler reads the caller by taking a `ToolCaller` argument:
 use suprnova::{Response, ToolCaller, handler, json_response, tool};
 
 #[tool(
-    name = "users.profile",
+    name = "read_user_profile",
     description = "Read the signed-in user's profile.",
     callers = [user, agent],
 )]
@@ -320,7 +326,7 @@ forbids agents to:
 ```rust
 use suprnova::{Gate, ToolCaller};
 
-Gate::define::<User, Post>("posts.delete", |_user, _post| {
+Gate::define::<User, Post>("delete_post", |_user, _post| {
     !ToolCaller::current().is_some_and(|caller| caller.is_agent())
 });
 ```
@@ -332,7 +338,7 @@ risky call. A bare key means `true`:
 
 ```rust
 #[tool(
-    name = "posts.delete",
+    name = "delete_post",
     description = "Delete one post.",
     callers = [user, agent],
     scopes = [scope::POSTS_DELETE],
@@ -401,7 +407,7 @@ pub struct NoteQuery {
 }
 
 #[tool(
-    name = "notes.lookup",
+    name = "lookup_note",
     description = "Look a note up by its text.",
     callers = [public],
     input = NoteQuery,
@@ -842,7 +848,7 @@ the handler: `registration()` returns the agent's registration, and
 
 ```rust
 #[tool(
-    name = "posts.publish",
+    name = "publish_post",
     description = "Publish a draft post.",
     callers = [user, agent],
     scopes = [scope::POSTS_WRITE],
@@ -1282,17 +1288,17 @@ use suprnova::{InertiaResponse, PageTools, Request, Response, Router};
 pub fn register() -> Router {
     web::register()
         // Every page offers the search tool.
-        .share_tools(["posts.search"])
+        .share_tools(["search_posts"])
 }
 
 // In the route list, a route adds its own:
-// get!("/posts", posts::index).with_tools(["posts.create"]).name("posts.index"),
+// get!("/posts", posts::index).with_tools(["create_post"]).name("posts.index"),
 
 pub async fn show(request: Request) -> Response {
     // A handler adds tools for this request only.
-    PageTools::add(["posts.update"]).await?;
+    PageTools::add(["update_post"]).await?;
     Ok(InertiaResponse::new("Posts/Show")
-        .with_tools(["posts.delete"])
+        .with_tools(["delete_post"])
         .resolve(&request)
         .await?)
 }
@@ -1367,7 +1373,7 @@ impl Counter {
     }
 
     #[tool(
-        name = "counter.add",
+        name = "add_to_counter",
         description = "Add to the counter.",
         callers = [user, agent],
     )]
@@ -1377,7 +1383,7 @@ impl Counter {
     }
 
     #[tool(
-        name = "counter.peek",
+        name = "peek_counter",
         description = "Read the counter.",
         callers = [public],
         annotations(read_only),
@@ -1388,10 +1394,32 @@ impl Counter {
 ```
 
 A Live tool takes `name`, `description`, `title`, `callers`, `scopes`,
-`annotations`, `guard` and `headless`. Its arguments come from the action's
+`annotations`, `guard`, `arguments(...)` and `headless`. Its arguments come from the action's
 parameters, so it takes no `input`. Each argument must have a JSON Schema an
 agent can read: `String`, `bool`, `i64`, `u64`, `f64`, `Date`,
 `OffsetDateTime` or `Uuid`, or an `Option`, `Vec` or `BTreeMap` of them.
+
+Describe action parameters with `arguments(...)` on the tool marking:
+
+```rust,ignore
+#[tool(
+    name = "add_to_tally",
+    description = "Add to the current tally.",
+    callers = [user],
+    arguments(amount = "How much to add to the tally."),
+    headless,
+)]
+#[action]
+pub fn add(&mut self, amount: u64) {
+    self.count += amount;
+}
+```
+
+An argument without a description raises a compiler warning and a boot
+warning. A description of an argument the action does not take is a build
+error. For an agent-supplied mount property, put its description on the
+parameter as `#[doc = "The initial count."]`, for example
+`fn mount(#[doc = "The initial count."] start: u64) -> Self`.
 
 In the browser, the Live runtime registers a mounted component's tool actions
 with `document.modelContext` and removes them when the component leaves the
@@ -1401,12 +1429,15 @@ transaction. An action marked `#[action(authorize = "current")]` asks the
 Gate for `live:{component}.{action}`, as a click does. The result carries the
 agent-visible fields and no other state.
 
-The browser names a Live tool after its island: `counter.peek.main` for the
+The browser names a Live tool after its island: `peek_counter-main` for the
 island `live:key="main"`. The key must be one literal of 1 to 63 ASCII
 letters, digits, `_` and `-`, outside any loop, so data never reaches a name
 an agent reads as an instruction. `suprnova live:check` refuses any other key
 on a component with browser tools, and a key used twice on one page. A Live
-tool name has at most 64 characters, leaving room for the key.
+tool name, the `-` separator and the key must fit in 64 characters in all.
+The checker names the island, tool and combined length when they do not.
+Tool names contain no hyphens, so the first hyphen separates the name from
+its key, including a key such as `left-pane`.
 
 Marking an action `#[tool]` narrows who can click it to the callers you list.
 The caller check runs on every request to the action, with or without the
@@ -1416,6 +1447,11 @@ and adds `public` for guests. An action no person should click lists only
 `agent` and is never registered in the browser.
 
 ### The Inertia kits
+
+The React, Vue and Svelte kits type-check their WebMCP registration through
+`webmcp-types` 0.1.10. The package defines the model context, tool definition,
+execution options and annotations. It leaves the result payload open, so
+Suprnova keeps its `ToolResult` type for structured content and errors.
 
 The React, Vue and Svelte kits ship helpers in `src/lib/agents`, and their
 notes page uses them; see
@@ -1432,7 +1468,7 @@ import { usePageTool } from '../lib/agents'
 
 export default function Cart({ items }: { items: string[] }) {
   usePageTool({
-    name: 'cart.items',
+    name: 'list_cart_items',
     description: 'List the items in the visible cart.',
     inputSchema: { type: 'object', properties: {} },
     readOnly: true,
@@ -1461,7 +1497,7 @@ import { toolSchemas } from '../types/tool-schemas'
 export default function NewNote() {
   const note = useForm({ title: '', body: '' })
   useFormTool(note, {
-    name: 'notes.create',
+    name: 'create_note',
     description: 'Write a note.',
     schema: toolSchemas.StoreNoteRequest,
     action: { method: 'post', url: '/notes' },
@@ -1503,7 +1539,7 @@ struct AddTodo {
 /// Register the page's tools. They stay registered while the caller keeps
 /// the handles this returns.
 fn boot() -> Result<(ToolHandle, Vec<ToolHandle>), WebMcpError> {
-    let add = PageTool::<AddTodo>::new("todos.add", "Add an item to the visible todo list.")
+    let add = PageTool::<AddTodo>::new("add_todo", "Add an item to the visible todo list.")
         .title("Add todo")
         .register(|input: AddTodo| async move { Ok(ToolResult::json(&input.title)?) })?;
     let server = ServerTools::from_document()?;
@@ -1558,7 +1594,7 @@ impl Tally {
     }
 
     #[tool(
-        name = "tally.add",
+        name = "add_to_tally",
         description = "Add to the tally.",
         callers = [user, agent],
         headless,
@@ -1647,7 +1683,7 @@ async fn a_signed_in_user_creates_a_post_from_the_page() {
     // `user` is a user the test created.
     let call = client
         .acting_as(&user)
-        .tool("posts.create", json!({ "title": "From a page" }))
+        .tool("create_post", json!({ "title": "From a page" }))
         .send()
         .await;
     call.assert_ok();
@@ -1669,14 +1705,14 @@ async fn an_agent_needs_the_write_scope() {
     let refused = client
         .mcp()
         .as_caller(ToolCaller::agent("reg-1").claimed(true))
-        .call("posts.create", json!({ "title": "No scope" }))
+        .call("create_post", json!({ "title": "No scope" }))
         .await;
     assert_eq!(refused.status(), 403);
 
     let created = client
         .mcp()
         .as_caller(ToolCaller::agent("reg-1").claimed(true).scopes([scope::POSTS_WRITE]))
-        .call("posts.create", json!({ "title": "Scoped" }))
+        .call("create_post", json!({ "title": "Scoped" }))
         .await;
     assert!(!created.is_error());
 }
