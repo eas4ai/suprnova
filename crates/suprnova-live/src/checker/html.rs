@@ -1013,7 +1013,7 @@ impl ViewCheck<'_, '_, '_> {
                     let length = tool.len() + 1 + key.len();
                     if length > 64 {
                         let (view, line, column) = resolve(self.files, self.root.view(), position);
-                        self.diagnostics.tool_name_length(&view, line, column, component, format!(
+                        self.diagnostics.tool_name_length(view, line, column, component, format!(
                             "island `{key}`, tool `{tool}`: browser name has {length} characters; the limit is 64"
                         ));
                     }
