@@ -441,10 +441,12 @@ let headers = suprnova::SecurityHeaders::balanced().header(
 
 Chrome runs WebMCP for real users as an origin trial from Chrome 149. Register
 your origin for the trial and set `WEBMCP_ORIGIN_TRIAL_TOKEN` to the token it
-issues. Every HTML response then carries the token:
+issues. For several tokens, such as separate Chrome and Edge tokens, set a
+comma-separated list. Every HTML response carries one header, with the tokens
+joined by `, `:
 
 ```text
-Origin-Trial: <token>
+Origin-Trial: <chrome-token>, <edge-token>
 ```
 
 The server adds the header as each response leaves, after all middleware, so
@@ -453,7 +455,10 @@ Live pages do. JSON, redirects, assets and tool answers do not, because only a
 document enables a trial. A response that already carries the same token keeps
 it once. The header does not depend on `SecurityHeaders`: it is sent whether or
 not the middleware is registered. A value that is not base64 stops boot,
-naming the variable, and an empty value sends nothing. A test registers a
+naming the variable and the bad entry's position, never its value. Tokens are
+trimmed and empty entries are skipped; an empty list sends nothing. The
+[Origin Trials developer guide](https://github.com/GoogleChrome/OriginTrials/blob/gh-pages/developer-guide.md#15-can-i-provide-multiple-tokens-on-a-page)
+allows comma-separated tokens in one header. A test registers a
 token with `Config::register(WebMcpConfig::new().with_origin_trial_token(token)?)`.
 
 ## Cache nonce pages
