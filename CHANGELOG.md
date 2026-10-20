@@ -11,6 +11,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - Agent tools now refuse guards that use a different user provider from the
   caller's default guard, preventing matching ids from signing in as another
   person. (#160)
+- Built-in approval and agent claim forms now refuse agent tool submissions,
+  even when the tool has your signed-in session and a valid form token. (#161)
 - On MySQL and MariaDB, accent-insensitive email comparisons could let a
   different mailbox receive a magic link for another account. Account lookups
   now require byte equality after trimming and lowercasing, and magic links

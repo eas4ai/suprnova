@@ -206,6 +206,22 @@ impl Router {
                     )));
                 }
             };
+            // Consent needs its own refusal before the generic no-tool
+            // middleware can reject a browser tool header with a 400.
+            #[cfg(feature = "agents")]
+            let builder =
+                if CONSENT_ROUTES.contains(&mounted.routes[index].descriptor.name.as_str()) {
+                    builder.middleware_boxed(Arc::new(move |request, next| {
+                        Box::pin(async move {
+                            if let Err(error) = crate::agents::refuse_agents(&request) {
+                                return Err(refusal(403, &error.to_string(), !client));
+                            }
+                            next(request).await
+                        })
+                    }))
+                } else {
+                    builder
+                };
             let reads = matches!(method, hyper::Method::GET);
             router = if client || reads {
                 builder.into()
@@ -229,10 +245,21 @@ impl Router {
     }
 }
 
+/// Routes that record a person's consent. Agents are refused because a
+/// session and CSRF token do not let a tool approve or deny for that person.
+#[cfg(feature = "agents")]
+const CONSENT_ROUTES: &[&str] = &["authorization-server.decide"];
+
 /// Answer one request to the mounted route `index`.
 async fn serve(state: Arc<Mounted>, index: usize, request: Request) -> Response {
     let route = &state.routes[index];
     let browser = !route.client;
+    #[cfg(feature = "agents")]
+    if CONSENT_ROUTES.contains(&route.descriptor.name.as_str())
+        && let Err(error) = crate::agents::refuse_agents(&request)
+    {
+        return Ok(refusal(403, &error.to_string(), browser));
+    }
     let query = match single_valued(request.query().unwrap_or_default().as_bytes()) {
         Ok(query) => query,
         Err(Repeated) => return Ok(refusal(400, "a parameter is repeated", browser)),

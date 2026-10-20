@@ -77,6 +77,7 @@ pub use auth::{
     AuthorizationServerMetadata, CallerResolver, MetadataKind, ResolveContext, ResolveError,
 };
 pub use caller::{AgentRegistration, CallerChannel, CallerKind, ToolCaller};
+pub(crate) use consent::refuse_agents;
 pub use consent::{
     AgentApprovals, AgentClaims, ApprovalDecision, ApprovalLookup, ClaimConfirmation, ClaimLookup,
     ClaimRefusal, PendingApproval, PendingClaim,

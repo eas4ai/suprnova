@@ -609,6 +609,66 @@ async fn agent_017_claims_refuse_a_form_tool_submission() {
 // ------------------------------------------------------------- claims ----
 
 #[tokio::test]
+async fn agent_017_default_claim_refuses_a_form_tool_submission() {
+    default_claim_refuses_agent_header("Suprnova-Form-Tool").await;
+}
+
+#[tokio::test]
+async fn agent_017_default_claim_refuses_a_browser_tool_call() {
+    default_claim_refuses_agent_header("Suprnova-Tool-Call").await;
+}
+
+/// The built-in form must refuse tools before they can consume a valid claim.
+async fn default_claim_refuses_agent_header(header: &str) {
+    let world = claim_world(|agent| agent).await;
+    let client = &world.client;
+    let user = new_account("default-claim-agent-header");
+    let registration = service_auth(client, &account_email(&user)).await;
+    let (token, code) = attempt_of(&registration);
+    sign_in(client, &user).await;
+    let page = client
+        .get(crate::oauth::path_of(
+            registration["claim"]["verification_uri"].as_str().unwrap(),
+        ))
+        .send()
+        .await;
+    assert_eq!(page.status(), 200, "{}", page.body_text());
+    let csrf = crate::oauth::form_token(&page.body_text());
+    let form = [
+        ("_token", csrf.as_str()),
+        ("claim_attempt_token", token.as_str()),
+        ("user_code", code.as_str()),
+    ];
+    let refused = client
+        .post("/agent/claim")
+        .header(header, "1")
+        .form(&form)
+        .send()
+        .await;
+    assert_eq!(refused.status(), 403, "{header}: {}", refused.body_text());
+    assert!(
+        refused.body_text().contains("person"),
+        "{}",
+        refused.body_text()
+    );
+    assert_consent_headers(&refused, "the default claim's refusal");
+    assert_eq!(lookup_claim(client, &token).await["lookup"], "pending");
+    let claimed = client.post("/agent/claim").form(&form).send().await;
+    assert_eq!(claimed.status(), 200, "{}", claimed.body_text());
+    assert_eq!(
+        lookup_claim(client, &token).await,
+        json!({ "lookup": "refused", "refusal": "NotFound" })
+    );
+    let accounts = client.get("/test/facade/agents").send().await.json();
+    assert!(
+        accounts.as_array().is_some_and(|accounts| accounts
+            .iter()
+            .any(|account| account["id"] == registration["registration_id"])),
+        "the person's submission claimed the agent: {accounts}"
+    );
+}
+
+#[tokio::test]
 async fn agent_017_claims_read_and_confirm() {
     let world = claim_world(|agent| agent).await;
     let client = &world.client;
