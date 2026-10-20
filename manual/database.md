@@ -40,7 +40,7 @@ sqlite://./file.db                 → DatabaseType::Sqlite
 sqlite::memory:                    → DatabaseType::Sqlite
 ```
 
-A `mariadb://` URL selects the MySQL driver, because MariaDB speaks the
+A `mariadb://` URL selects the MySQL driver, because MariaDB uses the
 MySQL protocol. Wherever a URL reaches the driver, the framework hands it
 over with the `mariadb` scheme written as `mysql`: the primary connection,
 each named connection and read replica, the migrator, and

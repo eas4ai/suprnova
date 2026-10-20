@@ -2399,7 +2399,7 @@ in `.ssr(...)`, so the worker was never contacted: every first visit
 rendered on the client and `on_ssr_error` fired, or the visit answered
 `500` under `ssr_throw_on_error(true)`.
 
-**Now:** The client speaks TLS through rustls, as the HTTP client facade
+**Now:** The client connects over TLS through rustls, as the HTTP client facade
 does, and verifies the worker's certificate against the platform's trust
 store. The timeout, the response cap and the refusal of an oversized
 `Content-Length` are unchanged.

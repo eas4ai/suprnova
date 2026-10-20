@@ -497,9 +497,9 @@ owning the host root:
 It panics when one of these routes is already registered or when it is called
 twice. `Router::try_agents` returns the error instead.
 
-### What the endpoint speaks
+### Transport and protocol revisions
 
-The endpoint speaks MCP's Streamable HTTP transport, revision 2026-07-28: one
+The endpoint uses MCP's Streamable HTTP transport, revision 2026-07-28: one
 `POST` per JSON-RPC request, with `server/discover`, `tools/list`,
 `tools/call` and `ping`. Clients of revisions 2025-06-18 and 2025-11-25, which
 open with `initialize`, work on the same endpoint. The endpoint keeps no

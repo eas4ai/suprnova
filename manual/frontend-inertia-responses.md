@@ -2577,7 +2577,7 @@ resources/js/Pages/Dashboard.vue:12:5`.
 
 ### Workers over HTTPS
 
-A worker URL may be `https`. The client speaks TLS through rustls and
+A worker URL may be `https`. The client connects over TLS through rustls and
 verifies the worker's certificate against the platform's trust store, so a
 worker on another host or behind a TLS proxy needs no other setting.
 

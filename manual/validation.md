@@ -459,7 +459,7 @@ validate! { self =>
 
 Laravel's `date_format` takes PHP formats (`Y-m-d`); Suprnova's takes
 chrono's (`%Y-%m-%d`), the syntax every other date API in a Rust
-application already speaks. Laravel reads `after:today` in the
+application already uses. Laravel reads `after:today` in the
 application's time zone; Suprnova has no application time zone, so
 `DateBound::Today` starts at midnight UTC.
 
