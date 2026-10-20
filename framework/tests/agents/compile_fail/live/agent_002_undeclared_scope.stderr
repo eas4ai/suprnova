@@ -24,8 +24,4 @@ warning: use of deprecated constant `_::__SUPRNOVA_TOOL_BUDGET`: tool `add_to_co
 19 |         name = "add_to_counter",
    |                ^^^^^^^^^^^^^^^^
    |
-note: the lint level is defined here
-  --> tests/agents/compile_fail/live/agent_002_undeclared_scope.rs:19:16
-   |
-19 |         name = "add_to_counter",
-   |                ^^^^^^^^^^^^^^^^
+   = note: `#[warn(deprecated)]` on by default
