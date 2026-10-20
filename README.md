@@ -40,11 +40,11 @@ checks your models, routes and page props before anything ships.
 
 ## Get started
 
-Current `main` needs Rust 1.94.0 or newer, and the tagged v4.3.0 release has
+Current `main` needs Rust 1.94.0 or newer, and the tagged v4.4.0 release has
 the same floor. An Inertia front end also needs Node.js 20 or newer.
 
 ```bash
-cargo install --git https://github.com/eas4ai/suprnova.git --tag v4.3.0 suprnova-cli
+cargo install --git https://github.com/eas4ai/suprnova.git --tag v4.4.0 suprnova-cli
 suprnova new myapp --frontend svelte
 cd myapp
 suprnova serve
@@ -342,7 +342,7 @@ where Suprnova matches it, and where it differs on purpose.
 
 Suprnova is distributed through git tags, not crates.io. The tag is the
 release: an app depends on
-`suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.3.0" }`
+`suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.4.0" }`
 and moves versions by editing that one line. The adapter crates
 (`suprnova-payments-stripe`, `suprnova-payments-paddle`,
 `suprnova-payments-nowpayments` and `suprnova-web-push`) follow the same

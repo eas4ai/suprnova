@@ -541,7 +541,7 @@ ws!("/ws/internal/firehose", FirehoseHandler::new())
 `Cargo.toml`：
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.3.0", features = ["broadcasting-fanout"] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.4.0", features = ["broadcasting-fanout"] }
 ```
 
 `src/bootstrap.rs`：

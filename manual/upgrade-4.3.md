@@ -21,12 +21,12 @@ new: nothing changes until you turn them on.
 1. Point application dependencies and the CLI at `v4.3.0`:
 
    ```toml
-   suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.3.0" }
+   suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.4.0" }
    ```
 
    ```bash
    cargo update -p suprnova
-   cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v4.3.0 suprnova-cli
+   cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v4.4.0 suprnova-cli
    cargo check --all-targets
    ```
 
