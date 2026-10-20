@@ -265,7 +265,7 @@ the fieldset without extra handler work.
 // Response: { "data": { "type": "users", "id": "7", "attributes": { "email": "alice@example.com" } } }
 ```
 
-## Compound documents - `?include=` chains
+## Compound documents with `?include=` chains
 
 Declare relationship fields with `#[data(allow_include)]`. The framework
 builds an `IncludeTree` from `?include=author.posts.tags,comments`, walks
