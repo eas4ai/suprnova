@@ -9,11 +9,11 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, Condition, EntityTrait, ExprTrait, QueryFilter};
+use sea_orm::{ColumnTrait, Condition, DbBackend, EntityTrait, ExprTrait, QueryFilter};
 
 use super::credential_writes::fenced_credential_write;
 use super::{AuthTransaction, CredentialActor, SeaOrmStorage, db_error, random_id};
-use crate::password::{email_fits, email_too_long};
+use crate::password::{email_fits, email_too_long, normalize_email};
 use crate::schema::{
     AuthSchema, EntityBinding, SessionEpoch, SessionFields, UserFields, UserOptionalFields,
     password_hash_for_verifier,
@@ -51,7 +51,10 @@ pub struct NewUser {
 /// Storage API for generic user reads and credential writes.
 #[async_trait]
 pub trait UserStore: Send + Sync {
-    /// Find one user by normalized email.
+    /// Find one user by byte equality of addresses after trim and lowercase
+    /// normalization. MySQL and MariaDB accent-insensitive collations can
+    /// match a different address; trusting that match could mint a victim's
+    /// magic-link token for an attacker-controlled mailbox.
     async fn find_by_email(&self, email: &str) -> Result<Option<UserRecord>>;
     /// Find one user by identifier.
     async fn find_by_id(&self, user_id: &str) -> Result<Option<UserRecord>>;
@@ -203,18 +206,22 @@ where
         if email.is_empty() {
             return Err(empty("email"));
         }
+        let normalized = normalize_email(email);
         // Sign-up refuses an address this long, so no account holds one,
         // and MySQL's column could not hold it either; the lookup is never
         // sent.
-        if !email_fits(email) {
+        if !email_fits(&normalized) {
             return Ok(None);
         }
         let rows = <S::User as EntityBinding>::Entity::find()
-            .filter(S::User::email_column().eq(email.to_owned()))
+            .filter(S::User::email_column().eq(normalized.clone()))
             .all(self.database())
             .await
             .map_err(db_error)?;
-        Ok(rows.first().map(record::<S>))
+        Ok(rows
+            .iter()
+            .find(|row| normalize_email(&S::User::read_email(row)) == normalized)
+            .map(record::<S>))
     }
 
     async fn find_by_id(&self, user_id: &str) -> Result<Option<UserRecord>> {
@@ -300,6 +307,9 @@ where
         Ok(())
     }
 
+    /// Keep the address check inside the update so a concurrent change
+    /// refuses the stamp. MySQL and MariaDB need BINARY to bypass
+    /// accent-insensitive collations; Postgres and SQLite equality is exact.
     async fn mark_email_verified_for(
         &self,
         user_id: &str,
@@ -314,10 +324,27 @@ where
         }
         let mut model = <S::User as EntityBinding>::ActiveModel::default();
         S::User::write_email_verified_at(&mut model, Some(at));
+        let exact_email = match self.database().get_database_backend() {
+            DbBackend::MySql => Expr::cust_with_exprs(
+                "BINARY ? = BINARY ?",
+                [
+                    Expr::col(S::User::email_column()),
+                    Expr::value(email.to_owned()),
+                ],
+            ),
+            DbBackend::Postgres | DbBackend::Sqlite => S::User::email_column().eq(email.to_owned()),
+            _ => {
+                return Err(Error::DependencyUnavailable {
+                    dependency: "user store".to_owned(),
+                    message: "exact email verification is unavailable for this database backend"
+                        .to_owned(),
+                });
+            }
+        };
         let update = <S::User as EntityBinding>::Entity::update_many()
             .set(model)
             .filter(S::User::user_id_column().eq(S::User::user_id_value(user_id)))
-            .filter(S::User::email_column().eq(email.to_owned()))
+            .filter(exact_email)
             .exec(self.database())
             .await
             .map_err(db_error)?;
@@ -333,16 +360,15 @@ where
         if email.is_empty() {
             return Err(empty("email"));
         }
-        // No account holds an address this long: an unknown email.
-        if !email_fits(email) {
+        let Some(user) = self.find_by_email(email).await? else {
             return Ok(false);
-        }
+        };
         let mut model = <S::User as EntityBinding>::ActiveModel::default();
         S::User::write_locked_at(&mut model, Some(locked_at));
         let lock_column = S::User::locked_at_column();
         let update = <S::User as EntityBinding>::Entity::update_many()
             .set(model)
-            .filter(S::User::email_column().eq(email.to_owned()))
+            .filter(S::User::user_id_column().eq(S::User::user_id_value(&user.user_id)))
             .filter(
                 Condition::any()
                     .add(lock_column.is_null())
@@ -361,17 +387,16 @@ where
         if email.is_empty() {
             return Err(empty("email"));
         }
-        // No account holds an address this long: an unknown email.
-        if !email_fits(email) {
+        let Some(user) = self.find_by_email(email).await? else {
             return Ok(());
-        }
+        };
         let mut model = <S::User as EntityBinding>::ActiveModel::default();
         S::User::write_locked_at(&mut model, locked_at);
         // Absent emails are a deliberate no-op: lockout state is tracked for
         // unknown identities too, and this write must not become an oracle.
         let _ = <S::User as EntityBinding>::Entity::update_many()
             .set(model)
-            .filter(S::User::email_column().eq(email.to_owned()))
+            .filter(S::User::user_id_column().eq(S::User::user_id_value(&user.user_id)))
             .exec(self.database())
             .await
             .map_err(db_error)?;

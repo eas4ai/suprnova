@@ -4,6 +4,19 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 4.4.1 - 2026-10-20
+
+### Fixed
+
+- On MySQL and MariaDB, accent-insensitive email comparisons could let a
+  different mailbox receive a magic link for another account. Account lookups
+  now require byte equality after trimming and lowercasing, and magic links
+  go to the stored account address. Conflicting registrations return the same
+  generic response without issuing a token. (#167)
+- On MySQL and MariaDB, an email change that differed only by accents could
+  still receive a verification stamp for the old address. Verification now
+  checks the exact address atomically, so that change refuses the stamp. (#162)
+
 ## 4.4.0 - 2026-10-20
 
 ### Added

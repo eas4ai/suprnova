@@ -272,7 +272,7 @@ async fn open_mode_refuses_a_binding_that_cannot_represent_passwordless() {
     // A compliant NOT-NULL binding maps its sentinel back to None, so the
     // real store issues normally.
     let issued = world.magic.issue(EMAIL).await.unwrap();
-    assert!(matches!(issued, MagicLinkIssued::Minted(_)));
+    assert!(matches!(issued, MagicLinkIssued::Minted { .. }));
 }
 
 /// An open magic-link sign-up that loses the race for a new address answers
@@ -301,7 +301,10 @@ async fn a_magic_link_sign_up_that_loses_the_race_answers_as_the_existing_accoun
         .issue(EMAIL)
         .await
         .expect("a lost race answers as the existing account, not with an error");
-    let MagicLinkIssued::Minted(token) = issued else {
+    let MagicLinkIssued::Minted {
+        plaintext: token, ..
+    } = issued
+    else {
         panic!("a link is minted for the existing account");
     };
     let decision = service
@@ -330,5 +333,114 @@ async fn sign_up_refuses_an_email_longer_than_any_account_holds() {
         matches!(&error, magnetar::Error::InvalidInput { field, message }
             if field == "email" && message.contains("254")),
         "an over-long address is a validation error: {error:?}"
+    );
+}
+
+/// Simulate an accent-insensitive lookup while keeping real SQLite storage.
+struct AccentInsensitiveStore(Arc<magnetar::storage::SeaOrmStorage<storage_schema::StorageSchema>>);
+
+#[async_trait::async_trait]
+impl UserStore for AccentInsensitiveStore {
+    async fn find_by_email(&self, email: &str) -> magnetar::Result<Option<UserRecord>> {
+        let folded = email.replace('é', "e");
+        let stored = "user@café.example";
+        let lookup = if folded == stored.replace('é', "e") {
+            stored
+        } else {
+            email
+        };
+        self.0.find_by_email(lookup).await
+    }
+    async fn find_by_id(&self, user_id: &str) -> magnetar::Result<Option<UserRecord>> {
+        self.0.find_by_id(user_id).await
+    }
+    async fn create_user(&self, input: NewUser) -> magnetar::Result<UserRecord> {
+        self.0.create_user(input).await
+    }
+    async fn set_password_hash(&self, actor: &CredentialActor, hash: &str) -> magnetar::Result<()> {
+        self.0.set_password_hash(actor, hash).await
+    }
+    async fn mark_email_verified(&self, user_id: &str, at: DateTime<Utc>) -> magnetar::Result<()> {
+        self.0.mark_email_verified(user_id, at).await
+    }
+    async fn lock_if_unlocked_by_email(
+        &self,
+        email: &str,
+        at: DateTime<Utc>,
+        window_start: DateTime<Utc>,
+    ) -> magnetar::Result<bool> {
+        self.0
+            .lock_if_unlocked_by_email(email, at, window_start)
+            .await
+    }
+    async fn set_locked_at_by_email(
+        &self,
+        email: &str,
+        at: Option<DateTime<Utc>>,
+    ) -> magnetar::Result<()> {
+        self.0.set_locked_at_by_email(email, at).await
+    }
+}
+
+#[tokio::test]
+async fn a_confusable_request_mails_only_the_stored_account_address() {
+    let world = factor_world().await;
+    world
+        .storage
+        .create_user(NewUser {
+            email: "user@café.example".into(),
+            password_hash: None,
+        })
+        .await
+        .unwrap();
+    let service = Arc::new(MagicLinkService::new(
+        Arc::new(AccentInsensitiveStore(world.storage.clone())),
+        world.storage.clone(),
+        world.first_proof.clone(),
+        world.gate.clone(),
+        RegistrationPolicy::Open,
+    ));
+    let plugin = magnetar::plugins::magic_link::MagicLinkPlugin::new(
+        service.clone(),
+        world.mail.clone(),
+        Arc::new(harness::TestLinks),
+        Default::default(),
+    );
+    let context = magnetar::plugin::PluginContext::<storage_schema::StorageSchema>::new(
+        world.storage.clone(),
+        world.sessions.clone(),
+        world.gate.clone(),
+        Arc::new(harness::IdentityEncryptor),
+        world.limiter.clone(),
+        world.mail.clone(),
+        Arc::new(harness::NoTransport),
+        Arc::new(harness::TestLinks),
+    );
+    let registry = magnetar::plugin::PluginRegistry::new(context)
+        .register(plugin)
+        .build()
+        .await
+        .unwrap();
+    let response = harness::split(
+        registry
+            .handle(post_json(
+                "/magic-link",
+                json!({"email": "user@cafe.example"}),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, Some(json!({"status": "ok"})));
+    let issued = service.issue("user@cafe.example").await.unwrap();
+    assert!(
+        matches!(issued, MagicLinkIssued::Minted { email, .. } if email == "user@café.example")
+    );
+    let sent = world.mail.sent.lock();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].recipient, "user@café.example");
+    assert!(
+        sent.iter()
+            .all(|message| message.recipient != "user@cafe.example")
     );
 }

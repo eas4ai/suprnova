@@ -64,16 +64,22 @@ pub enum RegistrationPolicy {
 /// (the frozen facade posture) consumes `Minted` to build and mail its own
 /// link and treats `Suppressed` as the same generic success.
 pub enum MagicLinkIssued {
-    /// A token was minted; the plaintext is exposed exactly once here.
-    Minted(SecretString),
-    /// Existing-only policy with an absent email: nothing was minted.
+    /// A token was minted. Deliver it to the stored account address so a
+    /// collation-only lookup cannot redirect the link to a different mailbox.
+    Minted {
+        /// The plaintext is exposed exactly once here.
+        plaintext: SecretString,
+        /// The matched or created account's stored address.
+        email: String,
+    },
+    /// Policy or an address conflict suppressed issuance: nothing was minted.
     Suppressed,
 }
 
 impl std::fmt::Debug for MagicLinkIssued {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Minted(_) => formatter.write_str("Minted([redacted])"),
+            Self::Minted { .. } => formatter.write_str("Minted([redacted])"),
             Self::Suppressed => formatter.write_str("Suppressed"),
         }
     }
@@ -122,14 +128,19 @@ impl MagicLinkService {
                     // Torii's get-or-create: a first-time email is a signup.
                     // A sign-up that loses the race for the address mints
                     // the link for the account the other one created.
-                    let account = create_or_find_existing(
+                    let account = match create_or_find_existing(
                         self.users.as_ref(),
                         NewUser {
                             email: normalized.clone(),
                             password_hash: None,
                         },
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(account) => account,
+                        Err(Error::Conflict { .. }) => return Ok(MagicLinkIssued::Suppressed),
+                        Err(error) => return Err(error),
+                    };
                     match account {
                         SignUpAccount::Existing(existing) => existing,
                         SignUpAccount::Created(created) => {
@@ -161,7 +172,10 @@ impl MagicLinkService {
                 ttl: MAGIC_LINK_TTL,
             })
             .await?;
-        Ok(MagicLinkIssued::Minted(issued.plaintext))
+        Ok(MagicLinkIssued::Minted {
+            plaintext: issued.plaintext,
+            email: user.email,
+        })
     }
 
     /// Atomically consume a magic link, apply any first-proof cleanup, and
@@ -274,7 +288,9 @@ impl<S: AuthSchema> Plugin<S> for MagicLinkPlugin {
                 // Plugin-owned delivery: mint, build the link, and dispatch
                 // exactly one typed message. Suppressed sends mint and mail
                 // nothing; the response stays byte-identical.
-                if let MagicLinkIssued::Minted(plaintext) = self.service.issue(&email).await? {
+                if let MagicLinkIssued::Minted { plaintext, email } =
+                    self.service.issue(&email).await?
+                {
                     let link = self
                         .links
                         .url_for(
@@ -283,7 +299,7 @@ impl<S: AuthSchema> Plugin<S> for MagicLinkPlugin {
                         )
                         .await?;
                     self.mail
-                        .send(crate::mail::magic_link(&identity, &link))
+                        .send(crate::mail::magic_link(&email, &link))
                         .await?;
                 }
                 Ok(WireResponse::from_effects(EffectResponse::json(

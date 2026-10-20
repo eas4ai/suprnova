@@ -1210,7 +1210,7 @@ where
         use secrecy::ExposeSecret;
 
         match self.magic_links.issue(email).await? {
-            MagicLinkIssued::Minted(token) => Ok(token.expose_secret().to_owned()),
+            MagicLinkIssued::Minted { plaintext, .. } => Ok(plaintext.expose_secret().to_owned()),
             MagicLinkIssued::Suppressed => Err(Error::Conflict {
                 resource: "magic link".to_owned(),
                 message: "the configured registration policy suppressed issuance".to_owned(),
