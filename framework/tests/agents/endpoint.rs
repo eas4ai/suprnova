@@ -332,13 +332,45 @@ async fn agent_003_unknown_tool_and_unknown_method() {
 }
 
 #[tokio::test]
+async fn agent_003_notification_headers_are_checked_against_body() {
+    let _container = fixture::setup();
+    let client = fixture::client();
+    let mcp = client.mcp();
+    let mut body = modern_body("notifications/initialized", json!({}));
+    body.as_object_mut().unwrap().remove("id");
+    let mismatched = mcp
+        .raw(
+            &[
+                ("MCP-Protocol-Version", "2026-07-28"),
+                ("Mcp-Method", "tools/list"),
+            ],
+            body.clone(),
+        )
+        .await;
+    assert_eq!(mismatched.status(), 400, "{}", mismatched.body_text());
+    assert_eq!(mismatched.json()["error"]["code"], -32020);
+    assert!(mismatched.json().get("id").is_none());
+    let matching = mcp
+        .raw(
+            &[
+                ("MCP-Protocol-Version", "2026-07-28"),
+                ("Mcp-Method", "notifications/initialized"),
+            ],
+            body,
+        )
+        .await;
+    assert_eq!(matching.status(), 202, "{}", matching.body_text());
+    assert!(matching.body_text().is_empty());
+}
+
+#[tokio::test]
 async fn agent_003_notification_is_202_and_batch_is_refused() {
     let _container = fixture::setup();
     let client = fixture::client();
     let mcp = client.mcp();
     let notification = mcp
         .raw(
-            &[],
+            &[("MCP-Protocol-Version", "2025-11-25")],
             json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
         )
         .await;

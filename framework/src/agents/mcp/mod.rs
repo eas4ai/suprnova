@@ -190,11 +190,7 @@ async fn serve(request: Request) -> HttpResponse {
             None,
         );
     };
-    if message.get("id").is_none() {
-        // A notification: accepted, and nothing is answered.
-        return HttpResponse::new().status(202);
-    }
-    let Some(id) = readable_id.cloned() else {
+    if message.get("id").is_some() && readable_id.is_none() {
         return protocol::refuse(
             400,
             None,
@@ -202,14 +198,14 @@ async fn serve(request: Request) -> HttpResponse {
             "A request id is a string or an integer.",
             None,
         );
-    };
+    }
     let params = match message.get("params") {
         None | Some(Value::Null) => Map::new(),
         Some(Value::Object(params)) => params.clone(),
         Some(_) => {
             return protocol::refuse(
                 400,
-                Some(&id),
+                readable_id,
                 INVALID_PARAMS,
                 "params must be an object.",
                 None,
@@ -217,9 +213,13 @@ async fn serve(request: Request) -> HttpResponse {
         }
     };
 
-    let era = match detect_era(&id, method, &params, &headers) {
+    let era = match detect_era(readable_id, method, &params, &headers) {
         Ok(era) => era,
         Err(response) => return response,
+    };
+    let Some(id) = readable_id.cloned() else {
+        // A notification: its header checks passed, and nothing is answered.
+        return HttpResponse::new().status(202);
     };
     let caller = match authenticate(&headers, &config, address, &id).await {
         Ok(caller) => caller,
@@ -258,7 +258,7 @@ async fn serve(request: Request) -> HttpResponse {
 
 /// The era the request speaks, after every header check its era requires.
 fn detect_era(
-    id: &Value,
+    id: Option<&Value>,
     method: &str,
     params: &Map<String, Value>,
     headers: &hyper::HeaderMap,
@@ -271,10 +271,7 @@ fn detect_era(
         (NAME_HEADER, "Mcp-Name"),
     ] {
         if let Err(problem) = protocol::header_text(headers, name) {
-            return Err(protocol::header_mismatch(
-                Some(id),
-                &problem.describe(label),
-            ));
+            return Err(protocol::header_mismatch(id, &problem.describe(label)));
         }
     }
     if method == "initialize" {
@@ -284,7 +281,7 @@ fn detect_era(
         let Some(requested) = params.get("protocolVersion").and_then(Value::as_str) else {
             return Err(protocol::refuse(
                 400,
-                Some(id),
+                id,
                 INVALID_PARAMS,
                 "initialize needs params.protocolVersion, a string naming a revision.",
                 None,
@@ -299,7 +296,7 @@ fn detect_era(
     let version = match protocol::header_text(headers, PROTOCOL_VERSION_HEADER) {
         Err(problem) => {
             return Err(protocol::header_mismatch(
-                Some(id),
+                id,
                 &problem.describe("MCP-Protocol-Version"),
             ));
         }
@@ -309,7 +306,7 @@ fn detect_era(
         // and a missing required header is a `HeaderMismatch`.
         Ok(None) => {
             return Err(protocol::header_mismatch(
-                Some(id),
+                id,
                 "The MCP-Protocol-Version header is missing.",
             ));
         }
@@ -321,7 +318,7 @@ fn detect_era(
     }
     match LEGACY.iter().find(|legacy| **legacy == version) {
         Some(legacy) => Ok(Era::Legacy(legacy)),
-        None => Err(protocol::unsupported_version(Some(id), Some(&version))),
+        None => Err(protocol::unsupported_version(id, Some(&version))),
     }
 }
 
@@ -329,7 +326,7 @@ fn detect_era(
 /// header names and the client's capabilities, and `Mcp-Method` and, for a
 /// named method, `Mcp-Name` mirror the body.
 fn check_modern(
-    id: &Value,
+    id: Option<&Value>,
     method: &str,
     params: &Map<String, Value>,
     headers: &hyper::HeaderMap,
@@ -342,7 +339,7 @@ fn check_modern(
     else {
         return Err(protocol::refuse(
             400,
-            Some(id),
+            id,
             INVALID_PARAMS,
             "The request's _meta has no io.modelcontextprotocol/protocolVersion.",
             None,
@@ -350,7 +347,7 @@ fn check_modern(
     };
     if meta_version != version {
         return Err(protocol::header_mismatch(
-            Some(id),
+            id,
             &format!(
                 "Header mismatch: MCP-Protocol-Version header value '{version}' does not match \
                  body value '{meta_version}'"
@@ -363,7 +360,7 @@ fn check_modern(
     {
         return Err(protocol::refuse(
             400,
-            Some(id),
+            id,
             INVALID_PARAMS,
             "The request's _meta has no io.modelcontextprotocol/clientCapabilities.",
             None,
@@ -373,7 +370,7 @@ fn check_modern(
         Ok(Some(header)) if header == method => {}
         Ok(Some(header)) => {
             return Err(protocol::header_mismatch(
-                Some(id),
+                id,
                 &format!(
                     "Header mismatch: Mcp-Method header value '{header}' does not match body \
                      value '{method}'"
@@ -382,13 +379,13 @@ fn check_modern(
         }
         Ok(None) => {
             return Err(protocol::header_mismatch(
-                Some(id),
+                id,
                 "The Mcp-Method header is missing.",
             ));
         }
         Err(problem) => {
             return Err(protocol::header_mismatch(
-                Some(id),
+                id,
                 &problem.describe("Mcp-Method"),
             ));
         }
@@ -399,7 +396,7 @@ fn check_modern(
             Ok(Some(header)) => protocol::decode_name(&header),
             Ok(None) => {
                 return Err(protocol::header_mismatch(
-                    Some(id),
+                    id,
                     "The Mcp-Name header is missing.",
                 ));
             }
@@ -409,7 +406,7 @@ fn check_modern(
             (Some(header), Some(body)) if header == body => {}
             (Some(header), Some(body)) => {
                 return Err(protocol::header_mismatch(
-                    Some(id),
+                    id,
                     &format!(
                         "Header mismatch: Mcp-Name header value '{header}' does not match body \
                          value '{body}'"
@@ -418,13 +415,13 @@ fn check_modern(
             }
             (None, _) => {
                 return Err(protocol::header_mismatch(
-                    Some(id),
+                    id,
                     "The Mcp-Name header is not a valid value.",
                 ));
             }
             (Some(_), None) => {
                 return Err(protocol::header_mismatch(
-                    Some(id),
+                    id,
                     &format!("The Mcp-Name header names a {field} the body does not have."),
                 ));
             }

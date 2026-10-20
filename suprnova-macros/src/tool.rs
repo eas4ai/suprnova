@@ -367,7 +367,6 @@ pub(crate) fn meta_tokens(spec: &ToolSpec) -> TokenStream {
     let open_world = hint(spec.annotations.open_world);
     let untrusted_content = hint(spec.annotations.untrusted_content);
     let debugging = hint(spec.annotations.debugging);
-    let ignore_budget = spec.ignore_budget;
     quote! {
         ::suprnova::agents::__ToolMeta {
             name: #name,
@@ -384,7 +383,6 @@ pub(crate) fn meta_tokens(spec: &ToolSpec) -> TokenStream {
                 #debugging,
             ),
             guard: #guard,
-            ignore_budget: #ignore_budget,
         }
     }
 }

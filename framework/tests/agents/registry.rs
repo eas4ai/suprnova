@@ -236,16 +236,24 @@ pub async fn ignored_budget_tool(_input: BudgetInput) -> suprnova::Response {
 
 #[test]
 #[tracing_test::traced_test]
-fn agent_001_ignored_budgets_are_quiet_without_silencing_other_tools() {
+fn agent_001_ignored_budgets_still_warn_at_boot() {
     let router: Router = Router::new()
         .post("/budget", budget_tool)
         .post("/ignored-budget", ignored_budget_tool)
         .into();
     router.prepare_tools().expect("budgets are warnings");
-    assert!(logs_contain(
-        "tool `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`: the name has 31 characters; WebMCP's budget is 30"
-    ));
-    assert!(!logs_contain("tool `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`:"));
+    for name in [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ] {
+        for text in [
+            "the name has 31 characters; WebMCP's budget is 30",
+            "the description has 501 characters; WebMCP's budget is 500",
+            "input field `missing` has no description; WebMCP requires a description",
+        ] {
+            assert!(logs_contain(&format!("tool `{name}`: {text}")));
+        }
+    }
 }
 
 #[test]
