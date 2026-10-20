@@ -1065,7 +1065,16 @@ fn resolve_live(record: &'static LiveToolRecord) -> Result<RegisteredTool, Frame
 
 /// The three-part input of a headless Live tool: the mount properties, an
 /// optional handle, and the action's arguments (AGENT-013).
+///
+/// A call starts a component from `mount` or acts on one through `handle`,
+/// never both. When the mount has required properties, the schema says so
+/// with a `oneOf` over the two, so a client cannot send neither and learn
+/// about the missing properties only from the refusal.
 fn headless_input_schema(mount: Value, arguments: Value, required_arguments: bool) -> Value {
+    let required_mount = mount
+        .get("required")
+        .and_then(Value::as_array)
+        .is_some_and(|required| !required.is_empty());
     let mut mount = without_dialect(mount);
     if let Value::Object(object) = &mut mount {
         object.insert("description".into(), json!(MOUNT_DESCRIPTION));
@@ -1087,8 +1096,16 @@ fn headless_input_schema(mount: Value, arguments: Value, required_arguments: boo
         },
         "additionalProperties": false,
     });
-    if required_arguments && let Value::Object(object) = &mut schema {
-        object.insert("required".into(), json!(["arguments"]));
+    if let Value::Object(object) = &mut schema {
+        if required_arguments {
+            object.insert("required".into(), json!(["arguments"]));
+        }
+        if required_mount {
+            object.insert(
+                "oneOf".into(),
+                json!([{ "required": ["mount"] }, { "required": ["handle"] }]),
+            );
+        }
     }
     schema
 }
