@@ -91,18 +91,22 @@ Read on 2026-10-18 with the code map of that day.
 handler `#[tool]` with a description, an input struct whose JSON Schema
 (draft 2020-12) the framework derives from the type, its serde attributes
 and its `validator` attributes, and an output type whose schema becomes the
-tool's output schema. A tool name MUST be 1 to 128 characters of ASCII
-letters, digits, `_`, `-` and `.`, unique in the application; a duplicate
-or invalid name, or a missing description, MUST fail the build. Names,
+tool's output schema. A tool name MUST be 1 to 64 characters of ASCII
+letters, digits and `_`, unique in the application, so every model
+provider takes it as a function name; a duplicate or invalid name, or a
+missing description, MUST fail the build. The check of the tools at boot
+MUST warn, naming the tool, about a name over 30 characters, a description
+over 500 characters or an input field without a description, the budgets
+of Chrome's WebMCP guidance, and MUST NOT fail on them. Names,
 descriptions and schemas MUST be fixed at build time, never taken from
 data, because an agent reads them as instructions. A tool call MUST run
 through the same middleware, validation, `#[authorize]` policies and rate
 limits as the handler's route, whichever surface it arrives on. Nothing is
 a tool unless marked.
-Falsifier: a marked handler is not offered as a tool; an unmarked handler, route or Live action is offered; the published schema omits a field, a required flag or a `validator` bound of the input struct; an invalid or duplicate name builds; a name, description or schema can change at run time; or a tool call skips a middleware, validation rule or policy that the same handler's route applies.
+Falsifier: a marked handler is not offered as a tool; an unmarked handler, route or Live action is offered; the published schema omits a field, a required flag or a `validator` bound of the input struct; an invalid or duplicate name builds, one with a `.`, a `-` or a 65th character included; a tool over a budget boots without a warning naming it, or a budget stops the boot; a name, description or schema can change at run time; or a tool call skips a middleware, validation rule or policy that the same handler's route applies.
 Mechanism: `agents`.
-Rationale: schemars 1.x derives the schema and reads `validator` attributes, so what the agent is told matches what the server enforces; it is a schema generator, not an agent SDK.
-Status: Agreed 2026-10-18
+Rationale: schemars 1.x derives the schema and reads `validator` attributes, so what the agent is told matches what the server enforces; it is a schema generator, not an agent SDK. Names drop `.` because browser agents such as webmcp-extension pass them to model providers whose function names allow only letters, digits, `_` and `-`, and the warnings follow Google's webmcp-skills budgets (Shawn, 2026-10-19: "Yes to all").
+Status: Agreed 2026-10-19
 
 [AGENT-002] A tool MUST declare which callers it accepts: `public` (no
 authentication), `user` (a signed-in user, by browser session or by a
@@ -289,11 +293,13 @@ away, run a call through the ordinary action path (snapshot, CSRF,
 authorization `live:{component}.{action}`, transaction), and return the
 action's result with the agent-visible fields and no other state. A
 component whose actions are tools MUST carry a distinct `live:key` where it
-appears more than once on a page, which the checker enforces, and the key
-MUST be part of the tool name.
-Falsifier: a mounted component's tool action is not registered or stays registered after the component leaves; a call skips the snapshot, CSRF, authorization or transaction an ordinary action has; the result carries a field not marked agent-visible; or two unkeyed instances of a tool component pass the checker.
+appears more than once on a page, which the checker enforces, and a keyed
+island's tool name MUST be the tool's name, `-` and the key, at most 64
+characters in all, which the checker also enforces.
+Falsifier: a mounted component's tool action is not registered or stays registered after the component leaves; a call skips the snapshot, CSRF, authorization or transaction an ordinary action has; the result carries a field not marked agent-visible; two unkeyed instances of a tool component pass the checker; or a keyed island's tool name is not its tool's name, `-` and its key, or is over 64 characters and passes the checker.
 Mechanism: `agents-browser`.
-Status: Agreed 2026-10-18
+Rationale: tool names hold no `-` (AGENT-001), so the first `-` separates the tool from the key, and 64 characters is the function-name limit of the model providers a browser agent calls (Shawn, 2026-10-19: "Yes to all").
+Status: Agreed 2026-10-19
 
 [AGENT-013] A Live tool action marked `headless` MUST also be callable
 over the MCP endpoint with no browser. Its input schema has three parts:

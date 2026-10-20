@@ -223,7 +223,10 @@ async fn agent_005_redirect_uris_match_exactly_with_any_port_on_loopback() {
         "https://client.example.test:8443/callback",
         "https://evil.example.test/callback",
         "http://127.0.0.1:54321/other",
-        "http://localhost:4000/callback",
+        "http://localhost:4000/other",
+        "https://localhost:4000/callback",
+        "http://localhost.evil.test:3000/callback",
+        "http://127.0.0.2:3000/callback",
     ] {
         let response = h
             .authorize(&client_id, refused, &challenge, "", Some(&bearer))
@@ -237,6 +240,9 @@ async fn agent_005_redirect_uris_match_exactly_with_any_port_on_loopback() {
         "http://127.0.0.1:54321/callback",
         "http://[::1]:61000/callback",
         "http://localhost:3000/callback",
+        // MCP clients such as Claude Code register `localhost` without a
+        // port and listen on the one the system gives them.
+        "http://localhost:4000/callback",
     ] {
         let response = h
             .authorize(&client_id, accepted, &challenge, "", Some(&bearer))
