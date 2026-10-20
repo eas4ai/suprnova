@@ -704,7 +704,7 @@ fn check_name(name: &LitStr) -> syn::Result<()> {
     }
     if let Some(bad) = value
         .chars()
-        .find(|c| !(c.is_ascii_alphanumeric() || *c == '_'))
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '.'))
     {
         return Err(syn::Error::new(
             name.span(),
