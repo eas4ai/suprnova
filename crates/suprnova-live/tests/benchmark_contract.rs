@@ -377,9 +377,10 @@ fn the_render_cache_budget_is_an_on_demand_tool_and_never_a_gate_step() {
     // and kept only in local clones, so a clean checkout such as a CI
     // runner's has no gate to check.
     let steps_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/gate-steps.json");
-    if steps_path.exists() {
-        let steps =
-            fs::read_to_string(&steps_path).expect("the repository gate steps are readable");
+    let steps = steps_path
+        .exists()
+        .then(|| fs::read_to_string(&steps_path).expect("the repository gate steps are readable"));
+    if let Some(steps) = &steps {
         assert!(
             !steps.contains("render_cache_budget") && !steps.contains("render-cache-budget"),
             "the repository gate must not run the budget"
@@ -414,8 +415,10 @@ fn the_render_cache_budget_is_an_on_demand_tool_and_never_a_gate_step() {
         framework_manifest.contains("name = \"render_cache_workloads\""),
         "the framework workloads bench is a registered target"
     );
-    assert!(
-        !steps.contains("render_cache_workloads") && !steps.contains("render-cache-workloads"),
-        "the repository gate must not run the workloads bench either"
-    );
+    if let Some(steps) = &steps {
+        assert!(
+            !steps.contains("render_cache_workloads") && !steps.contains("render-cache-workloads"),
+            "the repository gate must not run the workloads bench either"
+        );
+    }
 }
