@@ -17,6 +17,7 @@
     "svelte": "^5.56.8"
   },
   "devDependencies": {
+    "webmcp-types": "0.1.10",
     "@inertiajs/vite": "^3.8.0",
     "@sveltejs/vite-plugin-svelte": "^7.2.0",
     "@tailwindcss/forms": "^0.5.11",
