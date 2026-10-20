@@ -884,10 +884,15 @@ async fn agent_dogfood_sign_in_refuses_a_wrong_password_and_a_foreign_return_to(
 }
 
 #[tokio::test]
-async fn agent_dogfood_registration_signs_the_new_user_in() {
+async fn agent_dogfood_registration_signs_the_new_user_in_at_the_same_origin_return_to() {
     let app = boot().await;
     user("Dee", "dee@example.test").await;
-    let page = app.client.get("/register").inertia().send().await;
+    let page = app
+        .client
+        .get("/register?return_to=%2Fconnected-agents")
+        .inertia()
+        .send()
+        .await;
     assert_eq!(page.status(), 200, "{}", page.body_text());
     assert_eq!(page.inertia_page()["component"], "auth/Register");
     let register = |name: &'static str, email: &'static str| {
@@ -915,11 +920,16 @@ async fn agent_dogfood_registration_signs_the_new_user_in() {
 
     let registered = register("Cy", " Cy@Example.test ").await;
     assert!(
-        matches!(registered.status(), 302 | 303),
+        matches!(registered.status(), 302 | 303 | 409),
         "{} {}",
         registered.status(),
         registered.body_text()
     );
+    let destination = match registered.status() {
+        409 => location_visit(&registered),
+        _ => location(&registered),
+    };
+    assert_eq!(path_of(&destination), "/connected-agents", "{destination}");
     let created = User::query()
         .filter("email", "cy@example.test")
         .first()
@@ -938,6 +948,43 @@ async fn agent_dogfood_registration_signs_the_new_user_in() {
         "signed in: {}",
         connected.body_text()
     );
+}
+
+#[tokio::test]
+async fn agent_dogfood_registration_ignores_a_foreign_return_to() {
+    let app = boot().await;
+    let page = app
+        .client
+        .get("/register?return_to=%2F%2Fevil.example")
+        .inertia()
+        .send()
+        .await;
+    assert_eq!(page.status(), 200, "{}", page.body_text());
+    let registered = app
+        .client
+        .post("/register")
+        .inertia()
+        .header("X-XSRF-TOKEN", xsrf(&page))
+        .json(&json!({
+            "name": "Cy",
+            "email": "cy@example.test",
+            "password": PASSWORD,
+            "password_confirmation": PASSWORD,
+        }))
+        .send()
+        .await;
+    assert!(
+        matches!(registered.status(), 302 | 303 | 409),
+        "{} {}",
+        registered.status(),
+        registered.body_text()
+    );
+    let destination = match registered.status() {
+        409 => location_visit(&registered),
+        _ => location(&registered),
+    };
+    assert_eq!(path_of(&destination), "/", "{destination}");
+    assert!(!destination.contains("evil"), "{destination}");
 }
 
 #[tokio::test]

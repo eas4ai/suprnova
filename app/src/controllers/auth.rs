@@ -113,6 +113,7 @@ pub struct RegisterProps {}
 /// `GET /register` - the registration form.
 #[handler]
 pub async fn show_register(req: Request) -> Response {
+    remember_return_to(&req);
     inertia_response!(&req, "auth/Register", RegisterProps {})
 }
 
