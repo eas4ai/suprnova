@@ -128,7 +128,7 @@ route serves. It takes these keys:
 | `title` | no | A display name |
 | `route` | no | The route name, when the handler serves more than one route |
 | `guard` | no | The auth guard a user caller is signed in to for the call |
-| `budget` | no | `budget = ignore` silences this tool's compile and boot budget warnings |
+| `budget` | no | `budget = ignore` silences this tool's compile warning; boot still logs its budget warnings |
 
 Use short action names such as `create_post` or `search_notes`. The build
 warns when a name exceeds 30 characters or a description exceeds 500
@@ -138,9 +138,10 @@ field a doc comment; `#[tool_input]` carries it into the JSON Schema.
 
 The compile warning is a Rust `deprecated` lint. A build with
 `RUSTFLAGS="-D warnings"` fails on it. Keep the tool within the budget. If a
-tool keeps its long name on purpose, set `budget = ignore` to silence all of
-that tool's compile and boot budget warnings. This key works on handlers and
-Live methods and leaves other deprecation warnings in their code visible:
+tool keeps its long name on purpose, set `budget = ignore` to silence that
+tool's compile warning. Boot still logs its budget warnings. This key works
+on handlers and Live methods and leaves other deprecation warnings in their
+code visible:
 
 ```rust
 #[tool(
