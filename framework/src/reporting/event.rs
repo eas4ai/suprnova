@@ -87,7 +87,9 @@ impl ReportingEvent {
 pub(crate) struct CapturedEvent {
     /// Deduplicate scrubbed diagnostics without resolving their symbols.
     pub(crate) event: ReportingEvent,
-    backtrace: std::backtrace::Backtrace,
+    /// `None` when the symbol resolver was busy at capture time: the event is
+    /// sent without frames rather than lost (issue #159).
+    backtrace: Option<std::backtrace::Backtrace>,
     send_pii: bool,
 }
 
@@ -100,19 +102,28 @@ impl CapturedEvent {
     fn capture(event: ReportingEvent, send_pii: bool) -> Self {
         Self {
             event,
-            backtrace: std::backtrace::Backtrace::force_capture(),
+            backtrace: Some(std::backtrace::Backtrace::force_capture()),
             send_pii,
         }
     }
 
-    /// Busy resolution must drop diagnostics instead of blocking on std's backtrace lock.
-    pub(crate) fn try_capture(event: ReportingEvent, send_pii: bool) -> Option<Self> {
+    /// Capture without waiting on another report's symbol resolution. A busy
+    /// resolver costs this event its frames, never the event: the message,
+    /// location, scope and release still reach the reporter, and the payload
+    /// says the stack was not captured.
+    pub(crate) fn try_capture(event: ReportingEvent, send_pii: bool) -> Self {
         let _guard = match STACK_ACCESS.try_lock() {
             Ok(guard) => guard,
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return None,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Self {
+                    event,
+                    backtrace: None,
+                    send_pii,
+                };
+            }
         };
-        Some(Self::capture(event, send_pii))
+        Self::capture(event, send_pii)
     }
 
     /// Keep the unwinding stack without waiting on another report's resolver.
@@ -120,7 +131,7 @@ impl CapturedEvent {
         message: &str,
         location: Option<&str>,
         config: &ReportingConfig,
-    ) -> Option<Self> {
+    ) -> Self {
         Self::try_capture(
             ReportingEvent::hook_snapshot(message, location, config),
             config.send_pii,
@@ -129,11 +140,18 @@ impl CapturedEvent {
 
     /// Resolve on a worker while keeping the original recorded location last.
     pub(crate) fn resolve(mut self) -> ReportingEvent {
-        let stack = {
-            let _guard = STACK_ACCESS
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            stacktrace(&self.backtrace)
+        let stack = match &self.backtrace {
+            Some(backtrace) => {
+                let _guard = STACK_ACCESS
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                stacktrace(backtrace)
+            }
+            None => {
+                self.event.payload["extra"]["stacktrace"] =
+                    json!("not captured: symbol resolution was busy");
+                json!({"frames":[]})
+            }
         };
         if let Some(values) = self.event.payload["exception"]["values"].as_array_mut() {
             for value in values {
@@ -212,7 +230,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "reporting-sentry")]
-    fn report_005_busy_symbol_resolution_drops_without_waiting_and_accepts_after_release() {
+    fn report_005_busy_symbol_resolution_sends_the_event_without_waiting() {
         use std::time::{Duration, Instant};
         let reporter = crate::ReportingConfig::default()
             .dsn("http://public@127.0.0.1:1/1")
@@ -224,14 +242,16 @@ mod tests {
         reporter
             .report_error(&crate::FrameworkError::internal("busy symbol resolution"))
             .expect("best effort report");
+        // The event is kept and only its frames are given up: a panic is the
+        // one event a reporter must not lose (issue #159).
         assert!(started.elapsed() < Duration::from_millis(150));
-        assert_eq!(reporter.metrics().queued, 0);
-        assert_eq!(reporter.metrics().dropped, 1);
+        assert_eq!(reporter.metrics().queued, 1);
+        assert_eq!(reporter.metrics().dropped, 0);
         drop(guard);
         reporter
             .report_error(&crate::FrameworkError::internal("capture after release"))
             .expect("accepted report");
-        assert_eq!(reporter.metrics().queued, 1);
+        assert_eq!(reporter.metrics().queued, 2);
         assert!(reporter.flush(Duration::from_secs(5)).expect("drain"));
     }
 

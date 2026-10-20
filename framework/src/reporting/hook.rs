@@ -89,10 +89,7 @@ pub(crate) fn capture(info: &std::panic::PanicHookInfo<'_>) {
         .unwrap_or("panic with non-string payload")
         .to_owned();
     let location = info.location().map(ToString::to_string);
-    let Some(event) = CapturedEvent::from_hook(&message, location.as_deref(), &state.config) else {
-        DROPPED.fetch_add(1, Ordering::Relaxed);
-        return;
-    };
+    let event = CapturedEvent::from_hook(&message, location.as_deref(), &state.config);
     queue.pending.begin();
     if queue
         .sender
