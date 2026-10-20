@@ -517,14 +517,14 @@ mod metadata {
             vec![field("count", FieldCategory::State)],
             vec![
                 action("increment", ModelCodec::I64)
-                    .with_tool(tool("counter.increment"))
+                    .with_tool(tool("increment_counter"))
                     .expect("tool"),
             ],
         );
         assert_ne!(with_tool.contract_digest(), plain.contract_digest());
         assert_eq!(
             with_tool.actions()[0].tool().map(ActionToolMetadata::name),
-            Some("counter.increment")
+            Some("increment_counter")
         );
 
         let visible = component(
@@ -544,7 +544,7 @@ mod metadata {
             vec![field("count", FieldCategory::State)],
             vec![
                 action("increment", ModelCodec::I64)
-                    .with_tool(tool("counter.bump"))
+                    .with_tool(tool("bump_counter"))
                     .expect("tool"),
             ],
         );
@@ -553,7 +553,7 @@ mod metadata {
             vec![field("count", FieldCategory::State)],
             vec![
                 action("increment", ModelCodec::I64)
-                    .with_tool(tool("counter.increment").headless(true))
+                    .with_tool(tool("increment_counter").headless(true))
                     .expect("tool"),
             ],
         );
@@ -564,7 +564,7 @@ mod metadata {
             vec![field("count", FieldCategory::State)],
             vec![
                 action("increment", ModelCodec::I64)
-                    .with_tool(tool("counter.increment").with_debugging(true))
+                    .with_tool(tool("increment_counter").with_debugging(true))
                     .expect("tool"),
             ],
         );
@@ -573,7 +573,7 @@ mod metadata {
             vec![field("count", FieldCategory::State)],
             vec![
                 action("increment", ModelCodec::I64)
-                    .with_tool(tool("counter.increment").with_debugging(false))
+                    .with_tool(tool("increment_counter").with_debugging(false))
                     .expect("tool"),
             ],
         );
@@ -592,13 +592,13 @@ mod metadata {
                 "{name:?}"
             );
         }
-        assert!(ActionToolMetadata::new("counter.increment", "  ").is_err());
+        assert!(ActionToolMetadata::new("increment_counter", "  ").is_err());
         assert!(ActionToolMetadata::new(&"a".repeat(64), "d").is_ok());
 
         // An argument with no schema cannot be part of a tool.
         assert_eq!(
             action("increment", ModelCodec::Json)
-                .with_tool(tool("counter.increment"))
+                .with_tool(tool("increment_counter"))
                 .map(|_| ())
                 .unwrap_err()
                 .kind(),
@@ -635,10 +635,10 @@ mod metadata {
             vec![],
             vec![
                 action("increment", ModelCodec::I64)
-                    .with_tool(tool("counter.change"))
+                    .with_tool(tool("change_counter"))
                     .expect("tool"),
                 action("decrement", ModelCodec::I64)
-                    .with_tool(tool("counter.change"))
+                    .with_tool(tool("change_counter"))
                     .expect("tool"),
             ],
         );
@@ -814,7 +814,7 @@ mod root {
     }
 
     fn browser_tool() -> ActionToolMetadata {
-        ActionToolMetadata::new("trace.execute", "Run the trace.")
+        ActionToolMetadata::new("execute_trace", "Run the trace.")
             .expect("tool")
             .with_title("Execute")
             .expect("title")
@@ -908,7 +908,7 @@ mod root {
         let tool = &tools["tools"][0];
         assert_eq!(tools["tools"].as_array().map(Vec::len), Some(1));
         assert_eq!(tool["action"], "execute");
-        assert_eq!(tool["name"], "trace.execute.main");
+        assert_eq!(tool["name"], "execute_trace-main");
         assert_eq!(tool["title"], "Execute");
         assert_eq!(tool["description"], "Run the trace.");
         assert_eq!(
@@ -929,7 +929,7 @@ mod root {
             .expect("mount");
         assert_eq!(
             tools_attribute(&html).expect("tools")["tools"][0]["name"],
-            "trace.execute.side-2"
+            "execute_trace-side-2"
         );
     }
 
@@ -967,7 +967,7 @@ mod root {
             .expect("mount");
         assert!(!html.contains("data-suprnova-live-tools"), "{html}");
 
-        let headless_only = ActionToolMetadata::new("trace.execute", "Run the trace.")
+        let headless_only = ActionToolMetadata::new("execute_trace", "Run the trace.")
             .expect("tool")
             .headless(true);
         let html = mount(trace_metadata(Some(headless_only), true), "main")
@@ -1033,10 +1033,10 @@ mod checker {
     }
 
     fn check(source: &str) -> CheckReport {
-        let browser = ActionToolMetadata::new("picker.select", "Select an item.")
+        let browser = ActionToolMetadata::new("select_item", "Select an item.")
             .expect("tool")
             .for_browser(true);
-        let headless = ActionToolMetadata::new("agent.select", "Select an item.")
+        let headless = ActionToolMetadata::new("select_agent_item", "Select an item.")
             .expect("tool")
             .headless(true);
         let registry = ComponentRegistryBuilder::new()
@@ -1151,6 +1151,35 @@ mod checker {
     }
 
     #[test]
+    fn agent_012_checker_refuses_a_combined_browser_name_over_64() {
+        let report = check(&format!(
+            r#"<section live:component="tests.picker" live:key="{}"></section>"#,
+            "k".repeat(60)
+        ));
+        assert!(
+            !report.diagnostics().is_empty(),
+            "an overlong browser name must fail"
+        );
+        let diagnostic = format!("{:?}", report.diagnostics());
+        for expected in ["tests.picker", "select_item", "72"] {
+            assert!(diagnostic.contains(expected), "{diagnostic}");
+        }
+    }
+
+    #[test]
+    fn agent_012_checker_accepts_a_combined_name_of_exactly_64() {
+        let report = check(&format!(
+            r#"<section live:component="tests.picker" live:key="{}"></section>"#,
+            "k".repeat(52)
+        ));
+        assert!(
+            report.diagnostics().is_empty(),
+            "{:?}",
+            report.diagnostics()
+        );
+    }
+
+    #[test]
     fn agent_012_checker_accepts_distinctly_keyed_tool_components() {
         let report = check(
             r#"<section live:component="tests.picker" live:key="left"></section>
@@ -1162,4 +1191,60 @@ mod checker {
             report.diagnostics()
         );
     }
+}
+
+#[test]
+fn agent_012_model_names_and_browser_names_obey_the_64_character_limit() {
+    use suprnova_live::metadata::ActionToolMetadata;
+    for name in [
+        "bad.dot".to_owned(),
+        "bad-dash".to_owned(),
+        "a".repeat(65),
+        String::new(),
+    ] {
+        assert!(ActionToolMetadata::new(&name, "A tool.").is_err(), "{name}");
+    }
+    assert!(ActionToolMetadata::new(&"a".repeat(64), "A tool.").is_ok());
+    let tool = ActionToolMetadata::new("add_to_tally", "Add to a tally.").expect("tool");
+    assert_eq!(
+        tool.browser_name("left-pane").as_deref(),
+        Some("add_to_tally-left-pane")
+    );
+    assert_eq!(
+        tool.browser_name(&"a".repeat(51)).as_ref().map(String::len),
+        Some(64)
+    );
+    assert!(tool.browser_name(&"a".repeat(52)).is_none());
+}
+
+#[test]
+fn agent_012_action_and_mount_descriptions_survive_optional_schema_wrappers() {
+    let arguments = ActionArgumentSchema::new(vec![
+        ActionArgumentField::new(field("amount"), ModelCodec::U64, false)
+            .expect("field")
+            .with_description("How much to add."),
+    ])
+    .expect("arguments")
+    .json_schema()
+    .expect("schema");
+    assert_eq!(
+        arguments["properties"]["amount"]["description"],
+        "How much to add."
+    );
+    assert!(arguments["properties"]["amount"]["anyOf"].is_array());
+    let mount = ChildParameterSchema::new(
+        1,
+        vec![
+            ChildParameterField::new(field("start"), ModelCodec::U64, false)
+                .with_description("The initial count."),
+        ],
+    )
+    .expect("mount")
+    .json_schema(&[])
+    .expect("schema");
+    assert_eq!(
+        mount["properties"]["start"]["description"],
+        "The initial count."
+    );
+    assert!(mount["properties"]["start"]["anyOf"].is_array());
 }

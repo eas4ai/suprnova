@@ -3,8 +3,8 @@ import { expect, test, type Page } from '@playwright/test';
 // AGENT-014: the server tools a Live page offers, registered with WebMCP
 // beside its islands' tools and called the way a built-in agent calls them,
 // through the DevTools `WebMCP` domain's `invokeTool`. The host's
-// `/server-tools` page offers `notes.show` to everyone and `posts.create`
-// and `posts.clear` to a signed-in user.
+// `/server-tools` page offers `show_note` to everyone and `create_post`
+// and `clear_posts` to a signed-in user.
 
 interface ToolResponse {
   readonly status: string;
@@ -35,7 +35,7 @@ interface Descriptor {
   readonly annotations: Record<string, boolean>;
 }
 
-const SERVER_TOOLS = ['notes.show', 'posts.clear', 'posts.create'];
+const SERVER_TOOLS = ['clear_posts', 'create_post', 'show_note'];
 
 async function webmcp(page: Page) {
   const cdp = await page.context().newCDPSession(page);
@@ -71,7 +71,7 @@ async function registered(page: Page): Promise<string[]> {
 
 /// The server tools among the registered ones.
 async function serverTools(page: Page): Promise<string[]> {
-  return (await registered(page)).filter((name) => !name.startsWith('counter.'));
+  return (await registered(page)).filter((name) => !name.includes('-'));
 }
 
 async function signIn(page: Page, user: string) {
@@ -106,11 +106,11 @@ async function openServerTools(page: Page, expected: string[]) {
 test('agent_014_live_page_registers_the_server_tools_the_viewer_may_call', async ({ page }) => {
   await reset(page);
   // A guest sees the public tool only.
-  await openServerTools(page, ['notes.show']);
+  await openServerTools(page, ['show_note']);
   // A signed-in user sees the user tools too, and the counter's tool.
   await signIn(page, 'alice');
   await openServerTools(page, SERVER_TOOLS);
-  expect(await registered(page)).toContain('counter.add.counter');
+  expect(await registered(page)).toContain('add_to_counter-counter');
 });
 
 test('agent_014_live_page_tools_leave_on_navigation', async ({ page }) => {
@@ -125,19 +125,19 @@ test('agent_014_live_server_tool_call_carries_session_csrf_and_header', async ({
   await signIn(page, 'alice');
   const agent = await openServerTools(page, SERVER_TOOLS);
   await reset(page);
-  const created = await agent.invoke('posts.create', { title: 'Hello' });
+  const created = await agent.invoke('create_post', { title: 'Hello' });
   expect(created.status).toBe('Completed');
   expect(created.output?.isError).toBe(false);
   expect(created.output?.structuredContent).toEqual({ id: 1, title: 'Hello', user: 'alice' });
   expect(created.output).not.toHaveProperty('content');
-  const shown = await agent.invoke('notes.show', { note: 'n/7' });
+  const shown = await agent.invoke('show_note', { note: 'n/7' });
   expect(shown.output?.isError).toBe(false);
   expect(shown.output?.structuredContent).toEqual({ note: 'n/7', same: true });
   const [create, show] = await toolCalls(page);
   // The route ran with the page's session and its CSRF token, which the
   // CSRF check accepted, and the header named the tool.
   expect(create).toMatchObject({
-    tool: 'posts.create',
+    tool: 'create_post',
     method: 'POST',
     path: '/posts',
     csrf: 'X-XSRF-TOKEN',
@@ -146,7 +146,7 @@ test('agent_014_live_server_tool_call_carries_session_csrf_and_header', async ({
   });
   // A GET tool sends its arguments, its path argument included, in the query.
   expect(show).toMatchObject({
-    tool: 'notes.show',
+    tool: 'show_note',
     method: 'GET',
     path: '/notes/n%2F7',
     query: 'note=n%2F7',
@@ -161,7 +161,7 @@ test('agent_014_live_write_tool_rerenders_the_mounted_islands', async ({ page })
   await signIn(page, 'alice');
   const agent = await openServerTools(page, SERVER_TOOLS);
   await expect(posts(page)).toHaveText('0');
-  const created = await agent.invoke('posts.create', { title: 'Hello' });
+  const created = await agent.invoke('create_post', { title: 'Hello' });
   expect(created.output?.isError).toBe(false);
   // The islands rendered fresh before the call resolved: the screen already
   // shows what the agent did.
@@ -169,7 +169,7 @@ test('agent_014_live_write_tool_rerenders_the_mounted_islands', async ({ page })
   const renders = await liveRequests(page);
   expect(renders.length).toBeGreaterThanOrEqual(2);
   expect(renders.every((request) => request.tool === null)).toBe(true);
-  const cleared = await agent.invoke('posts.clear', {});
+  const cleared = await agent.invoke('clear_posts', {});
   expect(cleared.output?.isError).toBe(false);
   expect(await posts(page).textContent()).toBe('0');
 });
@@ -178,7 +178,7 @@ test('agent_014_live_read_only_tool_does_not_rerender', async ({ page }) => {
   await signIn(page, 'alice');
   const agent = await openServerTools(page, SERVER_TOOLS);
   await reset(page);
-  const shown = await agent.invoke('notes.show', { note: '1' });
+  const shown = await agent.invoke('show_note', { note: '1' });
   expect(shown.output?.isError).toBe(false);
   await page.waitForTimeout(200);
   expect(await liveRequests(page)).toEqual([]);
@@ -207,19 +207,19 @@ test('agent_014_live_server_tool_annotations_follow_the_markings', async ({ page
     () => (window as unknown as { __registered: unknown[] }).__registered,
   )) as Descriptor[];
   const hints = (name: string) => descriptors.find((descriptor) => descriptor.name === name)?.annotations;
-  expect(hints('posts.create')).toEqual({
+  expect(hints('create_post')).toEqual({
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: false,
     debugging: false,
   });
-  expect(hints('posts.clear')).toEqual({
+  expect(hints('clear_posts')).toEqual({
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: true,
     debugging: false,
   });
-  expect(hints('notes.show')).toEqual({
+  expect(hints('show_note')).toEqual({
     readOnlyHint: true,
     untrustedContentHint: true,
     consequentialHint: false,
@@ -230,7 +230,7 @@ test('agent_014_live_server_tool_annotations_follow_the_markings', async ({ page
     const context = (document as unknown as {
       modelContext: { getTools(): Promise<{ name: string; annotations: Record<string, boolean> }[]> };
     }).modelContext;
-    return (await context.getTools()).find((tool) => tool.name === 'notes.show')?.annotations;
+    return (await context.getTools()).find((tool) => tool.name === 'show_note')?.annotations;
   });
   expect(kept).toMatchObject({ readOnlyHint: true, untrustedContentHint: true });
 });

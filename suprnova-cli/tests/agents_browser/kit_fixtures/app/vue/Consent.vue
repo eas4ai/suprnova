@@ -9,7 +9,7 @@ import { toolSchemas } from '../../types/tool-schemas'
 const root = usePage().props.root
 const decision = useForm<{ authorization: string; decision: string }>({ authorization: '', decision: '' })
 useFormTool(decision, {
-  name: 'fixture.consent.approve',
+  name: 'approve_fixture_consent',
   description: 'Decide a pending authorization.',
   schema: toolSchemas.ApprovalDecisionRequest,
   action: { method: 'post', url: `${root}/oauth/approve` },

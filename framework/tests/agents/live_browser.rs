@@ -156,7 +156,7 @@ async fn agent_012_a_router_without_agents_offers_its_tools() {
         "{}",
         page.html
     );
-    assert!(page.html.contains("counter.peek.main"), "{}", page.html);
+    assert!(page.html.contains("peek_counter-main"), "{}", page.html);
 }
 
 #[tokio::test]
@@ -190,7 +190,7 @@ async fn agent_012_a_router_serving_agents_offers_its_tools() {
         "{}",
         page.html
     );
-    assert!(page.html.contains("counter.peek.main"), "{}", page.html);
+    assert!(page.html.contains("peek_counter-main"), "{}", page.html);
 }
 
 #[tokio::test]
@@ -199,7 +199,7 @@ async fn agent_002_live_tool_action_checks_the_caller_without_the_header() {
     let client = live_fixture::live_client();
     let page = page(&client).await;
     let counter = PageIsland::keyed(&page.html, "main");
-    // `add` is the tool `counter.add`, for users and agents: a guest who
+    // `add` is the tool `add_to_counter`, for users and agents: a guest who
     // leaves the header off is refused as one who sends it.
     let refused = click(
         &client,
@@ -247,13 +247,13 @@ async fn agent_002_live_tool_action_without_the_header_is_not_counted() {
     }
     // The budget of one tool call is still whole.
     let called = client
-        .live_tool("counter.add.main", &page.html, json!({ "amount": 1 }))
+        .live_tool("add_to_counter-main", &page.html, json!({ "amount": 1 }))
         .send()
         .await;
     assert_eq!(called.status(), 200, "{}", called.body_text());
     assert_eq!(outcome(&called.body_text()), "accepted");
     let limited = client
-        .live_tool("counter.add.main", &page.html, json!({ "amount": 1 }))
+        .live_tool("add_to_counter-main", &page.html, json!({ "amount": 1 }))
         .send()
         .await;
     assert_eq!(limited.status(), 429, "{}", limited.body_text());
@@ -271,7 +271,7 @@ async fn agent_012_the_tool_header_cannot_cover_another_action() {
         &counter,
         "reset",
         json!({}),
-        Some("counter.peek.main"),
+        Some("peek_counter-main"),
     )
     .send()
     .await;
@@ -292,7 +292,7 @@ async fn agent_012_the_tool_header_cannot_cover_another_component() {
         &quota,
         "read",
         json!({}),
-        Some("counter.peek.main"),
+        Some("peek_counter-main"),
     )
     .send()
     .await;
@@ -304,7 +304,7 @@ async fn agent_012_the_tool_header_cannot_cover_another_component() {
         &quota,
         "read",
         json!({}),
-        Some("quota.read.side"),
+        Some("read_quota-side"),
     )
     .send()
     .await;
@@ -322,20 +322,20 @@ async fn agent_013_a_guest_handle_opens_only_from_its_address_bucket() {
     let second = client
         .clone()
         .with_peer_address(IpAddr::V4(Ipv4Addr::new(10, 7, 0, 2)));
-    let minted = first.mcp().call("quota.read", json!({ "mount": {} })).await;
+    let minted = first.mcp().call("read_quota", json!({ "mount": {} })).await;
     assert!(!minted.is_error(), "{:?}", minted.response());
     let handle = minted.handle().expect("a guest handle").to_string();
     // Another guest, from another address, cannot act on it.
     let elsewhere = second
         .mcp()
-        .call("quota.read", json!({ "handle": handle }))
+        .call("read_quota", json!({ "handle": handle }))
         .await;
     assert!(elsewhere.is_error(), "{:?}", elsewhere.response());
     assert!(elsewhere.text().contains("handle"), "{}", elsewhere.text());
     // From its own address it opens.
     let again = first
         .mcp()
-        .call("quota.read", json!({ "handle": handle }))
+        .call("read_quota", json!({ "handle": handle }))
         .await;
     assert!(!again.is_error(), "{:?}", again.response());
     let structured = again.structured().expect("structured content");
@@ -369,7 +369,7 @@ async fn agent_013_an_agent_route_snapshot_is_refused_by_the_browser_endpoint() 
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("alice")))
         .call(
-            "counter.add",
+            "add_to_counter",
             json!({
                 "mount": { "start": 1, "label": "Main" },
                 "arguments": { "amount": 1 },

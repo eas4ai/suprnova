@@ -59,7 +59,7 @@ async fn agent_005_password_change_ends_the_token_under_magnetar_sessions() {
     let called = client
         .mcp()
         .with_token(&tokens.access)
-        .call("users.profile", json!({}))
+        .call("read_user_profile", json!({}))
         .await;
     assert_eq!(called.status(), 200, "{:?}", called.response());
     assert_eq!(
@@ -151,7 +151,7 @@ async fn agent_005_magnetar_epoch_is_read_through_the_engine_not_the_oauth_conne
     let called = client
         .mcp()
         .with_token(&tokens.access)
-        .call("users.profile", json!({}))
+        .call("read_user_profile", json!({}))
         .await;
     assert_eq!(called.status(), 200, "{:?}", called.response());
     reset_password(email).await;

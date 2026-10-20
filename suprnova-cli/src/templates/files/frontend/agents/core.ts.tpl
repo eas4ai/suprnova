@@ -9,6 +9,8 @@
 // server render can import it. A browser without WebMCP registers nothing,
 // and the page works as it always did.
 
+import type {} from 'webmcp-types'
+
 import { csrfHeaders } from '../stream/core'
 
 /** One text block of a tool result. */
@@ -24,38 +26,27 @@ export type ToolResult = {
 }
 
 /** What WebMCP hands `execute` beside the input: the agent's abort signal. */
-export type ToolClient = { signal?: AbortSignal }
+export type ToolClient = Partial<WebMCP.ToolExecuteCallbackOptions>
 
 /**
  * The four hints every registration carries, from the tool's markings.
  * `debugging` marks a tool meant for debugging and developer tooling, not
  * end users.
  */
-export type ToolAnnotations = {
-  readOnlyHint: boolean
-  untrustedContentHint: boolean
-  consequentialHint: boolean
-  debugging: boolean
-}
+export type ToolAnnotations = Required<WebMCP.ToolAnnotations>
 
 /** A JSON Schema whose root is an object, as a tool's input must be. */
 export type ToolInputSchema = { readonly type: 'object'; readonly [key: string]: unknown }
 
 /** One tool as the page registers it with `document.modelContext`. */
-export type ToolDefinition = {
-  name: string
-  title?: string
-  description: string
+export type ToolDefinition = Omit<WebMCP.ModelContextTool, 'inputSchema' | 'annotations' | 'execute'> & {
   inputSchema: ToolInputSchema
   annotations: ToolAnnotations
   execute: (input: unknown, client?: ToolClient) => Promise<ToolResult>
 }
 
-/** The part of `document.modelContext` a page uses. */
-export type ModelContextLike = {
-  /** A promise in the draft; one that rejects is a refusal. */
-  registerTool(tool: ToolDefinition, options?: { signal?: AbortSignal }): unknown
-}
+/** The part of `document.modelContext` a page uses, checked against WebMCP. */
+export type ModelContextLike = Pick<WebMCP.ModelContext, 'registerTool'>
 
 /** The most tools one page lists. */
 export const MAX_PAGE_TOOLS = 64
@@ -74,7 +65,7 @@ export const TOOL_CALL_HEADER = 'Suprnova-Tool-Call'
 export const FORM_TOOL_HEADER = 'Suprnova-Form-Tool'
 
 /** A tool name the framework accepts (AGENT-001). */
-const TOOL_NAME = /^[A-Za-z0-9_.-]{1,128}$/u
+const TOOL_NAME = /^[A-Za-z0-9_]{1,64}$/u
 
 const LEFT = "The tool has left the page: call again once the page lists it."
 
@@ -123,7 +114,7 @@ function plainObject(value: unknown): value is Record<string, unknown> {
 /** Why `tool` cannot be registered, or `null`. */
 function definitionProblem(tool: ToolDefinition): string | null {
   if (!TOOL_NAME.test(tool.name)) {
-    return 'a tool name is 1 to 128 letters, digits, `_`, `-` and `.`'
+    return 'a tool name is 1 to 64 ASCII letters, digits and `_`'
   }
   if (typeof tool.description !== 'string' || tool.description.trim() === '') {
     return 'it has no description'

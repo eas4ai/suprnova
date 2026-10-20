@@ -14,34 +14,34 @@ fn agent_001_marked_handlers_are_tools_and_nothing_else_is() {
     assert_eq!(
         names,
         vec![
-            "bus.later",
+            "create_post",
+            "delete_post",
             "echo",
-            "math.eval",
-            "page.html",
-            "posts.create",
-            "posts.delete",
-            "posts.show",
-            "profile.update",
-            "request.peek",
-            "slow.bytes",
-            "slow.stream",
-            "slow.wait",
-            "tags.group",
-            "throttled.ping",
-            "users.api",
-            "users.named",
-            "users.profile",
+            "enqueue_message",
+            "evaluate_math",
+            "group_tags",
+            "peek_request",
+            "ping_throttled",
+            "read_api_user",
+            "read_html_page",
+            "read_named_user",
+            "read_slow_bytes",
+            "read_slow_stream",
+            "read_user_profile",
+            "show_post",
+            "update_profile",
+            "wait_slowly",
         ]
     );
     // `/plain` is a routed `#[handler]` without `#[tool]`, and `/posts/new`
     // a closure route: neither is offered.
     assert!(registry.get("plain").is_none());
-    let show = registry.get("posts.show").expect("posts.show is a tool");
+    let show = registry.get("show_post").expect("show_post is a tool");
     assert_eq!(show.pattern(), "/posts/{post}");
     assert_eq!(show.method().as_str(), "GET");
 }
 
-/// The fixture's routes without `users.profile`'s.
+/// The fixture's routes without `read_user_profile`'s.
 fn routes_without_profile() -> Router {
     Router::new()
         .post("/echo", echo)
@@ -64,8 +64,8 @@ async fn agent_001_unrouted_tools_are_left_out_with_a_warning() {
         .prepare_tools()
         .expect("a router that routes some tools serves");
     // One boot warning names each tool left out.
-    assert!(logs_contain("users.profile"));
-    assert!(logs_contain("profile.update"));
+    assert!(logs_contain("read_user_profile"));
+    assert!(logs_contain("update_profile"));
     assert!(logs_contain("not routed"));
 
     let client = suprnova::testing::TestClient::new(router, MiddlewareRegistry::new());
@@ -77,10 +77,13 @@ async fn agent_001_unrouted_tools_are_left_out_with_a_warning() {
         .assert_ok();
     let listed = client.mcp().list().await.tool_names();
     assert!(listed.contains(&"echo".to_string()), "{listed:?}");
-    assert!(!listed.contains(&"slow.stream".to_string()), "{listed:?}");
+    assert!(
+        !listed.contains(&"read_slow_stream".to_string()),
+        "{listed:?}"
+    );
     let unrouted = client
         .mcp()
-        .call("users.profile", serde_json::json!({}))
+        .call("read_user_profile", serde_json::json!({}))
         .await;
     assert_eq!(
         unrouted.error_code(),
@@ -121,7 +124,7 @@ async fn agent_001_an_unmarked_route_still_answers_as_a_route() {
         .assert_json(serde_json::json!({ "plain": true }));
 }
 
-/// The fixture's routes with `AuthMiddleware` on `posts.create`, a tool that
+/// The fixture's routes with `AuthMiddleware` on `create_post`, a tool that
 /// accepts agent callers.
 fn routes_with_auth_on_an_agent_tool() -> Router {
     Router::new()
@@ -145,14 +148,14 @@ fn agent_002_an_agent_tool_behind_auth_warns_at_boot() {
     router
         .prepare_tools()
         .expect("the warning does not refuse boot");
-    assert!(logs_contain("posts.create"));
+    assert!(logs_contain("create_post"));
     assert!(logs_contain("behind AuthMiddleware"));
 }
 
 #[tokio::test]
 async fn agent_001_a_misdeclared_route_name_refuses_boot() {
     let _container = fixture::setup();
-    // `users.named` declares `route = "users.named"`; here its handler
+    // `read_named_user` declares `route = "read_named_user"`; here its handler
     // serves a route of another name, so the declaration names nothing.
     let router = Router::new()
         .post("/named", fixture::named_profile)
@@ -162,9 +165,92 @@ async fn agent_001_a_misdeclared_route_name_refuses_boot() {
         .prepare_tools()
         .expect_err("a route name that matches none of the handler's routes refuses boot");
     let message = error.to_string();
-    assert!(message.contains("users.named"), "{message}");
+    assert!(message.contains("read_named_user"), "{message}");
     assert!(message.contains("route"), "{message}");
     // The route is not served without its checks: every request is refused.
     let client = suprnova::testing::TestClient::new(router, MiddlewareRegistry::new());
     client.post("/named").send().await.assert_status(500);
+}
+
+#[suprnova::tool_input]
+pub struct BudgetInput {
+    pub missing: String,
+    /// The value to echo back to the caller.
+    pub described: Option<String>,
+}
+
+#[suprnova::tool(
+    name = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    description = "ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    callers = [public],
+    input = BudgetInput,
+)]
+#[suprnova::handler]
+pub async fn budget_tool(_input: BudgetInput) -> suprnova::Response {
+    suprnova::json_response!({ "ok": true })
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn agent_001_webmcp_budgets_warn_once_without_refusing_boot() {
+    let router: Router = Router::new().post("/budget", budget_tool).into();
+    router.prepare_tools().expect("budgets are warnings");
+    for text in [
+        "the name has 31 characters; WebMCP's budget is 30",
+        "the description has 501 characters; WebMCP's budget is 500",
+        "input field `missing` has no description; WebMCP requires a description",
+    ] {
+        logs_assert(|lines| {
+            let count = lines
+                .iter()
+                .filter(|line| {
+                    line.contains(text)
+                        && line.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                        && line.contains("WARN")
+                })
+                .count();
+            if count == 1 {
+                Ok(())
+            } else {
+                Err(format!("expected one warning for {text}, got {count}"))
+            }
+        });
+    }
+    assert!(!logs_contain("input field `described` has no description"));
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn agent_001_browser_only_live_tools_warn_about_their_argument_fields() {
+    let _container = fixture::setup();
+    let router: Router = Router::new().into();
+    router.prepare_tools().expect("browser-only tools check");
+    assert!(logs_contain("input field `query` has no description"));
+    for (tool, field) in [
+        ("read_quota", "mount.note"),
+        ("rename_counter", "arguments.title"),
+    ] {
+        logs_assert(|lines| {
+            let count = lines
+                .iter()
+                .filter(|line| {
+                    line.contains(tool)
+                        && line.contains(&format!("input field `{field}` has no description"))
+                })
+                .count();
+            if count == 1 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "expected one warning for {tool} {field}, got {count}"
+                ))
+            }
+        });
+    }
+    assert!(!logs_contain(
+        "input field `mount.limit` has no description"
+    ));
+    assert!(!logs_contain(
+        "input field `mount.owner` has no description"
+    ));
 }

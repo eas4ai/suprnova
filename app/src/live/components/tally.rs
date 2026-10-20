@@ -1,5 +1,5 @@
 //! `app.tally`: a count an MCP client keeps for a signed-in user, with no
-//! browser. Its one action, `add`, is the headless Live tool `tally.add`
+//! browser. Its one action, `add`, is the headless Live tool `add_to_tally`
 //! (`src/agents.rs`).
 //!
 //! The headless tool has its own component rather than an action on
@@ -31,17 +31,18 @@ impl Tally {
     /// Starts a tally at `start`. An agent sends it, so the mount policy in
     /// `live::providers` checks it before anything mounts.
     #[mount]
-    pub fn mount(start: u64) -> Self {
+    pub fn mount(#[doc = "The initial tally count."] start: u64) -> Self {
         Self { count: start }
     }
 
     /// Adds `amount` to the count, stopping at the largest count rather
     /// than wrapping around.
     #[tool(
-        name = "tally.add",
+        name = "add_to_tally",
         title = "Add to a tally",
         description = "Add an amount to a tally kept for the signed-in user, and read the new count. Start a tally with `mount.start`, or continue one with the `handle` the last call answered.",
         callers = [user],
+        arguments(amount = "How much to add to the tally."),
         headless,
     )]
     #[action]

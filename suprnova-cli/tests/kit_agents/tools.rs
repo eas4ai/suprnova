@@ -1,5 +1,5 @@
 //! The two tools every Inertia and Live kit ships on the signed-in user's
-//! own notes: `notes.search` and `notes.create`, so a new project's MCP
+//! own notes: `search_notes` and `create_note`, so a new project's MCP
 //! endpoint lists something from the first `cargo run`, and its approval
 //! page has a real scope to show.
 //!
@@ -108,7 +108,7 @@ fn agent_017_kits_ship_the_notes_tools() {
         );
     }
 
-    let search = marking(&shared, "notes.search");
+    let search = marking(&shared, "search_notes");
     for part in [
         "callers = [user, agent],",
         "scopes = [scope::NOTES_READ],",
@@ -118,10 +118,10 @@ fn agent_017_kits_ship_the_notes_tools() {
     ] {
         assert!(
             contains(search, part),
-            "notes.search lacks `{part}`:\n{search}"
+            "search_notes lacks `{part}`:\n{search}"
         );
     }
-    let create = marking(&shared, "notes.create");
+    let create = marking(&shared, "create_note");
     for part in [
         "callers = [user, agent],",
         "scopes = [scope::NOTES_WRITE],",
@@ -131,7 +131,7 @@ fn agent_017_kits_ship_the_notes_tools() {
     ] {
         assert!(
             contains(create, part),
-            "notes.create lacks `{part}`:\n{create}"
+            "create_note lacks `{part}`:\n{create}"
         );
     }
     for part in [
@@ -166,7 +166,7 @@ fn agent_017_kits_ship_the_notes_tools() {
     }
 }
 
-/// AGENT-017: `notes.create` takes what the notes form takes, with the
+/// AGENT-017: `create_note` takes what the notes form takes, with the
 /// same bounds and the same messages as the Inertia kits' `StoreNoteRequest`
 /// and the Live kit's note form.
 #[test]
@@ -186,7 +186,7 @@ fn agent_017_notes_create_keeps_the_notes_form_bounds() {
             );
             assert!(
                 contains(&shared, rule),
-                "notes.create does not hold the notes form's `{rule}`"
+                "create_note does not hold the notes form's `{rule}`"
             );
         }
     }
@@ -195,7 +195,7 @@ fn agent_017_notes_create_keeps_the_notes_form_bounds() {
             &shared,
             "errs.add(\"title\", \"Give the note a title of 1 to 255 characters.\");"
         ),
-        "notes.create refuses a title of spaces as the notes form does"
+        "create_note refuses a title of spaces as the notes form does"
     );
 }
 
@@ -209,7 +209,7 @@ fn agent_017_the_notes_page_offers_the_notes_tools() {
         let routes = project.read("src/routes.rs");
         let authenticated = authenticated_group(&routes);
         for route in [
-            r#"get!("/notes", controllers::notes::index).name("notes.index").with_tools(["notes.search", "notes.create"])"#,
+            r#"get!("/notes", controllers::notes::index).name("notes.index").with_tools(["search_notes", "create_note"])"#,
             r#"get!("/notes/search", controllers::note_tools::search).name("notes.search")"#,
             r#"post!("/notes/tools", controllers::note_tools::create).name("notes.create")"#,
         ] {

@@ -58,7 +58,7 @@ test('agent_015_vue_component_tool_registers_while_mounted', async () => {
   let total = 1
   const view = probe(() =>
     usePageTool<{ amount: number }>({
-      name: 'cart.add',
+      name: 'add_to_cart',
       title: 'Add to the cart',
       description: 'Add an amount to the cart total.',
       inputSchema: SCHEMA,
@@ -67,7 +67,7 @@ test('agent_015_vue_component_tool_registers_while_mounted', async () => {
       execute: ({ amount }) => ({ total: total + amount }),
     }),
   )
-  expect(context.names()).toEqual(['cart.add'])
+  expect(context.names()).toEqual(['add_to_cart'])
   expect(context.descriptors[0].annotations).toEqual({
     readOnlyHint: false,
     untrustedContentHint: false,
@@ -75,12 +75,12 @@ test('agent_015_vue_component_tool_registers_while_mounted', async () => {
     debugging: true,
   })
   expect(context.descriptors[0].title).toBe('Add to the cart')
-  expect(await context.call('cart.add', { amount: 2 })).toEqual({
+  expect(await context.call('add_to_cart', { amount: 2 })).toEqual({
     structuredContent: { total: 3 },
     isError: false,
   })
   total = 10
-  expect((await context.call('cart.add', { amount: 2 })).structuredContent).toEqual({ total: 12 })
+  expect((await context.call('add_to_cart', { amount: 2 })).structuredContent).toEqual({ total: 12 })
   expect(context.descriptors).toHaveLength(1)
   view.unmount()
 })
@@ -88,7 +88,7 @@ test('agent_015_vue_component_tool_registers_while_mounted', async () => {
 test('agent_015_vue_component_tool_leaves_on_unmount', async () => {
   const view = probe(() =>
     usePageTool({
-      name: 'cart.clear',
+      name: 'clear_cart',
       description: 'Empty the cart.',
       inputSchema: { type: 'object' },
       execute: () => {
@@ -96,7 +96,7 @@ test('agent_015_vue_component_tool_leaves_on_unmount', async () => {
       },
     }),
   )
-  expect(await context.call('cart.clear', {})).toEqual({
+  expect(await context.call('clear_cart', {})).toEqual({
     content: [{ type: 'text', text: 'The cart is locked. Try later.' }],
     isError: true,
   })
@@ -113,14 +113,14 @@ test('agent_015_vue_form_tool_submits_through_inertia', async () => {
   const view = probe(() => {
     form = useForm<{ title: string; body: string | null }>({ title: '', body: null })
     useFormTool(form, {
-      name: 'notes.create',
+      name: 'create_note',
       description: 'Write a note.',
       schema: toolSchemas.StoreNoteRequest,
       action: { method: 'post', url: '/notes' },
     })
   })
   expect(context.descriptors[0].inputSchema).toBe(toolSchemas.StoreNoteRequest)
-  const result = await context.call('notes.create', { title: 'Hello', body: 'World', stray: 1 })
+  const result = await context.call('create_note', { title: 'Hello', body: 'World', stray: 1 })
   await settle()
   expect(visits).toEqual([{ method: 'post', url: '/notes', data: { title: 'Hello', body: 'World' } }])
   expect(result).toEqual({
@@ -141,13 +141,13 @@ test('agent_015_vue_form_tool_validation_errors_are_an_error_result', async () =
   const view = probe(() => {
     const form = useForm({ title: '', body: '' })
     useFormTool(form, {
-      name: 'notes.create',
+      name: 'create_note',
       description: 'Write a note.',
       schema: toolSchemas.StoreNoteRequest,
       action: { method: 'post', url: '/notes' },
     })
   })
-  const result = await context.call('notes.create', { title: '' })
+  const result = await context.call('create_note', { title: '' })
   expect(result).toEqual({
     structuredContent: {
       outcome: 'invalid',
@@ -164,20 +164,20 @@ test('agent_015_vue_destructive_form_tool_fills_and_does_not_submit', async () =
   const view = probe(() => {
     form = useForm({ confirm: '' })
     useFormTool(form, {
-      name: 'account.delete',
+      name: 'delete_account',
       description: 'Delete the account.',
       schema: { type: 'object', properties: { confirm: { type: 'string' } } },
       action: { method: 'delete', url: '/account' },
     })
     useFormTool(form, {
-      name: 'notes.purge',
+      name: 'purge_notes',
       description: 'Purge the notes.',
       schema: { type: 'object', properties: { confirm: { type: 'string' } } },
       action: { method: 'post', url: '/notes/purge' },
       destructive: true,
     })
   })
-  for (const name of ['account.delete', 'notes.purge']) {
+  for (const name of ['delete_account', 'purge_notes']) {
     const descriptor = context.descriptors.find((tool) => tool.name === name)
     expect(descriptor?.annotations.consequentialHint).toBe(true)
     const result = await context.call(name, { confirm: name })

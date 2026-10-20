@@ -48,7 +48,7 @@ fn register(name: &'static str) -> Result<ToolHandle, WebMcpError> {
 #[test]
 fn agent_016_native_registration_reports_unsupported() {
     assert!(matches!(
-        register("todos.add"),
+        register("add_todo"),
         Err(WebMcpError::Unsupported(Unsupported::Target))
     ));
     assert!(matches!(
@@ -58,9 +58,9 @@ fn agent_016_native_registration_reports_unsupported() {
 }
 
 #[test]
-fn agent_016_tool_names_follow_the_agent_001_grammar() {
-    let longest: &'static str = "n".repeat(128).leak();
-    for name in ["a", "posts.create", "Posts_v2-draft.0", longest] {
+fn agent_001_page_tool_names_follow_the_model_grammar() {
+    let longest: &'static str = "n".repeat(64).leak();
+    for name in ["a", "create_post", "Posts_v2_draft_0", longest] {
         assert!(
             matches!(
                 register(name),
@@ -69,10 +69,12 @@ fn agent_016_tool_names_follow_the_agent_001_grammar() {
             "`{name}` follows the grammar"
         );
     }
-    let too_long: &'static str = "n".repeat(129).leak();
+    let too_long: &'static str = "n".repeat(65).leak();
     for name in [
         "",
         too_long,
+        "posts.create",
+        "posts-create",
         "posts create",
         "posts/create",
         "posts:create",
@@ -90,19 +92,19 @@ fn agent_016_tool_names_follow_the_agent_001_grammar() {
 fn agent_016_registration_refuses_a_missing_description_a_blank_title_and_a_non_object_input() {
     let handler = |input: AddTodo| async move { Ok(ToolResult::text(input.title)) };
     assert!(matches!(
-        PageTool::<AddTodo>::new("todos.add", " ").register(handler),
-        Err(WebMcpError::MissingDescription { name }) if name == "todos.add"
+        PageTool::<AddTodo>::new("add_todo", " ").register(handler),
+        Err(WebMcpError::MissingDescription { name }) if name == "add_todo"
     ));
     assert!(matches!(
-        PageTool::<AddTodo>::new("todos.add", "Add an item.")
+        PageTool::<AddTodo>::new("add_todo", "Add an item.")
             .title("")
             .register(handler),
-        Err(WebMcpError::BlankTitle { name }) if name == "todos.add"
+        Err(WebMcpError::BlankTitle { name }) if name == "add_todo"
     ));
     assert!(matches!(
-        PageTool::<Count>::new("todos.count", "Count the items.")
+        PageTool::<Count>::new("count_todos", "Count the items.")
             .register(|count: Count| async move { Ok(ToolResult::text(count.0.to_string())) }),
-        Err(WebMcpError::InputNotObject { name }) if name == "todos.count"
+        Err(WebMcpError::InputNotObject { name }) if name == "count_todos"
     ));
 }
 

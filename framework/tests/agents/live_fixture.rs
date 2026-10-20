@@ -44,7 +44,7 @@ pub struct AgentCounter {
     owner: String,
 }
 
-/// The title `counter.rename` validates.
+/// The title `rename_counter` validates.
 #[derive(validator::Validate)]
 struct Title {
     #[validate(length(max = 8))]
@@ -55,8 +55,8 @@ struct Title {
 impl AgentCounter {
     #[mount]
     pub fn mount(
-        start: u64,
-        label: String,
+        #[doc = "The initial count."] start: u64,
+        #[doc = "The counter's label."] label: String,
         #[resolve(crate::live_fixture::owner_of)] owner: String,
     ) -> Self {
         Self {
@@ -67,8 +67,9 @@ impl AgentCounter {
     }
 
     #[tool(
-        name = "counter.add",
+        name = "add_to_counter",
         description = "Add to the counter.",
+        arguments(amount = "How much to add."),
         callers = [user, agent],
         headless,
     )]
@@ -78,7 +79,7 @@ impl AgentCounter {
     }
 
     #[tool(
-        name = "counter.peek",
+        name = "peek_counter",
         description = "Read the counter.",
         callers = [public],
         annotations(read_only),
@@ -87,7 +88,7 @@ impl AgentCounter {
     pub fn peek(&mut self) {}
 
     #[tool(
-        name = "counter.check",
+        name = "check_counter",
         description = "Check the counter is in range.",
         callers = [user],
         headless,
@@ -96,7 +97,7 @@ impl AgentCounter {
     pub fn check(&mut self) {}
 
     #[tool(
-        name = "counter.rename",
+        name = "rename_counter",
         description = "Rename the counter.",
         callers = [user],
         headless,
@@ -116,6 +117,16 @@ impl AgentCounter {
     #[validate]
     pub fn validate_component(&self) -> Result<(), validator::ValidationErrors> {
         validator::Validate::validate(self)
+    }
+
+    #[tool(
+        name = "search_counter",
+        description = "Look for a counter label.",
+        callers = [public],
+    )]
+    #[action]
+    pub fn search(&mut self, query: String) {
+        let _ = query;
     }
 
     #[action]
@@ -158,7 +169,7 @@ impl AgentQuota {
     }
 
     #[tool(
-        name = "quota.read",
+        name = "read_quota",
         description = "Read the quota.",
         callers = [public, user],
         headless,

@@ -339,6 +339,7 @@ fn run_check(emitter: &mut Emitter<'_>, roots: &[PathBuf]) -> Result<(), Tooling
                     .map(|component| component.as_str().to_owned()),
                 view: diagnostic.path().map(|view| view.as_str().to_owned()),
                 code: diagnostic.code().as_str().to_owned(),
+                detail: diagnostic.detail().map(str::to_owned),
                 severity,
                 line: diagnostic.line(),
                 column: diagnostic.column(),

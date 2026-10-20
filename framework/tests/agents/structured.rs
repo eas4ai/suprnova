@@ -26,7 +26,7 @@ pub struct IdCount {
     pub count: u64,
 }
 
-/// What `ids.kind` answers: a tagged enum, whose schema is not an object at
+/// What `read_id_kind` answers: a tagged enum, whose schema is not an object at
 /// its root.
 #[allow(
     dead_code,
@@ -45,7 +45,7 @@ pub enum IdsAnswer {
 }
 
 #[tool(
-    name = "ids.list",
+    name = "list_ids",
     description = "List the ids of the visible posts.",
     callers = [public],
     annotations(read_only),
@@ -56,7 +56,7 @@ pub async fn list_ids() -> Response {
 }
 
 #[tool(
-    name = "ids.typed",
+    name = "read_typed_id",
     description = "List the visible posts.",
     callers = [public],
     output = Vec<PostView>,
@@ -67,7 +67,7 @@ pub async fn typed_ids() -> Response {
 }
 
 #[tool(
-    name = "ids.count",
+    name = "count_ids",
     description = "Count the visible posts.",
     callers = [public],
     output = IdCount,
@@ -78,7 +78,7 @@ pub async fn count_ids() -> Response {
 }
 
 #[tool(
-    name = "ids.kind",
+    name = "read_id_kind",
     description = "Say whether any post is visible.",
     callers = [public],
     output = IdsAnswer,
@@ -114,7 +114,7 @@ async fn listed(client: &TestClient, version: &str, name: &str) -> Value {
 #[tokio::test]
 async fn agent_003_a_json_list_answer_is_structured_content_on_2026_07_28() {
     let _container = fixture::setup();
-    let result = client().mcp().call("ids.list", json!({})).await;
+    let result = client().mcp().call("list_ids", json!({})).await;
     assert_eq!(result.status(), 200);
     assert!(!result.is_error(), "{:?}", result.response().message());
     assert_eq!(result.text(), "[1,2]");
@@ -129,7 +129,7 @@ async fn agent_003_a_json_list_answer_is_text_alone_on_older_revisions() {
         let result = client
             .mcp()
             .protocol_version(version)
-            .call("ids.list", json!({}))
+            .call("list_ids", json!({}))
             .await;
         assert_eq!(result.status(), 200, "{version}");
         let message = result.response().message();
@@ -140,7 +140,7 @@ async fn agent_003_a_json_list_answer_is_text_alone_on_older_revisions() {
         let counted = client
             .mcp()
             .protocol_version(version)
-            .call("ids.count", json!({}))
+            .call("count_ids", json!({}))
             .await;
         assert_eq!(
             counted.structured(),
@@ -156,21 +156,21 @@ async fn agent_001_output_schemas_are_listed_as_each_revision_allows() {
     let client = client();
 
     // 2026-07-28 lists every output schema as declared.
-    let typed = listed(&client, "2026-07-28", "ids.typed").await;
+    let typed = listed(&client, "2026-07-28", "read_typed_id").await;
     assert_eq!(typed["outputSchema"]["type"], "array", "{typed:#}");
-    let kind = listed(&client, "2026-07-28", "ids.kind").await;
+    let kind = listed(&client, "2026-07-28", "read_id_kind").await;
     assert!(kind["outputSchema"]["oneOf"].is_array(), "{kind:#}");
-    let count = listed(&client, "2026-07-28", "ids.count").await;
+    let count = listed(&client, "2026-07-28", "count_ids").await;
     assert_eq!(count["outputSchema"]["type"], "object", "{count:#}");
 
     // The older revisions take only an object output schema, so the others
     // are left out, and the tools stay listed and callable.
     for version in OLDER_REVISIONS {
-        let typed = listed(&client, version, "ids.typed").await;
+        let typed = listed(&client, version, "read_typed_id").await;
         assert!(typed.get("outputSchema").is_none(), "{version}: {typed:#}");
-        let kind = listed(&client, version, "ids.kind").await;
+        let kind = listed(&client, version, "read_id_kind").await;
         assert!(kind.get("outputSchema").is_none(), "{version}: {kind:#}");
-        let count = listed(&client, version, "ids.count").await;
+        let count = listed(&client, version, "count_ids").await;
         assert_eq!(
             count["outputSchema"]["type"], "object",
             "{version}: {count:#}"
@@ -178,7 +178,7 @@ async fn agent_001_output_schemas_are_listed_as_each_revision_allows() {
         let called = client
             .mcp()
             .protocol_version(version)
-            .call("ids.kind", json!({}))
+            .call("read_id_kind", json!({}))
             .await;
         assert!(!called.is_error(), "{version}: {}", called.text());
     }

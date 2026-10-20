@@ -980,11 +980,17 @@ impl ViewCheck<'_, '_, '_> {
         attributes: &[(String, String)],
         positions: &[Position],
     ) {
-        let offers_tools = self
+        let tools: Vec<String> = self
             .registry
             .resolve(component)
-            .is_ok_and(|descriptor| descriptor.metadata().has_browser_tools());
-        if !offers_tools {
+            .ok()
+            .into_iter()
+            .flat_map(|descriptor| descriptor.metadata().actions().iter())
+            .filter_map(|action| action.tool())
+            .filter(|tool| tool.browser())
+            .map(|tool| tool.name().to_owned())
+            .collect();
+        if tools.is_empty() {
             return;
         }
         for ((_, key), position) in attributes
@@ -1002,6 +1008,16 @@ impl ViewCheck<'_, '_, '_> {
                     position,
                     component,
                 );
+            } else {
+                for tool in &tools {
+                    let length = tool.len() + 1 + key.len();
+                    if length > 64 {
+                        let (view, line, column) = resolve(self.files, self.root.view(), position);
+                        self.diagnostics.tool_name_length(&view, line, column, component, format!(
+                            "island `{key}`, tool `{tool}`: browser name has {length} characters; the limit is 64"
+                        ));
+                    }
+                }
             }
         }
     }

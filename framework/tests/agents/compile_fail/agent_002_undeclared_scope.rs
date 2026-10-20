@@ -8,7 +8,7 @@ suprnova::tool_scopes! {
 }
 
 #[tool(
-    name = "posts.purge",
+    name = "purge_posts",
     description = "Delete every post.",
     callers = [user],
     scopes = [scope::POSTS_PURGE]

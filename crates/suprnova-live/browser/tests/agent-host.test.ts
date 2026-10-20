@@ -11,7 +11,7 @@ import type { AgentToolDefinition } from "../src/islands/metadata.js";
 
 const TOOL: AgentToolDefinition = Object.freeze({
   action: "increment",
-  name: "counter.increment.main",
+  name: "increment_counter-main",
   description: "Add one to the counter.",
   inputSchema: Object.freeze({ type: "object" }),
   annotations: Object.freeze({
@@ -105,12 +105,12 @@ function hostWithIsland() {
 describe("the page's agent tool islands", () => {
   it("agent_012 registers an island's tools when it connects", () => {
     const { context } = hostWithIsland();
-    expect(context.live()).toEqual(["counter.increment.main"]);
+    expect(context.live()).toEqual(["increment_counter-main"]);
   });
 
   it("agent_012 a refusal answers the pending call before the island recovers", async () => {
     const { context, scheduler, host, island } = hostWithIsland();
-    const pending = settledState(context.call("counter.increment.main"));
+    const pending = settledState(context.call("increment_counter-main"));
     await flush();
     const order: string[] = [];
     const refused = agentToolError("The action did not run.");
@@ -133,8 +133,8 @@ describe("the page's agent tool islands", () => {
 
   it("agent_012 every pending call of the island has its result before the recovery", async () => {
     const { context, scheduler, host, island } = hostWithIsland();
-    const first = settledState(context.call("counter.increment.main", { n: 1 }));
-    const second = settledState(context.call("counter.increment.main", { n: 2 }));
+    const first = settledState(context.call("increment_counter-main", { n: 1 }));
+    const second = settledState(context.call("increment_counter-main", { n: 2 }));
     await flush();
     let answered = 0;
     const released = host.release(island, () => {
@@ -150,13 +150,13 @@ describe("the page's agent tool islands", () => {
 
   it("agent_012 a call made during a refusal is refused, not queued", async () => {
     const { context, scheduler, host, island, scheduled } = hostWithIsland();
-    void context.call("counter.increment.main", { n: 1 });
+    void context.call("increment_counter-main", { n: 1 });
     await flush();
     expect(scheduled).toEqual([{ n: 1 }]);
     const released = host.release(island, () => agentToolError("refused"));
     // WebMCP may still call the execute it was handed before the tools
     // left: the call is answered with an error and never reaches the island.
-    const late = await context.call("counter.increment.main", { n: 2 });
+    const late = await context.call("increment_counter-main", { n: 2 });
     expect(late.isError).toBe(true);
     expect(scheduled).toEqual([{ n: 1 }]);
     scheduler.runAll();
@@ -170,7 +170,7 @@ describe("the page's agent tool islands", () => {
     // The tools are gone until the island registers them again.
     expect(context.live()).toEqual([]);
     host.restore(island);
-    expect(context.live()).toEqual(["counter.increment.main"]);
+    expect(context.live()).toEqual(["increment_counter-main"]);
   });
 
   it("agent_012 execute refuses once its island has left the page", async () => {
@@ -192,9 +192,9 @@ describe("the page's agent tool islands", () => {
     expect((await before?.({}))?.isError).toBe(true);
     expect(scheduled).toEqual([]);
     host.resume();
-    expect(context.live()).toEqual(["counter.increment.main"]);
+    expect(context.live()).toEqual(["increment_counter-main"]);
     expect(context.registered).toHaveLength(2);
-    void context.call("counter.increment.main", { n: 3 });
+    void context.call("increment_counter-main", { n: 3 });
     expect(scheduled).toEqual([{ n: 3 }]);
   });
 
@@ -217,6 +217,6 @@ describe("the page's agent tool islands", () => {
     host.suspend();
     ready = true;
     host.resume();
-    expect(context.live()).toEqual(["counter.increment.main"]);
+    expect(context.live()).toEqual(["increment_counter-main"]);
   });
 });

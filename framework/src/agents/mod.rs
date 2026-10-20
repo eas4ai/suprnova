@@ -781,7 +781,7 @@ mod tests {
     #[test]
     fn agent_002_a_browser_live_tool_installs_the_live_tool_gate() {
         let router = router_with(live_registry(
-            "counter.peek",
+            "peek_counter",
             "tests.counter",
             "peek",
             &[CallerKind::Public],

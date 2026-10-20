@@ -232,13 +232,18 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                 let name = &argument.wire;
                 let codec = model_codec_tokens(&argument.ty);
                 let required = argument.required;
+                let description = action
+                    .tool
+                    .as_ref()
+                    .and_then(|tool| tool.argument_descriptions.get(name))
+                    .map(|description| quote!(.with_description(#description)));
                 quote! {
                     ::suprnova::live::__private::action::ActionArgumentField::new(
                         ::suprnova::live::__private::identity::ModelField::parse(#name)
                             .expect("macro-validated Live action argument identity"),
                         #codec,
                         #required,
-                    ).expect("macro-validated Live action argument field")
+                    ).expect("macro-validated Live action argument field")#description
                 }
             });
             quote! {
@@ -317,13 +322,17 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                 let name = &parameter.name;
                 let codec = model_codec_tokens(&parameter.ty);
                 let required = option_inner(&parameter.ty).is_none();
+                let description = parameter
+                    .description
+                    .as_ref()
+                    .map(|description| quote!(.with_description(#description)));
                 quote! {
                     ::suprnova::live::__private::component::composition::ChildParameterField::new(
                         ::suprnova::live::__private::identity::ModelField::parse(#name)
                             .expect("macro-validated Live mount parameter identity"),
                         #codec,
                         #required,
-                    )
+                    )#description
                 }
             });
     let parameter_values = parameter_values.collect::<Vec<_>>();
@@ -632,7 +641,27 @@ fn parse_live_tool(attribute: &Attribute, arguments: &[ActionParameter]) -> syn:
         Meta::List(list) => list.tokens.clone(),
         _ => TokenStream2::new(),
     };
-    let spec = parse_spec(tokens, ToolSite::Live)?;
+    let mut spec = parse_spec(tokens, ToolSite::Live)?;
+    for (name, description) in &spec.argument_descriptions {
+        if !arguments.iter().any(|argument| &argument.wire == name) {
+            return Err(syn::Error::new(
+                description.span(),
+                format!(
+                    "tool `{}` describes argument `{name}`, which this action does not take",
+                    spec.name.value()
+                ),
+            ));
+        }
+    }
+    spec.undocumented_arguments = arguments
+        .iter()
+        .filter(|argument| {
+            spec.argument_descriptions
+                .get(&argument.wire)
+                .is_none_or(|description| description.value().trim().is_empty())
+        })
+        .map(|argument| argument.wire.clone())
+        .collect();
     // `model_codec_tokens` falls back to the Json codec for every type it
     // does not know, which accepts any JSON its Serde type reads: an agent
     // would be told less than the action enforces (AGENT-012).
@@ -1269,6 +1298,7 @@ struct RegisteredMount {
 }
 
 struct MountParameter {
+    description: Option<syn::LitStr>,
     name: String,
     ident: syn::Ident,
     ty: Type,
@@ -1455,11 +1485,11 @@ fn validate_mount_signature(method: &ImplItemFn) -> syn::Result<()> {
     Ok(())
 }
 
-fn extract_mount_parameters(method: &ImplItemFn) -> syn::Result<Vec<MountParameter>> {
+fn extract_mount_parameters(method: &mut ImplItemFn) -> syn::Result<Vec<MountParameter>> {
     method
         .sig
         .inputs
-        .iter()
+        .iter_mut()
         .map(|argument| {
             let FnArg::Typed(argument) = argument else {
                 return Err(syn::Error::new(
@@ -1483,7 +1513,29 @@ fn extract_mount_parameters(method: &ImplItemFn) -> syn::Result<Vec<MountParamet
                     "mount parameters must be immutable owned values",
                 ));
             }
+            let docs: Vec<String> = argument
+                .attrs
+                .iter()
+                .filter_map(|attribute| {
+                    if !attribute.path().is_ident("doc") {
+                        return None;
+                    }
+                    if let Meta::NameValue(value) = &attribute.meta
+                        && let syn::Expr::Lit(value) = &value.value
+                        && let syn::Lit::Str(value) = &value.lit
+                    {
+                        return Some(value.value().trim().to_owned());
+                    }
+                    None
+                })
+                .collect();
+            let description = docs.join("\n");
+            argument
+                .attrs
+                .retain(|attribute| !attribute.path().is_ident("doc"));
             Ok(MountParameter {
+                description: (!description.trim().is_empty())
+                    .then(|| syn::LitStr::new(&description, pattern.ident.span())),
                 name: wire_name(&pattern.ident, "Live mount parameter")?,
                 ident: pattern.ident.clone(),
                 ty: argument.ty.as_ref().clone(),
@@ -1606,9 +1658,74 @@ mod tests {
     }
 
     #[test]
+    fn agent_012_tool_argument_descriptions_reach_the_schema_and_unknown_names_fail() {
+        let out = expand(syn::parse_quote! {
+            impl Counter {
+                #[mount]
+                pub fn mount(#[doc = "The initial count."] start: u64) -> Self { Self { count: start } }
+                #[tool(name = "add_to_counter", description = "Add.", callers = [public], arguments(amount = "How much to add."))]
+                #[action]
+                pub fn add(&mut self, amount: u64) {}
+            }
+        }).expect("described argument");
+        assert!(out.contains("with_description"), "{out}");
+        assert!(out.contains("How much to add."), "{out}");
+        assert!(out.contains("The initial count."), "{out}");
+        assert!(!out.contains("has no description"), "{out}");
+        let error = expand(syn::parse_quote! {
+            impl Counter {
+                #[tool(name = "add_to_counter", description = "Add.", callers = [public], arguments(typo = "A typo."))]
+                #[action]
+                pub fn add(&mut self, amount: u64) {}
+            }
+        }).expect_err("an unknown argument is a build error");
+        assert!(error.to_string().contains("typo"), "{error}");
+        let out = expand(syn::parse_quote! {
+            impl Counter {
+                #[tool(name = "add_to_counter", description = "Add.", callers = [public])]
+                #[action]
+                pub fn add(&mut self, amount: u64) {}
+            }
+        })
+        .expect("a missing description only warns");
+        assert!(
+            out.contains("input field `amount` has no description; WebMCP requires a description"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn agent_012_blank_argument_descriptions_warn_instead_of_failing() {
+        let out = expand(syn::parse_quote! {
+            impl Counter {
+                #[tool(name = "add_to_counter", description = "Add.", callers = [public], arguments(amount = "  "))]
+                #[action]
+                pub fn add(&mut self, amount: u64) {}
+            }
+        }).expect("a missing field description is a budget warning");
+        assert!(
+            out.contains("input field `amount` has no description"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn agent_012_argument_descriptions_use_raw_identifiers_wire_names() {
+        let out = expand(syn::parse_quote! {
+            impl Counter {
+                #[tool(name = "set_counter_type", description = "Set a type.", callers = [public], arguments(r#type = "The counter type."))]
+                #[action]
+                pub fn set_type(&mut self, r#type: String) {}
+            }
+        }).expect("a raw argument name is described by its wire name");
+        assert!(out.contains("The counter type."), "{out}");
+        assert!(!out.contains("has no description"), "{out}");
+    }
+
+    #[test]
     fn agent_001_live_tool_parser_takes_headless_and_refuses_route_schemas() {
         let spec = parse_spec(
-            quote! { name = "counter.add", description = "Add.", callers = [user], headless },
+            quote! { name = "add_to_counter", description = "Add.", callers = [user], headless },
             ToolSite::Live,
         )
         .expect("a Live tool");
@@ -1634,7 +1751,7 @@ mod tests {
         )
         .map(|_| ())
         .expect_err("a Live base name has at most 64 characters");
-        assert!(error.to_string().contains("at most 64"), "{error}");
+        assert!(error.to_string().contains("1 to 64"), "{error}");
         let error = parse_spec(
             quote! { name = "x", description = "d", callers = [user], headless },
             ToolSite::Handler,
@@ -1659,7 +1776,7 @@ mod tests {
                     Self { count: start, owner }
                 }
 
-                #[tool(name = "counter.add", description = "Add.", callers = [user], headless)]
+                #[tool(name = "add_to_counter", description = "Add.", callers = [user], headless)]
                 #[action(authorize = "current")]
                 pub fn add(&mut self, amount: u64) {}
 
@@ -1670,7 +1787,7 @@ mod tests {
         .expect("impl expansion");
         assert!(out.contains("ActionToolMetadata :: new"), "{out}");
         assert!(out.contains("LiveToolRecord :: __declare"), "{out}");
-        assert!(out.contains("__suprnova_tool_counter_2eadd"), "{out}");
+        assert!(out.contains("__suprnova_tool_add_5fto_5fcounter"), "{out}");
         assert!(out.contains("__snv_live_resolve_owner"), "{out}");
         // One record: `reset` is no tool.
         assert_eq!(out.matches("LiveToolRecord :: __declare").count(), 1);
@@ -1697,7 +1814,7 @@ mod tests {
             (
                 quote! {
                     impl Counter {
-                        #[tool(name = "counter.add", description = "Add.", callers = [user])]
+                        #[tool(name = "add_to_counter", description = "Add.", callers = [user])]
                         pub fn add(&mut self) {}
                     }
                 },
@@ -1706,7 +1823,7 @@ mod tests {
             (
                 quote! {
                     impl Counter {
-                        #[tool(name = "counter.add", description = "Add.", callers = [user])]
+                        #[tool(name = "add_to_counter", description = "Add.", callers = [user])]
                         #[action]
                         pub fn add(&mut self, filter: Filter) {}
                     }

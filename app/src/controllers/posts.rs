@@ -11,10 +11,10 @@
 //! - `GET  /api/posts/{id}` - fetch a single post; the `PostPolicy`
 //!   `view` rule (post.is_public) is enforced via `Gate::authorize`.
 //!
-//! - `POST /api/posts/tools` - the validated `posts.create` tool, for a
+//! - `POST /api/posts/tools` - the validated `create_post` tool, for a
 //!   signed-in user by browser session or by a token the user approved for
 //!   an MCP client with the `posts:write` scope. The listing is also the
-//!   public `posts.list` tool (`src/agents.rs`). Each tool call runs its
+//!   public `list_posts` tool (`src/agents.rs`). Each tool call runs its
 //!   route, including its session gate. The MCP endpoint signs the token's
 //!   user in first, so `Auth::user_as` reads the same user either way.
 //!
@@ -46,7 +46,7 @@ pub struct CreatePost {
     pub is_public: bool,
 }
 
-/// The validated input of `posts.create` on `POST /api/posts/tools`.
+/// The validated input of `create_post` on `POST /api/posts/tools`.
 /// `author_id` is intentionally omitted - the server derives it from the
 /// signed-in user to keep the trust boundary clean (a client must not be
 /// able to author a post as someone else). A missing field reads as empty,
@@ -66,7 +66,7 @@ pub struct CreatePostInput {
     #[serde(default)]
     #[validate(length(min = 1, message = "Give the post some text."))]
     pub body: String,
-    /// Whether anyone may read the post, through `posts.list` and
+    /// Whether anyone may read the post, through `list_posts` and
     /// `GET /api/posts`. Defaults to `false` when omitted, mirroring the
     /// column default in the migration.
     #[serde(default)]
@@ -92,7 +92,7 @@ impl FormRequest for CreatePostInput {
     }
 }
 
-/// A post as `posts.create` and `posts.list` answer it, with the keys
+/// A post as `create_post` and `list_posts` answer it, with the keys
 /// `GET /api/posts/{id}` answers too.
 #[tool_output]
 pub struct PostItem {
@@ -120,7 +120,7 @@ impl From<Post> for PostItem {
     }
 }
 
-/// One page of public posts, as `GET /api/posts` and `posts.list` answer
+/// One page of public posts, as `GET /api/posts` and `list_posts` answer
 /// it.
 #[tool_output]
 pub struct PostPage {
@@ -174,10 +174,10 @@ async fn write_post(author_id: i64, payload: CreatePost) -> Result<HttpResponse,
     answer(serde_json::to_value(PostItem::from(post)), 201)
 }
 
-/// `POST /api/posts/tools` - the tool `posts.create`: a post owned by the
+/// `POST /api/posts/tools` - the tool `create_post`: a post owned by the
 /// signed-in user.
 #[tool(
-    name = "posts.create",
+    name = "create_post",
     title = "Write a post",
     description = "Write a post for the signed-in user, with a title and some text. It stays private unless `is_public` is true. Answers the post written.",
     callers = [user],
@@ -203,13 +203,13 @@ pub async fn create(form: CreatePostInput) -> Response {
     .await?)
 }
 
-/// `GET /api/posts` - the tool `posts.list`: every public post, a page at a
+/// `GET /api/posts` - the tool `list_posts`: every public post, a page at a
 /// time.
 ///
 /// Post text is user content, so the tool is marked `untrusted_content`:
 /// an agent reads what it answers as data, never as instructions.
 #[tool(
-    name = "posts.list",
+    name = "list_posts",
     title = "List public posts",
     description = "List the newest public posts, twenty at a time. Anyone may read them, with no sign-in.",
     callers = [public],

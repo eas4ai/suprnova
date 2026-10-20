@@ -12,13 +12,13 @@ pub struct RenamePost {
     pub name: String,
 }
 
-#[tool(name = "posts.create", description = "Create a post.", callers = [public], input = RenamePost)]
+#[tool(name = "create_post", description = "Create a post.", callers = [public], input = RenamePost)]
 #[handler]
 pub async fn create(form: CreatePost) -> Response {
     json_response!({ "title": form.title })
 }
 
-#[tool(name = "posts.raw", description = "Read the body itself.", callers = [public], input = CreatePost)]
+#[tool(name = "create_raw_post", description = "Read the body itself.", callers = [public], input = CreatePost)]
 #[handler]
 pub async fn raw(request: suprnova::Request) -> Response {
     let _ = request;
@@ -32,7 +32,7 @@ mod other {
     }
 }
 
-#[tool(name = "posts.other", description = "Same name, other type.", callers = [public], input = CreatePost)]
+#[tool(name = "create_other_post", description = "Same name, other type.", callers = [public], input = CreatePost)]
 #[handler]
 pub async fn other(form: other::CreatePost) -> Response {
     json_response!({ "body": form.body })

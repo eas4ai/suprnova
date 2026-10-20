@@ -178,6 +178,9 @@ pub struct DiagnosticReport {
     pub view: Option<String>,
     /// Stable checker diagnostic code.
     pub code: String,
+    /// Additional contract details from registered metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     /// Whether the contract is invalid or merely unproved.
     pub severity: Severity,
     /// One-based source line, or zero when unknown.

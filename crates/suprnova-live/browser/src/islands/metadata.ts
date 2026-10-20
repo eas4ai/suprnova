@@ -13,7 +13,7 @@ const ACTION_PARAMETERS_ATTRIBUTE = "data-suprnova-live-actions";
 export const AGENT_TOOLS_ATTRIBUTE = "data-suprnova-live-tools";
 const MAX_AGENT_TOOLS = 64;
 const MAX_AGENT_FIELDS = 512;
-const AGENT_TOOL_NAME = /^[A-Za-z0-9_.-]{1,128}$/u;
+const AGENT_TOOL_NAME = /^[A-Za-z0-9_]+-[A-Za-z0-9_-]+$/u;
 const AGENT_TOOL_INSTANCE = /^[A-Za-z0-9_-]{1,63}$/u;
 const AGENT_FIELD_NAME = /^[A-Za-z0-9_]{1,128}$/u;
 const AGENT_ANNOTATIONS = [
@@ -232,7 +232,8 @@ export function parseAgentTools(value: string, documentKey: string): AgentToolCo
       !SAFE_TEXT_IDENTITY.test(action) ||
       typeof name !== "string" ||
       !AGENT_TOOL_NAME.test(name) ||
-      !name.endsWith(`.${documentKey}`) ||
+      name.length > 64 ||
+      name.slice(name.indexOf("-") + 1) !== documentKey ||
       name.length === documentKey.length + 1 ||
       names.has(name) ||
       (title !== undefined && (typeof title !== "string" || title.trim().length === 0)) ||

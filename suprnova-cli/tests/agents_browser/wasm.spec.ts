@@ -132,13 +132,13 @@ async function toolRequests(page: Page): Promise<Recorded[]> {
 
 test('agent_016_wasm_registers_a_typed_tool', async ({ page }) => {
   const agent = await openApp(page);
-  await expect.poll(() => registered(page)).toContain('todos.add');
-  await expect.poll(() => agent.added).toContain('todos.add');
+  await expect.poll(() => registered(page)).toContain('add_todo');
+  await expect.poll(() => agent.added).toContain('add_todo');
   await expect(page.locator('html')).toHaveAttribute('data-registered', 'ok');
 
   // The page registered the schema the crate derives from the input type,
   // with the same validation rules as the server and no root metadata.
-  const passed = await descriptor(page, 'todos.add');
+  const passed = await descriptor(page, 'add_todo');
   const derived = JSON.parse((await page.locator('html').getAttribute('data-expected-schema')) ?? 'null');
   const server = await (await page.request.get('/test/schema')).json();
   expect(passed?.inputSchema).toEqual(derived);
@@ -159,13 +159,13 @@ test('agent_016_wasm_registers_a_typed_tool', async ({ page }) => {
 
   // A call reaches the typed handler; input that breaks a rule comes back
   // as an error result naming the field as the server would.
-  const added = await agent.invoke('todos.add', { todoTitle: 'Buy milk' });
+  const added = await agent.invoke('add_todo', { todoTitle: 'Buy milk' });
   expect(added.status).toBe('Completed');
   expect(added.output?.isError).toBe(false);
   expect(added.output?.structuredContent).toEqual({ added: 'Buy milk', count: 1 });
   expect(added.output).not.toHaveProperty('content');
   await expect(page.locator('html')).toHaveAttribute('data-todos', '1');
-  const refused = await agent.invoke('todos.add', { todoTitle: '' });
+  const refused = await agent.invoke('add_todo', { todoTitle: '' });
   expect(refused.output?.isError).toBe(true);
   expect(refused.output?.content?.[0]?.text).toBe(
     'The input is not valid:\n- todoTitle: The todo title field must be between 1 and 80 characters.',
@@ -175,19 +175,19 @@ test('agent_016_wasm_registers_a_typed_tool', async ({ page }) => {
 
 test('agent_016_dropping_the_handle_unregisters_the_tool', async ({ page }) => {
   const agent = await openApp(page);
-  await expect.poll(() => registered(page)).toContain('todos.add');
+  await expect.poll(() => registered(page)).toContain('add_todo');
   await page.evaluate(() => (Reflect.get(window, 'fixture') as { dropTodoTool(): void }).dropTodoTool());
-  await expect.poll(() => agent.removed).toContain('todos.add');
-  await expect.poll(() => registered(page)).not.toContain('todos.add');
+  await expect.poll(() => agent.removed).toContain('add_todo');
+  await expect.poll(() => registered(page)).not.toContain('add_todo');
 });
 
 test('agent_016_wasm_server_tool_call_carries_session_csrf_and_header', async ({ page }) => {
   await page.goto('/login/alice');
   const agent = await openApp(page);
-  // The server lists `todos.save` for a signed-in viewer, and the front end
+  // The server lists `save_todo` for a signed-in viewer, and the front end
   // registered it from the page's element.
-  await expect.poll(() => registered(page)).toEqual(['todos.add', 'todos.save']);
-  const passed = await descriptor(page, 'todos.save');
+  await expect.poll(() => registered(page)).toEqual(['add_todo', 'save_todo']);
+  const passed = await descriptor(page, 'save_todo');
   expect(passed?.title).toBe('Save todo');
   expect(passed?.annotations).toEqual({
     readOnlyHint: false,
@@ -197,7 +197,7 @@ test('agent_016_wasm_server_tool_call_carries_session_csrf_and_header', async ({
   });
   await page.request.get('/test/reset');
 
-  const saved = await agent.invoke('todos.save', { title: 'Ship it' });
+  const saved = await agent.invoke('save_todo', { title: 'Ship it' });
   expect(saved.status).toBe('Completed');
   expect(saved.output?.isError).toBe(false);
   // The route saw the signed-in user and the session the page belongs to.
@@ -208,7 +208,7 @@ test('agent_016_wasm_server_tool_call_carries_session_csrf_and_header', async ({
   expect(call).toEqual({
     method: 'POST',
     path: '/todos',
-    tool: 'todos.save',
+    tool: 'save_todo',
     csrfHeader: 'X-CSRF-TOKEN',
     sessionCookie: true,
     accept: 'application/json',

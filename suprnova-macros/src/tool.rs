@@ -10,8 +10,8 @@
 //! An agent reads a tool's name, description and schemas as instructions, so
 //! all of them are fixed when the crate builds:
 //!
-//! - `name` and `description` are string literals. A name is 1 to 128
-//!   characters of ASCII letters, digits, `_`, `-` and `.`; a description is
+//! - `name` and `description` are string literals. A name is 1 to 64
+//!   characters of ASCII letters, digits, `_`; a description is
 //!   not empty. Anything else fails the build.
 //! - Two tools with one name in a crate fail the build: each tool also
 //!   emits a `#[macro_export]` macro named after its name, and a crate cannot
@@ -22,8 +22,11 @@
 //! - The schemas come from the `input` and `output` types through
 //!   `schemars`, never from data.
 
+use std::collections::BTreeMap;
+
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote, quote_spanned};
+use syn::ext::IdentExt;
 use syn::parse::{ParseStream, Parser};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
@@ -36,7 +39,7 @@ use crate::handler::{parse_handler_args, stable_hash};
 const NO_HANDLER: &str = "#[tool] works only on a `#[handler]` function: add `#[handler]` to it";
 
 /// The longest name a tool may have, as MCP limits it.
-const MAX_NAME_LEN: usize = 128;
+const MAX_NAME_LEN: usize = 64;
 
 /// Whether `attr` is a `#[tool]`, however its path is spelled.
 pub(crate) fn is_tool_attr(attr: &Attribute) -> bool {
@@ -72,6 +75,8 @@ pub(crate) struct ToolSpec {
     /// For a Live action: whether the MCP endpoint offers it with no
     /// browser (AGENT-013).
     pub(crate) headless: bool,
+    pub(crate) argument_descriptions: BTreeMap<String, LitStr>,
+    pub(crate) undocumented_arguments: Vec<String>,
 }
 
 /// Where a `#[tool]` sits, which decides what it may declare.
@@ -82,11 +87,6 @@ pub(crate) enum ToolSite {
     /// On an `#[action]` inside a `#[live]` impl.
     Live,
 }
-
-/// The longest base name a Live tool may have: a browser registers it as
-/// `{base}.{instance}` with an instance key of at most 63 bytes, inside the
-/// 128 characters of a tool name.
-const MAX_LIVE_NAME_LEN: usize = 64;
 
 impl ToolSpec {
     /// Whether a browser registers the tool: it accepts a public or a
@@ -289,13 +289,51 @@ pub(crate) fn marker_macro(spec: &ToolSpec) -> TokenStream {
         escape(&name.value()),
         span = name.span()
     );
+    let warnings = budget_warnings(spec);
     quote! {
+        #warnings
         #[doc(hidden)]
         #[macro_export]
         macro_rules! #marker {
             () => {};
         }
     }
+}
+
+/// Stable Rust exposes proc-macro warnings through deprecated items. Each
+/// anonymous constant keeps its diagnostic private to this tool's marking.
+fn budget_warning(tool: &LitStr, problem: &str) -> TokenStream {
+    let note = format!("tool `{}`: {problem}", tool.value());
+    quote_spanned! {tool.span()=>
+        #[warn(deprecated)]
+        const _: () = {
+            #[deprecated(note = #note)]
+            const __SUPRNOVA_TOOL_BUDGET: () = ();
+            let _ = __SUPRNOVA_TOOL_BUDGET;
+        };
+    }
+}
+
+fn budget_warnings(spec: &ToolSpec) -> TokenStream {
+    let mut warnings = TokenStream::new();
+    for (label, length, budget) in [
+        ("name", spec.name.value().chars().count(), 30),
+        ("description", spec.description.value().chars().count(), 500),
+    ] {
+        if length > budget {
+            warnings.extend(budget_warning(
+                &spec.name,
+                &format!("the {label} has {length} characters; WebMCP's budget is {budget}"),
+            ));
+        }
+    }
+    for argument in &spec.undocumented_arguments {
+        warnings.extend(budget_warning(
+            &spec.name,
+            &format!("input field `{argument}` has no description; WebMCP requires a description"),
+        ));
+    }
+    warnings
 }
 
 /// The `__ToolMeta` every tool record carries: the facts a tool declares,
@@ -378,7 +416,7 @@ fn last_segment(ty: &Type) -> Option<String> {
 
 /// A tool name as an identifier fragment that no other name shares: letters
 /// and digits stay, and `_`, `.` and `-` become `_5f`, `_2e` and `_2d`, so
-/// `posts.create` and `posts_create` stay apart.
+/// `create_post` and `posts_create` stay apart.
 fn escape(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for c in name.chars() {
@@ -409,6 +447,7 @@ pub(crate) fn parse_spec(attr: TokenStream, site: ToolSite) -> syn::Result<ToolS
     let mut route: Option<LitStr> = None;
     let mut guard: Option<LitStr> = None;
     let mut headless = false;
+    let mut argument_descriptions = BTreeMap::new();
 
     let parser = syn::meta::parser(|meta| {
         let key = meta
@@ -428,6 +467,9 @@ pub(crate) fn parse_spec(attr: TokenStream, site: ToolSite) -> syn::Result<ToolS
             "description" => {
                 description = Some(literal(meta.value()?, "description")?);
                 Ok(())
+            }
+            "arguments" if site == ToolSite::Live => {
+                parse_argument_descriptions(meta, &mut argument_descriptions)
             }
             "title" => {
                 title = Some(literal(meta.value()?, "title")?);
@@ -505,7 +547,7 @@ pub(crate) fn parse_spec(attr: TokenStream, site: ToolSite) -> syn::Result<ToolS
             }),
             _ if site == ToolSite::Live => Err(meta.error(
                 "unknown #[tool] argument on a Live action; expected `name`, `description`, \
-                 `title`, `callers`, `scopes`, `annotations`, `guard` or `headless`",
+                 `title`, `callers`, `scopes`, `annotations`, `guard`, `arguments` or `headless`",
             )),
             _ => Err(meta.error(
                 "unknown #[tool] argument; expected `name`, `description`, `title`, \
@@ -522,16 +564,6 @@ pub(crate) fn parse_spec(attr: TokenStream, site: ToolSite) -> syn::Result<ToolS
         )
     })?;
     check_name(&name)?;
-    if site == ToolSite::Live && name.value().len() > MAX_LIVE_NAME_LEN {
-        return Err(syn::Error::new(
-            name.span(),
-            format!(
-                "a Live tool name has at most {MAX_LIVE_NAME_LEN} characters: a browser \
-                 registers it with a `.` and the island's key, inside a tool name's \
-                 {MAX_NAME_LEN}"
-            ),
-        ));
-    }
     let description = description.ok_or_else(|| {
         syn::Error::new(
             span,
@@ -596,6 +628,29 @@ pub(crate) fn parse_spec(attr: TokenStream, site: ToolSite) -> syn::Result<ToolS
         route,
         guard,
         headless,
+        argument_descriptions,
+        undocumented_arguments: Vec::new(),
+    })
+}
+
+/// Description keys use the same wire names as action parameters, including
+/// raw Rust identifiers such as `r#type`.
+fn parse_argument_descriptions(
+    meta: syn::meta::ParseNestedMeta<'_>,
+    descriptions: &mut BTreeMap<String, LitStr>,
+) -> syn::Result<()> {
+    meta.parse_nested_meta(|argument| {
+        let name = argument
+            .path
+            .get_ident()
+            .ok_or_else(|| argument.error("an argument description names an action parameter"))?
+            .unraw()
+            .to_string();
+        let description = literal(argument.value()?, "argument description")?;
+        if descriptions.insert(name.clone(), description).is_some() {
+            return Err(argument.error(format!("argument `{name}` is described twice")));
+        }
+        Ok(())
     })
 }
 
@@ -616,8 +671,7 @@ fn literal(input: ParseStream, key: &str) -> syn::Result<LitStr> {
     }
 }
 
-/// Check a tool name: 1 to 128 characters of ASCII letters, digits, `_`,
-/// `-` and `.`.
+/// Check the function-name grammar every supported model provider accepts.
 fn check_name(name: &LitStr) -> syn::Result<()> {
     let value = name.value();
     if value.is_empty() || value.len() > MAX_NAME_LEN {
@@ -631,12 +685,12 @@ fn check_name(name: &LitStr) -> syn::Result<()> {
     }
     if let Some(bad) = value
         .chars()
-        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '_'))
     {
         return Err(syn::Error::new(
             name.span(),
             format!(
-                "a tool name uses ASCII letters, digits, `_`, `-` and `.` only; `{value}` \
+                "a tool name uses ASCII letters, digits, `_` only; `{value}` \
                  contains {bad:?}"
             ),
         ));
@@ -661,8 +715,44 @@ mod tests {
     }
 
     #[test]
+    fn agent_001_model_names_reject_punctuation_and_the_65th_character() {
+        for name in [
+            "has.dot".to_owned(),
+            "has-dash".to_owned(),
+            "a".repeat(65),
+            String::new(),
+        ] {
+            let out = expand(quote! { name = #name, description = "A tool.", callers = [public] });
+            assert!(out.contains("compile_error"), "{name}: {out}");
+        }
+        let name = "a".repeat(64);
+        let out = expand(quote! { name = #name, description = "A tool.", callers = [public] });
+        assert!(!out.contains("compile_error"), "{out}");
+    }
+
+    #[test]
+    fn agent_001_macro_warns_only_above_webmcp_budgets() {
+        let name = "a".repeat(31);
+        let description = "d".repeat(501);
+        let out = expand(quote! { name = #name, description = #description, callers = [public] });
+        assert!(out.contains("deprecated"), "{out}");
+        assert!(
+            out.contains("the name has 31 characters; WebMCP's budget is 30"),
+            "{out}"
+        );
+        assert!(
+            out.contains("the description has 501 characters; WebMCP's budget is 500"),
+            "{out}"
+        );
+        let name = "a".repeat(30);
+        let description = "é".repeat(500);
+        let out = expand(quote! { name = #name, description = #description, callers = [public] });
+        assert!(!out.contains("deprecated"), "{out}");
+    }
+
+    #[test]
     fn agent_001_names_escape_without_collisions() {
-        assert_eq!(escape("posts.create"), "posts_2ecreate");
+        assert_eq!(escape("create_post"), "create_5fpost");
         assert_eq!(escape("posts_create"), "posts_5fcreate");
         assert_eq!(escape("posts-create"), "posts_2dcreate");
         assert_ne!(escape("a.b"), escape("a_b"));
@@ -671,10 +761,10 @@ mod tests {
     #[test]
     fn agent_001_a_valid_tool_emits_the_marker_and_the_record() {
         let out = expand(quote! {
-            name = "posts.create", description = "Create a post.", callers = [user]
+            name = "create_post", description = "Create a post.", callers = [user]
         });
         assert!(out.contains("macro_export"), "{out}");
-        assert!(out.contains("__suprnova_tool_posts_2ecreate"), "{out}");
+        assert!(out.contains("__suprnova_tool_create_5fpost"), "{out}");
         assert!(out.contains("ToolRecord :: __declare"), "{out}");
     }
 
@@ -683,7 +773,7 @@ mod tests {
         for (attr, message) in [
             (
                 quote! { name = "", description = "d", callers = [user] },
-                "1 to 128",
+                "1 to 64",
             ),
             (
                 quote! { name = "has space", description = "d", callers = [user] },
@@ -715,9 +805,9 @@ mod tests {
             assert!(out.contains("compile_error"), "{out}");
             assert!(out.contains(message), "expected {message:?} in {out}");
         }
-        let long = "a".repeat(129);
+        let long = "a".repeat(65);
         let out = expand(quote! { name = #long, description = "d", callers = [user] });
-        assert!(out.contains("1 to 128"), "{out}");
+        assert!(out.contains("1 to 64"), "{out}");
     }
 
     #[test]

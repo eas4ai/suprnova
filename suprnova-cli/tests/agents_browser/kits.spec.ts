@@ -111,7 +111,7 @@ async function registered(page: Page): Promise<string[]> {
       .modelContext;
     return (await context.getTools())
       .map((tool) => tool.name)
-      .filter((name) => name.startsWith('fixture.'))
+      .filter((name) => name.includes('_fixture') || name === 'create_note_and_leave')
       .sort();
   });
 }
@@ -145,7 +145,7 @@ async function register(page: Page) {
   await expect(page).toHaveURL(/\/(verify-email|dashboard)$/);
 }
 
-const FIRST_PAGE_TOOLS = ['fixture.bump', 'fixture.help', 'fixture.peek', 'fixture.widget.ping'];
+const FIRST_PAGE_TOOLS = ['bump_fixture', 'peek_fixture', 'ping_fixture_widget', 'read_fixture_help'];
 
 test(`agent_014_${kit}_page_registers_the_server_tools_the_viewer_may_call`, async ({ page }) => {
   await page.goto('/agent-fixture/first');
@@ -155,7 +155,7 @@ test(`agent_014_${kit}_page_registers_the_server_tools_the_viewer_may_call`, asy
   await page.goto('/agent-fixture/first');
   await expect
     .poll(() => registered(page))
-    .toEqual(['fixture.bump', 'fixture.help', 'fixture.mine', 'fixture.peek', 'fixture.widget.ping']);
+    .toEqual(['bump_fixture', 'peek_fixture', 'ping_fixture_widget', 'read_fixture_help', 'read_my_fixture']);
 });
 
 test(`agent_014_${kit}_server_tool_annotations_follow_the_markings`, async ({ page }) => {
@@ -163,32 +163,32 @@ test(`agent_014_${kit}_server_tool_annotations_follow_the_markings`, async ({ pa
   await expect.poll(() => registered(page)).toEqual(FIRST_PAGE_TOOLS);
   const sent = await descriptors(page);
   const sentFor = (name: string) => sent.find((tool) => tool.name === name);
-  expect(sentFor('fixture.peek')?.annotations).toEqual({
+  expect(sentFor('peek_fixture')?.annotations).toEqual({
     readOnlyHint: true,
     untrustedContentHint: true,
     consequentialHint: false,
     debugging: false,
   });
-  expect(sentFor('fixture.bump')?.annotations).toEqual({
+  expect(sentFor('bump_fixture')?.annotations).toEqual({
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: false,
     debugging: false,
   });
-  expect(sentFor('fixture.bump')?.title).toBe('Bump');
-  expect(sentFor('fixture.bump')?.description).toBe('Add to the counter the first page shows.');
+  expect(sentFor('bump_fixture')?.title).toBe('Bump');
+  expect(sentFor('bump_fixture')?.description).toBe('Add to the counter the first page shows.');
   // What Chromium kept: the two hints it knows.
   const kept = await page.evaluate(async () => {
     const context = (document as unknown as {
       modelContext: { getTools(): Promise<{ name: string; annotations: Record<string, boolean> }[]> };
     }).modelContext;
-    return (await context.getTools()).find((tool) => tool.name === 'fixture.peek')?.annotations;
+    return (await context.getTools()).find((tool) => tool.name === 'peek_fixture')?.annotations;
   });
   expect(kept).toMatchObject({ readOnlyHint: true, untrustedContentHint: true });
 
   await page.getByTestId('to-second').click();
-  await expect.poll(() => registered(page)).toEqual(['fixture.help', 'fixture.reset']);
-  const reset = (await descriptors(page)).find((tool) => tool.name === 'fixture.reset');
+  await expect.poll(() => registered(page)).toEqual(['read_fixture_help', 'reset_fixture']);
+  const reset = (await descriptors(page)).find((tool) => tool.name === 'reset_fixture');
   expect(reset?.annotations).toEqual({
     readOnlyHint: false,
     untrustedContentHint: false,
@@ -205,17 +205,17 @@ test(`agent_014_${kit}_inertia_visit_replaces_the_page_tools`, async ({ page }) 
   await page.getByTestId('to-second').click();
   await expect(page.getByRole('heading', { name: 'Second' })).toBeVisible();
   // The route's tools leave, the group's shared tool stays registered.
-  await expect.poll(() => registered(page)).toEqual(['fixture.help', 'fixture.reset']);
+  await expect.poll(() => registered(page)).toEqual(['read_fixture_help', 'reset_fixture']);
   expect(loads()).toBe(0);
-  expect(agent.removed).toEqual(expect.arrayContaining(['fixture.bump', 'fixture.peek']));
-  expect(agent.removed).not.toContain('fixture.help');
+  expect(agent.removed).toEqual(expect.arrayContaining(['bump_fixture', 'peek_fixture']));
+  expect(agent.removed).not.toContain('read_fixture_help');
 });
 
 test(`agent_014_${kit}_history_back_restores_that_pages_tools`, async ({ page }) => {
   await page.goto('/agent-fixture/first');
   await expect.poll(() => registered(page)).toEqual(FIRST_PAGE_TOOLS);
   await page.getByTestId('to-second').click();
-  await expect.poll(() => registered(page)).toEqual(['fixture.help', 'fixture.reset']);
+  await expect.poll(() => registered(page)).toEqual(['read_fixture_help', 'reset_fixture']);
   await page.goBack();
   await expect(page.getByRole('heading', { name: 'First' })).toBeVisible();
   await expect.poll(() => registered(page)).toEqual(FIRST_PAGE_TOOLS);
@@ -225,9 +225,9 @@ test(`agent_014_${kit}_server_tool_call_carries_session_csrf_and_header`, async 
   const agent = await webmcp(page);
   await register(page);
   await page.goto('/agent-fixture/first');
-  await expect.poll(() => registered(page)).toContain('fixture.mine');
+  await expect.poll(() => registered(page)).toContain('read_my_fixture');
   const before = (await requests(page)).length;
-  const response = await agent.invoke('fixture.mine', {});
+  const response = await agent.invoke('read_my_fixture', {});
   expect(response.output?.isError).toBe(false);
   // The route's own guard saw the session's user, through a browser call.
   expect(response.output?.structuredContent).toMatchObject({ browser: true });
@@ -235,7 +235,7 @@ test(`agent_014_${kit}_server_tool_call_carries_session_csrf_and_header`, async 
   const call = (await requests(page))
     .slice(before)
     .find((request) => request.path === '/agent-fixture/mine');
-  expect(call).toMatchObject({ method: 'POST', tool: 'fixture.mine', csrf: true, cookie: true });
+  expect(call).toMatchObject({ method: 'POST', tool: 'read_my_fixture', csrf: true, cookie: true });
 });
 
 test(`agent_014_${kit}_write_tool_reloads_the_page_props`, async ({ page }) => {
@@ -245,14 +245,14 @@ test(`agent_014_${kit}_write_tool_reloads_the_page_props`, async ({ page }) => {
   const shown = Number(await page.getByTestId('counter').textContent());
   const loads = documentLoads(page);
   const before = (await requests(page)).length;
-  const response = await agent.invoke('fixture.bump', { by: 2 });
+  const response = await agent.invoke('bump_fixture', { by: 2 });
   expect(response.output?.isError).toBe(false);
   expect(response.output?.structuredContent).toMatchObject({ counter: shown + 2, kind: 'public' });
   // The screen shows what the agent did, through an Inertia reload.
   await expect(page.getByTestId('counter')).toHaveText(String(shown + 2));
   expect(loads()).toBe(0);
   const after = (await requests(page)).slice(before);
-  const call = after.findIndex((request) => request.tool === 'fixture.bump');
+  const call = after.findIndex((request) => request.tool === 'bump_fixture');
   const reload = after.findIndex(
     (request) => request.method === 'GET' && request.path === '/agent-fixture/first' && request.inertia,
   );
@@ -260,7 +260,7 @@ test(`agent_014_${kit}_write_tool_reloads_the_page_props`, async ({ page }) => {
   expect(reload).toBeGreaterThan(call);
   // A read-only tool reloads nothing.
   const quiet = (await requests(page)).length;
-  expect((await agent.invoke('fixture.peek', {})).output?.isError).toBe(false);
+  expect((await agent.invoke('peek_fixture', {})).output?.isError).toBe(false);
   expect(
     (await requests(page)).slice(quiet).filter((request) => request.path === '/agent-fixture/first'),
   ).toEqual([]);
@@ -269,23 +269,23 @@ test(`agent_014_${kit}_write_tool_reloads_the_page_props`, async ({ page }) => {
 test(`agent_015_${kit}_component_tool_registers_and_leaves_with_its_component`, async ({ page }) => {
   const agent = await webmcp(page);
   await page.goto('/agent-fixture/first');
-  await expect.poll(() => registered(page)).toContain('fixture.widget.ping');
-  expect((await agent.invoke('fixture.widget.ping', {})).output?.structuredContent).toEqual({ pong: true });
+  await expect.poll(() => registered(page)).toContain('ping_fixture_widget');
+  expect((await agent.invoke('ping_fixture_widget', {})).output?.structuredContent).toEqual({ pong: true });
   await page.getByTestId('toggle').click();
   await expect(page.getByTestId('widget')).toHaveCount(0);
-  await expect.poll(() => registered(page)).not.toContain('fixture.widget.ping');
-  await expect.poll(() => agent.removed).toContain('fixture.widget.ping');
+  await expect.poll(() => registered(page)).not.toContain('ping_fixture_widget');
+  await expect.poll(() => agent.removed).toContain('ping_fixture_widget');
   await page.getByTestId('toggle').click();
-  await expect.poll(() => registered(page)).toContain('fixture.widget.ping');
+  await expect.poll(() => registered(page)).toContain('ping_fixture_widget');
 });
 
 test(`agent_015_${kit}_form_tool_registers_the_generated_schema`, async ({ page }) => {
   await page.goto('/agent-fixture/form');
   await expect
     .poll(() => registered(page))
-    .toEqual(['fixture.help', 'fixture.notes.create', 'fixture.notes.create_and_leave', 'fixture.notes.purge']);
+    .toEqual(['create_fixture_note', 'create_note_and_leave', 'purge_fixture_notes', 'read_fixture_help']);
   const server = await (await page.request.get('/agent-fixture/schema')).json();
-  const sent = (await descriptors(page)).find((tool) => tool.name === 'fixture.notes.create');
+  const sent = (await descriptors(page)).find((tool) => tool.name === 'create_fixture_note');
   // The schema `generate-types` wrote is the one the server derives.
   expect(sent?.inputSchema).toEqual(server);
   expect(sent?.annotations).toEqual({
@@ -299,11 +299,11 @@ test(`agent_015_${kit}_form_tool_registers_the_generated_schema`, async ({ page 
 test(`agent_015_${kit}_form_tool_fills_and_submits_through_inertia`, async ({ page }) => {
   const agent = await webmcp(page);
   await page.goto('/agent-fixture/form');
-  await expect.poll(() => registered(page)).toContain('fixture.notes.create');
+  await expect.poll(() => registered(page)).toContain('create_fixture_note');
   const loads = documentLoads(page);
   const before = (await requests(page)).length;
   const title = `Agent note ${Date.now()}`;
-  const response = await agent.invoke('fixture.notes.create', { title });
+  const response = await agent.invoke('create_fixture_note', { title });
   expect(response.output?.isError).toBe(false);
   expect(response.output?.structuredContent).toMatchObject({ outcome: 'submitted', component: 'AgentFixture/Form' });
   await expect(page.getByTestId('notes')).toContainText(title);
@@ -318,8 +318,8 @@ test(`agent_015_${kit}_form_tool_fills_and_submits_through_inertia`, async ({ pa
 test(`agent_015_${kit}_form_tool_returns_each_invalid_field`, async ({ page }) => {
   const agent = await webmcp(page);
   await page.goto('/agent-fixture/form');
-  await expect.poll(() => registered(page)).toContain('fixture.notes.create');
-  const response = await agent.invoke('fixture.notes.create', { title: 'ab' });
+  await expect.poll(() => registered(page)).toContain('create_fixture_note');
+  const response = await agent.invoke('create_fixture_note', { title: 'ab' });
   expect(response.status).not.toBe('Error');
   expect(response.output?.isError).toBe(true);
   expect(response.output).not.toHaveProperty('content');
@@ -335,11 +335,11 @@ test(`agent_015_${kit}_form_tool_returns_each_invalid_field`, async ({ page }) =
 test(`agent_015_${kit}_destructive_form_tool_leaves_the_submit_to_the_user`, async ({ page }) => {
   const agent = await webmcp(page);
   await page.goto('/agent-fixture/form');
-  await expect.poll(() => registered(page)).toContain('fixture.notes.purge');
-  const sent = (await descriptors(page)).find((tool) => tool.name === 'fixture.notes.purge');
+  await expect.poll(() => registered(page)).toContain('purge_fixture_notes');
+  const sent = (await descriptors(page)).find((tool) => tool.name === 'purge_fixture_notes');
   expect(sent?.annotations.consequentialHint).toBe(true);
   const before = (await requests(page)).length;
-  const response = await agent.invoke('fixture.notes.purge', { confirm: 'yes' });
+  const response = await agent.invoke('purge_fixture_notes', { confirm: 'yes' });
   expect(response.output?.structuredContent).toEqual({ outcome: 'filled', submitted: false });
   await expect(page.getByTestId('confirm')).toHaveValue('yes');
   const purges = async () =>
@@ -360,16 +360,16 @@ test(`agent_015_${kit}_form_tool_answers_when_its_submit_leaves_the_page`, async
   // so a result the browser drops at the tool's removal shows.
   for (let round = 0; round < 5; round += 1) {
     await page.goto('/agent-fixture/form');
-    await expect.poll(() => registered(page)).toContain('fixture.notes.create_and_leave');
+    await expect.poll(() => registered(page)).toContain('create_note_and_leave');
     const title = `Leaving note ${round} ${Date.now()}`;
-    const response = await agent.invoke('fixture.notes.create_and_leave', { title });
+    const response = await agent.invoke('create_note_and_leave', { title });
     expect(response.output?.isError, `round ${round}: ${JSON.stringify(response)}`).toBe(false);
     expect(response.output?.structuredContent).toMatchObject({
       outcome: 'submitted',
       component: 'AgentFixture/First',
     });
     await expect(page.getByRole('heading', { name: 'First' })).toBeVisible();
-    await expect.poll(() => registered(page)).not.toContain('fixture.notes.create_and_leave');
+    await expect.poll(() => registered(page)).not.toContain('create_note_and_leave');
   }
 });
 
@@ -594,11 +594,11 @@ test(`agent_017_${kit}_form_tool_cannot_approve`, async ({ page, request, baseUR
     // with the user's own session and CSRF token.
     const agent = await webmcp(page);
     await page.goto('/agent-fixture/consent');
-    await expect.poll(() => registered(page)).toContain('fixture.consent.approve');
+    await expect.poll(() => registered(page)).toContain('approve_fixture_consent');
     const posted = page.waitForResponse(
       (response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/oauth/approve',
     );
-    await agent.invoke('fixture.consent.approve', { authorization: id, decision: 'approve' });
+    await agent.invoke('approve_fixture_consent', { authorization: id, decision: 'approve' });
     const refused = await posted;
     expect(refused.request().headers()['suprnova-form-tool']).toBe('1');
     expect(refused.status()).toBe(403);
@@ -650,15 +650,15 @@ test(`agent_014_${kit}_notes_page_offers_the_notes_tools`, async ({ page }) => {
 
   await register(page);
   await page.goto('/notes');
-  await expect.poll(() => everyTool(page)).toEqual(['notes.create', 'notes.search']);
+  await expect.poll(() => everyTool(page)).toEqual(['create_note', 'search_notes']);
   const sent = await descriptors(page);
-  expect(sent.find((tool) => tool.name === 'notes.search')?.annotations).toEqual({
+  expect(sent.find((tool) => tool.name === 'search_notes')?.annotations).toEqual({
     readOnlyHint: true,
     untrustedContentHint: true,
     consequentialHint: false,
     debugging: false,
   });
-  expect(sent.find((tool) => tool.name === 'notes.create')?.annotations).toEqual({
+  expect(sent.find((tool) => tool.name === 'create_note')?.annotations).toEqual({
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: false,
@@ -669,14 +669,14 @@ test(`agent_014_${kit}_notes_page_offers_the_notes_tools`, async ({ page }) => {
   // with no document load.
   const loads = documentLoads(page);
   const title = `Agent note ${Date.now()}`;
-  const created = await agent.invoke('notes.create', { title, body: 'Written through WebMCP.' });
+  const created = await agent.invoke('create_note', { title, body: 'Written through WebMCP.' });
   expect(created.output?.isError, JSON.stringify(created)).toBe(false);
   expect(created.output?.structuredContent).toMatchObject({ title });
   await expect(page.getByRole('link', { name: title })).toBeVisible();
   expect(loads()).toBe(0);
 
   // The search reads its input from the query the page sends.
-  const found = await agent.invoke('notes.search', { query: 'WebMCP', limit: 5 });
+  const found = await agent.invoke('search_notes', { query: 'WebMCP', limit: 5 });
   expect(found.output?.isError, JSON.stringify(found)).toBe(false);
   const notes = (found.output?.structuredContent?.notes ?? []) as { title: string }[];
   expect(notes.map((note) => note.title)).toEqual([title]);

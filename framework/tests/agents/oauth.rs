@@ -694,7 +694,7 @@ pub async fn refusal_reason(client: &TestClient, token: &str) -> String {
     let refused = client
         .mcp()
         .with_token(token)
-        .call("users.profile", json!({}))
+        .call("read_user_profile", json!({}))
         .await;
     assert_eq!(refused.status(), 401, "{:?}", refused.response());
     let www = refused
@@ -710,12 +710,12 @@ pub async fn refusal_reason(client: &TestClient, token: &str) -> String {
         .to_owned()
 }
 
-/// Call `users.profile` with `token` and answer the status.
+/// Call `read_user_profile` with `token` and answer the status.
 pub async fn profile_status(client: &TestClient, token: &str) -> u16 {
     client
         .mcp()
         .with_token(token)
-        .call("users.profile", json!({}))
+        .call("read_user_profile", json!({}))
         .await
         .status()
 }
@@ -728,7 +728,7 @@ async fn agent_005_client_registers_signs_in_and_calls_a_user_tool() {
     let client = &world.client;
 
     // 1. The endpoint refuses the call and names its metadata.
-    let refused = client.mcp().call("users.profile", json!({})).await;
+    let refused = client.mcp().call("read_user_profile", json!({})).await;
     assert_eq!(refused.status(), 401);
     let www = refused
         .response()
@@ -814,7 +814,7 @@ async fn agent_005_client_registers_signs_in_and_calls_a_user_tool() {
     let called = client
         .mcp()
         .with_token(&access)
-        .call("users.profile", json!({}))
+        .call("read_user_profile", json!({}))
         .await;
     assert_eq!(called.status(), 200, "{:?}", called.response());
     assert_eq!(
@@ -822,9 +822,9 @@ async fn agent_005_client_registers_signs_in_and_calls_a_user_tool() {
         Some(&json!({ "user": user, "browser": false }))
     );
     let listed = client.mcp().with_token(&access).list().await.tool_names();
-    assert!(listed.contains(&"posts.show".to_owned()), "{listed:?}");
+    assert!(listed.contains(&"show_post".to_owned()), "{listed:?}");
     assert!(
-        !listed.contains(&"posts.create".to_owned()),
+        !listed.contains(&"create_post".to_owned()),
         "a tool needing a scope the token lacks is not listed: {listed:?}"
     );
 
@@ -1476,7 +1476,7 @@ async fn agent_005_flow_under_a_path_prefix() {
     let client = &world.client;
     let www = client
         .mcp()
-        .call("users.profile", json!({}))
+        .call("read_user_profile", json!({}))
         .await
         .response()
         .header("www-authenticate")
@@ -1807,7 +1807,7 @@ async fn agent_005_store_failure_is_503_never_a_guest() {
     let refused = client
         .mcp()
         .with_token(&tokens.access)
-        .call("users.profile", json!({}))
+        .call("read_user_profile", json!({}))
         .await;
     assert_eq!(refused.status(), 503, "{:?}", refused.response());
     // A public tool is not served as a guest either: the token cannot be

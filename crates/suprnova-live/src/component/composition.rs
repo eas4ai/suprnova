@@ -56,6 +56,7 @@ pub struct ChildParameterField {
     name: ModelField,
     codec: ModelCodec,
     required: bool,
+    description: Option<String>,
 }
 
 impl ChildParameterField {
@@ -66,7 +67,15 @@ impl ChildParameterField {
             name,
             codec,
             required,
+            description: None,
         }
+    }
+
+    /// Supplies the field's instructions to the agent without changing validation.
+    #[must_use]
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
     }
 
     /// The parameter's registered name.
@@ -249,12 +258,20 @@ impl ChildParameterSchema {
                 continue;
             }
             let schema = field.codec.json_schema()?;
-            let schema = if field.required {
+            let mut schema = if field.required {
                 required.push(serde_json::Value::String(field.name.as_str().to_owned()));
                 schema
             } else {
                 serde_json::json!({ "anyOf": [schema, { "type": "null" }] })
             };
+            if let Some(description) = &field.description
+                && let serde_json::Value::Object(object) = &mut schema
+            {
+                object.insert(
+                    "description".to_owned(),
+                    serde_json::Value::String(description.clone()),
+                );
+            }
             properties.insert(field.name.as_str().to_owned(), schema);
         }
         Some(crate::state::object_schema(properties, required))

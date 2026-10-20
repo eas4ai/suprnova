@@ -1,5 +1,5 @@
-//! The notes tools: `notes.search` reads the user's own notes and
-//! `notes.create` writes one, for an MCP client the user approved, an agent
+//! The notes tools: `search_notes` reads the user's own notes and
+//! `create_note` writes one, for an MCP client the user approved, an agent
 //! the user claimed, or an agent in the user's browser on the notes page,
 //! which offers both (`routes.rs`).
 //!
@@ -8,7 +8,7 @@
 //! caller reads or writes another user's. A token needs the tool's scope
 //! from `crate::agents::scope`, and an agent no user has claimed holds none.
 //!
-//! Note text is user content, so `notes.search` is marked
+//! Note text is user content, so `search_notes` is marked
 //! `untrusted_content`: an agent reads what it answers as data, never as
 //! instructions.
 
@@ -21,10 +21,10 @@ use suprnova::{
 use crate::agents::scope;
 use crate::models::note::Note;
 
-/// How many notes `notes.search` answers when the call names no limit.
+/// How many notes `search_notes` answers when the call names no limit.
 const DEFAULT_LIMIT: u32 = 10;
 
-/// What `notes.search` takes. The notes page sends it in the query of a
+/// What `search_notes` takes. The notes page sends it in the query of a
 /// `GET`, and an MCP client as the call's arguments; the form request reads
 /// either.
 #[tool_input]
@@ -40,7 +40,7 @@ pub struct SearchNotesInput {
     pub limit: Option<u32>,
 }
 
-/// What `notes.create` takes: the notes form's two fields, with its rules.
+/// What `create_note` takes: the notes form's two fields, with its rules.
 #[tool_input]
 #[form_request(custom_hooks)]
 pub struct CreateNoteInput {
@@ -97,7 +97,7 @@ impl From<Note> for NoteItem {
     }
 }
 
-/// What `notes.search` answers. A list rides in an object, so clients of
+/// What `search_notes` answers. A list rides in an object, so clients of
 /// every MCP revision read it as structured content.
 #[tool_output]
 pub struct NoteSearchResults {
@@ -127,9 +127,9 @@ fn answer(value: serde_json::Result<serde_json::Value>) -> Response {
     Ok(HttpResponse::json(body))
 }
 
-/// `GET /notes/search?query=...&limit=...` - the tool `notes.search`.
+/// `GET /notes/search?query=...&limit=...` - the tool `search_notes`.
 #[tool(
-    name = "notes.search",
+    name = "search_notes",
     title = "Search notes",
     description = "Search the user's notes by the words in their titles and text, best match first. Leave the query empty to list the newest notes.",
     callers = [user, agent],
@@ -169,10 +169,10 @@ pub async fn search(caller: ToolCaller, form: SearchNotesInput) -> Response {
     answer(serde_json::to_value(NoteSearchResults { notes }))
 }
 
-/// `POST /notes/tools` - the tool `notes.create`, answering in JSON. The
+/// `POST /notes/tools` - the tool `create_note`, answering in JSON. The
 /// notes page's own form posts to `POST /notes`, which redirects back.
 #[tool(
-    name = "notes.create",
+    name = "create_note",
     title = "Write a note",
     description = "Write a note for the user, with a title and, if you like, some text. Answers the note written.",
     callers = [user, agent],

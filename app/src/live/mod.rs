@@ -87,7 +87,7 @@ pub fn registry() -> Result<LiveRegistry, RegistryError> {
         .register::<AccountMenu>()?
         .register::<LiveNativeGallery>()?
         // No page mounts the tally: an MCP client starts one with no
-        // browser (`tally.add`, `src/agents.rs`).
+        // browser (`add_to_tally`, `src/agents.rs`).
         .register::<Tally>()?
         .build();
     Ok(registry)

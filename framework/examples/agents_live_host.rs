@@ -6,7 +6,7 @@
 //! in Chromium with WebMCP enabled. It serves:
 //!
 //! - `/tools`, three counters keyed `main`, `left` and `right`, each
-//!   offering `counter.add`, with a button that removes the first one and a
+//!   offering `add_to_counter`, with a button that removes the first one and a
 //!   link to `/other`, a page with no island;
 //! - `/login/{user}`, which signs the browser in as that user, and
 //!   `/logout`; the counter's `live:examples.agents-counter.add` policy
@@ -14,9 +14,9 @@
 //! - `/test/requests`, every Live action request since `/test/reset`: its
 //!   tool-call header, the security checks its guard saw, the execution
 //!   phases it ran and the Gate abilities it asked;
-//! - `/server-tools`, a Live page offering the server tools `notes.show`
-//!   (public, `GET /notes/{note}`, read-only), `posts.create` (users,
-//!   `POST /posts`) and `posts.clear` (users, `DELETE /posts`, destructive),
+//! - `/server-tools`, a Live page offering the server tools `show_note`
+//!   (public, `GET /notes/{note}`, read-only), `create_post` (users,
+//!   `POST /posts`) and `clear_posts` (users, `DELETE /posts`, destructive),
 //!   with an island showing how many posts exist, read at each render, and a
 //!   counter island;
 //! - `/test/tool-calls`, every request carrying the tool-call header since
@@ -72,7 +72,7 @@ pub struct AgentsCounter {
 #[live]
 impl AgentsCounter {
     #[tool(
-        name = "counter.add",
+        name = "add_to_counter",
         description = "Add to the counter.",
         title = "Add",
         callers = [user],
@@ -115,14 +115,14 @@ impl AgentsPosts {
     }
 }
 
-/// The input of `notes.show`.
+/// The input of `show_note`.
 #[suprnova::tool_input]
 pub struct NoteRef {
     /// The note to show.
     pub note: String,
 }
 
-/// The input of `posts.create`.
+/// The input of `create_post`.
 #[suprnova::tool_input]
 pub struct CreatePost {
     /// The post's title.
@@ -131,7 +131,7 @@ pub struct CreatePost {
 }
 
 #[suprnova::tool(
-    name = "notes.show",
+    name = "show_note",
     description = "Show one note.",
     callers = [public],
     input = NoteRef,
@@ -143,7 +143,7 @@ pub async fn show_note(note: String, form: NoteRef) -> Response {
 }
 
 #[suprnova::tool(
-    name = "posts.create",
+    name = "create_post",
     description = "Create a post for the signed-in user.",
     title = "Create a post",
     callers = [user],
@@ -157,7 +157,7 @@ pub async fn create_post(form: CreatePost) -> Response {
 }
 
 #[suprnova::tool(
-    name = "posts.clear",
+    name = "clear_posts",
     description = "Delete every post.",
     callers = [user],
     annotations(destructive),
@@ -227,10 +227,10 @@ struct ServerMounts {
 
 async fn server_tools_page(request: Request, mounts: ServerMounts) -> Result<HttpResponse, String> {
     let mut document = LiveDocument::from_request(&request).map_err(|error| error.to_string())?;
-    // The route offers `notes.show` and `posts.create`; the page adds
-    // `posts.clear`.
+    // The route offers `show_note` and `create_post`; the page adds
+    // `clear_posts`.
     document
-        .with_tools(["posts.clear"])
+        .with_tools(["clear_posts"])
         .await
         .map_err(|error| error.to_string())?;
     let summary = document
@@ -627,7 +627,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 })
             }
         })
-        .with_tools(["notes.show", "posts.create"])
+        .with_tools(["show_note", "create_post"])
         .get("/notes/{note}", show_note)
         .post("/posts", create_post)
         .delete("/posts", clear_posts)

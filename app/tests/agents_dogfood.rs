@@ -1,8 +1,8 @@
 //! Agents in the dogfood application: the MCP endpoint at `/mcp`, the OAuth
 //! server and agent auth `src/agents.rs` serves, the approval page, the
-//! sign-in it sends a guest to, and the three tools: `posts.list` for
-//! anyone, `posts.create` for a signed-in user, and the headless Live tool
-//! `tally.add`.
+//! sign-in it sends a guest to, and the three tools: `list_posts` for
+//! anyone, `create_post` for a signed-in user, and the headless Live tool
+//! `add_to_tally`.
 //!
 //! Each test boots the router `cmd/main.rs` serves, agents and Live and the
 //! RenderCache included, behind the global middleware stack
@@ -13,6 +13,9 @@
 //! (`install_test_agent_auth_key`), so no key sits in the source.
 
 mod test_environment;
+
+#[path = "../../suprnova-cli/tests/fixtures/scaffold/tool_budget_probe.rs"]
+mod tool_budget_probe;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -102,6 +105,7 @@ async fn boot() -> Dogfood {
         .await
         .expect("install Live routes and the RenderCache middleware");
     let runtime = prepare_live_router_for_test(&router).expect("prepare the Live runtime");
+    tool_budget_probe::assert_quiet(&router);
     App::singleton(runtime);
 
     Dogfood {
@@ -315,7 +319,7 @@ async fn agent_dogfood_lists_every_tool_without_a_token() {
     names.sort();
     assert_eq!(
         names,
-        vec!["posts.create", "posts.list", "tally.add"],
+        vec!["add_to_tally", "create_post", "list_posts"],
         "a client without a token sees every tool, so calling one that needs a token sends it to sign in"
     );
 }
@@ -335,7 +339,7 @@ async fn agent_dogfood_runs_the_public_tool_without_a_token() {
         .expect("create a post");
     }
 
-    let result = app.client.mcp().call("posts.list", json!({})).await;
+    let result = app.client.mcp().call("list_posts", json!({})).await;
     assert_eq!(result.status(), 200, "{:?}", result.response());
     assert!(!result.is_error(), "{}", result.text());
     let structured = result.structured().expect("structured content");
@@ -355,7 +359,7 @@ async fn agent_dogfood_sends_a_caller_without_a_token_to_sign_in_for_the_user_to
         .client
         .mcp()
         .call(
-            "posts.create",
+            "create_post",
             json!({ "title": "No token", "body": "Text" }),
         )
         .await;
@@ -437,7 +441,7 @@ async fn agent_dogfood_user_tool_writes_a_post_for_the_user() {
         .mcp()
         .as_caller(caller(&ada, &[]))
         .call(
-            "posts.create",
+            "create_post",
             json!({ "title": "No scope", "body": "Text" }),
         )
         .await;
@@ -456,7 +460,7 @@ async fn agent_dogfood_user_tool_writes_a_post_for_the_user() {
         .mcp()
         .as_caller(caller(&ada, &[scope::POSTS_WRITE]))
         .call(
-            "posts.create",
+            "create_post",
             json!({ "title": "From an agent", "body": "Written over MCP", "is_public": true }),
         )
         .await;
@@ -478,7 +482,7 @@ async fn agent_dogfood_user_tool_writes_a_post_for_the_user() {
         .client
         .mcp()
         .as_caller(caller(&ada, &[scope::POSTS_WRITE]))
-        .call("posts.create", json!({ "title": "  ", "body": "Text" }))
+        .call("create_post", json!({ "title": "  ", "body": "Text" }))
         .await;
     assert!(invalid.is_error(), "{:?}", invalid.response());
     assert!(invalid.text().contains("title"), "{}", invalid.text());
@@ -492,7 +496,7 @@ async fn agent_dogfood_headless_live_tool_runs_for_a_user_and_keeps_its_state() 
 
     let first = mcp()
         .call(
-            "tally.add",
+            "add_to_tally",
             json!({ "mount": { "start": 2 }, "arguments": { "amount": 3 } }),
         )
         .await;
@@ -505,7 +509,7 @@ async fn agent_dogfood_headless_live_tool_runs_for_a_user_and_keeps_its_state() 
     // The handle carries the state to the next call.
     let second = mcp()
         .call(
-            "tally.add",
+            "add_to_tally",
             json!({ "handle": handle, "arguments": { "amount": 4 } }),
         )
         .await;
@@ -524,7 +528,7 @@ async fn agent_dogfood_headless_live_tool_runs_for_a_user_and_keeps_its_state() 
         .mcp()
         .as_caller(caller(&bo, &[]))
         .call(
-            "tally.add",
+            "add_to_tally",
             json!({ "handle": second.handle().unwrap_or_default(), "arguments": { "amount": 1 } }),
         )
         .await;
@@ -538,7 +542,7 @@ async fn agent_dogfood_headless_live_tool_needs_a_token() {
         .client
         .mcp()
         .call(
-            "tally.add",
+            "add_to_tally",
             json!({ "mount": { "start": 2 }, "arguments": { "amount": 3 } }),
         )
         .await;
@@ -679,7 +683,7 @@ async fn agent_dogfood_a_guest_signs_in_and_approves_a_client_whose_token_writes
         .mcp()
         .with_token(&token)
         .call(
-            "posts.create",
+            "create_post",
             json!({ "title": "Through the token", "body": "Text" }),
         )
         .await;
@@ -693,7 +697,7 @@ async fn agent_dogfood_a_guest_signs_in_and_approves_a_client_whose_token_writes
         .mcp()
         .with_token(&token)
         .call(
-            "tally.add",
+            "add_to_tally",
             json!({ "mount": { "start": 1 }, "arguments": { "amount": 2 } }),
         )
         .await;
@@ -730,10 +734,7 @@ async fn agent_dogfood_a_guest_signs_in_and_approves_a_client_whose_token_writes
         .client
         .mcp()
         .with_token(&token)
-        .call(
-            "posts.create",
-            json!({ "title": "Revoked", "body": "Text" }),
-        )
+        .call("create_post", json!({ "title": "Revoked", "body": "Text" }))
         .await;
     assert_eq!(refused.status(), 401, "{:?}", refused.response());
 }
