@@ -26,9 +26,17 @@ fn agent_001_webmcp_budget_warnings_reach_cargo_check() {
     let source = format!(
         r#"
 use suprnova::{{handler, tool, Response}};
-#[tool(name = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", description = "{}", callers = [public])]
+#[tool(name = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", description = "{description}", callers = [public])]
 #[handler]
 async fn over_budget() -> Response {{ suprnova::json_response!({{}}) }}
+#[tool(name = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", description = "{description}", callers = [public])]
+#[allow(deprecated)]
+#[handler]
+async fn allowed() -> Response {{ suprnova::json_response!({{}}) }}
+#[handler]
+#[tool(name = "ccccccccccccccccccccccccccccccc", description = "{description}", callers = [public])]
+#[expect(deprecated)]
+async fn expected() -> Response {{ suprnova::json_response!({{}}) }}
 #[tool(name = "within_budget", description = "A short description.", callers = [public])]
 #[handler]
 async fn within_budget() -> Response {{ suprnova::json_response!({{}}) }}
@@ -43,9 +51,17 @@ impl WarningCounter {{
     #[tool(name = "describe_counter", description = "Describe the counter.", callers = [public], arguments(query = "The label to find."))]
     #[action]
     pub fn described(&mut self, query: String) {{ let _ = query; }}
+    #[allow(deprecated)]
+    #[tool(name = "ddddddddddddddddddddddddddddddd", description = "{description}", callers = [public])]
+    #[action]
+    pub fn allowed(&mut self, query: String) {{ let _ = query; }}
+    #[expect(deprecated)]
+    #[tool(name = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", description = "{description}", callers = [public])]
+    #[action]
+    pub fn expected(&mut self, query: String) {{ let _ = query; }}
 }}
 "#,
-        "d".repeat(501),
+        description = "d".repeat(501),
     );
     fs::write(fixture.path().join("src/lib.rs"), source).expect("fixture tools");
     let target = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -74,4 +90,16 @@ impl WarningCounter {{
     }
     assert!(!stderr.contains("tool `within_budget`:"), "{stderr}");
     assert!(!stderr.contains("tool `describe_counter`:"), "{stderr}");
+    for name in [
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "ccccccccccccccccccccccccccccccc",
+        "ddddddddddddddddddddddddddddddd",
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    ] {
+        assert!(!stderr.contains(&format!("tool `{name}`:")), "{stderr}");
+    }
+    assert!(
+        !stderr.contains("unfulfilled_lint_expectations"),
+        "{stderr}"
+    );
 }

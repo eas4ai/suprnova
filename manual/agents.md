@@ -132,8 +132,23 @@ route serves. It takes these keys:
 Use short action names such as `create_post` or `search_notes`. The build
 warns when a name exceeds 30 characters or a description exceeds 500
 characters. Boot logs the same budgets and warns about each input field
-without a description. These budgets never refuse a tool. Give every input
+without a description. Boot warnings never refuse a tool. Give every input
 field a doc comment; `#[tool_input]` carries it into the JSON Schema.
+
+The compile warning is a Rust `deprecated` lint. A build with
+`RUSTFLAGS="-D warnings"` fails on it. Keep the tool within the budget or add
+`#[allow(deprecated)]` to silence that tool's compile warning:
+
+```rust
+#[tool(name = "search_archived_project_records", description = "Search archived project records.", callers = [user])]
+#[allow(deprecated)]
+#[handler]
+async fn search_records() -> Response {
+    json_response!([])
+}
+```
+
+Boot still logs the tool's budget warnings.
 
 Names, descriptions and schemas are fixed when the application is built. An
 agent reads them as instructions, so nothing at run time can change them. The
