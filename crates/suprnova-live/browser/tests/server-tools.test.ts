@@ -396,6 +396,21 @@ function callOptions(answer: (sent: Sent) => Promise<Response>) {
 }
 
 describe("a server tool call", () => {
+  it("agent_014_json_answer_fits_once_below_the_extension_result_cap", async () => {
+    const value = { text: "x".repeat(5_000) };
+    const run = callOptions(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(value), {
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    run.options.limits.maxResultBytes = 8_192;
+    const result = await callServerTool(TOOL, { title: "Hello" }, run.options);
+    expect(result).toEqual({ structuredContent: value, isError: false });
+    expect(JSON.stringify(result).length).toBeLessThan(8_000);
+  });
+
   it("sends the session and the CSRF token with the tool-call header", async () => {
     const run = callOptions(() =>
       Promise.resolve(
@@ -404,7 +419,6 @@ describe("a server tool call", () => {
     );
     const result = await callServerTool(TOOL, { title: "Hello" }, run.options);
     expect(result).toEqual({
-      content: [{ type: "text", text: '{"id":7}' }],
       structuredContent: { id: 7 },
       isError: false,
     });
@@ -869,7 +883,6 @@ describe("the runtime's server tools", () => {
     expect(settled).toBe(false);
     for (const request of requests.slice(1)) request.respond(new Response(null, { status: 500 }));
     expect(await result).toEqual({
-      content: [{ type: "text", text: '{"id":1}' }],
       structuredContent: { id: 1 },
       isError: false,
     });

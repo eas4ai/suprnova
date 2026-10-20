@@ -129,6 +129,7 @@ test('agent_014_live_server_tool_call_carries_session_csrf_and_header', async ({
   expect(created.status).toBe('Completed');
   expect(created.output?.isError).toBe(false);
   expect(created.output?.structuredContent).toEqual({ id: 1, title: 'Hello', user: 'alice' });
+  expect(created.output).not.toHaveProperty('content');
   const shown = await agent.invoke('notes.show', { note: 'n/7' });
   expect(shown.output?.isError).toBe(false);
   expect(shown.output?.structuredContent).toEqual({ note: 'n/7', same: true });

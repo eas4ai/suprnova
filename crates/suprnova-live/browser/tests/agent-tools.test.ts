@@ -315,12 +315,13 @@ describe("the tool result", () => {
       { fields: ["count", "label"], integers: ["count"], arguments: [] },
     );
     expect(result.isError).toBe(false);
+    expect(result).not.toHaveProperty("content");
     expect(result.structuredContent).toEqual({
       outcome: "accepted",
       fields: { count: "18446744073709551615", label: "Main" },
     });
-    expect(result.content[0]?.text).not.toContain("alice");
-    expect(result.content[0]?.text).not.toContain("secret html");
+    expect(JSON.stringify(result)).not.toContain("alice");
+    expect(JSON.stringify(result)).not.toContain("secret html");
     expect(agentFields({ body: { state: { owner: "x" } } }, [], [])).toEqual({});
   });
 
@@ -376,7 +377,7 @@ describe("the tool result", () => {
         title: ["The title is too long."],
       },
     });
-    expect(result.content[0]?.text).not.toContain("owner");
+    expect(JSON.stringify(result)).not.toContain("owner");
     // The arguments are the properties the tool's input schema lists.
     expect(
       argumentNames({
@@ -402,7 +403,7 @@ describe("the tool result", () => {
       fields: { count: 3 },
       validation: { "": [] },
     });
-    expect(result.content[0]?.text).not.toContain("too long");
+    expect(JSON.stringify(result)).not.toContain("too long");
   });
 
   it("agent_013 a keyed path of a visible field shows in full", () => {

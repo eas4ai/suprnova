@@ -311,6 +311,7 @@ test('agent_014_live_kit_notes_page_offers_the_notes_tools', async ({ page }) =>
   const created = await invoke('notes.create', { title, body: 'Written through WebMCP.' });
   expect(created.output?.isError, JSON.stringify(created)).toBe(false);
   expect(created.output?.structuredContent).toMatchObject({ title });
+  expect(created.output).not.toHaveProperty('content');
   await expect(page.getByRole('link', { name: title })).toBeVisible();
   expect(loads).toBe(0);
 

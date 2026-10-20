@@ -540,10 +540,8 @@ fn agent_016_page_tool_descriptor_carries_the_derived_schema_and_all_four_hints(
             }
         })
     );
-    assert_eq!(
-        descriptor["inputSchema"]["$schema"],
-        "https://json-schema.org/draft/2020-12/schema"
-    );
+    assert!(descriptor["inputSchema"].get("$schema").is_none());
+    assert!(descriptor["inputSchema"].get("title").is_none());
     assert_eq!(
         descriptor["inputSchema"]["properties"]["title"]["maxLength"],
         20
@@ -577,7 +575,6 @@ fn agent_016_page_tool_checks_its_input_before_the_handler() {
     assert_eq!(
         shown(&done),
         json!({
-            "content": [{ "type": "text", "text": r#"{"added":"Buy milk"}"# }],
             "structuredContent": { "added": "Buy milk" },
             "isError": false
         })

@@ -1,9 +1,9 @@
 //! Tool results, and how a server tool's answer becomes one.
 //!
 //! The mapping is the framework's MCP mapping (`answer_result` in
-//! `framework/src/agents/mcp/tools.rs`) without `resultType`, plus the rows
-//! only a browser meets: an expired page session, a network failure, the
-//! call timer and an answer over the size bound. The Live runtime and the
+//! `framework/src/agents/mcp/tools.rs`) without `resultType` or a text copy
+//! of a JSON answer, plus the rows only a browser meets: an expired page
+//! session, a network failure, the call timer and an answer over the size bound. The Live runtime and the
 //! kits implement the same table, and the shared fixture
 //! `framework/tests/agents/fixtures/browser-calls.json` holds all four to
 //! it, so an agent reads the same words whichever front end it calls
@@ -16,16 +16,17 @@ use serde_json::{Map, Value};
 
 use crate::error::WebMcpError;
 
-/// What a WebMCP tool's `execute` resolves to: the shape MCP gives a tool
-/// result, which WebMCP reuses.
+/// What a WebMCP tool's `execute` resolves to. JSON answers appear only in
+/// `structuredContent`; text answers appear only in `content`, so the
+/// browser serializes each answer once.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct ToolResult {
-    /// What the agent reads.
+    /// Text for the agent, omitted when the answer is JSON or empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub content: Vec<Content>,
-    /// The same answer as JSON, when it is JSON, so the agent need not
-    /// parse the text.
+    /// The answer as JSON, without a second copy as text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_content: Option<Value>,
     /// Whether the call failed. A failure is still a result, never a
@@ -46,7 +47,7 @@ pub enum Content {
 }
 
 impl ToolResult {
-    /// A result carrying `value` as JSON text and as structured content,
+    /// A result carrying `value` only as structured content,
     /// the shape a server tool's JSON answer takes.
     ///
     /// # Errors
@@ -56,10 +57,8 @@ impl ToolResult {
     pub fn json<S: Serialize + ?Sized>(value: &S) -> Result<Self, WebMcpError> {
         let structured =
             serde_json::to_value(value).map_err(|error| WebMcpError::Output(error.to_string()))?;
-        let text = serde_json::to_string(&structured)
-            .map_err(|error| WebMcpError::Output(error.to_string()))?;
         Ok(Self {
-            content: vec![Content::Text { text }],
+            content: Vec::new(),
             structured_content: Some(structured),
             is_error: false,
         })
@@ -170,9 +169,7 @@ pub(crate) fn answer_result(answer: &Answer<'_>, max_bytes: usize) -> ToolResult
             }
             match json_body {
                 Some(structured) => ToolResult {
-                    content: vec![Content::Text {
-                        text: String::from_utf8_lossy(answer.body).into_owned(),
-                    }],
+                    content: Vec::new(),
                     structured_content: Some(structured),
                     is_error: false,
                 },

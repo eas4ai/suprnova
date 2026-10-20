@@ -632,7 +632,7 @@ The OAuth server also needs `APP_URL` (see **Application**). See
 | `AGENT_AUTH_PREVIOUS_KEY_ID` | none | `String` | After a rotation, the identifier of the key that signed before. Set all three `AGENT_AUTH_PREVIOUS_*` variables or none; a partial set fails boot. |
 | `AGENT_AUTH_PREVIOUS_PRIVATE_KEY` | none | `String` (P-256 private key, PEM) | After a rotation, the previous key, which still verifies the assertions it signed until they expire. |
 | `AGENT_AUTH_PREVIOUS_ROTATED_AT` | none | RFC 3339 time | When the previous key stopped signing. |
-| `WEBMCP_ORIGIN_TRIAL_TOKEN` | none | `String` (base64) | The WebMCP Origin Trial token. When set, every HTML response carries it in an `Origin-Trial` header; JSON, redirects and assets do not. A value that is not base64 fails boot, naming the variable. An empty value is no token. See [Security Headers](security-headers.md#webmcp-and-permissions-policy). |
+| `WEBMCP_ORIGIN_TRIAL_TOKEN` | none | `String` (comma-separated base64 tokens) | WebMCP Origin Trial tokens, for example separate Chrome and Edge tokens. Every HTML response carries one `Origin-Trial` header with tokens joined by `, `; JSON, redirects and assets do not. Each token is checked as base64. A bad token fails boot, naming the variable and entry position, never its value. Tokens are trimmed and empty entries are skipped. An empty list is no token. See [Security Headers](security-headers.md#webmcp-and-permissions-policy). |
 
 ## Inertia / Frontend
 

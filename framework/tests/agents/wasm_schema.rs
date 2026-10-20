@@ -1,7 +1,6 @@
 //! AGENT-016: the WebAssembly crate derives a typed page tool's input
-//! schema exactly as the server derives a `#[tool]`'s (AGENT-001), so a type
-//! shared between the server and a Rust front end tells an agent the same
-//! thing on both sides.
+//! schema with the same validation rules as the server's `#[tool]`
+//! (AGENT-001). Browser schemas omit root metadata; server schemas keep it.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -59,12 +58,20 @@ pub struct FileTask {
     pub filed_by: Option<u64>,
 }
 
-fn assert_agree(server: Value, page: Value) {
+fn assert_agree(mut server: Value, page: Value) {
     assert_eq!(
         server["$schema"], "https://json-schema.org/draft/2020-12/schema",
         "{server:#}"
     );
-    assert_eq!(page, server, "page:\n{page:#}\nserver:\n{server:#}");
+    assert!(server.get("title").is_some(), "{server:#}");
+    assert!(page.get("$schema").is_none(), "{page:#}");
+    assert!(page.get("title").is_none(), "{page:#}");
+    let object = server
+        .as_object_mut()
+        .expect("the server schema is an object");
+    object.remove("$schema");
+    object.remove("title");
+    assert_eq!(page, server, "page:\n{page:#}\nserver rules:\n{server:#}");
 }
 
 /// The same input declared twice, once with the server's `#[tool_input]`

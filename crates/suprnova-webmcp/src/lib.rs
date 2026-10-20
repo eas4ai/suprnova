@@ -173,12 +173,19 @@ pub mod __private {
 /// attributes.
 ///
 /// These are the settings the framework's `#[tool]` uses, so a type shared
-/// between the server and the front end gets one schema on both sides.
+/// between the server and the front end gets the same validation rules.
+/// The browser descriptor omits `$schema` and the root type name in `title`
+/// to keep the agent's context focused on the input fields.
 pub fn input_schema<T: schemars::JsonSchema>() -> serde_json::Value {
-    schemars::generate::SchemaSettings::draft2020_12()
+    let mut schema = schemars::generate::SchemaSettings::draft2020_12()
         .into_generator()
         .into_root_schema_for::<T>()
-        .to_value()
+        .to_value();
+    if let Some(object) = schema.as_object_mut() {
+        object.remove("$schema");
+        object.remove("title");
+    }
+    schema
 }
 
 /// The bound on a page tool's validation text when no server limit
