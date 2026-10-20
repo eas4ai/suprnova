@@ -122,6 +122,8 @@ pub struct __ToolMeta {
     pub annotations: ToolAnnotations,
     /// The guard a user caller is signed into.
     pub guard: Option<&'static str>,
+    /// Suppress this tool's budget diagnostics when its marking opts out.
+    pub ignore_budget: bool,
 }
 
 /// What `#[tool]` declares about a tool on a routed handler. Built only by
@@ -762,6 +764,9 @@ fn check_unique_names(
 
 /// Budgets help agents choose and call tools; they never refuse boot.
 fn warn_tool_budgets(meta: &__ToolMeta, input_schema: &Value, headless: bool) {
+    if meta.ignore_budget {
+        return;
+    }
     let name = meta.name;
     for (label, length, budget) in [
         ("name", name.chars().count(), 30),
@@ -1180,6 +1185,7 @@ pub(crate) mod test_support {
             scopes: &[],
             annotations: ToolAnnotations::default(),
             guard: None,
+            ignore_budget: false,
         }));
         let tool = RegisteredTool {
             meta,

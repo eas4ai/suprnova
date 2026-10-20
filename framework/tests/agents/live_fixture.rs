@@ -1,6 +1,9 @@
 //! The Live component the Live tool tests act on, and the application
 //! serving it with Live and the MCP endpoint (AGENT-012, AGENT-013).
 
+// These fixtures keep boot budget warnings while silencing their compile lint.
+#![allow(deprecated)]
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -103,7 +106,6 @@ impl AgentCounter {
         headless,
     )]
     // `title` stays undescribed: the boot warning test reads its warning.
-    #[allow(deprecated)]
     #[action(validate = "arguments")]
     pub fn rename(&mut self, title: String) {
         self.label = title;
@@ -127,7 +129,6 @@ impl AgentCounter {
         callers = [public],
     )]
     // `query` stays undescribed: the boot warning test reads its warning.
-    #[allow(deprecated)]
     #[action]
     pub fn search(&mut self, query: String) {
         let _ = query;

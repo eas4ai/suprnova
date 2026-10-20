@@ -29,14 +29,14 @@ use suprnova::{{handler, tool, Response}};
 #[tool(name = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", description = "{description}", callers = [public])]
 #[handler]
 async fn over_budget() -> Response {{ suprnova::json_response!({{}}) }}
-#[tool(name = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", description = "{description}", callers = [public])]
-#[allow(deprecated)]
+#[deprecated(note = "real deprecation remains visible")]
+fn old_api() {{}}
+#[tool(name = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", description = "{description}", callers = [public], budget = ignore)]
 #[handler]
-async fn allowed() -> Response {{ suprnova::json_response!({{}}) }}
+async fn ignored() -> Response {{ old_api(); suprnova::json_response!({{}}) }}
 #[handler]
-#[tool(name = "ccccccccccccccccccccccccccccccc", description = "{description}", callers = [public])]
-#[expect(deprecated)]
-async fn expected() -> Response {{ suprnova::json_response!({{}}) }}
+#[tool(name = "ccccccccccccccccccccccccccccccc", description = "{description}", callers = [public], budget = ignore)]
+async fn also_ignored() -> Response {{ suprnova::json_response!({{}}) }}
 #[tool(name = "within_budget", description = "A short description.", callers = [public])]
 #[handler]
 async fn within_budget() -> Response {{ suprnova::json_response!({{}}) }}
@@ -51,14 +51,12 @@ impl WarningCounter {{
     #[tool(name = "describe_counter", description = "Describe the counter.", callers = [public], arguments(query = "The label to find."))]
     #[action]
     pub fn described(&mut self, query: String) {{ let _ = query; }}
-    #[allow(deprecated)]
-    #[tool(name = "ddddddddddddddddddddddddddddddd", description = "{description}", callers = [public])]
+    #[tool(name = "ddddddddddddddddddddddddddddddd", description = "{description}", callers = [public], budget = ignore)]
     #[action]
-    pub fn allowed(&mut self, query: String) {{ let _ = query; }}
-    #[expect(deprecated)]
-    #[tool(name = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", description = "{description}", callers = [public])]
+    pub fn ignored(&mut self, query: String) {{ old_api(); let _ = query; }}
+    #[tool(name = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", description = "{description}", callers = [public], budget = ignore)]
     #[action]
-    pub fn expected(&mut self, query: String) {{ let _ = query; }}
+    pub fn also_ignored(&mut self, query: String) {{ let _ = query; }}
 }}
 "#,
         description = "d".repeat(501),
@@ -98,8 +96,13 @@ impl WarningCounter {{
     ] {
         assert!(!stderr.contains(&format!("tool `{name}`:")), "{stderr}");
     }
-    assert!(
-        !stderr.contains("unfulfilled_lint_expectations"),
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|line| line.starts_with("warning:")
+                && line.contains("real deprecation remains visible"))
+            .count(),
+        2,
         "{stderr}"
     );
 }

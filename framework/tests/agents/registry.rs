@@ -1,6 +1,9 @@
 //! AGENT-001: what is a tool, and the boot check of every tool against the
 //! application's routes.
 
+// These fixtures keep boot budget warnings while silencing their compile lint.
+#![allow(deprecated)]
+
 use suprnova::agents::AgentsConfig;
 use suprnova::{MiddlewareRegistry, Router};
 
@@ -185,7 +188,6 @@ pub struct BudgetInput {
     callers = [public],
     input = BudgetInput,
 )]
-#[allow(deprecated)]
 #[suprnova::handler]
 pub async fn budget_tool(input: BudgetInput) -> suprnova::Response {
     suprnova::json_response!({ "missing": input.missing, "described": input.described })
@@ -218,6 +220,32 @@ fn agent_001_webmcp_budgets_warn_once_without_refusing_boot() {
         });
     }
     assert!(!logs_contain("input field `described` has no description"));
+}
+
+#[suprnova::tool(
+    name = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    description = "ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    callers = [public],
+    input = BudgetInput,
+    budget = ignore,
+)]
+#[suprnova::handler]
+pub async fn ignored_budget_tool(_input: BudgetInput) -> suprnova::Response {
+    suprnova::json_response!({})
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn agent_001_ignored_budgets_are_quiet_without_silencing_other_tools() {
+    let router: Router = Router::new()
+        .post("/budget", budget_tool)
+        .post("/ignored-budget", ignored_budget_tool)
+        .into();
+    router.prepare_tools().expect("budgets are warnings");
+    assert!(logs_contain(
+        "tool `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`: the name has 31 characters; WebMCP's budget is 30"
+    ));
+    assert!(!logs_contain("tool `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`:"));
 }
 
 #[test]
