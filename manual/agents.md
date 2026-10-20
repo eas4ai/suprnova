@@ -128,6 +128,7 @@ route serves. It takes these keys:
 | `title` | no | A display name |
 | `route` | no | The route name, when the handler serves more than one route |
 | `guard` | no | The auth guard a user caller is signed in to for the call |
+| `budget` | no | `budget = ignore` silences this tool's compile and boot budget warnings |
 
 Use short action names such as `create_post` or `search_notes`. The build
 warns when a name exceeds 30 characters or a description exceeds 500
@@ -136,19 +137,23 @@ without a description. Boot warnings never refuse a tool. Give every input
 field a doc comment; `#[tool_input]` carries it into the JSON Schema.
 
 The compile warning is a Rust `deprecated` lint. A build with
-`RUSTFLAGS="-D warnings"` fails on it. Keep the tool within the budget or add
-`#[allow(deprecated)]` to silence that tool's compile warning:
+`RUSTFLAGS="-D warnings"` fails on it. Keep the tool within the budget. If a
+tool keeps its long name on purpose, set `budget = ignore` to silence all of
+that tool's compile and boot budget warnings. This key works on handlers and
+Live methods and leaves other deprecation warnings in their code visible:
 
 ```rust
-#[tool(name = "search_archived_project_records", description = "Search archived project records.", callers = [user])]
-#[allow(deprecated)]
+#[tool(
+    name = "search_archived_project_records",
+    description = "Search archived project records.",
+    callers = [user],
+    budget = ignore,
+)]
 #[handler]
 async fn search_records() -> Response {
     json_response!([])
 }
 ```
-
-Boot still logs the tool's budget warnings.
 
 Names, descriptions and schemas are fixed when the application is built. An
 agent reads them as instructions, so nothing at run time can change them. The

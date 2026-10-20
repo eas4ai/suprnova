@@ -77,7 +77,7 @@ pub(crate) struct ToolSpec {
     pub(crate) headless: bool,
     pub(crate) argument_descriptions: BTreeMap<String, LitStr>,
     pub(crate) undocumented_arguments: Vec<String>,
-    budget_lint: Option<Attribute>,
+    ignore_budget: bool,
 }
 
 /// Where a `#[tool]` sits, which decides what it may declare.
@@ -90,14 +90,6 @@ pub(crate) enum ToolSite {
 }
 
 impl ToolSpec {
-    /// An expectation belongs to the generated diagnostic, while the source
-    /// item keeps its suppression without an unfulfilled expectation.
-    pub(crate) fn take_budget_lint(&mut self, attributes: &mut Vec<Attribute>) {
-        if !budget_warnings(self).is_empty() {
-            self.budget_lint = take_budget_lint(attributes);
-        }
-    }
-
     /// Whether a browser registers the tool: it accepts a public or a
     /// signed-in caller, the callers a page has.
     pub(crate) fn offered_to_browser(&self) -> bool {
@@ -117,7 +109,7 @@ pub fn tool_impl(
 
 /// `proc_macro2` form of [`tool_impl`], so unit tests can drive it.
 pub(crate) fn tool_impl_inner(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let mut item_fn: ItemFn = match syn::parse2(item.clone()) {
+    let item_fn: ItemFn = match syn::parse2(item.clone()) {
         Ok(item_fn) => item_fn,
         Err(_) => {
             let error = syn::Error::new(Span::call_site(), NO_HANDLER).to_compile_error();
@@ -135,14 +127,13 @@ pub(crate) fn tool_impl_inner(attr: TokenStream, item: TokenStream) -> TokenStre
             return quote! { #error #item_fn };
         }
     };
-    let mut spec = match parse_spec(attr, ToolSite::Handler) {
+    let spec = match parse_spec(attr, ToolSite::Handler) {
         Ok(spec) => spec,
         Err(error) => {
             let error = error.to_compile_error();
             return quote! { #error #item_fn };
         }
     };
-    spec.take_budget_lint(&mut item_fn.attrs);
     if item_fn.sig.asyncness.is_none() {
         let error = syn::Error::new_spanned(
             item_fn.sig.fn_token,
@@ -312,15 +303,11 @@ pub(crate) fn marker_macro(spec: &ToolSpec) -> TokenStream {
 
 /// Stable Rust exposes proc-macro warnings through deprecated items. Each
 /// anonymous constant keeps its diagnostic private to this tool's marking.
+/// The enclosing module controls its lint level.
 fn budget_warning(spec: &ToolSpec, problem: &str) -> TokenStream {
     let tool = &spec.name;
     let note = format!("tool `{}`: {problem}", tool.value());
-    let lint = spec.budget_lint.as_ref().map_or_else(
-        || quote_spanned!(tool.span()=> #[warn(deprecated)]),
-        |lint| quote!(#lint),
-    );
     quote_spanned! {tool.span()=>
-        #lint
         const _: () = {
             #[deprecated(note = #note)]
             const __SUPRNOVA_TOOL_BUDGET: () = ();
@@ -329,49 +316,11 @@ fn budget_warning(spec: &ToolSpec, problem: &str) -> TokenStream {
     }
 }
 
-fn take_budget_lint(attributes: &mut Vec<Attribute>) -> Option<Attribute> {
-    let (index, entries) = attributes
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(index, attribute)| {
-            if !attribute.path().is_ident("allow") && !attribute.path().is_ident("expect") {
-                return None;
-            }
-            let entries = attribute
-                .parse_args_with(Punctuated::<syn::Meta, Token![,]>::parse_terminated)
-                .ok()?;
-            entries
-                .iter()
-                .any(|entry| entry.path().is_ident("deprecated"))
-                .then_some((index, entries))
-        })?;
-    let mut lint = attributes[index].clone();
-    if lint.path().is_ident("expect") {
-        let budget: Vec<_> = entries
-            .iter()
-            .filter(|entry| entry.path().is_ident("deprecated") || entry.path().is_ident("reason"))
-            .collect();
-        let remaining: Vec<_> = entries
-            .iter()
-            .filter(|entry| !entry.path().is_ident("deprecated"))
-            .collect();
-        if remaining
-            .iter()
-            .any(|entry| matches!(entry, syn::Meta::Path(_)))
-        {
-            attributes[index].meta = syn::parse_quote!(expect(#(#remaining),*));
-            attributes.insert(index + 1, syn::parse_quote!(#[allow(deprecated)]));
-            lint.meta = syn::parse_quote!(expect(#(#budget),*));
-        } else {
-            attributes[index].meta = syn::parse_quote!(allow(#(#budget),*));
-        }
-    }
-    Some(lint)
-}
-
 fn budget_warnings(spec: &ToolSpec) -> TokenStream {
     let mut warnings = TokenStream::new();
+    if spec.ignore_budget {
+        return warnings;
+    }
     for (label, length, budget) in [
         ("name", spec.name.value().chars().count(), 30),
         ("description", spec.description.value().chars().count(), 500),
@@ -418,6 +367,7 @@ pub(crate) fn meta_tokens(spec: &ToolSpec) -> TokenStream {
     let open_world = hint(spec.annotations.open_world);
     let untrusted_content = hint(spec.annotations.untrusted_content);
     let debugging = hint(spec.annotations.debugging);
+    let ignore_budget = spec.ignore_budget;
     quote! {
         ::suprnova::agents::__ToolMeta {
             name: #name,
@@ -434,6 +384,7 @@ pub(crate) fn meta_tokens(spec: &ToolSpec) -> TokenStream {
                 #debugging,
             ),
             guard: #guard,
+            ignore_budget: #ignore_budget,
         }
     }
 }
@@ -504,6 +455,7 @@ pub(crate) fn parse_spec(attr: TokenStream, site: ToolSite) -> syn::Result<ToolS
     let mut guard: Option<LitStr> = None;
     let mut headless = false;
     let mut argument_descriptions = BTreeMap::new();
+    let mut ignore_budget = false;
 
     let parser = syn::meta::parser(|meta| {
         let key = meta
@@ -522,6 +474,16 @@ pub(crate) fn parse_spec(attr: TokenStream, site: ToolSite) -> syn::Result<ToolS
             }
             "description" => {
                 description = Some(literal(meta.value()?, "description")?);
+                Ok(())
+            }
+            "budget" => {
+                let form = "the only accepted budget option is `budget = ignore`";
+                let value = meta.value().map_err(|_| meta.error(form))?;
+                let policy: Ident = value.parse().map_err(|_| meta.error(form))?;
+                if policy != "ignore" || (!value.is_empty() && !value.peek(Token![,])) {
+                    return Err(meta.error(form));
+                }
+                ignore_budget = true;
                 Ok(())
             }
             "arguments" if site == ToolSite::Live => {
@@ -603,11 +565,11 @@ pub(crate) fn parse_spec(attr: TokenStream, site: ToolSite) -> syn::Result<ToolS
             }),
             _ if site == ToolSite::Live => Err(meta.error(
                 "unknown #[tool] argument on a Live action; expected `name`, `description`, \
-                 `title`, `callers`, `scopes`, `annotations`, `guard`, `arguments` or `headless`",
+                 `title`, `callers`, `scopes`, `annotations`, `guard`, `arguments`, `headless` or `budget`",
             )),
             _ => Err(meta.error(
                 "unknown #[tool] argument; expected `name`, `description`, `title`, \
-                 `callers`, `scopes`, `input`, `output`, `annotations`, `route` or `guard`",
+                 `callers`, `scopes`, `input`, `output`, `annotations`, `route`, `guard` or `budget`",
             )),
         }
     });
@@ -686,7 +648,7 @@ pub(crate) fn parse_spec(attr: TokenStream, site: ToolSite) -> syn::Result<ToolS
         headless,
         argument_descriptions,
         undocumented_arguments: Vec::new(),
-        budget_lint: None,
+        ignore_budget,
     })
 }
 

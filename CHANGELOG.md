@@ -189,7 +189,7 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `AgentClaims::of` refuse it with 403, as they refuse a tool call, so a form
   tool on an approval or claim page cannot approve or claim.
 - **New projects ship two notes tools.** The Inertia and Live kits serve
-  `notes.search` at `GET /notes/search` and `notes.create` at
+  `search_notes` at `GET /notes/search` and `create_note` at
   `POST /notes/tools`, under the `notes:read` and `notes:write` scopes, each
   acting on the caller's own notes. The notes page offers both to an agent in
   the browser.
@@ -197,8 +197,30 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   the attribute only when a caller passes one. The Live kit's account forms
   bound the name at 255 characters and the address at 254.
 
+- **`#[tool]` warns over WebMCP's budgets.** The build warns when a tool's
+  name passes 30 characters, when its description passes 500, and when an
+  input field has no description, and boot logs the same. The warnings never
+  refuse a tool. A tool that keeps a long name on purpose sets
+  `budget = ignore` in its marking, which quiets the build and boot for that
+  tool alone.
+- **Live tools describe their arguments.** `arguments(amount = "How much to
+  add.")` on a Live tool marking gives each action parameter the description
+  an agent reads; an argument name the action does not have fails the build.
+  A mount parameter takes a doc comment.
+- **The Inertia frontends pin `webmcp-types`.** The React, Vue and Svelte
+  kits' browser helpers use the community's `webmcp-types` 0.1.10 definitions
+  for the model context, tool definitions and tool results.
+
 ### Changed
 
+- **Tool names are identifiers.** A tool name is 1 to 64 ASCII letters,
+  digits and underscores, so every model's tool calling accepts it; a name
+  with a dot or a hyphen fails the build. The shipped tools are renamed verb
+  first: `posts.create` is `create_post`, `notes.search` is `search_notes`.
+  A browser instance of a Live tool joins the tool name and the instance key
+  with a hyphen, and the whole fits in 64 characters: a root mount that does
+  not fit fails at declaration, and the Live checker reports an island that
+  does not. An application with dotted tool names renames them.
 - **`MagnetarLifecycleEvent` and `LifecycleEvent` carry an `attributes`
   map.** Agent auth events record the registration, the client address and
   the fields auth.md names for each kind in it; it is empty for the other
