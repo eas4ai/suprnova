@@ -201,8 +201,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   name passes 30 characters, when its description passes 500, and when an
   input field has no description, and boot logs the same. The warnings never
   refuse a tool. A tool that keeps a long name on purpose sets
-  `budget = ignore` in its marking, which quiets the build and boot for that
-  tool alone.
+  `budget = ignore` in its marking, which quiets the build warning for that
+  tool alone; boot still logs its budget warnings.
 - **Live tools describe their arguments.** `arguments(amount = "How much to
   add.")` on a Live tool marking gives each action parameter the description
   an agent reads; an argument name the action does not have fails the build.
