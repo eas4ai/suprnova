@@ -1,29 +1,29 @@
 //! Posts controller.
 //!
 //! Dogfoods the real SeaORM-backed `Post` model added by codex review
-//! finding #17. Three endpoints:
+//! finding #17. Four endpoints:
 //!
 //! - `POST /api/posts` - authenticated create. Body is the `CreatePost`
-//!   form (title/body/is_public). `author_id` comes from the signed-in
+//!   payload (title/body/is_public). `author_id` comes from the signed-in
 //!   user via `Auth::user_as::<User>()`, never from the request body.
 //! - `GET  /api/posts` - list every public post (gated at the query
 //!   layer via `Post::public_page`); does not require auth.
 //! - `GET  /api/posts/{id}` - fetch a single post; the `PostPolicy`
 //!   `view` rule (post.is_public) is enforced via `Gate::authorize`.
 //!
-//! The first two are also agent tools (`src/agents.rs`): `posts.list` for
-//! anyone, and `posts.create` for a signed-in user, by browser session or
-//! by a token the user approved for an MCP client with the `posts:write`
-//! scope. A tool call runs the route itself, its session gate included,
-//! so the tool can do nothing the route would refuse. The MCP endpoint
-//! signs the token's user in before the route runs, so `Auth::user_as`
-//! reads the same user either way.
+//! - `POST /api/posts/tools` - the validated `posts.create` tool, for a
+//!   signed-in user by browser session or by a token the user approved for
+//!   an MCP client with the `posts:write` scope. The listing is also the
+//!   public `posts.list` tool (`src/agents.rs`). Each tool call runs its
+//!   route, including its session gate. The MCP endpoint signs the token's
+//!   user in first, so `Auth::user_as` reads the same user either way.
 //!
 //! `DELETE /api/posts/{id}` continues to live in
 //! `controllers::admin::delete_post` because it pairs with the
 //! `Gate::authorize("delete-post", ...)` example wired in
 //! `app/src/policies/post_policy.rs`.
 
+use serde::Deserialize;
 use suprnova::{
     Auth, FormRequest, FrameworkError, Gate, HttpResponse, Model, Request, Response,
     ValidationErrors, attrs, handler, serde_json, tool, tool_input, tool_output,
@@ -33,14 +33,27 @@ use crate::agents::scope;
 use crate::models::posts::Post;
 use crate::models::users::User;
 
-/// The form of `POST /api/posts` and the input of `posts.create`.
+/// Body for `POST /api/posts`. Its validation keeps the REST error contract.
+/// `author_id` comes from the session rather than the request body.
+#[derive(Deserialize)]
+pub struct CreatePost {
+    /// The post's title.
+    pub title: String,
+    /// The post's text.
+    pub body: String,
+    /// Private unless the caller explicitly makes it public.
+    #[serde(default)]
+    pub is_public: bool,
+}
+
+/// The validated input of `posts.create` on `POST /api/posts/tools`.
 /// `author_id` is intentionally omitted - the server derives it from the
 /// signed-in user to keep the trust boundary clean (a client must not be
 /// able to author a post as someone else). A missing field reads as empty,
 /// so it fails the rules below, naming the field, rather than the parse.
 #[tool_input]
 #[form_request(custom_hooks)]
-pub struct CreatePost {
+pub struct CreatePostInput {
     /// The post's title.
     #[serde(default)]
     #[validate(length(
@@ -60,7 +73,7 @@ pub struct CreatePost {
     pub is_public: bool,
 }
 
-impl FormRequest for CreatePost {
+impl FormRequest for CreatePostInput {
     /// A title or text of spaces alone is none.
     fn after_validation(&self) -> Result<(), ValidationErrors> {
         let blank_title = self.title.trim().is_empty();
@@ -131,7 +144,37 @@ fn answer(
     Ok(HttpResponse::json(body).status(status))
 }
 
-/// `POST /api/posts` - the tool `posts.create`: a post owned by the
+/// `POST /api/posts` - create a post with the REST route's validation answers.
+pub async fn store(req: Request) -> Response {
+    store_inner(req).await.map_err(HttpResponse::from)
+}
+
+async fn store_inner(req: Request) -> Result<HttpResponse, FrameworkError> {
+    let current_user = Auth::user_as::<User>()
+        .await?
+        .ok_or(FrameworkError::Unauthorized)?;
+    let payload: CreatePost = req.json().await?;
+    if payload.title.trim().is_empty() {
+        return Err(FrameworkError::bad_request("title must not be empty"));
+    }
+    if payload.body.trim().is_empty() {
+        return Err(FrameworkError::bad_request("body must not be empty"));
+    }
+    write_post(current_user.id, payload).await
+}
+
+async fn write_post(author_id: i64, payload: CreatePost) -> Result<HttpResponse, FrameworkError> {
+    let post = Post::create(attrs! {
+        author_id: author_id,
+        title: payload.title,
+        body: payload.body,
+        is_public: payload.is_public,
+    })
+    .await?;
+    answer(serde_json::to_value(PostItem::from(post)), 201)
+}
+
+/// `POST /api/posts/tools` - the tool `posts.create`: a post owned by the
 /// signed-in user.
 #[tool(
     name = "posts.create",
@@ -139,25 +182,25 @@ fn answer(
     description = "Write a post for the signed-in user, with a title and some text. It stays private unless `is_public` is true. Answers the post written.",
     callers = [user],
     scopes = [scope::POSTS_WRITE],
-    input = CreatePost,
+    input = CreatePostInput,
     output = PostItem,
     annotations(read_only = false, destructive = false),
 )]
 #[handler]
-pub async fn store(form: CreatePost) -> Response {
+pub async fn create(form: CreatePostInput) -> Response {
     let current_user = Auth::user_as::<User>()
         .await?
         .ok_or(FrameworkError::Unauthorized)?;
 
-    let post = Post::create(attrs! {
-        author_id: current_user.id,
-        title: form.title,
-        body: form.body,
-        is_public: form.is_public,
-    })
-    .await?;
-
-    Ok(answer(serde_json::to_value(PostItem::from(post)), 201)?)
+    Ok(write_post(
+        current_user.id,
+        CreatePost {
+            title: form.title,
+            body: form.body,
+            is_public: form.is_public,
+        },
+    )
+    .await?)
 }
 
 /// `GET /api/posts` - the tool `posts.list`: every public post, a page at a
