@@ -40,8 +40,8 @@ checks your models, routes and page props before anything ships.
 
 ## Get started
 
-Current `main` and the tagged v4.3.0 release both need Rust 1.94.0 or
-newer. An Inertia front end also needs Node.js 20 or newer.
+Current `main` needs Rust 1.94.0 or newer, and the tagged v4.3.0 release has
+the same floor. An Inertia front end also needs Node.js 20 or newer.
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v4.3.0 suprnova-cli
