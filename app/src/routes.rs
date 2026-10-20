@@ -4,8 +4,8 @@ use suprnova::broadcasting::{
     BroadcastHub, BroadcastingWsHandler, ChannelRegistry, InMemoryBroadcastHub,
 };
 use suprnova::{
-    AuthMiddleware as SessionAuthMiddleware, RateLimitMiddleware, RateLimiterDriver,
-    SlidingWindowConfig,
+    AuthMiddleware as SessionAuthMiddleware, ConsentPageHeaders, RateLimitMiddleware,
+    RateLimiterDriver, SlidingWindowConfig,
     container::App,
     delete, get, group, identity_key, names_identity, post,
     rate_limit::{BackendErrorPolicy, memory::InMemoryRateLimiter},
@@ -38,6 +38,7 @@ fn client_ip_key(req: &suprnova::Request) -> String {
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
 use crate::controllers;
 use crate::middleware::AuthMiddleware;
+use crate::middleware::authenticate::RedirectIfAuthenticated;
 use crate::ws as app_ws;
 
 /// Build the `BroadcastingWsHandler` for `/ws/broadcast` by resolving
@@ -142,12 +143,63 @@ routes! {
     // Gate::authorize through PostPolicy for show). The framework's
     // middleware map is keyed by `(method, path)` so the public GET
     // and the auth-gated POST can share the `/api/posts` path string
-    // without leaking middleware across methods.
+    // without leaking middleware across methods. The listing is also the
+    // agent tool `posts.list` and the create `posts.create`
+    // (`src/agents.rs`): a tool call runs these routes, the session gate
+    // included, as the signed-in user or the user a token acts for.
     get!("/api/posts", controllers::posts::index).name("api.posts.index"),
     group!("/api/posts", {
         get!("/{id}", controllers::posts::show).name("api.posts.show"),
         post!("/", controllers::posts::store).name("api.posts.store"),
     }).middleware(SessionAuthMiddleware::new()),
+
+    // Sign-in and registration (`controllers::auth`). The OAuth server and
+    // agent auth send a guest to `/login` with the address to come back to,
+    // and so do the approval and claim pages below. A signed-in user goes
+    // on (`RedirectIfAuthenticated`). Each name is the one Laravel's starter
+    // kits give the route.
+    group!("/", {
+        get!("/login", controllers::auth::show_login).name("login"),
+        get!("/register", controllers::auth::show_register).name("register"),
+    }).middleware(RedirectIfAuthenticated),
+    // The two forms check a password or create an account, so each client
+    // address gets ten tries a minute between them. `FailClosed` for the
+    // reason the `/auth` group below gives: a limiter outage is when
+    // unbounded password guessing is most attractive.
+    group!("/", {
+        post!("/login", controllers::auth::login),
+        post!("/register", controllers::auth::register),
+    }).middleware(RedirectIfAuthenticated).middleware(
+        RateLimitMiddleware::new(
+            limiter(),
+            SlidingWindowConfig {
+                max_requests: 10,
+                window: Duration::from_secs(60),
+            },
+            |req| format!("sign-in:ip:{}", client_ip_key(req)),
+        )
+        .on_backend_error(BackendErrorPolicy::FailClosed),
+    ),
+
+    // Agents (`controllers::agents`, served with `src/agents.rs`): the
+    // approval page an MCP client sends the user to, the claim page an
+    // agent sends the user to, and the user's connected agents. A guest who
+    // opens the first two signs in and comes back. `ConsentPageHeaders`
+    // keeps every answer here out of frames, caches and referrers. No route
+    // here offers a tool: consent comes from the person.
+    group!("/", {
+        get!("/oauth/approve", controllers::agents::approval).name("agents.approval"),
+        post!("/oauth/approve", controllers::agents::decide).name("agents.decide"),
+        get!("/agent/claim", controllers::agents::claim).name("agents.claim"),
+        post!("/agent/claim", controllers::agents::confirm).name("agents.confirm"),
+    }).middleware(ConsentPageHeaders),
+    group!("/", {
+        get!("/connected-agents", controllers::agents::connected).name("agents.connected"),
+        post!("/connected-agents/clients/{grant}/revoke", controllers::agents::revoke_client)
+            .name("agents.clients.revoke"),
+        post!("/connected-agents/agents/{registration}/revoke", controllers::agents::revoke_agent)
+            .name("agents.accounts.revoke"),
+    }).middleware(SessionAuthMiddleware::redirect_to("/login")).middleware(ConsentPageHeaders),
 
     // Phase 5B Task 20 - mail dogfood. `POST /api/welcome?email=...&name=...`
     // queues a WelcomeEmail Mailable onto the mail queue via Mail::queue.

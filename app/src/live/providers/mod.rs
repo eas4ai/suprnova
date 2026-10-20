@@ -4,7 +4,7 @@
 pub mod tenant;
 pub mod upload_finalizer;
 
-use suprnova::Gate;
+use suprnova::{Gate, LiveMountRequest, ToolCaller};
 
 /// Upload controls the engine authorizes per field through the application's gate.
 const UPLOAD_CONTROLS: [&str; 14] = [
@@ -28,7 +28,20 @@ const UPLOAD_CONTROLS: [&str; 14] = [
 /// signed-in user may subscribe to the activity streams and manage their own
 /// avatar, gallery avatar and attachment uploads. The route guard has already
 /// required the principal.
+///
+/// An MCP client mounts `app.tally` from the properties it sends
+/// (`tally.add`), which are untrusted input: Live asks
+/// `live:app.tally.mount` before anything mounts, and refuses when no policy
+/// answers. A signed-in user may start a tally at any count; a call whose
+/// `start` the policy cannot read as a count is refused.
 pub fn authorize_live() {
+    Gate::define::<ToolCaller, LiveMountRequest>("live:app.tally.mount", |caller, mount| {
+        caller.is_user()
+            && mount
+                .property("start")
+                .and_then(suprnova::serde_json::Value::as_u64)
+                .is_some()
+    });
     Gate::define::<String, String>("live:app.activity-feed.stream.activity", |_, _| true);
     Gate::define::<String, String>("live:app.live-native-gallery.stream.activity", |_, _| true);
     for control in UPLOAD_CONTROLS {

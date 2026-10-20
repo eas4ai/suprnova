@@ -3,6 +3,7 @@
 //! Each middleware has its own dedicated file following the framework convention.
 
 mod auth;
+pub mod authenticate;
 mod logging;
 
 pub use auth::AuthMiddleware;
