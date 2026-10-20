@@ -506,7 +506,7 @@ impl ToolRegistry {
     ///
     /// - two tools share a name (two crates; within one crate the build
     ///   already failed), or a routed tool's name is a Live tool's base, a
-    ///   `.` and an instance key, which a browser would also register;
+    ///   `-` and an instance key, which a browser would also register;
     /// - two declarations of one scope disagree on its description, or a
     ///   tool names a scope no `tool_scopes!` declared;
     /// - a tool's handler serves several routes and the tool names none of
@@ -556,8 +556,14 @@ impl ToolRegistry {
         let mut unrouted: Vec<&'static str> = Vec::new();
         for record in records {
             match resolve(router, record)? {
-                Some(tool) => tools.push(tool),
-                None => unrouted.push(record.name()),
+                Some(tool) => {
+                    warn_tool_budgets(tool.meta, tool.input_schema(), false);
+                    tools.push(tool);
+                }
+                None => {
+                    warn_tool_budgets(&record.decl.meta, &(record.decl.input_schema)(), false);
+                    unrouted.push(record.name());
+                }
             }
         }
         // A router that leaves a tool unrouted, such as one a test builds for
@@ -575,6 +581,7 @@ impl ToolRegistry {
         let mut unserved: Vec<&'static str> = Vec::new();
         for record in live_records {
             let tool = resolve_live(record)?;
+            warn_tool_budgets(tool.meta, tool.input_schema(), record.decl.headless);
             if !record.decl.headless {
                 browser_tools.push(tool);
             } else if serves_live {
@@ -622,7 +629,7 @@ impl ToolRegistry {
     }
 
     /// The Live tool with the base name `base`, headless or not: what a
-    /// browser registers as `{base}.{instance}`.
+    /// browser registers as `{base}-{instance}`.
     pub fn live_tool(&self, base: &str) -> Option<&RegisteredTool> {
         self.get(base)
             .filter(|tool| tool.live_target().is_some())
@@ -647,11 +654,11 @@ impl ToolRegistry {
         })
     }
 
-    /// The Live tool a browser registers as `name`, `{base}.{instance}`,
+    /// The Live tool a browser registers as `name`, `{base}-{instance}`,
     /// with the instance.
     pub(crate) fn browser_tool<'a>(&self, name: &'a str) -> Option<(&RegisteredTool, &'a str)> {
-        let (base, instance) = name.rsplit_once('.')?;
-        if !suprnova_live::metadata::is_tool_instance_key(instance) {
+        let (base, instance) = name.split_once('-')?;
+        if name.len() > 64 || !suprnova_live::metadata::is_tool_instance_key(instance) {
             return None;
         }
         let tool = self.live_tool(base)?;
@@ -733,6 +740,16 @@ fn check_unique_names(
                 .map(|record| (record.name(), record.action_path())),
         );
     for (name, origin) in all {
+        if name.is_empty()
+            || name.len() > 64
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(FrameworkError::internal(format!(
+                "tool `{name}` ({origin}): a tool name has 1 to 64 ASCII letters, digits and `_`"
+            )));
+        }
         if let Some(previous) = seen.insert(name, origin.clone()) {
             return Err(FrameworkError::internal(format!(
                 "two tools are named `{name}`: {previous} and {origin}; a tool name is unique in \
@@ -743,8 +760,52 @@ fn check_unique_names(
     Ok(())
 }
 
+/// Budgets help agents choose and call tools; they never refuse boot.
+fn warn_tool_budgets(meta: &__ToolMeta, input_schema: &Value, headless: bool) {
+    let name = meta.name;
+    for (label, length, budget) in [
+        ("name", name.chars().count(), 30),
+        ("description", meta.description.chars().count(), 500),
+    ] {
+        if length > budget {
+            tracing::warn!(
+                tool = name,
+                "tool `{name}`: the {label} has {length} characters; WebMCP's budget is {budget}"
+            );
+        }
+    }
+    warn_input_descriptions(name, input_schema, "");
+    if headless {
+        for part in ["mount", "arguments"] {
+            if let Some(schema) = input_schema
+                .get("properties")
+                .and_then(|properties| properties.get(part))
+            {
+                warn_input_descriptions(name, schema, &format!("{part}."));
+            }
+        }
+    }
+}
+
+fn warn_input_descriptions(name: &str, schema: &Value, prefix: &str) {
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        for (field, schema) in properties {
+            if schema
+                .get("description")
+                .and_then(Value::as_str)
+                .is_none_or(|description| description.trim().is_empty())
+            {
+                tracing::warn!(
+                    tool = name,
+                    "tool `{name}`: input field `{prefix}{field}` has no description; WebMCP requires a description"
+                );
+            }
+        }
+    }
+}
+
 /// Refuse a routed tool whose name a browser could also register for a Live
-/// tool: `{base}.{instance}` with an instance key in the tool grammar. A page
+/// tool: `{base}-{instance}` with an instance key in the tool grammar. A page
 /// registers both kinds side by side (AGENT-014), and two tools of one name
 /// would make an agent's call ambiguous.
 fn check_browser_prefixes(
@@ -761,20 +822,17 @@ fn check_browser_prefixes(
         .iter()
         .filter(|tool| matches!(tool.target, ToolTarget::Route))
     {
-        let shadowed = tool
-            .name()
-            .rsplit_once('.')
-            .is_some_and(|(base, instance)| {
-                bases.contains(&base) && suprnova_live::metadata::is_tool_instance_key(instance)
-            });
+        let shadowed = tool.name().split_once('-').is_some_and(|(base, instance)| {
+            bases.contains(&base) && suprnova_live::metadata::is_tool_instance_key(instance)
+        });
         if shadowed {
             return Err(FrameworkError::internal(format!(
                 "tool `{}` ({}) has the name a browser gives the Live tool `{}` on the island \
                  keyed `{}`; rename one of them",
                 tool.name(),
                 tool.origin,
-                tool.name().rsplit_once('.').map_or("", |(base, _)| base),
-                tool.name().rsplit_once('.').map_or("", |(_, key)| key),
+                tool.name().split_once('-').map_or("", |(base, _)| base),
+                tool.name().split_once('-').map_or("", |(_, key)| key),
             )));
         }
     }
@@ -1007,13 +1065,20 @@ fn headless_input_schema(mount: Value, arguments: Value, required_arguments: boo
     if let Value::Object(object) = &mut mount {
         object.insert("description".into(), json!(MOUNT_DESCRIPTION));
     }
+    let mut arguments = without_dialect(arguments);
+    if let Value::Object(object) = &mut arguments {
+        object.insert(
+            "description".into(),
+            json!("The arguments passed to this action."),
+        );
+    }
     let mut schema = json!({
         "$schema": suprnova_live::state::JSON_SCHEMA_DIALECT,
         "type": "object",
         "properties": {
             "mount": mount,
             "handle": { "type": "string", "description": HANDLE_DESCRIPTION },
-            "arguments": without_dialect(arguments),
+            "arguments": arguments,
         },
         "additionalProperties": false,
     });

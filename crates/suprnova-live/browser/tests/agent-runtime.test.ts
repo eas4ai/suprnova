@@ -103,7 +103,7 @@ function encoded(value: JsonValue): string {
 
 const TAG = (value: string): JsonValue => ({ $live: "u64", value });
 
-/** One counter island keyed `key`, offering `counter.add.{key}`. */
+/** One counter island keyed `key`, offering `add_to_counter.{key}`. */
 function island(document: RuntimeDocument, key: string, seed: number): RuntimeElement {
   const slot = `counter-${key}`;
   const instance = identity(seed, 16);
@@ -129,7 +129,7 @@ function island(document: RuntimeDocument, key: string, seed: number): RuntimeEl
       tools: [
         {
           action: "add",
-          name: `counter.add.${key}`,
+          name: `add_to_counter-${key}`,
           description: "Add one to the counter.",
           inputSchema: { type: "object", properties: {}, additionalProperties: false },
           annotations: {
@@ -448,14 +448,14 @@ describe("the page's WebMCP tool calls through the runtime", () => {
   it("agent_012 registers each island's tools when the runtime starts", () => {
     const { context, diagnostics } = page();
     expect(diagnostics).toEqual([]);
-    expect(context.live()).toEqual(["counter.add.main", "counter.add.side"]);
+    expect(context.live()).toEqual(["add_to_counter-main", "add_to_counter-side"]);
   });
 
   it("agent_012 a reload for another island answers this island's pending call first", async () => {
     const { document, context, transport, scheduler, navigation } = page();
-    const call = settledState(context.call("counter.add.main"));
+    const call = settledState(context.call("add_to_counter-main"));
     // `main`'s tool call is in flight, its response held back.
-    expect((await transport.request("main", "add")).tool).toBe("counter.add.main");
+    expect((await transport.request("main", "add")).tool).toBe("add_to_counter-main");
     click(document, "side");
     (await transport.request("side", "touch")).respond(409, refreshRequired());
     // The page reloads to recover `side`: first `main`'s call has its
@@ -475,7 +475,7 @@ describe("the page's WebMCP tool calls through the runtime", () => {
       limits: { maxResultBytes: 1024, callTimeoutMs: 30_000 },
       tools: [
         {
-          name: "posts.create",
+          name: "create_post",
           description: "Create a post.",
           inputSchema: { type: "object" },
           annotations: {
@@ -490,11 +490,11 @@ describe("the page's WebMCP tool calls through the runtime", () => {
       ],
     });
     const { document, context, transport, scheduler, navigation } = page(["main", "side"], tools);
-    expect(context.live()).toEqual(["counter.add.main", "counter.add.side", "posts.create"]);
-    const call = settledState(context.call("posts.create", { title: "Hello" }));
+    expect(context.live()).toEqual(["add_to_counter-main", "add_to_counter-side", "create_post"]);
+    const call = settledState(context.call("create_post", { title: "Hello" }));
     // The server tool's call is in flight, its answer held back.
     await until(
-      () => transport.sent.some((request) => request.tool === "posts.create"),
+      () => transport.sent.some((request) => request.tool === "create_post"),
       "the server tool's request",
     );
     click(document, "side");
@@ -511,7 +511,7 @@ describe("the page's WebMCP tool calls through the runtime", () => {
 
   it("agent_012 a refused call's recovery waits for the call's result", async () => {
     const { context, transport, scheduler, navigation } = page();
-    const call = settledState(context.call("counter.add.main"));
+    const call = settledState(context.call("add_to_counter-main"));
     (await transport.request("main", "add")).respond(409, refreshRequired());
     await until(() => call.settled, "the call to settle");
     expect(call.value?.isError).toBe(true);
@@ -534,16 +534,16 @@ describe("the page's WebMCP tool calls through the runtime", () => {
     runtime.suspend();
     expect(context.live()).toEqual([]);
     runtime.resume();
-    expect(context.live()).toEqual(["counter.add.main", "counter.add.side"]);
+    expect(context.live()).toEqual(["add_to_counter-main", "add_to_counter-side"]);
     expect(context.registered).toHaveLength(4);
   });
 
   it("agent_012 a call refuses once its island has left the page", async () => {
     const { document, context, transport } = page();
-    const registration = context.registered.find((entry) => entry.tool.name === "counter.add.main");
+    const registration = context.registered.find((entry) => entry.tool.name === "add_to_counter-main");
     root(document, "main").remove();
     await until(() => context.live().length === 1, "main's tools to leave");
-    expect(context.live()).toEqual(["counter.add.side"]);
+    expect(context.live()).toEqual(["add_to_counter-side"]);
     const result = await registration?.tool.execute({});
     expect(result?.isError).toBe(true);
     expect(transport.sent).toEqual([]);
@@ -551,7 +551,7 @@ describe("the page's WebMCP tool calls through the runtime", () => {
 
   it("agent_012 a call's result unwraps only the fields the root marks as integers", async () => {
     const { context, transport } = page();
-    const call = context.call("counter.add.main");
+    const call = context.call("add_to_counter-main");
     (await transport.request("main", "add")).respond(
       200,
       committed("main", 16, { count: TAG("2"), shape: TAG("9") }),

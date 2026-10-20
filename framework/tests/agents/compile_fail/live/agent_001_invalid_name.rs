@@ -1,7 +1,7 @@
 use suprnova::live::{LiveComponent, live};
 
 #[derive(LiveComponent)]
-#[live(name = "fail.tool", view = "live/agents/tool.html")]
+#[live(name = "fail_tool", view = "live/agents/tool.html")]
 pub struct Counter {
     count: u64,
 }

@@ -187,11 +187,15 @@ impl<C: ComponentContract> LiveMount<C> {
             .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidDeclaration))?;
         let document_key = DocumentMountKey::parse(document_key)
             .map_err(|_| LiveDocumentError::new(LiveDocumentErrorKind::InvalidDeclaration))?;
-        // A browser registers the component's tools under names ending in
-        // the island's key, which allows neither `:` nor a second `.`
-        // (AGENT-012): refused at declaration, before any page renders.
-        if descriptor.metadata().has_browser_tools()
-            && !suprnova_live::metadata::is_tool_instance_key(document_key.as_str())
+        // Refuse invalid root browser names at declaration, before startup
+        // checks can accept a mount that rendering would reject (AGENT-012).
+        if descriptor
+            .metadata()
+            .actions()
+            .iter()
+            .filter_map(|action| action.tool())
+            .filter(|tool| tool.browser())
+            .any(|tool| tool.browser_name(document_key.as_str()).is_none())
         {
             return Err(LiveDocumentError::new(
                 LiveDocumentErrorKind::InvalidDeclaration,

@@ -54,6 +54,8 @@ pub enum DiagnosticCode {
     /// sits inside a loop: the key becomes part of each tool name, and data
     /// must never reach a tool name (AGENT-012).
     ToolComponentKey,
+    /// A keyed island would register a tool name longer than 64 characters.
+    ToolNameLength,
     /// A URL directive disagreed with registered URL policy.
     InvalidUrlBinding,
     /// An event identity was not registered.
@@ -116,6 +118,7 @@ impl DiagnosticCode {
             Self::InvalidKey => "invalid_key",
             Self::DuplicateKey => "duplicate_key",
             Self::ToolComponentKey => "tool_component_key",
+            Self::ToolNameLength => "tool_name_length",
             Self::InvalidUrlBinding => "invalid_url_binding",
             Self::UnknownEvent => "unknown_event",
             Self::UnknownEffect => "unknown_effect",
@@ -153,6 +156,7 @@ pub struct TemplateDiagnostic {
     line: u32,
     column: u32,
     component: Option<ComponentName>,
+    detail: Option<String>,
 }
 
 impl TemplateDiagnostic {
@@ -171,7 +175,15 @@ impl TemplateDiagnostic {
             line,
             column,
             component,
+            detail: None,
         }
+    }
+
+    /// A fixed explanation from registered metadata, when the diagnostic
+    /// needs more than a category to identify the invalid contract.
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
     }
 
     /// Returns the stable machine-readable category.
@@ -216,6 +228,7 @@ impl fmt::Debug for TemplateDiagnostic {
         formatter
             .debug_struct("TemplateDiagnostic")
             .field("code", &self.code.as_str())
+            .field("detail", &self.detail)
             .field("severity", &self.severity)
             .field("path", &self.path.as_ref().map(ViewName::as_str))
             .field("line", &self.line)
@@ -264,6 +277,41 @@ impl DiagnosticCollector {
             diagnostics: Vec::new(),
             max,
             limit_hit: false,
+        }
+    }
+
+    pub(crate) fn tool_name_length(
+        &mut self,
+        path: &ViewName,
+        line: u32,
+        column: u32,
+        component: &ComponentName,
+        detail: String,
+    ) {
+        self.push(
+            DiagnosticCode::ToolNameLength,
+            DiagnosticSeverity::Error,
+            Some(path),
+            line,
+            column,
+            Some(component),
+        );
+        if let Some(diagnostic) = self.diagnostics.iter_mut().find(|diagnostic| {
+            diagnostic.code == DiagnosticCode::ToolNameLength
+                && diagnostic.path.as_ref() == Some(path)
+                && diagnostic.line == line.max(1)
+                && diagnostic.column == column.max(1)
+                && diagnostic.component.as_ref() == Some(component)
+        }) {
+            // One island's diagnostic names every overlong tool at that location.
+            match &mut diagnostic.detail {
+                Some(existing) if !existing.contains(&detail) => {
+                    existing.push_str("; ");
+                    existing.push_str(&detail);
+                }
+                None => diagnostic.detail = Some(detail),
+                _ => {}
+            }
         }
     }
 

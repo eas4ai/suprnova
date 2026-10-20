@@ -100,8 +100,8 @@ async fn agent_001_wire_request_cannot_carry_the_tool_marker() {
         .header("Authorization", format!("Bearer {token}"))
         .header("MCP-Protocol-Version", "2026-07-28")
         .header("Mcp-Method", "tools/call")
-        .header("Mcp-Name", "posts.create")
-        .header("X-Agent-Call", "posts.create")
+        .header("Mcp-Name", "create_post")
+        .header("X-Agent-Call", "create_post")
         .header("Cookie", "suprnova_session=forged")
         .send()
         .await
@@ -115,7 +115,7 @@ async fn agent_001_tool_call_skips_csrf_and_session_but_a_post_still_gets_419() 
     let result = client
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_WRITE]))
-        .call("posts.create", json!({ "title": "Through MCP" }))
+        .call("create_post", json!({ "title": "Through MCP" }))
         .await;
     assert!(!result.is_error(), "{:?}", result.response());
     assert_eq!(

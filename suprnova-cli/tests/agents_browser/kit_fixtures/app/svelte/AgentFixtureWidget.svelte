@@ -3,7 +3,7 @@
 
   // A component whose tool lives while it is mounted (AGENT-015).
   usePageTool({
-    name: 'fixture.widget.ping',
+    name: 'ping_fixture_widget',
     description: 'Answer pong while the widget is shown.',
     inputSchema: { type: 'object', properties: {} },
     readOnly: true,

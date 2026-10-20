@@ -149,11 +149,15 @@ fn run_inner(
         let component = super::live_tool::display_text(
             diagnostic.component.as_deref().unwrap_or("<no component>"),
         );
-        let message = format!(
+        let mut message = format!(
             "{location}: {} [{}] in {component}",
             super::live_tool::display_text(&diagnostic.code),
             diagnostic.severity.as_str()
         );
+        if let Some(detail) = &diagnostic.detail {
+            message.push_str(": ");
+            message.push_str(&super::live_tool::display_text(detail));
+        }
         match diagnostic.severity {
             Severity::Error => ui::error(&message),
             Severity::Unproved => ui::warning(&message),

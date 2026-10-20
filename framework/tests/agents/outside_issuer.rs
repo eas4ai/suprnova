@@ -147,7 +147,7 @@ async fn refusal(client: &TestClient, token: &str) -> (u16, String) {
     let refused = client
         .mcp()
         .with_token(token)
-        .call("users.profile", json!({}))
+        .call("read_user_profile", json!({}))
         .await;
     let www = refused
         .response()
@@ -173,7 +173,7 @@ async fn agent_006_valid_outside_token_calls_a_user_tool() {
         .client
         .mcp()
         .with_token(&token)
-        .call("users.profile", json!({}))
+        .call("read_user_profile", json!({}))
         .await;
     assert_eq!(profile.status(), 200, "{:?}", profile.response());
     assert_eq!(
@@ -186,7 +186,7 @@ async fn agent_006_valid_outside_token_calls_a_user_tool() {
         .client
         .mcp()
         .with_token(&token)
-        .call("posts.create", json!({ "title": "From outside" }))
+        .call("create_post", json!({ "title": "From outside" }))
         .await;
     assert_eq!(created.status(), 200, "{:?}", created.response());
     let created = created.structured().cloned().unwrap_or_default();
@@ -201,7 +201,7 @@ async fn agent_006_valid_outside_token_calls_a_user_tool() {
             .client
             .mcp()
             .with_token(&late)
-            .call("users.profile", json!({}))
+            .call("read_user_profile", json!({}))
             .await
             .status(),
         200
@@ -291,7 +291,7 @@ async fn agent_006_missing_scope_is_refused() {
         .client
         .mcp()
         .with_token(&token)
-        .call("posts.create", json!({ "title": "Not allowed" }))
+        .call("create_post", json!({ "title": "Not allowed" }))
         .await;
     assert_eq!(refused.status(), 403, "{:?}", refused.response());
     let www = refused
@@ -310,7 +310,7 @@ async fn agent_006_missing_scope_is_refused() {
         .client
         .mcp()
         .with_token(&listed)
-        .call("posts.create", json!({ "title": "Allowed" }))
+        .call("create_post", json!({ "title": "Allowed" }))
         .await;
     assert_eq!(created.status(), 200, "{:?}", created.response());
 }
@@ -338,7 +338,7 @@ async fn agent_006_outside_token_is_never_an_agent() {
         .client
         .mcp()
         .with_token(&token)
-        .call("posts.create", json!({ "title": "x" }))
+        .call("create_post", json!({ "title": "x" }))
         .await;
     assert_eq!(
         created.structured().map(|value| value["kind"].clone()),
@@ -521,7 +521,7 @@ async fn agent_006_a_user_matched_on_email_needs_email_verified() {
         .client
         .mcp()
         .with_token(&verified)
-        .call("users.profile", json!({}))
+        .call("read_user_profile", json!({}))
         .await;
     assert_eq!(profile.status(), 200, "{:?}", profile.response());
     assert_eq!(
@@ -802,7 +802,7 @@ async fn agent_006_an_issuer_id_claim_needs_no_verified_flag() {
         .client
         .mcp()
         .with_token(&token)
-        .call("users.profile", json!({}))
+        .call("read_user_profile", json!({}))
         .await;
     assert_eq!(profile.status(), 200, "{:?}", profile.response());
     assert_eq!(

@@ -18,8 +18,8 @@ pub enum WebMcpError {
     /// The tool name breaks the AGENT-001 grammar, which a browser and an
     /// agent both rely on to tell tools apart.
     #[error(
-        "the tool name `{name}` is not valid: a tool name has 1 to 128 characters, each an ASCII \
-         letter, a digit, `_`, `-` or `.`"
+        "the tool name `{name}` is not valid: a tool name has 1 to 64 characters, each an ASCII \
+         letter, a digit or `_`"
     )]
     InvalidName {
         /// The name as given.

@@ -8,10 +8,10 @@
 //! that output, and drives it in Chromium with WebMCP enabled. It serves:
 //!
 //! - `/app`, the page the front end boots in, whose head carries the CSRF
-//!   meta tag and the `PageTools::element` listing `todos.save` for a
+//!   meta tag and the `PageTools::element` listing `save_todo` for a
 //!   signed-in viewer;
 //! - `/pkg/{file}`, the front end's JavaScript and WebAssembly;
-//! - `todos.save` at `POST /todos`, a `#[tool]` for signed-in users that
+//! - `save_todo` at `POST /todos`, a `#[tool]` for signed-in users that
 //!   answers with what it saw: the user and the session the page belongs
 //!   to;
 //! - `/login/{user}`, which signs the browser in as that user and writes
@@ -37,7 +37,7 @@ use suprnova::{
     json_response, session, session_mut, tool, tool_input,
 };
 
-/// The input of `todos.save`.
+/// The input of `save_todo`.
 #[tool_input]
 pub struct SaveTodo {
     /// What to save.
@@ -45,7 +45,7 @@ pub struct SaveTodo {
     pub title: String,
 }
 
-// The server's twin of the front end's `todos.add` input: the same fields,
+// The server's twin of the front end's `add_todo` input: the same fields,
 // renames, rules and doc comments, so the two derive one schema.
 
 /// An item to add to the visible todo list.
@@ -59,7 +59,7 @@ pub struct AddTodo {
 }
 
 #[tool(
-    name = "todos.save",
+    name = "save_todo",
     description = "Save a todo for the signed-in user.",
     title = "Save todo",
     callers = [user],
@@ -253,7 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Ok(HttpResponse::text("ok"))
         })
         .get("/app", app_page)
-        .with_tools(["todos.save"])
+        .with_tools(["save_todo"])
         .get("/pkg/{file}", move |request: Request| {
             let dir = pkg.clone();
             async move { pkg_file(&dir, request.param("file").unwrap_or("")) }

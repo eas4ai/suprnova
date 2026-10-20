@@ -22,7 +22,7 @@ async fn agent_018_guest_user_agent_through_mcp_and_browser() {
     let user = client
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_WRITE]))
-        .call("posts.create", json!({ "title": "User" }))
+        .call("create_post", json!({ "title": "User" }))
         .await;
     assert_eq!(
         user.structured().map(|value| &value["kind"]),
@@ -31,7 +31,7 @@ async fn agent_018_guest_user_agent_through_mcp_and_browser() {
     let agent = client
         .mcp()
         .as_caller(ToolCaller::agent("reg-18").scopes([scope::POSTS_WRITE]))
-        .call("posts.create", json!({ "title": "Agent" }))
+        .call("create_post", json!({ "title": "Agent" }))
         .await;
     assert_eq!(
         agent.structured().map(|value| &value["kind"]),
@@ -47,7 +47,7 @@ async fn agent_018_guest_user_agent_through_mcp_and_browser() {
         .acting_as(&TestUser {
             id: "7".to_string(),
         })
-        .tool("posts.create", json!({ "title": "Page" }))
+        .tool("create_post", json!({ "title": "Page" }))
         .send()
         .await;
     page_user.assert_ok();
@@ -61,7 +61,7 @@ async fn agent_018_test_path_applies_scope_and_origin_checks() {
     let unscoped = client
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("7")))
-        .call("posts.create", json!({ "title": "No scope" }))
+        .call("create_post", json!({ "title": "No scope" }))
         .await;
     assert_eq!(
         unscoped.status(),
@@ -77,7 +77,7 @@ async fn agent_018_test_path_applies_scope_and_origin_checks() {
     let invalid = client
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_WRITE]))
-        .call("posts.create", json!({ "title": "" }))
+        .call("create_post", json!({ "title": "" }))
         .await;
     assert!(invalid.is_error(), "validation still runs on the test path");
 }
@@ -94,7 +94,7 @@ async fn agent_018_claimed_and_unclaimed_agent() {
                     .claimed(claimed)
                     .scopes([scope::POSTS_WRITE]),
             )
-            .call("posts.create", json!({ "title": "Claim" }))
+            .call("create_post", json!({ "title": "Claim" }))
             .await;
         assert_eq!(
             result.structured().map(|value| &value["claimed"]),
@@ -112,7 +112,7 @@ async fn agent_018_browser_path_refuses_agent() {
     let fake = Agents::fake();
     let token = fake.token_for(ToolCaller::agent("reg-browser").scopes([scope::POSTS_WRITE]));
     client
-        .tool("posts.create", json!({ "title": "Agent in a page" }))
+        .tool("create_post", json!({ "title": "Agent in a page" }))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
@@ -144,7 +144,7 @@ async fn agent_018_mcp_calls_ignore_acting_as() {
     let result = client
         .mcp()
         .as_caller(ToolCaller::agent("reg-acting").scopes([scope::POSTS_WRITE]))
-        .call("posts.create", json!({ "title": "Not the browser's" }))
+        .call("create_post", json!({ "title": "Not the browser's" }))
         .await;
     let structured = result.structured().cloned().unwrap_or_default();
     assert_eq!(structured["kind"], "agent", "{structured}");

@@ -43,8 +43,8 @@ where
 {
     /// A tool named `name`, which an agent chooses by `description`.
     ///
-    /// The name follows the AGENT-001 grammar, 1 to 128 ASCII letters,
-    /// digits, `_`, `-` and `.`; [`register`](Self::register) refuses any
+    /// The name follows the AGENT-001 grammar, 1 to 64 ASCII letters,
+    /// digits and `_`; [`register`](Self::register) refuses any
     /// other.
     pub fn new(name: &'static str, description: &'static str) -> Self {
         Self {
@@ -232,13 +232,13 @@ pub(crate) struct Annotations {
     pub(crate) debugging: bool,
 }
 
-/// Whether `name` follows the AGENT-001 grammar: 1 to 128 ASCII letters,
-/// digits, `_`, `-` and `.`.
+/// Whether `name` follows the AGENT-001 grammar: 1 to 64 ASCII letters,
+/// digits and `_`.
 pub(crate) fn valid_name(name: &str) -> bool {
-    (1..=128).contains(&name.len())
+    (1..=64).contains(&name.len())
         && name
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 /// A tool as `registerTool` receives it, less `execute`.

@@ -5,15 +5,15 @@
 //! and loads it in the page `framework/examples/agents_wasm_host.rs`
 //! serves. On start it:
 //!
-//! - registers `todos.add`, a typed page tool that adds to a list the page
+//! - registers `add_todo`, a typed page tool that adds to a list the page
 //!   keeps, and writes the schema the crate derives for its input to
 //!   `data-expected-schema` on `<html>`;
 //! - registers the page's server tools from its element, counting each
 //!   refresh after a write tool in `data-refreshes`;
 //! - marks `<html>` `data-fixture="ready"`, and `data-registered` with how
-//!   the browser settled the `todos.add` registration.
+//!   the browser settled the `add_todo` registration.
 //!
-//! `drop_todo_tool`, exported to the page, drops the `todos.add` handle.
+//! `drop_todo_tool`, exported to the page, drops the `add_todo` handle.
 //!
 //! Outside `wasm32-unknown-unknown` the file is empty, so a native build of
 //! the crate's examples compiles it to nothing.
@@ -67,7 +67,7 @@ pub fn start() {
 async fn boot() -> Result<(), String> {
     let schema = serde_json::to_string(&input_schema::<AddTodo>()).map_err(|e| e.to_string())?;
     mark("data-expected-schema", &schema);
-    let handle = PageTool::<AddTodo>::new("todos.add", "Add an item to the visible todo list.")
+    let handle = PageTool::<AddTodo>::new("add_todo", "Add an item to the visible todo list.")
         .title("Add todo")
         .register(|input: AddTodo| async move {
             let count = TODOS.with(|todos| {
@@ -102,7 +102,7 @@ async fn boot() -> Result<(), String> {
     Ok(())
 }
 
-/// Drop the `todos.add` handle, which removes the tool from the page.
+/// Drop the `add_todo` handle, which removes the tool from the page.
 #[wasm_bindgen]
 pub fn drop_todo_tool() {
     TODO_TOOL.with(|tool| drop(tool.borrow_mut().take()));

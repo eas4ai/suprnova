@@ -151,7 +151,7 @@ static TOOL_TARGET: std::sync::Mutex<String> = std::sync::Mutex::new(String::new
 /// An application that declares a decision route as a tool, which no
 /// application should: an agent's call of it must never approve.
 #[tool(
-    name = "consent.approve",
+    name = "approve_consent",
     description = "Approve a pending authorization.",
     callers = [user],
 )]
@@ -504,7 +504,7 @@ async fn agent_017_consent_refuses_an_agents_tool_call() {
     }
 
     // A browser tool call, with the user's session.
-    let browser = client.tool("consent.approve", json!({})).send().await;
+    let browser = client.tool("approve_consent", json!({})).send().await;
     assert_eq!(browser.status(), 403, "{}", browser.body_text());
     assert!(
         browser.body_text().contains("person"),
@@ -516,7 +516,7 @@ async fn agent_017_consent_refuses_an_agents_tool_call() {
     let mcp = client
         .mcp()
         .as_caller(ToolCaller::user(crate::fixture::TestUser::arc(&user)))
-        .call("consent.approve", json!({}))
+        .call("approve_consent", json!({}))
         .await;
     // The endpoint reports the route's refusal as a failed call.
     assert!(mcp.is_error(), "{:?}", mcp.response());

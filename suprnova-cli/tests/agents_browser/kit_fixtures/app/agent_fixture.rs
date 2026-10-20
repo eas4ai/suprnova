@@ -17,7 +17,7 @@ use suprnova::{
 
 use crate::models::user::User;
 
-/// The number the first page shows and `fixture.bump` adds to.
+/// The number the first page shows and `bump_fixture` adds to.
 static COUNTER: AtomicI64 = AtomicI64::new(0);
 /// The notes the form tool saved, newest last.
 static NOTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -62,8 +62,8 @@ fn counter() -> i64 {
     COUNTER.load(Ordering::SeqCst)
 }
 
-/// `GET /agent-fixture/first`: offers `fixture.bump`, `fixture.peek` and
-/// `fixture.mine`, beside the group's `fixture.help`.
+/// `GET /agent-fixture/first`: offers `bump_fixture`, `peek_fixture` and
+/// `read_my_fixture`, beside the group's `read_fixture_help`.
 #[handler]
 pub async fn first(req: Request) -> Response {
     inertia_response!(
@@ -73,7 +73,7 @@ pub async fn first(req: Request) -> Response {
     )
 }
 
-/// `GET /agent-fixture/second`: offers `fixture.reset` and `fixture.help`.
+/// `GET /agent-fixture/second`: offers `reset_fixture` and `read_fixture_help`.
 #[handler]
 pub async fn second(req: Request) -> Response {
     inertia_response!(
@@ -101,7 +101,7 @@ pub async fn consent(req: Request) -> Response {
 #[derive(InertiaProps)]
 pub struct AgentFixtureConsentProps {}
 
-/// What `fixture.bump` adds.
+/// What `bump_fixture` adds.
 #[tool_input]
 pub struct BumpInput {
     /// How much to add, from 1 to 10.
@@ -110,7 +110,7 @@ pub struct BumpInput {
 }
 
 #[tool(
-    name = "fixture.bump",
+    name = "bump_fixture",
     description = "Add to the counter the first page shows.",
     title = "Bump",
     callers = [public, user],
@@ -129,7 +129,7 @@ pub async fn bump(caller: ToolCaller, form: BumpInput) -> Response {
 }
 
 #[tool(
-    name = "fixture.peek",
+    name = "peek_fixture",
     description = "Read the counter the first page shows.",
     callers = [public],
     annotations(read_only, untrusted_content),
@@ -140,7 +140,7 @@ pub async fn peek() -> Response {
 }
 
 #[tool(
-    name = "fixture.mine",
+    name = "read_my_fixture",
     description = "Read the signed-in user's id.",
     callers = [user],
 )]
@@ -150,7 +150,7 @@ pub async fn mine(caller: ToolCaller) -> Response {
 }
 
 #[tool(
-    name = "fixture.reset",
+    name = "reset_fixture",
     description = "Set the counter back to zero.",
     callers = [public],
     annotations(destructive),
@@ -162,7 +162,7 @@ pub async fn reset() -> Response {
 }
 
 #[tool(
-    name = "fixture.help",
+    name = "read_fixture_help",
     description = "Say what the fixture pages do.",
     callers = [public],
     annotations(read_only),
@@ -172,7 +172,7 @@ pub async fn help() -> Response {
     json_response!({ "help": "The first page counts; the form page writes notes." })
 }
 
-/// The note form, the form tool `fixture.notes.create` submits.
+/// The note form, the form tool `create_fixture_note` submits.
 #[tool_input]
 pub struct FixtureNoteRequest {
     /// The note's title.
@@ -207,7 +207,7 @@ pub async fn store_note_and_leave(form: FixtureNoteRequest) -> Response {
     redirect!("/agent-fixture/first").into()
 }
 
-/// The destructive form, the form tool `fixture.notes.purge` fills.
+/// The destructive form, the form tool `purge_fixture_notes` fills.
 #[tool_input]
 pub struct PurgeRequest {
     /// The word the user types to confirm.

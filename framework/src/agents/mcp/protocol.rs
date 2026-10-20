@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn agent_003_mcp_name_decodes_the_base64_sentinel() {
-        assert_eq!(decode_name("posts.create").as_deref(), Some("posts.create"));
+        assert_eq!(decode_name("create_post").as_deref(), Some("create_post"));
         assert_eq!(
             decode_name("=?base64?SGVsbG8sIOS4lueVjA==?=").as_deref(),
             Some("Hello, \u{4e16}\u{754c}")

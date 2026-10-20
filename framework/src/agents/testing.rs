@@ -18,11 +18,11 @@
 //! let result = client
 //!     .mcp()
 //!     .as_caller(ToolCaller::user(user.clone()).scopes([scope::POSTS_WRITE]))
-//!     .call("posts.create", json!({ "title": "Hello" }))
+//!     .call("create_post", json!({ "title": "Hello" }))
 //!     .await;
 //! assert!(!result.is_error());
 //!
-//! client.acting_as(&user).tool("posts.create", json!({ "title": "Hello" }))
+//! client.acting_as(&user).tool("create_post", json!({ "title": "Hello" }))
 //!     .send().await.assert_ok();
 //! ```
 

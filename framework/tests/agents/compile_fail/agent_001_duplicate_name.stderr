@@ -1,23 +1,23 @@
-error[E0428]: the name `__suprnova_tool_posts_2ecreate` is defined multiple times
+error[E0428]: the name `__suprnova_tool_create_5fpost` is defined multiple times
   --> tests/agents/compile_fail/agent_001_duplicate_name.rs:18:5
    |
- 8 |     #[tool(name = "posts.create", description = "The first.", callers = [public])]
-   |     ------------------------------------------------------------------------------ previous definition of the macro `__suprnova_tool_posts_2ecreate` here
+ 8 |     #[tool(name = "create_post", description = "The first.", callers = [public])]
+   |     ----------------------------------------------------------------------------- previous definition of the macro `__suprnova_tool_create_5fpost` here
 ...
-18 |     #[tool(name = "posts.create", description = "The second.", callers = [public])]
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `__suprnova_tool_posts_2ecreate` redefined here
+18 |     #[tool(name = "create_post", description = "The second.", callers = [public])]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `__suprnova_tool_create_5fpost` redefined here
    |
-   = note: `__suprnova_tool_posts_2ecreate` must be defined only once in the macro namespace of this module
+   = note: `__suprnova_tool_create_5fpost` must be defined only once in the macro namespace of this module
    = note: this error originates in the attribute macro `tool` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0428]: the name `__suprnova_tool_posts_2ecreate` is defined multiple times
+error[E0428]: the name `__suprnova_tool_create_5fpost` is defined multiple times
   --> tests/agents/compile_fail/agent_001_duplicate_name.rs:28:5
    |
- 8 |     #[tool(name = "posts.create", description = "The first.", callers = [public])]
-   |     ------------------------------------------------------------------------------ previous definition of the macro `__suprnova_tool_posts_2ecreate` here
+ 8 |     #[tool(name = "create_post", description = "The first.", callers = [public])]
+   |     ----------------------------------------------------------------------------- previous definition of the macro `__suprnova_tool_create_5fpost` here
 ...
-28 |     #[tool(name = "posts.create", description = "The third, in an impl block.", callers = [public])]
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `__suprnova_tool_posts_2ecreate` redefined here
+28 |     #[tool(name = "create_post", description = "The third, in an impl block.", callers = [public])]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `__suprnova_tool_create_5fpost` redefined here
    |
-   = note: `__suprnova_tool_posts_2ecreate` must be defined only once in the macro namespace of this module
+   = note: `__suprnova_tool_create_5fpost` must be defined only once in the macro namespace of this module
    = note: this error originates in the attribute macro `tool` (in Nightly builds, run with -Z macro-backtrace for more info)

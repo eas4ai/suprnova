@@ -60,7 +60,7 @@ export const toolSchemas = {
         "default": null
       }
     },
-    "description": "What `notes.create` takes: the notes form's two fields, with its rules.",
+    "description": "What `create_note` takes: the notes form's two fields, with its rules.",
     "title": "CreateNoteInput",
     "$schema": "https://json-schema.org/draft/2020-12/schema"
   },
@@ -159,7 +159,7 @@ export const toolSchemas = {
         "default": null
       }
     },
-    "description": "What `notes.search` takes. The notes page sends it in the query of a\n`GET`, and an MCP client as the call's arguments; the form request reads\neither.",
+    "description": "What `search_notes` takes. The notes page sends it in the query of a\n`GET`, and an MCP client as the call's arguments; the form request reads\neither.",
     "title": "SearchNotesInput",
     "$schema": "https://json-schema.org/draft/2020-12/schema"
   },

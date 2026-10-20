@@ -32,7 +32,7 @@ import { SERVER_DEFAULT_LIMITS } from "../src/limits.js";
 
 const TOOL = {
   action: "increment",
-  name: "counter.increment.main",
+  name: "increment_counter-main",
   title: "Increment",
   description: "Add one to the counter.",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
@@ -62,6 +62,15 @@ function invalid(value: string, key = "main"): void {
 }
 
 describe("the island root's tool contract", () => {
+  it("agent_012 enforces the combined name limit and splits on the first hyphen", () => {
+    const name = `peek_counter-${"k".repeat(51)}`;
+    expect(parseAgentTools(contract([{ ...TOOL, name }]), "k".repeat(51)).tools[0]?.name).toBe(name);
+    invalid(contract([{ ...TOOL, name: `${name}k` }]), "k".repeat(52));
+    expect(parseAgentTools(contract([{ ...TOOL, name: "peek_counter-left-pane" }]), "left-pane").tools).toHaveLength(1);
+    invalid(contract([{ ...TOOL, name: "peek-counter-left-pane" }]), "left-pane");
+    invalid(contract([{ ...TOOL, name: "peek.counter-main" }]));
+  });
+
   it("agent_012 parses tools named for the island's key", () => {
     const parsed = parseAgentTools(contract(), "main");
     expect(parsed.fields).toEqual(["count"]);
@@ -69,7 +78,7 @@ describe("the island root's tool contract", () => {
     expect(parsed.tools).toHaveLength(1);
     expect(parsed.tools[0]).toMatchObject({
       action: "increment",
-      name: "counter.increment.main",
+      name: "increment_counter-main",
       title: "Increment",
       description: "Add one to the counter.",
       annotations: {
@@ -84,9 +93,9 @@ describe("the island root's tool contract", () => {
 
   it("agent_012 refuses a contract the server did not build for this island", () => {
     // A name that does not end in this island's key.
-    invalid(contract([{ ...TOOL, name: "counter.increment.other" }]));
+    invalid(contract([{ ...TOOL, name: "increment_counter-other" }]));
     // A key outside the tool instance grammar.
-    invalid(contract([{ ...TOOL, name: "counter.increment.main.left" }]), "main.left");
+    invalid(contract([{ ...TOOL, name: "increment_counter-main.left" }]), "main.left");
     invalid(contract(), "a:b");
     // A name that is only the key.
     invalid(contract([{ ...TOOL, name: ".main" }]));
@@ -252,7 +261,7 @@ describe("WebMCP registration", () => {
     expect(context.registered).toHaveLength(1);
     const registered = context.registered[0];
     expect(registered?.tool).toMatchObject({
-      name: "counter.increment.main",
+      name: "increment_counter-main",
       title: "Increment",
       description: "Add one to the counter.",
       inputSchema: TOOL.inputSchema,
@@ -500,13 +509,13 @@ function island(form: "seed" | "instance") {
 describe("scheduling a tool call", () => {
   it("agent_012 schedules the action as a click does and names the tool", async () => {
     const { router, record, intents } = island("instance");
-    const scheduled = router.scheduleAgentAction(record, "increment", "counter.increment.main", {
+    const scheduled = router.scheduleAgentAction(record, "increment", "increment_counter-main", {
       amount: 2,
     });
     expect(scheduled).not.toBeNull();
     expect(intents).toHaveLength(1);
     const intent = defined(intents[0]);
-    expect(intent.source.agentTool).toBe("counter.increment.main");
+    expect(intent.source.agentTool).toBe("increment_counter-main");
     expect(intent.source.eventType).toBe("agent_tool");
     expect(intent.operations).toEqual([
       { kind: "invoke_action", name: "increment", arguments: { amount: 2 } },
@@ -520,7 +529,7 @@ describe("scheduling a tool call", () => {
       protocolVersion: 2,
       randomness: { randomBytes: (length) => new Uint8Array(length).fill(3) },
     });
-    expect(request.toolCall).toBe("counter.increment.main");
+    expect(request.toolCall).toBe("increment_counter-main");
     const seen: Headers[] = [];
     await fetchLiveRequest(request, {
       endpoint: new URL("https://app.example/__live/action"),
@@ -536,13 +545,13 @@ describe("scheduling a tool call", () => {
         },
       },
     }).catch(() => undefined);
-    expect(seen[0]?.get(TOOL_CALL_HEADER)).toBe("counter.increment.main");
+    expect(seen[0]?.get(TOOL_CALL_HEADER)).toBe("increment_counter-main");
     expect(seen[0]?.get("content-type")).toContain("application/vnd.suprnova.live+json");
   });
 
   it("agent_012 a call on a public seed promotes it, as a click does", () => {
     const { router, record, intents } = island("seed");
-    router.scheduleAgentAction(record, "increment", "counter.increment.main", {});
+    router.scheduleAgentAction(record, "increment", "increment_counter-main", {});
     expect(intents[0]?.promotionNonce()).not.toBeNull();
   });
 

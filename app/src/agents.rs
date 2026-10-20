@@ -3,8 +3,8 @@
 //! the claim page and the connected-agents page are this application's own
 //! (`controllers::agents`), as the Svelte Inertia kit's are.
 //!
-//! Three tools: `posts.list` for anyone and `posts.create` for a signed-in
-//! user (`controllers::posts`), and `tally.add`, a Live action an MCP client
+//! Three tools: `list_posts` for anyone and `create_post` for a signed-in
+//! user (`controllers::posts`), and `add_to_tally`, a Live action an MCP client
 //! runs with no browser (`live::components::tally`). A guest who opens the
 //! approval or the claim page signs in at `/login` and comes back.
 //!
@@ -22,8 +22,8 @@ suprnova::tool_scopes! {
     /// What a client or an agent may do for a user. A token holds the
     /// scopes the user approved, and each tool names the ones it needs.
     /// The approval page shows each description, and a claimed agent holds
-    /// them all. `posts.list` reads only public posts and needs none, and
-    /// `tally.add` keeps its count in the handle the caller holds, so it
+    /// them all. `list_posts` reads only public posts and needs none, and
+    /// `add_to_tally` keeps its count in the handle the caller holds, so it
     /// writes nothing a scope would guard.
     pub mod scope {
         POSTS_WRITE = "posts:write" => "Write posts for you";

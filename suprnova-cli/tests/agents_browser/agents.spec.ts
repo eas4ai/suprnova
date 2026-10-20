@@ -69,7 +69,7 @@ async function openTools(page: Page) {
   await page.goto('/tools');
   await expect
     .poll(() => registered(page))
-    .toEqual(['counter.add.left', 'counter.add.main', 'counter.add.right']);
+    .toEqual(['add_to_counter-left', 'add_to_counter-main', 'add_to_counter-right']);
   return agent;
 }
 
@@ -104,7 +104,7 @@ async function touch(page: Page, key: string) {
 }
 
 test('agent_012_mounted_tool_actions_register_with_model_context', async ({ page }) => {
-  // `counter.add` accepts users: a guest's page lists it on no island
+  // `add_to_counter` accepts users: a guest's page lists it on no island
   // (AGENT-014), so a signed-in user's page registers it.
   await page.goto('/tools');
   await page.waitForTimeout(500);
@@ -112,15 +112,15 @@ test('agent_012_mounted_tool_actions_register_with_model_context', async ({ page
   await signIn(page, 'alice');
   const agent = await openTools(page);
   await expect.poll(() => [...agent.added].sort()).toEqual([
-    'counter.add.left',
-    'counter.add.main',
-    'counter.add.right',
+    'add_to_counter-left',
+    'add_to_counter-main',
+    'add_to_counter-right',
   ]);
   const described = await page.evaluate(async () => {
     const context = (document as unknown as {
       modelContext: { getTools(): Promise<{ name: string; description: string; title: string; annotations: Record<string, boolean> }[]> };
     }).modelContext;
-    return (await context.getTools()).find((tool) => tool.name === 'counter.add.main');
+    return (await context.getTools()).find((tool) => tool.name === 'add_to_counter-main');
   });
   expect(described?.description).toBe('Add to the counter.');
   expect(described?.title).toBe('Add');
@@ -133,7 +133,7 @@ test('agent_012_tool_names_carry_the_live_key', async ({ page }) => {
   const keys = await page
     .locator('[data-suprnova-live-island]')
     .evaluateAll((roots) => roots.map((root) => root.getAttribute('data-suprnova-live-document-key')));
-  expect((await registered(page)).map((name) => name.replace(/^counter\.add\./u, ''))).toEqual(
+  expect((await registered(page)).map((name) => name.replace(/^add_to_counter-/u, ''))).toEqual(
     [...keys].sort(),
   );
 });
@@ -142,8 +142,8 @@ test('agent_012_tools_leave_with_their_component', async ({ page }) => {
   await signIn(page, 'alice');
   const agent = await openTools(page);
   await page.locator('#remove-first').click();
-  await expect.poll(() => registered(page)).toEqual(['counter.add.left', 'counter.add.right']);
-  await expect.poll(() => agent.removed).toContain('counter.add.main');
+  await expect.poll(() => registered(page)).toEqual(['add_to_counter-left', 'add_to_counter-right']);
+  await expect.poll(() => agent.removed).toContain('add_to_counter-main');
 });
 
 test('agent_012_tools_leave_on_navigation', async ({ page }) => {
@@ -164,14 +164,14 @@ test('agent_012_tool_call_sends_the_island_snapshot_and_passes_the_csrf_and_sess
   await clickAdd(page, 'main', '1');
   await reset(page);
   await clickAdd(page, 'main', '2');
-  const response = await agent.invoke('counter.add.main', { amount: 3 });
+  const response = await agent.invoke('add_to_counter-main', { amount: 3 });
   expect(response.status).toBe('Completed');
   expect(response.output?.isError).toBe(false);
   // The island applied the call's response as it applies a click's.
   await expect(count(page, 'main')).toHaveText('5');
   const [click, call] = await actionRequests(page);
   expect(click?.tool).toBeNull();
-  expect(call?.tool).toBe('counter.add.main');
+  expect(call?.tool).toBe('add_to_counter-main');
   expect(call?.status).toBe(200);
   // The same session, origin and CSRF evidence as the click's: the
   // browser's same-origin fetch is the Live origin proof the CSRF check
@@ -187,7 +187,7 @@ test('agent_012_tool_call_is_authorized', async ({ page }) => {
   const agent = await openTools(page);
   await touch(page, 'main');
   await reset(page);
-  const response = await agent.invoke('counter.add.main', { amount: 5 });
+  const response = await agent.invoke('add_to_counter-main', { amount: 5 });
   // The agent hears of the refusal: the page holds its recovery until the
   // error result is on its way.
   expect(response.output?.isError).toBe(true);
@@ -195,7 +195,7 @@ test('agent_012_tool_call_is_authorized', async ({ page }) => {
   const [call] = await actionRequests(page);
   // The call reached the action's own policy, as bob, and stopped there:
   // the endpoint refused it before the action ran.
-  expect(call?.tool).toBe('counter.add.main');
+  expect(call?.tool).toBe('add_to_counter-main');
   expect(call?.gate).toEqual(['live:examples.agents-counter.add as bob']);
   expect(call?.phases).toContain('Authorize');
   expect(call?.phases).not.toContain('Action');
@@ -210,7 +210,7 @@ test('agent_012_tool_call_runs_the_execution_phases_of_a_click', async ({ page }
   await clickAdd(page, 'main', '1');
   await reset(page);
   await clickAdd(page, 'main', '2');
-  const response = await agent.invoke('counter.add.main', { amount: 1 });
+  const response = await agent.invoke('add_to_counter-main', { amount: 1 });
   expect(response.output?.isError).toBe(false);
   const [click, call] = await actionRequests(page);
   expect(click?.phases.length).toBeGreaterThan(0);
@@ -223,7 +223,7 @@ test('agent_012_tool_call_runs_the_execution_phases_of_a_click', async ({ page }
 test('agent_012_tool_result_carries_only_agent_visible_fields', async ({ page }) => {
   await signIn(page, 'alice');
   const agent = await openTools(page);
-  const response = await agent.invoke('counter.add.main', { amount: 4 });
+  const response = await agent.invoke('add_to_counter-main', { amount: 4 });
   expect(response.output?.isError).toBe(false);
   expect(response.output?.structuredContent).toEqual({
     outcome: 'accepted',

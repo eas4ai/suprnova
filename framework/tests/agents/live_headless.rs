@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use suprnova::agents::AgentsConfig;
 use suprnova::live::testing::{AdjustableTestClock, prepare_live_router_with_clock_for_test};
 use suprnova::testing::TestClient;
-use suprnova::{Gate, LiveMountRequest, Response, ToolCaller, handler, json_response, tool};
+use suprnova::{Gate, LiveMountRequest, ToolCaller};
 
 use crate::fixture::{self, TestUser};
 use crate::live_fixture::{self, GUARDED, PAGE, RESOLVED};
@@ -29,18 +29,6 @@ fn fresh(start: u64, amount: u64) -> Value {
     })
 }
 
-/// A handler tool whose name is the browser name of `counter.peek` on an
-/// island keyed `left`. No shared router routes it.
-#[tool(
-    name = "counter.peek.left",
-    description = "Shadow a browser tool name.",
-    callers = [user],
-)]
-#[handler]
-pub async fn shadow() -> Response {
-    json_response!({ "shadow": true })
-}
-
 #[tokio::test]
 async fn agent_001_live_unmarked_action_is_not_a_tool() {
     let _container = fixture::setup();
@@ -48,33 +36,20 @@ async fn agent_001_live_unmarked_action_is_not_a_tool() {
         .tool_registry()
         .expect("the tools check");
     let add = registry
-        .get("counter.add")
+        .get("add_to_counter")
         .expect("the headless tool is offered");
     assert_eq!(add.live_action(), Some((live_fixture::COUNTER, "add")));
     // A tool only the browser registers is checked but never offered.
-    assert!(registry.get("counter.peek").is_none());
+    assert!(registry.get("peek_counter").is_none());
     let peek = registry
-        .live_tool("counter.peek")
+        .live_tool("peek_counter")
         .expect("the browser tool is checked");
     assert_eq!(peek.live_action(), Some((live_fixture::COUNTER, "peek")));
     // `reset` is an action without #[tool]: no tool runs it.
     for tool in registry.tools() {
         assert_ne!(tool.live_action().map(|(_, action)| action), Some("reset"));
     }
-    assert!(registry.live_tool("counter.reset").is_none());
-}
-
-#[tokio::test]
-async fn agent_001_live_tool_name_prefix_cannot_shadow_another_tool() {
-    let _container = fixture::setup();
-    let router: suprnova::Router = suprnova::Router::new().post("/shadow", shadow).into();
-    let error = router
-        .agents(AgentsConfig::new())
-        .tool_registry()
-        .expect_err("a route tool cannot take a browser tool's name");
-    let message = error.to_string();
-    assert!(message.contains("counter.peek.left"), "{message}");
-    assert!(message.contains("counter.peek"), "{message}");
+    assert!(registry.live_tool("reset_counter").is_none());
 }
 
 #[tokio::test]
@@ -82,7 +57,7 @@ async fn agent_002_live_headless_tool_refuses_a_caller_kind_it_did_not_accept() 
     let _container = fixture::setup();
     let client = live_fixture::live_client();
     let before = RESOLVED.load(Ordering::SeqCst);
-    let guest = client.mcp().call("counter.add", fresh(1, 1)).await;
+    let guest = client.mcp().call("add_to_counter", fresh(1, 1)).await;
     assert_eq!(guest.status(), 401, "{:?}", guest.response());
     assert!(guest.structured().is_none());
     assert_eq!(
@@ -98,12 +73,12 @@ async fn agent_013_headless_tool_is_listed_and_callable_without_a_browser() {
     let client = live_fixture::live_client();
     let listed = client.mcp().as_caller(alice()).list().await;
     let names = listed.tool_names();
-    assert!(names.contains(&"counter.add".to_string()), "{names:?}");
+    assert!(names.contains(&"add_to_counter".to_string()), "{names:?}");
 
     let result = client
         .mcp()
         .as_caller(alice())
-        .call("counter.add", fresh(2, 3))
+        .call("add_to_counter", fresh(2, 3))
         .await;
     assert!(!result.is_error(), "{:?}", result.response());
     let structured = result.structured().expect("structured content");
@@ -140,8 +115,8 @@ async fn agent_013_schema_has_mount_handle_and_arguments() {
         .unwrap_or_default();
     let add = tools
         .iter()
-        .find(|tool| tool["name"] == "counter.add")
-        .expect("counter.add is listed");
+        .find(|tool| tool["name"] == "add_to_counter")
+        .expect("add_to_counter is listed");
     let input = &add["inputSchema"];
     assert_eq!(input["type"], "object");
     assert_eq!(input["additionalProperties"], false);
@@ -150,11 +125,22 @@ async fn agent_013_schema_has_mount_handle_and_arguments() {
     assert_eq!(mount["required"], json!(["label", "start"]));
     assert_eq!(mount["additionalProperties"], false);
     assert!(mount["properties"].get("owner").is_none(), "{mount}");
-    assert_eq!(mount["properties"]["label"], json!({ "type": "string" }));
+    assert_eq!(
+        mount["properties"]["label"],
+        json!({ "type": "string", "description": "The counter's label." })
+    );
     assert!(mount["description"].is_string());
     assert_eq!(input["properties"]["handle"]["type"], "string");
     let arguments = &input["properties"]["arguments"];
     assert_eq!(arguments["required"], json!(["amount"]));
+    assert_eq!(
+        arguments["properties"]["amount"]["description"],
+        "How much to add."
+    );
+    assert_eq!(
+        mount["properties"]["start"]["description"],
+        "The initial count."
+    );
     assert!(arguments.get("$schema").is_none());
     let output = &add["outputSchema"];
     assert_eq!(
@@ -181,7 +167,7 @@ async fn agent_013_an_undeclared_mount_property_is_refused() {
         .mcp()
         .as_caller(alice())
         .call(
-            "counter.add",
+            "add_to_counter",
             json!({
                 "mount": { "start": 1, "label": "Main", "extra": true },
                 "arguments": { "amount": 1 },
@@ -202,7 +188,7 @@ async fn agent_013_mount_properties_are_validated_like_arguments() {
         .mcp()
         .as_caller(alice())
         .call(
-            "counter.add",
+            "add_to_counter",
             json!({
                 "mount": { "start": "007", "label": "Main" },
                 "arguments": { "amount": "-1" },
@@ -218,7 +204,7 @@ async fn agent_013_mount_properties_are_validated_like_arguments() {
         .mcp()
         .as_caller(alice())
         .call(
-            "counter.add",
+            "add_to_counter",
             json!({ "mount": { "start": 1 }, "arguments": { "amount": 1 } }),
         )
         .await;
@@ -229,7 +215,7 @@ async fn agent_013_mount_properties_are_validated_like_arguments() {
         .mcp()
         .as_caller(alice())
         .call(
-            "counter.add",
+            "add_to_counter",
             json!({
                 "mount": { "start": 1, "label": "Main" },
                 "handle": "x",
@@ -249,7 +235,7 @@ async fn agent_013_mount_checks_the_gate_before_loading() {
     let mallory = client
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("mallory")))
-        .call("counter.add", fresh(1, 1))
+        .call("add_to_counter", fresh(1, 1))
         .await;
     assert!(mallory.is_error(), "{:?}", mallory.response());
     assert!(
@@ -261,7 +247,7 @@ async fn agent_013_mount_checks_the_gate_before_loading() {
     let large = client
         .mcp()
         .as_caller(alice())
-        .call("counter.add", fresh(5_000, 1))
+        .call("add_to_counter", fresh(5_000, 1))
         .await;
     assert!(large.is_error(), "{:?}", large.response());
     assert!(large.text().contains("unauthorized"), "{}", large.text());
@@ -276,7 +262,7 @@ async fn add_from(client: &TestClient, start: Value) -> suprnova::agents::McpToo
         .mcp()
         .as_caller(alice())
         .call(
-            "counter.add",
+            "add_to_counter",
             json!({
                 "mount": { "start": start, "label": "Main" },
                 "arguments": { "amount": 1 },
@@ -356,7 +342,7 @@ async fn agent_013_an_optional_mount_property_mounts_with_none() {
     // null: the component mounts with None for both.
     let guest = client
         .mcp()
-        .call("quota.read", json!({ "mount": { "note": null } }))
+        .call("read_quota", json!({ "mount": { "note": null } }))
         .await;
     assert!(!guest.is_error(), "{:?}", guest.response());
     let structured = guest.structured().expect("structured content");
@@ -367,7 +353,7 @@ async fn agent_013_an_optional_mount_property_mounts_with_none() {
     let user = client
         .mcp()
         .as_caller(alice())
-        .call("quota.read", json!({ "mount": {} }))
+        .call("read_quota", json!({ "mount": {} }))
         .await;
     assert!(!user.is_error(), "{:?}", user.response());
     let structured = user.structured().expect("structured content");
@@ -376,7 +362,7 @@ async fn agent_013_an_optional_mount_property_mounts_with_none() {
     let noted = client
         .mcp()
         .as_caller(alice())
-        .call("quota.read", json!({ "mount": { "note": "hi" } }))
+        .call("read_quota", json!({ "mount": { "note": "hi" } }))
         .await;
     assert!(!noted.is_error(), "{:?}", noted.response());
     let structured = noted.structured().expect("structured content");
@@ -391,7 +377,7 @@ async fn agent_013_an_optional_mount_property_mounts_with_none() {
         .unwrap_or_default();
     let quota = tools
         .iter()
-        .find(|tool| tool["name"] == "quota.read")
+        .find(|tool| tool["name"] == "read_quota")
         .expect("the quota tool is listed");
     let mount = &quota["inputSchema"]["properties"]["mount"];
     assert_eq!(
@@ -413,7 +399,7 @@ async fn agent_013_only_a_64_bit_integer_field_is_unwrapped() {
     let client = live_fixture::live_client();
     let result = client
         .mcp()
-        .call("quota.read", json!({ "mount": {} }))
+        .call("read_quota", json!({ "mount": {} }))
         .await;
     assert!(!result.is_error(), "{:?}", result.response());
     let structured = result.structured().expect("structured content");
@@ -437,7 +423,7 @@ async fn agent_013_mount_without_a_policy_is_refused() {
     let result = client
         .mcp()
         .as_caller(alice())
-        .call("counter.add", fresh(1, 1))
+        .call("add_to_counter", fresh(1, 1))
         .await;
     assert!(result.is_error(), "{:?}", result.response());
     assert!(result.text().contains("unauthorized"), "{}", result.text());
@@ -452,7 +438,7 @@ async fn agent_013_resolver_property_cannot_be_set_by_the_agent() {
         .mcp()
         .as_caller(alice())
         .call(
-            "counter.add",
+            "add_to_counter",
             json!({
                 "mount": { "start": 1, "label": "Main", "owner": "eve" },
                 "arguments": { "amount": 1 },
@@ -473,7 +459,7 @@ async fn agent_013_headless_action_is_authorized() {
     let denied = client
         .mcp()
         .as_caller(bob())
-        .call("counter.add", fresh(1, 1))
+        .call("add_to_counter", fresh(1, 1))
         .await;
     assert!(denied.is_error(), "{:?}", denied.response());
     assert!(denied.text().contains("unauthorized"), "{}", denied.text());
@@ -482,7 +468,7 @@ async fn agent_013_headless_action_is_authorized() {
     let allowed = client
         .mcp()
         .as_caller(alice())
-        .call("counter.add", fresh(1, 1))
+        .call("add_to_counter", fresh(1, 1))
         .await;
     assert!(!allowed.is_error(), "{:?}", allowed.response());
 }
@@ -495,7 +481,7 @@ async fn agent_013_headless_action_runs_the_execution_phases_of_a_click() {
     let result = client
         .mcp()
         .as_caller(alice())
-        .call("counter.add", fresh(1, 1))
+        .call("add_to_counter", fresh(1, 1))
         .await;
     assert!(!result.is_error(), "{:?}", result.response());
     // An instanced action's phases, in a click's order: the ledger claim,
@@ -552,7 +538,7 @@ async fn agent_013_a_second_call_with_the_handle_sees_the_first() {
     let first = client
         .mcp()
         .as_caller(alice())
-        .call("counter.add", fresh(1, 2))
+        .call("add_to_counter", fresh(1, 2))
         .await;
     assert!(!first.is_error(), "{:?}", first.response());
     let handle = first.handle().expect("a handle").to_string();
@@ -560,7 +546,7 @@ async fn agent_013_a_second_call_with_the_handle_sees_the_first() {
         .mcp()
         .as_caller(alice())
         .call(
-            "counter.add",
+            "add_to_counter",
             json!({ "handle": handle, "arguments": { "amount": 4 } }),
         )
         .await;
@@ -586,7 +572,7 @@ async fn agent_013_a_stale_or_tampered_handle_is_refused() {
     let first = client
         .mcp()
         .as_caller(alice())
-        .call("counter.add", fresh(1, 1))
+        .call("add_to_counter", fresh(1, 1))
         .await;
     let handle = first.handle().expect("a handle").to_string();
     let next = |handle: &str| {
@@ -597,7 +583,7 @@ async fn agent_013_a_stale_or_tampered_handle_is_refused() {
                 .mcp()
                 .as_caller(alice())
                 .call(
-                    "counter.add",
+                    "add_to_counter",
                     json!({ "handle": handle, "arguments": { "amount": 1 } }),
                 )
                 .await
@@ -628,7 +614,7 @@ async fn agent_013_a_handle_is_refused_for_another_caller() {
     let first = client
         .mcp()
         .as_caller(alice())
-        .call("counter.add", fresh(1, 1))
+        .call("add_to_counter", fresh(1, 1))
         .await;
     let handle = first.handle().expect("a handle").to_string();
     // Alice's own agent account acts as alice, and the action's policy
@@ -640,7 +626,7 @@ async fn agent_013_a_handle_is_refused_for_another_caller() {
         .mcp()
         .as_caller(agent)
         .call(
-            "counter.add",
+            "add_to_counter",
             json!({ "handle": handle, "arguments": { "amount": 1 } }),
         )
         .await;
@@ -652,7 +638,7 @@ async fn agent_013_a_handle_is_refused_for_another_caller() {
         .mcp()
         .as_caller(client_of_alice)
         .call(
-            "counter.add",
+            "add_to_counter",
             json!({ "handle": first.handle().unwrap_or_default(), "arguments": { "amount": 1 } }),
         )
         .await;
@@ -672,7 +658,7 @@ async fn agent_013_a_handle_expires_as_a_browser_snapshot_does() {
     let first = client
         .mcp()
         .as_caller(alice())
-        .call("counter.add", fresh(1, 1))
+        .call("add_to_counter", fresh(1, 1))
         .await;
     assert!(!first.is_error(), "{:?}", first.response());
     let expires_at = first
@@ -689,7 +675,7 @@ async fn agent_013_a_handle_expires_as_a_browser_snapshot_does() {
         .mcp()
         .as_caller(alice())
         .call(
-            "counter.add",
+            "add_to_counter",
             json!({ "handle": first.handle(), "arguments": { "amount": 1 } }),
         )
         .await;
@@ -707,7 +693,7 @@ async fn agent_013_a_handle_expires_as_a_browser_snapshot_does() {
         .mcp()
         .as_caller(alice())
         .call(
-            "counter.add",
+            "add_to_counter",
             json!({ "handle": second.handle(), "arguments": { "amount": 1 } }),
         )
         .await;
@@ -725,14 +711,14 @@ async fn agent_013_an_action_without_headless_is_not_offered() {
             !listed
                 .tool_names()
                 .iter()
-                .any(|name| name.starts_with("counter.peek")),
+                .any(|name| name.starts_with("peek_counter")),
             "{:?}",
             listed.tool_names()
         );
         let call = client
             .mcp()
             .as_caller(caller)
-            .call("counter.peek", json!({}))
+            .call("peek_counter", json!({}))
             .await;
         assert!(call.structured().is_none());
         assert!(call.error_code().is_some(), "{:?}", call.response());
@@ -753,7 +739,7 @@ async fn agent_013_a_wire_request_to_the_agent_route_is_refused() {
     let posted = client
         .post("/__live/agent")
         .json(&fresh(1, 1))
-        .header("Suprnova-Tool-Call", "counter.add")
+        .header("Suprnova-Tool-Call", "add_to_counter")
         .send()
         .await;
     assert_eq!(posted.status(), 404, "{}", posted.body_text());
@@ -770,7 +756,7 @@ async fn agent_013_headless_runs_the_live_route_guard() {
     let result = client
         .mcp()
         .as_caller(alice())
-        .call("counter.add", fresh(1, 1))
+        .call("add_to_counter", fresh(1, 1))
         .await;
     assert!(!result.is_error(), "{:?}", result.response());
     assert!(
@@ -787,7 +773,7 @@ async fn agent_018_live_tool_through_mcp_and_the_browser_endpoint() {
     let user = client
         .mcp()
         .as_caller(alice())
-        .call("counter.add", fresh(1, 1))
+        .call("add_to_counter", fresh(1, 1))
         .await;
     assert!(!user.is_error(), "{:?}", user.response());
     assert!(user.handle().is_some());
@@ -798,7 +784,7 @@ async fn agent_018_live_tool_through_mcp_and_the_browser_endpoint() {
                 .claimed(true)
                 .bound_to(TestUser::arc("alice")),
         )
-        .call("counter.add", fresh(1, 1))
+        .call("add_to_counter", fresh(1, 1))
         .await;
     assert!(!agent.is_error(), "{:?}", agent.response());
 
@@ -807,9 +793,9 @@ async fn agent_018_live_tool_through_mcp_and_the_browser_endpoint() {
     let page = client.get(PAGE).send().await;
     assert_eq!(page.status(), 200, "{}", page.body_text());
     let html = page.body_text();
-    assert!(html.contains("counter.peek.main"), "{html}");
+    assert!(html.contains("peek_counter-main"), "{html}");
     let called = client
-        .live_tool("counter.peek.main", &html, json!({}))
+        .live_tool("peek_counter-main", &html, json!({}))
         .send()
         .await;
     assert_eq!(called.status(), 200, "{}", called.body_text());
@@ -818,8 +804,8 @@ async fn agent_018_live_tool_through_mcp_and_the_browser_endpoint() {
     // The header must name the action the request runs: a counted tool
     // name cannot cover another action of the island.
     let mismatched = client
-        .live_tool("counter.peek.main", &html, json!({}))
-        .header("Suprnova-Tool-Call", "counter.peek.other")
+        .live_tool("peek_counter-main", &html, json!({}))
+        .header("Suprnova-Tool-Call", "peek_counter-other")
         .send()
         .await;
     assert_ne!(mismatched.status(), 200, "{}", mismatched.body_text());
@@ -836,7 +822,7 @@ async fn agent_013_validation_names_only_visible_fields_and_arguments() {
         .mcp()
         .as_caller(long_name)
         .call(
-            "counter.check",
+            "check_counter",
             json!({ "mount": { "start": 1, "label": "Main" } }),
         )
         .await;
@@ -851,7 +837,7 @@ async fn agent_013_validation_names_only_visible_fields_and_arguments() {
         .mcp()
         .as_caller(alice())
         .call(
-            "counter.rename",
+            "rename_counter",
             json!({
                 "mount": { "start": 1, "label": "Main" },
                 "arguments": { "title": "far too long a title" },
@@ -883,7 +869,7 @@ async fn agent_013_a_validation_outcome_is_an_error_with_the_new_handle() {
         .mcp()
         .as_caller(alice())
         .call(
-            "counter.check",
+            "check_counter",
             json!({ "mount": { "start": 150, "label": "Main" } }),
         )
         .await;
@@ -900,7 +886,7 @@ async fn agent_013_a_validation_outcome_is_an_error_with_the_new_handle() {
         .mcp()
         .as_caller(alice())
         .call(
-            "counter.add",
+            "add_to_counter",
             json!({ "handle": handle, "arguments": { "amount": 1 } }),
         )
         .await;
@@ -925,5 +911,24 @@ fn agent_012_a_tool_component_key_must_fit_the_tool_name_grammar() {
             LiveMount::<AgentCounter>::public_seed("/counters", "counter", key).is_err(),
             "{key}"
         );
+    }
+}
+
+#[test]
+fn agent_012_root_tool_names_must_fit_the_model_limit() {
+    use suprnova::live::{LiveDocumentErrorKind, LiveMount};
+
+    use crate::live_fixture::AgentCounter;
+
+    // `rename_counter` and the separator leave 49 characters for the key.
+    assert!(
+        LiveMount::<AgentCounter>::public_seed("/counters", "counter", &"k".repeat(49)).is_ok()
+    );
+    for length in [50, 60] {
+        let error =
+            LiveMount::<AgentCounter>::public_seed("/counters", "counter", &"k".repeat(length))
+                .err()
+                .expect("a root tool's complete browser name must fit the model limit");
+        assert_eq!(error.kind(), LiveDocumentErrorKind::InvalidDeclaration);
     }
 }

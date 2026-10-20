@@ -458,7 +458,7 @@ async fn refusal(client: &TestClient, token: &str) -> String {
     let refused = client
         .mcp()
         .with_token(token)
-        .call("posts.show", json!({ "post": "1" }))
+        .call("show_post", json!({ "post": "1" }))
         .await;
     assert_eq!(refused.status(), 401, "{:?}", refused.response());
     let www = refused
@@ -500,7 +500,7 @@ async fn agent_007_anonymous_agent_registers_and_calls_an_agent_tool() {
     assert_eq!(claims["iss"], ISSUER);
 
     let token = agent_token(client, assertion).await;
-    let (status, shown) = call(client, &token, "posts.show", json!({ "post": "7" })).await;
+    let (status, shown) = call(client, &token, "show_post", json!({ "post": "7" })).await;
     assert_eq!(status, 200, "{shown}");
     assert_eq!(shown["post"], "7");
 }
@@ -533,7 +533,7 @@ async fn agent_007_service_auth_agent_claims_and_calls_an_agent_tool() {
     let (status, created) = call(
         client,
         token,
-        "posts.create",
+        "create_post",
         json!({ "title": "From the agent" }),
     )
     .await;
@@ -583,7 +583,7 @@ async fn agent_007_identity_assertion_agent_registers_and_calls_an_agent_tool() 
     let assertion = registration["identity_assertion"].as_str().unwrap();
     assert_eq!(jwt_part(assertion, 1)["email"], account_email(&user));
     let token = agent_token(client, assertion).await;
-    let (status, created) = call(client, &token, "posts.create", json!({ "title": "Hi" })).await;
+    let (status, created) = call(client, &token, "create_post", json!({ "title": "Hi" })).await;
     assert_eq!(status, 200, "{created}");
     assert_eq!(created["user"], user);
     assert_eq!(created["client"], PROVIDER, "the provider it came through");
@@ -633,7 +633,7 @@ async fn agent_007_flow_under_a_path_prefix() {
         .await;
     assert_eq!(tokens.status(), 200, "{}", tokens.body_text());
     let token = tokens.json()["access_token"].as_str().unwrap().to_owned();
-    let (status, shown) = call(client, &token, "posts.show", json!({ "post": "3" })).await;
+    let (status, shown) = call(client, &token, "show_post", json!({ "post": "3" })).await;
     assert_eq!(status, 200, "{shown}");
 
     let metadata = client
@@ -839,12 +839,12 @@ async fn agent_007_unclaimed_agent_holds_only_pre_claim_scopes() {
     let token = agent_token(client, assertion).await;
     let listed = client.mcp().with_token(&token).list().await;
     let names = listed.tool_names();
-    assert!(names.contains(&"posts.show".to_owned()), "{names:?}");
-    assert!(!names.contains(&"posts.create".to_owned()), "{names:?}");
+    assert!(names.contains(&"show_post".to_owned()), "{names:?}");
+    assert!(!names.contains(&"create_post".to_owned()), "{names:?}");
     let refused = client
         .mcp()
         .with_token(&token)
-        .call("posts.create", json!({ "title": "No" }))
+        .call("create_post", json!({ "title": "No" }))
         .await;
     assert_eq!(refused.status(), 403);
     let www = refused
@@ -866,7 +866,7 @@ async fn agent_007_narrowed_post_claim_scopes_apply_to_a_bound_agent_at_once() {
         call(
             &world.client,
             token,
-            "posts.create",
+            "create_post",
             json!({ "title": "Before" })
         )
         .await
@@ -881,7 +881,7 @@ async fn agent_007_narrowed_post_claim_scopes_apply_to_a_bound_agent_at_once() {
     let refused = narrowed
         .mcp()
         .with_token(token)
-        .call("posts.create", json!({ "title": "After" }))
+        .call("create_post", json!({ "title": "After" }))
         .await;
     assert_eq!(refused.status(), 403, "{:?}", refused.response());
     let www = refused
@@ -891,7 +891,7 @@ async fn agent_007_narrowed_post_claim_scopes_apply_to_a_bound_agent_at_once() {
         .to_owned();
     assert!(www.contains("error=\"insufficient_scope\""), "{www}");
     assert_eq!(
-        call(&narrowed, token, "posts.show", json!({ "post": "1" }))
+        call(&narrowed, token, "show_post", json!({ "post": "1" }))
             .await
             .0,
         200,
@@ -981,11 +981,15 @@ async fn agent_007_agent_token_never_calls_a_user_tool() {
         .client
         .mcp()
         .with_token(token)
-        .call("users.profile", json!({}))
+        .call("read_user_profile", json!({}))
         .await;
     assert_eq!(refused.status(), 403, "{:?}", refused.response());
     let listed = world.client.mcp().with_token(token).list().await;
-    assert!(!listed.tool_names().contains(&"users.profile".to_owned()));
+    assert!(
+        !listed
+            .tool_names()
+            .contains(&"read_user_profile".to_owned())
+    );
 }
 
 #[tokio::test]
@@ -1393,7 +1397,7 @@ async fn agent_008_email_only_match_answers_interaction_required_and_binds_only_
     let tokens = poll(client, claim_token).await;
     assert_eq!(tokens.status(), 200, "{}", tokens.body_text());
     let token = tokens.json()["access_token"].as_str().unwrap().to_owned();
-    let (status, created) = call(client, &token, "posts.create", json!({ "title": "x" })).await;
+    let (status, created) = call(client, &token, "create_post", json!({ "title": "x" })).await;
     assert_eq!(status, 200, "{created}");
     assert_eq!(created["user"], user);
 }
@@ -1835,7 +1839,7 @@ async fn agent_009_claim_revokes_pre_claim_tokens_and_returns_an_assertion_with_
     let registration = anonymous(client).await;
     let pre_claim = agent_token(client, registration["identity_assertion"].as_str().unwrap()).await;
     assert_eq!(
-        call(client, &pre_claim, "posts.show", json!({ "post": "1" }))
+        call(client, &pre_claim, "show_post", json!({ "post": "1" }))
             .await
             .0,
         200
@@ -2545,7 +2549,7 @@ async fn agent_010_revoked_agent_token_stops_calling_tools() {
     let registration = anonymous(client).await;
     let token = agent_token(client, registration["identity_assertion"].as_str().unwrap()).await;
     assert_eq!(
-        call(client, &token, "posts.show", json!({ "post": "1" }))
+        call(client, &token, "show_post", json!({ "post": "1" }))
             .await
             .0,
         200
@@ -2569,7 +2573,7 @@ async fn agent_010_revoked_registration_with_a_live_grant_is_refused() {
     let registration = anonymous(client).await;
     let token = agent_token(client, registration["identity_assertion"].as_str().unwrap()).await;
     assert_eq!(
-        call(client, &token, "posts.show", json!({ "post": "1" }))
+        call(client, &token, "show_post", json!({ "post": "1" }))
             .await
             .0,
         200
@@ -2659,7 +2663,7 @@ async fn agent_010_forged_and_replayed_security_events_are_refused() {
         .await;
     assert_eq!(refused.status(), 400, "{}", refused.body_text());
     assert_eq!(
-        call(client, &token, "posts.show", json!({ "post": "1" }))
+        call(client, &token, "show_post", json!({ "post": "1" }))
             .await
             .0,
         200
@@ -2764,7 +2768,7 @@ async fn agent_010_another_users_registration_cannot_be_revoked() {
         .await;
     assert_eq!(refused.status(), 404, "{}", refused.body_text());
     assert_eq!(
-        call(client, &token, "posts.show", json!({ "post": "1" }))
+        call(client, &token, "show_post", json!({ "post": "1" }))
             .await
             .0,
         200
@@ -2778,7 +2782,7 @@ async fn agent_010_password_change_ends_a_bound_agent_token() {
     let claimed = claim_anonymous(&world, &user).await;
     let token = claimed.tokens["access_token"].as_str().unwrap();
     assert_eq!(
-        call(&world.client, token, "posts.show", json!({ "post": "1" }))
+        call(&world.client, token, "show_post", json!({ "post": "1" }))
             .await
             .0,
         200
@@ -2808,7 +2812,7 @@ async fn agent_010_agent_revoke_form_needs_the_csrf_token() {
         .await;
     assert_eq!(refused.status(), 419, "{}", refused.body_text());
     assert_eq!(
-        call(&client, token, "posts.show", json!({ "post": "1" }))
+        call(&client, token, "show_post", json!({ "post": "1" }))
             .await
             .0,
         200,
@@ -3510,7 +3514,7 @@ async fn agent_008_mixed_case_stored_email_matches_and_is_never_provisioned_agai
     let tokens = poll(client, body["claim_token"].as_str().unwrap()).await;
     assert_eq!(tokens.status(), 200, "{}", tokens.body_text());
     let token = tokens.json()["access_token"].as_str().unwrap().to_owned();
-    let (status, created) = call(client, &token, "posts.create", json!({ "title": "x" })).await;
+    let (status, created) = call(client, &token, "create_post", json!({ "title": "x" })).await;
     assert_eq!(status, 200, "{created}");
     assert_eq!(created["user"], "1");
 

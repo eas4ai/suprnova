@@ -34,7 +34,7 @@ const HINTS = {
 
 function serverTool(overrides: Partial<PageTool> = {}): PageTool {
   return {
-    name: 'fixture.tool',
+    name: 'call_fixture',
     description: 'A fixture tool.',
     inputSchema: SCHEMA,
     annotations: HINTS,
@@ -151,48 +151,48 @@ function page(component: string, tools: PageTool[]) {
 }
 
 const search = serverTool({
-  name: 'posts.search',
+  name: 'search_posts',
   description: 'Search the posts.',
   method: 'GET',
   path: [{ text: '/posts' }],
   annotations: { readOnlyHint: true, untrustedContentHint: true, consequentialHint: false, debugging: true },
 })
 const create = serverTool({
-  name: 'posts.create',
+  name: 'create_post',
   title: 'Create a post',
   description: 'Create a draft post.',
   path: [{ text: '/posts' }],
 })
 const destroy = serverTool({
-  name: 'posts.delete',
+  name: 'delete_post',
   description: 'Delete a post.',
   method: 'DELETE',
   path: [{ text: '/posts/' }, { param: 'post', optional: false, catchAll: false }],
   annotations: { readOnlyHint: false, untrustedContentHint: false, consequentialHint: true, debugging: false },
 })
-const help = serverTool({ name: 'help.search', description: 'Search the help.', path: [{ text: '/help' }] })
+const help = serverTool({ name: 'search_help', description: 'Search the help.', path: [{ text: '/help' }] })
 
 test('agent_014_page_tools_register_with_their_annotations', () => {
   const router = fakeRouter()
   const stop = installPageTools(router)
   router.navigate(page('Posts/Index', [search, create, destroy]))
-  expect(context.names()).toEqual(['posts.create', 'posts.delete', 'posts.search'])
+  expect(context.names()).toEqual(['create_post', 'delete_post', 'search_posts'])
   const descriptor = (name: string) => context.descriptors.find((tool) => tool.name === name) as ToolDefinition
-  expect(descriptor('posts.search').annotations).toEqual({
+  expect(descriptor('search_posts').annotations).toEqual({
     readOnlyHint: true,
     untrustedContentHint: true,
     consequentialHint: false,
     debugging: true,
   })
-  expect(descriptor('posts.delete').annotations).toEqual({
+  expect(descriptor('delete_post').annotations).toEqual({
     readOnlyHint: false,
     untrustedContentHint: false,
     consequentialHint: true,
     debugging: false,
   })
-  expect(descriptor('posts.create').title).toBe('Create a post')
-  expect(descriptor('posts.create').description).toBe('Create a draft post.')
-  expect(descriptor('posts.create').inputSchema).toEqual(SCHEMA)
+  expect(descriptor('create_post').title).toBe('Create a post')
+  expect(descriptor('create_post').description).toBe('Create a draft post.')
+  expect(descriptor('create_post').inputSchema).toEqual(SCHEMA)
   stop()
   expect(context.names()).toEqual([])
 })
@@ -201,14 +201,14 @@ test('agent_014_inertia_visit_replaces_the_page_tools', () => {
   const router = fakeRouter()
   const stop = installPageTools(router)
   router.navigate(page('Posts/Index', [help, search, create]))
-  const firstHelp = context.live.get('help.search')?.tool
+  const firstHelp = context.live.get('search_help')?.tool
   // The next page keeps the shared tool, drops the route's, adds its own
   // and changes the description of one it keeps.
   const changed = { ...create, description: 'Create a post as a draft.' }
   router.navigate(page('Posts/Show', [help, changed, destroy]))
-  expect(context.names()).toEqual(['help.search', 'posts.create', 'posts.delete'])
-  expect(context.live.get('help.search')?.tool).toBe(firstHelp)
-  expect(context.live.get('posts.create')?.tool.description).toBe('Create a post as a draft.')
+  expect(context.names()).toEqual(['create_post', 'delete_post', 'search_help'])
+  expect(context.live.get('search_help')?.tool).toBe(firstHelp)
+  expect(context.live.get('create_post')?.tool.description).toBe('Create a post as a draft.')
   // A page that lists none removes every one.
   router.navigate({ component: 'Home' })
   expect(context.names()).toEqual([])
@@ -223,7 +223,7 @@ test('agent_014_history_back_restores_that_pages_tools', () => {
   router.navigate(page('Posts/Show', [help, destroy]))
   // A history step hands back the earlier page object, `agentTools` and all.
   router.navigate(first)
-  expect(context.names()).toEqual(['help.search', 'posts.search'])
+  expect(context.names()).toEqual(['search_help', 'search_posts'])
   stop()
 })
 
@@ -238,7 +238,7 @@ test('agent_014_invalid_page_tools_register_nothing', () => {
   const hint = { ...create, annotations: { ...HINTS, readOnlyHint: 'yes' } }
   router.navigate({ component: 'Posts/Index', agentTools: { v: 1, limits: LIMITS, tools: [hint] } })
   expect(context.names()).toEqual([])
-  const methodless = { name: 'posts.create', description: 'Create.', inputSchema: SCHEMA, path: [{ text: '/posts' }] }
+  const methodless = { name: 'create_post', description: 'Create.', inputSchema: SCHEMA, path: [{ text: '/posts' }] }
   router.navigate({ component: 'Posts/Index', agentTools: { v: 1, limits: LIMITS, tools: [methodless] } })
   expect(context.names()).toEqual([])
   // A version this reader does not know is a change it must not guess at.
@@ -263,8 +263,8 @@ test('agent_014_page_tools_ignore_keys_they_do_not_know', () => {
     component: 'Posts/Index',
     agentTools: { v: 1, limits: { ...LIMITS, retries: 3 }, tools: [later], later: true },
   })
-  expect(context.names()).toEqual(['posts.create'])
-  const descriptor = context.descriptors.find((tool) => tool.name === 'posts.create') as ToolDefinition
+  expect(context.names()).toEqual(['create_post'])
+  const descriptor = context.descriptors.find((tool) => tool.name === 'create_post') as ToolDefinition
   expect(Object.keys(descriptor).sort()).toEqual(['annotations', 'description', 'execute', 'inputSchema', 'name', 'title'])
   expect(descriptor.annotations).toEqual(HINTS)
   stop()
@@ -275,8 +275,8 @@ test('agent_014_a_missing_hint_reads_as_false', () => {
   const stop = installPageTools(router)
   const older = { ...create, annotations: { readOnlyHint: true, untrustedContentHint: false, consequentialHint: false } }
   router.navigate({ component: 'Posts/Index', agentTools: { v: 1, limits: LIMITS, tools: [older] } })
-  expect(context.names()).toEqual(['posts.create'])
-  const descriptor = context.descriptors.find((tool) => tool.name === 'posts.create') as ToolDefinition
+  expect(context.names()).toEqual(['create_post'])
+  const descriptor = context.descriptors.find((tool) => tool.name === 'create_post') as ToolDefinition
   expect(descriptor.annotations).toEqual({ ...HINTS, readOnlyHint: true })
   stop()
 })
@@ -288,7 +288,7 @@ test('agent_014_server_tool_call_carries_session_csrf_and_header', async () => {
   const router = fakeRouter()
   const stop = installPageTools(router)
   router.navigate(page('Posts/Index', [create]))
-  const pending = context.call('posts.create', { title: 'Hello' })
+  const pending = context.call('create_post', { title: 'Hello' })
   await settle()
   router.reloads[0]?.onFinish?.()
   const result = await pending
@@ -302,7 +302,7 @@ test('agent_014_server_tool_call_carries_session_csrf_and_header', async () => {
   expect(request.init.credentials).toBe('same-origin')
   expect(request.init.redirect).toBe('manual')
   expect(request.init.cache).toBe('no-store')
-  expect(headers[TOOL_CALL_HEADER]).toBe('posts.create')
+  expect(headers[TOOL_CALL_HEADER]).toBe('create_post')
   expect(headers['X-CSRF-TOKEN']).toBe('page-token')
   expect(headers.Accept).toBe('application/json')
   expect(headers['Content-Type']).toBe('application/json')
@@ -316,7 +316,7 @@ test('agent_014_write_tool_reloads_the_page_props', async () => {
   const stop = installPageTools(router)
   router.navigate(page('Posts/Index', [create]))
   let resolved = false
-  const pending = context.call('posts.create', {}).then((result) => {
+  const pending = context.call('create_post', {}).then((result) => {
     resolved = true
     return result
   })
@@ -337,7 +337,7 @@ test('agent_014_read_only_tool_does_not_reload', async () => {
   const router = fakeRouter()
   const stop = installPageTools(router)
   router.navigate(page('Posts/Index', [search]))
-  const result = await context.call('posts.search', { q: 'x' })
+  const result = await context.call('search_posts', { q: 'x' })
   expect(result.isError).toBe(false)
   expect(router.reloads).toHaveLength(0)
   stop()
@@ -348,7 +348,7 @@ test('agent_014_unanswered_call_does_not_reload', async () => {
   const router = fakeRouter()
   const stop = installPageTools(router)
   router.navigate(page('Posts/Index', [create]))
-  const result = await context.call('posts.create', {})
+  const result = await context.call('create_post', {})
   expect(result).toEqual({ content: [{ type: 'text', text: 'The tool could not be reached.' }], isError: true })
   expect(router.reloads).toHaveLength(0)
   stop()
@@ -364,7 +364,7 @@ test('agent_014_an_aborted_call_rejects_and_does_not_reload', async () => {
   const stop = installPageTools(router)
   router.navigate(page('Posts/Index', [create]))
   const controller = new AbortController()
-  const pending = context.call('posts.create', {}, { signal: controller.signal })
+  const pending = context.call('create_post', {}, { signal: controller.signal })
   controller.abort()
   await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
   expect(router.reloads).toHaveLength(0)
@@ -377,15 +377,15 @@ function tool(name: string, execute: ToolDefinition['execute'] = async () => ({ 
 
 test('agent_015_duplicate_tool_name_is_refused', () => {
   const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
-  const leave = registerTool(tool('notes.save'))
-  const second = registerTool(tool('notes.save'))
-  expect(context.names()).toEqual(['notes.save'])
+  const leave = registerTool(tool('save_note'))
+  const second = registerTool(tool('save_note'))
+  expect(context.names()).toEqual(['save_note'])
   expect(error).toHaveBeenCalledWith(expect.stringContaining('another tool on the page has that name'))
   registerTool(tool('not a name'))
   expect(error).toHaveBeenCalledWith(expect.stringContaining('was not registered'))
-  expect(context.names()).toEqual(['notes.save'])
+  expect(context.names()).toEqual(['save_note'])
   second()
-  expect(context.names()).toEqual(['notes.save'])
+  expect(context.names()).toEqual(['save_note'])
   leave()
   expect(context.names()).toEqual([])
 })
@@ -393,12 +393,12 @@ test('agent_015_duplicate_tool_name_is_refused', () => {
 test('agent_015_a_leaving_tool_unregisters_at_once_and_its_pending_call_still_answers', async () => {
   let finish: (result: { content: { type: 'text'; text: string }[]; isError: boolean }) => void = () => undefined
   const leave = registerTool(
-    tool('notes.save', () => new Promise((resolve) => {
+    tool('save_note', () => new Promise((resolve) => {
       finish = resolve
     })),
   )
-  const execute = context.live.get('notes.save')?.tool.execute
-  const first = context.call('notes.save', {})
+  const execute = context.live.get('save_note')?.tool.execute
+  const first = context.call('save_note', {})
   leave()
   // Gone from the browser at once, as the tool of a form that a submit
   // took off the page goes: the browser still delivers the pending answer.
@@ -408,25 +408,25 @@ test('agent_015_a_leaving_tool_unregisters_at_once_and_its_pending_call_still_an
   finish({ content: [{ type: 'text', text: 'saved' }], isError: false })
   await expect(first).resolves.toEqual({ content: [{ type: 'text', text: 'saved' }], isError: false })
   // A tool of the same name, on the page that follows, registers at once.
-  const next = registerTool(tool('notes.save'))
-  expect(context.names()).toEqual(['notes.save'])
+  const next = registerTool(tool('save_note'))
+  expect(context.names()).toEqual(['save_note'])
   next()
   expect(context.names()).toEqual([])
 })
 
 test('agent_015_back_forward_cache_suspends_and_restores_tools', () => {
-  const leave = registerTool(tool('notes.save'))
+  const leave = registerTool(tool('save_note'))
   window.dispatchEvent(Object.assign(new Event('pagehide'), { persisted: true }))
   expect(context.names()).toEqual([])
   window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }))
-  expect(context.names()).toEqual(['notes.save'])
+  expect(context.names()).toEqual(['save_note'])
   leave()
   expect(context.names()).toEqual([])
 })
 
 test('agent_015_a_page_without_webmcp_registers_nothing', () => {
   removeModelContext()
-  const leave = registerTool(tool('notes.save'))
+  const leave = registerTool(tool('save_note'))
   leave()
   expect(Reflect.get(document, 'modelContext')).toBeUndefined()
 })
@@ -438,7 +438,7 @@ test('agent_017_a_form_tool_submission_carries_the_form_tool_header', async () =
   const sent: { method: string; url: string; visit: FormVisit }[] = []
   const tool = formTool(
     {
-      name: 'fixture.consent.approve',
+      name: 'approve_fixture_consent',
       description: 'Approve the pending authorization.',
       schema: { type: 'object', properties: { authorization: { type: 'string' } } },
       action: { method: 'post', url: '/oauth/approve' },
@@ -463,7 +463,7 @@ test('agent_017_a_form_tool_submission_carries_the_form_tool_header', async () =
 test('agent_015_page_tool_json_is_carried_once_and_explicit_results_are_preserved', async () => {
   const values = [{ id: 7 }, [1, 2], 42, false, null]
   for (const value of values) {
-    const definition = componentTool({ name: 'page.json', description: 'Read JSON.', inputSchema: SCHEMA, execute: () => value }, () => () => value)
+    const definition = componentTool({ name: 'read_page_json', description: 'Read JSON.', inputSchema: SCHEMA, execute: () => value }, () => () => value)
     await expect(definition.execute({})).resolves.toEqual({ structuredContent: value, isError: false })
   }
   for (const value of [
@@ -472,7 +472,7 @@ test('agent_015_page_tool_json_is_carried_once_and_explicit_results_are_preserve
     { content: [{ type: 'text', text: 'Duplicate' }], structuredContent: { id: 7 }, isError: false },
     { content: [{ type: 'text', text: 'Read this.' }], isError: false },
   ]) {
-    const definition = componentTool({ name: 'page.result', description: 'Read a result.', inputSchema: SCHEMA, execute: () => value }, () => () => value)
+    const definition = componentTool({ name: 'read_page_result', description: 'Read a result.', inputSchema: SCHEMA, execute: () => value }, () => () => value)
     await expect(definition.execute({})).resolves.toEqual('structuredContent' in value
       ? { structuredContent: value.structuredContent, isError: value.isError }
       : value)
@@ -480,6 +480,6 @@ test('agent_015_page_tool_json_is_carried_once_and_explicit_results_are_preserve
 })
 
 test('agent_015_page_tool_text_is_carried_only_as_text', async () => {
-  const definition = componentTool({ name: 'page.text', description: 'Read text.', inputSchema: SCHEMA, execute: () => 'Hello.' }, () => () => 'Hello.')
+  const definition = componentTool({ name: 'read_page_text', description: 'Read text.', inputSchema: SCHEMA, execute: () => 'Hello.' }, () => () => 'Hello.')
   await expect(definition.execute({})).resolves.toEqual({ content: [{ type: 'text', text: 'Hello.' }], isError: false })
 })

@@ -8,7 +8,7 @@ suprnova::tool_scopes! {
 }
 
 #[derive(LiveComponent)]
-#[live(name = "fail.tool", view = "live/agents/tool.html")]
+#[live(name = "fail_tool", view = "live/agents/tool.html")]
 pub struct Counter {
     count: u64,
 }
@@ -16,7 +16,7 @@ pub struct Counter {
 #[live]
 impl Counter {
     #[tool(
-        name = "counter.add",
+        name = "add_to_counter",
         description = "Add to the counter.",
         callers = [user],
         scopes = [scope::COUNTER_WRITE],

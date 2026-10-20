@@ -37,3 +37,9 @@ fn agent_002_live_tool_with_undeclared_scope_fails_to_build() {
     install_live_templates();
     trybuild::TestCases::new().compile_fail("tests/agents/compile_fail/live/agent_002_*.rs");
 }
+
+#[test]
+fn agent_001_budget_warnings_allow_a_64_character_name_to_build() {
+    install_live_templates();
+    trybuild::TestCases::new().pass("tests/agents/compile_pass/agent_001_*.rs");
+}

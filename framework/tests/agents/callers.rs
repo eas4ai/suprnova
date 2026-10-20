@@ -17,7 +17,7 @@ async fn agent_002_policy_reads_caller_kind() {
     let user = client
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("7")).scopes(scopes))
-        .call("posts.delete", json!({ "post": "1" }))
+        .call("delete_post", json!({ "post": "1" }))
         .await;
     assert!(!user.is_error(), "a user may delete: {:?}", user.response());
     // The same user's agent account is signed in as the user, and the
@@ -30,7 +30,7 @@ async fn agent_002_policy_reads_caller_kind() {
                 .bound_to(TestUser::arc("7"))
                 .scopes(scopes),
         )
-        .call("posts.delete", json!({ "post": "1" }))
+        .call("delete_post", json!({ "post": "1" }))
         .await;
     assert!(
         agent.is_error(),
@@ -51,7 +51,7 @@ async fn agent_002_user_tool_rejects_agent_bound_to_user() {
                 .claimed(true)
                 .bound_to(TestUser::arc("8")),
         )
-        .call("users.profile", json!({}))
+        .call("read_user_profile", json!({}))
         .await;
     assert_eq!(result.status(), 403);
     assert!(result.structured().is_none(), "the tool did not run");
@@ -67,7 +67,7 @@ async fn agent_002_user_tool_rejects_agent_bound_to_user() {
     let result = client
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("8")))
-        .call("users.profile", json!({}))
+        .call("read_user_profile", json!({}))
         .await;
     assert_eq!(
         result.structured(),
@@ -86,7 +86,7 @@ async fn agent_002_handler_receives_tool_caller() {
                 .scopes([scope::POSTS_WRITE])
                 .client("claude-code"),
         )
-        .call("posts.create", json!({ "title": "From a client" }))
+        .call("create_post", json!({ "title": "From a client" }))
         .await;
     let user = user.structured().cloned().unwrap_or_default();
     assert_eq!(user["kind"], "user");
@@ -103,7 +103,7 @@ async fn agent_002_handler_receives_tool_caller() {
                 .scopes([scope::POSTS_WRITE])
                 .client("https://issuer.example"),
         )
-        .call("posts.create", json!({ "title": "From an agent" }))
+        .call("create_post", json!({ "title": "From an agent" }))
         .await;
     let agent = agent.structured().cloned().unwrap_or_default();
     assert_eq!(agent["kind"], "agent");
@@ -118,7 +118,7 @@ async fn agent_002_handler_receives_tool_caller() {
         .acting_as(&TestUser {
             id: "7".to_string(),
         })
-        .tool("posts.create", json!({ "title": "From a page" }))
+        .tool("create_post", json!({ "title": "From a page" }))
         .send()
         .await;
     browser.assert_ok();
@@ -139,17 +139,17 @@ async fn agent_002_per_caller_limit_returns_429() {
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("limit-1")));
     for _ in 0..2 {
-        let result = mcp.call("users.profile", json!({})).await;
+        let result = mcp.call("read_user_profile", json!({})).await;
         assert_eq!(result.status(), 200, "{:?}", result.response());
     }
-    let refused = mcp.call("users.profile", json!({})).await;
+    let refused = mcp.call("read_user_profile", json!({})).await;
     assert_eq!(refused.status(), 429);
     assert!(refused.response().header("retry-after").is_some());
     // Another user has calls of their own.
     let other = client
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("limit-2")))
-        .call("users.profile", json!({}))
+        .call("read_user_profile", json!({}))
         .await;
     assert_eq!(other.status(), 200);
 }
@@ -183,14 +183,14 @@ async fn agent_002_browser_calls_count_against_the_caller() {
     client
         .clone()
         .acting_as(&user)
-        .tool("users.profile", json!({}))
+        .tool("read_user_profile", json!({}))
         .send()
         .await
         .assert_ok();
     let refused = client
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("limit-3")))
-        .call("users.profile", json!({}))
+        .call("read_user_profile", json!({}))
         .await;
     assert_eq!(
         refused.status(),
@@ -276,7 +276,7 @@ impl suprnova::UserProvider for KnownUsers {
     }
 }
 
-/// `posts.create` and `users.profile`, each behind a middleware `make`
+/// `create_post` and `read_user_profile`, each behind a middleware `make`
 /// builds.
 fn routes_behind<M: suprnova::Middleware + 'static>(make: impl Fn() -> M) -> suprnova::Router {
     let router: suprnova::Router = suprnova::Router::new()
@@ -371,7 +371,7 @@ async fn agent_002_a_session_user_is_a_browser_caller_with_every_scope() {
     );
     client.get("/sign-in").send().await.assert_ok();
     let page = client
-        .tool("posts.create", json!({ "title": "From the session" }))
+        .tool("create_post", json!({ "title": "From the session" }))
         .send()
         .await;
     page.assert_ok();
@@ -394,12 +394,12 @@ async fn agent_002_ordinary_requests_to_a_tool_route_use_no_budget() {
         client.post("/me").send().await.assert_ok();
     }
     client
-        .tool("users.profile", json!({}))
+        .tool("read_user_profile", json!({}))
         .send()
         .await
         .assert_ok();
     client
-        .tool("users.profile", json!({}))
+        .tool("read_user_profile", json!({}))
         .send()
         .await
         .assert_status(429);
@@ -490,7 +490,7 @@ async fn agent_002_ordinary_requests_survive_a_failed_limiter_store() {
     });
     client.post("/me").send().await.assert_ok();
     client
-        .tool("users.profile", json!({}))
+        .tool("read_user_profile", json!({}))
         .send()
         .await
         .assert_status(503);
@@ -601,7 +601,7 @@ async fn agent_002_a_remember_me_user_is_a_browser_caller() {
     // remember-me cookie on this very request.
     let client = suprnova::testing::TestClient::new(fixture::router(), registry);
     let page = client
-        .tool("posts.create", json!({ "title": "Remembered" }))
+        .tool("create_post", json!({ "title": "Remembered" }))
         .header(
             "Cookie",
             format!("{}={cookie}", suprnova::auth::remember::COOKIE_NAME),
