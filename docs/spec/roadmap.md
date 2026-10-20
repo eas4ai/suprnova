@@ -1374,6 +1374,35 @@ Requirements: AGENT-001, AGENT-002, AGENT-003, AGENT-004, AGENT-005, AGENT-006, 
    and called a user tool and a headless Live tool once, and the review is
    recorded.
 
+## agents-tool-names-for-every-model
+
+Requirements: AGENT-001, AGENT-002, AGENT-003, AGENT-004, AGENT-005, AGENT-006, AGENT-007, AGENT-008, AGENT-009, AGENT-010, AGENT-011, AGENT-012, AGENT-013, AGENT-014, AGENT-015, AGENT-016, AGENT-017, AGENT-018, AGENT-019
+
+62. agents-tool-names-for-every-model - agents-public-tools-stay-open,
+   superseded on 2026-10-19 when the developer ruled "Yes to all" on three
+   findings from Google's WebMCP projects (webmcp-tools, webmcp-extension,
+   webmcp-types, webmcp-skills) and webmcp-rs: tool names hold only
+   letters, digits and `_`, up to 64 characters, because browser agents pass
+   them to model providers whose function names allow no `.`; a keyed Live
+   island's tool name is the tool's name, `-` and the key; the boot check
+   warns about Chrome's WebMCP budgets; and the kits type-check their
+   WebMCP use with the community group's `webmcp-types`. This commitment
+   carries all of the agents work, committed before its start, and adds:
+   - the name rule and the boot warnings in the framework, the macros and
+     the Live checker (AGENT-001, AGENT-012), with every shipped, scaffolded
+     and dogfood tool renamed to it
+   - `webmcp-types` as a dev dependency of the three Inertia kits
+   - browser tool results that carry their answer once, the Origin Trial
+     token list, and the manual's part on trying tools in a browser
+   - the dogfood application's MCP endpoint, plugins and tools
+   Delivery: as for agents. Mechanisms: `agents` and `agents-browser`, as
+   declared and bound for agents, rebound to the revised AGENT-001 and
+   AGENT-012. Done when every requirement has a current pass on a committed
+   tree, a hand-run `claude mcp add --transport http` against the dogfood
+   application has listed its tools without a token, been sent to sign in
+   by a call of a tool that needs one, signed in and called a user tool and
+   a headless Live tool once, and the review is recorded.
+
 Out of every commitment above, by the developer's 2026-09-12 ruling:
 complete blocks (auth flows, account settings, CTAs, pricing, dashboard
 layouts), tag input, nested menus, command palette, drag-reorder,
