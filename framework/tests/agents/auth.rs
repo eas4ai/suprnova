@@ -524,21 +524,31 @@ impl suprnova::UserProvider for ApiUsers {
         Ok((id == "7").then(|| {
             Arc::new(fixture::ApiUser {
                 id: "7".to_string(),
-                name: "from the api provider".to_string(),
             }) as Arc<dyn suprnova::auth::Authenticatable>
         }))
     }
 }
 
+/// Both providers know `7`, so only the guard's configured provider differs.
+fn guarded_tool_client(provider: &str) -> (suprnova::testing::TestClient, Arc<AtomicUsize>) {
+    let config = suprnova::AuthConfig::default()
+        .guard("api", suprnova::auth::GuardConfig::session(provider));
+    let manager = suprnova::AuthManager::new(config);
+    manager.register_provider("users", Arc::new(crate::callers::KnownUsers));
+    manager.register_provider("api-users", Arc::new(ApiUsers));
+    suprnova::testing::TestContainer::singleton(manager);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = fixture::client_with(
+        AgentsConfig::new(),
+        MiddlewareRegistry::new().append(ApiRouteCalls(Arc::clone(&calls))),
+    );
+    (client, calls)
+}
+
 #[tokio::test]
 async fn agent_004_guarded_tool_loads_the_user_through_its_guard() {
     let _container = fixture::setup();
-    let config = suprnova::AuthConfig::default()
-        .guard("api", suprnova::auth::GuardConfig::session("api-users"));
-    let manager = suprnova::AuthManager::new(config);
-    manager.register_provider("api-users", Arc::new(ApiUsers));
-    suprnova::testing::TestContainer::singleton(manager);
-    let client = fixture::client();
+    let (client, calls) = guarded_tool_client("users");
     let known = client
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("7")))
@@ -547,9 +557,10 @@ async fn agent_004_guarded_tool_loads_the_user_through_its_guard() {
     assert_eq!(known.status(), 200, "{:?}", known.response());
     assert_eq!(
         known.structured(),
-        Some(&json!({ "user": "7", "name": "from the api provider" })),
-        "the guard's own provider loaded the user"
+        Some(&json!({ "user": "7", "api_user": "7" })),
+        "the shared provider loaded the user and the api guard signed them in"
     );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     let unknown = client
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("999")))
@@ -560,4 +571,37 @@ async fn agent_004_guarded_tool_loads_the_user_through_its_guard() {
         401,
         "the guard's provider does not know the user"
     );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// Counts entry to the tool's route, after the endpoint's guard check.
+struct ApiRouteCalls(Arc<AtomicUsize>);
+
+#[async_trait]
+impl suprnova::Middleware for ApiRouteCalls {
+    async fn handle(&self, request: suprnova::Request, next: suprnova::Next) -> suprnova::Response {
+        if request.path() == "/api/me" {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        next(request).await
+    }
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn agent_004_guard_on_another_provider_cannot_reload_the_callers_id() {
+    let _container = fixture::setup();
+    let (client, calls) = guarded_tool_client("api-users");
+    let refused = client
+        .mcp()
+        .as_caller(ToolCaller::user(TestUser::arc("7")))
+        .call("read_api_user", json!({}))
+        .await;
+    assert_eq!(refused.status(), 500, "{:?}", refused.response());
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "the tool never ran");
+    // Configuration details belong in the logged error, not the public response.
+    assert!(logs_contain("guard 'api'"));
+    assert!(logs_contain("provider 'api-users'"));
+    assert!(logs_contain("default guard's provider 'users'"));
+    assert!(logs_contain("must share the caller's provider"));
 }

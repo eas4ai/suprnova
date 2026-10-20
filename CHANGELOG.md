@@ -8,6 +8,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Agent tools now refuse guards that use a different user provider from the
+  caller's default guard, preventing matching ids from signing in as another
+  person. (#160)
 - On MySQL and MariaDB, accent-insensitive email comparisons could let a
   different mailbox receive a magic link for another account. Account lookups
   now require byte equality after trimming and lowercasing, and magic links

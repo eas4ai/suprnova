@@ -132,7 +132,7 @@ route serves. It takes these keys:
 | `annotations(...)` | no | Hints for clients, described below |
 | `title` | no | A display name |
 | `route` | no | The route name, when the handler serves more than one route |
-| `guard` | no | The auth guard a user caller is signed in to for the call |
+| `guard` | no | The auth guard a user caller is signed in to for the call. It must use the default guard's provider; another provider is refused as a configuration error because an id in one provider does not name the same person in another. |
 | `budget` | no | `budget = ignore` silences this tool's compile warning; boot still logs its budget warnings |
 
 Use short action names such as `create_post` or `search_notes`. The build
@@ -705,6 +705,10 @@ verifies them against the provider's published keys, for issuer, audience,
 expiry and scope, and finds the user with the default guard's provider. It
 serves the `user` caller kind only: an outside token is never an agent
 account.
+
+The tool's guard must use the default guard's provider; a guard on another
+provider is refused as a configuration error because an id in one provider
+does not name the same person in another.
 
 ```rust
 use std::sync::Arc;

@@ -390,6 +390,15 @@ impl AuthManager {
         self.provider(&config.provider)
     }
 
+    /// The configured provider name of the guard `name`.
+    ///
+    /// A tool checks this before reusing a caller's id, since an id only
+    /// identifies a person within one provider. Invalid guard configuration
+    /// returns an error so the caller cannot silently cross that boundary.
+    pub(crate) fn guard_provider_name(&self, name: &str) -> Result<String, FrameworkError> {
+        Ok(self.guard_config(name)?.provider)
+    }
+
     /// Look up a registered provider by name.
     fn provider(&self, name: &str) -> Result<Arc<dyn UserProvider>, FrameworkError> {
         let map = self.providers.read().unwrap_or_else(|e| e.into_inner());

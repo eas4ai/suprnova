@@ -603,9 +603,9 @@ async fn call_tool(
     if !tool.missing_scopes(&caller).is_empty() {
         return insufficient_scope(&config, &id, tool.scopes());
     }
-    // A tool with its own guard signs in the user that guard's provider
-    // knows by the identifier the resolver returned, never the resolver's
-    // record; a user the provider does not know cannot call it.
+    // A tool's guard must share the caller's configured provider, where the
+    // id names the same person. Reload that provider's view for the guard;
+    // a user the provider does not know cannot call it.
     let caller = match guard_user(tool.guard(), caller).await {
         Ok(caller) => caller,
         Err(GuardRefusal::Unknown) => {
@@ -800,7 +800,7 @@ impl<T> futures::Stream for CallStream<T> {
 enum GuardRefusal {
     /// The guard's provider does not know the user.
     Unknown,
-    /// The application has no AuthManager, or the guard names no provider.
+    /// The guard has no usable provider or uses another provider's id space.
     Misconfigured(FrameworkError),
     /// The guard's provider failed to answer.
     Failed(FrameworkError),
@@ -808,16 +808,35 @@ enum GuardRefusal {
 
 /// The caller with its user loaded through the guard `guard`, when the
 /// tool names one and the caller has a user.
+///
+/// A different configured provider is an error because an id identifies a
+/// person only within its provider. Matching providers still reload the user
+/// so the guard sees its provider's current view of that record.
 async fn guard_user(guard: Option<&str>, caller: ToolCaller) -> Result<ToolCaller, GuardRefusal> {
     let (Some(guard), Some(user)) = (guard, caller.acting_user()) else {
         return Ok(caller);
     };
-    let id = user.get_auth_identifier();
     let manager = crate::App::get::<crate::auth::AuthManager>().ok_or_else(|| {
         GuardRefusal::Misconfigured(FrameworkError::internal(format!(
             "the tool's guard '{guard}' needs an AuthManager"
         )))
     })?;
+    let provider_name = manager
+        .guard_provider_name(guard)
+        .map_err(GuardRefusal::Misconfigured)?;
+    let default_provider_name = manager
+        .guard_provider_name(manager.default_guard_name())
+        .map_err(GuardRefusal::Misconfigured)?;
+    if provider_name != default_provider_name {
+        return Err(GuardRefusal::Misconfigured(FrameworkError::internal(
+            format!(
+                "the tool's guard '{guard}' uses provider '{provider_name}', which differs \
+                 from the default guard's provider '{default_provider_name}'; a tool's guard \
+                 must share the caller's provider"
+            ),
+        )));
+    }
+    let id = user.get_auth_identifier();
     let provider = manager
         .guard_provider(guard)
         .map_err(GuardRefusal::Misconfigured)?;
