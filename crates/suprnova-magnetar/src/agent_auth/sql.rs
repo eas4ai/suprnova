@@ -1321,3 +1321,24 @@ impl AgentAuthStore for SqlAgentAuthStore {
             .rows_affected)
     }
 }
+
+#[cfg(all(test, feature = "seaorm-sqlite"))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn replay_recording_refuses_a_duplicate_key() {
+        let db = sea_orm::Database::connect("sqlite::memory:")
+            .await
+            .expect("connect SQLite");
+        migrate(&db).await.expect("agent auth's tables");
+        let store = SqlAgentAuthStore::new(db);
+        let now = Utc::now();
+        let expires_at = now + chrono::Duration::minutes(5);
+        let key = "security-event";
+        assert!(!store.replay_recorded(key, now).await.unwrap());
+        assert!(store.record_replay(key, expires_at).await.unwrap());
+        assert!(store.replay_recorded(key, now).await.unwrap());
+        assert!(!store.record_replay(key, expires_at).await.unwrap());
+    }
+}

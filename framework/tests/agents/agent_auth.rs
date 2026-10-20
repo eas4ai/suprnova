@@ -2638,6 +2638,76 @@ async fn agent_010_security_event_revokes_the_registration_and_its_tokens() {
 }
 
 #[tokio::test]
+async fn agent_010_concurrent_security_event_replay_is_refused() {
+    use magnetar::agent_auth::{AgentAuthStore, SqlAgentAuthStore};
+    use sha2::Digest;
+
+    let world =
+        agent_world(|agent| with_id_jags(agent).provision_users(Arc::new(CreateAccounts))).await;
+    let client = &world.client;
+    let subject = unique("concurrent-set-subject");
+    let registration = present(
+        client,
+        &world.id_jag(&id_jag_claims(
+            &subject,
+            &account_email(&unique("concurrent-set")),
+        )),
+    )
+    .await
+    .json();
+    let assertion = registration["identity_assertion"].as_str().unwrap();
+    let token = agent_token(client, assertion).await;
+    let claims = revocation_event(&subject);
+    let jti = claims["jti"].as_str().unwrap();
+    let replay_key = hex::encode(sha2::Sha256::digest(format!("set\n{PROVIDER}\n{jti}")));
+    let store = SqlAgentAuthStore::new(world.db.clone());
+    assert!(
+        !store
+            .replay_recorded(&replay_key, chrono::Utc::now())
+            .await
+            .unwrap()
+    );
+    let replay_until = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
+    // Record a competing delivery after the first replay check, during
+    // revocation. The real store then loses its insert without a race.
+    world
+        .db
+        .execute_unprepared(&format!(
+            "CREATE TRIGGER record_security_event_replay
+             AFTER UPDATE OF status ON auth_agent_registrations
+             WHEN OLD.status != 'revoked' AND NEW.status = 'revoked'
+             BEGIN
+                 INSERT INTO auth_agent_replays (id, expires_at)
+                 VALUES ('{replay_key}', '{replay_until}');
+             END"
+        ))
+        .await
+        .unwrap();
+    let refused = client
+        .post("/agent/event/notify")
+        .body("application/secevent+jwt", world.event(&claims))
+        .send()
+        .await;
+    assert_eq!(refused.status(), 400, "{}", refused.body_text());
+    assert_eq!(refused.json()["err"], "invalid_request");
+    assert_eq!(
+        refused.json()["description"],
+        "this event was already received"
+    );
+    assert!(
+        store
+            .replay_recorded(&replay_key, chrono::Utc::now())
+            .await
+            .unwrap()
+    );
+    assert_eq!(refusal(client, &token).await, "The token was revoked.");
+    assert_eq!(
+        exchange(client, assertion, None).await.json()["error"],
+        "invalid_grant"
+    );
+}
+
+#[tokio::test]
 async fn agent_010_forged_and_replayed_security_events_are_refused() {
     let world =
         agent_world(|agent| with_id_jags(agent).provision_users(Arc::new(CreateAccounts))).await;

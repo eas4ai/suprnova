@@ -222,9 +222,14 @@ impl Core {
             .and_then(|issued| later(issued, self.config.event_max_age).ok())
             .and_then(|until| later(until, self.config.clock_skew).ok())
             .unwrap_or(now);
-        // A concurrent delivery of the same event may record it first; both
-        // revoked the same registration, so both are accepted.
-        self.store.record_replay(&replay_key, replay_until).await?;
+        // Revocation is idempotent; if a concurrent delivery recorded this
+        // identifier first, this delivery is refused as a replay.
+        if !self.store.record_replay(&replay_key, replay_until).await? {
+            return Ok(set_error(
+                "invalid_request",
+                "this event was already received",
+            ));
+        }
         Ok(respond(202, None, &NO_STORE))
     }
 }
