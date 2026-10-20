@@ -80,8 +80,9 @@ would disable that permission. Strict requires authorized style elements and
 does not permit inline style attributes.
 
 In `APP_ENV=local` or `development`, the framework also permits the configured
-Vite dev server in `script-src` and its origin and HMR websocket in
-`connect-src`. It reads the same configuration as the Inertia Vite integration,
+Vite dev server in `script-src`, `style-src`, `font-src` and `img-src`, and
+its origin and HMR websocket in `connect-src`. The stylesheet links come from
+the dev server, and so do the fonts and images they point at. It reads the same configuration as the Inertia Vite integration,
 so `suprnova serve` works with the balanced policy.
 
 ## Configure headers

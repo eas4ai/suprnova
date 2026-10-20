@@ -333,6 +333,18 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   token as already used, on every engine. A consume the database ends in a
   deadlock or a serialization conflict runs again, up to three times, and
   answers a conflict rather than an internal error if every run conflicts.
+- **Pages keep their styles under the Vite dev server.** In development,
+  `SecurityHeaders` allowed the dev server in `script-src` and `connect-src`
+  only, so the browser refused the stylesheet link the framework puts in the
+  head, and a page under the balanced preset rendered with no styles. The
+  dev server is now allowed in `style-src`, `font-src` and `img-src` as well.
+- **A panic the panic hook reports carries its request.** A panic raised
+  inside a request or job scope but outside the framework's own catch
+  reached the tracker without the scope's request id, request, route and
+  user, which an error reported in the same scope carries. It now carries
+  them. The hook never waits on a lock the panicking thread may still hold:
+  a field it cannot read at once is left out, and if the request's auth
+  state is locked, the event names no user rather than a wrong one.
 
 ## 4.3.0 - 2026-10-18
 

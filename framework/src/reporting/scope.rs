@@ -5,7 +5,7 @@ use crate::{App, Request};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::future::Future;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::SystemTime;
 
 #[derive(Clone, Default)]
@@ -104,13 +104,39 @@ impl ReportScope {
 }
 
 pub(crate) fn current() -> Option<ReportScope> {
+    current_scope(Wait::Yes)
+}
+
+/// Whether a scope's state is taken by waiting for its lock. The panic hook
+/// runs on the panicking thread before it unwinds, so a lock that thread
+/// holds is still held, and waiting on it there would hang the process.
+#[derive(Clone, Copy)]
+enum Wait {
+    Yes,
+    OnlyWhenFree,
+}
+
+fn current_scope(wait: Wait) -> Option<ReportScope> {
     let context = crate::Context::current().map(|store| store.reporting.clone());
     if let Some(scope) = &context
-        && scope.0.lock().unwrap_or_else(PoisonError::into_inner).job
+        && state(scope, wait).is_some_and(|state| state.job)
     {
         return context;
     }
     CURRENT.try_with(Clone::clone).ok().or(context)
+}
+
+/// The scope's state, or `None` when `wait` allows only a free lock and the
+/// lock is held.
+fn state(scope: &ReportScope, wait: Wait) -> Option<MutexGuard<'_, State>> {
+    match wait {
+        Wait::Yes => Some(scope.0.lock().unwrap_or_else(PoisonError::into_inner)),
+        Wait::OnlyWhenFree => match scope.0.try_lock() {
+            Ok(state) => Some(state),
+            Err(TryLockError::Poisoned(error)) => Some(error.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        },
+    }
 }
 
 pub(crate) fn note_request(request: &Request, request_id: &str) {
@@ -142,8 +168,20 @@ pub(crate) fn note_request(request: &Request, request_id: &str) {
 }
 
 pub(crate) fn enrich(payload: &mut Value, send_pii: bool) {
-    if let Some(scope) = current() {
-        let mut state = scope.0.lock().unwrap_or_else(PoisonError::into_inner);
+    enrich_scope(payload, send_pii, Wait::Yes);
+}
+
+/// [`enrich`] for the panic hook, which must never wait on a lock: the
+/// scope's state and the request's auth state are read only when free, and
+/// an event whose scope is busy goes without the fields that scope holds.
+pub(crate) fn enrich_from_hook(payload: &mut Value, send_pii: bool) {
+    enrich_scope(payload, send_pii, Wait::OnlyWhenFree);
+}
+
+fn enrich_scope(payload: &mut Value, send_pii: bool, wait: Wait) {
+    if let Some(scope) = current_scope(wait)
+        && let Some(mut state) = state(&scope, wait)
+    {
         state.failed = true;
         if let Some(request) = &state.request {
             payload["request"] = request.clone();
@@ -158,10 +196,16 @@ pub(crate) fn enrich(payload: &mut Value, send_pii: bool) {
         if let Some(id) = id {
             payload["tags"]["request_id"] = json!(id);
         }
-        let user = if state.request.is_some() {
-            route_user_id(state.user_id.as_ref())
-        } else {
-            state.user_id.clone()
+        let user = match wait {
+            Wait::Yes => user_id(&state),
+            // A busy auth state can leave the route's own guard unread and
+            // name the default guard's user, so that event names no one.
+            Wait::OnlyWhenFree => {
+                match crate::auth::request_state::without_waiting(|| user_id(&state)) {
+                    (user, false) => user,
+                    (_, true) => None,
+                }
+            }
         };
         if let Some(user) = user {
             payload["user"]["id"] = json!(user);
@@ -174,6 +218,14 @@ pub(crate) fn enrich(payload: &mut Value, send_pii: bool) {
             payload["contexts"]["trace"] =
                 json!({"type":"trace","trace_id":trace.id,"span_id":&trace.id[..16],"op":trace.op});
         }
+    }
+}
+
+fn user_id(state: &State) -> Option<String> {
+    if state.request.is_some() {
+        route_user_id(state.user_id.as_ref())
+    } else {
+        state.user_id.clone()
     }
 }
 

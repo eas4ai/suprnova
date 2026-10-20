@@ -55,8 +55,9 @@
 //! matches that key and is never stored under it. The default guard's own
 //! reads record its bare principal too, through `observe_default_identity`.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 
 use super::authenticatable::Authenticatable;
 use super::config::AuthConfig;
@@ -171,8 +172,41 @@ tokio::task_local! {
 fn read_state<R>(f: impl FnOnce(&AuthRequestState) -> R) -> Option<R> {
     crate::render_cache::collector::observe_principal_read();
     AUTH_STATE
-        .try_with(|state| f(&state.lock().unwrap_or_else(|e| e.into_inner())))
+        .try_with(|state| {
+            if WITHOUT_WAITING.get().is_none() {
+                return Some(f(&state.lock().unwrap_or_else(|e| e.into_inner())));
+            }
+            match state.try_lock() {
+                Ok(state) => Some(f(&state)),
+                Err(TryLockError::Poisoned(error)) => Some(f(&error.into_inner())),
+                Err(TryLockError::WouldBlock) => {
+                    WITHOUT_WAITING.set(Some(true));
+                    None
+                }
+            }
+        })
         .ok()
+        .flatten()
+}
+
+thread_local! {
+    /// `Some` while [`without_waiting`] runs, recording whether a read found
+    /// the request's auth state locked.
+    static WITHOUT_WAITING: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// Run `f` with every read of the request's auth state taking its lock only
+/// when it is free; a read that finds it held answers as if outside a
+/// request. Returns `f`'s result and whether any read found the lock held.
+///
+/// The panic hook reads identity this way: it runs on the panicking thread
+/// before that thread unwinds, so a lock the thread holds is still held, and
+/// waiting on it there would hang the process.
+pub(crate) fn without_waiting<R>(f: impl FnOnce() -> R) -> (R, bool) {
+    let previous = WITHOUT_WAITING.replace(Some(false));
+    let result = f();
+    let refused = WITHOUT_WAITING.replace(previous) == Some(true);
+    (result, refused)
 }
 
 /// Run `fut` with a fresh request-scoped auth state installed.
@@ -1185,6 +1219,22 @@ mod tests {
             assert!(!via_remember());
             set_guard_via_remember("web", true);
             assert!(via_remember());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_read_without_waiting_answers_none_while_the_state_is_locked() {
+        scope(async {
+            set_current_user(Arc::new(TestUser { id: "1".into() }));
+            AUTH_STATE.with(|state| {
+                let _held = state.lock().expect("auth state");
+                assert_eq!(without_waiting(current_user_id), (None, true));
+            });
+            assert_eq!(
+                without_waiting(current_user_id),
+                (Some("1".to_owned()), false)
+            );
         })
         .await;
     }
