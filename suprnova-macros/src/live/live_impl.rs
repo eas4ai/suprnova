@@ -103,11 +103,7 @@ pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<Toke
                 validate_registered_name(&literal)?;
                 let (authorization_parameter, arguments) = extract_action_parameters(method)?;
                 let tool = match &tool_attribute {
-                    Some(tool) => {
-                        let mut spec = parse_live_tool(tool, &arguments)?;
-                        spec.take_budget_lint(&mut method.attrs);
-                        Some(spec)
-                    }
+                    Some(tool) => Some(parse_live_tool(tool, &arguments)?),
                     None => None,
                 };
                 let registered = RegisteredAction {
