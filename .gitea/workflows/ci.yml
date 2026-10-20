@@ -1,8 +1,10 @@
 name: CI
 
-# Runs on the Gitea runners (runner-1, the Mac and the Windows tablet) when a
-# lane branch reaches git.stonedoubtstudio.com, so a lane is checked before it
-# merges and never has to reach GitHub. GitHub ignores this directory.
+# Runs on the Gitea runners. A lane branch pushed to git.stonedoubtstudio.com
+# gets fmt and clippy on runner-1: the one check the controller would
+# otherwise build on the workstation at merge. The lane has already run the
+# tests it touched. The full test suite on Linux, the Mac and the Windows
+# tablet starts only by hand. GitHub ignores this directory.
 on:
   push:
     branches:
@@ -17,29 +19,26 @@ jobs:
   # Warnings are reported, never denied: toolchain and dependency drift must
   # not become a hard error. rust-toolchain.toml selects the compiler, so the
   # runner's default toolchain is left alone.
-  linux:
-    name: fmt, clippy and tests (Linux)
+  lint:
+    name: fmt and clippy
     runs-on: [self-hosted, rust-ci, Linux]
-    timeout-minutes: 170
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: cargo fmt
         run: cargo fmt --all --check
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets
-      - name: Install nextest
-        run: cargo install cargo-nextest --locked
-      - name: Workspace tests
-        run: cargo nextest run --workspace --no-fail-fast
 
-  other:
+  tests:
     name: tests (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, rust-ci, "${{ matrix.os }}"]
     timeout-minutes: 170
     strategy:
       fail-fast: false
       matrix:
-        os: [macOS, Windows]
+        os: [Linux, macOS, Windows]
     steps:
       - uses: actions/checkout@v4
       - name: Install nextest

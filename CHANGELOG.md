@@ -333,6 +333,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   token as already used, on every engine. A consume the database ends in a
   deadlock or a serialization conflict runs again, up to three times, and
   answers a conflict rather than an internal error if every run conflicts.
+- **Pages keep their styles under the Vite dev server.** In development,
+  `SecurityHeaders` allowed the dev server in `script-src` and `connect-src`
+  only, so the browser refused the stylesheet link the framework puts in the
+  head, and a page under the balanced preset rendered with no styles. The
+  dev server is now allowed in `style-src`, `font-src` and `img-src` as well.
 
 ## 4.3.0 - 2026-10-18
 

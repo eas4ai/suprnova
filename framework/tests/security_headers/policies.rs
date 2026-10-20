@@ -250,6 +250,36 @@ async fn sec_002_local_policy_uses_the_installed_vite_origin_and_hmr_websocket()
     );
 }
 
+/// Issue #153: the development document links the stylesheet from the Vite
+/// dev server, and that stylesheet loads its fonts and images from there too.
+#[tokio::test]
+async fn sec_003_local_policy_loads_the_dev_server_stylesheet_and_its_fonts_and_images() {
+    let _scope = production();
+    Config::register(AppConfig::builder().environment(Environment::Local).build());
+    suprnova::Inertia::install(
+        &suprnova::InertiaConfig::new()
+            .development(true)
+            .register_globally(false)
+            .vite_dev_server("http://localhost:5765"),
+    )
+    .expect("development config");
+    let response = client(SecurityHeaders::balanced()).get("/").send().await;
+    let csp = response.header("content-security-policy").unwrap();
+    for directive in ["style-src", "font-src", "img-src"] {
+        let sources = csp
+            .split(';')
+            .map(str::trim)
+            .find(|candidate| candidate.split_whitespace().next() == Some(directive))
+            .unwrap_or_else(|| panic!("{directive} missing: {csp}"));
+        assert!(
+            sources
+                .split_whitespace()
+                .any(|source| source == "http://localhost:5765"),
+            "{directive} does not allow the dev server: {csp}"
+        );
+    }
+}
+
 #[test]
 fn sec_001_from_env_rejects_invalid_values_and_selects_every_preset() {
     const CHILD: &str = "SUPRNOVA_SECURITY_TEST_CHILD";

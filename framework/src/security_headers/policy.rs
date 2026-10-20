@@ -142,9 +142,10 @@ impl ContentSecurityPolicy {
                 .split(';')
                 .map(|directive| {
                     let directive = directive.trim();
-                    if directive.starts_with("script-src ") {
+                    let name = directive.split_whitespace().next().unwrap_or_default();
+                    if DEV_SERVER_DIRECTIVES.contains(&name) {
                         format!("{directive} {origin}")
-                    } else if directive.starts_with("connect-src ") {
+                    } else if name == "connect-src" {
                         format!("{directive} {origin} {websocket}")
                     } else {
                         directive.to_string()
@@ -159,6 +160,12 @@ impl ContentSecurityPolicy {
         policy
     }
 }
+
+/// The directives that name the Vite dev server in development: a page loads
+/// its scripts from there, the stylesheet the framework links (SEC-003), and
+/// the fonts and images that stylesheet points at, which resolve against its
+/// URL.
+const DEV_SERVER_DIRECTIVES: [&str; 4] = ["script-src", "style-src", "font-src", "img-src"];
 
 /// `value` with every policy in it refusing every framing ancestor. One
 /// header value can hold several policies separated by commas, each

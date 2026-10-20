@@ -74,6 +74,7 @@ impl ReportingEvent {
         payload["level"] = json!("error");
         payload["exception"] =
             json!({"values":[{"type":"panic","value":message,"stacktrace":stack}]});
+        super::scope::enrich_from_hook(&mut payload, config.send_pii);
         crate::error::redaction::scrub(&mut payload, config.send_pii);
         Self {
             kind: ReportingKind::Event,
