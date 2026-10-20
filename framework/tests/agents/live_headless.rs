@@ -121,6 +121,13 @@ async fn agent_013_schema_has_mount_handle_and_arguments() {
     assert_eq!(input["type"], "object");
     assert_eq!(input["additionalProperties"], false);
     assert_eq!(input["required"], json!(["arguments"]));
+    // The mount has required properties, so a call that starts a component
+    // must send them; a call on an earlier handle sends the handle instead,
+    // and never both.
+    assert_eq!(
+        input["oneOf"],
+        json!([{ "required": ["mount"] }, { "required": ["handle"] }])
+    );
     let mount = &input["properties"]["mount"];
     assert_eq!(mount["required"], json!(["label", "start"]));
     assert_eq!(mount["additionalProperties"], false);
@@ -390,6 +397,13 @@ async fn agent_013_an_optional_mount_property_mounts_with_none() {
             .as_array()
             .is_none_or(|required| required.is_empty()),
         "{mount}"
+    );
+    // Nothing in this mount is required, so a call may send neither a mount
+    // nor a handle.
+    assert!(
+        quota["inputSchema"].get("oneOf").is_none(),
+        "{}",
+        quota["inputSchema"]
     );
 }
 
