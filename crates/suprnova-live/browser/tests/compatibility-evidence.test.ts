@@ -310,7 +310,7 @@ describe("actual-browser compatibility evidence", () => {
           },
         ),
       );
-      expect(execution.status).toBe(0);
+      expect(execution.status, execution.stderr).toBe(0);
       expect(execution.stdout).toContain("chrome-minimum-114");
       expect(`${execution.stdout}${execution.stderr}`).not.toContain("SECRET_SENTINEL");
       const evidence = await readFile(join(results, "chrome-minimum-114.json"), "utf8");

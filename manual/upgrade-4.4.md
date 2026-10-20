@@ -51,7 +51,11 @@ that entry if your code stores the intended URL itself.
 
 **Now:** `#[tool]` on a routed `#[handler]` makes it a tool, with an input
 schema `#[tool_input]` derives and scopes `tool_scopes!` declares. A tool call
-runs the route's middleware, validation, policies and rate limits.
+runs the route's middleware, validation, policies and rate limits. Tool names
+use 1 to 64 ASCII letters, digits and `_`, for example `create_post`.
+A Live island registers `{name}-{key}`, at most 64 characters in all.
+The compiler and boot warn about names over 30 characters and descriptions
+over 500; boot also warns about each input field without a description.
 
 **Do:** Nothing unless you adopt it. To adopt it, follow
 [Agents](agents.md). The `agents` feature must be on.
@@ -334,7 +338,7 @@ header as the kits' does.
 
 **Before:** 4.3's kits shipped no tools.
 
-**Now:** the Inertia and Live kits serve `notes.search` and `notes.create`
+**Now:** the Inertia and Live kits serve `search_notes` and `create_note`
 under the `notes:read` and `notes:write` scopes.
 
 **Do:** Nothing. They are a worked example for your own tools; see

@@ -166,12 +166,17 @@ pub(crate) fn declared_agent_tools(
 
 impl AgentToolsDeclaration {
     /// The attribute value for the island `document_key`: canonical JSON
-    /// naming each tool `{base}.{document_key}`. `None` when the key is
+    /// naming each tool `{base}-{document_key}`. `None` when the key is
     /// outside the tool instance grammar.
     fn render(&self, document_key: &str) -> Option<String> {
         use serde_json::json;
 
-        if !crate::metadata::is_tool_instance_key(document_key) {
+        if !crate::metadata::is_tool_instance_key(document_key)
+            || self
+                .tools
+                .iter()
+                .any(|tool| tool.base.len() + 1 + document_key.len() > 64)
+        {
             return None;
         }
         let tools: Vec<serde_json::Value> = self
@@ -182,7 +187,7 @@ impl AgentToolsDeclaration {
                 entry.insert("action".to_owned(), json!(tool.action));
                 entry.insert(
                     "name".to_owned(),
-                    json!(format!("{}.{document_key}", tool.base)),
+                    json!(format!("{}-{document_key}", tool.base)),
                 );
                 if let Some(title) = &tool.title {
                     entry.insert("title".to_owned(), json!(title));
@@ -512,7 +517,7 @@ mod tests {
         )
         .expect("action")
         .with_tool(
-            ActionToolMetadata::new("counter.bump", "Bump the counter.")
+            ActionToolMetadata::new("bump_counter", "Bump the counter.")
                 .expect("tool")
                 .for_browser(true),
         )
@@ -577,7 +582,10 @@ mod tests {
             ViewName::parse("tests/counter.html").expect("view"),
             ContractVersions::new(1, 1, 1, 1, 1).expect("versions"),
             Vec::new(),
-            vec![action("peek", "counter.peek"), action("add", "counter.add")],
+            vec![
+                action("peek", "peek_counter"),
+                action("add", "add_to_counter"),
+            ],
         )
         .expect("metadata");
         let names = |filter: &AgentToolFilter| -> Vec<String> {
@@ -595,8 +603,8 @@ mod tests {
                 .collect()
         };
         assert_eq!(names(&AgentToolFilter::All).len(), 2);
-        let only_peek = AgentToolFilter::Only(["counter.peek".to_owned()].into_iter().collect());
-        assert_eq!(names(&only_peek), vec!["counter.peek.main".to_owned()]);
+        let only_peek = AgentToolFilter::Only(["peek_counter".to_owned()].into_iter().collect());
+        assert_eq!(names(&only_peek), vec!["peek_counter-main".to_owned()]);
         // A filter that admits none of the tools lists no attribute at all.
         assert!(
             declared_agent_tools(&metadata, &AgentToolFilter::Only(Default::default())).is_none()

@@ -222,6 +222,9 @@ them on, and `cmd/main.rs` serves the routes through `agents::serve`. The
 kit replaces the framework's three default pages with its own, rendered by
 `src/controllers/agents.rs` in the kit's frontend:
 
+The browser helpers use the community's `webmcp-types` 0.1.10 definitions,
+pinned in `devDependencies`, to check their registrations and annotations.
+
 | Page | Route | What the user does there |
 |---|---|---|
 | `Agents/Approve` | `GET /oauth/approve` | Allows or denies an MCP client. The page names the client, its host, every permission it asks for and the address the user returns to. |
@@ -273,22 +276,22 @@ their scopes with [`tool_scopes!`](agents.md#declare-scopes), in
 
 | Tool | Route | Scope | What it does |
 |---|---|---|---|
-| `notes.search` | `GET /notes/search` | `notes:read`, "Read your notes" | Finds the user's notes by the words in their titles and text, best match first, or lists the newest. It takes `query`, up to 200 characters, and `limit`, 1 to 50 and 10 when left out. |
-| `notes.create` | `POST /notes/tools` | `notes:write`, "Write notes for you" | Writes a note for the user, with the notes form's rules: a `title` of 1 to 255 characters and an optional `body` of up to 10000. It answers the note. |
+| `search_notes` | `GET /notes/search` | `notes:read`, "Read your notes" | Finds the user's notes by the words in their titles and text, best match first, or lists the newest. It takes `query`, up to 200 characters, and `limit`, 1 to 50 and 10 when left out. |
+| `create_note` | `POST /notes/tools` | `notes:write`, "Write notes for you" | Writes a note for the user, with the notes form's rules: a `title` of 1 to 255 characters and an optional `body` of up to 10000. It answers the note. |
 
 Both tools accept users and agents, and each call acts for one user: the
 one signed in, the one who approved the client, or the one who claimed the
 agent. A client's token holds the scopes the user allowed on the approval
 page, which shows each scope by its description. An agent holds both scopes
 once a user claims it, and none before: an agent no user has claimed gets a
-403 with `insufficient_scope`. `notes.search` is marked `read_only` and
+403 with `insufficient_scope`. `search_notes` is marked `read_only` and
 `untrusted_content`, because it hands back note text, which the user wrote
 and an agent must not take as instructions.
 
 The notes page offers both tools to an agent in the user's browser, through
-`.with_tools(["notes.search", "notes.create"])` on its route. It is the only
+`.with_tools(["search_notes", "create_note"])` on its route. It is the only
 page that offers a tool, and a guest is never offered either. After
-`notes.create`,
+`create_note`,
 the page reloads its props, so the list shows the new note.
 `frontend/src/types/tool-schemas.ts` carries both inputs, as
 `SearchNotesInput` and `CreateNoteInput`.
@@ -306,7 +309,7 @@ one answers 401, and Claude Code reports that the server needs you to sign
 in; run `/mcp` to sign in. The client gets its token from the kit's OAuth
 server: it registers, sends you to the approval page to allow the scopes it
 asks for, and from then on lists the tools those scopes reach. A token with
-`notes:read` alone sees `notes.search` and not `notes.create`. See
+`notes:read` alone sees `search_notes` and not `create_note`. See
 [Users who approve a client](agents.md#users-who-approve-a-client).
 
 ### Why Suprnova diverges
@@ -644,22 +647,22 @@ with their scopes declared by [`tool_scopes!`](agents.md#declare-scopes) in
 
 | Tool | Route | Scope | What it does |
 |---|---|---|---|
-| `notes.search` | `GET /notes/search` | `notes:read`, "Read your notes" | Finds the user's notes by the words in their titles and text, best match first, or lists the newest. It takes `query`, up to 200 characters, and `limit`, 1 to 50 and 10 when left out. |
-| `notes.create` | `POST /notes/tools` | `notes:write`, "Write notes for you" | Writes a note for the user, with the note form's rules: a `title` of 1 to 255 characters and an optional `body` of up to 10000. It answers the note. |
+| `search_notes` | `GET /notes/search` | `notes:read`, "Read your notes" | Finds the user's notes by the words in their titles and text, best match first, or lists the newest. It takes `query`, up to 200 characters, and `limit`, 1 to 50 and 10 when left out. |
+| `create_note` | `POST /notes/tools` | `notes:write`, "Write notes for you" | Writes a note for the user, with the note form's rules: a `title` of 1 to 255 characters and an optional `body` of up to 10000. It answers the note. |
 
 Each call acts for one user: the one signed in, the one who approved the
 client, or the one who claimed the agent. A client's token holds the scopes
 the user allowed on the approval page, and an agent holds both once a user
 claims it and none before, so an agent no user has claimed gets a 403 with
-`insufficient_scope`. `notes.search` is marked `read_only` and
+`insufficient_scope`. `search_notes` is marked `read_only` and
 `untrusted_content`, because the note text it hands back is the user's, not
 instructions for an agent.
 
 The notes page is the one page that offers tools: its route names both with
-`.with_tools(["notes.search", "notes.create"])`, and the document's head
+`.with_tools(["search_notes", "create_note"])`, and the document's head
 carries them in its `suprnova-agent-tools` element, which the Live runtime
 registers with WebMCP. A guest is never offered either. After
-`notes.create`, the runtime renders the page's islands again, so the list
+`create_note`, the runtime renders the page's islands again, so the list
 shows the new note.
 
 To call the tools from Claude Code, run the project with `suprnova serve`

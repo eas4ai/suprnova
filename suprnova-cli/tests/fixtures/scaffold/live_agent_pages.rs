@@ -106,6 +106,7 @@ async fn boot() -> World {
         .expect("the routes with the render cache");
     let runtime = prepare_live_router_for_test(&router).expect("the Live runtime");
     App::singleton(runtime);
+    tool_budget_probe::assert_quiet(&router);
     let client = TestClient::new(router, MiddlewareRegistry::from_global())
         .with_peer_address("127.0.0.1".parse().expect("an address"));
     let grace = User::create("Grace Hopper", "grace@example.test", PASSWORD)
@@ -1568,7 +1569,7 @@ async fn write_notes(user_id: u64, notes: &[(&str, &str)]) {
     }
 }
 
-/// The titles of the notes a `notes.search` answer holds, in its order.
+/// The titles of the notes a `search_notes` answer holds, in its order.
 fn titles(answer: &Value) -> Vec<String> {
     answer["notes"]
         .as_array()
@@ -1584,11 +1585,11 @@ fn sorted(mut names: Vec<String>) -> Vec<String> {
     names
 }
 
-/// `notes.search` as the notes page's runtime calls it for the client's
+/// `search_notes` as the notes page's runtime calls it for the client's
 /// session: a `GET` with the arguments in the query and the tool-call
 /// header.
 async fn search_in_browser(client: &TestClient, arguments: Value) -> TestResponse {
-    client.tool("notes.search", arguments).send().await
+    client.tool("search_notes", arguments).send().await
 }
 
 /// The `WWW-Authenticate` header of a refused MCP call.
@@ -1731,8 +1732,8 @@ async fn agent_014_live_notes_page_offers_the_notes_tools(world: &World, email: 
         "{}",
         notes.body_text()
     );
-    assert_eq!(sorted(notes.page_tools()), ["notes.create", "notes.search"]);
-    let search = notes.page_tool("notes.search").expect("notes.search");
+    assert_eq!(sorted(notes.page_tools()), ["create_note", "search_notes"]);
+    let search = notes.page_tool("search_notes").expect("search_notes");
     assert_eq!(search["method"], "GET", "{search}");
     assert_eq!(
         search["annotations"],
@@ -1743,7 +1744,7 @@ async fn agent_014_live_notes_page_offers_the_notes_tools(world: &World, email: 
             "debugging": false,
         }),
     );
-    let create = notes.page_tool("notes.create").expect("notes.create");
+    let create = notes.page_tool("create_note").expect("create_note");
     assert_eq!(create["method"], "POST", "{create}");
     assert_eq!(
         create["annotations"],
@@ -1806,7 +1807,7 @@ async fn agent_001_live_notes_search_is_matched_before_a_note_id(world: &World, 
     let found = client
         .mcp()
         .with_token(&token)
-        .call("notes.search", json!({}))
+        .call("search_notes", json!({}))
         .await;
     assert!(!found.is_error(), "{}", found.text());
     assert_eq!(
@@ -1815,7 +1816,7 @@ async fn agent_001_live_notes_search_is_matched_before_a_note_id(world: &World, 
     );
 }
 
-/// AGENT-001: `notes.search` reads its input from the query of the page's
+/// AGENT-001: `search_notes` reads its input from the query of the page's
 /// `GET`, and from the arguments of an MCP call: the words to find in the
 /// titles and the text, and how many notes to answer. Out of bounds, each
 /// field is named: a 422 on the page, a tool error over MCP.
@@ -1859,18 +1860,18 @@ async fn agent_001_live_notes_search_reads_its_input_from_the_query(world: &Worl
     let token = user_token(world, "notes:read", "Read your notes").await;
     let mcp = client.mcp().with_token(&token);
     let one = mcp
-        .call("notes.search", json!({"query": "apple", "limit": 1}))
+        .call("search_notes", json!({"query": "apple", "limit": 1}))
         .await;
     assert!(!one.is_error(), "{}", one.text());
     let found = titles(one.structured().expect("structured notes"));
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].starts_with("Apple "), "{found:?}");
-    let text = mcp.call("notes.search", json!({"query": "cinnamon"})).await;
+    let text = mcp.call("search_notes", json!({"query": "cinnamon"})).await;
     assert_eq!(
         titles(text.structured().expect("structured notes")),
         ["Apple pie"]
     );
-    let refused = mcp.call("notes.search", json!({"limit": 0})).await;
+    let refused = mcp.call("search_notes", json!({"limit": 0})).await;
     assert_eq!(refused.status(), 200, "a tool error, not a protocol error");
     assert!(refused.is_error(), "{}", refused.text());
     assert!(
@@ -1905,10 +1906,10 @@ async fn agent_002_live_notes_tools_act_for_the_caller_only(world: &World, email
     assert_eq!(listed.status(), 200, "{listed:?}");
     let names = listed.tool_names();
     assert!(
-        names.contains(&"notes.search".to_owned()) && !names.contains(&"notes.create".to_owned()),
+        names.contains(&"search_notes".to_owned()) && !names.contains(&"create_note".to_owned()),
         "{names:?}"
     );
-    let found = reader.call("notes.search", shared.clone()).await;
+    let found = reader.call("search_notes", shared.clone()).await;
     assert!(!found.is_error(), "{}", found.text());
     assert_eq!(
         titles(found.structured().expect("structured notes")),
@@ -1916,7 +1917,7 @@ async fn agent_002_live_notes_tools_act_for_the_caller_only(world: &World, email
     );
     let refused = reader
         .call(
-            "notes.create",
+            "create_note",
             json!({"title": "Not the client's to write"}),
         )
         .await;
@@ -1930,10 +1931,10 @@ async fn agent_002_live_notes_tools_act_for_the_caller_only(world: &World, email
     let agent_token = claimed_agent_token(world, email).await;
     let agent = client.mcp().with_token(&agent_token);
     let names = agent.list().await.tool_names();
-    for name in ["notes.search", "notes.create"] {
+    for name in ["search_notes", "create_note"] {
         assert!(names.contains(&name.to_owned()), "{name}: {names:?}");
     }
-    let found = agent.call("notes.search", shared.clone()).await;
+    let found = agent.call("search_notes", shared.clone()).await;
     assert!(!found.is_error(), "{}", found.text());
     assert_eq!(
         titles(found.structured().expect("structured notes")),
@@ -1941,7 +1942,7 @@ async fn agent_002_live_notes_tools_act_for_the_caller_only(world: &World, email
     );
     let written = agent
         .call(
-            "notes.create",
+            "create_note",
             json!({"title": "  Written by an agent ", "body": "Kept from nobody."}),
         )
         .await;
@@ -1950,7 +1951,7 @@ async fn agent_002_live_notes_tools_act_for_the_caller_only(world: &World, email
         written.structured().expect("the note")["title"],
         "Written by an agent"
     );
-    let blank = agent.call("notes.create", json!({"title": "   "})).await;
+    let blank = agent.call("create_note", json!({"title": "   "})).await;
     assert!(blank.is_error(), "{}", blank.text());
     assert!(blank.text().contains("title"), "{}", blank.text());
     let hers = search_in_browser(client, json!({"query": "nobody"})).await;
@@ -1976,8 +1977,8 @@ async fn agent_002_live_notes_tools_act_for_the_caller_only(world: &World, email
         "{names:?}"
     );
     for (name, arguments) in [
-        ("notes.search", shared),
-        ("notes.create", json!({"title": "Nobody's note"})),
+        ("search_notes", shared),
+        ("create_note", json!({"title": "Nobody's note"})),
     ] {
         let refused = stranger.call(name, arguments).await;
         assert_eq!(refused.status(), 403, "{name}: {}", refused.text());

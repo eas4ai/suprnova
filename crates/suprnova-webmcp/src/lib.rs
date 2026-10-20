@@ -30,7 +30,7 @@
 //! }
 //!
 //! fn boot() -> Result<(), WebMcpError> {
-//!     let add = PageTool::<AddTodo>::new("todos.add", "Add an item to the visible todo list.")
+//!     let add = PageTool::<AddTodo>::new("add_todo", "Add an item to the visible todo list.")
 //!         .title("Add todo")
 //!         .register(|input: AddTodo| async move { Ok(ToolResult::json(&input.title)?) })?;
 //!     let server = ServerTools::from_document()?;

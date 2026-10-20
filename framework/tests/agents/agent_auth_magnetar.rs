@@ -97,7 +97,7 @@ async fn agent_009_claim_under_magnetar_sessions() {
         .mcp()
         .with_token(&token)
         .call(
-            "posts.create",
+            "create_post",
             json!({ "title": "From a Magnetar user's agent" }),
         )
         .await;
@@ -109,7 +109,7 @@ async fn agent_009_claim_under_magnetar_sessions() {
     let refused = client
         .mcp()
         .with_token(&token)
-        .call("posts.show", json!({ "post": "1" }))
+        .call("show_post", json!({ "post": "1" }))
         .await;
     assert_eq!(refused.status(), 401, "{:?}", refused.response());
     let www = refused

@@ -16,18 +16,14 @@ use crate::canonical::CanonicalValue;
 use super::{ComponentMetadata, MetadataError, MetadataErrorKind};
 
 /// The longest base name a Live tool may have. A browser registers the tool
-/// as `{base}.{instance}`, with an instance key of at most 63 bytes, and a
-/// tool name has at most 128 characters.
+/// as `{base}-{instance}`; the combined name must fit in 64 characters.
 pub const MAX_TOOL_BASE_BYTES: usize = 64;
-
-/// The longest description a tool may carry, in bytes.
-const MAX_DESCRIPTION_BYTES: usize = 4_096;
 
 /// The longest display title a tool may carry, in bytes.
 const MAX_TITLE_BYTES: usize = 256;
 
 /// The longest instance key a tool component's island may have, in bytes:
-/// a base of [`MAX_TOOL_BASE_BYTES`], a `.` and the key fit in 128.
+/// the checker also bounds the combined base, separator and key to 64.
 pub const MAX_TOOL_INSTANCE_BYTES: usize = 63;
 
 /// What `#[tool]` declares on one Live action.
@@ -52,15 +48,14 @@ impl ActionToolMetadata {
     ///
     /// [`MetadataErrorKind::InvalidActionMetadata`] when the name is empty,
     /// longer than [`MAX_TOOL_BASE_BYTES`] or outside ASCII letters, digits,
-    /// `_`, `-` and `.`, or the description is blank or longer than 4 KiB.
+    /// `_`, or the description is blank.
     pub fn new(name: &str, description: &str) -> Result<Self, MetadataError> {
         let name_valid = !name.is_empty()
             && name.len() <= MAX_TOOL_BASE_BYTES
             && name
                 .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
-        if !name_valid || description.trim().is_empty() || description.len() > MAX_DESCRIPTION_BYTES
-        {
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        if !name_valid || description.trim().is_empty() {
             return Err(invalid());
         }
         Ok(Self {
@@ -186,11 +181,12 @@ impl ActionToolMetadata {
     }
 
     /// The browser name of the tool on the island `instance`:
-    /// `{base}.{instance}`, or `None` when `instance` is outside the
-    /// instance grammar ([`is_tool_instance_key`]).
+    /// `{base}-{instance}`, or `None` when `instance` is outside the
+    /// instance grammar ([`is_tool_instance_key`]) or the combined name exceeds 64 characters.
     #[must_use]
     pub fn browser_name(&self, instance: &str) -> Option<String> {
-        is_tool_instance_key(instance).then(|| format!("{}.{instance}", self.name))
+        (is_tool_instance_key(instance) && self.name.len() + 1 + instance.len() <= 64)
+            .then(|| format!("{}-{instance}", self.name))
     }
 
     /// Whether `arguments` can be described to an agent.
@@ -204,9 +200,8 @@ impl ActionToolMetadata {
 /// Whether `key` may name the island of a tool component: 1 to 63 bytes of
 /// ASCII letters, digits, `_` and `-`.
 ///
-/// A tool name allows no `:`, and a `.` would make the browser name
-/// ambiguous between the base and the instance, so the key grammar is
-/// narrower than the one a document key or a `live:key` otherwise has.
+/// The first hyphen separates the tool name from this key, so a key may
+/// itself carry hyphens without making a browser name ambiguous.
 #[must_use]
 pub fn is_tool_instance_key(key: &str) -> bool {
     !key.is_empty()

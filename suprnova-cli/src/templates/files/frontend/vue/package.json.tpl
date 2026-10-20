@@ -17,6 +17,7 @@
     "vue": "^3.5.40"
   },
   "devDependencies": {
+    "webmcp-types": "0.1.10",
     "@inertiajs/vite": "^3.8.0",
     "@tailwindcss/forms": "^0.5.11",
     "@tailwindcss/typography": "^0.5.20",

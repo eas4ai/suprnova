@@ -30,7 +30,7 @@ const UPLOAD_CONTROLS: [&str; 14] = [
 /// required the principal.
 ///
 /// An MCP client mounts `app.tally` from the properties it sends
-/// (`tally.add`), which are untrusted input: Live asks
+/// (`add_to_tally`), which are untrusted input: Live asks
 /// `live:app.tally.mount` before anything mounts, and refuses when no policy
 /// answers. A signed-in user may start a tally at any count; a call whose
 /// `start` the policy cannot read as a count is refused.

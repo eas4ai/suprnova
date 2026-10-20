@@ -361,12 +361,30 @@ fn agent_017_inertia_kits_ship_the_browser_helpers() {
         let project = Project::new(kit);
         let file = |relative: &str| project.read(&format!("frontend/src/{relative}"));
 
+        let package: serde_json::Value =
+            serde_json::from_str(&project.read("frontend/package.json"))
+                .expect("the generated package manifest");
+        assert_eq!(
+            package["devDependencies"]["webmcp-types"], "0.1.10",
+            "{kit}"
+        );
         let core = file("lib/agents/core.ts");
         assert_eq!(
             core,
             template("frontend/agents/core.ts.tpl"),
             "{kit}: core.ts"
         );
+        for upstream in [
+            "WebMCP.ModelContextTool",
+            "WebMCP.ToolAnnotations",
+            "WebMCP.ModelContext",
+            "WebMCP.ToolExecuteCallbackOptions",
+        ] {
+            assert!(
+                core.contains(upstream),
+                "{kit}: browser helpers do not use {upstream}"
+            );
+        }
         // A form tool marks its submission with the header the consent
         // pages refuse, by the framework's own name for it.
         for needle in [

@@ -60,7 +60,7 @@ impl Authenticatable for TestUser {
 #[derive(Default)]
 pub struct Post;
 
-/// The input of `posts.create`.
+/// The input of `create_post`.
 #[tool_input]
 pub struct CreatePost {
     /// The post's title.
@@ -76,7 +76,7 @@ pub struct CreatePost {
     pub stars: Option<u8>,
 }
 
-/// What `posts.create` answers.
+/// What `create_post` answers.
 #[tool_output]
 pub struct PostView {
     pub id: u64,
@@ -98,7 +98,7 @@ pub struct Echo {
     pub text: String,
 }
 
-/// The input of `slow.wait`.
+/// The input of `wait_slowly`.
 #[tool_input]
 pub struct Wait {
     /// How long to wait, in milliseconds.
@@ -164,7 +164,7 @@ impl Drop for DropFlag {
     }
 }
 
-/// How many times `slow.wait` began.
+/// How many times `wait_slowly` began.
 pub static SLOW_STARTED: AtomicUsize = AtomicUsize::new(0);
 
 // ---------------------------------------------------------------- tools ----
@@ -182,7 +182,7 @@ pub async fn echo(caller: ToolCaller, form: Echo) -> Response {
 }
 
 #[tool(
-    name = "posts.create",
+    name = "create_post",
     description = "Create a draft post for the signed-in user.",
     title = "Create a post",
     callers = [user, agent],
@@ -207,7 +207,7 @@ pub async fn create_post(caller: ToolCaller, form: CreatePost) -> Response {
 }
 
 #[tool(
-    name = "posts.show",
+    name = "show_post",
     description = "Show one post.",
     callers = [user, agent],
     scopes = [scope::POSTS_READ],
@@ -221,7 +221,7 @@ pub async fn show_post(post: String, form: PostRef) -> Response {
 }
 
 #[tool(
-    name = "posts.delete",
+    name = "delete_post",
     description = "Delete one post.",
     callers = [user, agent],
     scopes = [scope::POSTS_READ, scope::POSTS_DELETE],
@@ -229,13 +229,13 @@ pub async fn show_post(post: String, form: PostRef) -> Response {
     annotations(destructive),
 )]
 #[handler]
-#[suprnova::authorize("posts.delete", Post)]
+#[suprnova::authorize("delete_post", Post)]
 pub async fn delete_post(post: String, form: PostRef) -> Response {
     json_response!({ "deleted": post, "same": post == form.post })
 }
 
 #[tool(
-    name = "users.profile",
+    name = "read_user_profile",
     description = "Read the signed-in user's profile.",
     callers = [user],
 )]
@@ -245,7 +245,7 @@ pub async fn profile(caller: ToolCaller) -> Response {
 }
 
 #[tool(
-    name = "slow.wait",
+    name = "wait_slowly",
     description = "Wait, then answer.",
     callers = [public],
     input = Wait,
@@ -263,7 +263,7 @@ pub async fn slow(form: Wait) -> Response {
 }
 
 #[tool(
-    name = "request.peek",
+    name = "peek_request",
     description = "Report what the tool's request carried.",
     callers = [public, user],
 )]
@@ -278,7 +278,7 @@ pub async fn peek(request: Request) -> Response {
 }
 
 #[tool(
-    name = "throttled.ping",
+    name = "ping_throttled",
     description = "Answer pong, at most twice a minute.",
     callers = [public],
 )]
@@ -288,7 +288,7 @@ pub async fn throttled() -> Response {
 }
 
 #[tool(
-    name = "page.html",
+    name = "read_html_page",
     description = "Answer with a page rather than data.",
     callers = [public],
 )]
@@ -298,11 +298,11 @@ pub async fn page() -> Response {
     Ok(HttpResponse::html(format!("<p>hello {render}</p>")))
 }
 
-/// How many times `page.html` rendered.
+/// How many times `read_html_page` rendered.
 pub static PAGE_RENDERS: AtomicUsize = AtomicUsize::new(0);
 
 #[tool(
-    name = "slow.stream",
+    name = "read_slow_stream",
     description = "Answer with an event that arrives late.",
     callers = [public],
     input = Wait,
@@ -323,7 +323,7 @@ pub async fn slow_stream(form: Wait) -> Response {
 }
 
 #[tool(
-    name = "slow.bytes",
+    name = "read_slow_bytes",
     description = "Answer with a body that arrives late.",
     callers = [public],
     input = Wait,
@@ -357,7 +357,7 @@ pub struct Address {
     pub city: String,
 }
 
-/// The input of `profile.update`: several required fields, one nested.
+/// The input of `update_profile`: several required fields, one nested.
 #[tool_input]
 #[serde(deny_unknown_fields)]
 pub struct UpdateProfile {
@@ -373,7 +373,7 @@ pub struct UpdateProfile {
 }
 
 #[tool(
-    name = "profile.update",
+    name = "update_profile",
     description = "Update the signed-in user's profile.",
     callers = [user],
     input = UpdateProfile,
@@ -392,7 +392,7 @@ pub async fn update_profile(form: UpdateProfile) -> Response {
 /// How many times the after-response command ran.
 pub static LATER_RUNS: AtomicUsize = AtomicUsize::new(0);
 
-/// The command `bus.later` queues for after its response.
+/// The command `enqueue_message` queues for after its response.
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub struct Later;
 
@@ -415,7 +415,7 @@ impl suprnova::bus::command::Handler<Later> for LaterHandler {
 }
 
 #[tool(
-    name = "bus.later",
+    name = "enqueue_message",
     description = "Queue work for after the response.",
     callers = [public],
 )]
@@ -445,7 +445,7 @@ impl Authenticatable for ApiUser {
 }
 
 #[tool(
-    name = "users.api",
+    name = "read_api_user",
     description = "Read the user an API guard signs in.",
     callers = [user],
     guard = "api",
@@ -476,7 +476,7 @@ pub enum Expr {
     Exp { arg: Box<Expr> },
 }
 
-/// The input of `math.eval`.
+/// The input of `evaluate_math`.
 #[tool_input]
 pub struct Eval {
     /// The expression.
@@ -484,7 +484,7 @@ pub struct Eval {
 }
 
 #[tool(
-    name = "math.eval",
+    name = "evaluate_math",
     description = "Evaluate an expression.",
     callers = [public],
     input = Eval,
@@ -502,7 +502,7 @@ impl Expr {
     }
 }
 
-/// The input of `tags.group`: a map whose keys the caller chooses.
+/// The input of `group_tags`: a map whose keys the caller chooses.
 #[tool_input]
 pub struct TagGroups {
     /// Tag ids by group name.
@@ -510,7 +510,7 @@ pub struct TagGroups {
 }
 
 #[tool(
-    name = "tags.group",
+    name = "group_tags",
     description = "Group tags.",
     callers = [public],
     input = TagGroups,
@@ -521,10 +521,10 @@ pub async fn group_tags(form: TagGroups) -> Response {
 }
 
 #[tool(
-    name = "users.named",
+    name = "read_named_user",
     description = "A tool that names the route it calls.",
     callers = [user],
-    route = "users.named",
+    route = "read_named_user",
 )]
 #[handler]
 pub async fn named_profile(caller: ToolCaller) -> Response {
@@ -541,14 +541,14 @@ pub async fn plain() -> Response {
 pub fn define_policies() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
-        Gate::define::<TestUser, Post>("posts.delete", |_user, _post| {
+        Gate::define::<TestUser, Post>("delete_post", |_user, _post| {
             !ToolCaller::current().is_some_and(|caller| caller.is_agent())
         });
     });
 }
 
-/// Every tool's route, the counting middleware on `posts.create`, a route
-/// throttle on `throttled.ping`, and a literal `/posts/new` beside
+/// Every tool's route, the counting middleware on `create_post`, a route
+/// throttle on `ping_throttled`, and a literal `/posts/new` beside
 /// `/posts/{post}`.
 pub fn routes() -> Router {
     Router::new()
@@ -574,7 +574,7 @@ pub fn routes() -> Router {
         .post("/math", eval)
         .post("/tags", group_tags)
         .post("/named", named_profile)
-        .name("users.named")
+        .name("read_named_user")
         .post("/plain", plain)
         .into()
 }

@@ -23,7 +23,7 @@ async fn agent_001_tool_call_runs_route_middleware() {
         .mcp()
         .as_caller(writer())
         .header("User-Agent", key)
-        .call("posts.create", json!({ "title": "Counted" }))
+        .call("create_post", json!({ "title": "Counted" }))
         .await;
     assert!(!result.is_error(), "{:?}", result.response());
     assert_eq!(
@@ -40,7 +40,7 @@ async fn agent_001_tool_call_runs_form_request_validation_and_returns_is_error_p
     let result = client
         .mcp()
         .as_caller(writer())
-        .call("posts.create", json!({ "title": "", "stars": 9 }))
+        .call("create_post", json!({ "title": "", "stars": 9 }))
         .await;
     assert_eq!(result.status(), 200);
     assert_eq!(
@@ -63,7 +63,7 @@ async fn agent_001_tool_call_runs_authorize_policy() {
     let result = client
         .mcp()
         .as_caller(ToolCaller::agent("reg-1").scopes([scope::POSTS_READ, scope::POSTS_DELETE]))
-        .call("posts.delete", json!({ "post": "42" }))
+        .call("delete_post", json!({ "post": "42" }))
         .await;
     assert!(result.is_error(), "{:?}", result.response());
     // A user passes the same check.
@@ -72,7 +72,7 @@ async fn agent_001_tool_call_runs_authorize_policy() {
         .as_caller(
             ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_READ, scope::POSTS_DELETE]),
         )
-        .call("posts.delete", json!({ "post": "42" }))
+        .call("delete_post", json!({ "post": "42" }))
         .await;
     assert!(!result.is_error(), "{:?}", result.response());
     assert_eq!(
@@ -87,10 +87,10 @@ async fn agent_001_tool_call_runs_route_throttle() {
     let client = fixture::client().with_peer_address(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 1)));
     let mcp = client.mcp();
     for _ in 0..2 {
-        let result = mcp.call("throttled.ping", json!({})).await;
+        let result = mcp.call("ping_throttled", json!({})).await;
         assert!(!result.is_error(), "{:?}", result.response());
     }
-    let third = mcp.call("throttled.ping", json!({})).await;
+    let third = mcp.call("ping_throttled", json!({})).await;
     assert!(
         third.is_error(),
         "the route's throttle refused the third call"
@@ -106,7 +106,7 @@ async fn agent_001_path_parameter_cannot_inject_a_segment() {
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_READ]));
     for value in ["a/b", "../admin", "%2F", "x?y=1#z"] {
-        let result = mcp.call("posts.show", json!({ "post": value })).await;
+        let result = mcp.call("show_post", json!({ "post": value })).await;
         assert!(!result.is_error(), "{value}: {:?}", result.response());
         assert_eq!(
             result.structured(),
@@ -116,7 +116,7 @@ async fn agent_001_path_parameter_cannot_inject_a_segment() {
     }
     // `new` would match the literal `/posts/new` route, which is not the
     // tool's: the call is refused rather than sent there.
-    let result = mcp.call("posts.show", json!({ "post": "new" })).await;
+    let result = mcp.call("show_post", json!({ "post": "new" })).await;
     assert!(result.is_error(), "{:?}", result.response());
 }
 
@@ -129,7 +129,7 @@ async fn agent_001_tool_call_does_not_forward_the_bearer_token() {
         .as_caller(ToolCaller::user(TestUser::arc("7")))
         .header("Cookie", "suprnova_session=abc")
         .header("User-Agent", "peek-agent")
-        .call("request.peek", json!({}))
+        .call("peek_request", json!({}))
         .await;
     assert!(!result.is_error(), "{:?}", result.response());
     assert_eq!(
@@ -147,7 +147,7 @@ async fn agent_001_tool_call_does_not_forward_the_bearer_token() {
 async fn agent_001_tool_error_body_is_text_not_html() {
     let _container = fixture::setup();
     let client = fixture::client();
-    let result = client.mcp().call("page.html", json!({})).await;
+    let result = client.mcp().call("read_html_page", json!({})).await;
     assert!(result.is_error(), "a page is not a tool result");
     assert!(!result.text().contains("<p>"), "{}", result.text());
 }
@@ -215,7 +215,7 @@ async fn agent_001_render_cache_does_not_serve_tool_calls() {
         .expect("the RenderCache migration");
     suprnova::testing::TestContainer::singleton(conn);
 
-    // `page.html` answers a public page, which this policy would store and
+    // `read_html_page` answers a public page, which this policy would store and
     // serve to the next request.
     let policy = RenderCachePolicy::builder(RepresentationClass::PublicShared)
         .freshness(FreshnessPolicy::new(60_000, 0, 0).expect("a freshness"))
@@ -238,7 +238,7 @@ async fn agent_001_render_cache_does_not_serve_tool_calls() {
 
     let before = fixture::PAGE_RENDERS.load(Ordering::SeqCst);
     for _ in 0..2 {
-        let result = client.mcp().call("page.html", json!({})).await;
+        let result = client.mcp().call("read_html_page", json!({})).await;
         assert_eq!(result.status(), 200, "{:?}", result.response());
     }
     assert_eq!(
@@ -297,7 +297,7 @@ async fn agent_001_dispatch_after_response_runs_after_a_tool_call() {
         "id": 1,
         "method": "tools/call",
         "params": {
-            "name": "bus.later",
+            "name": "enqueue_message",
             "arguments": {},
             "_meta": {
                 "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -312,7 +312,7 @@ async fn agent_001_dispatch_after_response_runs_after_a_tool_call() {
         .header("Content-Type", "application/json")
         .header("MCP-Protocol-Version", "2026-07-28")
         .header("Mcp-Method", "tools/call")
-        .header("Mcp-Name", "bus.later")
+        .header("Mcp-Name", "enqueue_message")
         .body(Full::new(Bytes::from(body.to_string())))
         .expect("a valid request");
     let response = sender.send_request(request).await.expect("the answer");

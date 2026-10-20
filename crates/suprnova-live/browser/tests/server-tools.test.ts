@@ -149,7 +149,7 @@ describe("the shared browser call cases", () => {
 });
 
 const TOOL: ServerToolDefinition = Object.freeze({
-  name: "posts.create",
+  name: "create_post",
   title: "Create a post",
   description: "Create a draft post for the signed-in user.",
   inputSchema: Object.freeze({ type: "object" }),
@@ -165,7 +165,7 @@ const TOOL: ServerToolDefinition = Object.freeze({
 
 const READ: ServerToolDefinition = Object.freeze({
   ...TOOL,
-  name: "notes.show",
+  name: "show_note",
   annotations: Object.freeze({
     readOnlyHint: true,
     untrustedContentHint: true,
@@ -191,7 +191,7 @@ describe("the server tools element", () => {
   it("reads a valid payload", () => {
     const parsed = parseServerTools(payload());
     expect(parsed.limits).toEqual({ maxResultBytes: 1024, callTimeoutMs: 30_000 });
-    expect(parsed.tools.map((tool) => tool.name)).toEqual(["posts.create", "notes.show"]);
+    expect(parsed.tools.map((tool) => tool.name)).toEqual(["create_post", "show_note"]);
     expect(parsed.tools[1]?.path).toEqual(READ.path);
   });
 
@@ -431,7 +431,7 @@ describe("a server tool call", () => {
     expect(sent?.init.cache).toBe("no-store");
     expect(sent?.init.body).toBe('{"title":"Hello"}');
     const headers = new Headers(sent?.init.headers);
-    expect(headers.get("suprnova-tool-call")).toBe("posts.create");
+    expect(headers.get("suprnova-tool-call")).toBe("create_post");
     expect(headers.get("x-xsrf-token")).toBe("token-1");
     expect(headers.get("accept")).toBe("application/json");
     expect(headers.get("content-type")).toBe("application/json");
@@ -775,8 +775,8 @@ describe("the runtime's server tools", () => {
         later: true,
       }),
     );
-    expect(context.live()).toEqual(["posts.create"]);
-    const registered = context.registered.find((entry) => entry.tool.name === "posts.create");
+    expect(context.live()).toEqual(["create_post"]);
+    const registered = context.registered.find((entry) => entry.tool.name === "create_post");
     expect(Object.keys(registered?.tool ?? {}).sort()).toEqual([
       "annotations",
       "description",
@@ -796,8 +796,8 @@ describe("the runtime's server tools", () => {
 
   it("registers the element's tools, and removes them on suspend and dispose", () => {
     const { context, runtime } = page(payload());
-    expect(context.live()).toEqual(["notes.show", "posts.create"]);
-    const registered = context.registered.find((entry) => entry.tool.name === "posts.create");
+    expect(context.live()).toEqual(["create_post", "show_note"]);
+    const registered = context.registered.find((entry) => entry.tool.name === "create_post");
     expect(registered?.tool.title).toBe("Create a post");
     expect(registered?.tool.annotations).toEqual({
       readOnlyHint: false,
@@ -806,7 +806,7 @@ describe("the runtime's server tools", () => {
       debugging: false,
     });
     // `debugging` is WebMCP's fourth hint, sent as the server set it.
-    const debugging = context.registered.find((entry) => entry.tool.name === "notes.show");
+    const debugging = context.registered.find((entry) => entry.tool.name === "show_note");
     expect(debugging?.tool.annotations).toEqual({
       readOnlyHint: true,
       untrustedContentHint: true,
@@ -816,7 +816,7 @@ describe("the runtime's server tools", () => {
     runtime.suspend();
     expect(context.live()).toEqual([]);
     runtime.resume();
-    expect(context.live()).toEqual(["notes.show", "posts.create"]);
+    expect(context.live()).toEqual(["create_post", "show_note"]);
     runtime.dispose();
     expect(context.live()).toEqual([]);
   });
@@ -839,13 +839,13 @@ describe("the runtime's server tools", () => {
 
   it("calls the tool's route, then renders every island fresh before it answers", async () => {
     const { context, requests } = page(payload());
-    const result = context.call("posts.create", { title: "Hello" });
+    const result = context.call("create_post", { title: "Hello" });
     await vi.waitFor(() => {
       expect(requests).toHaveLength(1);
     });
     const call = requests[0];
     expect(call?.url).toBe("https://app.example.test/posts");
-    expect(new Headers(call?.init.headers).get("suprnova-tool-call")).toBe("posts.create");
+    expect(new Headers(call?.init.headers).get("suprnova-tool-call")).toBe("create_post");
     let settled = false;
     void result.then(() => {
       settled = true;
@@ -890,7 +890,7 @@ describe("the runtime's server tools", () => {
 
   it("does not render the islands after a read-only tool", async () => {
     const { context, requests } = page(payload());
-    const result = context.call("notes.show", { note: "1" });
+    const result = context.call("show_note", { note: "1" });
     await vi.waitFor(() => {
       expect(requests).toHaveLength(1);
     });

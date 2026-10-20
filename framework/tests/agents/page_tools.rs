@@ -22,7 +22,7 @@ use crate::live_fixture::{self, AgentCounter, AgentPage, AgentQuota};
 
 // ---------------------------------------------------------------- tools ----
 
-/// The input of `notes.lookup`.
+/// The input of `lookup_note`.
 #[tool_input]
 pub struct NoteQuery {
     /// What to look for.
@@ -30,7 +30,7 @@ pub struct NoteQuery {
 }
 
 #[tool(
-    name = "notes.search",
+    name = "search_notes",
     description = "List the latest notes.",
     callers = [public],
     annotations(read_only, untrusted_content, debugging),
@@ -41,7 +41,7 @@ pub async fn search_notes(request: Request) -> Response {
 }
 
 #[tool(
-    name = "notes.lookup",
+    name = "lookup_note",
     description = "Look a note up, reading the body on GET.",
     callers = [public],
     input = NoteQuery,
@@ -51,7 +51,7 @@ pub async fn lookup_notes(form: NoteQuery) -> Response {
     json_response!({ "q": form.q })
 }
 
-/// The input of `notes.show`: its path parameter, and a scalar beside it.
+/// The input of `show_note`: its path parameter, and a scalar beside it.
 #[tool_input]
 pub struct NoteRef {
     /// The note.
@@ -61,7 +61,7 @@ pub struct NoteRef {
 }
 
 #[tool(
-    name = "notes.show",
+    name = "show_note",
     description = "Show one note.",
     callers = [public],
     input = NoteRef,
@@ -73,7 +73,7 @@ pub async fn show_note(note: String, form: NoteRef) -> Response {
     json_response!({ "note": form.note, "format": form.format, "same": note == form.note })
 }
 
-/// What `notes.filter` narrows the notes by.
+/// What `filter_notes` narrows the notes by.
 #[tool_schema]
 #[derive(serde::Deserialize, Validate)]
 pub struct NoteFilters {
@@ -81,7 +81,7 @@ pub struct NoteFilters {
     pub drafts: bool,
 }
 
-/// The input of `notes.filter`: a structured field, which a query cannot
+/// The input of `filter_notes`: a structured field, which a query cannot
 /// carry.
 #[tool_input]
 pub struct NoteFilter {
@@ -91,7 +91,7 @@ pub struct NoteFilter {
 }
 
 #[tool(
-    name = "notes.filter",
+    name = "filter_notes",
     description = "Filter the notes.",
     callers = [public],
     input = NoteFilter,
@@ -102,7 +102,7 @@ pub async fn filter_notes(form: NoteFilter) -> Response {
 }
 
 #[tool(
-    name = "audit.export",
+    name = "export_audit",
     description = "Export the audit log for an agent account.",
     callers = [agent],
 )]
@@ -136,11 +136,11 @@ async fn inertia_page(request: Request) -> Response {
 }
 
 async fn inertia_with_additions(request: Request) -> Response {
-    PageTools::add(["posts.create"])
+    PageTools::add(["create_post"])
         .await
         .map_err(HttpResponse::from)?;
     InertiaResponse::new("Posts/Index")
-        .with_tools(["request.peek"])
+        .with_tools(["peek_request"])
         .resolve(&request)
         .await
         .map_err(HttpResponse::from)
@@ -154,7 +154,7 @@ async fn plain_page(request: Request) -> Response {
 }
 
 /// The fixture's routes, the page tests' tools and pages, with
-/// `notes.search` shared by every page.
+/// `search_notes` shared by every page.
 fn page_routes() -> Router {
     fixture::define_policies();
     let router: Router = fixture::routes()
@@ -164,21 +164,21 @@ fn page_routes() -> Router {
         .get("/notes/{note}", show_note)
         .post("/audit", export_audit)
         .get("/inertia/posts", inertia_page)
-        .with_tools(["echo", "users.profile", "posts.create", "posts.delete"])
+        .with_tools(["echo", "read_user_profile", "create_post", "delete_post"])
         .middleware(StandInToken)
         .get("/inertia/notes", inertia_page)
-        .with_tools(["notes.show"])
+        .with_tools(["show_note"])
         .get("/plain/posts", plain_page)
-        .with_tools(["echo", "users.profile", "posts.create"])
+        .with_tools(["echo", "read_user_profile", "create_post"])
         .middleware(StandInToken)
         .get("/inertia/bare", inertia_page)
         .into();
     let router = suprnova::group!("/grouped", {
         suprnova::get!("/page", inertia_with_additions).with_tools(["echo"])
     })
-    .with_tools(["users.profile"])
+    .with_tools(["read_user_profile"])
     .register(router);
-    router.share_tools(["notes.search"])
+    router.share_tools(["search_notes"])
 }
 
 /// A client of [`page_routes`] with no global middleware.
@@ -219,18 +219,18 @@ async fn agent_014_page_lists_only_tools_the_viewer_may_call() {
     let client = page_client();
 
     let guest = visit(client.clone(), "/inertia/posts").await;
-    assert_eq!(guest.page_tools(), ["echo", "notes.search"]);
+    assert_eq!(guest.page_tools(), ["echo", "search_notes"]);
 
     // A session user holds every scope.
     let session = visit(client.clone().acting_as(&seven()), "/inertia/posts").await;
     assert_eq!(
         session.page_tools(),
         [
+            "create_post",
+            "delete_post",
             "echo",
-            "notes.search",
-            "posts.create",
-            "posts.delete",
-            "users.profile"
+            "read_user_profile",
+            "search_notes"
         ]
     );
 
@@ -244,17 +244,17 @@ async fn agent_014_page_lists_only_tools_the_viewer_may_call() {
     direct.assert_ok();
     assert_eq!(
         direct.page_tools(),
-        ["echo", "notes.search", "users.profile"]
+        ["echo", "read_user_profile", "search_notes"]
     );
 
     // The first visit's HTML document carries the same list.
     let first = client.get("/inertia/posts").send().await;
     first.assert_ok();
-    assert_eq!(first.page_tools(), ["echo", "notes.search"]);
+    assert_eq!(first.page_tools(), ["echo", "search_notes"]);
 
     // A page with no tool of its own offers the shared ones.
     let bare = visit(client.clone(), "/inertia/bare").await;
-    assert_eq!(bare.page_tools(), ["notes.search"]);
+    assert_eq!(bare.page_tools(), ["search_notes"]);
 }
 
 #[tokio::test]
@@ -265,7 +265,7 @@ async fn agent_014_a_plain_view_carries_the_element_in_its_head() {
     guest.assert_ok();
     let html = guest.body_text();
     assert!(element_in_head(&html), "{html}");
-    assert_eq!(guest.page_tools(), ["echo", "notes.search"]);
+    assert_eq!(guest.page_tools(), ["echo", "search_notes"]);
     let session = client
         .clone()
         .acting_as(&seven())
@@ -274,7 +274,7 @@ async fn agent_014_a_plain_view_carries_the_element_in_its_head() {
         .await;
     assert_eq!(
         session.page_tools(),
-        ["echo", "notes.search", "posts.create", "users.profile"]
+        ["create_post", "echo", "read_user_profile", "search_notes"]
     );
 }
 
@@ -297,7 +297,7 @@ async fn agent_014_a_page_that_offers_no_tool_carries_no_element() {
     // A page whose only tool the viewer cannot call carries none either.
     let router: Router = fixture::routes()
         .get("/plain/users", plain_page)
-        .with_tools(["users.profile"])
+        .with_tools(["read_user_profile"])
         .into();
     let client = TestClient::new(
         router.agents(AgentsConfig::new()),
@@ -314,7 +314,7 @@ async fn agent_014_a_page_that_offers_no_tool_carries_no_element() {
         {
             let router: Router = fixture::routes()
                 .get("/inertia/users", inertia_page)
-                .with_tools(["users.profile"])
+                .with_tools(["read_user_profile"])
                 .into();
             router.agents(AgentsConfig::new())
         },
@@ -336,11 +336,11 @@ async fn agent_014_response_tools_join_route_group_and_shared_tools() {
     assert_eq!(
         page.page_tools(),
         [
+            "create_post",
             "echo",
-            "notes.search",
-            "posts.create",
-            "request.peek",
-            "users.profile"
+            "peek_request",
+            "read_user_profile",
+            "search_notes"
         ],
         "the group's, the route's, the shared, the request's and the response's tools"
     );
@@ -361,7 +361,7 @@ async fn agent_014_a_response_naming_a_tool_a_browser_cannot_call_fails() {
             naming(request, "no.such.tool")
         })
         .get("/agent-only", |request: Request| {
-            naming(request, "audit.export")
+            naming(request, "export_audit")
         })
         .post("/audit", export_audit)
         .into();
@@ -391,7 +391,7 @@ async fn agent_014_page_tool_annotations_follow_the_markings() {
         json!({ "maxResultBytes": 8 * 1024 * 1024, "callTimeoutMs": 30_000 })
     );
 
-    let create = page.page_tool("posts.create").expect("posts.create");
+    let create = page.page_tool("create_post").expect("create_post");
     assert_eq!(create["title"], "Create a post");
     assert_eq!(
         create["description"],
@@ -411,7 +411,7 @@ async fn agent_014_page_tool_annotations_follow_the_markings() {
     assert_eq!(
         &create["inputSchema"],
         registry
-            .get("posts.create")
+            .get("create_post")
             .expect("registered")
             .input_schema(),
         "the schema the MCP endpoint lists"
@@ -433,7 +433,7 @@ async fn agent_014_page_tool_annotations_follow_the_markings() {
         })
     );
 
-    let delete = page.page_tool("posts.delete").expect("posts.delete");
+    let delete = page.page_tool("delete_post").expect("delete_post");
     assert_eq!(
         delete["annotations"],
         json!({
@@ -454,7 +454,7 @@ async fn agent_014_page_tool_annotations_follow_the_markings() {
 
     // `annotations(debugging)` marks a tool meant for debugging and developer
     // tooling: WebMCP's fourth hint, which a page always sends.
-    let search = page.page_tool("notes.search").expect("notes.search");
+    let search = page.page_tool("search_notes").expect("search_notes");
     assert_eq!(
         search["annotations"],
         json!({
@@ -474,9 +474,9 @@ async fn agent_014_page_tool_annotations_follow_the_markings() {
         .and_then(|tools| {
             tools
                 .into_iter()
-                .find(|tool| tool["name"] == "notes.search")
+                .find(|tool| tool["name"] == "search_notes")
         })
-        .expect("notes.search is listed over MCP");
+        .expect("search_notes is listed over MCP");
     assert_eq!(search["annotations"]["readOnlyHint"], true, "{search:#}");
     assert!(
         search["annotations"].get("debugging").is_none(),
@@ -524,9 +524,9 @@ async fn agent_014_unknown_live_or_agent_only_page_tool_fails_boot() {
     let _container = fixture::setup();
     for name in [
         "no.such.tool",
-        "counter.peek",
-        "counter.add",
-        "audit.export",
+        "peek_counter",
+        "add_to_counter",
+        "export_audit",
     ] {
         let error = boot_with_route_tool(name).expect_err(name);
         let text = message(&error);
@@ -538,21 +538,21 @@ async fn agent_014_unknown_live_or_agent_only_page_tool_fails_boot() {
         assert!(text.contains("share_tools"), "{name}: {text}");
     }
     // A routed tool a browser can call passes.
-    boot_with_route_tool("notes.search").expect("a public GET tool with no input");
-    boot_with_route_tool("posts.create").expect("a user tool");
+    boot_with_route_tool("search_notes").expect("a public GET tool with no input");
+    boot_with_route_tool("create_post").expect("a user tool");
     boot_with_shared_tool("echo").expect("a public tool");
 }
 
 #[tokio::test]
 async fn agent_014_a_get_page_tool_whose_input_has_an_object_field_fails_boot() {
     let _container = fixture::setup();
-    let error = boot_with_route_tool("notes.filter").expect_err("an object field on GET");
+    let error = boot_with_route_tool("filter_notes").expect_err("an object field on GET");
     let text = message(&error);
-    assert!(text.contains("notes.filter"), "{text}");
+    assert!(text.contains("filter_notes"), "{text}");
     assert!(text.contains("`filters`"), "the field is named: {text}");
     assert!(text.contains("query"), "{text}");
     // A GET tool whose input holds scalars reads it from the query.
-    boot_with_route_tool("notes.lookup").expect("a GET tool with a scalar input");
+    boot_with_route_tool("lookup_note").expect("a GET tool with a scalar input");
 }
 
 // ---------------------------------------------------- the call's checks ----
@@ -564,12 +564,12 @@ async fn agent_014_tool_call_header_must_name_the_routes_tool() {
     let mismatched = client
         .post("/echo")
         .json(&json!({ "text": "hi" }))
-        .header("Suprnova-Tool-Call", "slow.wait")
+        .header("Suprnova-Tool-Call", "wait_slowly")
         .send()
         .await;
     assert_eq!(mismatched.status(), 400, "{}", mismatched.body_text());
     assert!(
-        mismatched.body_text().contains("slow.wait"),
+        mismatched.body_text().contains("wait_slowly"),
         "{}",
         mismatched.body_text()
     );
@@ -588,7 +588,7 @@ async fn agent_014_tool_call_header_on_a_route_without_a_tool_is_refused() {
     // `post = "new"` on `/posts/{post}` reaches the literal `/posts/new`.
     let steered = client
         .get("/posts/new")
-        .header("Suprnova-Tool-Call", "posts.show")
+        .header("Suprnova-Tool-Call", "show_post")
         .send()
         .await;
     assert_eq!(steered.status(), 400, "{}", steered.body_text());
@@ -608,7 +608,7 @@ async fn agent_014_a_get_tool_call_reads_its_input_from_the_query() {
     let _container = fixture::setup();
     let client = page_client();
     let call = client
-        .tool("notes.lookup", json!({ "q": "café & co" }))
+        .tool("lookup_note", json!({ "q": "café & co" }))
         .send()
         .await;
     call.assert_ok();
@@ -622,12 +622,12 @@ async fn agent_014_a_get_tool_on_a_path_parameter_reads_it_from_the_query() {
     // The page offers it: its input holds scalars only.
     let page = visit(client.clone(), "/inertia/notes").await;
     assert!(
-        page.page_tools().contains(&"notes.show".to_string()),
+        page.page_tools().contains(&"show_note".to_string()),
         "{:?}",
         page.page_tools()
     );
     let call = client
-        .tool("notes.show", json!({ "note": "n/7", "format": "short" }))
+        .tool("show_note", json!({ "note": "n/7", "format": "short" }))
         .send()
         .await;
     call.assert_ok();
@@ -637,7 +637,7 @@ async fn agent_014_a_get_tool_on_a_path_parameter_reads_it_from_the_query() {
     );
     // A null argument stays out of the query.
     let call = client
-        .tool("notes.show", json!({ "note": "8", "format": null }))
+        .tool("show_note", json!({ "note": "8", "format": null }))
         .send()
         .await;
     call.assert_ok();
@@ -652,7 +652,7 @@ async fn agent_014_a_get_tool_call_sends_its_arguments_in_the_query() {
     let _container = fixture::setup();
     let client = page_client();
     let call = client
-        .tool("notes.search", json!({ "q": "café & co" }))
+        .tool("search_notes", json!({ "q": "café & co" }))
         .send()
         .await;
     call.assert_ok();
@@ -665,7 +665,7 @@ async fn agent_014_a_get_tool_call_sends_its_arguments_in_the_query() {
 const TOOLS_PAGE: &str = "/agents/tools-page";
 
 /// [`live_fixture::live_router`]'s shape, serving [`TOOLS_PAGE`] with the
-/// route's tools, and the document adding `request.peek`.
+/// route's tools, and the document adding `peek_request`.
 fn live_tools_router() -> Router {
     fixture::define_policies();
     let mount = LiveMount::<AgentCounter>::public_seed(TOOLS_PAGE, "counter", "main")
@@ -678,7 +678,7 @@ fn live_tools_router() -> Router {
             let (mount, side) = handler_mounts.clone();
             async move { render_tools_page(request, mount, side).await }
         })
-        .with_tools(["echo", "users.profile", "posts.create"])
+        .with_tools(["echo", "read_user_profile", "create_post"])
         .into();
     router
         .try_live_with(live_fixture::guard)
@@ -698,7 +698,7 @@ async fn render_tools_page(
         let mut document = LiveDocument::from_request(&request)
             .map_err(|error| FrameworkError::internal(format!("from_request {error}")))?;
         document
-            .with_tools(["request.peek"])
+            .with_tools(["peek_request"])
             .await
             .map_err(|error| FrameworkError::internal(format!("with_tools {error}")))?;
         let start = CanonicalValue::Object(BTreeMap::from([
@@ -775,7 +775,7 @@ async fn agent_014_live_document_lists_only_tools_the_viewer_may_call() {
     let guest = client.get(TOOLS_PAGE).send().await;
     assert_eq!(guest.status(), 200, "{}", guest.body_text());
     assert!(element_in_head(&guest.body_text()), "{}", guest.body_text());
-    assert_eq!(guest.page_tools(), ["echo", "request.peek"]);
+    assert_eq!(guest.page_tools(), ["echo", "peek_request"]);
     let user = client
         .clone()
         .acting_as(&TestUser::arc("alice"))
@@ -785,7 +785,7 @@ async fn agent_014_live_document_lists_only_tools_the_viewer_may_call() {
     assert_eq!(user.status(), 200, "{}", user.body_text());
     assert_eq!(
         user.page_tools(),
-        ["echo", "posts.create", "request.peek", "users.profile"]
+        ["create_post", "echo", "peek_request", "read_user_profile"]
     );
 }
 
@@ -830,8 +830,8 @@ async fn agent_014_a_live_island_lists_only_tools_the_viewer_can_call() {
     assert_eq!(guest.status(), 200, "{}", guest.body_text());
     assert_eq!(
         island_tools(&guest.body_text(), "main"),
-        ["counter.peek.main"],
-        "a guest sees the public tool only"
+        ["peek_counter-main", "search_counter-main"],
+        "a guest sees the public tools only"
     );
     let user = client
         .clone()
@@ -845,19 +845,20 @@ async fn agent_014_a_live_island_lists_only_tools_the_viewer_can_call() {
     assert_eq!(
         listed,
         [
-            "counter.add.main",
-            "counter.check.main",
-            "counter.peek.main",
-            "counter.rename.main"
+            "add_to_counter-main",
+            "check_counter-main",
+            "peek_counter-main",
+            "rename_counter-main",
+            "search_counter-main"
         ],
-        "a session user sees the user tools and the public one"
+        "a session user sees the user tools and the public ones"
     );
     // The quota's one tool accepts the public, so every viewer sees it.
     assert_eq!(
         island_tools(&guest.body_text(), "side"),
-        ["quota.read.side"]
+        ["read_quota-side"]
     );
-    assert_eq!(island_tools(&user.body_text(), "side"), ["quota.read.side"]);
+    assert_eq!(island_tools(&user.body_text(), "side"), ["read_quota-side"]);
 }
 
 // --------------------------------------------------------- RenderCache ----
@@ -944,11 +945,11 @@ async fn cached_client() -> (TestClient, impl Drop, tempfile::TempDir) {
     };
     let router: Router = fixture::routes()
         .get("/mixed", cached_page)
-        .with_tools(["echo", "users.profile"])
+        .with_tools(["echo", "read_user_profile"])
         .get("/leaky", cached_page)
-        .with_tools(["echo", "users.profile"])
+        .with_tools(["echo", "read_user_profile"])
         .get("/public", cached_page)
-        .with_tools(["echo", "throttled.ping"])
+        .with_tools(["echo", "ping_throttled"])
         .into();
     let router = router
         .agents(AgentsConfig::new())
@@ -995,16 +996,16 @@ async fn agent_014_a_cached_page_never_shows_one_viewers_tools_to_another() {
     let guest = cached(&client, "/leaky", None).await;
     assert_eq!(guest.page_tools(), ["echo"]);
     let alice = cached(&client, "/leaky", Some("alice")).await;
-    assert_eq!(alice.page_tools(), ["echo", "users.profile"]);
+    assert_eq!(alice.page_tools(), ["echo", "read_user_profile"]);
     let guest_again = cached(&client, "/leaky", None).await;
     assert_eq!(guest_again.page_tools(), ["echo"]);
     // `/mixed` varies by principal: each viewer gets their own list.
     let alice = cached(&client, "/mixed", Some("alice")).await;
-    assert_eq!(alice.page_tools(), ["echo", "users.profile"]);
+    assert_eq!(alice.page_tools(), ["echo", "read_user_profile"]);
     let guest = cached(&client, "/mixed", None).await;
     assert_eq!(guest.page_tools(), ["echo"]);
     let alice_again = cached(&client, "/mixed", Some("alice")).await;
-    assert_eq!(alice_again.page_tools(), ["echo", "users.profile"]);
+    assert_eq!(alice_again.page_tools(), ["echo", "read_user_profile"]);
 }
 
 #[tokio::test]
@@ -1031,7 +1032,7 @@ async fn agent_014_guests_share_one_cached_copy_of_a_page_with_mixed_tools() {
     assert_eq!(first.body_text(), second.body_text());
     // A signed-in viewer renders their own.
     let alice = cached(&client, "/mixed", Some("alice")).await;
-    assert_eq!(alice.page_tools(), ["echo", "users.profile"]);
+    assert_eq!(alice.page_tools(), ["echo", "read_user_profile"]);
     assert_eq!(CACHED_RENDERS.load(Ordering::SeqCst), renders + 1);
 }
 
@@ -1047,12 +1048,12 @@ async fn agent_014_a_page_of_public_tools_reads_no_caller() {
     }
     let (client, _container, _directory) = cached_client().await;
     let guest = cached(&client, "/public", None).await;
-    assert_eq!(guest.page_tools(), ["echo", "throttled.ping"]);
+    assert_eq!(guest.page_tools(), ["echo", "ping_throttled"]);
     let renders = CACHED_RENDERS.load(Ordering::SeqCst);
     // `/public` declares no variance, so a page that read the viewer would
     // not be stored: one shared copy serves every viewer.
     let alice = cached(&client, "/public", Some("alice")).await;
-    assert_eq!(alice.page_tools(), ["echo", "throttled.ping"]);
+    assert_eq!(alice.page_tools(), ["echo", "ping_throttled"]);
     let bob = cached(&client, "/public", Some("bob")).await;
     assert_eq!(bob.body_text(), guest.body_text());
     assert_eq!(
@@ -1198,8 +1199,8 @@ async fn agent_014_a_guests_stream_render_lists_no_user_tool() {
     let _container = fixture::setup();
     let client = live_fixture::live_client();
     let (promoted, streamed) = stream_render_tools(&client).await;
-    assert_eq!(promoted, ["counter.peek.main"]);
-    assert_eq!(streamed, ["counter.peek.main"]);
+    assert_eq!(promoted, ["peek_counter-main", "search_counter-main"]);
+    assert_eq!(streamed, ["peek_counter-main", "search_counter-main"]);
 }
 
 #[tokio::test]
@@ -1208,10 +1209,11 @@ async fn agent_014_a_signed_in_users_stream_render_lists_the_user_tools() {
     let client = live_fixture::live_client().acting_as(&TestUser::arc("alice"));
     let (promoted, streamed) = stream_render_tools(&client).await;
     let all = [
-        "counter.add.main",
-        "counter.check.main",
-        "counter.peek.main",
-        "counter.rename.main",
+        "add_to_counter-main",
+        "check_counter-main",
+        "peek_counter-main",
+        "rename_counter-main",
+        "search_counter-main",
     ];
     assert_eq!(promoted, all);
     assert_eq!(streamed, all);

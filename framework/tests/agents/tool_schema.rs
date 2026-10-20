@@ -26,7 +26,7 @@ pub enum SortOrder {
     Oldest,
 }
 
-/// The input of `notes.sort`.
+/// The input of `sort_notes`.
 #[tool_input]
 pub struct SortNotes {
     /// The order to list the notes in.
@@ -34,7 +34,7 @@ pub struct SortNotes {
 }
 
 #[tool(
-    name = "notes.sort",
+    name = "sort_notes",
     description = "List the notes in an order.",
     callers = [public],
     input = SortNotes,
@@ -65,8 +65,8 @@ async fn agent_001_a_tool_schema_enum_is_part_of_the_input_schema() {
     let tool = list
         .result()
         .and_then(|result| result["tools"].as_array().cloned())
-        .and_then(|tools| tools.into_iter().find(|tool| tool["name"] == "notes.sort"))
-        .expect("notes.sort is listed");
+        .and_then(|tools| tools.into_iter().find(|tool| tool["name"] == "sort_notes"))
+        .expect("sort_notes is listed");
     let schema = &tool["inputSchema"];
     assert_eq!(
         schema["properties"]["order"]["$ref"], "#/$defs/SortOrder",
@@ -86,14 +86,14 @@ async fn agent_001_a_tool_schema_enum_is_part_of_the_input_schema() {
 
     let sorted = client
         .mcp()
-        .call("notes.sort", json!({ "order": "oldest" }))
+        .call("sort_notes", json!({ "order": "oldest" }))
         .await;
     assert!(!sorted.is_error(), "{}", sorted.text());
     assert_eq!(sorted.structured(), Some(&json!({ "order": "oldest" })));
 
     let refused = client
         .mcp()
-        .call("notes.sort", json!({ "order": "sideways" }))
+        .call("sort_notes", json!({ "order": "sideways" }))
         .await;
     assert!(refused.is_error(), "{}", refused.text());
     assert!(refused.text().contains("order"), "{}", refused.text());

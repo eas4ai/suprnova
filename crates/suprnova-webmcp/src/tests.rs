@@ -49,7 +49,7 @@ fn path_case(case: &Value) -> Result<(), String> {
         "v": 1,
         "limits": { "maxResultBytes": 8_388_608, "callTimeoutMs": 30_000 },
         "tools": [{
-            "name": "fixture.tool",
+            "name": "call_fixture",
             "description": "A tool of the shared fixture.",
             "inputSchema": { "type": "object" },
             "annotations": {
@@ -63,7 +63,7 @@ fn path_case(case: &Value) -> Result<(), String> {
         }],
     });
     let tools = ServerTools::parse(&payload.to_string()).map_err(|error| error.to_string())?;
-    let tool = tools.tool("fixture.tool").ok_or("the tool is missing")?;
+    let tool = tools.tool("call_fixture").ok_or("the tool is missing")?;
     let expected = &case["expected"];
     match server::plan(tool, &case["arguments"]) {
         Ok(plan) => {
@@ -177,7 +177,7 @@ fn element() -> Value {
         "v": 1,
         "limits": { "maxResultBytes": 8_388_608, "callTimeoutMs": 30_000 },
         "tools": [{
-            "name": "posts.create",
+            "name": "create_post",
             "title": "Create a post",
             "description": "Create a draft post for the signed-in user.",
             "inputSchema": {
@@ -202,7 +202,7 @@ type Breakage = Box<dyn Fn(&mut Value)>;
 #[test]
 fn agent_016_server_tools_element_is_read_strictly() {
     let tools = ServerTools::parse(&element().to_string()).expect("the contract's element reads");
-    assert_eq!(tools.names().collect::<Vec<_>>(), vec!["posts.create"]);
+    assert_eq!(tools.names().collect::<Vec<_>>(), vec!["create_post"]);
 
     let mut too_many = element();
     let one = too_many["tools"][0].clone();
@@ -416,11 +416,11 @@ fn agent_016_an_element_from_another_release_reads_the_keys_it_knows() {
     later["tools"][0]["annotations"]["futureHint"] = json!(true);
     later["tools"][0]["path"][1]["pattern"] = json!(".*");
     let tools = ServerTools::parse(&later.to_string()).expect("unknown keys are ignored");
-    let tool = tools.tool("posts.create").expect("the tool reads");
+    let tool = tools.tool("create_post").expect("the tool reads");
     assert_eq!(
         tool.descriptor(),
         json!({
-            "name": "posts.create",
+            "name": "create_post",
             "title": "Create a post",
             "description": "Create a draft post for the signed-in user.",
             "inputSchema": element()["tools"][0]["inputSchema"],
@@ -441,7 +441,7 @@ fn agent_016_a_missing_hint_reads_as_false() {
     let mut older = element();
     older["tools"][0]["annotations"] = json!({ "readOnlyHint": true });
     let tools = ServerTools::parse(&older.to_string()).expect("a missing hint reads");
-    let tool = tools.tool("posts.create").expect("the tool reads");
+    let tool = tools.tool("create_post").expect("the tool reads");
     assert_eq!(
         tool.descriptor()["annotations"],
         json!({
@@ -458,7 +458,7 @@ fn agent_016_a_missing_hint_reads_as_false() {
     let tools = ServerTools::parse(&bare.to_string()).expect("no annotations read");
     assert_eq!(
         tools
-            .tool("posts.create")
+            .tool("create_post")
             .map(|tool| tool.descriptor()["annotations"]["debugging"].clone()),
         Some(json!(false))
     );
@@ -517,7 +517,7 @@ struct AddTodo {
 
 #[test]
 fn agent_016_page_tool_descriptor_carries_the_derived_schema_and_all_four_hints() {
-    let descriptor = PageTool::<AddTodo>::new("todos.add", "Add an item to the todo list.")
+    let descriptor = PageTool::<AddTodo>::new("add_todo", "Add an item to the todo list.")
         .title("Add todo")
         .read_only(false)
         .untrusted_content(true)
@@ -528,7 +528,7 @@ fn agent_016_page_tool_descriptor_carries_the_derived_schema_and_all_four_hints(
     assert_eq!(
         descriptor,
         json!({
-            "name": "todos.add",
+            "name": "add_todo",
             "title": "Add todo",
             "description": "Add an item to the todo list.",
             "inputSchema": input_schema::<AddTodo>(),
@@ -547,7 +547,7 @@ fn agent_016_page_tool_descriptor_carries_the_derived_schema_and_all_four_hints(
         20
     );
 
-    let plain = PageTool::<AddTodo>::new("todos.add", "Add an item to the todo list.")
+    let plain = PageTool::<AddTodo>::new("add_todo", "Add an item to the todo list.")
         .descriptor()
         .expect("a valid tool has a descriptor");
     assert!(plain.get("title").is_none(), "{plain:#}");
@@ -753,7 +753,7 @@ async fn sort_todos(input: SortTodos) -> Result<ToolResult, ToolError> {
 fn agent_016_a_nested_enum_takes_tool_schema() {
     // The enum names no schemars path: `#[tool_schema]` points its derive
     // at the crate's copy, and its schema is part of the tool's.
-    let descriptor = PageTool::<SortTodos>::new("todos.sort", "Sort the todo list.")
+    let descriptor = PageTool::<SortTodos>::new("sort_todos", "Sort the todo list.")
         .descriptor()
         .expect("a valid tool has a descriptor");
     let schema = &descriptor["inputSchema"];

@@ -1,11 +1,23 @@
-error[E0428]: the name `__suprnova_tool_counter_2eadd` is defined multiple times
+error[E0428]: the name `__suprnova_tool_add_5fto_5fcounter` is defined multiple times
   --> tests/agents/compile_fail/live/agent_001_duplicate_of_handler_tool.rs:16:1
    |
- 4 | #[tool(name = "counter.add", description = "Add over HTTP.", callers = [user])]
-   | ------------------------------------------------------------------------------- previous definition of the macro `__suprnova_tool_counter_2eadd` here
+ 4 | #[tool(name = "add_to_counter", description = "Add over HTTP.", callers = [user])]
+   | ---------------------------------------------------------------------------------- previous definition of the macro `__suprnova_tool_add_5fto_5fcounter` here
 ...
 16 | #[live]
-   | ^^^^^^^ `__suprnova_tool_counter_2eadd` redefined here
+   | ^^^^^^^ `__suprnova_tool_add_5fto_5fcounter` redefined here
    |
-   = note: `__suprnova_tool_counter_2eadd` must be defined only once in the macro namespace of this module
+   = note: `__suprnova_tool_add_5fto_5fcounter` must be defined only once in the macro namespace of this module
    = note: this error originates in the attribute macro `live` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: use of deprecated constant `_::__SUPRNOVA_TOOL_BUDGET`: tool `add_to_counter`: input field `amount` has no description; WebMCP requires a description
+  --> tests/agents/compile_fail/live/agent_001_duplicate_of_handler_tool.rs:18:19
+   |
+18 |     #[tool(name = "add_to_counter", description = "Add to the counter.", callers = [user])]
+   |                   ^^^^^^^^^^^^^^^^
+   |
+note: the lint level is defined here
+  --> tests/agents/compile_fail/live/agent_001_duplicate_of_handler_tool.rs:18:19
+   |
+18 |     #[tool(name = "add_to_counter", description = "Add to the counter.", callers = [user])]
+   |                   ^^^^^^^^^^^^^^^^

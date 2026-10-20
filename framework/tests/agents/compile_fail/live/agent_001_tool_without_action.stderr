@@ -1,5 +1,5 @@
 error: #[tool] inside #[live] marks an action: add #[action] to this method
   --> tests/agents/compile_fail/live/agent_001_tool_without_action.rs:11:5
    |
-11 |     #[tool(name = "counter.add", description = "Add to the counter.", callers = [user])]
+11 |     #[tool(name = "add_to_counter", description = "Add to the counter.", callers = [user])]
    |     ^

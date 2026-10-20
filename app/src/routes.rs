@@ -144,7 +144,7 @@ routes! {
     // middleware map is keyed by `(method, path)` so the public GET
     // and the auth-gated POST can share the `/api/posts` path string
     // without leaking middleware across methods. The listing is also the
-    // agent tool `posts.list`; `posts.create` has its own validated route
+    // agent tool `list_posts`; `create_post` has its own validated route
     // (`src/agents.rs`): a tool call runs these routes, the session gate
     // included, as the signed-in user or the user a token acts for.
     get!("/api/posts", controllers::posts::index).name("api.posts.index"),

@@ -827,7 +827,7 @@ pub fn request(attr: TokenStream, input: TokenStream) -> TokenStream {
 /// }
 ///
 /// #[tool(
-///     name = "posts.create",
+///     name = "create_post",
 ///     description = "Create a draft post for the signed-in user.",
 ///     callers = [user, agent],
 ///     scopes = [scope::POSTS_WRITE],
@@ -841,8 +841,8 @@ pub fn request(attr: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// # Arguments
 ///
-/// - `name` (required): a string literal of 1 to 128 ASCII letters, digits,
-///   `_`, `-` and `.`, unique in the application. An invalid or duplicate
+/// - `name` (required): a string literal of 1 to 64 ASCII letters, digits and
+///   `_`, unique in the application. An invalid or duplicate
 ///   name fails the build; a duplicate across crates refuses boot.
 /// - `description` (required): a non-empty string literal. Agents read it
 ///   as an instruction, so it is fixed at build time.

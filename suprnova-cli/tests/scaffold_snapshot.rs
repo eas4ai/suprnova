@@ -665,7 +665,12 @@ fn live_kit_compiles_and_renders() {
 mod account_flows_harness;
 
 /// The test that runs inside the generated project.
-const AGENT_PAGES_TEST: &str = include_str!("fixtures/scaffold/agent_pages.rs");
+const AGENT_PAGES_TEST: &str = concat!(
+    include_str!("fixtures/scaffold/agent_pages.rs"),
+    "\nmod tool_budget_probe {\n",
+    include_str!("fixtures/scaffold/tool_budget_probe.rs"),
+    "\n}\n",
+);
 
 /// Every case `tests/fixtures/scaffold/agent_pages.rs` runs, which must each
 /// report `ok`.
@@ -743,7 +748,12 @@ fn agent_017_a_generated_inertia_application_serves_the_agent_pages() {
 /// The test `agent_017_a_generated_live_application_serves_the_agent_pages`
 /// writes into the scaffold as `tests/agent_pages.rs`. `__PACKAGE__` is the
 /// scaffold's crate name.
-const LIVE_AGENT_PAGES: &str = include_str!("fixtures/scaffold/live_agent_pages.rs");
+const LIVE_AGENT_PAGES: &str = concat!(
+    include_str!("fixtures/scaffold/live_agent_pages.rs"),
+    "\nmod tool_budget_probe {\n",
+    include_str!("fixtures/scaffold/tool_budget_probe.rs"),
+    "\n}\n",
+);
 
 /// The cases `tests/agent_pages.rs` runs, each of which prints
 /// `case <name> ... ok` when it passes.

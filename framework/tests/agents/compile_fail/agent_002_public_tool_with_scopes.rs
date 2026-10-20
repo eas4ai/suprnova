@@ -9,7 +9,7 @@ suprnova::tool_scopes! {
 }
 
 #[tool(
-    name = "posts.feed",
+    name = "read_post_feed",
     description = "List posts.",
     callers = [public, user],
     scopes = [scope::POSTS_READ]

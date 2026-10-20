@@ -33,7 +33,7 @@ async fn agent_004_list_without_token_shows_every_offered_tool() {
     );
     assert!(
         listed.len() > PUBLIC_TOOLS.len()
-            && beyond_public(listed).contains(&"posts.delete".to_owned()),
+            && beyond_public(listed).contains(&"delete_post".to_owned()),
         "the fixture offers tools that need a token"
     );
 }
@@ -41,16 +41,16 @@ async fn agent_004_list_without_token_shows_every_offered_tool() {
 /// The fixture's tools that accept `public`, sorted: every caller may call
 /// them.
 const PUBLIC_TOOLS: [&str; 10] = [
-    "bus.later",
     "echo",
-    "math.eval",
-    "page.html",
-    "request.peek",
-    "slow.bytes",
-    "slow.stream",
-    "slow.wait",
-    "tags.group",
-    "throttled.ping",
+    "enqueue_message",
+    "evaluate_math",
+    "group_tags",
+    "peek_request",
+    "ping_throttled",
+    "read_html_page",
+    "read_slow_bytes",
+    "read_slow_stream",
+    "wait_slowly",
 ];
 
 /// `names` without the public tools, which every caller sees.
@@ -79,11 +79,11 @@ async fn agent_004_list_filters_by_kind_and_scope() {
     assert_eq!(
         beyond_public(reader.tool_names()),
         vec![
-            "posts.show",
-            "profile.update",
-            "users.api",
-            "users.named",
-            "users.profile"
+            "read_api_user",
+            "read_named_user",
+            "read_user_profile",
+            "show_post",
+            "update_profile"
         ],
         "a user sees the tools that accept users and whose scopes the token holds"
     );
@@ -94,7 +94,7 @@ async fn agent_004_list_filters_by_kind_and_scope() {
         .await;
     assert_eq!(
         beyond_public(writer.tool_names()),
-        vec!["posts.create"],
+        vec!["create_post"],
         "an agent sees no tool that does not accept agents"
     );
 }
@@ -105,7 +105,7 @@ async fn agent_004_missing_token_is_401_with_resource_metadata_and_scope() {
     let client = fixture::client();
     let result = client
         .mcp()
-        .call("posts.delete", json!({ "post": "1" }))
+        .call("delete_post", json!({ "post": "1" }))
         .await;
     assert_eq!(result.status(), 401);
     let www = result
@@ -130,7 +130,7 @@ async fn agent_004_missing_scope_is_403_insufficient_scope_with_all_scopes() {
     let result = client
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_READ]))
-        .call("posts.delete", json!({ "post": "1" }))
+        .call("delete_post", json!({ "post": "1" }))
         .await;
     assert_eq!(result.status(), 403);
     let www = result
@@ -218,7 +218,11 @@ async fn agent_004_resolver_chain_not_mine_falls_through_invalid_stops() {
 
     let listed = client.mcp().with_token("tok-user").list().await;
     assert_eq!(listed.status(), 200);
-    assert!(listed.tool_names().contains(&"users.profile".to_string()));
+    assert!(
+        listed
+            .tool_names()
+            .contains(&"read_user_profile".to_string())
+    );
     assert_eq!(
         second.load(Ordering::SeqCst),
         0,
@@ -366,7 +370,7 @@ async fn agent_004_metadata_under_a_path_prefix() {
     assert_eq!(document["resource"], "https://example.test/billing/mcp");
     let challenge = client
         .mcp()
-        .call("posts.delete", json!({ "post": "1" }))
+        .call("delete_post", json!({ "post": "1" }))
         .await;
     assert_eq!(challenge.status(), 401);
     let www = challenge
@@ -538,7 +542,7 @@ async fn agent_004_guarded_tool_loads_the_user_through_its_guard() {
     let known = client
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("7")))
-        .call("users.api", json!({}))
+        .call("read_api_user", json!({}))
         .await;
     assert_eq!(known.status(), 200, "{:?}", known.response());
     assert_eq!(
@@ -549,7 +553,7 @@ async fn agent_004_guarded_tool_loads_the_user_through_its_guard() {
     let unknown = client
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("999")))
-        .call("users.api", json!({}))
+        .call("read_api_user", json!({}))
         .await;
     assert_eq!(
         unknown.status(),

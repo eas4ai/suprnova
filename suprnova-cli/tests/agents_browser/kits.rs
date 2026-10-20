@@ -274,14 +274,14 @@ fn agent_015_svelte_tools_in_jsdom() {
 
 /// The fixture's routes, inserted into the scaffold's `routes!` before the
 /// static files: two pages that offer server tools through `with_tools`, a
-/// group whose `fixture.help` every fixture page offers, the form page, the
+/// group whose `read_fixture_help` every fixture page offers, the form page, the
 /// tools' own routes, the recorder, and the route that verifies the
 /// signed-in user's address for the agents' claim page.
 const FIXTURE_ROUTES: &str = r#"    // The AGENT-014 and AGENT-015 browser fixture.
     group!("/agent-fixture", {
         get!("/first", controllers::agent_fixture::first)
-            .with_tools(["fixture.bump", "fixture.peek", "fixture.mine"]),
-        get!("/second", controllers::agent_fixture::second).with_tools(["fixture.reset"]),
+            .with_tools(["bump_fixture", "peek_fixture", "read_my_fixture"]),
+        get!("/second", controllers::agent_fixture::second).with_tools(["reset_fixture"]),
         get!("/form", controllers::agent_fixture::form),
         get!("/consent", controllers::agent_fixture::consent),
         post!("/bump", controllers::agent_fixture::bump),
@@ -296,7 +296,7 @@ const FIXTURE_ROUTES: &str = r#"    // The AGENT-014 and AGENT-015 browser fixtu
         get!("/requests", controllers::agent_fixture::requests),
         post!("/verify-me", controllers::agent_fixture::verify_me),
     })
-    .with_tools(["fixture.help"])
+    .with_tools(["read_fixture_help"])
     .middleware(controllers::agent_fixture::Recorder),
 
 "#;

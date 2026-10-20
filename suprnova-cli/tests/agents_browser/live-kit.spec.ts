@@ -292,12 +292,12 @@ test('agent_014_live_kit_notes_page_offers_the_notes_tools', async ({ page }) =>
   await page.waitForURL('**/verify-email');
   await page.goto('/notes');
   await liveForm(page, 'notes-list');
-  await expect.poll(() => everyTool(page)).toEqual(['notes.create', 'notes.search']);
+  await expect.poll(() => everyTool(page)).toEqual(['create_note', 'search_notes']);
   const kept = await page.evaluate(async () => {
     const context = (document as unknown as {
       modelContext: { getTools(): Promise<{ name: string; annotations: Record<string, boolean> }[]> };
     }).modelContext;
-    return (await context.getTools()).find((tool) => tool.name === 'notes.search')?.annotations;
+    return (await context.getTools()).find((tool) => tool.name === 'search_notes')?.annotations;
   });
   expect(kept).toMatchObject({ readOnlyHint: true, untrustedContentHint: true });
 
@@ -308,7 +308,7 @@ test('agent_014_live_kit_notes_page_offers_the_notes_tools', async ({ page }) =>
     loads += 1;
   });
   const title = `Agent note ${Date.now()}`;
-  const created = await invoke('notes.create', { title, body: 'Written through WebMCP.' });
+  const created = await invoke('create_note', { title, body: 'Written through WebMCP.' });
   expect(created.output?.isError, JSON.stringify(created)).toBe(false);
   expect(created.output?.structuredContent).toMatchObject({ title });
   expect(created.output).not.toHaveProperty('content');
@@ -316,7 +316,7 @@ test('agent_014_live_kit_notes_page_offers_the_notes_tools', async ({ page }) =>
   expect(loads).toBe(0);
 
   // The search reads its input from the query the page sends.
-  const found = await invoke('notes.search', { query: 'WebMCP', limit: 5 });
+  const found = await invoke('search_notes', { query: 'WebMCP', limit: 5 });
   expect(found.output?.isError, JSON.stringify(found)).toBe(false);
   const notes = (found.output?.structuredContent?.notes ?? []) as { title: string }[];
   expect(notes.map((note) => note.title)).toEqual([title]);

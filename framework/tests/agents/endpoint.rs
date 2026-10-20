@@ -142,7 +142,7 @@ async fn agent_003_header_mismatch_is_400_32020() {
             vec![
                 ("MCP-Protocol-Version", "2026-07-28"),
                 ("Mcp-Method", "tools/call"),
-                ("Mcp-Name", "posts.delete"),
+                ("Mcp-Name", "delete_post"),
             ],
             call.clone(),
         ),
@@ -254,7 +254,7 @@ async fn agent_003_foreign_origin_is_403() {
         .as_caller(writer())
         .header("Origin", "https://evil.example")
         .header("User-Agent", key)
-        .call("posts.create", json!({ "title": "Rebound" }))
+        .call("create_post", json!({ "title": "Rebound" }))
         .await;
     assert_eq!(refused.status(), 403);
     assert_eq!(fixture::seen(key), 0, "nothing ran for the foreign origin");
@@ -263,7 +263,7 @@ async fn agent_003_foreign_origin_is_403() {
             .mcp()
             .as_caller(writer())
             .header("Origin", origin)
-            .call("posts.create", json!({ "title": "Allowed" }))
+            .call("create_post", json!({ "title": "Allowed" }))
             .await;
         assert_eq!(allowed.status(), 200, "{origin}: {:?}", allowed.response());
     }
@@ -293,7 +293,7 @@ async fn agent_003_slow_call_is_cut_off() {
     let key = "agent-003-slow";
     let result = client
         .mcp()
-        .call("slow.wait", json!({ "millis": 20_000, "key": key }))
+        .call("wait_slowly", json!({ "millis": 20_000, "key": key }))
         .await;
     assert_eq!(result.status(), 200);
     assert!(result.is_error(), "{:?}", result.response());
@@ -412,7 +412,7 @@ async fn closed_answer_cancels_call(accept: &str, content_type: &str, key: &str)
     let registry = Arc::new(MiddlewareRegistry::new());
     let body = modern_body(
         "tools/call",
-        json!({ "name": "slow.wait", "arguments": { "millis": 30_000, "key": key } }),
+        json!({ "name": "wait_slowly", "arguments": { "millis": 30_000, "key": key } }),
     );
     let request = hyper::Request::builder()
         .method("POST")
@@ -422,7 +422,7 @@ async fn closed_answer_cancels_call(accept: &str, content_type: &str, key: &str)
         .header("Accept", accept)
         .header("MCP-Protocol-Version", "2026-07-28")
         .header("Mcp-Method", "tools/call")
-        .header("Mcp-Name", "slow.wait")
+        .header("Mcp-Name", "wait_slowly")
         .body(Full::new(Bytes::from(body.to_string())))
         .expect("a valid request");
 
@@ -488,8 +488,8 @@ async fn agent_003_slow_body_is_cut_off_as_sse_and_as_stream() {
         MiddlewareRegistry::new(),
     );
     for (tool, key) in [
-        ("slow.stream", "agent-003-late-event"),
-        ("slow.bytes", "agent-003-late-bytes"),
+        ("read_slow_stream", "agent-003-late-event"),
+        ("read_slow_bytes", "agent-003-late-bytes"),
     ] {
         let started = std::time::Instant::now();
         let result = client
@@ -641,7 +641,7 @@ async fn agent_003_input_check_names_every_field() {
         .mcp()
         .as_caller(ToolCaller::user(TestUser::arc("7")))
         .call(
-            "profile.update",
+            "update_profile",
             json!({ "age": "ten", "address": { "street": "1 Main" }, "nickname": "x" }),
         )
         .await;
@@ -677,7 +677,7 @@ async fn agent_003_input_check_is_bounded_for_recursive_schemas() {
     let started = std::time::Instant::now();
     let result = client
         .mcp()
-        .call("math.eval", json!({ "expr": nested_expr(15) }))
+        .call("evaluate_math", json!({ "expr": nested_expr(15) }))
         .await;
     let elapsed = started.elapsed();
     assert!(
@@ -706,7 +706,7 @@ async fn agent_003_invalid_input_report_is_bounded() {
     let values: Vec<&str> = vec!["not a number"; 1_000];
     let result = client
         .mcp()
-        .call("tags.group", json!({ "groups": { key: values } }))
+        .call("group_tags", json!({ "groups": { key: values } }))
         .await;
     assert!(result.is_error(), "{:?}", result.response());
     let text = result.text();

@@ -17,3 +17,15 @@ help: a constant with a similar name exists
 22 -         scopes = [scope::COUNTER_WRITE],
 22 +         scopes = [scope::COUNTER_READ],
    |
+
+warning: use of deprecated constant `_::__SUPRNOVA_TOOL_BUDGET`: tool `add_to_counter`: input field `amount` has no description; WebMCP requires a description
+  --> tests/agents/compile_fail/live/agent_002_undeclared_scope.rs:19:16
+   |
+19 |         name = "add_to_counter",
+   |                ^^^^^^^^^^^^^^^^
+   |
+note: the lint level is defined here
+  --> tests/agents/compile_fail/live/agent_002_undeclared_scope.rs:19:16
+   |
+19 |         name = "add_to_counter",
+   |                ^^^^^^^^^^^^^^^^

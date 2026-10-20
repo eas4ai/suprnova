@@ -6,20 +6,20 @@ export default function Form({ notes }: { notes: string[] }) {
   const { root } = usePage().props
   const note = useForm<{ title: string; body: string | null }>({ title: '', body: null })
   useFormTool(note, {
-    name: 'fixture.notes.create',
+    name: 'create_fixture_note',
     description: 'Write a note on the fixture page.',
     schema: toolSchemas.FixtureNoteRequest,
     action: { method: 'post', url: `${root}/agent-fixture/notes` },
   })
   useFormTool(note, {
-    name: 'fixture.notes.create_and_leave',
+    name: 'create_note_and_leave',
     description: 'Write a note on the fixture page, then go to the first page.',
     schema: toolSchemas.FixtureNoteRequest,
     action: { method: 'post', url: `${root}/agent-fixture/notes/away` },
   })
   const purge = useForm<{ confirm: string }>({ confirm: '' })
   useFormTool(purge, {
-    name: 'fixture.notes.purge',
+    name: 'purge_fixture_notes',
     description: 'Delete every note on the fixture page.',
     schema: toolSchemas.PurgeRequest,
     action: { method: 'post', url: `${root}/agent-fixture/purge` },

@@ -20,19 +20,15 @@ fn schemars_schema<T: schemars::JsonSchema>() -> Value {
 #[tokio::test]
 async fn agent_001_a_tool_output_type_publishes_its_output_schema() {
     let _container = fixture::setup();
-    // `posts.create` is listed to a user holding `posts:write`.
+    // `create_post` is listed to a user holding `posts:write`.
     let writer = ToolCaller::user(TestUser::arc("7")).scopes([scope::POSTS_WRITE]);
     let list = fixture::client().mcp().as_caller(writer).list().await;
     assert_eq!(list.status(), 200);
     let create = list
         .result()
         .and_then(|result| result["tools"].as_array().cloned())
-        .and_then(|tools| {
-            tools
-                .into_iter()
-                .find(|tool| tool["name"] == "posts.create")
-        })
-        .expect("posts.create is listed");
+        .and_then(|tools| tools.into_iter().find(|tool| tool["name"] == "create_post"))
+        .expect("create_post is listed");
     let published = &create["outputSchema"];
     assert_eq!(*published, schemars_schema::<PostView>(), "{create:#}");
     assert_eq!(published["type"], "object", "{published:#}");

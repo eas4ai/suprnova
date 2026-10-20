@@ -21,7 +21,7 @@ import { TOOL_CALL_HEADER } from "../transport/fetch.js";
 export const SERVER_TOOLS_ELEMENT_ID = "suprnova-agent-tools";
 
 const MAX_SERVER_TOOLS = 64;
-const TOOL_NAME = /^[A-Za-z0-9_.-]{1,128}$/u;
+const TOOL_NAME = /^[A-Za-z0-9_]{1,64}$/u;
 const PARAM_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/u;
 const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 const HINTS = ["consequentialHint", "debugging", "readOnlyHint", "untrustedContentHint"] as const;

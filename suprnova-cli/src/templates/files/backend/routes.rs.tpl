@@ -32,7 +32,7 @@ routes! {
         // notes. The list offers an agent in the browser the two notes
         // tools, the only tools a page offers.
         get!("/notes", controllers::notes::index).name("notes.index")
-            .with_tools(["notes.search", "notes.create"]),
+            .with_tools(["search_notes", "create_note"]),
         // The notes tools (`controllers::note_tools`), in JSON, for the
         // notes page and for MCP clients and agents acting for the user.
         // `/notes/search` is a static path, so it wins over `/notes/{id}`.

@@ -1,4 +1,4 @@
-// AGENT-001: a tool name is 1 to 128 ASCII letters, digits, `_`, `-` and `.`.
+// AGENT-001: a tool name is 1 to 64 ASCII letters, digits and `_`.
 use suprnova::{Response, handler, json_response, tool};
 
 #[tool(name = "posts create", description = "A space in the name.", callers = [public])]
