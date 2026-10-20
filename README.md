@@ -21,6 +21,21 @@ Suprnova is a full-stack web framework for Rust. Its API reads like Laravel:
 `routes!`. Underneath it runs on Tokio, hyper and SeaORM, and the compiler
 checks your models, routes and page props before anything ships.
 
+## Read the manual from your agent
+
+The whole manual is served to agents at `https://suprnova.app/mcp`, with no
+sign-in. Add it to Claude Code:
+
+```bash
+claude mcp add suprnova --transport http https://suprnova.app/mcp
+```
+
+Three read-only tools come back: `list_manual_chapters`,
+`read_manual_chapter` and `search_manual`. Any MCP client that speaks HTTP
+connects to the same URL, and every page on [suprnova.app](https://suprnova.app)
+offers the same tools to browser agents through WebMCP. Your own app gets the
+same surface from `#[tool]` handlers; see [Agents](./manual/agents.md).
+
 ## Why Suprnova
 
 - **Familiar from day one.** If you know Laravel, you know where things are.
