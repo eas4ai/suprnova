@@ -3,14 +3,78 @@
 
 import '@inertiajs/core';
 
+export interface ApprovalProps {
+  approval: ApprovalView;
+}
+
+export interface ApprovalView {
+  id: string;
+  client_name: string;
+  client_host: string;
+  redirect_uri: string;
+  scopes: Array<ScopeView>;
+  expires_at: string;
+}
+
+export interface ClaimProps {
+  claim: ClaimView;
+  claim_attempt_token: string;
+}
+
+export interface ClaimView {
+  registration_type: string;
+  provider: string | null;
+  signed_in_as: string;
+  email: string | null;
+  scopes: Array<ScopeView>;
+  expires_in_seconds: number;
+  attempts_remaining: number;
+  first_time_account: boolean;
+  first_time_provider: boolean;
+}
+
+export interface ConnectedAgentsProps {
+  clients: Array<ClientView>;
+  agents: Array<AgentView>;
+}
+
+export interface ClientView {
+  id: string;
+  client_name: string;
+  client_host: string;
+  scopes: Array<ScopeView>;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export interface AgentView {
+  id: string;
+  registration_type: string;
+  provider: string | null;
+  scopes: Array<ScopeView>;
+  created_at: string;
+  claimed_at: string | null;
+}
+
+export interface ScopeView {
+  name: string;
+  description: string;
+}
+
 export interface HomeProps {
   title: string;
   message: string;
 }
 
+export interface LoginProps {
+}
+
 export interface PublicUserProps {
   id: number;
   name: string;
+}
+
+export interface RegisterProps {
 }
 
 export interface Stats {
@@ -49,6 +113,11 @@ export interface UserResourceInput {
 }
 
 export interface Pages {
+  "Agents/Approve": ApprovalProps;
+  "Agents/Claim": ClaimProps;
+  "Agents/Connected": ConnectedAgentsProps;
+  "auth/Login": LoginProps;
+  "auth/Register": RegisterProps;
 }
 
 export interface SharedProps {

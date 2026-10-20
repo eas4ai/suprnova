@@ -1,12 +1,10 @@
 <script lang="ts">
   import { useForm } from '@inertiajs/svelte'
 
-  // No Rust route renders this component yet - the dogfood app has no
-  // login handler. Its prop shape is therefore declared here rather
-  // than imported from `inertia-props.ts`, which `suprnova generate-types`
-  // rewrites from the `#[derive(InertiaProps)]` structs that actually
-  // exist. Importing a name the generator cannot emit meant running the
-  // documented command broke this file.
+  // `controllers::auth::show_login` renders this component. Its one prop is
+  // the `errors` the framework fills from a failed submission, so its shape
+  // is declared here: the generated `LoginProps` is empty, because a declared
+  // `errors` prop would replace the flashed ones.
   type LoginProps = {
     errors?: { email?: string; password?: string }
   }
