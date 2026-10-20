@@ -96,6 +96,11 @@ Claude Code:
 claude mcp add my-app --transport http https://app.example.com/mcp --scope user
 ```
 
+Give the client the host `APP_URL` spells, `app.example.com` here. The
+protected resource metadata names the endpoint under `APP_URL`, and a client
+checks that against the URL it was given; `localhost` and `127.0.0.1` are
+different hosts to it, so a mismatch stops sign-in before it starts.
+
 `create_post` accepts users and agents, so calling it needs a token. The
 client sees it in `tools/list` without one, and its first call answers 401,
 which sends the client to sign in. Turn on the

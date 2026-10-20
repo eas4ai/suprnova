@@ -111,14 +111,7 @@ impl Reporter for SentryReporter {
         if self.repeated(&event) {
             return Ok(());
         }
-        let Some(captured) = super::event::CapturedEvent::try_capture(event, self.config.send_pii)
-        else {
-            self.transport
-                .counters
-                .dropped
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return Ok(());
-        };
+        let captured = super::event::CapturedEvent::try_capture(event, self.config.send_pii);
         self.transport.send_capture(captured);
         Ok(())
     }

@@ -4,7 +4,7 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
-## 4.4.0 - 2026-10-18
+## 4.4.0 - 2026-10-20
 
 ### Added
 
@@ -367,6 +367,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   them. The hook never waits on a lock the panicking thread may still hold:
   a field it cannot read at once is left out, and if the request's auth
   state is locked, the event names no user rather than a wrong one.
+- **A panic reported while another report resolves its stack is kept.** The
+  panic hook gave up the whole event when the symbol resolver was busy, so
+  the one event a reporter exists for could vanish and only a counter said
+  so. The hook now sends the event without frames and says so in its
+  payload; the message, location, request and release all arrive.
 
 ## 4.3.0 - 2026-10-18
 

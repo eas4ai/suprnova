@@ -457,7 +457,7 @@ right answer when:
 - The same model appears under different envelopes (one endpoint ships
   `posts`, another ships `subscriptions`).
 
-See [JSON:API resources](eloquent-resources.md#compound-documents---include-chains)
+See [JSON:API resources](eloquent-resources.md#compound-documents-with-include-chains)
 for the full pattern.
 
 ## What about JSON:API?
