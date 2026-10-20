@@ -762,7 +762,6 @@
         "body": ""
       },
       "expected": {
-        "content": [],
         "isError": false
       }
     },
@@ -775,12 +774,6 @@
         "body": "{\"id\":1,\"title\":\"Hello\"}"
       },
       "expected": {
-        "content": [
-          {
-            "type": "text",
-            "text": "{\"id\":1,\"title\":\"Hello\"}"
-          }
-        ],
         "structuredContent": {
           "id": 1,
           "title": "Hello"
@@ -797,12 +790,6 @@
         "body": "{\"data\":{\"id\":\"1\"}}"
       },
       "expected": {
-        "content": [
-          {
-            "type": "text",
-            "text": "{\"data\":{\"id\":\"1\"}}"
-          }
-        ],
         "structuredContent": {
           "data": {
             "id": "1"
@@ -820,12 +807,6 @@
         "body": "[1,2]"
       },
       "expected": {
-        "content": [
-          {
-            "type": "text",
-            "text": "[1,2]"
-          }
-        ],
         "structuredContent": [
           1,
           2

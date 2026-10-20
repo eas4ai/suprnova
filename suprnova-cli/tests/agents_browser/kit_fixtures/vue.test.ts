@@ -76,7 +76,6 @@ test('agent_015_vue_component_tool_registers_while_mounted', async () => {
   })
   expect(context.descriptors[0].title).toBe('Add to the cart')
   expect(await context.call('cart.add', { amount: 2 })).toEqual({
-    content: [{ type: 'text', text: '{"total":3}' }],
     structuredContent: { total: 3 },
     isError: false,
   })
@@ -125,7 +124,6 @@ test('agent_015_vue_form_tool_submits_through_inertia', async () => {
   await settle()
   expect(visits).toEqual([{ method: 'post', url: '/notes', data: { title: 'Hello', body: 'World' } }])
   expect(result).toEqual({
-    content: [{ type: 'text', text: '{"outcome":"submitted","component":"Notes/Show","url":"/notes/1"}' }],
     structuredContent: { outcome: 'submitted', component: 'Notes/Show', url: '/notes/1' },
     isError: false,
   })
@@ -151,12 +149,6 @@ test('agent_015_vue_form_tool_validation_errors_are_an_error_result', async () =
   })
   const result = await context.call('notes.create', { title: '' })
   expect(result).toEqual({
-    content: [
-      {
-        type: 'text',
-        text: 'The input is not valid:\n- title: Give the note a title of 1 to 255 characters.\n- body: Keep the note to 10000 characters.',
-      },
-    ],
     structuredContent: {
       outcome: 'invalid',
       errors: { title: 'Give the note a title of 1 to 255 characters.', body: 'Keep the note to 10000 characters.' },
@@ -190,7 +182,6 @@ test('agent_015_vue_destructive_form_tool_fills_and_does_not_submit', async () =
     expect(descriptor?.annotations.consequentialHint).toBe(true)
     const result = await context.call(name, { confirm: name })
     expect(result).toEqual({
-      content: [{ type: 'text', text: 'The form is filled. The user reviews it and submits it.' }],
       structuredContent: { outcome: 'filled', submitted: false },
       isError: false,
     })

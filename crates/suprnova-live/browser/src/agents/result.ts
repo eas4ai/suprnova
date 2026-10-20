@@ -99,9 +99,6 @@ function shownValidation(
 
 function result(structured: Record<string, unknown>, isError: boolean): ModelContextToolResult {
   return Object.freeze({
-    content: Object.freeze([
-      Object.freeze({ type: "text" as const, text: JSON.stringify(structured) }),
-    ]),
     structuredContent: Object.freeze(structured),
     isError,
   });

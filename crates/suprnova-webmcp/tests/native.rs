@@ -112,14 +112,13 @@ fn agent_016_tool_results_take_the_shape_webmcp_reads() {
     assert_eq!(
         serde_json::to_value(&json_result).expect("a result serializes"),
         json!({
-            "content": [{ "type": "text", "text": "{\"id\":1}" }],
             "structuredContent": { "id": 1 },
             "isError": false
         })
     );
     assert_eq!(
         serde_json::to_value(ToolResult::empty()).expect("a result serializes"),
-        json!({ "content": [], "isError": false })
+        json!({ "isError": false })
     );
     assert_eq!(
         serde_json::to_value(ToolResult::error("No room left.")).expect("a result serializes"),
@@ -138,4 +137,15 @@ fn agent_016_a_nested_input_without_the_attribute_does_not_compile() {
     // it carries `#[tool_input]` too, so leaving it off is a build error
     // that names the fix.
     trybuild::TestCases::new().compile_fail("tests/compile_fail/agent_016_*.rs");
+}
+
+#[test]
+fn agent_016_input_schema_omits_root_metadata_and_keeps_properties() {
+    let schema = suprnova_webmcp::input_schema::<AddTodo>();
+    assert!(schema.get("$schema").is_none(), "{schema}");
+    assert!(schema.get("title").is_none(), "{schema}");
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["properties"]["title"]["type"], "string");
+    assert_eq!(schema["properties"]["title"]["maxLength"], 200);
+    assert_eq!(schema["required"], json!(["title"]));
 }

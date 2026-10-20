@@ -38,12 +38,15 @@ impl WebMcpConfig {
         Self::default()
     }
 
-    /// Carry `token` in every HTML response. An empty token is no token.
+    /// Carry a comma-separated list of trial tokens in every HTML response.
+    /// Tokens are trimmed and empty entries are skipped. An empty list is
+    /// no token.
     ///
     /// # Errors
     ///
-    /// When `token` is not base64, the form Chrome issues trial tokens in,
-    /// or cannot be a header value.
+    /// When an entry is not base64, the form browsers issue trial tokens
+    /// in, or cannot be a header value. The error names its position, never
+    /// its value.
     pub fn with_origin_trial_token(mut self, token: &str) -> Result<Self, FrameworkError> {
         self.origin_trial_token = parse(token)?;
         Ok(self)
@@ -64,7 +67,7 @@ impl WebMcpConfig {
         }
     }
 
-    /// The token, when one is set.
+    /// The tokens joined by `, ` for one header, when any are set.
     pub fn origin_trial_token(&self) -> Option<&str> {
         self.origin_trial_token
             .as_ref()
@@ -72,26 +75,46 @@ impl WebMcpConfig {
     }
 }
 
-/// `token` as the header value, or `None` when it is empty.
+/// The tokens in one header, or `None` when the list has no tokens.
+///
+/// The [Origin Trials developer guide] permits comma-separated tokens in
+/// one `Origin-Trial` header, so Chrome and Edge tokens can travel together.
+///
+/// [Origin Trials developer guide]: https://github.com/GoogleChrome/OriginTrials/blob/gh-pages/developer-guide.md#15-can-i-provide-multiple-tokens-on-a-page
 fn parse(token: &str) -> Result<Option<HeaderValue>, FrameworkError> {
-    let token = token.trim();
-    if token.is_empty() {
-        return Ok(None);
-    }
     let engine = base64::engine::GeneralPurpose::new(
         &base64::alphabet::STANDARD,
         base64::engine::GeneralPurposeConfig::new()
             .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
     );
-    if engine.decode(token).is_err() {
-        return Err(FrameworkError::internal(format!(
-            "{TOKEN_VARIABLE} is not an Origin Trial token: a token is base64, as Chrome issues \
-             it; copy it again from the trial's registration page, or leave the variable unset"
-        )));
+    let mut tokens = Vec::new();
+    for (index, entry) in token.split(',').enumerate() {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let position = index + 1;
+        if engine.decode(entry).is_err() {
+            return Err(FrameworkError::internal(format!(
+                "{TOKEN_VARIABLE} entry {position} is not an Origin Trial token: a token is \
+                 base64, as the browser issues it; copy it again from the trial's registration \
+                 page, or leave the variable unset"
+            )));
+        }
+        HeaderValue::from_str(entry).map_err(|_| {
+            FrameworkError::internal(format!(
+                "{TOKEN_VARIABLE} entry {position} cannot be sent as a header value; copy the \
+                 token again, or leave the variable unset"
+            ))
+        })?;
+        tokens.push(entry);
     }
-    HeaderValue::from_str(token).map(Some).map_err(|_| {
+    if tokens.is_empty() {
+        return Ok(None);
+    }
+    HeaderValue::from_str(&tokens.join(", ")).map(Some).map_err(|_| {
         FrameworkError::internal(format!(
-            "{TOKEN_VARIABLE} cannot be sent as a header value; copy the token again, or leave \
+            "{TOKEN_VARIABLE} cannot be sent as a header value; copy the tokens again, or leave \
              the variable unset"
         ))
     })

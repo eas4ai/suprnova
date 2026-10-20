@@ -9,6 +9,7 @@ import {
   FORM_TOOL_HEADER,
   TOOL_CALL_HEADER,
   callPageTool,
+  componentTool,
   formTool,
   registerTool,
   type FormVisit,
@@ -292,7 +293,6 @@ test('agent_014_server_tool_call_carries_session_csrf_and_header', async () => {
   router.reloads[0]?.onFinish?.()
   const result = await pending
   expect(result).toEqual({
-    content: [{ type: 'text', text: '{"id":7}' }],
     structuredContent: { id: 7 },
     isError: false,
   })
@@ -371,7 +371,7 @@ test('agent_014_an_aborted_call_rejects_and_does_not_reload', async () => {
   stop()
 })
 
-function tool(name: string, execute: ToolDefinition['execute'] = async () => ({ content: [], isError: false })): ToolDefinition {
+function tool(name: string, execute: ToolDefinition['execute'] = async () => ({ isError: false })): ToolDefinition {
   return { name, description: `The ${name} tool.`, inputSchema: SCHEMA, annotations: HINTS, execute }
 }
 
@@ -458,4 +458,28 @@ test('agent_017_a_form_tool_submission_carries_the_form_tool_header', async () =
   expect(sent).toHaveLength(1)
   expect(sent[0].visit.headers).toEqual({ [FORM_TOOL_HEADER]: '1' })
   expect(sent[0].visit.headers).not.toHaveProperty(TOOL_CALL_HEADER)
+})
+
+test('agent_015_page_tool_json_is_carried_once_and_explicit_results_are_preserved', async () => {
+  const values = [{ id: 7 }, [1, 2], 42, false, null]
+  for (const value of values) {
+    const definition = componentTool({ name: 'page.json', description: 'Read JSON.', inputSchema: SCHEMA, execute: () => value }, () => () => value)
+    await expect(definition.execute({})).resolves.toEqual({ structuredContent: value, isError: false })
+  }
+  for (const value of [
+    { isError: false },
+    { structuredContent: { errors: { title: 'Required.' } }, isError: true },
+    { content: [{ type: 'text', text: 'Duplicate' }], structuredContent: { id: 7 }, isError: false },
+    { content: [{ type: 'text', text: 'Read this.' }], isError: false },
+  ]) {
+    const definition = componentTool({ name: 'page.result', description: 'Read a result.', inputSchema: SCHEMA, execute: () => value }, () => () => value)
+    await expect(definition.execute({})).resolves.toEqual('structuredContent' in value
+      ? { structuredContent: value.structuredContent, isError: value.isError }
+      : value)
+  }
+})
+
+test('agent_015_page_tool_text_is_carried_only_as_text', async () => {
+  const definition = componentTool({ name: 'page.text', description: 'Read text.', inputSchema: SCHEMA, execute: () => 'Hello.' }, () => () => 'Hello.')
+  await expect(definition.execute({})).resolves.toEqual({ content: [{ type: 'text', text: 'Hello.' }], isError: false })
 })

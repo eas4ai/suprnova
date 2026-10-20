@@ -247,3 +247,53 @@ fn agent_014_an_invalid_origin_trial_token_stops_boot_child() {
         Some(TOKEN)
     );
 }
+
+#[test]
+fn agent_014_token_lists_skip_empty_entries_and_keep_order() {
+    for (tokens, expected) in [
+        (" , , ", None),
+        (" , QUJDRA==, , RUZHSA, ", Some("QUJDRA==, RUZHSA")),
+    ] {
+        let config = WebMcpConfig::new()
+            .with_origin_trial_token(tokens)
+            .expect("valid token list");
+        assert_eq!(config.origin_trial_token(), expected);
+    }
+}
+
+#[test]
+fn agent_014_invalid_token_list_entry_names_position_without_value() {
+    for (tokens, position, secret) in [
+        ("QUJDRA==, bad-token!", 2, "bad-token!"),
+        (", QUJDRA==, bad-token!", 3, "bad-token!"),
+        ("bad-token!, QUJDRA==", 1, "bad-token!"),
+    ] {
+        let error = WebMcpConfig::new()
+            .with_origin_trial_token(tokens)
+            .expect_err("invalid token list entry");
+        let shown = format!("{error:?}");
+        assert!(shown.contains("WEBMCP_ORIGIN_TRIAL_TOKEN"), "{shown}");
+        assert!(shown.contains(&format!("entry {position}")), "{shown}");
+        assert!(!shown.contains(secret), "{shown}");
+        assert!(!shown.contains("QUJDRA=="), "{shown}");
+    }
+}
+
+#[tokio::test]
+async fn agent_014_token_list_is_sent_as_one_header() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "agent_014_token_list_is_sent_as_one_header",
+    )
+    .await
+    {
+        return;
+    }
+    Config::register(
+        WebMcpConfig::new()
+            .with_origin_trial_token(" QUJDRA==, , RUZHSA== ")
+            .expect("two valid tokens"),
+    );
+    let response = client().get("/view").send().await;
+    assert_eq!(trial(&response), Some("QUJDRA==, RUZHSA=="));
+}

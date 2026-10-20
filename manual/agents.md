@@ -1698,6 +1698,36 @@ build callers; `.scopes([...])`, `.claimed(bool)`, `.client(id)` and
 `.bound_to(user)` shape them. Over MCP, only the token's verification is
 faked. [Mocking](mocking.md) covers `TestContainer`.
 
+### Try it in a browser
+
+For local work, open `chrome://flags/#enable-webmcp-testing` in Chrome,
+set it to **Enabled**, and relaunch. See [Chrome's WebMCP guide](https://developer.chrome.com/docs/ai/webmcp#local-webmcp).
+WebMCP needs a [secure context](https://webmachinelearning.github.io/webmcp/#idl-index):
+use HTTPS or [localhost](https://w3c.github.io/webappsec-secure-contexts/#is-origin-trustworthy).
+
+In DevTools, open **Application > WebMCP**. The
+[WebMCP pane](https://developer.chrome.com/docs/devtools/application/webmcp)
+lists available tools and their calls, including inputs, outputs and errors.
+Select a tool, enter its arguments and click **Run tool** to test it directly.
+
+The [example agentic extension](https://github.com/GoogleChromeLabs/webmcp-extension)
+needs Chrome 155 or later; its manifest sets the minimum to 155.0.8052.0.
+It always asks before calling a tool marked `consequentialHint: true`.
+By default, it also asks before tools without `readOnlyHint: true`. Users can
+turn those alerts off or allow a site's actions for the chat. Those choices
+never bypass a consequential tool's prompt.
+The extension cuts results at 8,000 characters and appends a warning. Keep
+answers small enough for the client that reads them. Suprnova's browser tools
+carry JSON in `structuredContent` only, without repeating it as text.
+
+The [Model Context Tool Inspector](https://github.com/beaufortfrancois/model-context-tool-inspector),
+listed in [webmcp-tools](https://github.com/GoogleChromeLabs/webmcp-tools),
+inspects exposed tools and their input schemas and helps debug connections.
+
+For an agent using [chrome-devtools-mcp](https://developer.chrome.com/docs/devtools/application/webmcp#command-line-flags),
+add `--categoryExperimentalWebmcp` to its server arguments. This enables
+`list_webmcp_tools` and `execute_webmcp_tool`, which are off by default.
+
 ### Why Suprnova diverges
 
 Laravel serves MCP through the `laravel/mcp` package: a tool is a class
