@@ -323,6 +323,36 @@ async fn create_post_inserts_real_row_owned_by_session_user() {
 }
 
 #[tokio::test]
+async fn create_post_rejects_blank_fields_with_bad_request() {
+    let app = setup_app().await;
+    let (_user, session) = seed_session_for_new_user(&app).await;
+
+    for (payload, message) in [
+        (
+            serde_json::json!({ "title": " ", "body": "x" }),
+            "title must not be empty",
+        ),
+        (
+            serde_json::json!({ "title": "Title", "body": " \t" }),
+            "body must not be empty",
+        ),
+    ] {
+        let (status, body) = send_request(
+            app.addr,
+            "POST",
+            "/api/posts",
+            Some(&payload),
+            Some(&session),
+        )
+        .await;
+        let body = std::str::from_utf8(&body).expect("response is text");
+        assert_eq!(status.as_u16(), 400, "{payload}: {body}");
+        assert!(body.contains(message), "{body}");
+    }
+    assert!(Post::query().get().await.expect("read posts").is_empty());
+}
+
+#[tokio::test]
 async fn list_public_posts_returns_only_public_rows() {
     let app = setup_app().await;
     let (_user, session) = seed_session_for_new_user(&app).await;

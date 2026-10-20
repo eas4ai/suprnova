@@ -38,6 +38,7 @@ use components::form_gallery::FormGallery;
 use components::live_native_gallery::LiveNativeGallery;
 use components::navigation_gallery::NavigationGallery;
 use components::overlay_gallery::OverlayGallery;
+use components::tally::Tally;
 use providers::tenant::SingleTenant;
 use suprnova::live::components::SearchBox;
 
@@ -85,6 +86,9 @@ pub fn registry() -> Result<LiveRegistry, RegistryError> {
         .register::<DatatableGallery>()?
         .register::<AccountMenu>()?
         .register::<LiveNativeGallery>()?
+        // No page mounts the tally: an MCP client starts one with no
+        // browser (`tally.add`, `src/agents.rs`).
+        .register::<Tally>()?
         .build();
     Ok(registry)
 }

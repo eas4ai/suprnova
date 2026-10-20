@@ -30,11 +30,11 @@ use suprnova::broadcasting::{BroadcastHub, ChannelRegistry, InMemoryBroadcastHub
 use suprnova::features::{FeatureMiddleware, bootstrap_database_cached};
 use suprnova::queue::worker::register_job;
 use suprnova::{
-    App, CsrfMiddleware, DB, DevToolsConfig, EloquentUserProvider, EventFacade, FrameworkError,
-    IncludeMiddleware, Inertia, InertiaConfig, InertiaRequestExt, InertiaRootTemplate,
-    InertiaSharedData, LocaleMiddleware, LocaleShare, Prop, SecurityHeaders, SessionBlock,
-    SessionConfig, SessionMiddleware, Storage, SupervisorRegistry, UserProvider, bind,
-    global_middleware,
+    App, Auth, AuthConfig, AuthManager, CsrfMiddleware, DB, DevToolsConfig, EloquentUserProvider,
+    EventFacade, FrameworkError, IncludeMiddleware, Inertia, InertiaConfig, InertiaRequestExt,
+    InertiaRootTemplate, InertiaSharedData, LocaleMiddleware, LocaleShare, Prop, SecurityHeaders,
+    SessionBlock, SessionConfig, SessionMiddleware, Storage, SupervisorRegistry, UserProvider,
+    bind, global_middleware,
 };
 
 use crate::broadcasting::{ChatChannel, UserRegisteredChannel};
@@ -60,16 +60,7 @@ pub async fn register() {
     // Initialize database connection
     DB::init().await.expect("Failed to connect to database");
 
-    // Register the user provider for Auth::user() and the auth-flow facades.
-    //
-    // `EloquentUserProvider<User>` queries the typed `#[suprnova::model]` User
-    // by primary key for session lookups (`Auth::user_as::<User>()`), exactly
-    // like the previous `DatabaseUserProvider` did. Because `User` now impls
-    // `MustVerifyEmail + CanResetPassword`, this provider implements email
-    // verification and the verified-account password-reset fallback. Magnetar
-    // is required only when reset must act as atomic first mailbox proof or the
-    // application uses Magnetar-owned credentials and sessions.
-    bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
+    register_auth().expect("register the user provider and the auth manager");
 
     // Live: one immutable component registry, the upload host with this
     // application's finalizer, and the gates that authorize the dogfood stream
@@ -223,6 +214,27 @@ pub async fn register() {
     bootstrap_database_cached(Duration::from_secs(60))
         .await
         .expect("feature-flag chain wired");
+}
+
+/// Register the user provider and the auth manager.
+///
+/// `EloquentUserProvider<User>` queries the typed `#[suprnova::model]` User
+/// by primary key for session lookups (`Auth::user_as::<User>()`), exactly
+/// like the previous `DatabaseUserProvider` did. Because `User` now impls
+/// `MustVerifyEmail + CanResetPassword`, this provider implements email
+/// verification and the verified-account password-reset fallback. Magnetar
+/// is required only when reset must act as atomic first mailbox proof or the
+/// application uses Magnetar-owned credentials and sessions.
+///
+/// The `AuthManager` (the `config/auth.php` analogue) is what `Auth::attempt`
+/// and `Auth::login` sign a user in through, on the sign-in and registration
+/// forms (`controllers::auth`), with the same provider registered as
+/// `users`, the default guard's provider. Split out of [`register`] so a test
+/// harness registers exactly what a booted application does.
+pub fn register_auth() -> Result<(), FrameworkError> {
+    bind!(dyn UserProvider, EloquentUserProvider::<User>::new());
+    App::singleton(AuthManager::new(AuthConfig::from_env()));
+    Auth::register_provider("users", Arc::new(EloquentUserProvider::<User>::new()))
 }
 
 /// The document every Inertia first visit renders into:

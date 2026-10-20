@@ -124,6 +124,21 @@ impl MigratorTrait for Migrator {
         migrations.push(Box::new(m_2026_10_14_search_dogfood::Migration));
         migrations.extend(suprnova::search::migrations());
         migrations.extend(suprnova::recommendations::migrations());
+        // Agents (`src/agents.rs`): the set the Inertia and Live kits'
+        // migrators list, last here so a database migrated before them takes
+        // them on its next `migrate`. First, one account per address, compared through `LOWER` as
+        // agent auth matches addresses: a unique index on `LOWER(email)` on
+        // SQLite, Postgres and MySQL 8.0.13 or later. It fails, saying how
+        // many, on a database that already holds two addresses that differ
+        // only in case. MariaDB has no expression index and relies on a
+        // unique index of the column's own and a `_ci` collation, which this
+        // table's `email` column was never given, so there it fails naming
+        // what is missing. Then the OAuth server's clients, grants and
+        // tokens, and agent auth's registrations and claims.
+        migrations.push(Box::new(
+            suprnova::auth::migrations::UniqueEmailIgnoringCase::on("users", "email"),
+        ));
+        migrations.extend(suprnova::agents::migrations());
         migrations
     }
 }

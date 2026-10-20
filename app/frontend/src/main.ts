@@ -1,6 +1,7 @@
 import './app.css'
-import { createInertiaApp } from '@inertiajs/svelte'
+import { createInertiaApp, router } from '@inertiajs/svelte'
 import { hydrate, mount } from 'svelte'
+import { installPageTools } from './lib/agents'
 
 // No hand-rolled CSRF header here, on purpose. The Inertia client this app
 // locks (`@inertiajs/core` 3.8.0) sends its visits over XMLHttpRequest and,
@@ -12,6 +13,12 @@ import { hydrate, mount } from 'svelte'
 // visit - the logout - is refused with a 419. Server-side verification is
 // unchanged: the CSRF middleware still checks the token on every
 // state-changing request.
+
+// The server tools each page lists register with the browser's WebMCP
+// `document.modelContext` while the page is shown, as in the Svelte
+// Inertia kit. Installed before `createInertiaApp`, so the first page's
+// `navigate` event is heard.
+installPageTools(router)
 
 createInertiaApp({
   // The `@inertiajs/vite` plugin in `vite.config.ts` resolves `name` to

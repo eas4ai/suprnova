@@ -1,4 +1,6 @@
 pub mod admin;
+pub mod agents;
+pub mod auth;
 pub mod auth_2fa;
 pub mod auth_reset;
 pub mod auth_verify;
