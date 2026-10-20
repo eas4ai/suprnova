@@ -487,10 +487,9 @@ function answerResult(
     }
   }
   if (status >= 200 && status <= 299) {
-    if (text.length === 0) return Object.freeze({ content: Object.freeze([]), isError: false });
+    if (text.length === 0) return Object.freeze({ isError: false });
     if (!parsed) return errorResult("The tool answered with a body that is not JSON.");
     return Object.freeze({
-      content: Object.freeze([Object.freeze({ type: "text" as const, text })]),
       structuredContent: json,
       isError: false,
     });

@@ -322,7 +322,10 @@ test(`agent_015_${kit}_form_tool_returns_each_invalid_field`, async ({ page }) =
   const response = await agent.invoke('fixture.notes.create', { title: 'ab' });
   expect(response.status).not.toBe('Error');
   expect(response.output?.isError).toBe(true);
-  expect(response.output?.content?.[0]?.text).toContain('- title: Give the note a title of 3 to 80 characters.');
+  expect(response.output).not.toHaveProperty('content');
+  expect(response.output?.structuredContent).toMatchObject({
+    errors: { title: 'Give the note a title of 3 to 80 characters.' },
+  });
   expect(response.output?.structuredContent).toMatchObject({ outcome: 'invalid' });
   // The user sees the same form the agent filled, with the same error.
   await expect(page.getByTestId('title')).toHaveValue('ab');

@@ -14,12 +14,12 @@ import { csrfHeaders } from '../stream/core'
 /** One text block of a tool result. */
 export type ToolText = { type: 'text'; text: string }
 
-/** What a tool call resolves to: MCP's tool result. */
+/** What a WebMCP tool call resolves to, carrying each answer once. */
 export type ToolResult = {
-  content: ToolText[]
+  content?: ToolText[]
   /** The answer as data, when it is JSON. */
   structuredContent?: unknown
-  /** The call failed; the text says why, for the agent to read. */
+  /** The call failed; the answer says why, for the agent to read. */
   isError: boolean
 }
 
@@ -356,9 +356,9 @@ function messageOf(body: { value: unknown } | null, fallback: string): string {
 }
 
 /**
- * The tool result of a route's answer, as the MCP endpoint maps one: a
- * JSON body becomes the structured content and its text, and a failure
- * becomes a result with `isError: true` whose text the agent can act on.
+ * The browser result of a route's answer. A JSON body appears only as
+ * structured content. A failure becomes a result with `isError: true`
+ * whose text the agent can act on.
  * A server failure shows nothing of its body.
  */
 export function answerResult(
@@ -377,11 +377,11 @@ export function answerResult(
   }
   if (status >= 200 && status <= 299) {
     if (body === '') {
-      return { content: [], isError: false }
+      return { isError: false }
     }
     return json === null
       ? errorResult('The tool answered with a body that is not JSON.')
-      : { content: [{ type: 'text', text: body }], structuredContent: json.value, isError: false }
+      : { structuredContent: json.value, isError: false }
   }
   if (status >= 300 && status <= 399) {
     return errorResult('The tool answered with a redirect, which a tool call cannot follow.')
@@ -842,31 +842,33 @@ export type PageToolOptions<TInput = Record<string, unknown>> = {
   debugging?: boolean
   /**
    * Answers a call: a {@link ToolResult}, or any JSON value, which becomes
-   * the result's text and, for an object, its structured content. A thrown
+   * the result's structured content. A string becomes text. A thrown
    * error becomes a tool error with its message.
    */
   execute: (input: TInput, signal?: AbortSignal) => unknown
 }
 
 function isToolResult(value: unknown): value is ToolResult {
-  return plainObject(value) && Array.isArray(value.content) && typeof value.isError === 'boolean'
+  return plainObject(value) && typeof value.isError === 'boolean'
+    && (Array.isArray(value.content)
+      || Object.prototype.hasOwnProperty.call(value, 'structuredContent')
+      || Object.keys(value).length === 1)
 }
 
 /** `value` as a tool result. */
 function resultOf(value: unknown): ToolResult {
   if (isToolResult(value)) {
-    return value
+    return Object.prototype.hasOwnProperty.call(value, 'structuredContent')
+      ? { structuredContent: value.structuredContent, isError: value.isError }
+      : value
   }
   if (value === undefined) {
-    return { content: [], isError: false }
+    return { isError: false }
   }
   if (typeof value === 'string') {
     return { content: [{ type: 'text', text: value }], isError: false }
   }
-  const text = JSON.stringify(value)
-  return plainObject(value)
-    ? { content: [{ type: 'text', text }], structuredContent: value, isError: false }
-    : { content: [{ type: 'text', text }], isError: false }
+  return { structuredContent: value, isError: false }
 }
 
 /**
@@ -1016,7 +1018,6 @@ export function formTool(options: FormToolOptions, driver: () => FormDriver): To
       form.fill(values)
       if (destructive) {
         return {
-          content: [{ type: 'text', text: 'The form is filled. The user reviews it and submits it.' }],
           structuredContent: { outcome: 'filled', submitted: false },
           isError: false,
         }
@@ -1045,14 +1046,12 @@ export function formTool(options: FormToolOptions, driver: () => FormDriver): To
             onSuccess: (page) => {
               const outcome = { outcome: 'submitted', component: page.component, url: page.url }
               settle({
-                content: [{ type: 'text', text: JSON.stringify(outcome) }],
                 structuredContent: outcome,
                 isError: false,
               })
             },
             onError: (errors) => {
               settle({
-                content: [{ type: 'text', text: validationText(errors, DEFAULT_MAX_RESULT_BYTES) }],
                 structuredContent: { outcome: 'invalid', errors },
                 isError: true,
               })

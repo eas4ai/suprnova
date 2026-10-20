@@ -12,11 +12,10 @@ import type { AgentToolAnnotations } from "../islands/metadata.js";
 
 /**
  * What a WebMCP tool's `execute` resolves to. A server tool's result
- * carries structured content only when its route answered with JSON, as
- * the MCP endpoint's result does.
+ * carries a JSON answer only as structured content, without a text copy.
  */
 export interface ModelContextToolResult {
-  readonly content: readonly Readonly<{ type: "text"; text: string }>[];
+  readonly content?: readonly Readonly<{ type: "text"; text: string }>[];
   readonly structuredContent?: unknown;
   readonly isError: boolean;
 }

@@ -137,12 +137,17 @@ test('agent_016_wasm_registers_a_typed_tool', async ({ page }) => {
   await expect(page.locator('html')).toHaveAttribute('data-registered', 'ok');
 
   // The page registered the schema the crate derives from the input type,
-  // which is the schema the server derives for the same type.
+  // with the same validation rules as the server and no root metadata.
   const passed = await descriptor(page, 'todos.add');
   const derived = JSON.parse((await page.locator('html').getAttribute('data-expected-schema')) ?? 'null');
   const server = await (await page.request.get('/test/schema')).json();
   expect(passed?.inputSchema).toEqual(derived);
-  expect(derived).toEqual(server);
+  const { $schema: dialect, title: typeName, ...rules } = server;
+  expect(dialect).toBe('https://json-schema.org/draft/2020-12/schema');
+  expect(typeName).toBe('AddTodo');
+  expect(derived).not.toHaveProperty('$schema');
+  expect(derived).not.toHaveProperty('title');
+  expect(derived).toEqual(rules);
   expect(passed?.title).toBe('Add todo');
   expect(passed?.description).toBe('Add an item to the visible todo list.');
   expect(passed?.annotations).toEqual({
@@ -158,6 +163,7 @@ test('agent_016_wasm_registers_a_typed_tool', async ({ page }) => {
   expect(added.status).toBe('Completed');
   expect(added.output?.isError).toBe(false);
   expect(added.output?.structuredContent).toEqual({ added: 'Buy milk', count: 1 });
+  expect(added.output).not.toHaveProperty('content');
   await expect(page.locator('html')).toHaveAttribute('data-todos', '1');
   const refused = await agent.invoke('todos.add', { todoTitle: '' });
   expect(refused.output?.isError).toBe(true);
