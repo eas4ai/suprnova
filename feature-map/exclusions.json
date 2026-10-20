@@ -7,7 +7,7 @@
    "suprnova-macros/src/redirect.rs:59"
   ],
   "CARGO_PKG_NAME": [
-   "suprnova-macros/src/live/live_impl.rs:493"
+   "suprnova-macros/src/live/live_impl.rs:550"
   ],
   "CARGO_PKG_VERSION": [
    "framework/src/render_cache/config.rs:702",
@@ -83,13 +83,13 @@
    "framework/src/vector/mariadb.rs:160"
   ],
   "VERIFY_CA": [
-   "framework/src/database/schema_dump.rs:1045"
+   "framework/src/database/schema_dump.rs:1070"
   ],
   "VERIFY_IDENTITY": [
-   "framework/src/database/schema_dump.rs:1045"
+   "framework/src/database/schema_dump.rs:1070"
   ],
   "VITE_REPORTING_DSN": [
-   "framework/src/security_headers/mod.rs:640"
+   "framework/src/security_headers/mod.rs:800"
   ]
  },
  "rust_items_not_extracted": [
@@ -97,6 +97,6 @@
   "methods of external trait impls (Debug, Clone, Serialize, ...); the traits themselves are listed in each type's implements_external",
   "demo application code (app/), test-support crates and fixtures"
  ],
- "sibling_reexports_folded_into_aliases": 679,
- "source_rev": "bab29464d"
+ "sibling_reexports_folded_into_aliases": 709,
+ "source_rev": "d5947344f"
 }

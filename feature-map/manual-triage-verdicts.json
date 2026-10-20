@@ -848,6 +848,14 @@
     "console search:baseline --engine": {
       "class": "noise",
       "evidence": "Correct: `search:baseline run` parses `--engine name` and `--engine=name` by hand from its trailing args (framework/src/search/commands.rs:227-230), so clap's help cannot list it."
+    },
+    "Unsupported::NoModelContext": {
+      "class": "noise",
+      "evidence": "The variant exists: crates/suprnova-webmcp/src/error.rs:79 `NoModelContext` on `Unsupported`, and crates/suprnova-webmcp/src/lib.rs:57 documents it. feature-map/tools/generate.sh does not scan the suprnova-webmcp crate, so the surface lacks it; the manual is correct."
+    },
+    "`issue_for(&user)` :: The same for an account the request just registered, which nobody has signed in to yet.": {
+      "class": "noise",
+      "evidence": "The sentence describes the account's state inside the registration flow (framework/src/magnetar_integration/email_verification.rs:120 `issue_for` takes the user the request just created), not the code's state in time; `yet` is about the account, so this is no time claim."
     }
   }
 }
