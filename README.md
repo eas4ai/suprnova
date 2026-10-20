@@ -23,18 +23,32 @@ checks your models, routes and page props before anything ships.
 
 ## Read the manual from your agent
 
-The whole manual is served to agents at `https://suprnova.app/mcp`, with no
-sign-in. Add it to Claude Code:
+The manual is served at `https://suprnova.app/mcp` over the MCP streamable
+HTTP transport, with no sign-in. Register it once in your agent.
+
+Claude Code:
 
 ```bash
 claude mcp add suprnova --transport http https://suprnova.app/mcp
 ```
 
-Three read-only tools come back: `list_manual_chapters`,
-`read_manual_chapter` and `search_manual`. Any MCP client that speaks HTTP
-connects to the same URL, and every page on [suprnova.app](https://suprnova.app)
-offers the same tools to browser agents through WebMCP. Your own app gets the
-same surface from `#[tool]` handlers; see [Agents](./manual/agents.md).
+Codex:
+
+```bash
+codex mcp add suprnova --url https://suprnova.app/mcp
+```
+
+Muse Code, under `mcpServers` in `~/.config/muse/settings.json`:
+
+```json
+"suprnova": { "type": "streamable-http", "url": "https://suprnova.app/mcp" }
+```
+
+The server has three read-only tools: `list_manual_chapters`,
+`read_manual_chapter` and `search_manual`. Every page on
+[suprnova.app](https://suprnova.app) also offers them to browser agents through
+WebMCP. Your own app gets the same surface from `#[tool]` handlers; see
+[Agents](./manual/agents.md).
 
 ## Why Suprnova
 
