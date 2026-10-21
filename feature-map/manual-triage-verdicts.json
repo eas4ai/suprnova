@@ -856,6 +856,18 @@
     "`issue_for(&user)` :: The same for an account the request just registered, which nobody has signed in to yet.": {
       "class": "noise",
       "evidence": "The sentence describes the account's state inside the registration flow (framework/src/magnetar_integration/email_verification.rs:120 `issue_for` takes the user the request just created), not the code's state in time; `yet` is about the account, so this is no time claim."
+    },
+    "A commit after that SELECT cannot attach a newer version to older content, including a row with no kept version yet.": {
+      "class": "noise",
+      "evidence": "'yet' is ordinary English about runtime state (a file, row, key, dependency or build that doesn't exist yet), not a claim about the code's development."
+    },
+    "Headless Live tools now report when their growing state no longer fits a follow-up request, so agents can restart instead of receiving an unusable handle.": {
+      "class": "noise",
+      "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
+    },
+    "If the sealed successor would make even the smallest follow-up request exceed the endpoint's `max_body_bytes`, the outcome is `too_large` with `isError: true`.": {
+      "class": "noise",
+      "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
     }
   }
 }

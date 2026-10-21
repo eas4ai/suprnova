@@ -83,10 +83,10 @@
    "framework/src/vector/mariadb.rs:160"
   ],
   "VERIFY_CA": [
-   "framework/src/database/schema_dump.rs:1070"
+   "framework/src/database/schema_dump.rs:1087"
   ],
   "VERIFY_IDENTITY": [
-   "framework/src/database/schema_dump.rs:1070"
+   "framework/src/database/schema_dump.rs:1087"
   ],
   "VITE_REPORTING_DSN": [
    "framework/src/security_headers/mod.rs:800"
@@ -98,5 +98,5 @@
   "demo application code (app/), test-support crates and fixtures"
  ],
  "sibling_reexports_folded_into_aliases": 709,
- "source_rev": "d92a826fd"
+ "source_rev": "1c9b94930"
 }
