@@ -378,6 +378,11 @@ edited the file.
 
 ## Fixed entries with no upgrade step
 
+- **The locked dependency set no longer carries the webpki advisories
+  RUSTSEC-2026-0381, 0382 and 0383.** Nothing to change in code. Your own
+  application's lock file is separate: run `cargo update -p rustls-webpki -p
+  webpki-roots@1.0.9 -p webpki-root-certs@1.0.9` (name the versions your lock
+  holds) and `cargo audit` to bring it the same fix. (4.5.1)
 - **Database search vector updates and deletions now release their SQL
   connection before calling the vector store, avoiding deadlocks on shared
   pools.** Nothing to change.

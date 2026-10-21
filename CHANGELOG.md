@@ -4,6 +4,16 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 4.5.1 - 2026-10-21
+
+### Fixed
+
+- **The locked dependency set no longer carries the webpki advisories
+  RUSTSEC-2026-0381, 0382 and 0383.** `rustls-webpki` 0.103.16, `webpki-roots`
+  1.0.10 and `webpki-root-certs` 1.0.10 replace versions whose bundled roots
+  trusted distrusted emSign intermediates. Binaries built from the tag with
+  `--locked`, the CLI among them, get the fixed versions.
+
 ## 4.5.0 - 2026-10-21
 
 ### Changed
