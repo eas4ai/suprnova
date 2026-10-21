@@ -8,6 +8,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- Indexing and semantic queries now require the provider's model id and revision
+  to match the generation. Rebuild with `search:reindex` after changing models. (#187)
+
 - Qdrant now supports retained flush fences and index deletion through the search
   maintenance commands. Flush fences use the configured tombstone lifetime. (#189)
 
@@ -46,6 +49,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   (#168)
 
 ### Fixed
+
+- Replacing an embedding provider with another model of the same dimensions now
+  reports a rebuild error instead of silently mixing incompatible vectors. (#187)
 
 - Qdrant flushes now block delayed writes, including keys absent at the start,
   and deleting an index removes its collections and generation metadata. (#189)

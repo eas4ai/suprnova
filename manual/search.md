@@ -495,6 +495,9 @@ verified before loading; a changed byte is refused. A verified cache works
 offline. Keep the manifest with its artifacts. Generation settings pin the
 resolved model revision and dimensions; `ModelProfile::provenance()` exposes
 the manifest digest and file hashes, and baseline records include them.
+Indexing and semantic queries refuse a provider whose model id or revision differs
+from the generation's pin, even when its dimensions match. After changing models,
+rebuild the index with `search:reindex <Model|index>`.
 
 ### Media embeddings
 

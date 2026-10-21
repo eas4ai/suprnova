@@ -50,3 +50,6 @@ mod common;
 
 #[cfg(feature = "search-media")]
 mod media;
+
+#[cfg(feature = "testing")]
+mod provider_identity;

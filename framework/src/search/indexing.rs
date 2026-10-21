@@ -1292,6 +1292,9 @@ async fn embed_dense_documents(
         Some(name) => SearchRegistry::embedder_named(index, name)?,
         None => SearchRegistry::embedder_for(index)?,
     };
+    settings
+        .index_time
+        .validate_model(index, embedder.profile())?;
     let mut inputs = indexed
         .iter()
         .map(|indexed| {

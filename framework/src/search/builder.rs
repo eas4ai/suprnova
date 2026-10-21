@@ -1174,6 +1174,9 @@ async fn retrieve(
             Some(name) => SearchRegistry::embedder_named(descriptor.name, name)?,
             None => SearchRegistry::embedder_for(descriptor.name)?,
         };
+        settings
+            .index_time
+            .validate_model(descriptor.name, embedder.profile())?;
         let vector = embedder.embed_query(&plan.text.original).await?;
         let vector = validate_embedding(
             vector.dense,
