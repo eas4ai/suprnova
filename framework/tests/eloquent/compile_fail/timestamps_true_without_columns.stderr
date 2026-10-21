@@ -1,5 +1,0 @@
-error: `timestamps = true` names no timestamp columns: add `created_at` and `updated_at`, or drop `timestamps = true`
- --> tests/eloquent/compile_fail/timestamps_true_without_columns.rs:5:12
-  |
-5 | pub struct StampedRow {
-  |            ^^^^^^^^^^
