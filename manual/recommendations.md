@@ -255,7 +255,7 @@ search index:
 
 - **Shared engagement.** Two documents get a `co_engaged` edge when at least
   `RECOMMEND_MIN_PEERS` actors hold both among their most recent
-  `RECOMMEND_GRAPH_FANOUT` positives. Every event class counts, but only the
+  `RECOMMEND_GRAPH_FANOUT` positives. Positive events count, and only the
   aggregate is stored, so no edge describes one person.
 - **Public engagement.** For the event types `RECOMMEND_PUBLIC_EVENT_TYPES`
   lists, each signed-in actor gets an `engaged` edge to the documents they

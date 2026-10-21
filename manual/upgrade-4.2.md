@@ -18,7 +18,8 @@ application scaffolded before 4.2.
 
 ## Upgrade in this order
 
-1. Point application dependencies and the CLI at `v4.2.0`:
+1. Point application dependencies and the CLI at the release you are
+   upgrading to, `v4.2.0` or later. The examples pin the current release:
 
    ```toml
    suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.4.0" }

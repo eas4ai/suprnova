@@ -535,9 +535,11 @@ default. Set a smaller positive limit to reduce worker memory. Larger limits
 are refused. A size check and a bounded range read apply to every part.
 Each part's bytes join the document's content hash, so a file replaced at the
 same path is embedded again. Replacing a file does not reindex anything by
-itself: after you replace it, save the row or call
-`suprnova::search::searchable::<M>(&keys)` for it. Every save of a document
-with media parts reads all of its parts, even unchanged ones, to compare them.
+itself, and a save that changes no column returns before search
+synchronization runs. After you replace a file, call
+`suprnova::search::searchable::<M>(&keys)` for the row, or save it with a
+changed column. Every save that reaches search synchronization reads all of the
+document's media parts, even unchanged ones, to compare them.
 
 Images accept PNG, JPEG and WebP. Audio accepts PCM WAV, mixes channels to
 mono and resamples to 16 kHz with a Hann-windowed sinc filter. It computes

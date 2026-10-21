@@ -54,9 +54,9 @@ driver, and call it done. Suprnova treats the choice as a configuration
 concern. The same trait covers an in-process `HashMap` for tests,
 a dedicated vector DB (Qdrant, Pinecone) when the embedding count
 justifies the operational cost, and a relational backend (MariaDB
-11.7+) when you'd rather keep vectors next to the rows that produced
-them. Weaviate, Milvus, LanceDB, pgvector, and LibSQL queue up behind
-real consumer demand - none are blocked by the trait shape.
+11.7+, or Postgres with pgvector) when you'd rather keep vectors next to
+the rows that produced them. Weaviate, Milvus, LanceDB, and LibSQL queue up
+behind real consumer demand - none are blocked by the trait shape.
 
 When the rest of your app fits on one engine, MariaDB 11.7+ keeps
 vectors alongside relational tables, JSON documents, and

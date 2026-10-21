@@ -33,7 +33,7 @@ The dependency upgrade requires no application data migration.
 
 Suprnova is distributed as a Cargo project, and the CLI installer pulls
 the framework from git rather than crates.io (see [Distribution
-model](#distribution-model) below). The command installs the tagged v2.1.0 release:
+model](#distribution-model) below). The command installs the current tagged release:
 
 ```bash
 cargo install --git https://github.com/eas4ai/suprnova.git --tag v4.4.0 suprnova-cli

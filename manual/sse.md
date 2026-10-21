@@ -438,9 +438,10 @@ pub async fn deploy(req: Request) -> Response {
 
 In Vue each result is a ref, read as `reply.data.value` in a script and as
 `reply.data` in a template. In Svelte each hook returns a store, read as
-`$reply.data`; call it while the component initializes. Every hook connects
-when its component mounts and cancels its request when the component unmounts,
-so the server render opens no connection.
+`$reply.data`; call it while the component initializes. The event stream hooks
+connect when their component mounts; the fetch hooks send on mount only when
+`initialInput` is given and otherwise wait for `send`. Every hook cancels its
+request when the component unmounts, so the server render opens no connection.
 
 The `fetch` hooks send a JSON body with the CSRF token: from the `csrfToken`
 option, else the `<meta name="csrf-token">` tag the root template writes, else
