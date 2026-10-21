@@ -53,3 +53,6 @@ mod media;
 
 #[cfg(feature = "testing")]
 mod provider_identity;
+
+#[cfg(feature = "testing")]
+mod boot;
