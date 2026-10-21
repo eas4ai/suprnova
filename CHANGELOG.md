@@ -25,6 +25,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Adding a source to a Content Security Policy now changes only the policy
+  containing its directive, keeping other policies in the header unchanged. (#180)
 - Live now announces interrupted actions to screen readers in the shipped browser
   bundles. (#172)
 - A sign-up whose address collides with an existing account only under the
