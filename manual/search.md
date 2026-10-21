@@ -122,10 +122,19 @@ Timestamped projections use `updated_at` in UTC microseconds. A model without
 `search_source_versions` table: every save raises it inside the save's own
 transaction, so a rolled-back save leaves it unchanged, and reading a row never
 raises it. `to_search_document()` is synchronous and cannot query, so Eloquent
-loads the kept versions in one query beside the rows it returns, and each
+loads each kept version together with its row, and each
 model carries the version of the revision it holds: the one its load found or
 its save raised. A model keeps that version for as long as you hold it; a row
 another process saved since then reads the newer version on its next load.
+An ordinary SELECT's correlated version lookup shares the content's snapshot on
+Postgres, MySQL/InnoDB and SQLite. A commit after that SELECT cannot attach
+a newer version to older content, including a row with no kept version yet.
+For a locking model query on Postgres or MySQL, Eloquent holds the row locks
+while reading versions with the same lock on the same transaction. This reads
+current metadata on MySQL even when the transaction has an older snapshot;
+Postgres reads metadata after any row-lock wait. A pool query owns a short
+transaction for those reads. SQLite's lock hints are no-ops and use the ordinary
+single SELECT. Derived union and window queries also keep the single SELECT.
 Undeclared model fields stay outside the document.
 
 ## Index settings

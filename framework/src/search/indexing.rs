@@ -126,7 +126,7 @@ impl KeptVersions {
 
 /// The kept version a projection reads for a row of a model without `updated_at`: the
 /// value this process last saved or loaded for the row, 0 when it has done neither.
-/// Eloquent loads these values in one query beside the rows themselves.
+/// Eloquent loads each value in the same statement as the row itself.
 #[doc(hidden)]
 pub fn kept_version(index: &str, key: &str) -> i64 {
     versions()
@@ -282,13 +282,38 @@ async fn remember_after_commit(
     Ok(())
 }
 
-/// Load the kept versions of freshly read rows in one query per batch, so a projection
-/// of any row Eloquent returns reads the version its database holds. Runs only for a
-/// searchable model without `updated_at`.
+/// Load kept versions for rows already read under the executor's snapshot.
+/// The caller must hold the same snapshot across both reads. Eloquent uses
+/// a single SELECT for ordinary reads, because a pool or a READ COMMITTED
+/// transaction can see a newer version than an earlier SELECT's content.
+/// Locking reads hold row locks while fetching current metadata instead.
+/// Database and key errors are returned so failed reads cannot mislabel a row.
 #[doc(hidden)]
 pub async fn prefetch_kept_versions<M>(
     rows: &[M],
     exec: &crate::database::transaction::ExecutorChoice,
+) -> Result<(), FrameworkError>
+where
+    M: crate::eloquent::Model + From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    prefetch_versions(rows, exec, "").await
+}
+
+/// With a lock suffix, model rows must already be locked on this executor.
+/// The metadata read uses the same lock so MySQL reads current versions rather
+/// than an older REPEATABLE READ snapshot. Row locks prevent intervening saves.
+pub(crate) async fn prefetch_versions<M>(
+    rows: &[M],
+    exec: &crate::database::transaction::ExecutorChoice,
+    lock_suffix: &str,
 ) -> Result<(), FrameworkError>
 where
     M: crate::eloquent::Model + From<<M::Entity as EntityTrait>::Model>,
@@ -329,7 +354,7 @@ where
         for row in exec
             .query_all(super::outbox::statement(
                 backend,
-                &format!("SELECT model_key, version FROM search_source_versions WHERE index_name = ? AND model_key IN ({placeholders})"),
+                &format!("SELECT model_key, version FROM search_source_versions WHERE index_name = ? AND model_key IN ({placeholders}){lock_suffix}"),
                 values,
             )?)
             .await
@@ -344,12 +369,216 @@ where
     remember_kept(&versions(), entry.index, &loaded);
     let loaded: HashMap<String, i64> = loaded.into_iter().collect();
     for (row, key) in rows.iter().zip(&keys) {
-        if let (Some(cache), Some(version)) = (row.__eager_cache(), loaded.get(key)) {
-            cache.__keep_version(*version);
+        if let Some(cache) = row.__eager_cache() {
+            cache.__keep_version(loaded.get(key).copied().unwrap_or(0));
         }
     }
     Ok(())
 }
+pub(crate) const KEPT_VERSION_COLUMN: &str = "__suprnova_kept_source_version";
+
+/// Keep flat locking SELECTs and their metadata read on one connection. Pool
+/// reads own a short transaction; an explicit or ambient transaction stays owned
+/// by its caller. Dropping this guard on an error rolls back an owned transaction.
+pub(crate) struct LockedVersionRead {
+    pub(crate) exec: crate::database::transaction::ExecutorChoice,
+    owned: bool,
+}
+
+impl LockedVersionRead {
+    pub(crate) async fn begin(
+        exec: &crate::database::transaction::ExecutorChoice,
+    ) -> Result<Self, FrameworkError> {
+        use crate::database::transaction::ExecutorChoice;
+        use sea_orm::TransactionTrait;
+
+        match exec {
+            ExecutorChoice::Tx(tx, name) => Ok(Self {
+                exec: ExecutorChoice::Tx(tx.clone(), name.clone()),
+                owned: false,
+            }),
+            ExecutorChoice::Pool(connection, name) => {
+                let tx = connection.inner().begin().await.map_err(|e| {
+                    FrameworkError::database(format!("search locking read: begin: {e}"))
+                })?;
+                Ok(Self {
+                    exec: ExecutorChoice::Tx(std::sync::Arc::new(tx), name.clone()),
+                    owned: true,
+                })
+            }
+        }
+    }
+
+    pub(crate) async fn finish(self) -> Result<(), FrameworkError> {
+        use crate::database::transaction::ExecutorChoice;
+
+        if !self.owned {
+            return Ok(());
+        }
+        let ExecutorChoice::Tx(tx, _) = self.exec else {
+            return Err(FrameworkError::database(
+                "search locking read lost its owned transaction",
+            ));
+        };
+        std::sync::Arc::try_unwrap(tx)
+            .map_err(|_| {
+                FrameworkError::database("search locking read transaction is still shared")
+            })?
+            .commit()
+            .await
+            .map_err(|e| FrameworkError::database(format!("search locking read: commit: {e}")))
+    }
+}
+
+/// Discover metadata before the row SELECT, so even a pool read can fetch
+/// content and version together without changing the caller's transaction.
+pub(crate) async fn kept_version_index<M: crate::eloquent::EloquentModel + 'static>(
+    exec: &crate::database::transaction::ExecutorChoice,
+) -> Result<Option<&'static str>, FrameworkError> {
+    if M::HAS_TIMESTAMPS {
+        return Ok(None);
+    }
+    let Some(entry) = SearchRegistry::by_type(TypeId::of::<M>())? else {
+        return Ok(None);
+    };
+    Ok(
+        super::outbox::persistent_table(entry.index, exec, "search_source_versions")
+            .await?
+            .then_some(entry.index),
+    )
+}
+
+/// A scalar lookup preserves the row SELECT's cardinality and ordering.
+/// Postgres and SQLite cast keys to TEXT; MySQL uses CHAR so numeric keys compare
+/// as the same textual keys that `document_key` stores, without numeric coercion.
+pub(crate) fn kept_version_expression(
+    backend: sea_orm::DbBackend,
+    table: &str,
+    key: &str,
+    index_placeholder: &str,
+) -> Result<String, FrameworkError> {
+    use crate::database::{clauses::quote_identifier, validate_identifier};
+
+    validate_identifier(table)?;
+    validate_identifier(key)?;
+    let table = quote_identifier(backend, table);
+    let key = quote_identifier(backend, key);
+    let text = match backend {
+        sea_orm::DbBackend::Postgres | sea_orm::DbBackend::Sqlite => "TEXT",
+        sea_orm::DbBackend::MySql => "CHAR",
+        _ => return Err(crate::database::unsupported_database_backend(backend)),
+    };
+    Ok(format!(
+        "COALESCE((SELECT version FROM search_source_versions AS __suprnova_versions WHERE __suprnova_versions.index_name = {index_placeholder} AND __suprnova_versions.model_key = CAST({table}.{key} AS {text})), 0)"
+    ))
+}
+
+/// Attach only versions returned by the content SELECT, including a known zero.
+/// Decode the whole batch before updating caches so a bad column returns an error
+/// without leaving part of the batch with a different hydration state.
+pub(crate) fn attach_kept_versions<M>(
+    rows: &[M],
+    raw_rows: &[sea_orm::QueryResult],
+    index: Option<&str>,
+) -> Result<(), FrameworkError>
+where
+    M: crate::eloquent::Model + From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    let Some(index) = index else {
+        return Ok(());
+    };
+    if rows.len() != raw_rows.len() {
+        return Err(FrameworkError::database(format!(
+            "search index `{index}` kept versions: content and version row counts differ"
+        )));
+    }
+    let loaded = rows
+        .iter()
+        .zip(raw_rows)
+        .map(|(row, raw)| {
+            Ok((
+                document_key(&row.primary_key_value_json())?,
+                raw.try_get::<i64>("", KEPT_VERSION_COLUMN).map_err(|e| {
+                    FrameworkError::database(format!("search index `{index}` kept versions: {e}"))
+                })?,
+            ))
+        })
+        .collect::<Result<Vec<_>, FrameworkError>>()?;
+    for (row, (_, version)) in rows.iter().zip(&loaded) {
+        if let Some(cache) = row.__eager_cache() {
+            cache.__keep_version(*version);
+        }
+    }
+    remember_kept(&versions(), index, &loaded);
+    Ok(())
+}
+
+/// Hydrate content and its version in one statement. Postgres's statement
+/// snapshot, MySQL/InnoDB's consistent SELECT read and SQLite's read transaction
+/// cover the correlated lookup too, even when another writer commits immediately
+/// after the SELECT. No transaction isolation setting is changed.
+pub(crate) async fn load_with_kept_versions<M>(
+    mut select: sea_orm::Select<M::Entity>,
+    exec: &crate::database::transaction::ExecutorChoice,
+) -> Result<Vec<M>, FrameworkError>
+where
+    M: crate::eloquent::Model + From<<M::Entity as EntityTrait>::Model>,
+    <M::Entity as EntityTrait>::Model: From<M>
+        + IntoActiveModel<<M::Entity as EntityTrait>::ActiveModel>
+        + Serialize
+        + Send
+        + Sync,
+    <M::Entity as EntityTrait>::ActiveModel: Send,
+    <<M::Entity as EntityTrait>::PrimaryKey as PrimaryKeyTrait>::ValueType:
+        Send + Into<sea_orm::Value>,
+{
+    use sea_orm::{FromQueryResult, QuerySelect, QueryTrait, sea_query::Expr};
+
+    let index = kept_version_index::<M>(exec).await?;
+    let failure = |e: sea_orm::DbErr| FrameworkError::database(e.to_string());
+    let Some(index) = index else {
+        return exec
+            .select_all(select)
+            .await
+            .map_err(failure)?
+            .into_iter()
+            .map(M::try_from_storage)
+            .collect();
+    };
+    let expression = kept_version_expression(
+        exec.backend(),
+        M::TABLE,
+        M::PRIMARY_KEY,
+        &crate::database::placeholder::placeholder(exec.backend(), 1)?,
+    )?;
+    select = select.column_as(
+        Expr::cust_with_values(expression, [index]),
+        KEPT_VERSION_COLUMN,
+    );
+    let raw_rows = exec
+        .query_all(select.build(exec.backend()))
+        .await
+        .map_err(failure)?;
+    let rows = raw_rows
+        .iter()
+        .map(|raw| {
+            M::try_from_storage(
+                <M::Entity as EntityTrait>::Model::from_query_result(raw, "").map_err(failure)?,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    attach_kept_versions(&rows, &raw_rows, Some(index))?;
+    Ok(rows)
+}
+
 type VersionCache = std::sync::Arc<Mutex<VersionState>>;
 static VERSIONS: LazyLock<VersionCache> =
     LazyLock::new(|| std::sync::Arc::new(Mutex::new(VersionState::default())));

@@ -1449,6 +1449,222 @@ async fn update_returns_the_new_search_version_and_leaves_the_older_instance_ver
     .unwrap();
 }
 
+struct CommitAfterRowRead {
+    id: i64,
+    armed: std::sync::atomic::AtomicBool,
+    committed: std::sync::atomic::AtomicBool,
+}
+
+#[suprnova::async_trait]
+impl suprnova::Listener<suprnova::database::events::QueryExecuted> for CommitAfterRowRead {
+    async fn handle(
+        &self,
+        event: &suprnova::database::events::QueryExecuted,
+    ) -> Result<(), FrameworkError> {
+        use sea_orm::{ConnectionTrait, TransactionTrait};
+        use std::sync::atomic::Ordering;
+
+        if !event.sql.starts_with("SELECT ")
+            || !(event.sql.contains("FROM \"search_notes\"")
+                || event.sql.contains("FROM search_notes"))
+            || !self.armed.swap(false, Ordering::SeqCst)
+        {
+            return Ok(());
+        }
+        // The row SELECT has finished, but hydration has not read a separate
+        // version yet. Commit both changes through an independent transaction.
+        let connection = DB::connection()?;
+        let tx = connection
+            .inner()
+            .begin()
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        tx.execute_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Sqlite,
+            "UPDATE search_notes SET title = 'After' WHERE id = ?",
+            [self.id.into()],
+        ))
+        .await
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        tx.execute_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Sqlite,
+            "INSERT INTO search_source_versions (index_name, model_key, version) VALUES (?, ?, 1) ON CONFLICT (index_name, model_key) DO UPDATE SET version = version + 1",
+            [SearchNote::descriptor().name.into(), self.id.to_string().into()],
+        ))
+        .await
+        .map_err(|e| FrameworkError::database(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| FrameworkError::database(e.to_string()))?;
+        self.committed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+enum VersionRead {
+    Find,
+    FindMany,
+    All,
+    Builder,
+}
+
+async fn assert_content_and_version_share_a_snapshot(path: VersionRead, saved: bool) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let _db = database().await;
+    let _queue = Queue::fake();
+    SearchConfig::scope(config(true), async {
+        let (id, before) = SearchRegistry::isolated(async {
+            let model = note(if saved { "Initial" } else { "Before" }, true, 0).await;
+            let model = if saved {
+                model
+                    .update(suprnova::attrs! { title: "Before" })
+                    .await
+                    .unwrap()
+            } else {
+                model
+            };
+            (model.id, stored_version(model.id).await.unwrap_or(0))
+        })
+        .await;
+        SearchRegistry::isolated(async {
+            let listener = Arc::new(CommitAfterRowRead {
+                id,
+                armed: AtomicBool::new(true),
+                committed: AtomicBool::new(false),
+            });
+            suprnova::EventFacade::listen::<suprnova::database::events::QueryExecuted, _>(
+                listener.clone(),
+            )
+            .await;
+            let rows = match path {
+                VersionRead::Find => vec![SearchNote::find(id).await.unwrap().unwrap()],
+                VersionRead::FindMany => SearchNote::find_many([id]).await.unwrap(),
+                VersionRead::All => SearchNote::all().await.unwrap().into_vec(),
+                VersionRead::Builder => SearchNote::query()
+                    .filter("id", id)
+                    .get()
+                    .await
+                    .unwrap()
+                    .into_vec(),
+            };
+            assert!(listener.committed.load(Ordering::SeqCst));
+            assert_eq!(stored_version(id).await, Some(before + 1));
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].title, "Before");
+            assert_eq!(rows[0].to_search_document().unwrap().source_version, before);
+            let current = SearchNote::find(id).await.unwrap().unwrap();
+            assert_eq!(current.title, "After");
+            assert_eq!(
+                current.to_search_document().unwrap().source_version,
+                before + 1
+            );
+            // Loading the newer revision must not change an older projection,
+            // including one whose SELECT found no kept version yet.
+            assert_eq!(rows[0].to_search_document().unwrap().source_version, before);
+        })
+        .await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn find_keeps_the_version_of_the_content_before_an_interleaved_commit() {
+    assert_content_and_version_share_a_snapshot(VersionRead::Find, true).await;
+}
+
+#[tokio::test]
+async fn find_many_keeps_the_version_of_the_content_before_an_interleaved_commit() {
+    assert_content_and_version_share_a_snapshot(VersionRead::FindMany, true).await;
+}
+
+#[tokio::test]
+async fn all_keeps_the_version_of_the_content_before_an_interleaved_commit() {
+    assert_content_and_version_share_a_snapshot(VersionRead::All, true).await;
+}
+
+#[tokio::test]
+async fn builder_keeps_the_version_of_the_content_before_an_interleaved_commit() {
+    assert_content_and_version_share_a_snapshot(VersionRead::Builder, true).await;
+}
+
+#[tokio::test]
+async fn a_loaded_zero_search_version_stays_with_its_content_after_an_interleaved_commit() {
+    assert_content_and_version_share_a_snapshot(VersionRead::Builder, false).await;
+}
+
+#[tokio::test]
+async fn builder_search_versions_survive_projections_unions_order_and_runtime_casts() {
+    use std::collections::HashMap;
+    use suprnova::eloquent::casts::IntoDynCast;
+
+    let _db = database().await;
+    let _queue = Queue::fake();
+    SearchConfig::scope(config(true), async {
+        let (first, second) = SearchRegistry::isolated(async {
+            let first = note("First", true, 0)
+                .await
+                .update(suprnova::attrs! { title: "First saved" })
+                .await
+                .unwrap();
+            let second = note("Second", true, 0)
+                .await
+                .update(suprnova::attrs! { title: "Second saved" })
+                .await
+                .unwrap();
+            (
+                (first.id, stored_version(first.id).await.unwrap()),
+                (second.id, stored_version(second.id).await.unwrap()),
+            )
+        })
+        .await;
+        SearchRegistry::isolated(async {
+            let rows = SearchNote::query()
+                .filter("id", first.0)
+                .select_raw_with_bindings("search_notes.*, ? AS extra", vec![7_i64.into()])
+                .union_all(
+                    SearchNote::query()
+                        .filter("id", second.0)
+                        .select_raw_with_bindings("search_notes.*, ? AS extra", vec![8_i64.into()]),
+                )
+                .order_by_desc("id")
+                .with_casts(HashMap::from([(
+                    "tags",
+                    Arc::from(suprnova::AsArray::<String>::into_dyn()),
+                )]))
+                .get()
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].id, second.0);
+            assert_eq!(rows[1].id, first.0);
+            assert_eq!(rows[0].tags, vec!["rust", "search"]);
+            assert_eq!(
+                rows[0].to_search_document().unwrap().source_version,
+                second.1
+            );
+            assert_eq!(
+                rows[1].to_search_document().unwrap().source_version,
+                first.1
+            );
+            let selected = SearchNote::query()
+                .select(["search_notes.*"])
+                .filter("id", first.0)
+                .get()
+                .await
+                .unwrap();
+            assert_eq!(
+                selected[0].to_search_document().unwrap().source_version,
+                first.1
+            );
+        })
+        .await;
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn search_001_each_saved_revision_of_a_timestamp_free_model_carries_a_newer_version() {
     let _db = database().await;
@@ -1719,4 +1935,146 @@ async fn search_001_kept_versions_follow_saves_on_postgres() {
 #[ignore = "requires disposable MariaDB or MySQL at MYSQL_TEST_URL"]
 async fn search_001_kept_versions_follow_saves_on_mariadb() {
     kept_versions_follow_saves_on("MYSQL_TEST_URL").await;
+}
+
+#[suprnova::model(table = "search_locked_kept_rows", timestamps = false, fillable = ["id", "title"])]
+#[derive(Searchable)]
+#[searchable(index = "test_search_locked_kept_rows")]
+pub(crate) struct LockedKeptRow {
+    pub id: i64,
+    #[searchable(text)]
+    pub title: String,
+}
+
+async fn locked_kept_version() -> i64 {
+    DB::scalar(
+        "SELECT version FROM search_source_versions WHERE index_name = 'test_search_locked_kept_rows' AND model_key = '7'",
+        vec![],
+    )
+    .await
+    .unwrap()
+}
+
+async fn locking_search_version_on(variable: &str) {
+    use sea_orm::{ConnectionTrait, TransactionTrait};
+
+    let _guard = super::database_support::live_database(variable)
+        .await
+        .unwrap();
+    let _queue = Queue::fake();
+    let _ = DB::update("DROP TABLE search_locked_kept_rows", vec![]).await;
+    DB::update(
+        "CREATE TABLE search_locked_kept_rows (id BIGINT PRIMARY KEY, title VARCHAR(255) NOT NULL)",
+        vec![],
+    )
+    .await
+    .unwrap();
+    DB::update(
+        "INSERT INTO search_locked_kept_rows (id, title) VALUES (7, 'Initial')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    SearchConfig::scope(config(true), SearchRegistry::isolated(async {
+        LockedKeptRow::find(7_i64).await.unwrap().unwrap()
+            .update(suprnova::attrs! { title: "Before" }).await.unwrap();
+        let connection = DB::connection().unwrap();
+        let backend = connection.inner().get_database_backend();
+        for shared in [false, true] {
+            let before = locked_kept_version().await;
+            let tx = DB::begin_transaction().await.unwrap();
+            // On MySQL this establishes an older REPEATABLE READ snapshot.
+            let old = LockedKeptRow::query().with_tx(&tx).filter("id", 7_i64)
+                .get().await.unwrap();
+            assert_eq!(old[0].to_search_document().unwrap().source_version, before);
+            let writer = connection.inner().begin().await.unwrap();
+            writer.execute_unprepared("UPDATE search_locked_kept_rows SET title = 'After' WHERE id = 7")
+                .await.unwrap();
+            writer.execute_unprepared("UPDATE search_source_versions SET version = version + 1 WHERE index_name = 'test_search_locked_kept_rows' AND model_key = '7'")
+                .await.unwrap();
+            let query = LockedKeptRow::query().with_tx(&tx).filter("id", 7_i64);
+            let query = if shared { query.shared_lock() } else { query.lock_for_update() };
+            let rows = if backend == sea_orm::DbBackend::Postgres {
+                let reader_pid = tx.query_all(sea_orm::Statement::from_string(
+                    backend, "SELECT pg_backend_pid() AS pid".to_owned(),
+                )).await.unwrap()[0].try_get::<i32>("", "pid").unwrap();
+                // Commit only after the reader's locking SELECT is waiting on
+                // this writer. Its command snapshot then predates the commit.
+                let commit = async move {
+                    for _ in 0..200 {
+                        writer.execute_unprepared("SELECT pg_stat_clear_snapshot()")
+                            .await.unwrap();
+                        let waiting = writer.query_one_raw(sea_orm::Statement::from_sql_and_values(
+                            backend,
+                            "SELECT COUNT(*) AS waiting FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock'",
+                            [reader_pid.into()],
+                        )).await.unwrap().unwrap().try_get::<i64>("", "waiting").unwrap();
+                        if waiting == 1 {
+                            writer.commit().await.unwrap();
+                            return;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                    panic!("reader never waited on the writer's row lock");
+                };
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    let (rows, ()) = tokio::join!(query.get(), commit);
+                    rows.unwrap()
+                }).await.unwrap()
+            } else {
+                writer.commit().await.unwrap();
+                query.get().await.unwrap()
+            };
+            tx.rollback().await.unwrap();
+            assert_eq!(rows[0].title, "After");
+            assert_eq!(rows[0].to_search_document().unwrap().source_version, before + 1);
+        }
+        // Pool locking reads must pin metadata to the row's connection, finish
+        // their owned transaction, and release a one-connection pool again.
+        let single = suprnova::DbConnection::connect(
+            &suprnova::DatabaseConfig::builder()
+                .url(std::env::var(variable).unwrap())
+                .max_connections(1)
+                .min_connections(0)
+                .logging(false)
+                .build(),
+        ).await.unwrap();
+        suprnova::testing::TestContainer::singleton(single);
+        for shared in [false, true] {
+            let version = locked_kept_version().await;
+            let query = LockedKeptRow::query().filter("id", 7_i64);
+            let query = if shared { query.shared_lock() } else { query.lock_for_update() };
+            let rows = tokio::time::timeout(std::time::Duration::from_secs(5), query.get())
+                .await.unwrap().unwrap();
+            assert_eq!(rows[0].to_search_document().unwrap().source_version, version);
+            assert_eq!(locked_kept_version().await, version);
+        }
+        DB::update("DELETE FROM search_source_versions WHERE index_name = 'test_search_locked_kept_rows' AND model_key = '7'", vec![])
+            .await.unwrap();
+        let zero = LockedKeptRow::query().filter("id", 7_i64).lock_for_update().get().await.unwrap();
+        assert_eq!(zero[0].to_search_document().unwrap().source_version, 0);
+    })).await.unwrap();
+    DB::update("DROP TABLE search_locked_kept_rows", vec![])
+        .await
+        .unwrap();
+    DB::update(
+        "DELETE FROM search_source_versions WHERE index_name = 'test_search_locked_kept_rows'",
+        vec![],
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[serial_test::serial(search_database_postgres)]
+#[ignore = "requires disposable Postgres at PG_TEST_URL"]
+async fn locking_search_versions_match_content_after_a_postgres_lock_wait() {
+    locking_search_version_on("PG_TEST_URL").await;
+}
+
+#[tokio::test]
+#[serial_test::serial(search_database_mysql)]
+#[ignore = "requires disposable MariaDB or MySQL at MYSQL_TEST_URL"]
+async fn locking_search_versions_match_current_content_after_a_mysql_snapshot() {
+    locking_search_version_on("MYSQL_TEST_URL").await;
 }

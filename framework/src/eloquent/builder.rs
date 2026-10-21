@@ -648,6 +648,8 @@ pub struct Builder<M> {
     pub(crate) select_cols: Option<Vec<String>>,
     pub(crate) select_raw: Option<String>,
     select_bindings: Vec<SeaValue>,
+    /// Hydration-only metadata, projected by every union operand with its row.
+    kept_version_index: Option<(&'static str, &'static str)>,
     maximum_expression: Option<QueryExpression>,
     pub(crate) group_by: Vec<QueryExpression>,
     pub(crate) having_terms: Vec<WhereTerm>,
@@ -762,6 +764,7 @@ impl<M> Clone for Builder<M> {
             select_cols: self.select_cols.clone(),
             select_raw: self.select_raw.clone(),
             select_bindings: self.select_bindings.clone(),
+            kept_version_index: self.kept_version_index,
             maximum_expression: self.maximum_expression.clone(),
             group_by: self.group_by.clone(),
             having_terms: self.having_terms.clone(),
@@ -1320,6 +1323,7 @@ impl<M> Builder<M> {
             select_cols: None,
             select_raw: None,
             select_bindings: Vec::new(),
+            kept_version_index: None,
             maximum_expression: None,
             group_by: Vec::new(),
             having_terms: Vec::new(),
@@ -5052,6 +5056,15 @@ impl<M> Builder<M> {
         ))
     }
 
+    /// Each operand reads its row and version together, before union or window
+    /// wrappers can hide the model's table from a correlated metadata lookup.
+    fn set_kept_version_index(&mut self, index: Option<(&'static str, &'static str)>) {
+        self.kept_version_index = index;
+        for (arm, _) in &mut self.unions {
+            arm.set_kept_version_index(index);
+        }
+    }
+
     /// One operand after `UNION`: as it is when it is a plain SELECT, and
     /// as a derived table when it carries an ordering, a limit, an offset
     /// or unions of its own, which a bare operand cannot hold or would
@@ -5130,6 +5143,21 @@ impl<M> Builder<M> {
             sql.push_str(&format!(
                 ", {} AS {UNION_ROW_ALIAS}",
                 self.own_row(backend, table)
+            ));
+        }
+        if let Some((index, key)) = self.kept_version_index {
+            *n += 1;
+            let placeholder = crate::database::placeholder::placeholder(backend, *n)?;
+            values.push(index.into());
+            let expression = crate::search::indexing::kept_version_expression(
+                backend,
+                table,
+                key,
+                &placeholder,
+            )?;
+            sql.push_str(&format!(
+                ", {expression} AS {}",
+                crate::search::indexing::KEPT_VERSION_COLUMN
             ));
         }
         sql.push_str(" FROM ");
@@ -6496,6 +6524,26 @@ where
         // `__read_replica__` auto-routing > default pool.
         let exec = this.resolve_read_executor().await?;
         let backend = exec.backend();
+        let kept_index = crate::search::indexing::kept_version_index::<M>(&exec).await?;
+        // A locking SELECT can return a newer row than its command snapshot.
+        // Hold its row locks while reading current metadata on the same tx.
+        // Outer locks on derived unions/windows do not lock MySQL source rows;
+        // those retain the scalar lookup and its shared statement snapshot.
+        let locked_read = if kept_index.is_some()
+            && this.wants_primary_pool()
+            && matches!(backend, DbBackend::Postgres | DbBackend::MySql)
+            && this.unions.is_empty()
+            && !(this.eager_partition.is_some() && this.limit.is_some())
+        {
+            Some(crate::search::indexing::LockedVersionRead::begin(&exec).await?)
+        } else {
+            None
+        };
+        this.set_kept_version_index(
+            kept_index
+                .filter(|_| locked_read.is_none())
+                .map(|index| (index, M::PRIMARY_KEY)),
+        );
         let runtime_casts = this.runtime_casts.clone();
         // Move the eager plan out of `self` - `EagerSpec::WithWhere`
         // owns a `Box<dyn Any>` (the type-erased predicate) which is
@@ -6511,23 +6559,33 @@ where
         // type, not the user's runtime struct.
         //
         // Route through the resolved executor's instrumented
-        // `statement_all` terminal rather than calling
+        // `query_all` terminal rather than calling
         // `find_by_statement(stmt).all(conn)` straight at the
         // connection, so the base SELECT - and the eager-load IN-queries
         // that recurse back through `Builder::get` - emit `QueryExecuted`
         // to `DB::listen` / the query log. T11: tx-vs-pool routing is
         // handled inside the executor.
-        let raw_rows = exec
-            .statement_all::<<<M as EloquentModel>::Entity as sea_orm::EntityTrait>::Model>(stmt)
+        let row_exec = locked_read.as_ref().map(|read| &read.exec).unwrap_or(&exec);
+        let raw_rows = row_exec
+            .query_all(stmt)
             .await
             .map_err(|e| FrameworkError::database(e.to_string()))?;
+        let stored_rows = raw_rows
+            .iter()
+            .map(|row| {
+                <<M as EloquentModel>::Entity as sea_orm::EntityTrait>::Model::from_query_result(
+                    row, "",
+                )
+                .map_err(|e| FrameworkError::database(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut out: Vec<M> = if runtime_casts.is_empty() {
             // Fast path - convert each row via the macro-emitted
             // fallible `Model::try_from_storage`, so a cast that fails
             // to decode a stored value propagates as a `FrameworkError`
             // instead of panicking.
-            raw_rows
+            stored_rows
                 .into_iter()
                 .map(M::try_from_storage)
                 .collect::<Result<Vec<_>, _>>()?
@@ -6537,8 +6595,8 @@ where
             // deserialise into M. Static casts on M are NOT applied;
             // the runtime cast map is treated as a full replacement
             // for this query.
-            let mut buf = Vec::with_capacity(raw_rows.len());
-            for row in raw_rows {
+            let mut buf = Vec::with_capacity(stored_rows.len());
+            for row in stored_rows {
                 let mut as_json = serde_json::to_value(&row).map_err(|e| {
                     FrameworkError::database(format!("serialise inner Model for runtime cast: {e}"))
                 })?;
@@ -6564,6 +6622,18 @@ where
             }
             buf
         };
+        if let Some(read) = locked_read {
+            crate::search::indexing::prefetch_versions(
+                &out,
+                &read.exec,
+                lock_clause(backend, this.lock_mode)?,
+            )
+            .await?;
+            read.finish().await?;
+        } else {
+            crate::search::indexing::attach_kept_versions(&out, &raw_rows, kept_index)?;
+        }
+        drop(raw_rows);
         // Lazy-loading prevention reads this mark. Every paginator, chunk
         // walk and eager load hydrates through here, so they all set it.
         M::__mark_query_result(&mut out);
@@ -6610,10 +6680,6 @@ where
         }
 
         this.load_existence_flags(&out, &exec).await?;
-
-        // A searchable model without `updated_at` brings its kept versions
-        // in one query, so its synchronous projection reads current ones.
-        crate::search::indexing::prefetch_kept_versions(&out, &exec).await?;
 
         // Phase 10C T1 - Retrieved fires ONCE per hydrated row, AFTER
         // eager loads land. Listeners observe the fully-populated

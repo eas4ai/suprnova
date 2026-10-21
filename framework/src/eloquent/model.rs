@@ -26,6 +26,7 @@ use std::hash::Hash;
 use async_trait::async_trait;
 use sea_orm::{
     ColumnTrait, EntityTrait, IntoActiveModel, PrimaryKeyToColumn, PrimaryKeyTrait, QueryFilter,
+    QuerySelect,
 };
 // `find_many` calls `<Self::Entity as EntityTrait>::PrimaryKey::iter()`.
 // `iter` lives on `IntoEnumIterator`, brought in via `PrimaryKeyTrait`'s
@@ -966,14 +967,11 @@ where
         for (column, value) in <Self::Entity as EntityTrait>::PrimaryKey::iter().zip(key) {
             select = select.filter(column.into_column().eq(value));
         }
-        let row = exec
-            .select_one(select)
-            .await
-            .map_err(|e| table_read_then(Self::TABLE, FrameworkError::database(e.to_string())))?;
-        let hydrated = row
-            .map(Self::try_from_storage)
-            .transpose()
-            .map_err(|error| table_read_then(Self::TABLE, error))?;
+        let hydrated =
+            crate::search::indexing::load_with_kept_versions::<Self>(select.limit(1), &exec)
+                .await
+                .map(|rows| rows.into_iter().next())
+                .map_err(|error| table_read_then(Self::TABLE, error))?;
         match hydrated {
             // A hydrated row depends on that row and on any write that
             // could have touched it without naming it, and on nothing else:
@@ -998,7 +996,6 @@ where
             None => crate::render_cache::collector::observe_table_read(Self::TABLE),
         }
         if let Some(ref m) = hydrated {
-            crate::search::indexing::prefetch_kept_versions(std::slice::from_ref(m), &exec).await?;
             Self::__dispatch_retrieved(m).await?;
         }
         Ok(hydrated)
@@ -1071,21 +1068,18 @@ where
         let rows = if held.is_empty() {
             Vec::new()
         } else {
-            exec.select_all(Self::Entity::find().filter(pk.into_column().is_in(held)))
-                .await
-                .map_err(|e| {
-                    table_read_then(Self::TABLE, FrameworkError::database(e.to_string()))
-                })?
+            crate::search::indexing::load_with_kept_versions::<Self>(
+                Self::Entity::find().filter(pk.into_column().is_in(held)),
+                &exec,
+            )
+            .await
+            .map_err(|error| table_read_then(Self::TABLE, error))?
         };
 
         let mut by_id: HashMap<_, _> = rows
             .into_iter()
-            .map(|row| {
-                let model = Self::try_from_storage(row)?;
-                Ok((model.primary_key_value(), model))
-            })
-            .collect::<Result<HashMap<_, _>, FrameworkError>>()
-            .map_err(|error| table_read_then(Self::TABLE, error))?;
+            .map(|model| (model.primary_key_value(), model))
+            .collect();
         let mut ordered: Vec<Self> = id_vec
             .into_iter()
             .filter_map(|id| by_id.remove(&id))
@@ -1109,7 +1103,6 @@ where
                 crate::render_cache::collector::observe_table_read(Self::TABLE);
             }
         }
-        crate::search::indexing::prefetch_kept_versions(&ordered, &exec).await?;
         for row in &ordered {
             Self::__dispatch_retrieved(row).await?;
         }
@@ -1138,16 +1131,10 @@ where
             Self::default_connection_name(),
         )
         .await?;
-        let rows = exec
-            .select_all(Self::Entity::find())
-            .await
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        let mut out: Vec<Self> = rows
-            .into_iter()
-            .map(Self::try_from_storage)
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut out =
+            crate::search::indexing::load_with_kept_versions::<Self>(Self::Entity::find(), &exec)
+                .await?;
         Self::__mark_query_result(&mut out);
-        crate::search::indexing::prefetch_kept_versions(&out, &exec).await?;
         for row in &out {
             Self::__dispatch_retrieved(row).await?;
         }
