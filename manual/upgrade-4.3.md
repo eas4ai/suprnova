@@ -22,12 +22,12 @@ new: nothing changes until you turn them on.
    upgrading to, `v4.3.0` or later. The examples pin the current release:
 
    ```toml
-   suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.4.0" }
+   suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.5.0" }
    ```
 
    ```bash
    cargo update -p suprnova
-   cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v4.4.0 suprnova-cli
+   cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v4.5.0 suprnova-cli
    cargo check --all-targets
    ```
 
