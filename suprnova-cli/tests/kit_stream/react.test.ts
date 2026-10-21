@@ -254,3 +254,43 @@ test('only the last reader releases and cancels a shared engine (#182)', async (
     release()
   }
 })
+
+
+test('EventSource stays open after an error and receives later messages (#183)', async () => {
+  vi.stubGlobal('EventSource', FakeEventSource)
+  const onError = vi.fn()
+  const onComplete = vi.fn()
+  const { result, unmount } = probe(() => useEventStream('/progress', { onError, onComplete }))
+  const source = FakeEventSource.opened.at(-1)!
+  const error = new Event('error')
+  try {
+    await step(() => source.dispatchEvent(error))
+    expect(onError).toHaveBeenCalledWith(error)
+    expect(source.closed).toBe(false)
+    expect(onComplete).not.toHaveBeenCalled()
+    await step(() => source.emit('update', 'reconnected'))
+    expect(result.current.message).toBe('reconnected')
+    await step(() => source.emit('update', '</stream>'))
+    expect(source.closed).toBe(true)
+    expect(onComplete).toHaveBeenCalledTimes(1)
+    await step(() => source.emit('update', 'after-end'))
+    expect(result.current.message).toBe('reconnected')
+  } finally {
+    await unmount()
+  }
+
+  const second = probe(() => useEventStream('/progress'))
+  const next = FakeEventSource.opened.at(-1)!
+  await step(() => next.dispatchEvent(new Event('error')))
+  await second.unmount()
+  expect(next.closed).toBe(true)
+})
+
+test('EventSource caller cancellation still closes the source (#183)', async () => {
+  vi.stubGlobal('EventSource', FakeEventSource)
+  const { result, unmount } = probe(() => useEventStream('/progress'))
+  const source = FakeEventSource.opened.at(-1)!
+  await step(() => result.current.close())
+  expect(source.closed).toBe(true)
+  await unmount()
+})

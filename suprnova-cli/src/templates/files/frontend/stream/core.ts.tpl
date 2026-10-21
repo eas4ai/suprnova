@@ -501,7 +501,8 @@ export type EventStreamConnection = {
 
 /**
  * Opens an `EventSource` on `url` and reports its messages to `onChange`
- * until the end signal arrives, an error closes it, or it is closed.
+ * until the end signal arrives or the caller closes it. Errors are reported
+ * without closing the source, so the browser can reconnect after an interruption.
  * Reads the options each time it uses them, so a component can hand it
  * callbacks that change between renders.
  */
@@ -535,7 +536,6 @@ export function openEventStream(
   }
   const error = (event: Event) => {
     options().onError?.(event)
-    close()
   }
   const close = (resetMessage = false) => {
     for (const name of names) {
