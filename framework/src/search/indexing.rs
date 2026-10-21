@@ -1558,7 +1558,6 @@ async fn touched_parent_jobs<M: Serialize + 'static>(
 ) -> Result<Vec<SearchIndexJob>, FrameworkError> {
     use crate::eloquent::relations::RelationKind;
     let mut jobs = Vec::new();
-    let mut fields = None;
     for relation in crate::eloquent::relations::relations().filter(|relation| {
         (relation.target_type)() == TypeId::of::<M>()
             || relation
@@ -1573,18 +1572,32 @@ async fn touched_parent_jobs<M: Serialize + 'static>(
         if !descriptor.search_touches.contains(&relation.name) {
             continue;
         }
-        let fields = fields
-            .get_or_insert(serde_json::to_value(model).map_err(|error| {
-                FrameworkError::param(format!("search touches model: {error}"))
-            })?);
-        let read = |column: &str| fields.get(column).filter(|value| !value.is_null()).cloned();
+        let reader = inventory::iter::<crate::eloquent::registry::ModelAttributeReader>
+            .into_iter()
+            .find(|reader| (reader.type_id)() == TypeId::of::<M>())
+            .ok_or_else(|| {
+                FrameworkError::param(format!(
+                    "search touches `{}`: model {} has no stored-column reader",
+                    relation.name,
+                    std::any::type_name::<M>(),
+                ))
+            })?;
+        let read = |column: &str| -> Result<Option<serde_json::Value>, FrameworkError> {
+            let value = (reader.read)(model, column)?.ok_or_else(|| {
+                FrameworkError::param(format!(
+                    "search touches `{}` on index `{}`: cannot read declared key column `{column}` from model {}",
+                    relation.name, descriptor.name, std::any::type_name::<M>(),
+                ))
+            })?;
+            Ok((!value.is_null()).then_some(value))
+        };
         let (from, predicate, value) = match relation.kind {
             RelationKind::HasOne
             | RelationKind::HasMany
             | RelationKind::MorphOne
             | RelationKind::MorphMany => {
                 if !relation.morph_type_column.is_empty()
-                    && read(relation.morph_type_column)
+                    && read(relation.morph_type_column)?
                         .as_ref()
                         .and_then(serde_json::Value::as_str)
                         != Some(relation.morph_type_value)
@@ -1594,13 +1607,13 @@ async fn touched_parent_jobs<M: Serialize + 'static>(
                 (
                     descriptor.model_table.to_owned(),
                     format!("p.{}", relation.parent_key),
-                    read(relation.foreign_key),
+                    read(relation.foreign_key)?,
                 )
             }
             RelationKind::BelongsTo => (
                 descriptor.model_table.to_owned(),
                 format!("p.{}", relation.foreign_key),
-                read(relation.parent_key),
+                read(relation.parent_key)?,
             ),
             RelationKind::BelongsToMany
             | RelationKind::MorphToMany
@@ -1624,7 +1637,7 @@ async fn touched_parent_jobs<M: Serialize + 'static>(
                         relation.pivot_parent_key
                     ),
                     format!("r.{}", relation.pivot_related_key),
-                    read(column),
+                    read(column)?,
                 )
             }
             RelationKind::MorphTo => {
@@ -1641,7 +1654,7 @@ async fn touched_parent_jobs<M: Serialize + 'static>(
                 (
                     descriptor.model_table.to_owned(),
                     format!("p.{}", relation.foreign_key),
-                    read(target.primary_key),
+                    read(target.primary_key)?,
                 )
             }
         };
@@ -1781,6 +1794,8 @@ async fn touched_parent_jobs<M: Serialize + 'static>(
 }
 
 /// The persistence bridge accepts all model types, making nonsearchable writes a cheap no-op.
+/// Touches read stored columns so hidden or renamed keys still schedule the parent.
+/// An unreadable declared key returns an error because silently skipping it loses reindex jobs.
 pub async fn after_model_write<M: Serialize + 'static>(
     model: &M,
     kind: WriteKind,
