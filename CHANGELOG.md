@@ -8,6 +8,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- Qdrant generation deletion can now resume from the dropping state while
+  ordinary writes continue to reject that state. (#190)
+
 - Qdrant hash lookups now retain the source version when skipping unchanged
   documents, preserving stale-write protection. (#186)
 
@@ -40,6 +43,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   (#168)
 
 ### Fixed
+
+- Pruning a retired Qdrant generation now removes its collection and metadata
+  instead of failing after deletion starts. (#190)
 
 - Unchanged Qdrant documents now keep their latest version, so delayed older
   removals cannot delete them. (#186)

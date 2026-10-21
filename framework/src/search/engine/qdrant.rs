@@ -1529,7 +1529,7 @@ impl SearchEngine for QdrantSearchEngine {
             Box::pin(async {
                 let _lock = self.mutations.lock().await;
                 let collection = collection_name(index, generation)?;
-                let txn = storage::locked(index.name, generation).await?;
+                let txn = storage::locked_for_drop(index.name, generation).await?;
                 if storage::current_locked(&txn, index.name).await?.as_ref() == Some(generation) {
                     return Err(error(&collection, "cannot drop the current generation"));
                 }
@@ -1643,7 +1643,9 @@ impl SearchEngine for QdrantSearchEngine {
                                             }))
                                             .map_err(|e| error(&collection, e))?,
                                         )
-                                        .points_selector(vec![QdrantVectorDriver::resolve_point_id(key)])
+                                        .points_selector(vec![
+                                            QdrantVectorDriver::resolve_point_id(key),
+                                        ])
                                         .wait(true),
                                     )
                                     .await

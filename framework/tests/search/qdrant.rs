@@ -2957,3 +2957,145 @@ async fn unchanged_content_advances_version_before_older_removal_qdrant() {
     })
     .await;
 }
+
+// Unique generation prefixes let concurrent coordinator tests clean up only their collections.
+async fn coordinator_fixture_qdrant(
+    test: impl for<'a> FnOnce(
+        &'a QdrantSearchEngine,
+        &'a IndexDescriptor,
+        &'a GenerationId,
+    ) -> TestFuture<'a>,
+) {
+    use futures::FutureExt;
+    use suprnova::search::{SearchConfig, SearchDriver};
+    let _db = super::commands::database().await;
+    let engine = Arc::new(engine());
+    let index = super::commands::CommandNote::descriptor();
+    let generation =
+        GenerationId::new(format!("qcoord_{}", uuid::Uuid::new_v4().simple())).unwrap();
+    let outcome = std::panic::AssertUnwindSafe(SearchConfig::scope(
+        SearchConfig {
+            driver: SearchDriver::Collection,
+            queue: false,
+            chunk: 2,
+            ..Default::default()
+        },
+        SearchRegistry::isolated(async {
+            SearchRegistry::register_engine("qdrant", engine.clone()).unwrap();
+            SearchRegistry::set_index_driver(index.name, "qdrant").unwrap();
+            engine
+                .create_generation(index, &index.index_settings(), &generation)
+                .await
+                .unwrap();
+            engine
+                .switch_generation(index, None, generation.clone())
+                .await
+                .unwrap();
+            test(&engine, index, &generation).await;
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    let prefix = format!("search_{}_{}", index.name, generation.as_str());
+    for collection in engine
+        .client()
+        .unwrap()
+        .list_collections()
+        .await
+        .unwrap()
+        .collections
+    {
+        if collection.name.starts_with(&prefix) {
+            engine
+                .client()
+                .unwrap()
+                .delete_collection(collection.name)
+                .await
+                .unwrap();
+        }
+    }
+    match outcome {
+        Ok(result) => result.unwrap(),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant at QDRANT_TEST_URL"]
+async fn coordinator_prune_drops_retired_generation_qdrant() {
+    coordinator_fixture_qdrant(|engine, index, old| {
+        Box::pin(async move {
+            let next = GenerationId::new(format!("{}_next", old.as_str())).unwrap();
+            engine
+                .create_generation(index, &index.index_settings(), &next)
+                .await
+                .unwrap();
+            engine
+                .switch_generation(index, Some(old.clone()), next.clone())
+                .await
+                .unwrap();
+            suprnova::search::generations::status(index.name, true)
+                .await
+                .unwrap();
+            let old_collection = format!("search_{}_{}", index.name, old.as_str());
+            assert!(
+                !engine
+                    .client()
+                    .unwrap()
+                    .collection_exists(old_collection)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                suprnova::DB::scalar::<i64>(
+                    "SELECT COUNT(*) FROM search_generations WHERE index_name=? AND generation=?",
+                    vec![index.name.into(), old.as_str().into()],
+                )
+                .await
+                .unwrap(),
+                0
+            );
+            assert_eq!(
+                engine.current_generation(index.name).await.unwrap(),
+                Some(next)
+            );
+            // Pruning is safe to retry after the retired generation has gone.
+            suprnova::search::generations::status(index.name, true)
+                .await
+                .unwrap();
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn dropping_generation_refuses_ordinary_writes_qdrant() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let _db = database().await;
+    let index = descriptor();
+    let generation = GenerationId::new("dropping").unwrap();
+    suprnova::DB::connection().unwrap().inner().execute_raw(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "INSERT INTO search_generations (index_name,generation,state,settings_json,digest) VALUES (?,?,'dropping',?,?)",
+        vec![index.name.into(), generation.as_str().into(), serde_json::to_string(&index.index_settings()).unwrap().into(), index.index_settings().index_time.digest().into()],
+    )).await.unwrap();
+    // Metadata must refuse these operations before any request reaches this unused endpoint.
+    let engine = QdrantSearchEngine::from_url("http://127.0.0.1:9", None, 1).unwrap();
+    for error in [
+        engine.index(&index, &generation, &[]).await.unwrap_err(),
+        engine.remove(&index, &generation, &[]).await.unwrap_err(),
+        engine
+            .stored_hashes(&index, &generation, &[])
+            .await
+            .unwrap_err(),
+        engine
+            .switch_generation(&index, None, generation.clone())
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(
+            error.to_string().contains("unavailable state dropping"),
+            "{error}"
+        );
+    }
+}

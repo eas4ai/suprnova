@@ -206,10 +206,40 @@ pub(super) async fn current(index: &str) -> Result<Option<GenerationId>, Framewo
         .map_err(|e| error(index, e))?;
     decode_current(index, row)
 }
-/// A row lock serializes generation switching and dropping across processes.
+/// A row lock serializes ordinary mutations and switching across processes.
 pub(super) async fn locked(
     index: &str,
     generation: &GenerationId,
+) -> Result<sea_orm::DatabaseTransaction, FrameworkError> {
+    locked_for_states(
+        index,
+        generation,
+        &["current", "building", "retired", "active", "inactive"],
+    )
+    .await
+}
+
+/// The coordinator commits retired/inactive -> dropping before remote deletion.
+/// Deletion must accept dropping to resume after a crash; ordinary mutations and
+/// switching reject it so no new work enters a generation being reclaimed.
+pub(super) async fn locked_for_drop(
+    index: &str,
+    generation: &GenerationId,
+) -> Result<sea_orm::DatabaseTransaction, FrameworkError> {
+    locked_for_states(
+        index,
+        generation,
+        &[
+            "current", "building", "retired", "active", "inactive", "dropping",
+        ],
+    )
+    .await
+}
+
+async fn locked_for_states(
+    index: &str,
+    generation: &GenerationId,
+    allowed_states: &[&str],
 ) -> Result<sea_orm::DatabaseTransaction, FrameworkError> {
     let db = DB::get()?;
     crate::render_cache::write_side_open(false).await?;
@@ -236,12 +266,7 @@ pub(super) async fn locked(
             .map_err(|e| error(index, e))?
             .ok_or_else(|| error(index, format!("generation {target}: not created")))?;
         let state: String = row.try_get("", "state").map_err(|e| error(index, e))?;
-        if target != "__control"
-            && !matches!(
-                state.as_str(),
-                "current" | "building" | "retired" | "active" | "inactive"
-            )
-        {
+        if target != "__control" && !allowed_states.contains(&state.as_str()) {
             return Err(error(
                 index,
                 format!("generation {target}: unavailable state {state}"),
