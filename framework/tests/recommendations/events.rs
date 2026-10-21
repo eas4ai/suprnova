@@ -36,6 +36,76 @@ use super::support::*;
 use suprnova::{Actor, DB, ProvenanceState, Recommend};
 
 #[tokio::test]
+async fn retry_returns_original_provenance_after_target_deletion() {
+    setup(async {
+        let a = note("A", "rust", true, "alice", 1).await;
+        let retry = event("alice", &a, EventType::Like, "retry").await;
+        let first = Recommend::record(retry.clone()).await.unwrap();
+        DB::delete(
+            "DELETE FROM recommendation_notes WHERE id = ?",
+            vec![a.id.into()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(Recommend::record(retry.clone()).await.unwrap(), first);
+        let mut fresh = retry;
+        fresh.dedupe_key = "first-write".into();
+        assert!(Recommend::record(fresh).await.is_err());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn retry_returns_original_provenance_after_target_scope_changes() {
+    setup(async {
+        let a = note("A", "rust", true, "alice", 1).await;
+        let retry = event("alice", &a, EventType::Like, "retry").await;
+        let first = Recommend::record(retry.clone()).await.unwrap();
+        DB::update(
+            "UPDATE recommendation_notes SET public = ? WHERE id = ?",
+            vec![false.into(), a.id.into()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(Recommend::record(retry.clone()).await.unwrap(), first);
+        let mut fresh = retry;
+        fresh.dedupe_key = "first-write".into();
+        assert!(Recommend::record(fresh).await.is_err());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn first_write_still_requires_a_live_target_and_current_scope() {
+    setup(async {
+        let a = note("A", "rust", true, "alice", 1).await;
+        let stale = event("alice", &a, EventType::Like, "first").await;
+        DB::update(
+            "UPDATE recommendation_notes SET public = ? WHERE id = ?",
+            vec![false.into(), a.id.into()],
+        )
+        .await
+        .unwrap();
+        assert!(Recommend::record(stale).await.is_err());
+        let missing = event("alice", &a, EventType::Like, "missing").await;
+        DB::delete(
+            "DELETE FROM recommendation_notes WHERE id = ?",
+            vec![a.id.into()],
+        )
+        .await
+        .unwrap();
+        assert!(Recommend::record(missing).await.is_err());
+        assert_eq!(
+            DB::scalar::<i64>("SELECT COUNT(*) FROM recommendation_events", [])
+                .await
+                .unwrap(),
+            0
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn duplicate_is_immutable_and_provenance_detects_changes_and_retention() {
     setup(async {
         let a = note("A", "rust", true, "alice", 1).await;

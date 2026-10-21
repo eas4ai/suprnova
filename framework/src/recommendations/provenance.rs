@@ -77,6 +77,19 @@ pub(crate) fn row_digest(row: &DynamicRow) -> Result<String, FrameworkError> {
     );
     Ok(digest(serde_json::Value::Object(fields)))
 }
+/// Read the original fact by its retry identity without consulting mutable target state.
+pub(crate) async fn for_identity(
+    actor: &super::Actor,
+    dedupe_key: &str,
+) -> Result<Option<EventProvenance>, FrameworkError> {
+    let (kind, id) = actor.parts();
+    storage::rows(
+        "SELECT * FROM recommendation_events WHERE actor_kind = ? AND actor_id = ? AND dedupe_key = ?",
+        vec![kind.into(), id.into(), dedupe_key.into()],
+    ).await?.first().map(|row| {
+        Ok(EventProvenance { id: row.get_int("id")?, digest: row_digest(row)? })
+    }).transpose()
+}
 pub(crate) async fn verify(reference: &EventProvenance) -> Result<ProvenanceState, FrameworkError> {
     let rows = storage::rows(
         "SELECT * FROM recommendation_events WHERE id = ?",

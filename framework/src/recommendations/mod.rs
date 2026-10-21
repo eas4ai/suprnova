@@ -35,15 +35,20 @@ const PRUNE_PAGE: i64 = 10_000;
 pub struct Recommend;
 impl Recommend {
     /// Append once per actor and dedupe key, returning the original fact on every retry.
+    /// Resolve retries before loading the target because a stored fact survives target
+    /// deletion and scope changes. First writes still validate the live boundary.
     pub async fn record(event: RecommendationEvent) -> Result<EventProvenance, FrameworkError> {
+        event.actor.validate()?;
+        event::validate_text(&event.dedupe_key, 128, "dedupe key")?;
+        if let Some(existing) = provenance::for_identity(&event.actor, &event.dedupe_key).await? {
+            return Ok(existing);
+        }
         let target = event
             .target
             .as_ref()
             .ok_or_else(|| FrameworkError::param("recommendation event requires a target"))?;
         target.validate()?;
-        event.actor.validate()?;
         event::validate_text(&event.surface, 128, "surface")?;
-        event::validate_text(&event.dedupe_key, 128, "dedupe key")?;
         let version = event.source_version.ok_or_else(|| {
             FrameworkError::param("recommendation event requires a source version")
         })?;
@@ -79,12 +84,13 @@ impl Recommend {
             event.event_type.as_str().into(), event.weight.into(), event.surface.into(), event.occurred_at.timestamp_micros().into(),
             crate::search::document::canonical_json(scope.clone()).into(), version.into(), event.dedupe_key.clone().into(), scoring.class.name().into(), scoring.score.into(),
         ]).await?;
-        let row = storage::rows("SELECT * FROM recommendation_events WHERE actor_kind = ? AND actor_id = ? AND dedupe_key = ?", vec![kind.into(), actor.into(), event.dedupe_key.into()]).await?
-            .into_iter().next().ok_or_else(|| FrameworkError::database("recorded recommendation event disappeared before provenance could be read"))?;
-        Ok(EventProvenance {
-            id: row.get_int("id")?,
-            digest: provenance::row_digest(&row)?,
-        })
+        provenance::for_identity(&event.actor, &event.dedupe_key)
+            .await?
+            .ok_or_else(|| {
+                FrameworkError::database(
+                    "recorded recommendation event disappeared before provenance could be read",
+                )
+            })
     }
     /// The analytics lane calls this only after session, target and position validation.
     /// Enabled=false is a deliberate no-op; guest hashes must come from the server session.

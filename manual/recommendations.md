@@ -56,6 +56,11 @@ Use a stable interaction identity for retries. Surface and dedupe key allow
 1-128 bytes without control characters; target index allows 128 bytes and
 target key 255.
 
+`Recommend::record` validates the actor and dedupe key before resolving a retry.
+An existing fact returns its original provenance even after its target is deleted
+or its access scope changes. A first write still requires a live target and a
+matching access-scope snapshot.
+
 ### Event types and scoring
 
 Every event's score is its base plus signed integer `weight / 20`. Weight is

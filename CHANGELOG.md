@@ -8,6 +8,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- Event retries now resolve their original provenance before checking the target's
+  current existence or access scope. (#192)
 - Quoted phrases now constrain semantic and hybrid searches using each engine's
   lexical phrase matching rules. (#191)
 - Indexing and semantic queries now require the provider's model id and revision
@@ -56,6 +58,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Retrying a recorded recommendation event now succeeds after its target is deleted
+  or its access scope changes. (#192)
 - Semantic and hybrid searches now exclude documents missing required quoted
   phrases and refill filtered candidates to preserve result depth. (#191)
 - Replacing an embedding provider with another model of the same dimensions now
