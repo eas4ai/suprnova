@@ -25,6 +25,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Stream requests now use the fresh CSRF cookie after sign-in, so Inertia
+  navigation no longer leaves them sending a stale token. (#181)
 - Adding a source to a Content Security Policy now changes only the policy
   containing its directive, keeping other policies in the header unchanged. (#180)
 - Live now announces interrupted actions to screen readers in the shipped browser

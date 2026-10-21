@@ -19,8 +19,9 @@ export type CsrfHeaderOptions = {
 
 /**
  * The header that carries the CSRF token: the token given, else the
- * `csrf-token` meta tag the root template writes, else the `XSRF-TOKEN`
- * cookie `CsrfMiddleware` sets. Empty outside the browser.
+ * configured XSRF cookie, else the `csrf-token` meta tag. The cookie wins
+ * because sign-in rotates it while Inertia can leave the meta tag stale.
+ * Empty outside the browser unless a token is given.
  */
 export function csrfHeaders({
   csrfToken,
@@ -33,10 +34,6 @@ export function csrfHeaders({
   if (typeof document === 'undefined') {
     return {}
   }
-  const meta = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
-  if (meta) {
-    return { 'X-CSRF-TOKEN': meta }
-  }
   const prefix = `${xsrfCookieName}=`
   for (const entry of document.cookie.split(';')) {
     const cookie = entry.trim()
@@ -44,7 +41,8 @@ export function csrfHeaders({
       return { [xsrfHeaderName]: decodeURIComponent(cookie.slice(prefix.length)) }
     }
   }
-  return {}
+  const meta = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
+  return meta ? { 'X-CSRF-TOKEN': meta } : {}
 }
 
 /** One server-sent event that carried data. */

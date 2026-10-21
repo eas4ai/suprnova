@@ -152,6 +152,31 @@ fn assert_stream_hooks(frontend: &Path, kit: &str) {
     );
 }
 
+/// Exercise the shipped stream helpers without building the frontend bundles.
+#[test]
+#[ignore = "needs node, npm and the network: runs the stream Vitest suite"]
+fn kit_react_stream_hooks() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let frontend = scaffold(&tmp, "stream-react", "react");
+    assert_stream_hooks(&frontend, "react");
+}
+
+#[test]
+#[ignore = "needs node, npm and the network: runs the stream Vitest suite"]
+fn kit_vue_stream_hooks() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let frontend = scaffold(&tmp, "stream-vue", "vue");
+    assert_stream_hooks(&frontend, "vue");
+}
+
+#[test]
+#[ignore = "needs node, npm and the network: runs the stream Vitest suite"]
+fn kit_svelte_stream_hooks() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let frontend = scaffold(&tmp, "stream-svelte", "svelte");
+    assert_stream_hooks(&frontend, "svelte");
+}
+
 #[test]
 #[ignore = "needs node, npm and the network: runs npm install, check, build and build:ssr"]
 fn kit_svelte_type_checks_and_builds() {

@@ -1,6 +1,6 @@
 import { createApp, defineComponent } from 'vue'
 import { afterEach, expect, test, vi } from 'vitest'
-import { useEventStream, useJsonEventStream, useJsonStream, useStream } from './src/lib/stream'
+import { csrfHeaders, useEventStream, useJsonEventStream, useJsonStream, useStream } from './src/lib/stream'
 import { FakeEventSource, fakeFetch, settle } from './fakes'
 
 function probe<T>(hook: () => T) {
@@ -170,4 +170,30 @@ test('useEventStream joins messages, closes at the end signal and on unmount', a
   const next = FakeEventSource.opened.at(-1)!
   second.unmount()
   expect(next.closed).toBe(true)
+})
+
+
+test('CSRF headers prefer the fresh cookie over a stale meta token (#181)', () => {
+  document.head.innerHTML = '<meta name="csrf-token" content="stale-token">'
+  document.cookie = 'XSRF-TOKEN=fresh%2Btoken; path=/'
+  try {
+    expect(csrfHeaders()).toEqual({ 'X-XSRF-TOKEN': 'fresh+token' })
+    expect(csrfHeaders({ csrfToken: 'explicit-token' })).toEqual({
+      'X-CSRF-TOKEN': 'explicit-token',
+    })
+  } finally {
+    document.cookie = 'XSRF-TOKEN=; Max-Age=0; path=/'
+  }
+  expect(csrfHeaders()).toEqual({ 'X-CSRF-TOKEN': 'stale-token' })
+})
+
+test('CSRF headers use the configured cookie and header names (#181)', () => {
+  document.head.innerHTML = '<meta name="csrf-token" content="stale-token">'
+  document.cookie = 'CUSTOM-XSRF=custom%2Ftoken; path=/'
+  try {
+    expect(csrfHeaders({ xsrfCookieName: 'CUSTOM-XSRF', xsrfHeaderName: 'X-CUSTOM-XSRF' }))
+      .toEqual({ 'X-CUSTOM-XSRF': 'custom/token' })
+  } finally {
+    document.cookie = 'CUSTOM-XSRF=; Max-Age=0; path=/'
+  }
 })
