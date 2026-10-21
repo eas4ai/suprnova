@@ -1188,11 +1188,16 @@ async fn retrieve(
             .await?
         {
             validate_candidates(descriptor, &native.candidates)?;
-            // Qdrant already applies exclusions with its configured tokenizer to
-            // both legs. A framework word check would change those boundaries.
+            // Qdrant already applies phrases and exclusions with its configured
+            // tokenizer to both legs. A framework check would change those boundaries.
             if engine.name() != "qdrant" || !super::engine::qdrant::native_bm25(&settings) {
                 native.candidates.retain(|candidate| {
                     !matches_negative(&candidate.document, &settings, &query.expanded.negatives)
+                        && matches_required_phrases(
+                            &candidate.document,
+                            &settings,
+                            &query.expanded.phrases,
+                        )
                 });
             }
             total = native.total;
@@ -1205,21 +1210,16 @@ async fn retrieve(
                 })
                 .collect();
         } else {
-            let mut semantic = engine
-                .semantic(
-                    descriptor,
-                    &generation,
-                    &vector.dense,
-                    query.filter.as_ref(),
-                    query.depth,
-                )
-                .await?;
-            validate_candidates(descriptor, &semantic.candidates)?;
-            semantic.candidates.retain(|candidate| {
-                !matches_negative(&candidate.document, &settings, &query.expanded.negatives)
-            });
+            let semantic = semantic_with_refills(
+                engine.as_ref(),
+                descriptor,
+                &generation,
+                &vector.dense,
+                &settings,
+                &query,
+            )
+            .await?;
             let semantic_keys = semantic
-                .candidates
                 .iter()
                 .map(|hit| hit.document.key.clone())
                 .collect::<Vec<_>>();
@@ -1230,7 +1230,6 @@ async fn retrieve(
                 .collect::<Vec<_>>();
             let ranks = if ratio == 1.0 {
                 semantic
-                    .candidates
                     .iter()
                     .map(|hit| (hit.document.key.clone(), hit.score))
                     .collect()
@@ -1241,7 +1240,6 @@ async fn retrieve(
                 ])
             };
             let mut by_key: HashMap<_, _> = semantic
-                .candidates
                 .into_iter()
                 .map(|candidate| (candidate.document.key.clone(), candidate))
                 .collect();
@@ -1282,6 +1280,62 @@ async fn retrieve(
         facet_stats,
         hits_cap,
         needed,
+    })
+}
+
+/// Semantic engines receive vectors and scope filters without lexical constraints.
+/// Post-filter phrases and exclusions, then widen retrieval so rejected candidates
+/// do not reduce the fixed fusion depth.
+async fn semantic_with_refills(
+    engine: &dyn SearchEngine,
+    descriptor: &IndexDescriptor,
+    generation: &GenerationId,
+    vector: &[f32],
+    settings: &IndexSettings,
+    query: &EngineQuery,
+) -> Result<Vec<EngineCandidate>, FrameworkError> {
+    let mut depth = query.depth;
+    loop {
+        let mut semantic = engine
+            .semantic(descriptor, generation, vector, query.filter.as_ref(), depth)
+            .await?;
+        validate_candidates(descriptor, &semantic.candidates)?;
+        let fetched = semantic.candidates.len();
+        semantic.candidates.retain(|candidate| {
+            !matches_negative(&candidate.document, settings, &query.expanded.negatives)
+                && matches_required_phrases(&candidate.document, settings, &query.expanded.phrases)
+        });
+        let next_depth = depth.saturating_mul(2);
+        if semantic.candidates.len() >= query.depth || fetched < depth || next_depth == depth {
+            semantic.candidates.truncate(query.depth);
+            return Ok(semantic.candidates);
+        }
+        depth = next_depth;
+    }
+}
+
+/// Quoted phrases use adjacent tokens within one searchable attribute, as in lexical search.
+fn matches_required_phrases(
+    document: &SearchDocument,
+    settings: &IndexSettings,
+    phrases: &[Vec<String>],
+) -> bool {
+    if phrases.is_empty() {
+        return true;
+    }
+    let fields = settings
+        .index_time
+        .searchable_attributes
+        .iter()
+        .filter_map(|attribute| document.attributes.get(&attribute.name))
+        .filter_map(AttributeValue::searchable_text)
+        .map(|text| super::expansion::tokenize(&text))
+        .collect::<Vec<_>>();
+    phrases.iter().all(|phrase| {
+        !phrase.is_empty()
+            && fields
+                .iter()
+                .any(|words| words.windows(phrase.len()).any(|window| window == phrase))
     })
 }
 

@@ -2267,16 +2267,13 @@ impl SearchEngine for QdrantSearchEngine {
                 total: Total::Estimated(0),
             }));
         }
-        let mut scope = QFilter::must(match &q.filter {
-            Some(filter) => Some(self.bound_predicate(&collection, filter).await?),
-            None => None,
-        });
-        scope.must_not.extend(
-            q.expanded
-                .negatives
-                .iter()
-                .map(|word| Condition::matches_text("__text", word.clone())),
-        );
+        // Dense candidates keep the lexical phrase and exclusion rules, but do
+        // not require the unquoted words that only guide lexical ranking.
+        let mut semantic = q.clone();
+        semantic.expanded.terms.clear();
+        let scope = self
+            .query_filter(index, &settings, &semantic, &collection)
+            .await?;
         if ratio == 1.0 {
             let candidates = self
                 .query_points(

@@ -1200,6 +1200,162 @@ async fn semantic_and_hybrid_results_exclude_negative_words_in_searchable_lists(
 }
 
 #[tokio::test]
+async fn hybrid_required_phrases_match_lexical_on_database() {
+    assert_required_phrases_on_database(0.5).await;
+}
+
+#[tokio::test]
+async fn semantic_required_phrases_match_lexical_on_database() {
+    assert_required_phrases_on_database(1.0).await;
+}
+
+async fn phrase_database_engine(
+    depth: usize,
+    semantic_order: Option<Vec<String>>,
+) -> Arc<std::sync::Mutex<Vec<usize>>> {
+    for migration in suprnova::search::migrations() {
+        migration
+            .up(&sea_orm_migration::SchemaManager::new(
+                suprnova::DB::connection().unwrap().inner(),
+            ))
+            .await
+            .unwrap();
+    }
+    let depths = Arc::new(std::sync::Mutex::new(Vec::new()));
+    SearchRegistry::register_engine(
+        "collection",
+        Arc::new(DecoratedEngine {
+            inner: Arc::new(suprnova::search::DatabaseSearchEngine::new()),
+            query_depths: Arc::default(),
+            semantic_depths: depths.clone(),
+            inject_attribute: false,
+            unsafe_highlights: false,
+            index_calls: Arc::default(),
+            leg_orders: semantic_order.map(|order| (vec![], order)),
+        }),
+    )
+    .unwrap();
+    SearchRegistry::register_embedder("fake", Arc::new(FakeEmbedder::new(8).unwrap())).unwrap();
+    let descriptor = SearchNote::descriptor();
+    super::database_support::vectors(descriptor.name);
+    let engine = SearchRegistry::engine_for(descriptor.name).unwrap();
+    let mut settings = descriptor.index_settings();
+    settings.index_time.embedder = Some("fake".into());
+    settings.index_time.dimensions = Some(8);
+    settings.query.fusion_depth = depth;
+    let generation = suprnova::GenerationId::new("required_phrases").unwrap();
+    engine
+        .create_generation(descriptor, &settings, &generation)
+        .await
+        .unwrap();
+    engine
+        .switch_generation(descriptor, None, generation)
+        .await
+        .unwrap();
+    depths
+}
+
+async fn assert_required_phrases_on_database(ratio: f32) {
+    let _db = database().await;
+    SearchConfig::scope(
+        config(),
+        SearchRegistry::isolated(async {
+            phrase_database_engine(20, None).await;
+            let allowed = note("RUST, database", true, 0).await;
+            index(&allowed).await;
+            index(&note("garden flowers", true, 0).await).await;
+            index(&note("database rust", true, 0).await).await;
+            index(&note("rust fast database", true, 0).await).await;
+            index(&note("rust databases", true, 0).await).await;
+            let split = note("rust", true, 0)
+                .await
+                .update(suprnova::attrs! { body: "database" })
+                .await
+                .unwrap();
+            index(&split).await;
+            let listed = note("listed", true, 0)
+                .await
+                .update(suprnova::attrs! { tags: vec!["Rust", "Database"] })
+                .await
+                .unwrap();
+            index(&listed).await;
+            for query in [r#""rust database""#, r#""rust database" "search body""#] {
+                let result = SearchNote::search(query).hybrid(ratio).get().await.unwrap();
+                let mut keys = result
+                    .hits
+                    .iter()
+                    .map(|hit| hit.key.clone())
+                    .collect::<Vec<_>>();
+                keys.sort();
+                let mut expected = vec![allowed.id.to_string(), listed.id.to_string()];
+                expected.sort();
+                assert_eq!(keys, expected, "{query} at ratio {ratio}");
+            }
+            assert!(
+                SearchNote::search(r#""rust database" "missing phrase""#)
+                    .hybrid(ratio)
+                    .get()
+                    .await
+                    .unwrap()
+                    .hits
+                    .is_empty()
+            );
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn hybrid_required_phrases_refill_an_entire_rejected_semantic_page() {
+    let _db = database().await;
+    SearchConfig::scope(
+        config(),
+        SearchRegistry::isolated(async {
+            let order = [
+                "garden flowers",
+                "database rust",
+                "rust database first",
+                "rust database second",
+                "rust database third",
+            ];
+            let depths = phrase_database_engine(
+                2,
+                Some(order.iter().map(|title| (*title).into()).collect()),
+            )
+            .await;
+            for title in order {
+                index(&note(title, true, 0).await).await;
+            }
+            for ratio in [1.0, 0.5] {
+                depths.lock().unwrap().clear();
+                let result = SearchNote::search(r#""rust database""#)
+                    .hybrid(ratio)
+                    .limit(3)
+                    .get()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    result
+                        .hits
+                        .iter()
+                        .map(|hit| hit.model.title.as_str())
+                        .collect::<Vec<_>>(),
+                    ["rust database first", "rust database second"],
+                    "refill must restore the fusion depth at ratio {ratio}"
+                );
+                assert!(
+                    depths.lock().unwrap().len() > 1,
+                    "must look beyond the first page"
+                );
+            }
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn pagination_refills_candidates_dropped_by_live_scope_checks() {
     let _db = database().await;
     SearchConfig::scope(

@@ -515,6 +515,46 @@ async fn native_bm25_builder_hybrid_exclusion_boundaries_qdrant() {
     .await;
 }
 
+#[tokio::test]
+#[ignore = "requires Qdrant at QDRANT_TEST_URL"]
+async fn native_bm25_builder_hybrid_required_phrases_qdrant() {
+    use super::derive::SearchNote;
+    for tokenizer in [None, Some("whitespace")] {
+        native_builder_fixture(
+            tokenizer,
+            [5.0, 1.0],
+            &[
+                ("rust database", "search body"),
+                ("garden flowers", "search body"),
+                ("database rust", "search body"),
+                ("rust", "database"),
+                ("rust fast database", "search body"),
+            ],
+            |models, _| {
+                Box::pin(async move {
+                    for ratio in [0.5, 1.0] {
+                        for text in [r#""rust database""#, r#""rust database" "search body""#] {
+                            let hits = SearchNote::search(text).hybrid(ratio).get().await.unwrap();
+                            assert_eq!(hits.hits.len(), 1, "{text} at ratio {ratio}");
+                            assert_eq!(hits.hits[0].model.id, models[0].id);
+                        }
+                        assert!(
+                            SearchNote::search(r#""rust database" "missing phrase""#)
+                                .hybrid(ratio)
+                                .get()
+                                .await
+                                .unwrap()
+                                .hits
+                                .is_empty()
+                        );
+                    }
+                })
+            },
+        )
+        .await;
+    }
+}
+
 async fn fixture(
     test: impl for<'a> FnOnce(
         &'a QdrantSearchEngine,

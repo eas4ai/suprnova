@@ -8,6 +8,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- Quoted phrases now constrain semantic and hybrid searches using each engine's
+  lexical phrase matching rules. (#191)
 - Indexing and semantic queries now require the provider's model id and revision
   to match the generation. Rebuild with `search:reindex` after changing models. (#187)
 - Worker boot now constructs configured search providers before validating
@@ -54,6 +56,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Semantic and hybrid searches now exclude documents missing required quoted
+  phrases and refill filtered candidates to preserve result depth. (#191)
 - Replacing an embedding provider with another model of the same dimensions now
   reports a rebuild error instead of silently mixing incompatible vectors. (#187)
 - Workers with searchable models now start with an environment-selected HTTP or
