@@ -648,12 +648,17 @@ differ unless you pass `--replace`.
 
 ## Limits
 
-Every limit Live applies is a setting with a default sized for large pages: a
+Live's runtime limits are settings with defaults sized for large pages: a
 data table of tens of thousands of rows renders, travels and morphs without
 touching one. The server's configuration is the only source. The bootstrap
 writes every value into the page's configuration element, and the browser
 runtime applies what it reads there, so it never refuses what the server
 allows.
+
+Component metadata has fixed limits of 512 fields, 256 actions, and 64
+browser tool actions. Metadata exceeding these bounds is rejected before
+islands are served. Headless-only tools do not count toward the browser tool
+limit.
 
 Set a limit in the application's `.env` file:
 

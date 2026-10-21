@@ -1459,6 +1459,10 @@ transaction. An action marked `#[action(authorize = "current")]` asks the
 Gate for `live:{component}.{action}`, as a click does. The result carries the
 agent-visible fields and no other state.
 
+One component may declare at most 64 browser tools. Metadata validation
+rejects more before the page is served. Headless-only tools do not count
+toward this limit; the component's overall limit remains 256 actions.
+
 The browser names a Live tool after its island: `peek_counter-main` for the
 island `live:key="main"`. The key must be one literal of 1 to 63 ASCII
 letters, digits, `_` and `-`, outside any loop, so data never reaches a name

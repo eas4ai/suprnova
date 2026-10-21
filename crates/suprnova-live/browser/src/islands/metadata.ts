@@ -11,6 +11,7 @@ const SAFE_DOCUMENT_KEY = /^[A-Za-z0-9._:-]+$/u;
 const SAFE_INSTANCE = /^[A-Za-z0-9_-]{22,43}$/u;
 const ACTION_PARAMETERS_ATTRIBUTE = "data-suprnova-live-actions";
 export const AGENT_TOOLS_ATTRIBUTE = "data-suprnova-live-tools";
+// Mirrors MAX_BROWSER_TOOLS in src/metadata/component.rs so server metadata always fits.
 const MAX_AGENT_TOOLS = 64;
 const MAX_AGENT_FIELDS = 512;
 const AGENT_TOOL_NAME = /^[A-Za-z0-9_]+-[A-Za-z0-9_-]+$/u;

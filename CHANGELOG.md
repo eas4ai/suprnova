@@ -19,6 +19,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Live components now reject more than 64 browser tools on the server,
+  preventing oversized tool metadata from disabling ordinary clicks. (#166)
 - Headless Live tools now report when their growing state no longer fits a
   follow-up request, so agents can restart instead of receiving an unusable
   handle. (#165)

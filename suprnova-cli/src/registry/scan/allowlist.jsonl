@@ -9975,6 +9975,7 @@
 {"path":"suprnova::live::metadata::MetadataErrorKind::InvalidUploadMetadata","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::live::metadata::MetadataErrorKind::InvalidVersion","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::live::metadata::MetadataErrorKind::TooManyActions","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
+{"path":"suprnova::live::metadata::MetadataErrorKind::TooManyBrowserTools","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::live::metadata::MetadataErrorKind::TooManyEffects","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::live::metadata::MetadataErrorKind::TooManyEventTargets","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::live::metadata::MetadataErrorKind::TooManyEvents","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
