@@ -99,6 +99,19 @@ impl AgentCounter {
     #[action(validate = "whole")]
     pub fn check(&mut self) {}
 
+    /// Grow the snapshot on the server so a small call can exceed the next request's budget.
+    #[tool(
+        name = "grow_counter",
+        description = "Grow the counter's label.",
+        callers = [user],
+        headless,
+    )]
+    #[action(validate = "whole")]
+    pub fn grow(&mut self) -> Result<(), FrameworkError> {
+        self.label = "x".repeat(8192);
+        Ok(())
+    }
+
     #[tool(
         name = "rename_counter",
         description = "Rename the counter.",

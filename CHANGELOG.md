@@ -19,6 +19,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Headless Live tools now report when their growing state no longer fits a
+  follow-up request, so agents can restart instead of receiving an unusable
+  handle. (#165)
 - Concurrent fresh database migrations now recover when another migration
   creates the authorization server or agent auth tables first on Postgres. (#164)
 - Concurrent agent assertions now share one provider key-set fetch, preventing

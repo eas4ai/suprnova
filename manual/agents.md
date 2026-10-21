@@ -1683,6 +1683,13 @@ browser snapshot does, after `LIVE_LEDGER_INSTANCE_LIFETIME_MS`. A stale
 handle answers 409, and the agent calls again with the latest one or without
 one.
 
+Headless outcomes are `accepted`, `no_render`, `redirect`, and `invalid`.
+If the sealed successor would make even the smallest follow-up request exceed
+the endpoint's `max_body_bytes`, the outcome is `too_large` with `isError: true`.
+The result keeps the agent-visible `fields` and any `validation` issues, but
+returns no `handle`. Its message explains that the component's state no longer
+fits one request and the mount must be started again.
+
 A headless tool's component cannot have `#[session]` fields, and an action
 that finalizes an upload cannot be headless.
 

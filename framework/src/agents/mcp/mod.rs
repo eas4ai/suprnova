@@ -724,15 +724,7 @@ async fn run_call(
     }
     let answer = crate::routing::root::scope(
         root,
-        dispatch::call(
-            &endpoint,
-            tool,
-            arguments,
-            caller,
-            client,
-            config.call_timeout,
-            config.max_result_bytes,
-        ),
+        dispatch::call(&endpoint, tool, arguments, caller, client, &config),
     )
     .await;
     let live = tool.live_target().is_some();
@@ -753,6 +745,29 @@ async fn run_call(
         other => other,
     };
     protocol::result(&id, result)
+}
+
+/// Serialize the minimum modern continuation request, including required metadata,
+/// because the endpoint limits the entire JSON-RPC body rather than just its handle.
+/// Serialization errors propagate so a failed measurement cannot admit a handle.
+pub(super) fn minimum_live_call_bytes(
+    name: &str,
+    handle: &str,
+) -> Result<usize, serde_json::Error> {
+    serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "tools/call",
+        "params": {
+            "name": name,
+            "arguments": { "handle": handle, "arguments": {} },
+            "_meta": {
+                META_PROTOCOL_VERSION: MODERN,
+                META_CLIENT_CAPABILITIES: {},
+            },
+        },
+    }))
+    .map(|body| body.len())
 }
 
 /// A request-scoped answer body: one item carrying the call's JSON-RPC

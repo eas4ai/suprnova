@@ -109,8 +109,7 @@ pub(crate) async fn call(
     arguments: Map<String, Value>,
     caller: ToolCaller,
     client: ClientFacts,
-    timeout: Duration,
-    max_result_bytes: usize,
+    config: &super::AgentsConfig,
 ) -> Result<RouteAnswer, CallFailure> {
     let path = fill_path(tool.pattern(), &arguments).map_err(CallFailure::BadArguments)?;
     // A literal route such as `/posts/new` would otherwise answer a call
@@ -130,7 +129,8 @@ pub(crate) async fn call(
         None => path,
     };
     let body = Bytes::from(serde_json::to_vec(&Value::Object(arguments)).unwrap_or_default());
-    let request = build_request(tool, &target, body, &client).map_err(CallFailure::BadArguments)?;
+    let request = build_request(tool, &target, body, &client, config.max_body_bytes)
+        .map_err(CallFailure::BadArguments)?;
     let guard = tool.guard();
     let seeded = caller.clone();
     let served = crate::server::serve_internal(
@@ -146,9 +146,9 @@ pub(crate) async fn call(
     let run = caller.scope(async move {
         let response = served.await;
         let (parts, body) = response.into_parts();
-        let body = match Limited::new(body, max_result_bytes).collect().await {
+        let body = match Limited::new(body, config.max_result_bytes).collect().await {
             Ok(collected) => collected.to_bytes(),
-            Err(_) => return Err(CallFailure::TooLarge(max_result_bytes)),
+            Err(_) => return Err(CallFailure::TooLarge(config.max_result_bytes)),
         };
         Ok(RouteAnswer {
             status: parts.status.as_u16(),
@@ -160,9 +160,9 @@ pub(crate) async fn call(
             body,
         })
     });
-    match tokio::time::timeout(timeout, run).await {
+    match tokio::time::timeout(config.call_timeout, run).await {
         Ok(answer) => answer,
-        Err(_) => Err(CallFailure::TimedOut(timeout)),
+        Err(_) => Err(CallFailure::TimedOut(config.call_timeout)),
     }
 }
 
@@ -172,6 +172,7 @@ fn build_request(
     target: &str,
     body: Bytes,
     client: &ClientFacts,
+    max_body_bytes: usize,
 ) -> Result<Request, String> {
     let mut builder = hyper::Request::builder()
         .method(tool.method().clone())
@@ -194,6 +195,7 @@ fn build_request(
         AgentMark::Call(CallContext {
             tool: tool.name(),
             live: tool.live_target().cloned(),
+            max_body_bytes,
         }),
     ))
 }
