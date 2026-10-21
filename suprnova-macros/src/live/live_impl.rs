@@ -1,0 +1,1912 @@
+use std::collections::BTreeMap;
+
+use proc_macro2::{Span, TokenStream as TokenStream2};
+use quote::{format_ident, quote};
+use syn::ext::IdentExt as _;
+use syn::spanned::Spanned as _;
+use syn::{
+    Attribute, FnArg, GenericArgument, ImplItem, ImplItemFn, ItemImpl, Meta, Pat, PathArguments,
+    Receiver, Type, Visibility,
+};
+
+use super::attrs::{
+    ActionAuthorizationArgs, ActionTransactionArgs, ActionValidationArgs, contains_reference,
+    is_field_helper, is_method_helper, parse_action_args, parse_validation_hook_args,
+    validate_registered_name, wire_name,
+};
+use super::component::{model_codec_has_schema, model_codec_tokens};
+use super::expand::enforce_runtime_path_contract;
+use crate::tool::{ToolSite, ToolSpec, is_tool_attr, marker_macro, meta_tokens, parse_spec};
+
+pub(crate) fn expand(args: TokenStream2, mut item: ItemImpl) -> syn::Result<TokenStream2> {
+    if !args.is_empty() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "the outer #[live] impl attribute does not accept arguments",
+        ));
+    }
+    if item.trait_.is_some() {
+        return Err(syn::Error::new(
+            item.impl_token.span(),
+            "#[live] requires an inherent impl",
+        ));
+    }
+    if !item.generics.params.is_empty() || item.generics.where_clause.is_some() {
+        return Err(syn::Error::new(
+            item.generics.span(),
+            "a Live component impl cannot be generic",
+        ));
+    }
+
+    let mut actions = BTreeMap::<String, RegisteredAction>::new();
+    let mut singleton_helpers = BTreeMap::<String, Span>::new();
+    let mut mount = None::<RegisteredMount>;
+    let mut lifecycle_hooks = BTreeMap::<String, RegisteredLifecycleHook>::new();
+    let mut computed_methods = Vec::<RegisteredComputed>::new();
+    let mut supports_params_changed = false;
+    let mut supports_lazy_complete = false;
+    let mut component_validation_hooks = Vec::new();
+    let mut action_validation_hooks = BTreeMap::new();
+    for impl_item in &mut item.items {
+        let ImplItem::Fn(method) = impl_item else {
+            reject_helpers_on_non_method(impl_item)?;
+            continue;
+        };
+        let (helper, tool_attribute) = take_method_helper(method)?;
+        let resolvers = take_resolvers(method)?;
+        let Some((helper_name, attribute)) = helper else {
+            if let Some(tool) = tool_attribute {
+                return Err(syn::Error::new(
+                    tool.span(),
+                    "#[tool] inside #[live] marks an action: add #[action] to this method",
+                ));
+            }
+            if let Some((_, path)) = resolvers.into_iter().next() {
+                return Err(syn::Error::new(
+                    path.span(),
+                    "#[resolve] fills a #[mount] parameter",
+                ));
+            }
+            continue;
+        };
+        if helper_name != "action"
+            && let Some(tool) = &tool_attribute
+        {
+            return Err(syn::Error::new(
+                tool.span(),
+                "#[tool] inside #[live] marks an action: it cannot sit on this method",
+            ));
+        }
+        if helper_name != "mount"
+            && let Some((_, path)) = resolvers.iter().next()
+        {
+            return Err(syn::Error::new(
+                path.span(),
+                "#[resolve] fills a #[mount] parameter",
+            ));
+        }
+        validate_common_signature(method)?;
+        match helper_name.as_str() {
+            "action" => {
+                validate_action_signature(method)?;
+                method.attrs.push(syn::parse_quote!(
+                    #[doc = "Live may invoke this action body again after an uncommitted attempt. Nontransactional external effects require application idempotency, compensation, or an established outbox/delivery contract."]
+                ));
+                let args = parse_action_args(&attribute)?;
+                let name = args
+                    .name
+                    .as_ref()
+                    .map_or_else(|| method.sig.ident.unraw().to_string(), syn::LitStr::value);
+                let literal = args
+                    .name
+                    .unwrap_or_else(|| syn::LitStr::new(&name, method.sig.ident.span()));
+                validate_registered_name(&literal)?;
+                let (authorization_parameter, arguments) = extract_action_parameters(method)?;
+                let tool = match &tool_attribute {
+                    Some(tool) => Some(parse_live_tool(tool, &arguments)?),
+                    None => None,
+                };
+                let registered = RegisteredAction {
+                    version: args.version,
+                    method: method.sig.ident.clone(),
+                    arguments,
+                    asynchronous: method.sig.asyncness.is_some(),
+                    authorization: args.authorization,
+                    validation: args.validation,
+                    transaction: args.transaction,
+                    authorization_parameter,
+                    tool,
+                };
+                if actions.insert(name, registered).is_some() {
+                    return Err(syn::Error::new(
+                        attribute.span(),
+                        "duplicate registered Live action name",
+                    ));
+                }
+            }
+            "mount" => {
+                ensure_singleton(&mut singleton_helpers, &helper_name, attribute.span())?;
+                validate_mount_signature(method)?;
+                let parameters = extract_mount_parameters(method)?;
+                for (name, path) in &resolvers {
+                    if !parameters.iter().any(|parameter| &parameter.name == name) {
+                        return Err(syn::Error::new(
+                            path.span(),
+                            "#[resolve] names a parameter this #[mount] does not take",
+                        ));
+                    }
+                }
+                mount = Some(RegisteredMount {
+                    method: method.sig.ident.clone(),
+                    parameters,
+                    asynchronous: method.sig.asyncness.is_some(),
+                    resolvers,
+                });
+                ensure_path_helper(&attribute)?;
+            }
+            "computed" => {
+                validate_computed_signature(method)?;
+                computed_methods.push(extract_computed(method)?);
+                ensure_path_helper(&attribute)?;
+            }
+            "validate" => {
+                validate_receiver_method(method, false)?;
+                let hook = parse_validation_hook_args(&attribute)?;
+                if let Some(action) = hook.action {
+                    let action_name = action.value();
+                    let arguments = extract_validation_parameters(method)?;
+                    let hook = RegisteredValidationHook {
+                        method: method.sig.ident.clone(),
+                        arguments,
+                        asynchronous: method.sig.asyncness.is_some(),
+                        span: attribute.span(),
+                    };
+                    if action_validation_hooks.insert(action_name, hook).is_some() {
+                        return Err(syn::Error::new(
+                            action.span(),
+                            "an action may declare only one typed validation hook",
+                        ));
+                    }
+                } else {
+                    if method.sig.inputs.len() != 1 {
+                        return Err(syn::Error::new(
+                            method.sig.ident.span(),
+                            "component validation methods accept only `&self` or `&mut self`",
+                        ));
+                    }
+                    component_validation_hooks
+                        .push((method.sig.ident.clone(), method.sig.asyncness.is_some()));
+                }
+            }
+            _ => {
+                ensure_singleton(&mut singleton_helpers, &helper_name, attribute.span())?;
+                validate_receiver_method(method, true)?;
+                if method.sig.inputs.len() != 1 {
+                    return Err(syn::Error::new(
+                        method.sig.ident.span(),
+                        "Live lifecycle hooks accept only `&mut self`",
+                    ));
+                }
+                ensure_path_helper(&attribute)?;
+                supports_params_changed |= helper_name == "params_changed";
+                supports_lazy_complete |= helper_name == "lazy_complete";
+                lifecycle_hooks.insert(
+                    helper_name,
+                    RegisteredLifecycleHook {
+                        method: method.sig.ident.clone(),
+                        asynchronous: method.sig.asyncness.is_some(),
+                    },
+                );
+            }
+        }
+    }
+
+    validate_validation_hooks(
+        &actions,
+        &component_validation_hooks,
+        &action_validation_hooks,
+    )?;
+
+    let self_ty = &item.self_ty;
+    let action_values = actions
+        .iter()
+        .map(|(name, action)| {
+            let version = action.version;
+            let authorization = match action.authorization {
+                ActionAuthorizationArgs::Public => quote!(Public),
+                ActionAuthorizationArgs::Current => quote!(Current),
+            };
+            let validation = match action.validation {
+                ActionValidationArgs::None => quote!(None),
+                ActionValidationArgs::Whole => quote!(WholeComponent),
+                ActionValidationArgs::Arguments => quote!(ActionArguments),
+                ActionValidationArgs::All => quote!(ComponentAndArguments),
+            };
+            let transaction = match action.transaction {
+                ActionTransactionArgs::None => quote!(None),
+                ActionTransactionArgs::Required => quote!(Required),
+            };
+            let tool = action.tool.as_ref().map(engine_tool_tokens);
+            let tool = tool.map_or_else(TokenStream2::new, |tool| quote!(.with_tool(#tool)?));
+            let argument_fields = action.arguments.iter().map(|argument| {
+                let name = &argument.wire;
+                let codec = model_codec_tokens(&argument.ty);
+                let required = argument.required;
+                let description = action
+                    .tool
+                    .as_ref()
+                    .and_then(|tool| tool.argument_descriptions.get(name))
+                    .map(|description| quote!(.with_description(#description)));
+                quote! {
+                    ::suprnova::live::__private::action::ActionArgumentField::new(
+                        ::suprnova::live::__private::identity::ModelField::parse(#name)
+                            .expect("macro-validated Live action argument identity"),
+                        #codec,
+                        #required,
+                    ).expect("macro-validated Live action argument field")#description
+                }
+            });
+            quote! {
+                ::suprnova::live::__private::metadata::ActionMetadata::new_with_contract(
+                    ::suprnova::live::__private::identity::ActionName::parse(#name)
+                        .expect("macro-validated Live action identity"),
+                    #version,
+                    ::suprnova::live::__private::action::ActionArgumentSchema::new(
+                        ::std::vec![#(#argument_fields),*],
+                    ).expect("macro-validated Live action argument schema"),
+                    ::suprnova::live::__private::action::AuthorizationRequirement::#authorization,
+                    ::suprnova::live::__private::validation::ValidationSelection::#validation,
+                    ::suprnova::live::__private::action::TransactionPolicy::#transaction,
+                )?#tool
+            }
+        })
+        .collect::<Vec<_>>();
+    let action_entries = actions
+        .values()
+        .enumerate()
+        .map(|(index, action)| {
+            let method = &action.method;
+            // The generated locals take mixed-site spans and the decoded
+            // arguments take generated names, so an argument the
+            // application names `target`, `arguments` or `authorization`
+            // neither shadows them nor is shadowed by them.
+            let target = generated_local("__snv_live_target");
+            let authorization = generated_local("__snv_live_authorization");
+            let arguments = generated_local("__snv_live_arguments");
+            let decoded = generated_locals("__snv_live_argument", action.arguments.len());
+            let decodes = action.arguments.iter().zip(&decoded).map(|(argument, local)| {
+                let ty = &argument.ty;
+                let name = &argument.wire;
+                quote! {
+                    let #local: #ty = #arguments.decode::<#ty>(#name)?;
+                }
+            });
+            let mut invocation_arguments = Vec::new();
+            if action.authorization_parameter.is_some() {
+                invocation_arguments.push(quote!(#authorization));
+            }
+            invocation_arguments.extend(decoded.iter().map(|local| quote!(#local)));
+            let invocation = if action.asynchronous {
+                quote!(#target.#method(#(#invocation_arguments),*).await)
+            } else {
+                quote!(#target.#method(#(#invocation_arguments),*))
+            };
+            quote! {
+                ::suprnova::live::__private::action::ActionEntry::new(
+                    metadata.actions()[#index].clone(),
+                    |#target, #authorization, #arguments| {
+                        ::std::boxed::Box::pin(async move {
+                            let #target = #target
+                                .as_any_mut()
+                                .downcast_mut::<#self_ty>()
+                                .ok_or_else(
+                                    ::suprnova::live::__private::action::ActionError::dispatcher_contract
+                                )?;
+                            #(#decodes)*
+                            let _ = #authorization;
+                            let output = #invocation;
+                            ::suprnova::live::__private::action::IntoActionResult::into_action_result(
+                                output,
+                            )
+                        })
+                    },
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    let parameter_values =
+        mount
+            .iter()
+            .flat_map(|mount| mount.parameters.iter())
+            .map(|parameter| {
+                let name = &parameter.name;
+                let codec = model_codec_tokens(&parameter.ty);
+                let required = option_inner(&parameter.ty).is_none();
+                let description = parameter
+                    .description
+                    .as_ref()
+                    .map(|description| quote!(.with_description(#description)));
+                quote! {
+                    ::suprnova::live::__private::component::composition::ChildParameterField::new(
+                        ::suprnova::live::__private::identity::ModelField::parse(#name)
+                            .expect("macro-validated Live mount parameter identity"),
+                        #codec,
+                        #required,
+                    )#description
+                }
+            });
+    let parameter_values = parameter_values.collect::<Vec<_>>();
+    let validation_port = if component_validation_hooks.is_empty()
+        && action_validation_hooks.is_empty()
+    {
+        quote! {}
+    } else {
+        let component_validation_calls =
+            component_validation_hooks.iter().map(|(method, asynchronous)| {
+            let invocation = if *asynchronous {
+                quote!(target.#method().await)
+            } else {
+                quote!(target.#method())
+            };
+            quote! {
+                {
+                    let target = request
+                        .target_mut()
+                        .and_then(|target| target.as_any_mut().downcast_mut::<#self_ty>())
+                        .ok_or_else(
+                            ::suprnova::live::__private::validation::ValidationPortError::unavailable,
+                        )?;
+                    issues.extend(
+                        ::suprnova::live::__private::validation::into_validation_issues(
+                            #invocation,
+                        )?,
+                    );
+                }
+            }
+        });
+        let has_component_validation = !component_validation_hooks.is_empty();
+        let action_validation_arms = action_validation_hooks.iter().map(|(name, hook)| {
+            let name = syn::LitStr::new(name, hook.span);
+            let method = &hook.method;
+            let decoded = generated_locals("__snv_live_argument", hook.arguments.len());
+            let decodes = hook.arguments.iter().zip(&decoded).map(|(argument, local)| {
+                let ty = &argument.ty;
+                let name = &argument.wire;
+                quote! {
+                    let #local: #ty = request.decode_argument::<#ty>(#name)?;
+                }
+            });
+            let arguments = decoded.iter();
+            let invocation = if hook.asynchronous {
+                quote!(target.#method(#(#arguments),*).await)
+            } else {
+                quote!(target.#method(#(#arguments),*))
+            };
+            quote! {
+                #name => {
+                    #(#decodes)*
+                    let target = request
+                        .target_mut()
+                        .and_then(|target| target.as_any_mut().downcast_mut::<#self_ty>())
+                        .ok_or_else(
+                            ::suprnova::live::__private::validation::ValidationPortError::unavailable,
+                        )?;
+                    issues.extend(
+                        ::suprnova::live::__private::validation::into_validation_issues(
+                            #invocation,
+                        )?,
+                    );
+                }
+            }
+        });
+        quote! {
+            fn validation_port() -> ::std::option::Option<
+                ::std::sync::Arc<
+                    dyn ::suprnova::live::__private::validation::ValidationPort,
+                >,
+            > {
+                struct GeneratedValidation;
+
+                impl ::suprnova::live::__private::validation::ValidationPort
+                    for GeneratedValidation
+                {
+                    fn validate<'a>(
+                        &'a self,
+                        mut request: ::suprnova::live::__private::validation::ValidationRequest<'a>,
+                    ) -> ::suprnova::live::__private::validation::ValidationFuture<
+                        'a,
+                        ::std::result::Result<
+                            ::std::vec::Vec<
+                                ::suprnova::live::__private::validation::ValidationIssue,
+                            >,
+                            ::suprnova::live::__private::validation::ValidationPortError,
+                        >,
+                    > {
+                        ::std::boxed::Box::pin(async move {
+                            let selection = request.selection().clone();
+                            // Named, not inferred: with argument hooks only,
+                            // the first use of `issues` is a method call
+                            // (`retain`) that cannot infer the element type.
+                            let mut issues: ::std::vec::Vec<
+                                ::suprnova::live::__private::validation::ValidationIssue,
+                            > = ::std::vec::Vec::new();
+                            let validate_component = ::std::matches!(
+                                selection,
+                                ::suprnova::live::__private::validation::ValidationSelection::Selected(_)
+                                    | ::suprnova::live::__private::validation::ValidationSelection::WholeComponent
+                                    | ::suprnova::live::__private::validation::ValidationSelection::ComponentAndArguments
+                            );
+                            if validate_component {
+                                if !#has_component_validation {
+                                    return ::std::result::Result::Err(
+                                        ::suprnova::live::__private::validation::ValidationPortError::unavailable(),
+                                    );
+                                }
+                                #(#component_validation_calls)*
+                                if let ::suprnova::live::__private::validation::ValidationSelection::Selected(selected) = &selection {
+                                    issues.retain(|issue| {
+                                        selected.iter().any(|selected| {
+                                            let candidate = issue.path().as_str();
+                                            let selected = selected.as_str();
+                                            candidate == selected
+                                                || candidate.strip_prefix(selected).is_some_and(
+                                                    |suffix| suffix.starts_with('.'),
+                                                )
+                                        })
+                                    });
+                                }
+                            }
+
+                            let validate_arguments = ::std::matches!(
+                                selection,
+                                ::suprnova::live::__private::validation::ValidationSelection::ActionArguments
+                                    | ::suprnova::live::__private::validation::ValidationSelection::ComponentAndArguments
+                            );
+                            if validate_arguments {
+                                let action = request
+                                    .action()
+                                    .ok_or_else(
+                                        ::suprnova::live::__private::validation::ValidationPortError::unavailable,
+                                    )?
+                                    .as_str()
+                                    .to_owned();
+                                match action.as_str() {
+                                    #(#action_validation_arms)*
+                                    _ => {
+                                        return ::std::result::Result::Err(
+                                            ::suprnova::live::__private::validation::ValidationPortError::unavailable(),
+                                        );
+                                    }
+                                }
+                            }
+                            ::std::result::Result::Ok(issues)
+                        })
+                    }
+                }
+
+                ::std::option::Option::Some(::std::sync::Arc::new(GeneratedValidation))
+            }
+        }
+    };
+    let mount_runtime = generate_mount_runtime(&mount);
+    let hydrated_runtime =
+        generate_context_lifecycle_hook(&lifecycle_hooks, "hydrate", "hydrated_generated");
+    let rendering_runtime =
+        generate_context_lifecycle_hook(&lifecycle_hooks, "rendering", "rendering_generated");
+    let rendered_runtime =
+        generate_context_lifecycle_hook(&lifecycle_hooks, "rendered", "rendered_generated");
+    let dehydrating_runtime =
+        generate_context_lifecycle_hook(&lifecycle_hooks, "dehydrate", "dehydrating_generated");
+    let params_changed_runtime = generate_params_changed_hook(&lifecycle_hooks, &mount);
+    let lazy_complete_runtime = generate_context_lifecycle_hook(
+        &lifecycle_hooks,
+        "lazy_complete",
+        "lazy_complete_generated",
+    );
+    let teardown_runtime = generate_teardown_hook(&lifecycle_hooks);
+    let component_ident = self_type_ident(self_ty)?;
+    let view_ident = format_ident!("__SuprnovaLiveViewFor{component_ident}");
+    let computed_forwarders = computed_methods.iter().map(|computed| {
+        let method = &computed.method;
+        let inputs = &computed.inputs;
+        let arguments = &computed.arguments;
+        let output = &computed.output;
+        quote! {
+            fn #method(&self, #(#inputs),*) #output {
+                self.component.#method(#(#arguments),*)
+            }
+        }
+    });
+    let computed_view_impl = if computed_methods.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            impl<'__snv_live> #view_ident<'__snv_live> {
+                #(#computed_forwarders)*
+            }
+        }
+    };
+    // The application's own impl is emitted as written and is not checked:
+    // a string in an action body, or a module of its own, is not a path the
+    // macro generated.
+    let generated = quote! {
+        #computed_view_impl
+
+        impl ::suprnova::live::__private::component::generated::GeneratedComponentRuntime
+            for #self_ty
+        {
+            #mount_runtime
+            #hydrated_runtime
+            #rendering_runtime
+            #rendered_runtime
+            #dehydrating_runtime
+            #params_changed_runtime
+            #lazy_complete_runtime
+            #teardown_runtime
+        }
+
+        impl ::suprnova::live::__private::metadata::LiveComponentContract for #self_ty {
+            fn origin_crate() -> &'static str {
+                ::std::env!("CARGO_PKG_NAME")
+            }
+
+            fn descriptor() -> ::std::result::Result<
+                ::suprnova::live::__private::registry::ComponentDescriptor,
+                ::suprnova::live::__private::metadata::MetadataError,
+            > {
+                let metadata = <Self as
+                    ::suprnova::live::__private::metadata::LiveComponentDefinitionMetadata
+                >::component_metadata(::std::vec![#(#action_values),*])?;
+                let action_table =
+                    ::suprnova::live::__private::action::ActionTable::new(
+                        ::std::vec![#(#action_entries),*],
+                    ).expect("macro-validated Live action table");
+                let parameter_schema =
+                    ::suprnova::live::__private::component::composition::ChildParameterSchema::new(
+                        metadata.versions().state_schema(),
+                        ::std::vec![#(#parameter_values),*],
+                    ).expect("macro-validated Live mount parameter schema");
+                let hooks =
+                    ::suprnova::live::__private::component::generated::component_hooks::<Self>(
+                        metadata.clone(),
+                    );
+                ::std::result::Result::Ok(
+                    ::suprnova::live::__private::registry::ComponentDescriptor::with_hooks(
+                        metadata,
+                        hooks,
+                    )
+                        .with_composition(
+                            parameter_schema,
+                            #supports_params_changed,
+                            #supports_lazy_complete,
+                        )
+                        .with_actions(action_table)
+                        .expect("macro-validated Live action metadata equivalence"),
+                )
+            }
+
+            fn descriptor_with_hooks(
+                hooks: ::suprnova::live::__private::component::ComponentHooks,
+            ) -> ::std::result::Result<
+                ::suprnova::live::__private::registry::ComponentDescriptor,
+                ::suprnova::live::__private::metadata::MetadataError,
+            > {
+                let metadata = <Self as
+                    ::suprnova::live::__private::metadata::LiveComponentDefinitionMetadata
+                >::component_metadata(::std::vec![#(#action_values),*])?;
+                let action_table =
+                    ::suprnova::live::__private::action::ActionTable::new(
+                        ::std::vec![#(#action_entries),*],
+                    ).expect("macro-validated Live action table");
+                let parameter_schema =
+                    ::suprnova::live::__private::component::composition::ChildParameterSchema::new(
+                        metadata.versions().state_schema(),
+                        ::std::vec![#(#parameter_values),*],
+                    ).expect("macro-validated Live mount parameter schema");
+                ::std::result::Result::Ok(
+                    ::suprnova::live::__private::registry::ComponentDescriptor::with_hooks(
+                        metadata,
+                        hooks,
+                    ).with_composition(
+                        parameter_schema,
+                        #supports_params_changed,
+                        #supports_lazy_complete,
+                    )
+                    .with_actions(action_table)
+                    .expect("macro-validated Live action metadata equivalence"),
+                )
+            }
+
+            #validation_port
+        }
+    };
+    let tools = tool_records(self_ty, component_ident, &actions, &mount)?;
+    let generated = quote! {
+        #generated
+
+        #tools
+    };
+    enforce_runtime_path_contract(&generated)?;
+    Ok(quote! {
+        #item
+
+        #generated
+    })
+}
+
+/// Parse a `#[tool]` on a Live action, refusing an argument an agent could
+/// not be told the shape of.
+fn parse_live_tool(attribute: &Attribute, arguments: &[ActionParameter]) -> syn::Result<ToolSpec> {
+    let tokens = match &attribute.meta {
+        Meta::List(list) => list.tokens.clone(),
+        _ => TokenStream2::new(),
+    };
+    let mut spec = parse_spec(tokens, ToolSite::Live)?;
+    for (name, description) in &spec.argument_descriptions {
+        if !arguments.iter().any(|argument| &argument.wire == name) {
+            return Err(syn::Error::new(
+                description.span(),
+                format!(
+                    "tool `{}` describes argument `{name}`, which this action does not take",
+                    spec.name.value()
+                ),
+            ));
+        }
+    }
+    spec.undocumented_arguments = arguments
+        .iter()
+        .filter(|argument| {
+            spec.argument_descriptions
+                .get(&argument.wire)
+                .is_none_or(|description| description.value().trim().is_empty())
+        })
+        .map(|argument| argument.wire.clone())
+        .collect();
+    // `model_codec_tokens` falls back to the Json codec for every type it
+    // does not know, which accepts any JSON its Serde type reads: an agent
+    // would be told less than the action enforces (AGENT-012).
+    for argument in arguments {
+        if !model_codec_has_schema(&argument.ty) {
+            return Err(syn::Error::new(
+                argument.ty.span(),
+                format!(
+                    "the argument `{}` of a tool action has no JSON Schema an agent can read: \
+                     take String, bool, i64, u64, f64, Date, OffsetDateTime or Uuid, or an \
+                     Option, Vec or BTreeMap of them",
+                    argument.wire
+                ),
+            ));
+        }
+    }
+    Ok(spec)
+}
+
+/// The engine's `ActionToolMetadata` for a tool action.
+fn engine_tool_tokens(spec: &ToolSpec) -> TokenStream2 {
+    let name = &spec.name;
+    let description = &spec.description;
+    let title = spec
+        .title
+        .as_ref()
+        .map_or_else(TokenStream2::new, |title| quote!(.with_title(#title)?));
+    let read_only = spec.annotations.read_only.unwrap_or(false);
+    let untrusted = spec.annotations.untrusted_content.unwrap_or(false);
+    // WebMCP's consequential hint is what MCP calls destructive (AGENT-014).
+    let consequential = spec.annotations.destructive.unwrap_or(false);
+    let debugging = spec.annotations.debugging.unwrap_or(false);
+    let browser = spec.offered_to_browser();
+    let headless = spec.headless;
+    quote! {
+        ::suprnova::live::__private::metadata::ActionToolMetadata::new(#name, #description)?
+            #title
+            .with_hints(#read_only, #untrusted, #consequential)
+            .with_debugging(#debugging)
+            .for_browser(#browser)
+            .headless(#headless)
+    }
+}
+
+/// The framework records of the component's tool actions: one marker macro
+/// and one `LiveToolRecord` each, with the resolver adapters the headless
+/// ones share. Nothing at all for a component without a tool, so the
+/// standalone macro fixture, which has no `suprnova::agents`, still builds.
+fn tool_records(
+    self_ty: &Type,
+    component_ident: &syn::Ident,
+    actions: &BTreeMap<String, RegisteredAction>,
+    mount: &Option<RegisteredMount>,
+) -> syn::Result<TokenStream2> {
+    let tools: Vec<(&String, &ToolSpec)> = actions
+        .iter()
+        .filter_map(|(name, action)| action.tool.as_ref().map(|tool| (name, tool)))
+        .collect();
+    let resolvers = mount
+        .iter()
+        .flat_map(|mount| mount.resolvers.iter())
+        .collect::<Vec<_>>();
+    if tools.is_empty() {
+        if let Some((_, path)) = resolvers.first() {
+            return Err(syn::Error::new(
+                path.span(),
+                "#[resolve] fills a mount property for headless tools: mark an action \
+                 #[tool(..., headless)], or remove #[resolve]",
+            ));
+        }
+        return Ok(TokenStream2::new());
+    }
+    if !resolvers.is_empty() && !tools.iter().any(|(_, tool)| tool.headless) {
+        let (_, path) = resolvers[0];
+        return Err(syn::Error::new(
+            path.span(),
+            "#[resolve] fills a mount property for headless tools: mark an action \
+             #[tool(..., headless)], or remove #[resolve]",
+        ));
+    }
+    let adapters = resolvers.iter().map(|(name, path)| {
+        let adapter = format_ident!("__snv_live_resolve_{}", name);
+        let parameter = mount.as_ref().and_then(|mount| {
+            mount
+                .parameters
+                .iter()
+                .find(|parameter| &&parameter.name == name)
+        });
+        let Some(parameter) = parameter else {
+            return quote! {};
+        };
+        let ty = &parameter.ty;
+        let encode = match option_inner(ty) {
+            Some(inner) => {
+                let codec = model_codec_tokens(inner);
+                quote! {
+                    match value {
+                        ::std::option::Option::Some(value) => {
+                            ::suprnova::agents::__encode_resolved(#name, &value, &#codec)
+                        }
+                        ::std::option::Option::None => ::std::result::Result::Ok(
+                            ::suprnova::live::__private::canonical::CanonicalValue::Null,
+                        ),
+                    }
+                }
+            }
+            None => {
+                let codec = model_codec_tokens(ty);
+                quote! { ::suprnova::agents::__encode_resolved(#name, &value, &#codec) }
+            }
+        };
+        quote! {
+            fn #adapter<'a>(
+                caller: &'a ::suprnova::agents::ToolCaller,
+            ) -> ::suprnova::agents::__ResolverFuture<'a> {
+                ::std::boxed::Box::pin(async move {
+                    let value: #ty = #path(caller).await?;
+                    #encode
+                })
+            }
+        }
+    });
+    let resolver_entries = resolvers.iter().map(|(name, _)| {
+        let adapter = format_ident!("__snv_live_resolve_{}", name);
+        quote! {
+            ::suprnova::agents::__LiveResolver { property: #name, resolve: #adapter }
+        }
+    });
+    let component_type = component_ident.to_string();
+    let markers = tools.iter().map(|(_, tool)| marker_macro(tool));
+    let submissions = tools.iter().map(|(action, tool)| {
+        let meta = meta_tokens(tool);
+        let headless = tool.headless;
+        // Only a headless tool is mounted from properties, so only it reads
+        // the resolvers.
+        let resolvers = if headless {
+            quote!(__SNV_LIVE_RESOLVERS)
+        } else {
+            quote!(&[])
+        };
+        quote! {
+            ::suprnova::inventory::submit! {
+                ::suprnova::agents::LiveToolRecord::__declare(
+                    ::suprnova::agents::__LiveToolDeclaration {
+                        meta: #meta,
+                        action: #action,
+                        headless: #headless,
+                        registration:
+                            <#self_ty as ::suprnova::live::ComponentContract>::__live_registration,
+                        component_type: #component_type,
+                        module: ::core::module_path!(),
+                        resolvers: #resolvers,
+                    },
+                )
+            }
+        }
+    });
+    Ok(quote! {
+        #(#markers)*
+
+        const _: () = {
+            #(#adapters)*
+
+            #[allow(dead_code)]
+            const __SNV_LIVE_RESOLVERS: &[::suprnova::agents::__LiveResolver] = &[
+                #(#resolver_entries),*
+            ];
+
+            #(#submissions)*
+        };
+    })
+}
+
+/// Take every `#[resolve(path)]` off the method's parameters, so the method
+/// is emitted without them, keyed by the parameter's wire name.
+fn take_resolvers(method: &mut ImplItemFn) -> syn::Result<BTreeMap<String, syn::Path>> {
+    let mut resolvers = BTreeMap::new();
+    for argument in &mut method.sig.inputs {
+        let FnArg::Typed(argument) = argument else {
+            continue;
+        };
+        let mut retained = Vec::with_capacity(argument.attrs.len());
+        for attribute in argument.attrs.drain(..) {
+            let is_resolve = attribute
+                .path()
+                .get_ident()
+                .is_some_and(|ident| ident.unraw() == "resolve");
+            if !is_resolve {
+                retained.push(attribute);
+                continue;
+            }
+            let path: syn::Path = attribute.parse_args().map_err(|_| {
+                syn::Error::new(
+                    attribute.span(),
+                    "expected #[resolve(path::to::resolver)], an `async fn(&ToolCaller) -> \
+                     Result<T, FrameworkError>`",
+                )
+            })?;
+            let Pat::Ident(pattern) = argument.pat.as_ref() else {
+                return Err(syn::Error::new(
+                    argument.pat.span(),
+                    "#[resolve] needs a simply named parameter",
+                ));
+            };
+            let name = wire_name(&pattern.ident, "Live mount parameter")?;
+            if resolvers.insert(name, path).is_some() {
+                return Err(syn::Error::new(
+                    attribute.span(),
+                    "a parameter takes one #[resolve]",
+                ));
+            }
+        }
+        argument.attrs = retained;
+    }
+    Ok(resolvers)
+}
+
+/// Decodes the mount parameter `parameter` from `parameters` into `local`.
+/// A required parameter must be present; an `Option<T>` parameter that is
+/// absent or `null` is `None`, whatever its codec, since no codec decodes
+/// `null` itself.
+fn mount_parameter_decode(parameter: &MountParameter, local: &syn::Ident) -> TokenStream2 {
+    let name = &parameter.name;
+    let ty = &parameter.ty;
+    let codec = model_codec_tokens(ty);
+    if option_inner(ty).is_some() {
+        quote! {
+            let #local: #ty = match parameters.get(#name) {
+                ::std::option::Option::None
+                | ::std::option::Option::Some(
+                    ::suprnova::live::__private::canonical::CanonicalValue::Null,
+                ) => ::std::option::Option::None,
+                ::std::option::Option::Some(value) => {
+                    ::suprnova::live::__private::component::generated::decode_model_field(
+                        value,
+                        &#codec,
+                    )?
+                }
+            };
+        }
+    } else {
+        quote! {
+            let #local: #ty =
+                ::suprnova::live::__private::component::generated::decode_model_field(
+                    parameters.get(#name).ok_or_else(
+                        ::suprnova::live::__private::component::ComponentError::contract_failure,
+                    )?,
+                    &#codec,
+                )?;
+        }
+    }
+}
+
+fn generate_mount_runtime(mount: &Option<RegisteredMount>) -> TokenStream2 {
+    let (expected, decodes, invocation) = if let Some(mount) = mount {
+        let expected = mount.parameters.len();
+        let decoded = generated_locals("__snv_live_mount", mount.parameters.len());
+        let decodes = mount
+            .parameters
+            .iter()
+            .zip(&decoded)
+            .map(|(parameter, local)| mount_parameter_decode(parameter, local));
+        let method = &mount.method;
+        let arguments = decoded.iter();
+        let invocation = if mount.asynchronous {
+            quote!(Self::#method(#(#arguments),*).await)
+        } else {
+            quote!(Self::#method(#(#arguments),*))
+        };
+        (
+            expected,
+            quote!(#(#decodes)*),
+            quote! {
+                let output = #invocation;
+                ::suprnova::live::__private::component::generated::IntoComponentResult::into_component_result(
+                    output,
+                )
+            },
+        )
+    } else {
+        (
+            0,
+            quote! {},
+            quote! {
+                <Self as
+                    ::suprnova::live::__private::component::generated::GeneratedComponentState
+                >::default_mount_state()
+            },
+        )
+    };
+
+    quote! {
+        fn mount_generated<'a>(
+            context: &'a ::suprnova::live::__private::component::MountContext<'a>,
+        ) -> ::suprnova::live::__private::component::LiveFuture<
+            'a,
+            ::std::result::Result<
+                Self,
+                ::suprnova::live::__private::component::ComponentError,
+            >,
+        > {
+            ::std::boxed::Box::pin(async move {
+                let ::suprnova::live::__private::canonical::CanonicalValue::Object(parameters) =
+                    context.parameters()
+                else {
+                    return ::std::result::Result::Err(
+                        ::suprnova::live::__private::component::ComponentError::contract_failure(),
+                    );
+                };
+                if parameters.len() > #expected {
+                    return ::std::result::Result::Err(
+                        ::suprnova::live::__private::component::ComponentError::contract_failure(),
+                    );
+                }
+                #decodes
+                #invocation
+            })
+        }
+    }
+}
+
+fn generate_context_lifecycle_hook(
+    hooks: &BTreeMap<String, RegisteredLifecycleHook>,
+    source: &str,
+    generated: &str,
+) -> TokenStream2 {
+    let Some(hook) = hooks.get(source) else {
+        return quote! {};
+    };
+    let generated = syn::Ident::new(generated, hook.method.span());
+    let method = &hook.method;
+    let invocation = if hook.asynchronous {
+        quote!(self.#method().await)
+    } else {
+        quote!(self.#method())
+    };
+    quote! {
+        fn #generated<'a>(
+            &'a mut self,
+            _context: &'a ::suprnova::live::__private::component::RenderContext<'a>,
+        ) -> ::suprnova::live::__private::component::LiveFuture<
+            'a,
+            ::std::result::Result<
+                (),
+                ::suprnova::live::__private::component::ComponentError,
+            >,
+        > {
+            ::std::boxed::Box::pin(async move {
+                let output = #invocation;
+                ::suprnova::live::__private::component::generated::IntoComponentHookResult::into_component_hook_result(
+                    output,
+                )
+            })
+        }
+    }
+}
+
+fn generate_params_changed_hook(
+    hooks: &BTreeMap<String, RegisteredLifecycleHook>,
+    mount: &Option<RegisteredMount>,
+) -> TokenStream2 {
+    let Some(hook) = hooks.get("params_changed") else {
+        return quote! {};
+    };
+    let expected_parameters = mount.as_ref().map_or(0, |mount| mount.parameters.len());
+    let decoded_parameters = mount.iter().flat_map(|mount| {
+        mount.parameters.iter().map(|parameter| {
+            let decoded = format_ident!("__snv_live_parameter_{}", parameter.ident.unraw());
+            mount_parameter_decode(parameter, &decoded)
+        })
+    });
+    let parameter_assignments = mount.iter().flat_map(|mount| {
+        mount.parameters.iter().map(|parameter| {
+            let field = &parameter.ident;
+            let decoded = format_ident!("__snv_live_parameter_{}", parameter.ident.unraw());
+            quote! {
+                self.#field = #decoded;
+            }
+        })
+    });
+    let method = &hook.method;
+    let invocation = if hook.asynchronous {
+        quote!(self.#method().await)
+    } else {
+        quote!(self.#method())
+    };
+    quote! {
+        fn params_changed_generated<'a>(
+            &'a mut self,
+            _context: &'a ::suprnova::live::__private::component::RenderContext<'a>,
+            _parameters: &'a ::suprnova::live::__private::child::VerifiedChildParametersV1,
+        ) -> ::suprnova::live::__private::component::LiveFuture<
+            'a,
+            ::std::result::Result<
+                (),
+                ::suprnova::live::__private::component::ComponentError,
+            >,
+        > {
+            ::std::boxed::Box::pin(async move {
+                let output = #invocation;
+                ::suprnova::live::__private::component::generated::IntoComponentHookResult::into_component_hook_result(
+                    output,
+                )
+            })
+        }
+
+        fn params_changed_v2_generated<'a>(
+            &'a mut self,
+            _context: &'a ::suprnova::live::__private::component::RenderContext<'a>,
+            _parameters: &'a ::suprnova::live::__private::child::EligibleChildParametersV2,
+        ) -> ::suprnova::live::__private::component::LiveFuture<
+            'a,
+            ::std::result::Result<
+                (),
+                ::suprnova::live::__private::component::ComponentError,
+            >,
+        > {
+            ::std::boxed::Box::pin(async move {
+                let ::suprnova::live::__private::canonical::CanonicalValue::Object(parameters) =
+                    _parameters.parameters()
+                else {
+                    return ::std::result::Result::Err(
+                        ::suprnova::live::__private::component::ComponentError::contract_failure(),
+                    );
+                };
+                if parameters.len() > #expected_parameters {
+                    return ::std::result::Result::Err(
+                        ::suprnova::live::__private::component::ComponentError::contract_failure(),
+                    );
+                }
+                #(#decoded_parameters)*
+                #(#parameter_assignments)*
+                let output = #invocation;
+                ::suprnova::live::__private::component::generated::IntoComponentHookResult::into_component_hook_result(
+                    output,
+                )
+            })
+        }
+    }
+}
+
+fn generate_teardown_hook(hooks: &BTreeMap<String, RegisteredLifecycleHook>) -> TokenStream2 {
+    let Some(hook) = hooks.get("teardown") else {
+        return quote! {};
+    };
+    let method = &hook.method;
+    let invocation = if hook.asynchronous {
+        quote!(self.#method().await)
+    } else {
+        quote!(self.#method())
+    };
+    quote! {
+        fn teardown_generated<'a>(
+            &'a mut self,
+        ) -> ::suprnova::live::__private::component::LiveFuture<
+            'a,
+            ::std::result::Result<
+                (),
+                ::suprnova::live::__private::component::ComponentError,
+            >,
+        > {
+            ::std::boxed::Box::pin(async move {
+                let output = #invocation;
+                ::suprnova::live::__private::component::generated::IntoComponentHookResult::into_component_hook_result(
+                    output,
+                )
+            })
+        }
+    }
+}
+
+fn self_type_ident(self_ty: &Type) -> syn::Result<&syn::Ident> {
+    let Type::Path(path) = self_ty else {
+        return Err(syn::Error::new(
+            self_ty.span(),
+            "Live component impl target must be a named type",
+        ));
+    };
+    path.path
+        .segments
+        .last()
+        .map(|segment| &segment.ident)
+        .ok_or_else(|| syn::Error::new(self_ty.span(), "Live component impl target is empty"))
+}
+
+/// The method's one Live helper and its `#[tool]`, if any, both taken off
+/// the method: the standalone `#[tool]` works only on a `#[handler]`, so one
+/// left on a Live action would fail there.
+#[allow(
+    clippy::type_complexity,
+    reason = "the helper and the tool attribute are two independent optional takes"
+)]
+fn take_method_helper(
+    method: &mut ImplItemFn,
+) -> syn::Result<(Option<(String, Attribute)>, Option<Attribute>)> {
+    let mut helper = None;
+    let mut tool = None;
+    let mut retained = Vec::with_capacity(method.attrs.len());
+    for attribute in method.attrs.drain(..) {
+        if is_tool_attr(&attribute) {
+            if tool.replace(attribute).is_some() {
+                return Err(syn::Error::new(
+                    method.sig.ident.span(),
+                    "a Live action declares one #[tool]",
+                ));
+            }
+            continue;
+        }
+        let Some(name) = attribute
+            .path()
+            .get_ident()
+            .map(|ident| ident.unraw().to_string())
+        else {
+            retained.push(attribute);
+            continue;
+        };
+        if is_field_helper(&name) {
+            return Err(syn::Error::new(
+                attribute.span(),
+                "field helper cannot be placed on a Live impl method",
+            ));
+        }
+        if is_method_helper(&name) {
+            if helper.replace((name, attribute)).is_some() {
+                return Err(syn::Error::new(
+                    method.sig.ident.span(),
+                    "a Live method may declare only one method helper",
+                ));
+            }
+        } else {
+            retained.push(attribute);
+        }
+    }
+    method.attrs = retained;
+    Ok((helper, tool))
+}
+
+fn reject_helpers_on_non_method(item: &ImplItem) -> syn::Result<()> {
+    let attributes = match item {
+        ImplItem::Const(item) => &item.attrs,
+        ImplItem::Type(item) => &item.attrs,
+        ImplItem::Macro(item) => &item.attrs,
+        ImplItem::Verbatim(_) | _ => return Ok(()),
+    };
+    if let Some(attribute) = attributes.iter().find(|attribute| {
+        attribute.path().get_ident().is_some_and(|ident| {
+            let name = ident.unraw().to_string();
+            is_method_helper(&name) || is_field_helper(&name)
+        })
+    }) {
+        return Err(syn::Error::new(
+            attribute.span(),
+            "Live helpers can only be placed on their documented item kind",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_common_signature(method: &ImplItemFn) -> syn::Result<()> {
+    let signature = &method.sig;
+    if signature.constness.is_some()
+        || signature.unsafety.is_some()
+        || signature.abi.is_some()
+        || signature.variadic.is_some()
+        || !signature.generics.params.is_empty()
+        || signature.generics.where_clause.is_some()
+    {
+        return Err(syn::Error::new(
+            signature.span(),
+            "Live methods cannot be const, unsafe, extern, variadic, or generic",
+        ));
+    }
+    if !matches!(method.vis, Visibility::Public(_)) {
+        return Err(syn::Error::new(
+            method.sig.ident.span(),
+            "registered Live methods must be public",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_action_signature(method: &ImplItemFn) -> syn::Result<()> {
+    let receiver = method.sig.inputs.first().and_then(receiver);
+    if !receiver.is_some_and(|value| value.reference.is_some() && value.mutability.is_some()) {
+        return Err(syn::Error::new(
+            method.sig.ident.span(),
+            "Live actions require `&mut self` as their first argument",
+        ));
+    }
+    Ok(())
+}
+
+struct RegisteredAction {
+    version: u16,
+    method: syn::Ident,
+    arguments: Vec<ActionParameter>,
+    asynchronous: bool,
+    authorization: ActionAuthorizationArgs,
+    validation: ActionValidationArgs,
+    transaction: ActionTransactionArgs,
+    authorization_parameter: Option<syn::Ident>,
+    /// What `#[tool]` declares, when the action is an agent tool.
+    tool: Option<ToolSpec>,
+}
+
+struct ActionParameter {
+    /// The argument's name in metadata and in the request: unraw, in the
+    /// Live identity grammar.
+    wire: String,
+    ty: Type,
+    required: bool,
+}
+
+/// A local the generated code introduces for itself. The mixed-site span
+/// keeps it apart from every name in the application's own tokens.
+fn generated_local(name: &str) -> syn::Ident {
+    syn::Ident::new(name, Span::mixed_site())
+}
+
+/// `count` generated locals, `<prefix>_0` onward.
+fn generated_locals(prefix: &str, count: usize) -> Vec<syn::Ident> {
+    (0..count)
+        .map(|index| generated_local(&format!("{prefix}_{index}")))
+        .collect()
+}
+
+struct RegisteredMount {
+    method: syn::Ident,
+    parameters: Vec<MountParameter>,
+    asynchronous: bool,
+    /// The parameters the application fills for a headless tool call, by
+    /// wire name, with their resolvers.
+    resolvers: BTreeMap<String, syn::Path>,
+}
+
+struct MountParameter {
+    description: Option<syn::LitStr>,
+    name: String,
+    ident: syn::Ident,
+    ty: Type,
+}
+
+struct RegisteredLifecycleHook {
+    method: syn::Ident,
+    asynchronous: bool,
+}
+
+struct RegisteredComputed {
+    method: syn::Ident,
+    inputs: Vec<FnArg>,
+    arguments: Vec<syn::Ident>,
+    output: syn::ReturnType,
+}
+
+struct RegisteredValidationHook {
+    method: syn::Ident,
+    arguments: Vec<ActionParameter>,
+    asynchronous: bool,
+    span: Span,
+}
+
+fn validate_validation_hooks(
+    actions: &BTreeMap<String, RegisteredAction>,
+    component_hooks: &[(syn::Ident, bool)],
+    action_hooks: &BTreeMap<String, RegisteredValidationHook>,
+) -> syn::Result<()> {
+    for (name, hook) in action_hooks {
+        let action = actions.get(name).ok_or_else(|| {
+            syn::Error::new(
+                hook.span,
+                "typed validation hook names an unknown registered action",
+            )
+        })?;
+        let same_contract = action.arguments.len() == hook.arguments.len()
+            && action
+                .arguments
+                .iter()
+                .zip(&hook.arguments)
+                .all(|(action, hook)| {
+                    let action_ty = &action.ty;
+                    let hook_ty = &hook.ty;
+                    action.wire == hook.wire
+                        && quote!(#action_ty).to_string() == quote!(#hook_ty).to_string()
+                });
+        if !same_contract {
+            return Err(syn::Error::new(
+                hook.span,
+                "typed validation hook arguments must exactly match the registered action",
+            ));
+        }
+    }
+
+    for (name, action) in actions {
+        let component_required = matches!(
+            action.validation,
+            ActionValidationArgs::Whole | ActionValidationArgs::All
+        );
+        if component_required && component_hooks.is_empty() {
+            return Err(syn::Error::new(
+                action.method.span(),
+                "component validation selection requires a bare #[validate] hook",
+            ));
+        }
+        let arguments_required = matches!(
+            action.validation,
+            ActionValidationArgs::Arguments | ActionValidationArgs::All
+        );
+        if arguments_required && !action_hooks.contains_key(name) {
+            return Err(syn::Error::new(
+                action.method.span(),
+                "argument validation selection requires #[validate(action = \"...\")]",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn extract_action_parameters(
+    method: &ImplItemFn,
+) -> syn::Result<(Option<syn::Ident>, Vec<ActionParameter>)> {
+    let mut authorization = None;
+    let mut parameters = Vec::new();
+    for (index, argument) in method.sig.inputs.iter().skip(1).enumerate() {
+        let FnArg::Typed(argument) = argument else {
+            return Err(syn::Error::new(
+                argument.span(),
+                "action arguments must be typed named values",
+            ));
+        };
+        let Pat::Ident(pattern) = argument.pat.as_ref() else {
+            return Err(syn::Error::new(
+                argument.pat.span(),
+                "action arguments must use simple stable names",
+            ));
+        };
+        if is_authorized_action_reference(&argument.ty) {
+            if index != 0 || authorization.is_some() {
+                return Err(syn::Error::new(
+                    argument.span(),
+                    "the authorized action context must be the first action parameter",
+                ));
+            }
+            authorization = Some(pattern.ident.clone());
+            continue;
+        }
+        if pattern.by_ref.is_some()
+            || pattern.mutability.is_some()
+            || pattern.subpat.is_some()
+            || contains_reference(&argument.ty)
+        {
+            return Err(syn::Error::new(
+                argument.span(),
+                "action arguments must be immutable owned values",
+            ));
+        }
+        parameters.push(ActionParameter {
+            wire: wire_name(&pattern.ident, "Live action argument")?,
+            ty: argument.ty.as_ref().clone(),
+            required: option_inner(&argument.ty).is_none(),
+        });
+    }
+    Ok((authorization, parameters))
+}
+
+fn extract_validation_parameters(method: &ImplItemFn) -> syn::Result<Vec<ActionParameter>> {
+    let (authorization, parameters) = extract_action_parameters(method)?;
+    if authorization.is_some() {
+        return Err(syn::Error::new(
+            method.sig.ident.span(),
+            "validation hooks cannot receive authorization capabilities",
+        ));
+    }
+    Ok(parameters)
+}
+
+fn is_authorized_action_reference(ty: &Type) -> bool {
+    let Type::Reference(reference) = ty else {
+        return false;
+    };
+    if reference.mutability.is_some() {
+        return false;
+    }
+    let Type::Path(path) = reference.elem.as_ref() else {
+        return false;
+    };
+    path.path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "AuthorizedAction")
+}
+
+fn option_inner(ty: &Type) -> Option<&Type> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    if segment.ident != "Option" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    match arguments.args.first()? {
+        GenericArgument::Type(inner) if arguments.args.len() == 1 => Some(inner),
+        _ => None,
+    }
+}
+
+fn validate_mount_signature(method: &ImplItemFn) -> syn::Result<()> {
+    if method
+        .sig
+        .inputs
+        .iter()
+        .any(|argument| matches!(argument, FnArg::Receiver(_)))
+    {
+        return Err(syn::Error::new(
+            method.sig.ident.span(),
+            "mount must be an associated constructor without a self receiver",
+        ));
+    }
+    Ok(())
+}
+
+fn extract_mount_parameters(method: &mut ImplItemFn) -> syn::Result<Vec<MountParameter>> {
+    method
+        .sig
+        .inputs
+        .iter_mut()
+        .map(|argument| {
+            let FnArg::Typed(argument) = argument else {
+                return Err(syn::Error::new(
+                    argument.span(),
+                    "mount parameters must be typed named arguments",
+                ));
+            };
+            let Pat::Ident(pattern) = argument.pat.as_ref() else {
+                return Err(syn::Error::new(
+                    argument.pat.span(),
+                    "mount parameters must use simple stable names",
+                ));
+            };
+            if pattern.by_ref.is_some()
+                || pattern.mutability.is_some()
+                || pattern.subpat.is_some()
+                || contains_reference(&argument.ty)
+            {
+                return Err(syn::Error::new(
+                    argument.span(),
+                    "mount parameters must be immutable owned values",
+                ));
+            }
+            let docs: Vec<String> = argument
+                .attrs
+                .iter()
+                .filter_map(|attribute| {
+                    if !attribute.path().is_ident("doc") {
+                        return None;
+                    }
+                    if let Meta::NameValue(value) = &attribute.meta
+                        && let syn::Expr::Lit(value) = &value.value
+                        && let syn::Lit::Str(value) = &value.lit
+                    {
+                        return Some(value.value().trim().to_owned());
+                    }
+                    None
+                })
+                .collect();
+            let description = docs.join("\n");
+            argument
+                .attrs
+                .retain(|attribute| !attribute.path().is_ident("doc"));
+            Ok(MountParameter {
+                description: (!description.trim().is_empty())
+                    .then(|| syn::LitStr::new(&description, pattern.ident.span())),
+                name: wire_name(&pattern.ident, "Live mount parameter")?,
+                ident: pattern.ident.clone(),
+                ty: argument.ty.as_ref().clone(),
+            })
+        })
+        .collect()
+}
+
+fn validate_computed_signature(method: &ImplItemFn) -> syn::Result<()> {
+    if method.sig.asyncness.is_some() {
+        return Err(syn::Error::new(
+            method.sig.ident.span(),
+            "computed values must be synchronous",
+        ));
+    }
+    let receiver = method.sig.inputs.first().and_then(receiver);
+    if !receiver.is_some_and(|value| value.reference.is_some() && value.mutability.is_none()) {
+        return Err(syn::Error::new(
+            method.sig.ident.span(),
+            "computed values require `&self`",
+        ));
+    }
+    Ok(())
+}
+
+fn extract_computed(method: &ImplItemFn) -> syn::Result<RegisteredComputed> {
+    let mut inputs = Vec::new();
+    let mut arguments = Vec::new();
+    for argument in method.sig.inputs.iter().skip(1) {
+        let FnArg::Typed(argument) = argument else {
+            return Err(syn::Error::new(
+                argument.span(),
+                "computed arguments must be typed named values",
+            ));
+        };
+        let Pat::Ident(pattern) = argument.pat.as_ref() else {
+            return Err(syn::Error::new(
+                argument.pat.span(),
+                "computed arguments must use simple stable names",
+            ));
+        };
+        if pattern.by_ref.is_some() || pattern.mutability.is_some() || pattern.subpat.is_some() {
+            return Err(syn::Error::new(
+                argument.pat.span(),
+                "computed arguments must use immutable named values",
+            ));
+        }
+        inputs.push(FnArg::Typed(argument.clone()));
+        arguments.push(pattern.ident.clone());
+    }
+    Ok(RegisteredComputed {
+        method: method.sig.ident.clone(),
+        inputs,
+        arguments,
+        output: method.sig.output.clone(),
+    })
+}
+
+fn validate_receiver_method(method: &ImplItemFn, require_mutable: bool) -> syn::Result<()> {
+    let receiver = method.sig.inputs.first().and_then(receiver);
+    let valid = receiver.is_some_and(|value| {
+        value.reference.is_some() && (!require_mutable || value.mutability.is_some())
+    });
+    if !valid {
+        return Err(syn::Error::new(
+            method.sig.ident.span(),
+            if require_mutable {
+                "lifecycle hooks require `&mut self`"
+            } else {
+                "validation methods require `&self` or `&mut self`"
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn receiver(argument: &FnArg) -> Option<&Receiver> {
+    match argument {
+        FnArg::Receiver(receiver) => Some(receiver),
+        FnArg::Typed(_) => None,
+    }
+}
+
+fn ensure_singleton(
+    helpers: &mut BTreeMap<String, Span>,
+    name: &str,
+    span: Span,
+) -> syn::Result<()> {
+    if helpers.insert(name.to_owned(), span).is_some() {
+        return Err(syn::Error::new(
+            span,
+            format!("duplicate #[{name}] lifecycle helper"),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_path_helper(attribute: &Attribute) -> syn::Result<()> {
+    if matches!(attribute.meta, Meta::Path(_)) {
+        Ok(())
+    } else {
+        Err(syn::Error::new(
+            attribute.span(),
+            "this Live method helper does not accept arguments",
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quote::quote;
+    use syn::{DeriveInput, ItemImpl};
+
+    use crate::live::component;
+    use crate::tool::{ToolSite, parse_spec};
+
+    fn expand(implementation: ItemImpl) -> syn::Result<String> {
+        super::expand(proc_macro2::TokenStream::new(), implementation)
+            .map(|tokens| tokens.to_string())
+    }
+
+    #[test]
+    fn agent_012_tool_argument_descriptions_reach_the_schema_and_unknown_names_fail() {
+        let out = expand(syn::parse_quote! {
+            impl Counter {
+                #[mount]
+                pub fn mount(#[doc = "The initial count."] start: u64) -> Self { Self { count: start } }
+                #[tool(name = "add_to_counter", description = "Add.", callers = [public], arguments(amount = "How much to add."))]
+                #[action]
+                pub fn add(&mut self, amount: u64) {}
+            }
+        }).expect("described argument");
+        assert!(out.contains("with_description"), "{out}");
+        assert!(out.contains("How much to add."), "{out}");
+        assert!(out.contains("The initial count."), "{out}");
+        assert!(!out.contains("has no description"), "{out}");
+        let error = expand(syn::parse_quote! {
+            impl Counter {
+                #[tool(name = "add_to_counter", description = "Add.", callers = [public], arguments(typo = "A typo."))]
+                #[action]
+                pub fn add(&mut self, amount: u64) {}
+            }
+        }).expect_err("an unknown argument is a build error");
+        assert!(error.to_string().contains("typo"), "{error}");
+        let out = expand(syn::parse_quote! {
+            impl Counter {
+                #[tool(name = "add_to_counter", description = "Add.", callers = [public])]
+                #[action]
+                pub fn add(&mut self, amount: u64) {}
+            }
+        })
+        .expect("a missing description only warns");
+        assert!(
+            out.contains("input field `amount` has no description; WebMCP requires a description"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn agent_012_blank_argument_descriptions_warn_instead_of_failing() {
+        let out = expand(syn::parse_quote! {
+            impl Counter {
+                #[tool(name = "add_to_counter", description = "Add.", callers = [public], arguments(amount = "  "))]
+                #[action]
+                pub fn add(&mut self, amount: u64) {}
+            }
+        }).expect("a missing field description is a budget warning");
+        assert!(
+            out.contains("input field `amount` has no description"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn agent_012_argument_descriptions_use_raw_identifiers_wire_names() {
+        let out = expand(syn::parse_quote! {
+            impl Counter {
+                #[tool(name = "set_counter_type", description = "Set a type.", callers = [public], arguments(r#type = "The counter type."))]
+                #[action]
+                pub fn set_type(&mut self, r#type: String) {}
+            }
+        }).expect("a raw argument name is described by its wire name");
+        assert!(out.contains("The counter type."), "{out}");
+        assert!(!out.contains("has no description"), "{out}");
+    }
+
+    #[test]
+    fn agent_001_live_tool_parser_takes_headless_and_refuses_route_schemas() {
+        let spec = parse_spec(
+            quote! { name = "add_to_counter", description = "Add.", callers = [user], headless },
+            ToolSite::Live,
+        )
+        .expect("a Live tool");
+        assert!(spec.headless);
+        assert!(spec.offered_to_browser());
+        for argument in [
+            quote!(input = Form),
+            quote!(output = View),
+            quote!(route = "x"),
+        ] {
+            let error = parse_spec(
+                quote! { name = "x", description = "d", callers = [user], #argument },
+                ToolSite::Live,
+            )
+            .map(|_| ())
+            .expect_err("a Live tool takes no route schema");
+            assert!(error.to_string().contains("argument codecs"), "{error}");
+        }
+        let long = "a".repeat(65);
+        let error = parse_spec(
+            quote! { name = #long, description = "d", callers = [user] },
+            ToolSite::Live,
+        )
+        .map(|_| ())
+        .expect_err("a Live base name has at most 64 characters");
+        assert!(error.to_string().contains("1 to 64"), "{error}");
+        let error = parse_spec(
+            quote! { name = "x", description = "d", callers = [user], headless },
+            ToolSite::Handler,
+        )
+        .map(|_| ())
+        .expect_err("a handler tool takes no `headless`");
+        assert!(error.to_string().contains("Live action tool"), "{error}");
+        let agent_only = parse_spec(
+            quote! { name = "x", description = "d", callers = [agent] },
+            ToolSite::Live,
+        )
+        .expect("an agent-only tool");
+        assert!(!agent_only.offered_to_browser());
+    }
+
+    #[test]
+    fn agent_012_a_tool_action_emits_its_records_and_leaves_no_helper_behind() {
+        let out = expand(syn::parse_quote! {
+            impl Counter {
+                #[mount]
+                pub fn mount(start: u64, #[resolve(crate::owner_of)] owner: String) -> Self {
+                    Self { count: start, owner }
+                }
+
+                #[tool(name = "add_to_counter", description = "Add.", callers = [user], headless)]
+                #[action(authorize = "current")]
+                pub fn add(&mut self, amount: u64) {}
+
+                #[action]
+                pub fn reset(&mut self) {}
+            }
+        })
+        .expect("impl expansion");
+        assert!(out.contains("ActionToolMetadata :: new"), "{out}");
+        assert!(out.contains("LiveToolRecord :: __declare"), "{out}");
+        assert!(out.contains("__suprnova_tool_add_5fto_5fcounter"), "{out}");
+        assert!(out.contains("__snv_live_resolve_owner"), "{out}");
+        // One record: `reset` is no tool.
+        assert_eq!(out.matches("LiveToolRecord :: __declare").count(), 1);
+        // Neither helper reaches the emitted method.
+        assert!(!out.contains("# [tool"), "{out}");
+        assert!(!out.contains("# [resolve"), "{out}");
+    }
+
+    #[test]
+    fn agent_012_a_component_without_tools_emits_no_framework_record() {
+        let out = expand(syn::parse_quote! {
+            impl Plain {
+                #[action]
+                pub fn save(&mut self) {}
+            }
+        })
+        .expect("impl expansion");
+        assert!(!out.contains("agents"), "{out}");
+    }
+
+    #[test]
+    fn agent_012_tool_markings_on_live_methods_fail_where_they_must() {
+        for (implementation, message) in [
+            (
+                quote! {
+                    impl Counter {
+                        #[tool(name = "add_to_counter", description = "Add.", callers = [user])]
+                        pub fn add(&mut self) {}
+                    }
+                },
+                "add #[action]",
+            ),
+            (
+                quote! {
+                    impl Counter {
+                        #[tool(name = "add_to_counter", description = "Add.", callers = [user])]
+                        #[action]
+                        pub fn add(&mut self, filter: Filter) {}
+                    }
+                },
+                "no JSON Schema",
+            ),
+            (
+                quote! {
+                    impl Counter {
+                        #[tool(name = "has space", description = "Add.", callers = [user])]
+                        #[action]
+                        pub fn add(&mut self) {}
+                    }
+                },
+                "contains",
+            ),
+            (
+                quote! {
+                    impl Counter {
+                        #[mount]
+                        pub fn mount(#[resolve(crate::owner_of)] owner: String) -> Self {
+                            Self { owner }
+                        }
+
+                        #[action]
+                        pub fn reset(&mut self) {}
+                    }
+                },
+                "for headless tools",
+            ),
+            (
+                quote! {
+                    impl Counter {
+                        #[action]
+                        pub fn add(&mut self, #[resolve(crate::owner_of)] owner: String) {}
+                    }
+                },
+                "fills a #[mount] parameter",
+            ),
+        ] {
+            let implementation: ItemImpl = syn::parse2(implementation).expect("impl syntax");
+            let error = expand(implementation).expect_err("the marking fails");
+            assert!(error.to_string().contains(message), "{message}: {error}");
+        }
+    }
+
+    #[test]
+    fn agent_012_agent_visible_marks_only_snapshot_state() {
+        let visible: DeriveInput = syn::parse_quote! {
+            #[live(name = "macro.visible", view = "live/macro/visible.html")]
+            pub struct Visible {
+                #[agent_visible]
+                count: u64,
+                #[agent_visible]
+                #[public]
+                label: String,
+            }
+        };
+        let out = component::derive(visible)
+            .expect("component expansion")
+            .to_string();
+        assert_eq!(out.matches("with_agent_visible").count(), 2, "{out}");
+        for helper in [
+            quote!(#[secret]),
+            quote!(#[server_only]),
+            quote!(#[session]),
+            quote!(#[model(transient)]),
+        ] {
+            let hidden: DeriveInput = syn::parse_quote! {
+                #[live(name = "macro.hidden", view = "live/macro/hidden.html")]
+                pub struct Hidden {
+                    #[agent_visible]
+                    #helper
+                    value: String,
+                }
+            };
+            let error = component::derive(hidden)
+                .map(|_| ())
+                .expect_err("only snapshot state can be agent-visible");
+            assert!(
+                error.to_string().contains("never leaves the server"),
+                "{error}"
+            );
+        }
+    }
+}

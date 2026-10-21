@@ -1,0 +1,5 @@
+error: stream modes must be `sse` or `websocket`
+  --> tests/ui/live/fail/stream_invalid_mode.rs:15:84
+   |
+15 |     streams(stream(name = "orders", topics("orders"), events(OrdersUpdated), modes("smoke")))
+   |                                                                                    ^^^^^^^
