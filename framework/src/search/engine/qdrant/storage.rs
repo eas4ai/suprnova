@@ -581,3 +581,86 @@ pub(super) async fn vocabulary_on<C: ConnectionTrait>(
     }
     Ok(vocabulary)
 }
+
+/// Persist the cutoff before the remote sweep so absent keys are fenced too.
+pub(super) async fn record_flush(
+    index: &str,
+    generation: &GenerationId,
+    cutoff: i64,
+) -> Result<(), FrameworkError> {
+    let txn = locked(index, generation).await?;
+    let query = Query::update()
+        .table(a("search_generations"))
+        .value(a("flush_version"), cutoff)
+        .value(a("flush_removed_at"), crate::clock::now().timestamp())
+        .and_where(Expr::col(a("index_name")).eq(index))
+        .and_where(Expr::col(a("generation")).eq(generation.as_str()))
+        .and_where(
+            Expr::col(a("flush_version"))
+                .is_null()
+                .or(Expr::col(a("flush_version")).lte(cutoff)),
+        )
+        .to_owned();
+    txn.execute_raw(txn.get_database_backend().build(&query))
+        .await
+        .map_err(|e| error(index, e))?;
+    commit_write(txn, index).await
+}
+
+/// Read the retained fence inside the write lock to serialize flushes with writes.
+pub(super) async fn flush_on<C: ConnectionTrait>(
+    conn: &C,
+    index: &str,
+    generation: &GenerationId,
+) -> Result<Option<i64>, FrameworkError> {
+    let query = Query::select()
+        .columns([a("flush_version"), a("flush_removed_at")])
+        .from(a("search_generations"))
+        .and_where(Expr::col(a("index_name")).eq(index))
+        .and_where(Expr::col(a("generation")).eq(generation.as_str()))
+        .to_owned();
+    let row = conn
+        .query_one_raw(conn.get_database_backend().build(&query))
+        .await
+        .map_err(|e| error(index, e))?
+        .ok_or_else(|| {
+            error(
+                index,
+                format!("generation {}: not created", generation.as_str()),
+            )
+        })?;
+    let version: Option<i64> = row
+        .try_get("", "flush_version")
+        .map_err(|e| error(index, e))?;
+    let removed: Option<i64> = row
+        .try_get("", "flush_removed_at")
+        .map_err(|e| error(index, e))?;
+    let retention = crate::search::SearchConfig::current()?
+        .tombstone_hours
+        .checked_mul(3600)
+        .and_then(|seconds| i64::try_from(seconds).ok())
+        .ok_or_else(|| FrameworkError::param("SEARCH_TOMBSTONE_HOURS exceeds timestamp range"))?;
+    let expires_before = crate::clock::now()
+        .timestamp()
+        .checked_sub(retention)
+        .ok_or_else(|| FrameworkError::param("SEARCH_TOMBSTONE_HOURS exceeds timestamp range"))?;
+    Ok(version
+        .zip(removed)
+        .filter(|(_, removed)| *removed > expires_before)
+        .map(|(version, _)| version))
+}
+
+/// Direct retirement shares the control lock so it cannot race publication.
+pub(super) async fn retire_index(index: &str) -> Result<(), FrameworkError> {
+    let txn = locked(index, &GenerationId::new("__control")?).await?;
+    let query = Query::update()
+        .table(a("search_generations"))
+        .value(a("state"), "retired")
+        .and_where(Expr::col(a("index_name")).eq(index))
+        .and_where(Expr::col(a("state")).is_in(["current", "active"]))
+        .to_owned();
+    txn.execute_raw(txn.get_database_backend().build(&query))
+        .await
+        .map_err(|e| error(index, e))?;
+    commit_write(txn, index).await
+}

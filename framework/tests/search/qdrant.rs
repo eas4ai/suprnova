@@ -3099,3 +3099,197 @@ async fn dropping_generation_refuses_ordinary_writes_qdrant() {
         );
     }
 }
+
+#[tokio::test]
+async fn retained_flush_metadata_is_monotonic_qdrant() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    use suprnova::DB;
+    let _db = database().await;
+    let index = descriptor();
+    let generation = GenerationId::new("flush_metadata").unwrap();
+    for (id, state) in [("__control", "control"), (generation.as_str(), "current")] {
+        DB::connection().unwrap().inner().execute_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO search_generations (index_name,generation,state,settings_json,digest) VALUES (?,?,?,?,?)",
+            vec![index.name.into(), id.into(), state.into(), serde_json::to_string(&index.index_settings()).unwrap().into(), index.index_settings().index_time.digest().into()],
+        )).await.unwrap();
+    }
+    // Recording a flush is SQL-only; an unused endpoint keeps this contract runnable offline.
+    let engine = QdrantSearchEngine::from_url("http://127.0.0.1:9", None, 1).unwrap();
+    engine.record_flush(&index, &generation, 100).await.unwrap();
+    let removed_at = DB::scalar::<i64>(
+        "SELECT flush_removed_at FROM search_generations WHERE index_name=? AND generation=?",
+        vec![index.name.into(), generation.as_str().into()],
+    )
+    .await
+    .unwrap();
+    assert!(removed_at > 0);
+    engine.record_flush(&index, &generation, 90).await.unwrap();
+    assert_eq!(
+        DB::scalar::<i64>(
+            "SELECT flush_version FROM search_generations WHERE index_name=? AND generation=?",
+            vec![index.name.into(), generation.as_str().into()],
+        )
+        .await
+        .unwrap(),
+        100
+    );
+    assert_eq!(
+        DB::scalar::<i64>(
+            "SELECT flush_removed_at FROM search_generations WHERE index_name=? AND generation=?",
+            vec![index.name.into(), generation.as_str().into()],
+        )
+        .await
+        .unwrap(),
+        removed_at
+    );
+    engine.record_flush(&index, &generation, 110).await.unwrap();
+    assert_eq!(
+        DB::scalar::<i64>(
+            "SELECT flush_version FROM search_generations WHERE index_name=? AND generation=?",
+            vec![index.name.into(), generation.as_str().into()],
+        )
+        .await
+        .unwrap(),
+        110
+    );
+    let fresh = QdrantSearchEngine::from_url("http://127.0.0.1:9", None, 1).unwrap();
+    fresh.retire_index(index.name).await.unwrap();
+    assert_eq!(fresh.current_generation(index.name).await.unwrap(), None);
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant at QDRANT_TEST_URL"]
+async fn coordinator_flush_fences_delayed_writes_qdrant() {
+    coordinator_fixture_qdrant(|engine, index, generation| {
+        Box::pin(async move {
+            use super::commands::CommandNote;
+            use suprnova::{DB, IndexOperation, SearchIndexJob, queue::Job};
+            for n in 0..3 {
+                CommandNote::create(suprnova::attrs! {title: format!("Before flush {n}")}).await.unwrap();
+            }
+            let absent = CommandNote::without_syncing_to_search(|| async {
+                CommandNote::create(suprnova::attrs! {title: "Delayed absent key"}).await
+            }).await.unwrap();
+            let bounded = engine.keys_before_version(index, generation, i64::MAX, 2).await.unwrap();
+            assert_eq!(bounded.len(), 2);
+            assert_ne!(bounded[0].0, bounded[1].0);
+            assert!(engine.keys_before_version(index, generation, i64::MAX, 0).await.unwrap().is_empty());
+            suprnova::search::generations::flush_index(index.name).await.unwrap();
+            let cutoff = DB::scalar::<i64>(
+                "SELECT flush_version FROM search_generations WHERE index_name=? AND generation=?",
+                vec![index.name.into(), generation.as_str().into()],
+            ).await.unwrap();
+            // Replay the real coordinator path for a key absent when the sweep began.
+            SearchIndexJob {
+                index: index.name.into(), key: absent.id.to_string(), source_version: cutoff - 1,
+                op: IndexOperation::Index, generation: Some(generation.clone()),
+            }.handle().await.unwrap();
+            let q = suprnova::search::testing::conformance::empty_query();
+            assert_eq!(engine.count(index, generation, &q).await.unwrap().value(), 0);
+
+            // A fresh engine instance must observe the fence and reject equality too.
+            let fresh = crate::qdrant::engine();
+            let mut doc = absent.to_search_document().unwrap();
+            doc.source_version = cutoff;
+            let mut doc = IndexedDocument { content_hash: doc.content_hash(&index.index_settings().index_time.digest()), document: doc, dense: None, sparse: None };
+            assert_eq!(fresh.index(index, generation, &[doc.clone()]).await.unwrap().skipped_tombstoned, 1);
+            fresh.record_flush(index, generation, cutoff - 1).await.unwrap();
+            assert_eq!(DB::scalar::<i64>(
+                "SELECT flush_version FROM search_generations WHERE index_name=? AND generation=?",
+                vec![index.name.into(), generation.as_str().into()],
+            ).await.unwrap(), cutoff);
+            doc.document.source_version = cutoff + 1;
+            assert_eq!(fresh.index(index, generation, &[doc.clone()]).await.unwrap().written, 1);
+            let mut blocked = doc.clone();
+            blocked.document.source_version = cutoff;
+            assert!(fresh.stored_hashes(index, generation, &[blocked]).await.unwrap().is_empty());
+            assert!(fresh.keys_before_version(index, generation, cutoff, 2).await.unwrap().is_empty());
+            // A replay at the original cutoff must preserve a later reimport.
+            fresh.record_flush(index, generation, cutoff).await.unwrap();
+            assert_eq!(fresh.count(index, generation, &q).await.unwrap().value(), 1);
+
+            // Once retention expires, the generation-wide fence no longer rejects absent keys.
+            use sea_orm::{ConnectionTrait, DbBackend, Statement};
+            DB::connection().unwrap().inner().execute_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "UPDATE search_generations SET flush_removed_at=0 WHERE index_name=? AND generation=?",
+                vec![index.name.into(), generation.as_str().into()],
+            )).await.unwrap();
+            doc.document.key = "expired_fence".into();
+            doc.document.source_version = cutoff - 1;
+            doc.content_hash = doc.document.content_hash(&index.index_settings().index_time.digest());
+            assert_eq!(fresh.index(index, generation, &[doc]).await.unwrap().written, 1);
+        })
+    }).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant at QDRANT_TEST_URL"]
+async fn coordinator_delete_index_removes_collections_and_rows_qdrant() {
+    coordinator_fixture_qdrant(|engine, index, generation| {
+        Box::pin(async move {
+            let next = GenerationId::new(format!("{}_next", generation.as_str())).unwrap();
+            engine.create_generation(index, &index.index_settings(), &next).await.unwrap();
+            engine.switch_generation(index, Some(generation.clone()), next.clone()).await.unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                suprnova::search::generations::delete_index(index.name),
+            ).await.expect("deletion must not wait on its own control-row lock").unwrap();
+            for id in [generation, &next] {
+                assert!(!engine.client().unwrap().collection_exists(format!("search_{}_{}", index.name, id.as_str())).await.unwrap());
+            }
+            assert_eq!(suprnova::DB::scalar::<i64>(
+                "SELECT COUNT(*) FROM search_generations WHERE index_name=? AND generation!='__control'",
+                vec![index.name.into()],
+            ).await.unwrap(), 0);
+            assert_eq!(engine.current_generation(index.name).await.unwrap(), None);
+        })
+    }).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Qdrant at QDRANT_TEST_URL"]
+async fn bounded_version_cutoff_is_exact_qdrant() {
+    fixture(|engine, index, generation| {
+        Box::pin(async move {
+            engine
+                .create_generation(index, &index.index_settings(), generation)
+                .await
+                .unwrap();
+            let versions = [i64::MIN, i64::MIN + 1, i64::MAX - 2, i64::MAX - 1, i64::MAX];
+            let docs = versions
+                .into_iter()
+                .enumerate()
+                .map(|(n, version)| {
+                    let mut doc = document(index, &n.to_string(), "apple", n as i64 + 1);
+                    doc.document.source_version = version;
+                    doc
+                })
+                .collect::<Vec<_>>();
+            engine.index(index, generation, &docs).await.unwrap();
+            assert_eq!(
+                engine
+                    .keys_before_version(index, generation, i64::MIN, 10)
+                    .await
+                    .unwrap(),
+                vec![("0".into(), i64::MIN)]
+            );
+            let keys = engine
+                .keys_before_version(index, generation, i64::MAX - 1, 10)
+                .await
+                .unwrap();
+            assert_eq!(keys.len(), 4);
+            assert!(keys.iter().all(|(_, version)| *version <= i64::MAX - 1));
+            assert_eq!(
+                engine
+                    .keys_before_version(index, generation, i64::MAX, 1)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        })
+    })
+    .await;
+}

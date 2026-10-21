@@ -844,7 +844,9 @@ async fn delete_index_inner(index: &str) -> Result<(), FrameworkError> {
         return Err(error(index, "a generation build prevents index deletion"));
     }
     let engine = SearchRegistry::engine_for(index)?;
-    if engine.name() != "database" {
+    // These engines keep their read pointer in search_generations. Retire it in
+    // this transaction; a separate engine transaction would wait on our control lock.
+    if !matches!(engine.name(), "database" | "qdrant") {
         engine.retire_index(index).await?;
     }
     execute(&tx,index,"UPDATE search_generations SET state='retired' WHERE index_name=? AND generation!='__control'",vec![index.to_owned().into()]).await?;

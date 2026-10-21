@@ -8,6 +8,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- Qdrant now supports retained flush fences and index deletion through the search
+  maintenance commands. Flush fences use the configured tombstone lifetime. (#189)
+
 - Qdrant generation deletion can now resume from the dropping state while
   ordinary writes continue to reject that state. (#190)
 
@@ -43,6 +46,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   (#168)
 
 ### Fixed
+
+- Qdrant flushes now block delayed writes, including keys absent at the start,
+  and deleting an index removes its collections and generation metadata. (#189)
 
 - Pruning a retired Qdrant generation now removes its collection and metadata
   instead of failing after deletion starts. (#190)

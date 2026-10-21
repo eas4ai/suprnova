@@ -1444,6 +1444,88 @@ impl SearchEngine for QdrantSearchEngine {
     ) -> Result<Option<GenerationId>, FrameworkError> {
         storage::current(index).await
     }
+    /// The fence is committed before sweeping so delayed writes cannot resurrect absent keys.
+    async fn record_flush(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        cutoff: i64,
+    ) -> Result<(), FrameworkError> {
+        crate::search::render_cache::coordinated_write(
+            index.name,
+            Box::pin(async {
+                let _lock = self.mutations.lock().await;
+                collection_name(index, generation)?;
+                storage::record_flush(index.name, generation, cutoff).await
+            }),
+        )
+        .await
+    }
+    /// Scroll only version candidates so newer ranked documents cannot stall a sweep.
+    /// Qdrant range bounds are floats, so widen the bound and check payload integers
+    /// exactly to preserve the cutoff even beyond the exact integer range of f64.
+    async fn keys_before_version(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        cutoff: i64,
+        limit: usize,
+    ) -> Result<Vec<(String, i64)>, FrameworkError> {
+        let collection = collection_name(index, generation)?;
+        storage::settings(index.name, generation).await?;
+        let mut keys = Vec::new();
+        if limit == 0 {
+            return Ok(keys);
+        }
+        let filter = QFilter::must([Condition::range(
+            "__source_version",
+            qb::Range {
+                lte: Some((cutoff as f64).next_up()),
+                ..Default::default()
+            },
+        )]);
+        let mut offset = None;
+        loop {
+            let page = self
+                .scroll_page(
+                    &collection,
+                    filter.clone(),
+                    offset,
+                    Some(vec!["__key".into(), "__source_version".into()]),
+                )
+                .await?;
+            for point in page.result {
+                let data: Value = Payload::from(point.payload).into();
+                let version = data["__source_version"]
+                    .as_i64()
+                    .ok_or_else(|| error(&collection, "stored source version missing"))?;
+                if version <= cutoff {
+                    let key = data["__key"]
+                        .as_str()
+                        .ok_or_else(|| error(&collection, "stored key missing"))?;
+                    keys.push((key.to_owned(), version));
+                    if keys.len() == limit {
+                        return Ok(keys);
+                    }
+                }
+            }
+            match page.next_page_offset {
+                Some(next) => offset = Some(next),
+                None => return Ok(keys),
+            }
+        }
+    }
+    /// Retire the shared read pointer before direct callers reclaim generation storage.
+    async fn retire_index(&self, index: &str) -> Result<(), FrameworkError> {
+        crate::search::render_cache::coordinated_write(
+            index,
+            Box::pin(async {
+                let _lock = self.mutations.lock().await;
+                storage::retire_index(index).await
+            }),
+        )
+        .await
+    }
     async fn create_generation(
         &self,
         index: &IndexDescriptor,
@@ -1591,8 +1673,18 @@ impl SearchEngine for QdrantSearchEngine {
                 let collection = collection_name(index, generation)?;
                 storage::settings(index.name, generation).await?;
                 let txn = storage::locked(index.name, generation).await?;
+                let flush = storage::flush_on(&txn, index.name, generation).await?;
                 let mut hashes = BTreeMap::new();
                 for batch in documents.chunks(256) {
+                    let batch = batch
+                        .iter()
+                        .filter(|doc| {
+                            flush.is_none_or(|cutoff| doc.document.source_version > cutoff)
+                        })
+                        .collect::<Vec<_>>();
+                    if batch.is_empty() {
+                        continue;
+                    }
                     let points = self
                         .client
                         .get_points(
@@ -1628,31 +1720,30 @@ impl SearchEngine for QdrantSearchEngine {
                         let version = data["__source_version"]
                             .as_i64()
                             .ok_or_else(|| error(&collection, "stored source version missing"))?;
-                        if let Some(proposed) = batch
+                        hashes.insert(key.to_owned(), hash.to_owned());
+                        let proposed_version = batch
                             .iter()
                             .filter(|doc| doc.document.key == key && doc.content_hash == hash)
-                            .max_by_key(|doc| doc.document.source_version)
-                        {
-                            if proposed.document.source_version > version {
-                                self.client
-                                    .set_payload(
-                                        qb::SetPayloadPointsBuilder::new(
-                                            &collection,
-                                            Payload::try_from(json!({
-                                                "__source_version": proposed.document.source_version
-                                            }))
-                                            .map_err(|e| error(&collection, e))?,
-                                        )
-                                        .points_selector(vec![
-                                            QdrantVectorDriver::resolve_point_id(key),
-                                        ])
-                                        .wait(true),
-                                    )
-                                    .await
-                                    .map_err(|e| error(&collection, e))?;
-                            }
+                            .map(|doc| doc.document.source_version)
+                            .max()
+                            .unwrap_or(version);
+                        if proposed_version <= version {
+                            continue;
                         }
-                        hashes.insert(key.to_owned(), hash.to_owned());
+                        self.client
+                            .set_payload(
+                                qb::SetPayloadPointsBuilder::new(
+                                    &collection,
+                                    Payload::try_from(
+                                        json!({"__source_version": proposed_version}),
+                                    )
+                                    .map_err(|e| error(&collection, e))?,
+                                )
+                                .points_selector(vec![QdrantVectorDriver::resolve_point_id(key)])
+                                .wait(true),
+                            )
+                            .await
+                            .map_err(|e| error(&collection, e))?;
                     }
                 }
                 storage::commit_write(txn, index.name).await?;
@@ -1714,8 +1805,13 @@ impl SearchEngine for QdrantSearchEngine {
                     }
                 }
                 let txn = storage::locked(index.name, generation).await?;
+                let flush = storage::flush_on(&txn, index.name, generation).await?;
                 let mut outcome = WriteOutcome::default();
                 for doc in docs {
+                    if flush.is_some_and(|cutoff| doc.document.source_version <= cutoff) {
+                        outcome.skipped_tombstoned += 1;
+                        continue;
+                    }
                     let key = &doc.document.key;
                     if storage::tombstone_on(&txn, index.name, generation, key)
                         .await?
