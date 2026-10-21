@@ -25,6 +25,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Live now announces interrupted actions to screen readers in the shipped browser
+  bundles. (#172)
 - A sign-up whose address collides with an existing account only under the
   database's looser comparison answers the same generic response as a
   registered address and creates nothing, instead of a conflict error. (#167)

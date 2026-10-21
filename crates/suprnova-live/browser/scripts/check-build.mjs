@@ -38,6 +38,12 @@ try {
       readFile(join(second, name)),
     ]);
     if (!left.equals(right)) throw new Error(`build_output_changed:${name}`);
+    if (
+      ["suprnova-live.classic.js", "suprnova-live.esm.js"].includes(name) &&
+      !/(?:[{,])interruption:"Request interrupted"[,}]/u.test(left.toString("utf8"))
+    ) {
+      throw new Error(`interruption_message_missing:${name}`);
+    }
   }
   process.stdout.write(`reproducible build: ${firstNames.join(", ")}\n`);
 } finally {
