@@ -6,6 +6,17 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ## 4.4.1 - 2026-10-20
 
+### Changed
+
+- `UserProvider` gained `rehash_password_for_sign_in(user, credentials,
+  recorded_epoch)`, the rehash the session guard's `attempt` calls. It checks
+  the stored epoch and the verified hash, writes atomically and returns the
+  snapshot it wrote. The default calls `rehash_password_if_required` only for a
+  user without a credential epoch, so a custom provider that upgrades hashes on
+  sign-in implements the new method; `once` and `logout_other_devices` still
+  call the old one. The built-in Eloquent and database providers implement it.
+  (#168)
+
 ### Fixed
 
 - Password resets now cancel password sign-ins already in progress, so an old

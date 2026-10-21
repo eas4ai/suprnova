@@ -255,6 +255,13 @@ where
         let (Some(plaintext), Some(hash)) = (password, user.get_auth_password()) else {
             return Ok(None);
         };
+        // While the application shares its database with Laravel, a sign-in
+        // rewrites a hash Laravel's hasher would refuse (`$2b$`, Argon2id) as
+        // the `$2y$` one it accepts, as Laravel itself rehashes on login,
+        // keeping a stored bcrypt cost above the configured one. A rewrite
+        // that cannot be minted or stored fails the sign-in: signing in on a
+        // hash Laravel refuses would leave a user Laravel cannot sign in
+        // (LDB-004). The stored hash stays, and the next sign-in tries again.
         if !(crate::LaravelDatabase::is_shared() && hashing::needs_rehash(hash)) {
             return Ok(None);
         }
