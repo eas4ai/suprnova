@@ -44,6 +44,60 @@ fn targets(rows: &[Recommendation]) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn a_stronger_two_hop_path_controls_the_score_and_explanation() {
+    let config = graph(|config| {
+        config.graph_surfaces.insert(
+            "home".into(),
+            GraphSurface {
+                affinity: 10_000,
+                semantic: 0,
+                social: 0,
+                freshness: 0,
+                feedback: 0,
+                trust: 0,
+                ..Default::default()
+            },
+        );
+    });
+    setup(with(config, async {
+        use suprnova::recommendations::graph::{document_node_key, edge_key};
+        let a = note("A", "a", true, "o", 1).await;
+        let b = note("B", "b", true, "o", 2).await;
+        let c = note("C", "c", true, "o", 3).await;
+        record("alice", &a, EventType::Like, "a").await;
+        peers_like(&["p1", "p2", "p3"], &[&a, &b, &c]).await;
+        Recommend::rebuild_graph().await.unwrap().unwrap();
+        let keys = [&a, &b, &c].map(|note| document_node_key(&key(note)));
+        let ab = edge_key("co_engaged", &keys[0], &keys[1]);
+        let ac = edge_key("co_engaged", &keys[0], &keys[2]);
+        let bc = edge_key("co_engaged", &keys[1], &keys[2]);
+        for (edge, confidence) in [(&ab, 9_000), (&ac, 1_000), (&bc, 9_000)] {
+            suprnova::DB::update(
+                "UPDATE recommendation_graph_edges SET confidence_bps = ? WHERE edge_key = ?",
+                vec![confidence.into(), edge.clone().into()],
+            )
+            .await
+            .unwrap();
+        }
+        let rows = for_alice(viewer("alice")).await;
+        let c = rows.iter().find(|row| row.target == key(&c)).unwrap();
+        assert_eq!(c.explanation.engine, "graph");
+        assert_eq!(c.score, 810_000);
+        let path: Vec<_> = c
+            .explanation
+            .evidence
+            .iter()
+            .filter_map(|evidence| match evidence {
+                ExplanationEvidence::Edge { key, .. } => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(path, [ab, bc]);
+    }))
+    .await;
+}
+
+#[tokio::test]
 async fn rec_007_a_fact_outside_the_viewer_scope_never_influences_a_score() {
     setup(with(graph(|_| {}), async {
         let a = note("A", "a", true, "o", 1).await;
@@ -138,12 +192,102 @@ async fn rec_007_followed_actors_add_social_proximity_only_when_three_agree() {
                 .filter(|row| row.target == key(&pair))
                 .all(|row| row.explanation.peer_count == 0)
         );
-        // A public engagement edge is cited, never the followed actors themselves.
+        // Neither raw identities nor recomputable engagement keys may identify contributors.
         let text = serde_json::to_string(&social.explanation).unwrap();
         assert!(
             !profiles
                 .iter()
                 .any(|p| text.contains(&format!("\"{}\"", p.id)))
+        );
+        use suprnova::recommendations::graph::{actor_node_key, document_node_key, edge_key};
+        for profile in &profiles {
+            let reference = edge_key(
+                "engaged",
+                &actor_node_key(&profile.id.to_string()),
+                &document_node_key(&key(&agreed)),
+            );
+            assert!(
+                !text.contains(&reference),
+                "a followed actor's edge key escaped"
+            );
+        }
+    }))
+    .await;
+}
+
+#[tokio::test]
+async fn rec_007_social_counts_keep_server_evidence_that_detects_revocation() {
+    use suprnova::recommendations::graph::{GraphProvenance, Revocation, actor_node_key};
+    let config = graph(|config| config.actor_index = Some("recommendation_notes".into()));
+    setup(with(config, async {
+        let agreed = note("Agreed", "x", true, "o", 2).await;
+        let mut actors = Vec::new();
+        for name in ["U1", "U2", "U3"] {
+            let profile = note(name, "u", true, "o", 1).await;
+            record("alice", &profile, EventType::Follow, name).await;
+            record(&profile.id.to_string(), &agreed, EventType::Like, "agreed").await;
+            actors.push(actor_node_key(&profile.id.to_string()));
+        }
+        Recommend::rebuild_graph().await.unwrap().unwrap();
+        let row = for_alice(viewer("alice"))
+            .await
+            .into_iter()
+            .find(|row| row.target == key(&agreed))
+            .unwrap();
+        let references: Vec<_> = row
+            .explanation
+            .evidence
+            .iter()
+            .filter_map(|evidence| match evidence {
+                ExplanationEvidence::Edge { key, kind } if kind == "engaged" => Some(key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            references.len(),
+            3,
+            "server-side verification keeps every contributor"
+        );
+        let store = DatabaseGraphStore;
+        let generation = store.current_generation().await.unwrap().unwrap();
+        let intact = store
+            .outgoing(&generation, &actors, &["engaged".into()], 50)
+            .await
+            .unwrap();
+        for reference in &references {
+            let edge = intact.iter().find(|edge| &edge.key == *reference).unwrap();
+            let GraphProvenance::Event(event) = &edge.provenance else {
+                panic!("public engagement must retain event provenance");
+            };
+            assert_eq!(
+                Recommend::verify_provenance(event).await.unwrap(),
+                suprnova::ProvenanceState::Intact
+            );
+        }
+        let GraphProvenance::Event(event) = &intact[0].provenance else {
+            panic!("public engagement must retain event provenance");
+        };
+        store
+            .revoke(&generation, &Revocation::Events(vec![event.id]))
+            .await
+            .unwrap();
+        let remaining = store
+            .outgoing(&generation, &actors, &["engaged".into()], 50)
+            .await
+            .unwrap();
+        assert!(
+            references
+                .iter()
+                .any(|reference| !remaining.iter().any(|edge| &edge.key == *reference))
+        );
+        let public = serde_json::to_value(&row.explanation).unwrap();
+        assert_eq!(public["peer_count"], 3);
+        assert_eq!(public["evidence"], serde_json::json!([]));
+        assert!(
+            for_alice(viewer("alice"))
+                .await
+                .iter()
+                .all(|row| row.target != key(&agreed) || row.explanation.peer_count == 0)
         );
     }))
     .await;
@@ -216,6 +360,16 @@ async fn rec_007_every_graph_explanation_cites_permitted_stored_evidence() {
         let row = rows.iter().find(|row| row.target == key(&b)).unwrap();
         assert_eq!(row.explanation.engine, "graph");
         assert!(!row.explanation.evidence.is_empty());
+        let text = serde_json::to_string(row).unwrap();
+        let affinity_key = suprnova::recommendations::graph::edge_key(
+            "co_engaged",
+            &suprnova::recommendations::graph::document_node_key(&key(&a)),
+            &suprnova::recommendations::graph::document_node_key(&key(&b)),
+        );
+        assert!(
+            !text.contains(&affinity_key),
+            "a derivable affinity key escaped"
+        );
         let store = DatabaseGraphStore;
         let generation = store.current_generation().await.unwrap().unwrap();
         for evidence in &row.explanation.evidence {

@@ -238,7 +238,7 @@ same way.
 
 Laravel's test client hands the request object to the kernel in the
 same process. Suprnova's request path takes hyper's `Incoming` body,
-which only a hyper connection produces, so the client still speaks
+which only a hyper connection produces, so the client still sends
 HTTP/1.1, over memory instead of a socket. A request is a builder you
 finish with `.send().await` rather than a call that takes the headers as
 arguments, because it is asynchronous.

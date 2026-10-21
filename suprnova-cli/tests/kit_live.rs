@@ -609,7 +609,7 @@ mod components {
             assert!(contains(&list, part), "{part} in:\n{list}");
         }
         assert!(!list.contains("contains_pattern") && !list.contains("LIKE ?"));
-        assert!(list.contains("result.total.value()"));
+        assert!(list.contains("result.pagination.has_more"));
         assert!(list.contains("usize::try_from(shown)"));
         assert!(
             !list.contains("usize::try_from(shown.saturating_add(1))"),

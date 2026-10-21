@@ -619,6 +619,8 @@ pub(crate) async fn events_removed(ids: &[i64]) -> Result<(), FrameworkError> {
 /// Keep the graph in step with a search write (REC-005): a document that left its index
 /// loses its facts, and a newer revision replaces the node and relation facts read from
 /// an older one. `document` is `None` when the document left its index.
+/// Event-backed incident edges survive replacement. The same revision can run again
+/// so a job that saved the node before a later error can finish its relation writes.
 ///
 /// # Errors
 ///
@@ -646,15 +648,9 @@ pub async fn document_changed(
         // The stream never named this document; the next rebuild decides whether it joins.
         return Ok(());
     };
-    if previous.source_version >= document.source_version {
+    if previous.source_version > document.source_version {
         return Ok(());
     }
-    store
-        .revoke(
-            &generation,
-            &Revocation::DocumentBefore(target.clone(), document.source_version),
-        )
-        .await?;
     let node = GraphNode {
         scope: GraphScope::of(document)?,
         source_version: document.source_version,
@@ -662,6 +658,12 @@ pub async fn document_changed(
     };
     store
         .put_nodes(&generation, std::slice::from_ref(&node))
+        .await?;
+    store
+        .revoke(
+            &generation,
+            &Revocation::DocumentRelationsBefore(target.clone(), document.source_version),
+        )
         .await?;
     let now = crate::clock::now().timestamp_micros();
     let mut nodes = Vec::new();

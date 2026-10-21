@@ -39,6 +39,8 @@ pub enum MetadataErrorKind {
     TooManyFields,
     /// More actions were declared than the bounded metadata profile permits.
     TooManyActions,
+    /// More browser tools were declared than the browser accepts, which would disable the island.
+    TooManyBrowserTools,
     /// More browser events were declared than the bounded profile permits.
     TooManyEvents,
     /// More browser effects were declared than the bounded profile permits.
@@ -103,6 +105,7 @@ impl MetadataErrorKind {
             Self::UnsupportedProtocol => "unsupported_component_protocol",
             Self::TooManyFields => "too_many_component_fields",
             Self::TooManyActions => "too_many_component_actions",
+            Self::TooManyBrowserTools => "too_many_browser_tools",
             Self::TooManyEvents => "too_many_component_events",
             Self::TooManyEffects => "too_many_component_effects",
             Self::TooManyEventTargets => "too_many_event_targets",

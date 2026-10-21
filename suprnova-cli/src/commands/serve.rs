@@ -1404,6 +1404,7 @@ pub fn run(
     // `@inertiajs/core` augmentation, handed to the type watcher so a
     // regeneration that finds the same file repeats nothing.
     let mut augmentation = super::generate_types::AugmentationNotice::default();
+    let mut tool_schema_refusals = None;
 
     // Generate TypeScript types on startup (unless skipped or frontend-only)
     if !skip_types && !frontend_only && has_frontend {
@@ -1478,6 +1479,7 @@ pub fn run(
                         outcome.wrote,
                     );
                 }
+                tool_schema_refusals = Some(outcome.refusals);
             }
             Err(e) => {
                 ui::warning(&format!(
@@ -1691,7 +1693,13 @@ pub fn run(
     if !skip_types && !frontend_only && has_frontend {
         let shutdown_watcher = manager.shutdown.clone();
         thread::spawn(move || {
-            start_type_watcher(shutdown_watcher, mode, type_options, augmentation);
+            start_type_watcher(
+                shutdown_watcher,
+                mode,
+                type_options,
+                augmentation,
+                tool_schema_refusals,
+            );
         });
     }
 
@@ -2200,11 +2208,15 @@ fn start_migration_watcher(shutdown: Arc<AtomicBool>, mode: OutputMode) {
 /// own `@inertiajs/core` augmentation, so a regeneration names the file
 /// only when it changed. Like the other informational lines, that notice
 /// is not printed under `--json`.
+/// `tool_schema_refusals` remembers the last successful scan, including
+/// startup. Refused requests are absent from the module, so new refusals
+/// can leave its bytes unchanged and `wrote` cannot signal new diagnostics.
 fn start_type_watcher(
     shutdown: Arc<AtomicBool>,
     mode: OutputMode,
     type_options: super::generate_types::GenerateOptions,
     mut augmentation: super::generate_types::AugmentationNotice,
+    mut tool_schema_refusals: Option<Vec<super::tool_schemas::Refusal>>,
 ) {
     let (tx, rx) = channel();
     let src_path = Path::new("src");
@@ -2334,33 +2346,34 @@ fn start_type_watcher(
                 }
             }
 
-            // A refusal is news only when the module changed.
             match super::tool_schemas::generate_tool_schemas_to_file(
                 project_path,
                 &tool_schemas_output,
             ) {
-                Ok(outcome) if outcome.wrote => {
-                    if mode.is_json() {
-                        emit_event(
-                            mode,
-                            DevEvent::TypesRegenerated {
-                                ts: now_ts(),
-                                artifact: TypesArtifact::ToolSchemas,
-                                count: outcome.count as u32,
-                            },
-                        );
-                    } else {
-                        for refusal in &outcome.refusals {
-                            eprintln!("{} {}", style("[types]").yellow(), refusal);
+                Ok(outcome) => {
+                    if tool_schema_refusals.as_ref() != Some(&outcome.refusals) && !mode.is_json() {
+                        super::generate_types::report_tool_schema_refusals(&outcome.refusals);
+                    }
+                    tool_schema_refusals = Some(outcome.refusals);
+                    if outcome.wrote {
+                        if mode.is_json() {
+                            emit_event(
+                                mode,
+                                DevEvent::TypesRegenerated {
+                                    ts: now_ts(),
+                                    artifact: TypesArtifact::ToolSchemas,
+                                    count: outcome.count as u32,
+                                },
+                            );
+                        } else {
+                            println!(
+                                "{} Regenerated {} form request schema(s)",
+                                style("[types]").blue(),
+                                outcome.count
+                            );
                         }
-                        println!(
-                            "{} Regenerated {} form request schema(s)",
-                            style("[types]").blue(),
-                            outcome.count
-                        );
                     }
                 }
-                Ok(_) => {}
                 Err(e) => {
                     eprintln!(
                         "{} Failed to regenerate the form request schemas: {}",

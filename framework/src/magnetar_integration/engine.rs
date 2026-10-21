@@ -1202,6 +1202,10 @@ where
                 let _ = self.users.user_for_id(&user_id).await;
                 Ok(Registration::Accepted)
             }
+            // Another account holds the address under the database's looser
+            // comparison. There is no exact row to read back; the answer is
+            // the one a registered address gets.
+            RegistrationOutcome::Unavailable => Ok(Registration::Accepted),
         }
     }
     /// Mint one plaintext magic-link token through Magnetar's single-use
@@ -1210,7 +1214,7 @@ where
         use secrecy::ExposeSecret;
 
         match self.magic_links.issue(email).await? {
-            MagicLinkIssued::Minted(token) => Ok(token.expose_secret().to_owned()),
+            MagicLinkIssued::Minted { plaintext, .. } => Ok(plaintext.expose_secret().to_owned()),
             MagicLinkIssued::Suppressed => Err(Error::Conflict {
                 resource: "magic link".to_owned(),
                 message: "the configured registration policy suppressed issuance".to_owned(),

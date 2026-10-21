@@ -114,7 +114,10 @@ pub trait UserProvider: Send + Sync + 'static {
     /// password in `credentials` was validated and before the user is signed
     /// in. Default: does nothing.
     ///
-    /// The session guard calls it in `attempt` and `once`, and
+    /// The session guard calls it in `once`, and through
+    /// [`rehash_password_for_sign_in`](Self::rehash_password_for_sign_in) in
+    /// `attempt` for users without epochs. Epoch-aware providers implement
+    /// that conditional hook for `attempt` instead. Also called by
     /// `Auth::logout_other_devices` after its password check, as Laravel's
     /// `SessionGuard` calls `rehashPasswordIfRequired`. The sign-in is the
     /// one moment the plaintext is at hand and proven, so a new hash can be
@@ -132,6 +135,31 @@ pub trait UserProvider: Send + Sync + 'static {
         _credentials: &serde_json::Value,
     ) -> Result<(), FrameworkError> {
         Ok(())
+    }
+
+    /// Rehash a proven password at `recorded_epoch`, returning the exact user
+    /// snapshot written by that rehash so a sign-in can record its new epoch.
+    /// A rehash changes a hash-derived epoch; a fresh lookup could instead
+    /// adopt a concurrent reset. Overrides must check the stored epoch and
+    /// write atomically, return only their own write's snapshot, and return an
+    /// error if the epoch moved. An error aborts the sign-in before it commits.
+    ///
+    /// The default leaves epoch-bearing snapshots unchanged: an older hook
+    /// cannot prove its write was conditional and could undo a reset before
+    /// the guard refuses the sign-in. Providers that rehash epoch-bearing
+    /// users must migrate their sign-in rehash to this hook. For users with
+    /// no epoch, the default calls the existing hook and returns `None`,
+    /// preserving their behavior.
+    async fn rehash_password_for_sign_in(
+        &self,
+        user: &dyn Authenticatable,
+        credentials: &serde_json::Value,
+        recorded_epoch: Option<u64>,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        if recorded_epoch.is_none() && super::epoch::credential_epoch(user).is_none() {
+            self.rehash_password_if_required(user, credentials).await?;
+        }
+        Ok(None)
     }
 
     /// View `model`, a model a request has just written, as one of this

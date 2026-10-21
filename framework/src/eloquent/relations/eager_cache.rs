@@ -60,7 +60,6 @@ use crate::eloquent::changes::RowState;
 /// A relation's count is kept apart from its rows, under the same name:
 /// `with(["posts"]).with_count(["posts"])` keeps both, in either order,
 /// and a count alone never reads as loaded rows.
-#[derive(Default)]
 pub struct EagerLoadCache {
     rows: HashMap<String, RelationCell>,
     /// `with_count` results, by relation name.
@@ -74,9 +73,15 @@ pub struct EagerLoadCache {
     /// Serialization overrides belong to this model, never to another clone.
     pub(crate) serialization: SerializationState,
     /// The search source version the framework keeps for this model's row, as the read or
-    /// save that produced the model found it; 0 when none did. It travels with the model,
-    /// so its projection reads it however many rows the process has seen since (SEARCH-001).
+    /// save that produced the model found it; -1 when none did. Zero is a loaded
+    /// revision with no kept version yet, which must not borrow a newer process value.
     kept_version: std::sync::atomic::AtomicI64,
+}
+
+impl Default for EagerLoadCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Instance lists are initialized only when a caller overrides the model policy.
@@ -113,7 +118,7 @@ impl EagerLoadCache {
             from_multi_row_query: false,
             row: RowState::default(),
             serialization: SerializationState::default(),
-            kept_version: std::sync::atomic::AtomicI64::new(0),
+            kept_version: std::sync::atomic::AtomicI64::new(-1),
         }
     }
 
@@ -134,16 +139,17 @@ impl EagerLoadCache {
             from_multi_row_query: false,
             row: RowState::loaded(row),
             serialization: SerializationState::default(),
-            kept_version: std::sync::atomic::AtomicI64::new(0),
+            kept_version: std::sync::atomic::AtomicI64::new(-1),
         }
     }
 
     /// The search source version kept for this model's row when the read or save that
-    /// produced the model found one.
+    /// produced the model found one. A loaded zero stays distinct from a model
+    /// with no recorded revision, so later reads cannot relabel its old content.
     #[doc(hidden)]
     pub fn __kept_version(&self) -> Option<i64> {
         let version = self.kept_version.load(std::sync::atomic::Ordering::Relaxed);
-        (version != 0).then_some(version)
+        (version >= 0).then_some(version)
     }
 
     /// Record the kept version a read or save found for this model's row. Versions only
@@ -216,7 +222,7 @@ impl EagerLoadCache {
             row: RowState::default(),
             serialization: self.serialization.clone(),
             // A replica is a new row, which no save has given a version yet.
-            kept_version: std::sync::atomic::AtomicI64::new(0),
+            kept_version: std::sync::atomic::AtomicI64::new(-1),
         }
     }
 

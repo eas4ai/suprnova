@@ -434,6 +434,83 @@ async fn sec_001_a_source_added_to_a_preset_reaches_its_directive_alone() {
 }
 
 #[tokio::test]
+async fn sec_001_an_added_source_stays_in_the_first_policy_naming_its_directive() {
+    let _scope = production();
+    for (template, expected) in [
+        (
+            "default-src *; connect-src 'self', default-src 'self'",
+            "default-src *; connect-src 'self' https://analytics.example, default-src 'self'",
+        ),
+        (
+            "default-src *; connect-src 'self', connect-src https://second.example; default-src 'self'",
+            "default-src *; connect-src 'self' https://analytics.example, connect-src https://second.example; default-src 'self'",
+        ),
+        (
+            "default-src  * ;  connect-src 'self'; img-src  data:, default-src  'self'; object-src 'none'",
+            "default-src  * ;  connect-src 'self' https://analytics.example; img-src  data:, default-src  'self'; object-src 'none'",
+        ),
+    ] {
+        let policy = suprnova::ContentSecurityPolicy::new(template)
+            .expect("a valid policy list")
+            .with_source("connect-src", "https://analytics.example")
+            .expect("a valid source");
+        let headers = SecurityHeaders::balanced().content_security_policy(Some(policy));
+        let response = client(headers).get("https://localhost/").send().await;
+        assert_eq!(
+            response.header("content-security-policy").expect("CSP"),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn sec_001_an_added_source_reaches_a_directive_only_the_second_policy_names() {
+    let _scope = production();
+    let policy = suprnova::ContentSecurityPolicy::new(
+        "default-src *; img-src data:, default-src 'self'; Connect-Src 'self'; object-src 'none'",
+    )
+    .expect("a valid policy list")
+    .with_source("connect-src", "https://analytics.example")
+    .expect("a valid source");
+    let headers = SecurityHeaders::balanced().content_security_policy(Some(policy));
+    let response = client(headers).get("https://localhost/").send().await;
+    assert_eq!(
+        response.header("content-security-policy").expect("CSP"),
+        "default-src *; img-src data:, default-src 'self'; connect-src 'self' https://analytics.example; object-src 'none'"
+    );
+}
+
+#[tokio::test]
+async fn sec_001_an_added_source_uses_the_first_policy_naming_a_fallback() {
+    let _scope = production();
+    for (template, expected) in [
+        (
+            "default-src 'self', child-src https://second.example",
+            "default-src 'self'; frame-src 'self' https://analytics.example, child-src https://second.example",
+        ),
+        (
+            "img-src data:, default-src 'none'; child-src 'self'",
+            "img-src data:, default-src 'none'; child-src 'self'; frame-src 'self' https://analytics.example",
+        ),
+        (
+            "img-src  data: , object-src 'none'",
+            "img-src  data: , object-src 'none'",
+        ),
+    ] {
+        let policy = suprnova::ContentSecurityPolicy::new(template)
+            .expect("a valid policy list")
+            .with_source("frame-src", "https://analytics.example")
+            .expect("a valid source");
+        let headers = SecurityHeaders::balanced().content_security_policy(Some(policy));
+        let response = client(headers).get("https://localhost/").send().await;
+        assert_eq!(
+            response.header("content-security-policy").expect("CSP"),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
 async fn sec_002_an_added_source_follows_the_policy_into_report_only_mode() {
     let _scope = production();
     for headers in [

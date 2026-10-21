@@ -132,7 +132,7 @@ route serves. It takes these keys:
 | `annotations(...)` | no | Hints for clients, described below |
 | `title` | no | A display name |
 | `route` | no | The route name, when the handler serves more than one route |
-| `guard` | no | The auth guard a user caller is signed in to for the call |
+| `guard` | no | The auth guard a user caller is signed in to for the call. It must use the default guard's provider; another provider is refused as a configuration error because an id in one provider does not name the same person in another. |
 | `budget` | no | `budget = ignore` silences this tool's compile warning; boot still logs its budget warnings |
 
 Use short action names such as `create_post` or `search_notes`. The build
@@ -497,9 +497,9 @@ owning the host root:
 It panics when one of these routes is already registered or when it is called
 twice. `Router::try_agents` returns the error instead.
 
-### What the endpoint speaks
+### Transport and protocol revisions
 
-The endpoint speaks MCP's Streamable HTTP transport, revision 2026-07-28: one
+The endpoint uses MCP's Streamable HTTP transport, revision 2026-07-28: one
 `POST` per JSON-RPC request, with `server/discover`, `tools/list`,
 `tools/call` and `ping`. Clients of revisions 2025-06-18 and 2025-11-25, which
 open with `initialize`, work on the same endpoint. The endpoint keeps no
@@ -705,6 +705,10 @@ verifies them against the provider's published keys, for issuer, audience,
 expiry and scope, and finds the user with the default guard's provider. It
 serves the `user` caller kind only: an outside token is never an agent
 account.
+
+The tool's guard must use the default guard's provider; a guard on another
+provider is refused as a configuration error because an id in one provider
+does not name the same person in another.
 
 ```rust
 use std::sync::Arc;
@@ -1455,6 +1459,10 @@ transaction. An action marked `#[action(authorize = "current")]` asks the
 Gate for `live:{component}.{action}`, as a click does. The result carries the
 agent-visible fields and no other state.
 
+One component may declare at most 64 browser tools. Metadata validation
+rejects more before the page is served. Headless-only tools do not count
+toward this limit; the component's overall limit remains 256 actions.
+
 The browser names a Live tool after its island: `peek_counter-main` for the
 island `live:key="main"`. The key must be one literal of 1 to 63 ASCII
 letters, digits, `_` and `-`, outside any loop, so data never reaches a name
@@ -1678,6 +1686,13 @@ handle issued to one caller is refused for any other. It expires as a
 browser snapshot does, after `LIVE_LEDGER_INSTANCE_LIFETIME_MS`. A stale
 handle answers 409, and the agent calls again with the latest one or without
 one.
+
+Headless outcomes are `accepted`, `no_render`, `redirect`, and `invalid`.
+If the sealed successor would make even the smallest follow-up request exceed
+the endpoint's `max_body_bytes`, the outcome is `too_large` with `isError: true`.
+The result keeps the agent-visible `fields` and any `validation` issues, but
+returns no `handle`. Its message explains that the component's state no longer
+fits one request and the mount must be started again.
 
 A headless tool's component cannot have `#[session]` fields, and an action
 that finalizes an upload cannot be headless.

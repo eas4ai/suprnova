@@ -522,7 +522,7 @@ async fn run_action(
         .and_then(text)
         .unwrap_or_default();
     match outcome.as_str() {
-        "accepted" => accepted(descriptor, target, &scope, &answer),
+        "accepted" => accepted(request, descriptor, target, &scope, &answer),
         "refresh_required" => match observer.cause() {
             Some(suprnova_live::execution::ExecutionFailure::Action(
                 suprnova_live::component::ActionExecutionErrorKind::Action(
@@ -545,7 +545,9 @@ async fn run_action(
 /// The answer of an accepted action: its outcome, the agent-visible fields
 /// of the successor snapshot, any validation issues, and the successor
 /// sealed as the next handle.
+/// A handle that cannot fit a follow-up is withheld so the caller restarts the mount.
 fn accepted(
+    request: &Request,
     descriptor: &ComponentDescriptor,
     target: &LiveTarget,
     scope: &ScopeFingerprint,
@@ -567,6 +569,17 @@ fn accepted(
         Ok(handle) => handle,
         Err(error) => return failed(&error),
     };
+    let Some(call) = request.agent_mark().and_then(|mark| mark.as_call()) else {
+        return refuse(404, "Not Found");
+    };
+    let handle_fits = match call.accepts_live_handle(&handle) {
+        Ok(fits) => fits,
+        Err(error) => {
+            return failed(&FrameworkError::internal(format!(
+                "the headless Live follow-up request could not be measured: {error}"
+            )));
+        }
+    };
     let state = body_field(snapshot, "state")
         .cloned()
         .unwrap_or_else(|| CanonicalValue::Object(BTreeMap::new()));
@@ -584,7 +597,9 @@ fn accepted(
         })
         .and_then(text)
         .is_some_and(|kind| kind == "no_render");
-    let outcome = if !validation.is_empty() {
+    let outcome = if !handle_fits {
+        "too_large"
+    } else if !validation.is_empty() {
         "invalid"
     } else if redirect {
         "redirect"
@@ -599,10 +614,19 @@ fn accepted(
     if !validation.is_empty() {
         structured.insert("validation".to_owned(), Value::Object(validation));
     }
-    structured.insert("handle".to_owned(), json!(handle));
-    structured.insert("expiresAt".to_owned(), json!(expires_at));
+    if handle_fits {
+        structured.insert("handle".to_owned(), json!(handle));
+        structured.insert("expiresAt".to_owned(), json!(expires_at));
+    } else {
+        structured.insert(
+            "message".to_owned(),
+            json!(
+                "The component's state no longer fits one request; the mount must be started again."
+            ),
+        );
+    }
     let body = json!({
-        "isError": outcome == "invalid",
+        "isError": matches!(outcome, "invalid" | "too_large"),
         "structuredContent": Value::Object(structured),
     });
     HttpResponse::bytes_body(Bytes::from(body.to_string()), RESULT_MEDIA_TYPE)

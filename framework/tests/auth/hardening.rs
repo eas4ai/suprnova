@@ -187,6 +187,112 @@ impl UserProvider for EpochProvider {
     }
 }
 
+/// An older provider rehash hook writes unconditionally. Its loaded password
+/// still verifies after a reset, but running that hook would restore it.
+struct LegacyRehashProvider {
+    inner: Arc<EpochProvider>,
+    reset_during_validation: AtomicBool,
+}
+
+#[async_trait]
+impl UserProvider for LegacyRehashProvider {
+    async fn retrieve_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        self.inner.retrieve_by_id(id).await
+    }
+
+    async fn retrieve_by_credentials(
+        &self,
+        credentials: &serde_json::Value,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        self.inner.retrieve_by_credentials(credentials).await
+    }
+
+    async fn validate_credentials(
+        &self,
+        user: &dyn Authenticatable,
+        credentials: &serde_json::Value,
+    ) -> Result<bool, FrameworkError> {
+        let valid = credentials
+            .get("password")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|password| {
+                user.get_auth_password()
+                    .is_some_and(|hash| hash.ends_with(&format!(":{password}")))
+            });
+        if valid && self.reset_during_validation.swap(false, Ordering::SeqCst) {
+            self.inner
+                .set_password("7", &stored_hash("the owner's new password", 1))
+                .await?;
+        }
+        Ok(valid)
+    }
+
+    async fn rehash_password_if_required(
+        &self,
+        _user: &dyn Authenticatable,
+        credentials: &serde_json::Value,
+    ) -> Result<(), FrameworkError> {
+        if let Some(password) = credentials
+            .get("password")
+            .and_then(serde_json::Value::as_str)
+        {
+            self.inner
+                .set_password("7", &stored_hash(password, 2))
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn attempt_legacy_rehash_cannot_restore_the_password_after_a_reset() {
+    if !crate::own_process::is_child() {
+        crate::own_process::run_alone(
+            "hardening::attempt_legacy_rehash_cannot_restore_the_password_after_a_reset",
+        );
+        return;
+    }
+    let provider = Arc::new(LegacyRehashProvider {
+        inner: EpochProvider::with_user("7", "seven@example.test", true),
+        reset_during_validation: AtomicBool::new(true),
+    });
+    let store = Arc::new(RevocationFailsStore::default());
+    in_scope(
+        AuthConfig::default(),
+        vec![("users", provider as Arc<dyn UserProvider>)],
+        store.clone(),
+        async move {
+            let config = session_config();
+            let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+            let handler: Next = Arc::new(|_request| {
+                Box::pin(async {
+                    let credentials = Credentials::password("seven@example.test", PASSWORD);
+                    let first = Auth::attempt(&credentials, false).await;
+                    let error = first.err().expect("the in-flight proof expires");
+                    assert_eq!(error.status_code(), 401);
+                    assert_eq!(Auth::id(), None);
+                    assert!(
+                        Auth::attempt(&credentials, false).await.unwrap().is_none(),
+                        "the old password must stay invalid after the refused attempt"
+                    );
+                    let reset =
+                        Credentials::password("seven@example.test", "the owner's new password");
+                    assert!(
+                        Auth::attempt(&reset, false).await.unwrap().is_some(),
+                        "the reset password must still work"
+                    );
+                    Ok(HttpResponse::text("reset preserved"))
+                })
+            });
+            assert_eq!(serve(&middleware, &config, None, handler).await.status, 200);
+            assert!(store.holds("web", "7"));
+        },
+    );
+}
+
 /// A session store in memory whose revocation of a user's sessions fails,
 /// as a database outage during a password reset makes it fail.
 #[derive(Default)]
@@ -516,6 +622,127 @@ async fn eloquent_user() -> TestDatabase {
     .await
     .expect("the user row");
     db
+}
+
+/// A legitimate Laravel hash upgrade changes the hash-derived epoch, so the
+/// sign-in must record that exact write and remain valid on its next request.
+#[test]
+fn attempt_rehash_records_its_own_epoch() {
+    if !crate::own_process::is_child() {
+        crate::own_process::run_alone("hardening::attempt_rehash_records_its_own_epoch");
+        return;
+    }
+    for provider in [
+        Arc::new(EloquentUserProvider::<TestUser>::new()) as Arc<dyn UserProvider>,
+        Arc::new(suprnova::DatabaseUserProvider::new("users")) as Arc<dyn UserProvider>,
+    ] {
+        let store = Arc::new(RevocationFailsStore::default());
+        in_scope(
+            AuthConfig::default(),
+            vec![("users", provider.clone())],
+            store.clone(),
+            async move {
+                suprnova::LaravelDatabase::share(false);
+                let _db = eloquent_user().await;
+                suprnova::LaravelDatabase::share(true);
+                let config = session_config();
+                let middleware = SessionMiddleware::with_store(config.clone(), store);
+                let cookie = sign_in(&middleware, &config).await;
+                let written = provider.retrieve_by_id("1").await.unwrap().unwrap();
+                assert!(written.get_auth_password().unwrap().starts_with("$2y$"));
+                let next = serve(
+                    &middleware,
+                    &config,
+                    Some(&cookie),
+                    authenticated_route(None),
+                )
+                .await;
+                assert_eq!(next.status, 200, "the rehash keeps its own sign-in current");
+            },
+        );
+    }
+}
+
+/// A hash upgrade must not overwrite a password reset committed after the
+/// snapshot was read, even though that snapshot's old password still validates.
+#[test]
+fn rehash_refuses_a_snapshot_from_before_a_password_reset() {
+    if !crate::own_process::is_child() {
+        crate::own_process::run_alone(
+            "hardening::rehash_refuses_a_snapshot_from_before_a_password_reset",
+        );
+        return;
+    }
+    let provider = Arc::new(EloquentUserProvider::<TestUser>::new());
+    in_scope(
+        AuthConfig::default(),
+        vec![("users", provider.clone() as Arc<dyn UserProvider>)],
+        Arc::new(RevocationFailsStore::default()),
+        async move {
+            let _db = eloquent_user().await;
+            let snapshot = provider.retrieve_by_id("1").await.unwrap().unwrap();
+            suprnova::LaravelDatabase::share(true);
+            let reset_hash = suprnova::hash("the owner's new password").unwrap();
+            provider.set_password("1", &reset_hash).await.unwrap();
+            let credentials = Credentials::password("one@example.test", PASSWORD).as_value();
+            assert!(
+                provider
+                    .validate_credentials(&*snapshot, &credentials)
+                    .await
+                    .unwrap()
+            );
+            let error = provider
+                .rehash_password_if_required(&*snapshot, &credentials)
+                .await
+                .expect_err("a rehash must refuse the stale password snapshot");
+            assert_eq!(error.status_code(), 401);
+            let current = provider.retrieve_by_id("1").await.unwrap().unwrap();
+            assert_eq!(current.get_auth_password(), Some(reset_hash.as_str()));
+        },
+    );
+}
+
+#[test]
+fn database_legacy_rehash_requires_exact_snapshot_bytes() {
+    if !crate::own_process::is_child() {
+        crate::own_process::run_alone(
+            "hardening::database_legacy_rehash_requires_exact_snapshot_bytes",
+        );
+        return;
+    }
+    in_scope(
+        AuthConfig::default(),
+        vec![],
+        Arc::new(RevocationFailsStore::default()),
+        async {
+            let db = TestDatabase::sqlite_memory().await.unwrap();
+            db.execute_unprepared("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, password TEXT COLLATE NOCASE)").await.unwrap();
+            let hash = suprnova::hash(PASSWORD).unwrap();
+            db.execute_unprepared(&format!(
+                "INSERT INTO users VALUES (7, 'seven@example.test', '{hash}')"
+            ))
+            .await
+            .unwrap();
+            let provider = suprnova::DatabaseUserProvider::new("users");
+            let snapshot = provider.retrieve_by_id("7").await.unwrap().unwrap();
+            let changed_hash = hash.to_ascii_uppercase();
+            assert_ne!(hash, changed_hash);
+            db.execute_unprepared(&format!(
+                "UPDATE users SET password = '{changed_hash}' WHERE id = 7"
+            ))
+            .await
+            .unwrap();
+            suprnova::LaravelDatabase::share(true);
+            let credentials = Credentials::password("seven@example.test", PASSWORD).as_value();
+            let error = provider
+                .rehash_password_if_required(&*snapshot, &credentials)
+                .await
+                .expect_err("collation equality must not authorize a rehash over different bytes");
+            assert_eq!(error.status_code(), 401);
+            let current = provider.retrieve_by_id("7").await.unwrap().unwrap();
+            assert_eq!(current.get_auth_password(), Some(changed_hash.as_str()));
+        },
+    );
 }
 
 /// A route behind `AuthMiddleware::new()` whose handler changes the

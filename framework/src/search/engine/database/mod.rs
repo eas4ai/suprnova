@@ -3,10 +3,12 @@
 //! Generation metadata serializes mutations across processes. Dense points carry
 //! immutable generation and content identities, so a partial external write cannot
 //! replace another generation's vectors or expose content absent from the side table.
+mod connection_cache;
 mod filter;
 mod mysql;
 mod postgres;
 mod sqlite;
+mod vector_delivery;
 
 use super::{
     EngineCandidate, EngineCapabilities, EngineResult, GenerationId, IndexedDocument, SearchEngine,
@@ -22,6 +24,7 @@ use crate::{
     vector::{Vector, VectorItem, VectorMatch, VectorStore},
 };
 use async_trait::async_trait;
+use connection_cache::ConnectionCache;
 use sea_orm::{
     ConnectionTrait, DatabaseTransaction, DbBackend, QueryResult, Statement, TransactionTrait,
     Value,
@@ -31,7 +34,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
-use tokio::sync::OnceCell;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dialect {
@@ -324,7 +326,7 @@ fn escape_native(text: &str, settings: &IndexSettings) -> Result<String, Framewo
 /// Search on the configured DB connection without maintaining a second application pool.
 #[derive(Default)]
 pub struct DatabaseSearchEngine {
-    mysql_dialect: OnceCell<Dialect>,
+    mysql_dialect: ConnectionCache<Dialect>,
 }
 impl DatabaseSearchEngine {
     /// Defer backend discovery until the application's connection has been installed.
@@ -332,14 +334,15 @@ impl DatabaseSearchEngine {
         Self::default()
     }
     async fn dialect(&self) -> Result<Dialect, FrameworkError> {
-        match DB::connection()?.get_database_backend() {
+        let connection = DB::connection()?;
+        match connection.get_database_backend() {
             DbBackend::Sqlite => Ok(Dialect::Sqlite),
             DbBackend::Postgres => Ok(Dialect::Postgres),
-            DbBackend::MySql => Ok(*self
+            DbBackend::MySql => Ok(self
                 .mysql_dialect
-                .get_or_try_init(|| async {
+                .get_or_try_init(DB::default_connection(), async {
                     let result = rows(
-                        DB::connection()?.inner(),
+                        connection.inner(),
                         "SELECT VERSION() AS version".into(),
                         Sql::new(Dialect::Mysql),
                     )
@@ -969,24 +972,74 @@ fn side_ddl(index: &IndexDescriptor, table: &str, dialect: Dialect) -> Vec<Strin
     }
     ddl
 }
+const CHILD_TABLES: &str = "_database_child_tables";
+
+type GenerationSettings = serde_json::Map<String, serde_json::Value>;
+
+fn settings_fields(settings: &IndexSettings) -> Result<GenerationSettings, FrameworkError> {
+    match serde_json::to_value(settings).map_err(db_error)? {
+        serde_json::Value::Object(fields) => Ok(fields),
+        _ => Err(db_error("generation settings must be an object")),
+    }
+}
+
+fn generation_settings(metadata: &QueryResult) -> Result<GenerationSettings, FrameworkError> {
+    serde_json::from_str(&get::<String>(metadata, "settings_json")?).map_err(db_error)
+}
+
+fn physical_children(index: &IndexDescriptor, table: &str) -> Vec<String> {
+    index
+        .attributes
+        .iter()
+        .filter(|attr| attr.ty == AttributeType::TextList)
+        .map(|attr| format!("{table}_{}", attr.name))
+        .collect()
+}
+
+async fn update_generation_settings<C: ConnectionTrait>(
+    conn: &C,
+    dialect: Dialect,
+    index: &str,
+    generation: &GenerationId,
+    settings: &GenerationSettings,
+) -> Result<(), FrameworkError> {
+    let mut sql = Sql::new(dialect);
+    let value = sql.bind(serde_json::to_string(settings).map_err(db_error)?);
+    let i = sql.bind(index.to_owned());
+    let g = sql.bind(generation.as_str().to_owned());
+    execute(conn, format!("UPDATE search_generations SET settings_json={value} WHERE index_name={i} AND generation={g}"), sql).await?;
+    Ok(())
+}
+
 async fn drop_tables<C: ConnectionTrait>(
     conn: &C,
     index: &IndexDescriptor,
+    generation: &GenerationId,
     table: &str,
     dialect: Dialect,
 ) -> Result<(), FrameworkError> {
+    let metadata =
+        DatabaseSearchEngine::metadata(conn, dialect, index.name, generation.as_str()).await?;
+    let settings = generation_settings(&metadata)?;
+    // Older generations have no ownership record, so retain their descriptor fallback.
+    let children: Vec<String> = match settings.get(CHILD_TABLES) {
+        Some(recorded) => serde_json::from_value(recorded.clone()).map_err(db_error)?,
+        None => physical_children(index, table),
+    };
+    for child in &children {
+        identifier(child)?;
+        if !child.starts_with(&format!("{table}_")) || child.len() > 63 {
+            return Err(db_error(format!(
+                "generation child table {child} does not belong to {table}"
+            )));
+        }
+    }
     let sql = Sql::new(dialect);
     let mut tables = Vec::new();
     if dialect == Dialect::Sqlite {
         tables.extend([format!("{table}_vocab"), format!("{table}_fts")]);
     }
-    tables.extend(
-        index
-            .attributes
-            .iter()
-            .filter(|a| a.ty == AttributeType::TextList)
-            .map(|a| format!("{table}_{}", a.name)),
-    );
+    tables.extend(children);
     tables.push(table.to_owned());
     for name in tables {
         conn.execute_unprepared(&format!("DROP TABLE IF EXISTS {}", sql.ident(&name)))
@@ -1179,6 +1232,8 @@ impl SearchEngine for DatabaseSearchEngine {
         let table = table(index, generation)?;
         super::collection::validate_settings(index, settings)?;
         let dialect = self.dialect().await?;
+        let mut persisted = settings_fields(settings)?;
+        persisted.insert(CHILD_TABLES.to_owned(), serde_json::json!(physical_children(index, &table)));
         let native_settings = native_settings(index, settings);
         let native = match dialect {
             Dialect::Sqlite => sqlite::ddl(&table, &native_settings)?,
@@ -1237,7 +1292,7 @@ impl SearchEngine for DatabaseSearchEngine {
             let i = sql.bind(index.name.to_owned());
             let g = sql.bind(generation.as_str().to_owned());
             let state = sql.bind("creating".to_owned());
-            let settings_json = sql.bind(serde_json::to_string(settings).map_err(db_error)?);
+            let settings_json = sql.bind(serde_json::to_string(&persisted).map_err(db_error)?);
             let digest = sql.bind(settings.index_time.digest());
             let model = sql.bind(settings.index_time.model.clone());
             let dimensions = sql.bind(
@@ -1260,7 +1315,8 @@ impl SearchEngine for DatabaseSearchEngine {
             let ddl = async {
                 if recovering {
                     renew_creation(conn.inner(),dialect,index.name,generation.as_str(),&owner).await?;
-                    drop_tables(conn.inner(),index,&table,dialect).await?;
+                    drop_tables(conn.inner(),index,generation,&table,dialect).await?;
+                    update_generation_settings(conn.inner(), dialect, index.name, generation, &persisted).await?;
                 }
                 for ddl in side_ddl(index,&table,dialect).into_iter().chain(native) {
                     renew_creation(conn.inner(),dialect,index.name,generation.as_str(),&owner).await?;
@@ -1451,10 +1507,9 @@ impl SearchEngine for DatabaseSearchEngine {
         let tx = conn.inner().begin().await.map_err(db_error)?;
         Self::lock(&tx, dialect, index.name, "__control").await?;
         Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
-        let state: String = get(
-            &Self::metadata(&tx, dialect, index.name, generation.as_str()).await?,
-            "state",
-        )?;
+        let metadata = Self::metadata(&tx, dialect, index.name, generation.as_str()).await?;
+        vector_delivery::ensure_unclaimed(&metadata)?;
+        let state: String = get(&metadata, "state")?;
         if matches!(state.as_str(), "current" | "active" | "creating") {
             return Err(FrameworkError::param(format!(
                 "search index {}: cannot drop active or building generation {}",
@@ -1513,7 +1568,7 @@ impl SearchEngine for DatabaseSearchEngine {
                 )
                 .await?;
         }
-        drop_tables(conn.inner(), index, &table, dialect).await?;
+        drop_tables(conn.inner(), index, generation, &table, dialect).await?;
         for metadata in [
             "search_vocabulary",
             "search_tombstones",
@@ -1538,26 +1593,33 @@ impl SearchEngine for DatabaseSearchEngine {
         generation: &GenerationId,
         settings: &IndexSettings,
     ) -> Result<(), FrameworkError> {
-        crate::search::render_cache::named_write(index.name, Box::pin(async {
-        super::collection::validate_settings(index, settings)?;
-        let (dialect, _, old) = self.context(index, generation).await?;
-        if old.index_time.digest() != settings.index_time.digest() {
-            return Err(FrameworkError::param(format!(
-                "search index {}: index-time settings require a new generation",
-                index.name
-            )));
-        }
-        let conn = DB::connection()?;
-        crate::render_cache::write_side_open(false).await?;
-        let tx = conn.inner().begin().await.map_err(db_error)?;
-        let mut sql = Sql::new(dialect);
-        let value = sql.bind(serde_json::to_string(settings).map_err(db_error)?);
-        let i = sql.bind(index.name.to_owned());
-        let g = sql.bind(generation.as_str().to_owned());
-        execute(&tx,format!("UPDATE search_generations SET settings_json={value} WHERE index_name={i} AND generation={g}"),sql).await?;
-        advance_transaction(&tx, index.name).await?;
-        tx.commit().await.map_err(db_error)
-        })).await
+        crate::search::render_cache::named_write(
+            index.name,
+            Box::pin(async {
+                super::collection::validate_settings(index, settings)?;
+                let (dialect, _, old) = self.context(index, generation).await?;
+                if old.index_time.digest() != settings.index_time.digest() {
+                    return Err(FrameworkError::param(format!(
+                        "search index {}: index-time settings require a new generation",
+                        index.name
+                    )));
+                }
+                let conn = DB::connection()?;
+                crate::render_cache::write_side_open(false).await?;
+                let tx = conn.inner().begin().await.map_err(db_error)?;
+                Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
+                let metadata =
+                    Self::metadata(&tx, dialect, index.name, generation.as_str()).await?;
+                let mut persisted = generation_settings(&metadata)?;
+                // Query settings must not erase storage ownership or other engine metadata.
+                persisted.extend(settings_fields(settings)?);
+                update_generation_settings(&tx, dialect, index.name, generation, &persisted)
+                    .await?;
+                advance_transaction(&tx, index.name).await?;
+                tx.commit().await.map_err(db_error)
+            }),
+        )
+        .await
     }
     async fn record_flush(
         &self,
@@ -2665,53 +2727,6 @@ async fn queue_vector(
     execute(tx,format!("UPDATE search_generations SET pending_vectors_json={pending} WHERE index_name={i} AND generation={g}"),sql).await?;
     Ok(())
 }
-impl DatabaseSearchEngine {
-    async fn drain_vectors(
-        &self,
-        index: &IndexDescriptor,
-        generation: &GenerationId,
-        table: &str,
-        dialect: Dialect,
-    ) -> Result<(), FrameworkError> {
-        let conn = DB::connection()?;
-        crate::render_cache::write_side_open(false).await?;
-        let tx = conn.inner().begin().await.map_err(db_error)?;
-        Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
-        let metadata = Self::metadata(&tx, dialect, index.name, generation.as_str()).await?;
-        let pending: BTreeSet<String> =
-            serde_json::from_str(&get::<String>(&metadata, "pending_vectors_json")?)
-                .map_err(db_error)?;
-        if pending.is_empty() {
-            return tx.commit().await.map_err(db_error);
-        }
-        let mut remaining = Vec::new();
-        let exists = sea_orm_migration::SchemaManager::new(&tx)
-            .has_table(table)
-            .await
-            .map_err(db_error)?;
-        for id in pending {
-            let mut sql = Sql::new(dialect);
-            let point = sql.bind(id.clone());
-            let text = format!(
-                "SELECT vector_id FROM {} WHERE vector_id={point} LIMIT 1",
-                sql.ident(table)
-            );
-            if !exists || rows(&tx, text, sql).await?.is_empty() {
-                remaining.push(id);
-            }
-        }
-        if !remaining.is_empty() {
-            vector_store(index.name)?.delete(remaining).await?;
-        }
-        let mut sql = Sql::new(dialect);
-        let empty = sql.bind("[]".to_owned());
-        let i = sql.bind(index.name.to_owned());
-        let g = sql.bind(generation.as_str().to_owned());
-        execute(&tx,format!("UPDATE search_generations SET pending_vectors_json={empty} WHERE index_name={i} AND generation={g}"),sql).await?;
-        advance_transaction(&tx, index.name).await?;
-        tx.commit().await.map_err(db_error)
-    }
-}
 
 fn vocabulary_step() -> Result<i64, FrameworkError> {
     crate::config::env_optional::<String>("SEARCH_VOCABULARY_REFRESH")
@@ -2748,54 +2763,4 @@ async fn drop_created<C: ConnectionTrait>(
             .map_err(db_error)?;
     }
     Ok(())
-}
-impl DatabaseSearchEngine {
-    async fn flush_vectors(
-        &self,
-        index: &IndexDescriptor,
-        generation: &GenerationId,
-        table: &str,
-        dialect: Dialect,
-    ) -> Result<(), FrameworkError> {
-        loop {
-            let conn = DB::connection()?;
-            crate::render_cache::write_side_open(false).await?;
-            let tx = conn.inner().begin().await.map_err(db_error)?;
-            Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
-            ensure_ready(&tx, dialect, index.name, generation).await?;
-            let mut sql = Sql::new(dialect);
-            let limit = sql.bind(512i64);
-            let text = format!(
-                "SELECT document_json,source_version,content_hash,vector_id,vector_dense_json FROM {} WHERE vector_pending=TRUE LIMIT {limit}",
-                sql.ident(table)
-            );
-            let pending = rows(&tx, text, sql).await?;
-            if pending.is_empty() {
-                return tx.commit().await.map_err(db_error);
-            }
-            let mut points = Vec::with_capacity(pending.len());
-            for row in &pending {
-                let document = decode(row)?;
-                let embedding: Vec<f32> =
-                    serde_json::from_str(&get::<String>(row, "vector_dense_json")?)
-                        .map_err(db_error)?;
-                let hash: String = get(row, "content_hash")?;
-                points.push(VectorItem::new(get::<String>(row,"vector_id")?,embedding,serde_json::json!({"index":index.name,"generation":generation.as_str(),"key":document.key,"content_hash":hash})));
-            }
-            vector_store(index.name)?.upsert(points).await?;
-            let mut sql = Sql::new(dialect);
-            let ids = pending
-                .iter()
-                .map(|r| Ok(sql.bind(get::<String>(r, "vector_id")?)))
-                .collect::<Result<Vec<_>, FrameworkError>>()?
-                .join(",");
-            let text = format!(
-                "UPDATE {} SET vector_pending=FALSE WHERE vector_id IN ({ids})",
-                sql.ident(table)
-            );
-            execute(&tx, text, sql).await?;
-            advance_transaction(&tx, index.name).await?;
-            tx.commit().await.map_err(db_error)?;
-        }
-    }
 }

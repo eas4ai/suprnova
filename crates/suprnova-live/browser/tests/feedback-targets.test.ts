@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { FeedbackTargetBinding, feedbackTimingPolicy } from "../src/feedback/targets.js";
-import type { FeedbackSnapshot } from "../src/feedback/state.js";
+import type { FeedbackSnapshot, FeedbackState } from "../src/feedback/state.js";
 import type { RuntimeClock, RuntimeScheduler } from "../src/runtime/ports.js";
 
 class FakeTime {
@@ -81,6 +81,38 @@ function snapshot(state: FeedbackSnapshot["states"], intentId = "intent-1"): Fee
 }
 
 describe("feedback directive targets", () => {
+  const defaultMessages = {
+    idle: "Ready",
+    dirty: "Unsaved changes",
+    queued: "Queued",
+    loading: "Loading",
+    validating: "Validating",
+    success: "Completed",
+    interrupted: "Request interrupted",
+    offline: "Offline",
+    retrying: "Retrying",
+    error: "Request failed",
+  } satisfies Record<FeedbackState, string>;
+
+  it.each(Object.entries(defaultMessages))("announces the default message for %s", (state, message) => {
+    const time = new FakeTime();
+    const element = new FakeElement("OUTPUT");
+    const feedbackState = state as FeedbackState;
+    const target = new FeedbackTargetBinding(
+      element as unknown as Element,
+      feedbackState,
+      ["live.polite"],
+      "action:save",
+      time.clock,
+      time.scheduler,
+    );
+
+    target.update(snapshot(new Set([feedbackState])), "intent-1");
+    time.advance(feedbackTimingPolicy(feedbackState).delayMs);
+    expect(element.textContent).toBe(message);
+    target.dispose();
+  });
+
   it("delays loading, truthfully disables a native control, and restores its baseline", () => {
     const time = new FakeTime();
     const element = new FakeElement("BUTTON", { hidden: "" });

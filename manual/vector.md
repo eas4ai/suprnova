@@ -54,9 +54,9 @@ driver, and call it done. Suprnova treats the choice as a configuration
 concern. The same trait covers an in-process `HashMap` for tests,
 a dedicated vector DB (Qdrant, Pinecone) when the embedding count
 justifies the operational cost, and a relational backend (MariaDB
-11.7+) when you'd rather keep vectors next to the rows that produced
-them. Weaviate, Milvus, LanceDB, pgvector, and LibSQL queue up behind
-real consumer demand - none are blocked by the trait shape.
+11.7+, or Postgres with pgvector) when you'd rather keep vectors next to
+the rows that produced them. Weaviate, Milvus, LanceDB, and LibSQL queue up
+behind real consumer demand - none are blocked by the trait shape.
 
 When the rest of your app fits on one engine, MariaDB 11.7+ keeps
 vectors alongside relational tables, JSON documents, and
@@ -149,7 +149,7 @@ QDRANT_URL=http://localhost:6334 cargo test -p suprnova --test vector -- --ignor
 
 Talks to Pinecone over its REST API, using the HTTP client the framework already carries.
 
-> **Why not the official SDK?** The driver used to wrap `pinecone-sdk`, which speaks gRPC. That crate's newest release (0.1.2, published 2024-09-06) pins `tonic 0.11 → rustls 0.22 → rustls-webpki 0.102`, and `rustls-webpki 0.102` carries four RustSec advisories that are all fixed upstream in `>= 0.103.13`. One abandoned crate held the whole tree back, with no version of "wait for upstream" that was going to end. Pinecone exposes every operation this driver needs over HTTPS, so the REST route removed four advisories and two dependencies at once.
+> **Why not the official SDK?** The driver used to wrap `pinecone-sdk`, which uses gRPC. That crate's newest release (0.1.2, published 2024-09-06) pins `tonic 0.11 → rustls 0.22 → rustls-webpki 0.102`, and `rustls-webpki 0.102` carries four RustSec advisories that are all fixed upstream in `>= 0.103.13`. One abandoned crate held the whole tree back, with no version of "wait for upstream" that was going to end. Pinecone exposes every operation this driver needs over HTTPS, so the REST route removed four advisories and two dependencies at once.
 
 ```rust
 use suprnova::PineconeVectorDriver;

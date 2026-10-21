@@ -35,6 +35,93 @@ fn text(value: &str) -> CanonicalValue {
     CanonicalValue::String(value.to_owned())
 }
 
+mod wrapped_time {
+    use super::*;
+    use suprnova_live::action::{
+        ActionEntry, ActionError, ActionFuture, ActionResult, ActionTable, ActionTarget,
+        AuthorizationRequirement, AuthorizedAction, PreparedActionArguments, RawActionArguments,
+        TransactionPolicy,
+    };
+    use suprnova_live::component::ComponentInstance;
+    use suprnova_live::identity::ActionName;
+    use suprnova_live::metadata::{ActionMetadata, ActionToolMetadata};
+    use suprnova_live::validation::ValidationSelection;
+    use time::OffsetDateTime;
+
+    use crate::component_support::{
+        FailurePoint, FixtureControl, TraceFixture, trusted_context_for,
+    };
+
+    fn schedule<'a>(
+        target: &'a mut dyn ActionTarget,
+        _authorization: &'a AuthorizedAction,
+        arguments: &'a PreparedActionArguments,
+    ) -> ActionFuture<'a, Result<ActionResult, ActionError>> {
+        Box::pin(async move {
+            let at: Option<OffsetDateTime> = arguments.decode("at")?;
+            let target = target
+                .as_any_mut()
+                .downcast_mut::<TraceFixture>()
+                .ok_or_else(ActionError::dispatcher_contract)?;
+            target.serial = at.map_or(0, |at| at.unix_timestamp() as u64);
+            target.record("scheduled");
+            Ok(ActionResult::render())
+        })
+    }
+
+    #[tokio::test]
+    async fn tool_action_runs_with_optional_datetime_present_or_omitted() {
+        let action = ActionMetadata::new_with_contract(
+            ActionName::parse("schedule").expect("action"),
+            1,
+            ActionArgumentSchema::new(vec![
+                ActionArgumentField::new(field("at"), ModelCodec::DateTime, false).expect("at"),
+            ])
+            .expect("arguments"),
+            AuthorizationRequirement::Public,
+            ValidationSelection::None,
+            TransactionPolicy::None,
+        )
+        .expect("action metadata")
+        .with_tool(ActionToolMetadata::new("schedule", "Schedule the event.").expect("tool"))
+        .expect("tool action");
+        let metadata = Box::leak(Box::new(metadata::component(vec![], vec![action.clone()])));
+        let table = ActionTable::new(vec![ActionEntry::new(action, schedule)]).expect("actions");
+        let context = trusted_context_for(metadata, None);
+        let control = FixtureControl::new_with_metadata(FailurePoint::None, metadata);
+        let mut component = TraceFixture {
+            trace: control.trace.clone(),
+            failure: FailurePoint::None,
+            serial: 1,
+            metadata,
+            action_gate: None,
+            render_override: None,
+        };
+        for (input, expected) in [
+            (
+                object(&[("at", text("2026-10-20T12:00:00Z"))]),
+                1_792_497_600,
+            ),
+            (object(&[]), 0),
+        ] {
+            let result = table
+                .invoke(
+                    metadata.identity(),
+                    context.capabilities(),
+                    &ActionName::parse("schedule").expect("action"),
+                    component.action_target(),
+                    RawActionArguments::new(input),
+                    &InputLimits::default(),
+                )
+                .await
+                .expect("tool action runs");
+            assert!(result.outcome().requires_render());
+            assert_eq!(component.serial, expected);
+        }
+        assert_eq!(control.values(), ["scheduled", "scheduled"]);
+    }
+}
+
 #[test]
 fn agent_012_codec_schemas_follow_each_codec() {
     let integer = json!({

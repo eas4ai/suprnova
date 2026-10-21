@@ -215,7 +215,7 @@ pub struct IndexTimeSettings {
     /// had before media parts existed and an upgrade rebuilds nothing.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub embed_media: Vec<MediaSource>,
-    /// The model identity is part of the generation's content digest.
+    /// Pin the model id and revision so equal dimensions cannot mix vector spaces.
     pub model: Option<String>,
     /// Registered sparse provider identity pins the lexical vector space to this generation.
     pub sparse_model: Option<String>,
@@ -224,6 +224,27 @@ pub struct IndexTimeSettings {
 }
 
 impl IndexTimeSettings {
+    /// Equal dimensions do not imply the same vector space, so check the pin before inference.
+    pub(crate) fn validate_model(
+        &self,
+        index: &str,
+        profile: &super::ModelProfile,
+    ) -> Result<(), FrameworkError> {
+        let Some(pinned) = &self.model else {
+            return Ok(());
+        };
+        let resolved = match &profile.revision {
+            Some(revision) => format!("{}@{revision}", profile.id),
+            None => profile.id.clone(),
+        };
+        if pinned != &resolved {
+            return Err(FrameworkError::param(format!(
+                "search index '{index}' generation pins model '{pinned}', but the resolved provider uses '{resolved}'; the index must be rebuilt with search:reindex {index}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Canonical JSON makes a generation digest independent of map insertion order.
     pub fn digest(&self) -> String {
         let bytes = canonical_json(serde_json::json!(self));

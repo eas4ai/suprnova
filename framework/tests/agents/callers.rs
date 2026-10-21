@@ -247,7 +247,7 @@ impl suprnova::Middleware for StandInToken {
 }
 
 /// Knows one user, `7`, whose password is `secret`.
-struct KnownUsers;
+pub(super) struct KnownUsers;
 
 #[suprnova::async_trait]
 impl suprnova::UserProvider for KnownUsers {

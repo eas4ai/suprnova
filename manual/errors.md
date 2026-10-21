@@ -159,7 +159,7 @@ an error you received.
 
 ### Automatic conversions
 
-`FrameworkError` already speaks the dialects your dependencies emit.
+`FrameworkError` already converts from the error types your dependencies emit.
 Both of these `?`s convert automatically:
 
 ```rust

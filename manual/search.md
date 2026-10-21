@@ -122,10 +122,19 @@ Timestamped projections use `updated_at` in UTC microseconds. A model without
 `search_source_versions` table: every save raises it inside the save's own
 transaction, so a rolled-back save leaves it unchanged, and reading a row never
 raises it. `to_search_document()` is synchronous and cannot query, so Eloquent
-loads the kept versions in one query beside the rows it returns, and each
+loads each kept version together with its row, and each
 model carries the version of the revision it holds: the one its load found or
 its save raised. A model keeps that version for as long as you hold it; a row
 another process saved since then reads the newer version on its next load.
+An ordinary SELECT's correlated version lookup shares the content's snapshot on
+Postgres, MySQL/InnoDB and SQLite. A commit after that SELECT cannot attach
+a newer version to older content, including a row with no kept version yet.
+For a locking model query on Postgres or MySQL, Eloquent holds the row locks
+while reading versions with the same lock on the same transaction. This reads
+current metadata on MySQL even when the transaction has an older snapshot;
+Postgres reads metadata after any row-lock wait. A pool query owns a short
+transaction for those reads. SQLite's lock hints are no-ops and use the ordinary
+single SELECT. Derived union and window queries also keep the single SELECT.
 Undeclared model fields stay outside the document.
 
 ## Index settings
@@ -406,6 +415,11 @@ input kinds, and artifact files. The local media profile accepts image, audio
 and video parts. The HTTP provider and default local profile accept text only.
 Unsupported parts fail.
 
+Application boot constructs the environment-selected provider before the bootstrap
+hook, so the hook can provision a first generation. Register provider configuration
+in the application's `config` callback or environment. The bootstrap hook can still
+register a custom provider that replaces the constructed one.
+
 ### Local inference
 
 Enable the `search-fastembed` Cargo feature and select
@@ -486,6 +500,9 @@ verified before loading; a changed byte is refused. A verified cache works
 offline. Keep the manifest with its artifacts. Generation settings pin the
 resolved model revision and dimensions; `ModelProfile::provenance()` exposes
 the manifest digest and file hashes, and baseline records include them.
+Indexing and semantic queries refuse a provider whose model id or revision differs
+from the generation's pin, even when its dimensions match. After changing models,
+rebuild the index with `search:reindex <Model|index>`.
 
 ### Media embeddings
 
@@ -518,9 +535,11 @@ default. Set a smaller positive limit to reduce worker memory. Larger limits
 are refused. A size check and a bounded range read apply to every part.
 Each part's bytes join the document's content hash, so a file replaced at the
 same path is embedded again. Replacing a file does not reindex anything by
-itself: after you replace it, save the row or call
-`suprnova::search::searchable::<M>(&keys)` for it. Every save of a document
-with media parts reads all of its parts, even unchanged ones, to compare them.
+itself, and a save that changes no column returns before search
+synchronization runs. After you replace a file, call
+`suprnova::search::searchable::<M>(&keys)` for the row, or save it with a
+changed column. Every save that reaches search synchronization reads all of the
+document's media parts, even unchanged ones, to compare them.
 
 Images accept PNG, JPEG and WebP. Audio accepts PCM WAV, mixes channels to
 mono and resamples to 16 kHz with a Hann-windowed sinc filter. It computes

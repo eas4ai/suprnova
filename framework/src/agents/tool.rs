@@ -1115,7 +1115,8 @@ fn without_dialect(mut schema: Value) -> Value {
 
 /// The result of a headless Live tool: the outcome, the agent-visible
 /// fields as the snapshot encodes them, any validation issues, and the
-/// handle a later call passes with its expiry.
+/// handle a later call passes with its expiry. Oversized state has no handle
+/// because no follow-up could carry it through the endpoint's request budget.
 fn headless_output_schema(metadata: &suprnova_live::metadata::ComponentMetadata) -> Value {
     use suprnova_live::snapshot::state::StateCodec;
 
@@ -1139,7 +1140,7 @@ fn headless_output_schema(metadata: &suprnova_live::metadata::ComponentMetadata)
         "properties": {
             "outcome": {
                 "type": "string",
-                "enum": ["accepted", "no_render", "redirect", "invalid"],
+                "enum": ["accepted", "no_render", "redirect", "invalid", "too_large"],
             },
             "fields": {
                 "type": "object",
@@ -1152,8 +1153,22 @@ fn headless_output_schema(metadata: &suprnova_live::metadata::ComponentMetadata)
             },
             "handle": { "type": "string" },
             "expiresAt": { "type": "integer", "minimum": 0 },
+            "message": { "type": "string" },
         },
-        "required": ["outcome", "fields", "handle", "expiresAt"],
+        "required": ["outcome", "fields"],
+        "oneOf": [
+            {
+                "properties": { "outcome": { "const": "too_large" } },
+                "required": ["message"],
+                "not": { "required": ["handle"] },
+            },
+            {
+                "properties": {
+                    "outcome": { "enum": ["accepted", "no_render", "redirect", "invalid"] },
+                },
+                "required": ["handle", "expiresAt"],
+            },
+        ],
     })
 }
 

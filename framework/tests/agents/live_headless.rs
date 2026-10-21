@@ -30,6 +30,132 @@ fn fresh(start: u64, amount: u64) -> Value {
 }
 
 #[tokio::test]
+async fn headless_growing_state_refuses_a_handle_over_the_request_budget() {
+    let _container = fixture::setup();
+    let client = live_fixture::live_client_with(AgentsConfig::new().max_body_bytes(4096), true);
+    let result = client
+        .mcp()
+        .as_caller(alice())
+        .call(
+            "grow_counter",
+            json!({ "mount": { "start": 1, "label": "Main" }, "arguments": {} }),
+        )
+        .await;
+    assert_eq!(result.status(), 200, "{:?}", result.response());
+    let structured = result.structured().expect("structured content");
+    assert_eq!(structured["outcome"], "too_large");
+    assert!(result.is_error());
+    assert!(structured.get("handle").is_none());
+    assert_eq!(structured["fields"]["count"], "1");
+    assert_eq!(structured["fields"]["label"], "x".repeat(8192));
+    assert!(structured["message"].as_str().is_some_and(|message| {
+        message.contains("state no longer fits one request")
+            && message.contains("mount must be started again")
+    }));
+}
+
+#[tokio::test]
+async fn headless_oversized_state_keeps_validation_in_the_result() {
+    let _container = fixture::setup();
+    // The rejected snapshot exceeds this budget even without action growth,
+    // while the initial mount request still fits.
+    let client = live_fixture::live_client_with(AgentsConfig::new().max_body_bytes(512), true);
+    let result = client
+        .mcp()
+        .as_caller(alice())
+        .call(
+            "check_counter",
+            json!({ "mount": { "start": 101, "label": "Main" }, "arguments": {} }),
+        )
+        .await;
+    let structured = result.structured().expect("structured content");
+    assert_eq!(structured["outcome"], "too_large");
+    assert!(result.is_error());
+    assert!(structured.get("handle").is_none());
+    assert_eq!(structured["fields"]["count"], "101");
+    assert!(structured["validation"]["count"].is_array());
+}
+
+#[tokio::test]
+async fn headless_handle_budget_includes_the_follow_up_envelope() {
+    let _container = fixture::setup();
+    let client = live_fixture::live_client();
+    let mount = json!({ "mount": { "start": 1, "label": "Main" }, "arguments": {} });
+    let first = client
+        .mcp()
+        .as_caller(alice())
+        .call("grow_counter", mount.clone())
+        .await;
+    let handle = first.handle().expect("successor handle");
+    let follow_up = json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "tools/call",
+        "params": {
+            "name": "grow_counter",
+            "arguments": { "handle": handle, "arguments": {} },
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+            },
+        },
+    });
+    let request_bytes = serde_json::to_vec(&follow_up)
+        .expect("follow-up JSON")
+        .len();
+    assert!(handle.len() < request_bytes - 1);
+    for (budget, outcome) in [
+        (request_bytes - 1, "too_large"),
+        (request_bytes, "accepted"),
+    ] {
+        let client =
+            live_fixture::live_client_with(AgentsConfig::new().max_body_bytes(budget), true);
+        let result = client
+            .mcp()
+            .as_caller(alice())
+            .call("grow_counter", mount.clone())
+            .await;
+        assert_eq!(
+            result.structured().expect("structured content")["outcome"],
+            outcome
+        );
+        assert_eq!(result.is_error(), outcome == "too_large");
+        assert_eq!(result.handle().is_some(), outcome == "accepted");
+    }
+}
+
+#[tokio::test]
+async fn headless_growing_state_under_default_budget_can_be_called_again() {
+    let _container = fixture::setup();
+    let client = live_fixture::live_client();
+    let result = client
+        .mcp()
+        .as_caller(alice())
+        .call(
+            "grow_counter",
+            json!({ "mount": { "start": 1, "label": "Main" }, "arguments": {} }),
+        )
+        .await;
+    assert!(!result.is_error(), "{:?}", result.response());
+    assert_eq!(
+        result.structured().expect("structured content")["outcome"],
+        "accepted"
+    );
+    let handle = result.handle().expect("successor handle");
+    let next = client
+        .mcp()
+        .as_caller(alice())
+        .call("grow_counter", json!({ "handle": handle, "arguments": {} }))
+        .await;
+    assert_eq!(next.status(), 200, "{:?}", next.response());
+    assert!(!next.is_error(), "{:?}", next.response());
+    let structured = next.structured().expect("structured content");
+    assert_eq!(structured["outcome"], "accepted");
+    assert_eq!(structured["fields"]["label"], "x".repeat(8192));
+    assert!(next.handle().is_some());
+}
+
+#[tokio::test]
 async fn agent_001_live_unmarked_action_is_not_a_tool() {
     let _container = fixture::setup();
     let registry = live_fixture::live_router_with(AgentsConfig::new())
@@ -150,9 +276,12 @@ async fn agent_013_schema_has_mount_handle_and_arguments() {
     );
     assert!(arguments.get("$schema").is_none());
     let output = &add["outputSchema"];
-    assert_eq!(
-        output["required"],
-        json!(["outcome", "fields", "handle", "expiresAt"])
+    assert_eq!(output["required"], json!(["outcome", "fields"]));
+    assert!(
+        output["properties"]["outcome"]["enum"]
+            .as_array()
+            .expect("outcome choices")
+            .contains(&json!("too_large"))
     );
     assert!(
         output["properties"]["fields"]["properties"]

@@ -8,7 +8,7 @@
 //!
 //! ```toml
 //! # Cargo.toml
-//! suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.4.0", features = ["broadcasting-fanout"] }
+//! suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.5.1", features = ["broadcasting-fanout"] }
 //! ```
 //!
 //! ```rust,no_run

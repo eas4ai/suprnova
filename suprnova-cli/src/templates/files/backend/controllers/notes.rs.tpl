@@ -180,8 +180,8 @@ pub async fn index(req: Request) -> Response {
             .limit(per_page)
             .get()
             .await?;
-        // Lexical search counts all matches, so impressions cover exactly this page.
-        let more = result.total.value() > (offset as u64).saturating_add(result.hits.len() as u64);
+        // Pagination honors the accessible hit cap, while the total counts all matches.
+        let more = result.pagination.has_more;
         let notes = result
             .hits
             .into_iter()

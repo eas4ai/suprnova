@@ -160,7 +160,7 @@ pub async fn create_user(new_user: ActiveModel) -> Result<Model, FrameworkError>
 ```
 
 If your code returns `Result<_, FrameworkError>`, every common error
-your dependencies produce already speaks the right language. The
+your dependencies produce already converts into it. The
 controller's `?` does no work beyond converting one error type into
 another.
 

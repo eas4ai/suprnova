@@ -252,6 +252,148 @@ fn guard() -> SessionGuard {
     SessionGuard::new(Arc::new(FakeProvider))
 }
 
+struct AttemptEpochUser {
+    epoch: Option<u64>,
+}
+
+impl Authenticatable for AttemptEpochUser {
+    fn get_auth_identifier(&self) -> String {
+        "7".to_owned()
+    }
+
+    fn auth_epoch(&self) -> Option<u64> {
+        self.epoch
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn into_arc_any(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+}
+
+/// Reset storage after checking the loaded snapshot, while that snapshot's
+/// password proof is still in flight. Retrieval always returns a new snapshot.
+struct AttemptEpochProvider {
+    epoch: std::sync::atomic::AtomicU64,
+    exposes_epoch: bool,
+    reset_during_validation: bool,
+}
+
+#[async_trait::async_trait]
+impl UserProvider for AttemptEpochProvider {
+    async fn retrieve_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        Ok((id == "7").then(|| {
+            Arc::new(AttemptEpochUser {
+                epoch: self
+                    .exposes_epoch
+                    .then(|| self.epoch.load(std::sync::atomic::Ordering::SeqCst)),
+            }) as Arc<dyn Authenticatable>
+        }))
+    }
+
+    async fn retrieve_by_credentials(
+        &self,
+        credentials: &serde_json::Value,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        if FakeProvider
+            .retrieve_by_credentials(credentials)
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        self.retrieve_by_id("7").await
+    }
+
+    async fn validate_credentials(
+        &self,
+        user: &dyn Authenticatable,
+        credentials: &serde_json::Value,
+    ) -> Result<bool, FrameworkError> {
+        let valid = FakeProvider.validate_credentials(user, credentials).await?;
+        if valid && self.reset_during_validation {
+            self.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(valid)
+    }
+}
+
+#[test]
+fn attempt_refuses_an_epoch_changed_during_password_validation() {
+    in_container(async {
+        run_in_request(async {
+            let g = SessionGuard::new(Arc::new(AttemptEpochProvider {
+                epoch: std::sync::atomic::AtomicU64::new(41),
+                exposes_epoch: true,
+                reset_during_validation: true,
+            }));
+            let attempted = g
+                .attempt(&Credentials::password("a@b.com", "secret"), false)
+                .await;
+            let error = attempted.err().expect("the old password proof must expire");
+            assert_eq!(error.status_code(), 401);
+            assert!(error.to_string().contains("the sign-in expired"));
+            assert!(!g.has_user().await);
+            let session = suprnova::session::session().expect("request session");
+            assert_eq!(session.user_id, None);
+            assert!(!session.data.contains_key("_auth_guards"));
+        })
+        .await;
+    });
+}
+
+#[test]
+fn attempt_records_the_epoch_read_with_the_password() {
+    in_container(async {
+        run_in_request(async {
+            let g = SessionGuard::new(Arc::new(AttemptEpochProvider {
+                epoch: std::sync::atomic::AtomicU64::new(41),
+                exposes_epoch: true,
+                reset_during_validation: false,
+            }));
+            assert!(
+                g.attempt(&Credentials::password("a@b.com", "secret"), false)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            let session = suprnova::session::session().expect("request session");
+            assert_eq!(session.user_id.as_deref(), Some("7"));
+            assert_eq!(session.data["_auth_guards"]["web"]["auth_epoch"], "41");
+        })
+        .await;
+    });
+}
+
+#[test]
+fn attempt_without_an_epoch_still_signs_in() {
+    in_container(async {
+        run_in_request(async {
+            let g = SessionGuard::new(Arc::new(AttemptEpochProvider {
+                epoch: std::sync::atomic::AtomicU64::new(41),
+                exposes_epoch: false,
+                reset_during_validation: true,
+            }));
+            assert!(
+                g.attempt(&Credentials::password("a@b.com", "secret"), false)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            let session = suprnova::session::session().expect("request session");
+            assert_eq!(session.user_id.as_deref(), Some("7"));
+            assert_eq!(session.data["_auth_guards"]["web"].get("auth_epoch"), None);
+        })
+        .await;
+    });
+}
+
 /// Drive `fut` inside the three task-local scopes a real request installs:
 /// the session, the pending-cookies bag, and the auth request state.
 async fn run_in_request<F, T>(fut: F) -> T

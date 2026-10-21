@@ -125,6 +125,7 @@ fn assert_stream_hooks(frontend: &Path, kit: &str) {
     copy(&format!("{kit}.test.ts"), "stream.test.ts");
     if kit == "svelte" {
         copy("StreamProbe.svelte", "StreamProbe.svelte");
+        copy("StreamReaders.svelte", "StreamReaders.svelte");
         copy("vitest.svelte.config.ts", "vitest.stream.config.ts");
     } else {
         copy("vitest.config.ts", "vitest.stream.config.ts");
@@ -150,6 +151,31 @@ fn assert_stream_hooks(frontend: &Path, kit: &str) {
         "npx",
         &["vitest", "run", "--config", "vitest.stream.config.ts"],
     );
+}
+
+/// Exercise the shipped stream helpers without building the frontend bundles.
+#[test]
+#[ignore = "needs node, npm and the network: runs the stream Vitest suite"]
+fn kit_react_stream_hooks() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let frontend = scaffold(&tmp, "stream-react", "react");
+    assert_stream_hooks(&frontend, "react");
+}
+
+#[test]
+#[ignore = "needs node, npm and the network: runs the stream Vitest suite"]
+fn kit_vue_stream_hooks() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let frontend = scaffold(&tmp, "stream-vue", "vue");
+    assert_stream_hooks(&frontend, "vue");
+}
+
+#[test]
+#[ignore = "needs node, npm and the network: runs the stream Vitest suite"]
+fn kit_svelte_stream_hooks() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let frontend = scaffold(&tmp, "stream-svelte", "svelte");
+    assert_stream_hooks(&frontend, "svelte");
 }
 
 #[test]

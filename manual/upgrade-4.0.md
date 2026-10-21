@@ -41,12 +41,12 @@ entry of the release is either a section here or listed under
    the lock file and the CLI:
 
    ```toml
-   suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.4.0" }
+   suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.5.1" }
    ```
 
    ```bash
    cargo update -p suprnova
-   cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v4.4.0 suprnova-cli
+   cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v4.5.1 suprnova-cli
    ```
 
 2. Build. Run `cargo check --all-targets`. The compiler names each type or
@@ -2399,7 +2399,7 @@ in `.ssr(...)`, so the worker was never contacted: every first visit
 rendered on the client and `on_ssr_error` fired, or the visit answered
 `500` under `ssr_throw_on_error(true)`.
 
-**Now:** The client speaks TLS through rustls, as the HTTP client facade
+**Now:** The client connects over TLS through rustls, as the HTTP client facade
 does, and verifies the worker's certificate against the platform's trust
 store. The timeout, the response cap and the refusal of an oversized
 `Content-Length` are unchanged.
@@ -2581,7 +2581,7 @@ built from, and `rev = "<commit hash>"` otherwise.
 tag when you move to a release:
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.4.0" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.5.1" }
 ```
 
 ### Web Push refuses endpoints that resolve to private or local addresses.

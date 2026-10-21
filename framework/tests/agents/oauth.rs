@@ -1140,6 +1140,62 @@ async fn agent_005_decision_needs_the_csrf_token() {
 }
 
 #[tokio::test]
+async fn agent_005_decision_refuses_a_form_tool_submission() {
+    decision_refuses_agent_header("Suprnova-Form-Tool").await;
+}
+
+#[tokio::test]
+async fn agent_005_decision_refuses_a_browser_tool_call() {
+    decision_refuses_agent_header("Suprnova-Tool-Call").await;
+}
+
+/// A valid session and CSRF token cannot let a tool decide for the person.
+async fn decision_refuses_agent_header(header: &str) {
+    let world = world().await;
+    let client = &world.client;
+    let user = new_account("consent-agent-header");
+    let client_id = register(client, LOOPBACK_REDIRECT).await;
+    sign_in(client, &user).await;
+    let (_, challenge) = pkce();
+    let (id, page) = open_approval(
+        client,
+        &client_id,
+        LOOPBACK_REDIRECT,
+        &challenge,
+        "posts:read",
+    )
+    .await;
+    assert_eq!(page.status(), 200, "{}", page.body_text());
+    let refused = client
+        .post(format!("/oauth/authorizations/{id}"))
+        .header(header, "1")
+        .form(&[
+            ("_token", form_token(&page.body_text()).as_str()),
+            ("decision", "approve"),
+        ])
+        .send()
+        .await;
+    assert_eq!(refused.status(), 403, "{header}: {}", refused.body_text());
+    assert_eq!(refused.json()["error"], "invalid_request");
+    assert!(
+        refused.json()["error_description"]
+            .as_str()
+            .unwrap()
+            .contains("person")
+    );
+    assert_eq!(refused.header("cache-control"), Some("no-store"));
+    assert_eq!(refused.header("x-frame-options"), Some("DENY"));
+    let pending = client
+        .get(format!("/oauth/authorizations/{id}"))
+        .send()
+        .await;
+    assert_eq!(pending.status(), 200, "{}", pending.body_text());
+    let decided = decide(client, &id, &page, "approve").await;
+    assert_eq!(decided.status(), 303, "{}", decided.body_text());
+    assert!(query_param(&location(&decided), "code").is_some());
+}
+
+#[tokio::test]
 async fn agent_005_decision_route_checks_csrf_without_global_middleware() {
     // An application that installed no CSRF middleware still gets the
     // check on the decision route.

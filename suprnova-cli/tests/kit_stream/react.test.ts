@@ -1,8 +1,9 @@
-import { act, createElement } from 'react'
+import { act, createElement, Fragment } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, expect, test, vi } from 'vitest'
-import { useEventStream, useJsonEventStream, useJsonStream, useStream } from './src/lib/stream'
+import { csrfHeaders, useEventStream, useJsonEventStream, useJsonStream, useStream } from './src/lib/stream'
 import { FakeEventSource, fakeFetch, settle } from './fakes'
+import { textStream } from './src/lib/stream/core'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -162,4 +163,262 @@ test('useEventStream joins messages, closes at the end signal and on unmount', a
   const next = FakeEventSource.opened.at(-1)!
   second.unmount()
   expect(next.closed).toBe(true)
+})
+
+
+test('CSRF headers prefer the fresh cookie over a stale meta token (#181)', () => {
+  document.head.innerHTML = '<meta name="csrf-token" content="stale-token">'
+  document.cookie = 'XSRF-TOKEN=fresh%2Btoken; path=/'
+  try {
+    expect(csrfHeaders()).toEqual({ 'X-XSRF-TOKEN': 'fresh+token' })
+    expect(csrfHeaders({ csrfToken: 'explicit-token' })).toEqual({
+      'X-CSRF-TOKEN': 'explicit-token',
+    })
+  } finally {
+    document.cookie = 'XSRF-TOKEN=; Max-Age=0; path=/'
+  }
+  expect(csrfHeaders()).toEqual({ 'X-CSRF-TOKEN': 'stale-token' })
+})
+
+test('CSRF headers use the configured cookie and header names (#181)', () => {
+  document.head.innerHTML = '<meta name="csrf-token" content="stale-token">'
+  document.cookie = 'CUSTOM-XSRF=custom%2Ftoken; path=/'
+  try {
+    expect(csrfHeaders({ xsrfCookieName: 'CUSTOM-XSRF', xsrfHeaderName: 'X-CUSTOM-XSRF' }))
+      .toEqual({ 'X-CUSTOM-XSRF': 'custom/token' })
+  } finally {
+    document.cookie = 'CUSTOM-XSRF=; Max-Age=0; path=/'
+  }
+})
+
+
+test('readers mounted together share text and callbacks for one id (#182)', async () => {
+  const server = fakeFetch()
+  vi.stubGlobal('fetch', server.fetch)
+  const onData = [vi.fn(), vi.fn()]
+  const onFinish = [vi.fn(), vi.fn()]
+  const readers: Array<ReturnType<typeof useStream>> = []
+  const Reader = ({ index }: { index: number }) => {
+    readers[index] = useStream('/chat', {
+      id: 'shared-readers', onData: onData[index], onFinish: onFinish[index],
+    })
+    return null
+  }
+  const root = createRoot(document.createElement('div'))
+  act(() => root.render(createElement(Fragment, null,
+    createElement(Reader, { index: 0 }), createElement(Reader, { index: 1 }),
+  )))
+  try {
+    await step(() => void readers[0].send())
+    await step(() => server.requests[0].respond())
+    await step(() => server.requests[0].push('shared'))
+    expect(readers.map((reader) => reader.data)).toEqual(['shared', 'shared'])
+    for (const callback of onData) expect(callback).toHaveBeenCalledWith('shared')
+    await step(() => server.requests[0].end())
+    for (const callback of onFinish) expect(callback).toHaveBeenCalledTimes(1)
+  } finally {
+    act(() => root.unmount())
+  }
+})
+
+test('server acquisition keeps no shared text engine (#182)', () => {
+  vi.stubGlobal('document', undefined)
+  try {
+    expect(textStream('server-reader')).not.toBe(textStream('server-reader'))
+  } finally {
+    vi.unstubAllGlobals()
+  }
+})
+
+test('only the last reader releases and cancels a shared engine (#182)', async () => {
+  const server = fakeFetch()
+  vi.stubGlobal('fetch', server.fetch)
+  const stream = textStream('reader-lifetime')
+  const first = stream.subscribe(() => undefined)
+  const second = stream.subscribe(() => undefined)
+  const done = stream.send('/chat', undefined, {})
+  try {
+    first()
+    expect(textStream(stream.id)).toBe(stream)
+    expect(server.requests[0].aborted()).toBe(false)
+  } finally {
+    second()
+  }
+  await done
+  expect(server.requests[0].aborted()).toBe(true)
+  const next = textStream(stream.id)
+  const release = next.subscribe(() => undefined)
+  try {
+    expect(next).not.toBe(stream)
+  } finally {
+    release()
+  }
+})
+
+
+test('EventSource stays open after an error and receives later messages (#183)', async () => {
+  vi.stubGlobal('EventSource', FakeEventSource)
+  const onError = vi.fn()
+  const onComplete = vi.fn()
+  const { result, unmount } = probe(() => useEventStream('/progress', { onError, onComplete }))
+  const source = FakeEventSource.opened.at(-1)!
+  const error = new Event('error')
+  try {
+    await step(() => source.dispatchEvent(error))
+    expect(onError).toHaveBeenCalledWith(error)
+    expect(source.closed).toBe(false)
+    expect(onComplete).not.toHaveBeenCalled()
+    await step(() => source.emit('update', 'reconnected'))
+    expect(result.current.message).toBe('reconnected')
+    await step(() => source.emit('update', '</stream>'))
+    expect(source.closed).toBe(true)
+    expect(onComplete).toHaveBeenCalledTimes(1)
+    await step(() => source.emit('update', 'after-end'))
+    expect(result.current.message).toBe('reconnected')
+  } finally {
+    await unmount()
+  }
+
+  const second = probe(() => useEventStream('/progress'))
+  const next = FakeEventSource.opened.at(-1)!
+  await step(() => next.dispatchEvent(new Event('error')))
+  await second.unmount()
+  expect(next.closed).toBe(true)
+})
+
+test('EventSource caller cancellation still closes the source (#183)', async () => {
+  vi.stubGlobal('EventSource', FakeEventSource)
+  const { result, unmount } = probe(() => useEventStream('/progress'))
+  const source = FakeEventSource.opened.at(-1)!
+  await step(() => result.current.close())
+  expect(source.closed).toBe(true)
+  await unmount()
+})
+
+
+test('cancelling from onResponse leaves both flags clear (#184)', async () => {
+  const server = fakeFetch()
+  vi.stubGlobal('fetch', server.fetch)
+  const onCancel = vi.fn()
+  const onFinish = vi.fn()
+  const { result, unmount } = probe(() => useStream('/chat', {
+    onResponse: () => result.current.cancel(), onCancel, onFinish,
+  }))
+  try {
+    await step(() => void result.current.send())
+    await step(() => server.requests[0].respond())
+    expect(result.current.isFetching).toBe(false)
+    expect(result.current.isStreaming).toBe(false)
+    expect(server.requests[0].aborted()).toBe(true)
+    await step(() => result.current.cancel())
+    expect(onCancel).toHaveBeenCalledTimes(1)
+    expect(onFinish).not.toHaveBeenCalled()
+  } finally {
+    await unmount()
+  }
+})
+
+
+test.each(['onResponse', 'onData', 'onError', 'onBeforeSend'] as const)(
+  'cancelling from %s cannot publish stale state or keep a controller (#184)',
+  async (callback) => {
+    const server = fakeFetch()
+    vi.stubGlobal('fetch', server.fetch)
+    const stream = textStream(`cancel-${callback}`)
+    const release = stream.subscribe(() => undefined)
+    const onFinish = vi.fn()
+    const cancel = vi.fn(() => stream.cancel())
+    const stop = stream.listen({ [callback]: cancel, onFinish })
+    try {
+      const done = stream.send('/chat', undefined, { json: callback === 'onError' })
+      if (callback !== 'onBeforeSend') {
+        server.requests[0].respond()
+        await settle()
+        if (callback !== 'onResponse') {
+          server.requests[0].push('invalid-json')
+          server.requests[0].end()
+        }
+      }
+      if (callback === 'onBeforeSend') {
+        expect(server.requests).toHaveLength(0)
+      } else {
+        await done
+      }
+      expect(cancel).toHaveBeenCalledTimes(1)
+      expect(stream.snapshot()).toEqual({
+        data: callback === 'onError' ? 'invalid-json' : '',
+        jsonData: null, isFetching: false, isStreaming: false,
+      })
+      expect(stream).toHaveProperty('controller', null)
+      expect(onFinish).not.toHaveBeenCalled()
+      if (callback === 'onBeforeSend') expect(server.requests).toHaveLength(0)
+    } finally {
+      stop()
+      release()
+    }
+  },
+)
+
+test.each(['onResponse', 'onData', 'onError', 'onBeforeSend'] as const)(
+  'a replacement sent from %s keeps its state and controller (#184)',
+  async (callback) => {
+    const server = fakeFetch()
+    vi.stubGlobal('fetch', server.fetch)
+    const stream = textStream(`replace-${callback}`)
+    const release = stream.subscribe(() => undefined)
+    const onFinish = vi.fn()
+    const replace = vi.fn(() => { void stream.send('/replacement', undefined, {}) })
+    const stop = stream.listen({ [callback]: replace.mockImplementationOnce(() => {
+      stop()
+      void stream.send('/replacement', undefined, {})
+    }), onFinish })
+    try {
+      const done = stream.send('/chat', undefined, { json: callback === 'onError' })
+      if (callback !== 'onBeforeSend') {
+        server.requests[0].respond()
+        await settle()
+        if (callback !== 'onResponse') {
+          server.requests[0].push('invalid-json')
+          server.requests[0].end()
+        }
+      }
+      if (callback === 'onBeforeSend') {
+        expect(server.requests).toHaveLength(1)
+      } else {
+        await done
+      }
+      expect(replace).toHaveBeenCalledTimes(1)
+      expect(stream.snapshot()).toEqual({
+        data: '', jsonData: null, isFetching: true, isStreaming: false,
+      })
+      const request = server.requests.at(-1)!
+      expect(request.url).toBe('/replacement')
+      expect(request.aborted()).toBe(false)
+      stream.cancel()
+      expect(request.aborted()).toBe(true)
+      expect(stream).toHaveProperty('controller', null)
+      expect(onFinish).not.toHaveBeenCalled()
+    } finally {
+      stop()
+      release()
+    }
+  },
+)
+
+
+test('onBeforeSend refusal releases the request without fetching (#184)', async () => {
+  const server = fakeFetch()
+  vi.stubGlobal('fetch', server.fetch)
+  const stream = textStream('refused-request')
+  const release = stream.subscribe(() => undefined)
+  const stop = stream.listen({ onBeforeSend: () => false })
+  try {
+    await stream.send('/chat', undefined, {})
+    expect(server.requests).toHaveLength(0)
+    expect(stream).toHaveProperty('controller', null)
+    expect(stream.snapshot()).toMatchObject({ isFetching: false, isStreaming: false })
+  } finally {
+    stop()
+    release()
+  }
 })

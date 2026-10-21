@@ -429,7 +429,6 @@ pub async fn later() -> Response {
 #[derive(Clone, Debug)]
 pub struct ApiUser {
     pub id: String,
-    pub name: String,
 }
 
 impl Authenticatable for ApiUser {
@@ -451,11 +450,13 @@ impl Authenticatable for ApiUser {
     guard = "api",
 )]
 #[handler]
+/// Read both users so tests detect sign-in through the wrong guard.
 pub async fn api_profile() -> Response {
-    let user = suprnova::Auth::user_as_arc::<ApiUser>().await?;
+    let user = suprnova::Auth::user_as_arc::<TestUser>().await?;
+    let api_user = suprnova::Auth::guard("api")?.id().await?;
     json_response!({
         "user": user.as_ref().map(|user| user.id.clone()),
-        "name": user.as_ref().map(|user| user.name.clone()),
+        "api_user": api_user,
     })
 }
 

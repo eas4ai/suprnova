@@ -24,6 +24,19 @@ pub struct ModelEntry {
 
 inventory::collect!(ModelEntry);
 
+/// Read stored columns through generated accessors so persistence bridges do not
+/// depend on public serialization. A mismatched type returns an error rather
+/// than panicking, and an absent column remains distinguishable from SQL null.
+#[doc(hidden)]
+pub struct ModelAttributeReader {
+    /// Match the concrete model before invoking its typed accessor.
+    pub type_id: fn() -> std::any::TypeId,
+    /// Return the stored column before hidden, rename or presentation rules apply.
+    pub read: fn(&dyn std::any::Any, &str) -> Result<Option<serde_json::Value>, FrameworkError>,
+}
+
+inventory::collect!(ModelAttributeReader);
+
 /// Iterator over every registered model in the binary. Order is
 /// link-time; do not depend on it.
 pub fn models() -> impl Iterator<Item = &'static ModelEntry> {

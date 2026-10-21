@@ -24,7 +24,7 @@ add the `database-mongodb` feature to the `suprnova` dependency:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.4.0", features = ["database-mongodb"] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.5.1", features = ["database-mongodb"] }
 ```
 
 The feature brings the `mongodb` driver and the `bson` crate. You don't add
@@ -1143,7 +1143,7 @@ holds the session in the same step.
   no fallback: an unset `MONGODB_URI` is an error that names it, so an
   application never writes to a server it wasn't pointed at.
 - **A facade of its own.** Laravel reaches MongoDB through
-  `DB::connection('mongodb')`. Suprnova's `DB` facade speaks SQL, so
+  `DB::connection('mongodb')`. Suprnova's `DB` facade is SQL only, so
   MongoDB has the `Mongo` facade, and its default connection keeps
   Laravel's name, `mongodb`.
 - **Configuration in code.** Laravel lists connections and driver options

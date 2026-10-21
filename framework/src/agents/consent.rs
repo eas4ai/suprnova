@@ -240,7 +240,7 @@ impl AgentApprovals {
 /// consent page sends the page's own form with the user's session. Consent
 /// comes from the person, so both halves refuse here, before anything is
 /// read, whatever the route.
-fn refuse_agents(request: &Request) -> Result<(), FrameworkError> {
+pub(crate) fn refuse_agents(request: &Request) -> Result<(), FrameworkError> {
     if request.is_agent_traffic()
         || request.header(super::TOOL_CALL_HEADER).is_some()
         || request.header(super::FORM_TOOL_HEADER).is_some()

@@ -50,3 +50,13 @@ mod common;
 
 #[cfg(feature = "search-media")]
 mod media;
+
+#[cfg(feature = "testing")]
+mod provider_identity;
+
+#[cfg(feature = "testing")]
+mod boot;
+
+// Exercise the private probe cache here so fake-server regressions share the search gate.
+#[path = "../../src/search/engine/database/connection_cache.rs"]
+mod database_connection_cache;

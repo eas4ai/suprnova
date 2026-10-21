@@ -14,6 +14,8 @@ use super::{
 
 const MAX_FIELDS: usize = 512;
 const MAX_ACTIONS: usize = 256;
+// Mirrors MAX_AGENT_TOOLS in browser/src/islands/metadata.ts so metadata cannot disable an island.
+const MAX_BROWSER_TOOLS: usize = 64;
 const MAX_EVENTS: usize = 256;
 const MAX_EFFECTS: usize = 256;
 
@@ -82,6 +84,7 @@ impl ComponentMetadata {
     }
 
     /// Creates complete metadata including event and stream-subscription contracts.
+    /// Rejects more than 64 browser tools because the browser would invalidate the island.
     #[allow(
         clippy::too_many_arguments,
         reason = "the macro supplies one closed contract tuple"
@@ -105,6 +108,15 @@ impl ComponentMetadata {
         }
         if actions.len() > MAX_ACTIONS {
             return Err(MetadataError::new(MetadataErrorKind::TooManyActions));
+        }
+        if actions
+            .iter()
+            .filter_map(ActionMetadata::tool)
+            .filter(|tool| tool.browser())
+            .count()
+            > MAX_BROWSER_TOOLS
+        {
+            return Err(MetadataError::new(MetadataErrorKind::TooManyBrowserTools));
         }
         if events.len() > MAX_EVENTS {
             return Err(MetadataError::new(MetadataErrorKind::TooManyEvents));
@@ -317,5 +329,68 @@ impl ComponentMetadata {
     #[must_use]
     pub fn has_browser_tools(&self) -> bool {
         self.tools().any(|(_, tool)| tool.browser())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::ActionName;
+    use crate::metadata::ActionToolMetadata;
+
+    fn metadata_with_actions(
+        action_count: usize,
+        browser_tools: usize,
+        headless_tools: usize,
+    ) -> Result<ComponentMetadata, MetadataError> {
+        let actions = (0..action_count)
+            .map(|index| {
+                let name = format!("action_{index}");
+                let action =
+                    ActionMetadata::new(ActionName::parse(&name).expect("action name"), 1)?;
+                if index < browser_tools + headless_tools {
+                    action.with_tool(
+                        ActionToolMetadata::new(&name, "A test tool.")?
+                            .for_browser(index < browser_tools)
+                            .headless(true),
+                    )
+                } else {
+                    Ok(action)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        ComponentMetadata::new(
+            ComponentName::parse("tests.tools").expect("component name"),
+            ViewName::parse("live/tests/tools.html").expect("view name"),
+            ContractVersions::new(1, 1, 1, 1, 1)?,
+            Vec::new(),
+            actions,
+        )
+    }
+
+    #[test]
+    fn too_many_actions_are_refused() {
+        let error = metadata_with_actions(257, 0, 0).expect_err("257 actions exceed the limit");
+        assert_eq!(error.kind(), MetadataErrorKind::TooManyActions);
+        assert_eq!(error.to_string(), "too_many_component_actions");
+    }
+
+    #[test]
+    fn too_many_browser_tools_are_refused() {
+        let error =
+            metadata_with_actions(65, 65, 0).expect_err("65 browser tools exceed the limit");
+        assert_eq!(error.kind(), MetadataErrorKind::TooManyBrowserTools);
+        assert_eq!(error.to_string(), "too_many_browser_tools");
+    }
+
+    #[test]
+    fn browser_tool_limit_leaves_room_for_headless_tools_and_plain_actions() {
+        let metadata = metadata_with_actions(256, 64, 65).expect("64 browser tools fit");
+        assert_eq!(
+            metadata.tools().filter(|(_, tool)| tool.browser()).count(),
+            64
+        );
+        assert_eq!(metadata.tools().count(), 129);
+        assert_eq!(metadata.actions().len(), 256);
     }
 }

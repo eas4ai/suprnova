@@ -1444,6 +1444,88 @@ impl SearchEngine for QdrantSearchEngine {
     ) -> Result<Option<GenerationId>, FrameworkError> {
         storage::current(index).await
     }
+    /// The fence is committed before sweeping so delayed writes cannot resurrect absent keys.
+    async fn record_flush(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        cutoff: i64,
+    ) -> Result<(), FrameworkError> {
+        crate::search::render_cache::coordinated_write(
+            index.name,
+            Box::pin(async {
+                let _lock = self.mutations.lock().await;
+                collection_name(index, generation)?;
+                storage::record_flush(index.name, generation, cutoff).await
+            }),
+        )
+        .await
+    }
+    /// Scroll only version candidates so newer ranked documents cannot stall a sweep.
+    /// Qdrant range bounds are floats, so widen the bound and check payload integers
+    /// exactly to preserve the cutoff even beyond the exact integer range of f64.
+    async fn keys_before_version(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+        cutoff: i64,
+        limit: usize,
+    ) -> Result<Vec<(String, i64)>, FrameworkError> {
+        let collection = collection_name(index, generation)?;
+        storage::settings(index.name, generation).await?;
+        let mut keys = Vec::new();
+        if limit == 0 {
+            return Ok(keys);
+        }
+        let filter = QFilter::must([Condition::range(
+            "__source_version",
+            qb::Range {
+                lte: Some((cutoff as f64).next_up()),
+                ..Default::default()
+            },
+        )]);
+        let mut offset = None;
+        loop {
+            let page = self
+                .scroll_page(
+                    &collection,
+                    filter.clone(),
+                    offset,
+                    Some(vec!["__key".into(), "__source_version".into()]),
+                )
+                .await?;
+            for point in page.result {
+                let data: Value = Payload::from(point.payload).into();
+                let version = data["__source_version"]
+                    .as_i64()
+                    .ok_or_else(|| error(&collection, "stored source version missing"))?;
+                if version <= cutoff {
+                    let key = data["__key"]
+                        .as_str()
+                        .ok_or_else(|| error(&collection, "stored key missing"))?;
+                    keys.push((key.to_owned(), version));
+                    if keys.len() == limit {
+                        return Ok(keys);
+                    }
+                }
+            }
+            match page.next_page_offset {
+                Some(next) => offset = Some(next),
+                None => return Ok(keys),
+            }
+        }
+    }
+    /// Retire the shared read pointer before direct callers reclaim generation storage.
+    async fn retire_index(&self, index: &str) -> Result<(), FrameworkError> {
+        crate::search::render_cache::coordinated_write(
+            index,
+            Box::pin(async {
+                let _lock = self.mutations.lock().await;
+                storage::retire_index(index).await
+            }),
+        )
+        .await
+    }
     async fn create_generation(
         &self,
         index: &IndexDescriptor,
@@ -1529,7 +1611,7 @@ impl SearchEngine for QdrantSearchEngine {
             Box::pin(async {
                 let _lock = self.mutations.lock().await;
                 let collection = collection_name(index, generation)?;
-                let txn = storage::locked(index.name, generation).await?;
+                let txn = storage::locked_for_drop(index.name, generation).await?;
                 if storage::current_locked(&txn, index.name).await?.as_ref() == Some(generation) {
                     return Err(error(&collection, "cannot drop the current generation"));
                 }
@@ -1576,48 +1658,99 @@ impl SearchEngine for QdrantSearchEngine {
         self.check_schema(index, generation, &settings).await?;
         Ok(settings)
     }
+    /// The coordinator skips matching documents, so the lookup must retain their
+    /// newest version under the same fences as writes and removals.
     async fn stored_hashes(
         &self,
         index: &IndexDescriptor,
         generation: &GenerationId,
         documents: &[IndexedDocument],
     ) -> Result<BTreeMap<String, String>, FrameworkError> {
-        let collection = collection_name(index, generation)?;
-        storage::settings(index.name, generation).await?;
-        let mut hashes = BTreeMap::new();
-        for batch in documents.chunks(256) {
-            let points = self
-                .client
-                .get_points(
-                    qb::GetPointsBuilder::new(
-                        &collection,
-                        batch
+        crate::search::render_cache::coordinated_write(
+            index.name,
+            Box::pin(async {
+                let _lock = self.mutations.lock().await;
+                let collection = collection_name(index, generation)?;
+                storage::settings(index.name, generation).await?;
+                let txn = storage::locked(index.name, generation).await?;
+                let flush = storage::flush_on(&txn, index.name, generation).await?;
+                let mut hashes = BTreeMap::new();
+                for batch in documents.chunks(256) {
+                    let batch = batch
+                        .iter()
+                        .filter(|doc| {
+                            flush.is_none_or(|cutoff| doc.document.source_version > cutoff)
+                        })
+                        .collect::<Vec<_>>();
+                    if batch.is_empty() {
+                        continue;
+                    }
+                    let points = self
+                        .client
+                        .get_points(
+                            qb::GetPointsBuilder::new(
+                                &collection,
+                                batch
+                                    .iter()
+                                    .map(|d| QdrantVectorDriver::resolve_point_id(&d.document.key))
+                                    .collect::<Vec<_>>(),
+                            )
+                            .with_payload(
+                                qb::with_payload_selector::SelectorOptions::Include(
+                                    qb::PayloadIncludeSelector {
+                                        fields: vec![
+                                            "__key".into(),
+                                            "__content_hash".into(),
+                                            "__source_version".into(),
+                                        ],
+                                    },
+                                ),
+                            ),
+                        )
+                        .await
+                        .map_err(|e| error(&collection, e))?;
+                    for point in points.result {
+                        let data: Value = Payload::from(point.payload).into();
+                        let key = data["__key"]
+                            .as_str()
+                            .ok_or_else(|| error(&collection, "stored key missing"))?;
+                        let hash = data["__content_hash"]
+                            .as_str()
+                            .ok_or_else(|| error(&collection, "stored content hash missing"))?;
+                        let version = data["__source_version"]
+                            .as_i64()
+                            .ok_or_else(|| error(&collection, "stored source version missing"))?;
+                        hashes.insert(key.to_owned(), hash.to_owned());
+                        let proposed_version = batch
                             .iter()
-                            .map(|d| QdrantVectorDriver::resolve_point_id(&d.document.key))
-                            .collect::<Vec<_>>(),
-                    )
-                    .with_payload(
-                        qb::with_payload_selector::SelectorOptions::Include(
-                            qb::PayloadIncludeSelector {
-                                fields: vec!["__key".into(), "__content_hash".into()],
-                            },
-                        ),
-                    ),
-                )
-                .await
-                .map_err(|e| error(&collection, e))?;
-            for point in points.result {
-                let data: Value = Payload::from(point.payload).into();
-                let key = data["__key"]
-                    .as_str()
-                    .ok_or_else(|| error(&collection, "stored key missing"))?;
-                let hash = data["__content_hash"]
-                    .as_str()
-                    .ok_or_else(|| error(&collection, "stored content hash missing"))?;
-                hashes.insert(key.to_owned(), hash.to_owned());
-            }
-        }
-        Ok(hashes)
+                            .filter(|doc| doc.document.key == key && doc.content_hash == hash)
+                            .map(|doc| doc.document.source_version)
+                            .max()
+                            .unwrap_or(version);
+                        if proposed_version <= version {
+                            continue;
+                        }
+                        self.client
+                            .set_payload(
+                                qb::SetPayloadPointsBuilder::new(
+                                    &collection,
+                                    Payload::try_from(
+                                        json!({"__source_version": proposed_version}),
+                                    )
+                                    .map_err(|e| error(&collection, e))?,
+                                )
+                                .points_selector(vec![QdrantVectorDriver::resolve_point_id(key)])
+                                .wait(true),
+                            )
+                            .await
+                            .map_err(|e| error(&collection, e))?;
+                    }
+                }
+                storage::commit_write(txn, index.name).await?;
+                Ok(hashes)
+            }),
+        )
+        .await
     }
     async fn index(
         &self,
@@ -1672,8 +1805,13 @@ impl SearchEngine for QdrantSearchEngine {
                     }
                 }
                 let txn = storage::locked(index.name, generation).await?;
+                let flush = storage::flush_on(&txn, index.name, generation).await?;
                 let mut outcome = WriteOutcome::default();
                 for doc in docs {
+                    if flush.is_some_and(|cutoff| doc.document.source_version <= cutoff) {
+                        outcome.skipped_tombstoned += 1;
+                        continue;
+                    }
                     let key = &doc.document.key;
                     if storage::tombstone_on(&txn, index.name, generation, key)
                         .await?
@@ -2129,16 +2267,13 @@ impl SearchEngine for QdrantSearchEngine {
                 total: Total::Estimated(0),
             }));
         }
-        let mut scope = QFilter::must(match &q.filter {
-            Some(filter) => Some(self.bound_predicate(&collection, filter).await?),
-            None => None,
-        });
-        scope.must_not.extend(
-            q.expanded
-                .negatives
-                .iter()
-                .map(|word| Condition::matches_text("__text", word.clone())),
-        );
+        // Dense candidates keep the lexical phrase and exclusion rules, but do
+        // not require the unquoted words that only guide lexical ranking.
+        let mut semantic = q.clone();
+        semantic.expanded.terms.clear();
+        let scope = self
+            .query_filter(index, &settings, &semantic, &collection)
+            .await?;
         if ratio == 1.0 {
             let candidates = self
                 .query_points(

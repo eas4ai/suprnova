@@ -84,6 +84,18 @@ pub(crate) fn collaborative(
             .filter(|target| peer_history.positive.contains_key(*target))
             .cloned()
             .collect();
+        let shared_events: BTreeSet<_> = shared
+            .iter()
+            .flat_map(|target| {
+                [
+                    history.positive.get(target),
+                    peer_history.positive.get(target),
+                ]
+                .into_iter()
+                .flatten()
+            })
+            .flat_map(|positive| positive.event_ids.iter().copied())
+            .collect();
         for (target, positive) in eligible {
             let candidate = candidates.entry(target.clone()).or_insert_with(|| Ranked {
                 target: target.clone(),
@@ -96,12 +108,8 @@ pub(crate) fn collaborative(
             candidate.score = candidate.score.saturating_add(positive.score);
             candidate.reason.peers += 1;
             candidate.reason.shared.extend(shared.iter().cloned());
-            candidate.reason.event_ids.insert(positive.event_id);
-            for target in &shared {
-                if let Some(own) = history.positive.get(target) {
-                    candidate.reason.event_ids.insert(own.event_id);
-                }
-            }
+            candidate.reason.event_ids.extend(&positive.event_ids);
+            candidate.reason.event_ids.extend(&shared_events);
         }
     }
     // A candidate fewer peers agree on would let its peer count point at one person;
@@ -133,7 +141,7 @@ pub(crate) fn fill(
                 let signal = signals.entry((attribute.clone(), value)).or_default();
                 signal.score = signal.score.saturating_add(positive.score);
                 signal.targets.insert(target.clone());
-                signal.events.insert(positive.event_id);
+                signal.events.extend(&positive.event_ids);
             }
         }
     }

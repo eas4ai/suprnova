@@ -233,18 +233,41 @@ impl DatabaseUserProvider {
     /// database trigger can abandon the statement without an error (SQLite's
     /// `RAISE(IGNORE)`), and the sign-in must not proceed on a hash that was
     /// never stored (PAR-132).
-    async fn write_password(&self, id: &str, hashed: &str) -> Result<(), FrameworkError> {
+    async fn write_password(
+        &self,
+        id: &str,
+        previous: &str,
+        hashed: &str,
+    ) -> Result<(), FrameworkError> {
         let mut attrs = crate::eloquent::attrs::Attrs::new();
         attrs.insert(self.password_column.clone(), hashed.to_owned());
-        let changed = DB::table(&self.table)
-            .filter(self.identifier_column.clone(), self.id_value(id).await?)
-            .update(attrs)
-            .await?;
+        let backend = crate::database::transaction::ExecutorChoice::resolve_write(None, None, None)
+            .await?
+            .backend();
+        let query =
+            DB::table(&self.table).filter(self.identifier_column.clone(), self.id_value(id).await?);
+        let column = crate::database::clauses::quote_identifier(backend, &self.password_column);
+        // An epoch follows the hash bytes, even when the column's collation
+        // equates different hashes. The conditional write must do so too.
+        let query = match backend {
+            sea_orm::DbBackend::MySql => query.where_binary(&self.password_column, previous),
+            sea_orm::DbBackend::Sqlite => query.where_raw(
+                format!("CAST({column} AS BLOB) = CAST(? AS BLOB)"),
+                vec![previous.into()],
+            ),
+            sea_orm::DbBackend::Postgres => query.where_raw(
+                format!("convert_to({column}, 'UTF8') = convert_to(?, 'UTF8')"),
+                vec![previous.into()],
+            ),
+            _ => {
+                return Err(FrameworkError::internal(
+                    "the database backend does not support byte-exact password rewrites",
+                ));
+            }
+        };
+        let changed = query.update(attrs).await?;
         if changed == 0 {
-            return Err(FrameworkError::internal(format!(
-                "the password rewrite for user {id} changed no row in {}",
-                self.table
-            )));
+            return Err(crate::magnetar_integration::expired_host_sign_in());
         }
         Ok(())
     }
@@ -338,36 +361,46 @@ impl UserProvider for DatabaseUserProvider {
         user: &dyn Authenticatable,
         credentials: &Value,
     ) -> Result<(), FrameworkError> {
+        self.rehash_password_for_sign_in(user, credentials, super::epoch::credential_epoch(user))
+            .await?;
+        Ok(())
+    }
+
+    async fn rehash_password_for_sign_in(
+        &self,
+        user: &dyn Authenticatable,
+        credentials: &Value,
+        recorded_epoch: Option<u64>,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
         let password = credentials.get("password").and_then(|v| v.as_str());
         let (Some(plaintext), Some(hash)) = (password, user.get_auth_password()) else {
-            return Ok(());
+            return Ok(None);
         };
-        // While the application shares its database with Laravel, a sign-in
-        // rewrites a hash Laravel's hasher would refuse (`$2b$`, Argon2id) as
-        // the `$2y$` one it accepts, in the configured password column, as
-        // the model provider does. If the rewrite cannot be minted or stored,
-        // the sign-in fails with that error, as it does there: Laravel could
-        // not sign this user in (LDB-004). The stored hash is left as it was,
-        // and the next sign-in tries again.
         if !(crate::LaravelDatabase::is_shared() && hashing::needs_rehash(hash)) {
-            return Ok(());
+            return Ok(None);
         }
-        let rewritten = match hashing::rehash_for_laravel_async(plaintext, hash).await {
-            Ok(rehashed) => {
-                self.write_password(&user.get_auth_identifier(), &rehashed)
-                    .await
-            }
-            Err(error) => Err(error),
-        };
-        if let Err(error) = rewritten {
-            tracing::warn!(
-                error = %error,
-                "the password hash could not be rewritten for Laravel after a \
-                 valid password; the sign-in fails"
-            );
-            return Err(error);
+        if recorded_epoch.is_some() && super::epoch::credential_epoch(user) != recorded_epoch {
+            return Err(crate::magnetar_integration::expired_host_sign_in());
         }
-        Ok(())
+        let rehashed = hashing::rehash_for_laravel_async(plaintext, hash).await?;
+        let id = user.get_auth_identifier();
+        // GenericUser's epoch is derived from its hash. Replace only that
+        // exact hash, and return our write rather than rereading after it.
+        self.write_password(&id, hash, &rehashed).await?;
+        let mut attributes = user
+            .as_any()
+            .downcast_ref::<GenericUser>()
+            .map(|user| user.attributes().clone())
+            .unwrap_or_default();
+        attributes.insert(
+            self.password_column.clone(),
+            Value::String(rehashed.clone()),
+        );
+        Ok(Some(Arc::new(GenericUser::new(
+            id,
+            Some(rehashed),
+            attributes,
+        ))))
     }
 }
 

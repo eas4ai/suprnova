@@ -1,7 +1,7 @@
 # Error Reporting
 
 Suprnova reports unhandled errors through `Reporter`. The built-in `sentry`
-driver speaks the Sentry envelope protocol, so one DSN reaches Rustrak,
+driver sends Sentry envelopes, so one DSN reaches Rustrak,
 Sentry or GlitchTip. No listener or vendor SDK setup is needed in your app.
 Without a DSN, the driver sends nothing.
 

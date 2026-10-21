@@ -154,8 +154,10 @@ unchanged.
 
 `ContentSecurityPolicy::with_source(directive, source)` does the same to one
 policy value. Both return an error for a directive that takes no sources,
-such as `sandbox`, and for anything but one source expression: an empty
-value, two sources in one call, `'none'`, or a fixed nonce. Call
+such as `sandbox`, and for a source that is not one expression: an empty
+value, whitespace, a `;` or `,`, two sources in one call, `'none'`, or a nonce
+other than `'nonce-{nonce}'`. They do not check the expression's grammar
+beyond that. Call
 `.csp_source` after `.content_security_policy(...)` or a `header(...)` call
 that sets a policy, since those replace the policy and its added sources.
 

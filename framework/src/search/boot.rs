@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 static BOOT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Construct the chosen provider once, preserving a provider installed by application bootstrap.
+/// Construct the chosen provider once, preserving an explicit registration.
+/// Run before application hooks so first-generation creation can resolve the provider.
+/// Invalid configuration returns an error before application code uses a missing provider.
 /// With no embedder, the core's lexical-only behavior remains authoritative.
 pub async fn boot() -> Result<(), FrameworkError> {
     let config = SearchConfig::current()?;

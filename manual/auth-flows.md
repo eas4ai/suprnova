@@ -1420,7 +1420,25 @@ Laravel accepts while the shared-database setting is on (see
 be minted or stored fails the sign-in with that error and leaves the stored
 hash as it was; the next sign-in tries again.
 
-A custom provider upgrades hashes on sign-in by implementing the method:
+The session guard's `attempt` binds the sign-in to the password it verified:
+it reads the user's credential epoch from the snapshot whose hash it checked,
+and it refuses the sign-in when the stored epoch moved before the session was
+issued, so a password reset that commits during a sign-in cancels that
+sign-in. A rehash changes a hash-derived epoch, so `attempt` rehashes through
+`UserProvider::rehash_password_for_sign_in(user, credentials, recorded_epoch)`
+instead of the method above. An implementation checks that the stored epoch
+and the old hash are still the ones it verified, writes the new hash in that
+same atomic step, and returns the snapshot it wrote (never a fresh read, which
+could carry a concurrent reset); it returns an error when the epoch moved,
+which fails the sign-in. The default calls `rehash_password_if_required` only
+for a user without a credential epoch and otherwise does nothing, because an
+unconditional rewrite could undo a reset. A user with a password hash has an
+epoch, so a custom provider that upgrades hashes on sign-in implements
+`rehash_password_for_sign_in` for `attempt`; `once` and
+`Auth::logout_other_devices` still call `rehash_password_if_required`.
+
+A custom provider upgrades hashes on sign-in by implementing both methods. The
+conditional store returns the record it wrote:
 
 ```rust
 use std::sync::Arc;
@@ -1452,6 +1470,33 @@ impl UserProvider for LegacyUsers {
         }
         Ok(())
     }
+
+    async fn rehash_password_for_sign_in(
+        &self,
+        user: &dyn Authenticatable,
+        credentials: &Value,
+        recorded_epoch: Option<u64>,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        let password = credentials.get("password").and_then(|v| v.as_str());
+        let (Some(plaintext), Some(stored)) = (password, user.get_auth_password()) else {
+            return Ok(None);
+        };
+        if !hashing::needs_rehash(stored) {
+            return Ok(None);
+        }
+        let fresh = hashing::hash_async(plaintext).await?;
+        // One statement replaces the hash only while the row still holds the
+        // verified hash at the verified epoch, and returns the row it wrote.
+        let written = legacy::replace_hash_if_unchanged(
+            &user.get_auth_identifier(),
+            stored,
+            recorded_epoch,
+            &fresh,
+        )
+        .await?
+        .ok_or(FrameworkError::Unauthorized)?;
+        Ok(Some(Arc::new(written)))
+    }
 }
 ```
 
@@ -1462,7 +1507,9 @@ unless `hashing.rehash_on_login` is off. The built-in Suprnova providers
 rewrite only while the shared-database setting is on, because their rewrite
 exists to keep a hash a Laravel application on the same database can verify.
 Outside that setting they leave the hash as it is; implement
-`rehash_password_if_required` on your provider to upgrade hashes on sign-in.
+`rehash_password_for_sign_in` (for `attempt`) and `rehash_password_if_required`
+(for `once` and `logout_other_devices`) on your provider to upgrade hashes on
+sign-in.
 
 ## Remember-me
 

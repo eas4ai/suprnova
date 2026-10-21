@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::agents::consent::{
-    AgentClaims, ClaimConfirmation, ClaimLookup, ClaimRefusal, PendingClaim,
+    AgentClaims, ClaimConfirmation, ClaimLookup, ClaimRefusal, PendingClaim, refuse_agents,
 };
 use crate::agents::page::{Html, csrf_token, guard_errors, guarded, notice, sign_in_redirect};
 use crate::csrf::CsrfMiddleware;
@@ -53,6 +53,16 @@ pub(super) fn mount_claim(router: Router, page: Arc<ClaimPage>) -> Result<Router
             let page = Arc::clone(&page);
             async move { guard_errors(confirm(page, request).await) }
         })?
+        // Consent answers before the generic no-tool check, which would
+        // otherwise turn a browser tool header into a 400 before confirm.
+        .middleware_boxed(Arc::new(|request, next| {
+            Box::pin(async move {
+                if let Err(error) = refuse_agents(&request) {
+                    return guard_errors(Err(error.into()));
+                }
+                next(request).await
+            })
+        }))
         .middleware(CsrfMiddleware::new().without_xsrf_cookie())
         .into())
 }
@@ -96,7 +106,10 @@ async fn claim(page: Arc<ClaimPage>, request: Request) -> Response {
 }
 
 /// The form's action: confirm the claim with the code the user typed.
+/// Agents are refused before reading the form because only the person can
+/// consent to an agent acting for them.
 async fn confirm(page: Arc<ClaimPage>, request: Request) -> Response {
+    refuse_agents(&request)?;
     let claims = AgentClaims::new(Arc::clone(&page.engine), request.ip());
     let bytes = match request.body_bytes_with_cap(MAX_FORM_BYTES).await {
         Ok((_, bytes)) => bytes,

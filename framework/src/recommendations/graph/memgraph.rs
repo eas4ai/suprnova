@@ -339,6 +339,13 @@ impl GraphStore for MemgraphGraphStore {
                 *version,
                 vec![],
             ),
+            Revocation::DocumentRelationsBefore(target, version) => (
+                "relations_before",
+                document_node_key(target),
+                format!("{}\n{}", target.index, target.key),
+                *version,
+                vec![],
+            ),
             Revocation::Events(ids) => ("events", String::new(), String::new(), 0, ids.clone()),
         };
         let bind = |q: Query| {
@@ -346,6 +353,7 @@ impl GraphStore for MemgraphGraphStore {
                 .param("mode", mode)
                 .param("document_mode", "document")
                 .param("before_mode", "before")
+                .param("relations_before_mode", "relations_before")
                 .param("events_mode", "events")
                 .param("key", key.clone())
                 .param("source", source.clone())
@@ -354,12 +362,12 @@ impl GraphStore for MemgraphGraphStore {
         };
         let mut txn = bounded(self.graph.start_txn()).await?;
         // Select nodes first so every edge removed by DETACH is included in the count.
-        let nodes = rows(&mut txn, bind(query("MATCH (n:SuprnovaGraphNode {generation: $generation}) WHERE n.scope_json IS NOT NULL AND (($mode = $document_mode AND (n.key = $key OR n.provenance_source = $source)) OR ($mode = $before_mode AND ((n.key = $key AND n.source_version < $version) OR (n.provenance_source = $source AND n.provenance_version < $version))) OR ($mode = $events_mode AND n.provenance_event IN $events)) RETURN n.key AS key"))).await?;
+        let nodes = rows(&mut txn, bind(query("MATCH (n:SuprnovaGraphNode {generation: $generation}) WHERE n.scope_json IS NOT NULL AND (($mode = $document_mode AND (n.key = $key OR n.provenance_source = $source)) OR ($mode = $before_mode AND ((n.key = $key AND n.source_version < $version) OR (n.provenance_source = $source AND n.provenance_version < $version))) OR ($mode = $relations_before_mode AND n.key <> $key AND n.provenance_source = $source AND n.provenance_version < $version) OR ($mode = $events_mode AND n.provenance_event IN $events)) RETURN n.key AS key"))).await?;
         let keys = nodes
             .iter()
             .map(|row| get::<String>(row, "key"))
             .collect::<Result<Vec<_>, _>>()?;
-        let removed = rows(&mut txn, bind(query("MATCH (s:SuprnovaGraphNode)-[e:SUPRNOVA_GRAPH_EDGE {generation: $generation}]->(t:SuprnovaGraphNode) WHERE s.key IN $removed OR t.key IN $removed OR s.scope_json IS NULL OR t.scope_json IS NULL OR ($mode = $document_mode AND (e.source = $key OR e.target = $key OR e.provenance_source = $source)) OR ($mode = $before_mode AND e.provenance_source = $source AND e.provenance_version < $version) OR ($mode = $events_mode AND e.provenance_event IN $events) DELETE e RETURN count(e) AS removed")).param("removed", keys.clone())).await?;
+        let removed = rows(&mut txn, bind(query("MATCH (s:SuprnovaGraphNode)-[e:SUPRNOVA_GRAPH_EDGE {generation: $generation}]->(t:SuprnovaGraphNode) WHERE s.key IN $removed OR t.key IN $removed OR s.scope_json IS NULL OR t.scope_json IS NULL OR ($mode = $document_mode AND (e.source = $key OR e.target = $key OR e.provenance_source = $source)) OR (($mode = $before_mode OR $mode = $relations_before_mode) AND e.provenance_source = $source AND e.provenance_version < $version) OR ($mode = $events_mode AND e.provenance_event IN $events) DELETE e RETURN count(e) AS removed")).param("removed", keys.clone())).await?;
         let edge_count: i64 = removed
             .first()
             .map(|row| get(row, "removed"))

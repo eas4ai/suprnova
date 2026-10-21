@@ -19,8 +19,9 @@ export type CsrfHeaderOptions = {
 
 /**
  * The header that carries the CSRF token: the token given, else the
- * `csrf-token` meta tag the root template writes, else the `XSRF-TOKEN`
- * cookie `CsrfMiddleware` sets. Empty outside the browser.
+ * configured XSRF cookie, else the `csrf-token` meta tag. The cookie wins
+ * because sign-in rotates it while Inertia can leave the meta tag stale.
+ * Empty outside the browser unless a token is given.
  */
 export function csrfHeaders({
   csrfToken,
@@ -33,10 +34,6 @@ export function csrfHeaders({
   if (typeof document === 'undefined') {
     return {}
   }
-  const meta = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
-  if (meta) {
-    return { 'X-CSRF-TOKEN': meta }
-  }
   const prefix = `${xsrfCookieName}=`
   for (const entry of document.cookie.split(';')) {
     const cookie = entry.trim()
@@ -44,7 +41,8 @@ export function csrfHeaders({
       return { [xsrfHeaderName]: decodeURIComponent(cookie.slice(prefix.length)) }
     }
   }
-  return {}
+  const meta = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
+  return meta ? { 'X-CSRF-TOKEN': meta } : {}
 }
 
 /** One server-sent event that carried data. */
@@ -288,12 +286,21 @@ const textStreams = new Map<string, TextStream<unknown>>()
 
 /**
  * The text stream with `id`: the one the components reading it share,
- * or a new one. A new stream joins the shared set when its first reader
- * subscribes and leaves it, cancelled, when its last reader goes, so a
- * server render, which never subscribes, keeps nothing.
+ * or a new one. Browser acquisition registers it immediately, so readers
+ * rendered together share one engine before either subscribes. Its last
+ * reader cancels and removes it. Without `document`, acquisition never
+ * registers an engine, so server renders keep no shared state.
  */
 export function textStream<TJsonData = null>(id: string): TextStream<TJsonData> {
-  return (textStreams.get(id) as TextStream<TJsonData> | undefined) ?? new TextStream<TJsonData>(id)
+  const existing = textStreams.get(id) as TextStream<TJsonData> | undefined
+  if (existing) {
+    return existing
+  }
+  const stream = new TextStream<TJsonData>(id)
+  if (typeof document !== 'undefined') {
+    textStreams.set(id, stream as TextStream<unknown>)
+  }
+  return stream
 }
 
 /** A POST whose response is read as text: `useStream`'s engine. */
@@ -344,10 +351,14 @@ export class TextStream<TJsonData = null> {
   /**
    * Cancels a request in flight, clears the data and POSTs `body` as JSON
    * to `url`, with the `X-STREAM-ID` and CSRF headers. Resolves when the
-   * response has ended, failed or been cancelled.
+   * response has ended, failed or been cancelled. Callbacks may cancel or
+   * replace the request, so only its current controller may publish state.
    */
   send = async (url: string, body: object | undefined, options: StreamOptions<object>): Promise<void> => {
     this.cancel()
+    if (this.controller !== null) {
+      return
+    }
     const controller = new AbortController()
     const request: RequestInit = {
       method: 'POST',
@@ -361,21 +372,28 @@ export class TextStream<TJsonData = null> {
       },
       body: JSON.stringify(body ?? {}),
     }
-    let changed: RequestInit | null = null
-    for (const callbacks of this.callbacks) {
-      const result = callbacks.onBeforeSend?.(request)
-      if (result === false) {
-        return
-      }
-      if (typeof result === 'object' && result !== null) {
-        changed = result
-        break
-      }
-    }
     this.controller = controller
-    this.set({ data: '', jsonData: null, isFetching: true, isStreaming: false })
     const current = () => this.controller === controller
     try {
+      let changed: RequestInit | null = null
+      for (const callbacks of this.callbacks) {
+        const result = callbacks.onBeforeSend?.(request)
+        if (!current()) {
+          return
+        }
+        if (result === false) {
+          this.controller = null
+          return
+        }
+        if (typeof result === 'object' && result !== null) {
+          changed = result
+          break
+        }
+      }
+      this.set({ data: '', jsonData: null, isFetching: true, isStreaming: false })
+      if (!current()) {
+        return
+      }
       const response = await fetch(url, changed ?? request)
       if (!response.ok) {
         throw new StreamResponseError(response, await response.text())
@@ -386,8 +404,14 @@ export class TextStream<TJsonData = null> {
       if (!current()) {
         return
       }
-      this.each((callbacks) => callbacks.onResponse?.(response))
+      this.each((callbacks) => callbacks.onResponse?.(response), current)
+      if (!current()) {
+        return
+      }
       this.set({ isFetching: false, isStreaming: true })
+      if (!current()) {
+        return
+      }
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let data = ''
@@ -401,7 +425,10 @@ export class TextStream<TJsonData = null> {
         const text = done ? decoder.decode() : decoder.decode(value, { stream: true })
         if (text !== '') {
           data += text
-          this.each((callbacks) => callbacks.onData?.(text))
+          this.each((callbacks) => callbacks.onData?.(text), current)
+          if (!current()) {
+            return
+          }
         }
         if (done) {
           break
@@ -413,7 +440,10 @@ export class TextStream<TJsonData = null> {
         try {
           jsonData = JSON.parse(data) as TJsonData
         } catch (error) {
-          this.each((callbacks) => callbacks.onError?.(error as Error))
+          this.each((callbacks) => callbacks.onError?.(error as Error), current)
+          if (!current()) {
+            return
+          }
         }
       }
       this.controller = null
@@ -454,8 +484,11 @@ export class TextStream<TJsonData = null> {
     }
   }
 
-  private each(report: (callbacks: StreamCallbacks) => void): void {
+  private each(report: (callbacks: StreamCallbacks) => void, current?: () => boolean): void {
     for (const callbacks of this.callbacks) {
+      if (current && !current()) {
+        return
+      }
       report(callbacks)
     }
   }
@@ -494,7 +527,8 @@ export type EventStreamConnection = {
 
 /**
  * Opens an `EventSource` on `url` and reports its messages to `onChange`
- * until the end signal arrives, an error closes it, or it is closed.
+ * until the end signal arrives or the caller closes it. Errors are reported
+ * without closing the source, so the browser can reconnect after an interruption.
  * Reads the options each time it uses them, so a component can hand it
  * callbacks that change between renders.
  */
@@ -528,7 +562,6 @@ export function openEventStream(
   }
   const error = (event: Event) => {
     options().onError?.(event)
-    close()
   }
   const close = (resetMessage = false) => {
     for (const name of names) {

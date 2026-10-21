@@ -95,6 +95,53 @@ fn reached_keys(reached: &[suprnova::recommendations::graph::Reached]) -> BTreeS
     reached.iter().map(|item| item.node.key.clone()).collect()
 }
 
+#[tokio::test]
+async fn a_stronger_later_path_replaces_the_first_path_even_at_the_node_cap() {
+    setup(async {
+        let store = DatabaseGraphStore;
+        let generation = store.begin_generation().await.unwrap();
+        let [a, b, c, d] = ["a", "b", "c", "d"].map(|key| node(key, true, "x", 1, 1));
+        store
+            .put_nodes(&generation, &[a.clone(), b.clone(), c.clone(), d.clone()])
+            .await
+            .unwrap();
+        let ab = edge("co_engaged", &a, &b, 9_000, event(1));
+        let bc = edge("co_engaged", &b, &c, 9_000, event(1));
+        store
+            .put_edges(
+                &generation,
+                &[
+                    edge("co_engaged", &a, &c, 1_000, event(1)),
+                    ab.clone(),
+                    bc.clone(),
+                    edge("co_engaged", &c, &a, 10_000, event(1)),
+                    edge("co_engaged", &c, &d, 8_000, event(1)),
+                ],
+            )
+            .await
+            .unwrap();
+        for max_nodes in [2, 100] {
+            let mut traversal = walk(&a, 3);
+            traversal.max_nodes = max_nodes;
+            let reached = traverse(&store, &generation, &traversal, &Viewer::Guest)
+                .await
+                .unwrap();
+            assert!(reached.len() <= max_nodes);
+            assert!(!reached.iter().any(|item| item.node.key == a.key));
+            let c = reached.iter().find(|item| item.node.key == c.key).unwrap();
+            assert!((c.weight - 0.81).abs() < 1e-9, "{}", c.weight);
+            assert_eq!(c.seed, a.key);
+            assert_eq!(c.path, [ab.clone(), bc.clone()]);
+            if max_nodes == 100 {
+                let d = reached.iter().find(|item| item.node.key == d.key).unwrap();
+                assert!((d.weight - 0.648).abs() < 1e-9);
+                assert_eq!(d.path.len(), 3);
+            }
+        }
+    })
+    .await;
+}
+
 /// Conformance: a store answers hops strongest first within its fan out.
 pub async fn a_store_answers_hops_strongest_first_within_its_fan_out(store: &dyn GraphStore) {
     let generation = store.begin_generation().await.unwrap();
@@ -707,6 +754,173 @@ async fn rec_005_a_newer_revision_replaces_the_relation_facts_read_from_an_older
         .unwrap();
         assert!(reached_keys(&walked).contains(&document_node_key(&key(&c))));
         assert!(!reached_keys(&walked).contains(&document_node_key(&key(&b))));
+    }))
+    .await;
+}
+
+/// Exercise the real document job with event edges in both directions and a stale
+/// relation-only node. A relation loader can fail after the replacement node is saved.
+async fn document_job_preserves_event_edges(store: std::sync::Arc<dyn GraphStore>, fail: bool) {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    suprnova::testing::TestContainer::bind::<dyn GraphStore>(store.clone());
+    let fail_relation = Arc::new(AtomicBool::new(false));
+    let fail_once = fail_relation.clone();
+    suprnova::Recommend::graph_relation(
+        suprnova::GraphRelation::new("next", "recommendation_notes", 8_000, move |document| {
+            if fail_once.swap(false, Ordering::SeqCst) {
+                return Err(suprnova::FrameworkError::database(
+                    "injected relation load failure",
+                ));
+            }
+            Ok(match document.attributes.get("category") {
+                Some(AttributeValue::Text(category)) => category
+                    .strip_prefix("next:")
+                    .map(|key| vec![target(key)])
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            })
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let b = note("Old relation", "plain", true, "o", 1).await;
+    let c = note("New relation", "plain", true, "o", 1).await;
+    let seed = note("Seed", "plain", true, "o", 1).await;
+    let a = note("Original", &format!("next:{}", b.id), true, "o", 1).await;
+    for peer in ["bob", "carol", "dave"] {
+        record(peer, &a, EventType::Like, "a").await;
+        record(peer, &seed, EventType::Like, "seed").await;
+    }
+    suprnova::Recommend::rebuild_graph().await.unwrap().unwrap();
+    let generation = store.current_generation().await.unwrap().unwrap();
+    let a_key = document_node_key(&key(&a));
+    let sources = vec![
+        a_key.clone(),
+        document_node_key(&key(&seed)),
+        document_node_key(&key(&b)),
+        document_node_key(&key(&c)),
+        suprnova::recommendations::graph::actor_node_key("bob"),
+        suprnova::recommendations::graph::actor_node_key("carol"),
+        suprnova::recommendations::graph::actor_node_key("dave"),
+    ];
+    let kinds = vec!["engaged".into(), "co_engaged".into()];
+    let before = store
+        .outgoing(&generation, &sources, &kinds, 50)
+        .await
+        .unwrap();
+    assert_eq!(before.len(), 8);
+    let original = store
+        .nodes(&generation, std::slice::from_ref(&a_key))
+        .await
+        .unwrap();
+    let a = a
+        .update(suprnova::attrs! { title: "Edited", category: format!("next:{}", c.id) })
+        .await
+        .unwrap();
+    let job = suprnova::recommendations::graph::GraphDocumentJob {
+        index: "recommendation_notes".into(),
+        indexed: vec![a.id.to_string()],
+        removed: vec![],
+    };
+    if fail {
+        fail_relation.store(true, Ordering::SeqCst);
+        let error = suprnova::queue::Job::handle(job.clone()).await.unwrap_err();
+        assert!(error.to_string().contains("injected relation load failure"));
+        let partial = store
+            .nodes(&generation, std::slice::from_ref(&a_key))
+            .await
+            .unwrap();
+        assert_eq!(partial.len(), 1);
+        assert!(partial[0].source_version > original[0].source_version);
+    }
+    suprnova::queue::Job::handle(job.clone()).await.unwrap();
+    suprnova::queue::Job::handle(job).await.unwrap();
+    let after = store
+        .outgoing(&generation, &sources, &kinds, 50)
+        .await
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "document jobs must preserve all event-backed edges"
+    );
+    let nodes = store
+        .nodes(&generation, std::slice::from_ref(&a_key))
+        .await
+        .unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert!(nodes[0].source_version > original[0].source_version);
+    let relations = store
+        .outgoing(
+            &generation,
+            &sources,
+            &["relation:next".into(), "relation:next:inverse".into()],
+            50,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        relations.len(),
+        2,
+        "retry must finish both directions of the replacement relation"
+    );
+    assert!(
+        relations
+            .iter()
+            .any(|edge| edge.source == a_key && edge.target == document_node_key(&key(&c)))
+    );
+    assert!(
+        relations
+            .iter()
+            .any(|edge| edge.target == a_key && edge.source == document_node_key(&key(&c)))
+    );
+    assert!(relations.iter().all(|edge| matches!(&edge.provenance, GraphProvenance::Relation { source, source_version, .. } if source == &key(&a) && *source_version == nodes[0].source_version)));
+    assert!(
+        store
+            .nodes(&generation, &[document_node_key(&key(&b))])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn rec_005_document_jobs_preserve_event_edges_when_replacing_relations() {
+    setup(in_graph(document_job_preserves_event_edges(
+        std::sync::Arc::new(DatabaseGraphStore),
+        false,
+    )))
+    .await;
+}
+
+#[tokio::test]
+async fn rec_005_document_jobs_retry_a_partially_completed_replacement() {
+    setup(in_graph(document_job_preserves_event_edges(
+        std::sync::Arc::new(DatabaseGraphStore),
+        true,
+    )))
+    .await;
+}
+
+#[cfg(feature = "graph-memgraph")]
+#[tokio::test]
+#[ignore = "requires Memgraph at MEMGRAPH_TEST_URL"]
+async fn rec_005_document_jobs_preserve_event_edges_when_replacing_relations_memgraph() {
+    setup(in_graph(async {
+        document_job_preserves_event_edges(std::sync::Arc::new(memgraph_store().await), false)
+            .await;
+    }))
+    .await;
+}
+
+#[cfg(feature = "graph-memgraph")]
+#[tokio::test]
+#[ignore = "requires Memgraph at MEMGRAPH_TEST_URL"]
+async fn rec_005_document_jobs_retry_a_partially_completed_replacement_memgraph() {
+    setup(in_graph(async {
+        document_job_preserves_event_edges(std::sync::Arc::new(memgraph_store().await), true).await;
     }))
     .await;
 }

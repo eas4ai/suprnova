@@ -49,6 +49,10 @@ pub struct RecommendationRun {
     pub high_water_mark: i64,
     /// A search catalog digest invalidates copied rankings when indexed content changes.
     pub catalog_digest: String,
+    /// Ranking settings invalidate unchanged histories so stale scores and peer counts
+    /// are replaced. Empty legacy digests force a refresh after an upgrade.
+    #[serde(default)]
+    pub ranking_digest: String,
     /// Running, complete or failed explicitly separates staging from publication.
     pub state: String,
     /// Failures retain their actionable reason without publishing partial rows.
@@ -62,13 +66,16 @@ pub enum GenerationOutcome {
     /// One complete snapshot is now available to readers.
     Completed(RecommendationRun),
 }
-/// One stored fact a graph explanation rests on, which the viewer may see (REC-007).
+/// One stored fact retained server-side so a graph explanation can be verified.
+/// [`RecommendationExplanation`] omits engagement references when serialized because
+/// their deterministic keys can reveal which known actors contributed (REC-007).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExplanationEvidence {
     /// One of the viewer's own events, by id and content digest.
     Event(super::EventProvenance),
-    /// A graph edge the viewer's scope covers, by key and kind.
+    /// A graph edge the viewer's scope covers, by key and kind. Engagement references
+    /// stay server-side when their containing explanation is serialized.
     Edge {
         /// The edge's key in the graph store.
         key: String,
@@ -78,6 +85,19 @@ pub enum ExplanationEvidence {
     /// A search document the viewer may see.
     Document(RecommendationTarget),
 }
+
+/// Keep derivable engagement keys available for server-side verification without
+/// exposing them in a caller's explanation. Propagate serializer errors to the caller.
+fn serialize_public_evidence<S: serde::Serializer>(
+    evidence: &[ExplanationEvidence],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(evidence.iter().filter(|item| {
+        !matches!(item, ExplanationEvidence::Edge { kind, .. }
+            if matches!(kind.as_str(), "engaged" | "co_engaged"))
+    }))
+}
+
 /// Explanations deliberately omit peer identities, interaction rows and private evidence ids.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RecommendationExplanation {
@@ -94,9 +114,11 @@ pub struct RecommendationExplanation {
     /// The engine that produced the row: `starter` or `graph`.
     #[serde(default)]
     pub engine: String,
-    /// The stored facts a graph row rests on; empty for a starter row, whose counts and
-    /// categories are its explanation.
-    #[serde(default)]
+    /// The stored facts a graph row rests on; empty for a starter row. Serialization
+    /// omits `engaged` and `co_engaged` references because their keys are derivable.
+    /// Retain the original server-side value to verify those facts against the store;
+    /// a serialized copy contains only counts and the remaining public evidence.
+    #[serde(default, serialize_with = "serialize_public_evidence")]
     pub evidence: Vec<ExplanationEvidence>,
     /// Why the graph engine answered with the starter's rows instead, when it did.
     #[serde(default)]

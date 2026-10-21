@@ -5406,6 +5406,7 @@
 {"path":"suprnova::Revocation","kind":"enum","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::recommendations::graph::Revocation"],"implements":[]}
 {"path":"suprnova::Revocation::Document","kind":"variant","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::recommendations::graph::Revocation::Document"],"implements":[]}
 {"path":"suprnova::Revocation::DocumentBefore","kind":"variant","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::recommendations::graph::Revocation::DocumentBefore"],"implements":[]}
+{"path":"suprnova::Revocation::DocumentRelationsBefore","kind":"variant","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::recommendations::graph::Revocation::DocumentRelationsBefore"],"implements":[]}
 {"path":"suprnova::Revocation::Events","kind":"variant","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::recommendations::graph::Revocation::Events"],"implements":[]}
 {"path":"suprnova::RevocationRequest","kind":"struct","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::RevocationRetry","kind":"enum","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":["suprnova::auth_flows::RevocationRetry","suprnova::auth_flows::password_reset::RevocationRetry"],"implements":[]}
@@ -6434,6 +6435,7 @@
 {"path":"suprnova::UserProvider::is_email_verified","kind":"fn","capability":"session","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::auth::UserProvider::is_email_verified","suprnova::auth::provider::UserProvider::is_email_verified"],"implements":[],"returns":"core::pin::Pin<alloc::boxed::Box<_>>"}
 {"path":"suprnova::UserProvider::mark_email_verified","kind":"fn","capability":"session","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::auth::UserProvider::mark_email_verified","suprnova::auth::provider::UserProvider::mark_email_verified"],"implements":[],"returns":"core::pin::Pin<alloc::boxed::Box<_>>"}
 {"path":"suprnova::UserProvider::mark_email_verified_for","kind":"fn","capability":"session","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::auth::UserProvider::mark_email_verified_for","suprnova::auth::provider::UserProvider::mark_email_verified_for"],"implements":[],"returns":"core::pin::Pin<alloc::boxed::Box<_>>"}
+{"path":"suprnova::UserProvider::rehash_password_for_sign_in","kind":"fn","capability":"session","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::auth::UserProvider::rehash_password_for_sign_in","suprnova::auth::provider::UserProvider::rehash_password_for_sign_in"],"implements":[],"returns":"core::pin::Pin<alloc::boxed::Box<_>>"}
 {"path":"suprnova::UserProvider::rehash_password_if_required","kind":"fn","capability":"session","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::auth::UserProvider::rehash_password_if_required","suprnova::auth::provider::UserProvider::rehash_password_if_required"],"implements":[],"returns":"core::pin::Pin<alloc::boxed::Box<_>>"}
 {"path":"suprnova::UserProvider::retrieve_all_by_email_ignoring_case","kind":"fn","capability":"session","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::auth::UserProvider::retrieve_all_by_email_ignoring_case","suprnova::auth::provider::UserProvider::retrieve_all_by_email_ignoring_case"],"implements":[],"returns":"core::pin::Pin<alloc::boxed::Box<_>>"}
 {"path":"suprnova::UserProvider::retrieve_by_credentials","kind":"fn","capability":"session","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::auth::UserProvider::retrieve_by_credentials","suprnova::auth::provider::UserProvider::retrieve_by_credentials"],"implements":[],"returns":"core::pin::Pin<alloc::boxed::Box<_>>"}
@@ -7482,6 +7484,7 @@
 {"path":"suprnova::eloquent::model::json_value_to_sea_value","kind":"fn","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"sea_query::value::Value"}
 {"path":"suprnova::eloquent::model::sea_value_to_json_loose","kind":"fn","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"serde_json::value::Value"}
 {"path":"suprnova::eloquent::pruners","kind":"fn","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::eloquent::prunable::pruners"],"implements":[],"returns":"_"}
+{"path":"suprnova::eloquent::registry::ModelAttributeReader","kind":"struct","capability":"database","hidden":true,"prefix":false,"refused":false,"aliases":[],"implements":[]}
 {"path":"suprnova::eloquent::scopes::ScopeDependency","kind":"enum","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[]}
 {"path":"suprnova::eloquent::scopes::ScopeDependency::Constant","kind":"variant","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[]}
 {"path":"suprnova::eloquent::scopes::ScopeDependency::PerRequest","kind":"variant","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[]}
@@ -9975,6 +9978,7 @@
 {"path":"suprnova::live::metadata::MetadataErrorKind::InvalidUploadMetadata","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::live::metadata::MetadataErrorKind::InvalidVersion","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::live::metadata::MetadataErrorKind::TooManyActions","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
+{"path":"suprnova::live::metadata::MetadataErrorKind::TooManyBrowserTools","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::live::metadata::MetadataErrorKind::TooManyEffects","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::live::metadata::MetadataErrorKind::TooManyEventTargets","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::live::metadata::MetadataErrorKind::TooManyEvents","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
@@ -10647,6 +10651,7 @@
 {"path":"suprnova::magnetar_integration::RegistrationOutcome","kind":"enum","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::magnetar_integration::RegistrationOutcome::Created","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::magnetar_integration::RegistrationOutcome::Existing","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
+{"path":"suprnova::magnetar_integration::RegistrationOutcome::Unavailable","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::magnetar_integration::RehashOutcome","kind":"enum","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::magnetar_integration::RehashOutcome::Failed","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
 {"path":"suprnova::magnetar_integration::RehashOutcome::NotNeeded","kind":"variant","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[]}
@@ -12216,6 +12221,7 @@
 {"path":"suprnova::recommendations::graph::store","kind":"fn","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"core::result::Result<alloc::sync::Arc<_>,suprnova::FrameworkError>"}
 {"path":"suprnova::recommendations::graph::traverse","kind":"fn","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[],"returns":"core::result::Result<alloc::vec::Vec<suprnova::recommendations::graph::Reached>,suprnova::FrameworkError>"}
 {"path":"suprnova::recommendations::migrations","kind":"fn","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::recommendations::migrations::migrations"],"implements":[],"returns":"alloc::vec::Vec<alloc::boxed::Box<_>>"}
+{"path":"suprnova::recommendations::migrations::AddRecommendationRankingDigest","kind":"struct","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[]}
 {"path":"suprnova::recommendations::migrations::CreateRecommendationGraph","kind":"struct","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[]}
 {"path":"suprnova::recommendations::migrations::CreateRecommendationTables","kind":"struct","capability":"database","hidden":false,"prefix":false,"refused":false,"aliases":[],"implements":[]}
 {"path":"suprnova::redirect","kind":"fn","capability":null,"hidden":false,"prefix":false,"refused":false,"aliases":["suprnova::routing::redirect"],"implements":[],"returns":"suprnova::Redirect"}

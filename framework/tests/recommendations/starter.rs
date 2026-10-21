@@ -3,6 +3,140 @@ use std::time::Duration;
 use suprnova::{Cache, DB, EventType, GenerateRun, GenerationOutcome, Recommend, Viewer};
 
 #[tokio::test]
+async fn stored_collaborative_rows_obey_the_current_peer_minimum_before_regeneration() {
+    setup(async {
+        let a = note("A", "seed", true, "alice", 1).await;
+        let c = note("C", "candidate", true, "alice", 2).await;
+        record("alice", &a, EventType::Like, "a").await;
+        record("bob", &a, EventType::Like, "a").await;
+        record("bob", &c, EventType::Like, "c").await;
+        suprnova::RecommendConfig::scope(
+            suprnova::RecommendConfig {
+                min_peers: 1,
+                ..Default::default()
+            },
+            async {
+                Recommend::generate(GenerateRun::default()).await.unwrap();
+                let rows = Recommend::for_user("alice").get().await.unwrap();
+                assert_eq!(rows[0].explanation.peer_count, 1);
+            },
+        )
+        .await
+        .unwrap();
+        for engine in ["starter", "graph"] {
+            suprnova::RecommendConfig::scope(
+                suprnova::RecommendConfig {
+                    engine: engine.into(),
+                    ..Default::default()
+                },
+                async {
+                    assert!(
+                        Recommend::for_user("alice")
+                            .for_viewer(Viewer::Guest)
+                            .get()
+                            .await
+                            .unwrap()
+                            .is_empty(),
+                        "{engine}"
+                    );
+                },
+            )
+            .await
+            .unwrap();
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_peer_minimum_change_regenerates_unchanged_collaborative_rows() {
+    setup(async {
+        let a = note("A", "seed", true, "alice", 1).await;
+        let c = note("C", "candidate", true, "alice", 2).await;
+        record("alice", &a, EventType::Like, "a").await;
+        record("bob", &a, EventType::Like, "a").await;
+        record("bob", &c, EventType::Like, "c").await;
+        suprnova::RecommendConfig::scope(
+            suprnova::RecommendConfig {
+                min_peers: 1,
+                ..Default::default()
+            },
+            async {
+                Recommend::generate(GenerateRun::default()).await.unwrap();
+            },
+        )
+        .await
+        .unwrap();
+        let previous = DB::select(
+            "SELECT explanation_id FROM starter_recommendations WHERE actor_id = ?",
+            vec!["alice".into()],
+        )
+        .await
+        .unwrap();
+        let old_explanation = previous[0].get_string("explanation_id").unwrap();
+        let GenerationOutcome::Completed(run) =
+            Recommend::generate(GenerateRun::default()).await.unwrap()
+        else {
+            panic!("lock")
+        };
+        assert_eq!(run.new_events, 0);
+        let copied = DB::scalar::<i64>(
+            "SELECT COUNT(*) FROM starter_recommendations WHERE run_id = ? AND explanation_id = ?",
+            vec![run.id.into(), old_explanation.into()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(copied, 0);
+        let rows = Recommend::for_user("alice").get().await.unwrap();
+        assert_eq!(rows[0].target, key(&c));
+        assert_eq!(rows[0].explanation.peer_count, 0);
+        assert_eq!(rows[0].explanation.fallback_tier, "popularity");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_peer_cap_change_regenerates_unchanged_collaborative_scores() {
+    setup(async {
+        let a = note("A", "seed", true, "alice", 1).await;
+        let c = note("C", "candidate", true, "alice", 2).await;
+        record("alice", &a, EventType::Like, "a").await;
+        for peer in ["bob", "carol", "dave"] {
+            record(peer, &a, EventType::Like, "a").await;
+            record(peer, &c, EventType::Like, "c").await;
+        }
+        for cap in [1, 2] {
+            suprnova::RecommendConfig::scope(
+                suprnova::RecommendConfig {
+                    peers: cap,
+                    min_peers: 1,
+                    ..Default::default()
+                },
+                async {
+                    if cap == 2 {
+                        Recommend::generate(GenerateRun {
+                            user: Some("bob".into()),
+                            surface: Some("home".into()),
+                        })
+                        .await
+                        .unwrap();
+                        let pending = Recommend::for_user("alice").get().await.unwrap();
+                        assert_eq!(pending[0].explanation.peer_count, 1);
+                    }
+                    Recommend::generate(GenerateRun::default()).await.unwrap();
+                    let rows = Recommend::for_user("alice").get().await.unwrap();
+                    assert_eq!(rows[0].explanation.peer_count, cap);
+                    assert_eq!(rows[0].score, 1400 * cap as i64);
+                },
+            )
+            .await
+            .unwrap();
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn shared_targets_recommend_unseen_c_and_project_explanations() {
     setup(async {
         let a = note("A", "rust", true, "alice", 1).await;
@@ -364,13 +498,13 @@ async fn most_recent_shared_peers_are_sampled_to_the_configured_cap() {
             },
             async {
                 Recommend::generate(GenerateRun::default()).await.unwrap();
+                let rows = Recommend::for_user("alice").limit(1).get().await.unwrap();
+                assert_eq!(rows[0].target, key(&newest));
+                assert_eq!(rows[0].explanation.peer_count, 1);
             },
         )
         .await
         .unwrap();
-        let rows = Recommend::for_user("alice").limit(1).get().await.unwrap();
-        assert_eq!(rows[0].target, key(&newest));
-        assert_eq!(rows[0].explanation.peer_count, 1);
     })
     .await;
 }
@@ -595,4 +729,43 @@ fn rec_002_the_peer_threshold_is_positive() {
     .unwrap_err();
     assert!(refused.to_string().contains("RECOMMEND_MIN_PEERS"));
     assert_eq!(suprnova::RecommendConfig::default().min_peers, 3);
+}
+#[tokio::test]
+async fn collaborative_provenance_keeps_every_event_on_both_sides_of_shared_targets() {
+    setup(async {
+        let a = note("A", "seed", true, "alice", 1).await;
+        let c = note("C", "candidate", true, "bob", 2).await;
+        let mut expected = Vec::new();
+        for (actor, target, dedupe) in [
+            ("alice", &a, "a1"),
+            ("alice", &a, "a2"),
+            ("bob", &a, "a1"),
+            ("bob", &a, "a2"),
+            ("bob", &c, "c1"),
+            ("bob", &c, "c2"),
+        ] {
+            expected.push(Recommend::record(event(actor, target, EventType::Like, dedupe).await).await.unwrap());
+        }
+        suprnova::RecommendConfig::scope(
+            suprnova::RecommendConfig { min_peers: 1, ..Default::default() },
+            async {
+                Recommend::generate(GenerateRun::default()).await.unwrap();
+                let rows = DB::select("SELECT e.event_ids FROM recommendation_explanations e JOIN starter_recommendations r ON r.explanation_id = e.id WHERE r.actor_id = ? AND r.target_key = ?", vec!["alice".into(), c.id.to_string().into()]).await.unwrap();
+                let refs: Vec<suprnova::EventProvenance> = serde_json::from_str(&rows[0].get_string("event_ids").unwrap()).unwrap();
+                assert_eq!(refs, expected);
+                for reference in &refs {
+                    assert_eq!(Recommend::verify_provenance(reference).await.unwrap(), suprnova::ProvenanceState::Intact);
+                }
+                let removed = &expected[2];
+                DB::delete("DELETE FROM recommendation_events WHERE id = ?", vec![removed.id.into()]).await.unwrap();
+                let mut changed = Vec::new();
+                for reference in &refs {
+                    if Recommend::verify_provenance(reference).await.unwrap() != suprnova::ProvenanceState::Intact {
+                        changed.push(reference.id);
+                    }
+                }
+                assert_eq!(changed, [removed.id]);
+            },
+        ).await.unwrap();
+    }).await;
 }

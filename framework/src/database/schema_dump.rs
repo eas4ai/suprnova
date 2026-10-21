@@ -726,21 +726,38 @@ async fn postgres_schema(url: &str) -> Result<String, FrameworkError> {
 /// needs the extension's owner, usually a superuser who installed it for the
 /// application's role, so the load fails with "must be owner of extension".
 /// `CREATE EXTENSION` sets the comment again, so the dump loses nothing.
+/// `pg_dump` writes comments as single-quoted literals with doubled quote
+/// escapes. A semicolon inside a multiline literal does not end the statement:
+/// stopping there leaves a fragment that makes the snapshot invalid SQL.
 fn without_extension_comments(dump: &str) -> String {
     let mut kept = String::with_capacity(dump.len());
     let mut skipping = false;
+    let mut quote = None;
     for line in dump.split_inclusive('\n') {
         if !skipping && line.starts_with("COMMENT ON EXTENSION ") {
             skipping = true;
         }
-        if skipping {
-            // The statement ends at the line that ends with its `;`.
-            if line.trim_end().ends_with(';') {
-                skipping = false;
-            }
+        if !skipping {
+            kept.push_str(line);
             continue;
         }
-        kept.push_str(line);
+        // Quoted extension identifiers can contain quotes and semicolons too.
+        let mut bytes = line.bytes().peekable();
+        while let Some(byte) = bytes.next() {
+            match quote {
+                Some(delimiter) if byte == delimiter => {
+                    if bytes.next_if_eq(&delimiter).is_none() {
+                        quote = None;
+                    }
+                }
+                None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
+                None if byte == b';' => {
+                    skipping = false;
+                    break;
+                }
+                _ => {}
+            }
+        }
     }
     kept
 }
@@ -1329,6 +1346,31 @@ mod tests {
     fn a_postgres_dump_without_extension_comments_is_unchanged() {
         let dump = "CREATE TABLE public.users (id bigint);\n";
         assert_eq!(without_extension_comments(dump), dump);
+    }
+
+    #[test]
+    fn a_postgres_dump_drops_extension_comments_with_quoted_semicolons() {
+        let dump = "COMMENT ON EXTENSION vector IS 'first line;\nsecond line';\n\
+                    CREATE TABLE public.users (id bigint);\n\
+                    COMMENT ON TABLE public.users IS 'the accounts';\n";
+        assert_eq!(
+            without_extension_comments(dump),
+            "CREATE TABLE public.users (id bigint);\n\
+             COMMENT ON TABLE public.users IS 'the accounts';\n"
+        );
+    }
+
+    #[test]
+    fn a_postgres_dump_drops_extension_comments_with_escaped_quotes() {
+        let dump = "COMMENT ON EXTENSION vector IS 'it''s the first line;\nsecond line';\n\
+                    COMMENT ON EXTENSION \"uuid-ossp\" IS 'another comment';\n\
+                    CREATE TABLE public.users (id bigint);\r\n\
+                    COMMENT ON TABLE public.users IS 'keep this; too';";
+        assert_eq!(
+            without_extension_comments(dump),
+            "CREATE TABLE public.users (id bigint);\r\n\
+             COMMENT ON TABLE public.users IS 'keep this; too';"
+        );
     }
 
     #[test]

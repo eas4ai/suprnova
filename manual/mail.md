@@ -89,7 +89,7 @@ from the credentials:
 | `MAIL_SMTP_USER` / `MAIL_SMTP_PASS` | Resolves to | Because |
 |---|---|---|
 | both set | `starttls` | Credentials imply a real relay on the submission port. |
-| neither set | `none` | The local-catcher path. Mailpit, MailHog and maildev listen unauthenticated on 1025 and speak no TLS. |
+| neither set | `none` | The local-catcher path. Mailpit, MailHog and maildev listen unauthenticated on 1025 without TLS. |
 
 So a fresh scaffold keeps working with zero configuration, and a
 production deploy that never wired the credentials stops instead of

@@ -107,7 +107,7 @@ async fn batch(
     started: Instant,
     lock: &crate::cache::LockGuard,
 ) -> Result<RecommendationRun, FrameworkError> {
-    let (mut run, previous, high_water) = begin(id, request, started).await?;
+    let (mut run, previous, high_water) = begin(id, request, config, started).await?;
     let inputs = inputs(request, config, previous.as_ref(), high_water, &mut run).await?;
     run.events_read = inputs.histories.events_read;
     run.users_covered = inputs.histories.actors.len() as i64;
@@ -151,6 +151,10 @@ async fn batch(
             .as_ref()
             .map(|old| old.catalog_digest.clone())
             .unwrap_or_default();
+        run.ranking_digest = previous
+            .as_ref()
+            .map(|old| old.ranking_digest.clone())
+            .unwrap_or_default();
     }
     publish(&run, &inputs.snapshots).await?;
     Ok(run)
@@ -158,6 +162,7 @@ async fn batch(
 async fn begin(
     id: &str,
     request: &GenerateRun,
+    config: &RecommendConfig,
     started: Instant,
 ) -> Result<(RecommendationRun, Option<RecommendationRun>, i64), FrameworkError> {
     // A prior process may have died while staging. Its cache lease has expired now.
@@ -211,16 +216,34 @@ async fn begin(
             high_water
         },
         catalog_digest: String::new(),
+        // These settings change stored rows. Event scoring is already snapshotted on
+        // each event; graph settings apply at read time, not to starter rows.
+        ranking_digest: hex::encode(Sha256::digest(
+            storage::encode(&(
+                "starter-ranking:v1",
+                config.history,
+                config.peers,
+                config.min_peers,
+                config.popularity_window,
+            ))?
+            .as_bytes(),
+        )),
         state: "running".into(),
         error: None,
     };
-    storage::execute("INSERT INTO recommendation_runs (id, started_at, duration_ms, events_read, new_events, users_covered, items_scored, coverage, fallback_share, high_water_mark, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        vec![id.into(), run.started_at.into(), 0_i64.into(), 0_i64.into(), new_events.into(), 0_i64.into(), 0_i64.into(), 0.0.into(), 0.0.into(), run.high_water_mark.into(), "running".into()]).await?;
-    if let Some(previous) = &previous {
+    storage::execute("INSERT INTO recommendation_runs (id, started_at, duration_ms, events_read, new_events, users_covered, items_scored, coverage, fallback_share, high_water_mark, ranking_digest, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        vec![id.into(), run.started_at.into(), 0_i64.into(), 0_i64.into(), new_events.into(), 0_i64.into(), 0_i64.into(), 0.0.into(), 0.0.into(), run.high_water_mark.into(), run.ranking_digest.clone().into(), "running".into()]).await?;
+    if let Some(previous) = &previous
+        && (previous.ranking_digest == run.ranking_digest
+            || request.user.is_some()
+            || request.surface.is_some())
+    {
         storage::execute("INSERT INTO starter_recommendations (run_id, actor_kind, actor_id, surface, target_index, target_key, score, rank, explanation_id) SELECT ?, actor_kind, actor_id, surface, target_index, target_key, score, rank, explanation_id FROM starter_recommendations WHERE run_id = ?", vec![id.into(), previous.id.clone().into()]).await?;
     }
     Ok((run, previous, high_water))
 }
+/// A ranking settings change refreshes every actor even without new events. The read
+/// guard protects peers immediately; regeneration replaces old scores and explanations.
 async fn inputs(
     request: &GenerateRun,
     config: &RecommendConfig,
@@ -269,7 +292,9 @@ async fn inputs(
         None => HistorySnapshots::new(),
     };
     let current_snapshots = histories.snapshots();
-    let changed = if previous.is_none_or(|old| old.catalog_digest != run.catalog_digest) {
+    let changed = if previous.is_none_or(|old| {
+        old.catalog_digest != run.catalog_digest || old.ranking_digest != run.ranking_digest
+    }) {
         histories.actors.keys().cloned().collect()
     } else {
         changed_actors(&histories, previous, &old_snapshots, &current_snapshots).await?
@@ -405,7 +430,7 @@ async fn leading(
                 continue;
             }
             if let Some(positive) = history.positive.get(seed) {
-                neighbor.reason.event_ids.insert(positive.event_id);
+                neighbor.reason.event_ids.extend(&positive.event_ids);
             }
             neighbors.push(neighbor);
         }
@@ -554,8 +579,8 @@ async fn publish(
     let snapshots = storage::encode(snapshots)?;
     DB::transaction(|_| Box::pin(async move {
         // One publication statement makes every staged row visible together.
-        let updated = storage::execute("UPDATE recommendation_runs SET state = ?, duration_ms = ?, events_read = ?, new_events = ?, users_covered = ?, items_scored = ?, coverage = ?, fallback_share = ?, high_water_mark = ?, catalog_digest = ?, actor_history_snapshots = ? WHERE id = ? AND state = ?",
-            vec!["complete".into(), run.duration_ms.into(), run.events_read.into(), run.new_events.into(), run.users_covered.into(), run.items_scored.into(), run.coverage.into(), run.fallback_share.into(), run.high_water_mark.into(), run.catalog_digest.clone().into(), snapshots.into(), run.id.clone().into(), "running".into()]).await?;
+        let updated = storage::execute("UPDATE recommendation_runs SET state = ?, duration_ms = ?, events_read = ?, new_events = ?, users_covered = ?, items_scored = ?, coverage = ?, fallback_share = ?, high_water_mark = ?, catalog_digest = ?, ranking_digest = ?, actor_history_snapshots = ? WHERE id = ? AND state = ?",
+            vec!["complete".into(), run.duration_ms.into(), run.events_read.into(), run.new_events.into(), run.users_covered.into(), run.items_scored.into(), run.coverage.into(), run.fallback_share.into(), run.high_water_mark.into(), run.catalog_digest.clone().into(), run.ranking_digest.clone().into(), snapshots.into(), run.id.clone().into(), "running".into()]).await?;
         if updated != 1 { return Err(FrameworkError::database("recommendation run is no longer available for publication")); }
         storage::execute("DELETE FROM starter_recommendations WHERE run_id <> ?", vec![run.id.clone().into()]).await?;
         storage::execute("UPDATE recommendation_runs SET actor_history_snapshots = ? WHERE id <> ?", vec![sea_orm::Value::String(None), run.id.clone().into()]).await?;

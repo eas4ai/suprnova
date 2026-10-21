@@ -2,7 +2,8 @@ import { flushSync, mount, unmount as destroy } from 'svelte'
 import { get } from 'svelte/store'
 import { afterEach, expect, test, vi } from 'vitest'
 import StreamProbe from './StreamProbe.svelte'
-import { useEventStream, useJsonEventStream, useJsonStream, useStream } from './src/lib/stream'
+import StreamReaders from './StreamReaders.svelte'
+import { csrfHeaders, useEventStream, useJsonEventStream, useJsonStream, useStream } from './src/lib/stream'
 import { FakeEventSource, fakeFetch, settle } from './fakes'
 
 function probe<T>(hook: () => T) {
@@ -161,4 +162,124 @@ test('useEventStream joins messages, closes at the end signal and on unmount', a
   const next = FakeEventSource.opened.at(-1)!
   second.unmount()
   expect(next.closed).toBe(true)
+})
+
+
+test('CSRF headers prefer the fresh cookie over a stale meta token (#181)', () => {
+  document.head.innerHTML = '<meta name="csrf-token" content="stale-token">'
+  document.cookie = 'XSRF-TOKEN=fresh%2Btoken; path=/'
+  try {
+    expect(csrfHeaders()).toEqual({ 'X-XSRF-TOKEN': 'fresh+token' })
+    expect(csrfHeaders({ csrfToken: 'explicit-token' })).toEqual({
+      'X-CSRF-TOKEN': 'explicit-token',
+    })
+  } finally {
+    document.cookie = 'XSRF-TOKEN=; Max-Age=0; path=/'
+  }
+  expect(csrfHeaders()).toEqual({ 'X-CSRF-TOKEN': 'stale-token' })
+})
+
+test('CSRF headers use the configured cookie and header names (#181)', () => {
+  document.head.innerHTML = '<meta name="csrf-token" content="stale-token">'
+  document.cookie = 'CUSTOM-XSRF=custom%2Ftoken; path=/'
+  try {
+    expect(csrfHeaders({ xsrfCookieName: 'CUSTOM-XSRF', xsrfHeaderName: 'X-CUSTOM-XSRF' }))
+      .toEqual({ 'X-CUSTOM-XSRF': 'custom/token' })
+  } finally {
+    document.cookie = 'CUSTOM-XSRF=; Max-Age=0; path=/'
+  }
+})
+
+
+test('readers mounted together share text and callbacks for one id (#182)', async () => {
+  const server = fakeFetch()
+  vi.stubGlobal('fetch', server.fetch)
+  const onData = [vi.fn(), vi.fn()]
+  const onFinish = [vi.fn(), vi.fn()]
+  const readers: Array<ReturnType<typeof useStream>> = []
+  const component = mount(StreamReaders, {
+    target: document.body,
+    props: {
+      readers: onData.map((callback, index) => () => {
+        readers[index] = useStream('/chat', {
+          id: 'shared-readers', onData: callback, onFinish: onFinish[index],
+        })
+      }),
+    },
+  })
+  flushSync()
+  try {
+    await step(() => void readers[0].send())
+    await step(() => server.requests[0].respond())
+    await step(() => server.requests[0].push('shared'))
+    expect(readers.map((reader) => get(reader).data)).toEqual(['shared', 'shared'])
+    for (const callback of onData) expect(callback).toHaveBeenCalledWith('shared')
+    await step(() => server.requests[0].end())
+    for (const callback of onFinish) expect(callback).toHaveBeenCalledTimes(1)
+  } finally {
+    await destroy(component)
+  }
+})
+
+
+test('EventSource stays open after an error and receives later messages (#183)', async () => {
+  vi.stubGlobal('EventSource', FakeEventSource)
+  const onError = vi.fn()
+  const onComplete = vi.fn()
+  const { result, unmount } = probe(() => useEventStream('/progress', { onError, onComplete }))
+  const source = FakeEventSource.opened.at(-1)!
+  const error = new Event('error')
+  try {
+    await step(() => source.dispatchEvent(error))
+    expect(onError).toHaveBeenCalledWith(error)
+    expect(source.closed).toBe(false)
+    expect(onComplete).not.toHaveBeenCalled()
+    await step(() => source.emit('update', 'reconnected'))
+    expect(get(result.current).message).toBe('reconnected')
+    await step(() => source.emit('update', '</stream>'))
+    expect(source.closed).toBe(true)
+    expect(onComplete).toHaveBeenCalledTimes(1)
+    await step(() => source.emit('update', 'after-end'))
+    expect(get(result.current).message).toBe('reconnected')
+  } finally {
+    await unmount()
+  }
+
+  const second = probe(() => useEventStream('/progress'))
+  const next = FakeEventSource.opened.at(-1)!
+  await step(() => next.dispatchEvent(new Event('error')))
+  await second.unmount()
+  expect(next.closed).toBe(true)
+})
+
+test('EventSource caller cancellation still closes the source (#183)', async () => {
+  vi.stubGlobal('EventSource', FakeEventSource)
+  const { result, unmount } = probe(() => useEventStream('/progress'))
+  const source = FakeEventSource.opened.at(-1)!
+  await step(() => result.current.close())
+  expect(source.closed).toBe(true)
+  await unmount()
+})
+
+
+test('cancelling from onResponse leaves both flags clear (#184)', async () => {
+  const server = fakeFetch()
+  vi.stubGlobal('fetch', server.fetch)
+  const onCancel = vi.fn()
+  const onFinish = vi.fn()
+  const { result, unmount } = probe(() => useStream('/chat', {
+    onResponse: () => result.current.cancel(), onCancel, onFinish,
+  }))
+  try {
+    await step(() => void result.current.send())
+    await step(() => server.requests[0].respond())
+    expect(get(result.current).isFetching).toBe(false)
+    expect(get(result.current).isStreaming).toBe(false)
+    expect(server.requests[0].aborted()).toBe(true)
+    await step(() => result.current.cancel())
+    expect(onCancel).toHaveBeenCalledTimes(1)
+    expect(onFinish).not.toHaveBeenCalled()
+  } finally {
+    await unmount()
+  }
 })

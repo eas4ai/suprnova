@@ -64,6 +64,9 @@ impl ContentSecurityPolicy {
     /// `default-src`), so the new source narrows nothing. A directive with
     /// no fallback in the policy already allows every source and is left as
     /// it is. `'none'` is dropped from a directive that gains a source.
+    /// In a comma-separated list, only the first policy naming the directive
+    /// (or, if none does, a fallback) changes, because browsers enforce each
+    /// policy separately.
     ///
     /// # Errors
     ///
@@ -73,26 +76,29 @@ impl ContentSecurityPolicy {
     /// `'nonce-{nonce}'`.
     pub fn with_source(self, directive: &str, source: &str) -> Result<Self, FrameworkError> {
         let (directive, fallbacks) = source_directive(directive, source)?;
-        let mut directives = self
-            .template
-            .split(';')
-            .map(str::trim)
-            .filter(|directive| !directive.is_empty())
-            .collect::<Vec<_>>();
+        let mut policies = policy_list(&self.template).collect::<Vec<_>>();
+        let owner = policies
+            .iter()
+            .position(|policy| first_directive(policy, directive).is_some())
+            .or_else(|| {
+                policies.iter().position(|policy| {
+                    fallbacks
+                        .iter()
+                        .any(|name| first_directive(policy, name).is_some())
+                })
+            });
+        let Some(policy) = owner.and_then(|owner| policies.get_mut(owner)) else {
+            return Ok(self);
+        };
         // A browser applies the first occurrence of a directive and ignores
         // later ones, so the first is the one to widen or to start from.
-        let first = |name: &str| {
-            directives.iter().position(|candidate| {
-                candidate
-                    .split_whitespace()
-                    .next()
-                    .is_some_and(|word| word.eq_ignore_ascii_case(name))
-            })
-        };
-        let (at, inherited) = match first(directive) {
-            Some(at) => (Some(at), directives[at]),
-            None => match fallbacks.iter().find_map(|name| first(name)) {
-                Some(from) => (None, directives[from]),
+        let (at, inherited) = match first_directive(policy, directive) {
+            Some((at, inherited)) => (Some(at), inherited),
+            None => match fallbacks
+                .iter()
+                .find_map(|name| first_directive(policy, name))
+            {
+                Some((_, inherited)) => (None, inherited),
                 None => return Ok(self),
             },
         };
@@ -108,11 +114,19 @@ impl ContentSecurityPolicy {
             .chain(sources)
             .collect::<Vec<_>>()
             .join(" ");
-        match at {
-            Some(at) => directives[at] = &widened,
+        let widened = if at.is_some() {
+            inherited.replacen(inherited.trim(), &widened, 1)
+        } else {
+            format!(" {widened}")
+        };
+        let mut directives = policy.split(';').collect::<Vec<_>>();
+        match at.and_then(|at| directives.get_mut(at)) {
+            Some(target) => *target = &widened,
             None => directives.push(&widened),
         }
-        Self::new(directives.join("; "))
+        let widened_policy = directives.join(";");
+        *policy = &widened_policy;
+        Self::new(policies.join(", "))
     }
 
     /// This policy refusing every framing ancestor, its other directives
@@ -167,6 +181,21 @@ impl ContentSecurityPolicy {
 /// URL.
 const DEV_SERVER_DIRECTIVES: [&str; 4] = ["script-src", "style-src", "font-src", "img-src"];
 
+/// Share policy boundaries so a directive cannot consume another policy's sources.
+fn policy_list(value: &str) -> impl Iterator<Item = &str> {
+    value.split(',').map(str::trim)
+}
+
+/// Retain directive text so changing one source list preserves its neighbours.
+fn first_directive<'a>(policy: &'a str, name: &str) -> Option<(usize, &'a str)> {
+    policy.split(';').enumerate().find(|(_, candidate)| {
+        candidate
+            .split_whitespace()
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case(name))
+    })
+}
+
 /// `value` with every policy in it refusing every framing ancestor. One
 /// header value can hold several policies separated by commas, each
 /// enforced on its own, so each gets `frame-ancestors 'none'` at its end in
@@ -174,8 +203,7 @@ const DEV_SERVER_DIRECTIVES: [&str; 4] = ["script-src", "style-src", "font-src",
 /// same-named directives, so every one is removed rather than the first.
 /// Works on a template and on a rendered header alike.
 pub(super) fn refuse_framing(value: &str) -> String {
-    value
-        .split(',')
+    policy_list(value)
         .map(refuse_framing_in_one)
         .collect::<Vec<_>>()
         .join(", ")

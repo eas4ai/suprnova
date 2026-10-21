@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) struct Positive {
     pub score: i64,
     pub event_id: i64,
+    /// Every positive fact contributes to the sum and must remain verifiable.
+    pub event_ids: BTreeSet<i64>,
     pub time: i64,
 }
 #[derive(Debug, Default)]
@@ -48,7 +50,7 @@ impl Histories {
     pub fn snapshots(&self) -> HistorySnapshots {
         self.actors.iter().map(|(actor, history)| {
             let positives: Vec<_> = history.positive.iter().map(|(target, positive)| serde_json::json!({
-                "target": target, "score": positive.score, "id": positive.event_id, "time": positive.time,
+                "target": target, "score": positive.score, "ids": positive.event_ids, "time": positive.time,
             })).collect();
             let content = crate::search::document::canonical_json(serde_json::json!({
                 "positive": positives, "excluded": history.excluded, "surfaces": history.surfaces,
@@ -105,6 +107,51 @@ impl Histories {
         }
         Ok(histories)
     }
+
+    /// Select peers using their capped history before hydrating any event rows, so
+    /// unrelated actors do not add work to a similarity read. The viewer's history
+    /// is loaded separately only when exclusions need it and it was not sampled.
+    pub async fn for_target(
+        target: &RecommendationTarget,
+        viewer: Option<&Actor>,
+        high_water: i64,
+        cap: usize,
+        peer_cap: usize,
+    ) -> Result<Self, FrameworkError> {
+        // Actor orders users before guests, then compares ids bytewise. Preserve
+        // that order even on databases whose default text collation folds case.
+        let actor_order = match storage::backend()? {
+            sea_orm::DbBackend::Postgres => "actor_id COLLATE \"C\"",
+            sea_orm::DbBackend::MySql => "BINARY actor_id",
+            sea_orm::DbBackend::Sqlite => "actor_id COLLATE BINARY",
+            _ => {
+                return Err(FrameworkError::database(
+                    "unsupported recommendation database backend",
+                ));
+            }
+        };
+        let mut actors = storage::rows(
+            &format!("WITH interested AS (SELECT DISTINCT actor_kind, actor_id FROM recommendation_events WHERE id <= ? AND target_index = ? AND target_key = ? AND event_class = ?), bounded AS (SELECT e.actor_kind, e.actor_id, e.target_index, e.target_key, e.event_class, e.occurred_at, ROW_NUMBER() OVER (PARTITION BY e.actor_kind, e.actor_id ORDER BY e.occurred_at DESC, e.id DESC) AS history_rank FROM recommendation_events e JOIN interested i ON i.actor_kind = e.actor_kind AND i.actor_id = e.actor_id WHERE e.id <= ? AND e.event_class <> ?) SELECT actor_kind, actor_id, MAX(occurred_at) AS shared_time FROM bounded WHERE history_rank <= ? AND target_index = ? AND target_key = ? AND event_class = ? GROUP BY actor_kind, actor_id ORDER BY shared_time DESC, CASE actor_kind WHEN 'user' THEN 0 ELSE 1 END, {actor_order} LIMIT ?"),
+            vec![high_water.into(), target.index.clone().into(), target.key.clone().into(), "positive".into(), high_water.into(), "seen".into(), (cap as i64).into(), target.index.clone().into(), target.key.clone().into(), "positive".into(), (peer_cap as i64).into()],
+        ).await?;
+        let peers = actors
+            .iter()
+            .map(|row| Ok((storage::actor(row)?, row.get_int("shared_time")?)))
+            .collect::<Result<Vec<_>, FrameworkError>>()?;
+        if let Some(actor) = viewer.filter(|actor| !peers.iter().any(|(peer, _)| peer == *actor)) {
+            let (kind, id) = actor.parts();
+            actors.push(DynamicRow(serde_json::Map::from_iter([
+                ("actor_kind".to_owned(), serde_json::Value::from(kind)),
+                ("actor_id".to_owned(), serde_json::Value::from(id)),
+            ])));
+        }
+        let mut histories = Self::default();
+        for chunk in actors.chunks(8) {
+            histories.load_chunk(chunk, high_water, cap).await?;
+        }
+        histories.by_target.insert(target.clone(), peers);
+        Ok(histories)
+    }
     async fn load_chunk(
         &mut self,
         actors: &[DynamicRow],
@@ -127,7 +174,12 @@ impl Histories {
         let mut evidence_ids = BTreeSet::new();
         for row in actors {
             if let Some(history) = self.actors.get(&storage::actor(row)?) {
-                evidence_ids.extend(history.positive.values().map(|positive| positive.event_id));
+                evidence_ids.extend(
+                    history
+                        .positive
+                        .values()
+                        .flat_map(|positive| positive.event_ids.iter().copied()),
+                );
             }
         }
         for row in rows {
@@ -168,6 +220,7 @@ impl Histories {
                 .entry(target)
                 .and_modify(|positive| {
                     positive.score = positive.score.saturating_add(score);
+                    positive.event_ids.insert(event_id);
                     if (time, event_id) > (positive.time, positive.event_id) {
                         positive.time = time;
                         positive.event_id = event_id;
@@ -176,6 +229,7 @@ impl Histories {
                 .or_insert(Positive {
                     score,
                     event_id,
+                    event_ids: [event_id].into(),
                     time,
                 });
         }

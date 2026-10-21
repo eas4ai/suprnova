@@ -56,6 +56,11 @@ Use a stable interaction identity for retries. Surface and dedupe key allow
 1-128 bytes without control characters; target index allows 128 bytes and
 target key 255.
 
+`Recommend::record` validates the actor and dedupe key before resolving a retry.
+An existing fact returns its original provenance even after its target is deleted
+or its access scope changes. A first write still requires a live target and a
+matching access-scope snapshot.
+
 ### Event types and scoring
 
 Every event's score is its base plus signed integer `weight / 20`. Weight is
@@ -106,6 +111,10 @@ names no peers. Otherwise a suggestion whose peer count is 1 would point at that
 one person, and the suggestion would be one of their own views or purchases.
 `Recommend::similar_to` counts co-occurrence under the same rule. Negative and
 previously seen/interacted targets are excluded.
+Materialized reads also enforce the current peer minimum, so older rows cannot
+reveal a lone peer while waiting for the next generation. That generation
+refreshes all actors when ranking settings change, replacing stale scores and
+explanations even when no history changed.
 Scores sort descending with `(index, key)` as a deterministic tie-break.
 
 When the higher tier is short, results fill in this order:
@@ -145,21 +154,22 @@ backend when several processes generate recommendations. Contention returns
 
 Runs have `running`, `complete`, or `failed` states. A run stages rows under
 its own id and publishes by marking itself complete in one statement. Reads
-select only the latest completed run and retrieve rows and evidence in one
-database statement. Previous rows are removed only after publication. A failed
+select only the latest completed run and retrieve ranked rows and evidence together
+in bounded pages pinned to that run. Previous rows are removed only after publication. A failed
 run removes its staged rows and explanations, keeps an error record, and leaves
 the previous completed run current.
 
 Generation tracks a completed high-water mark, new events, capped history
-snapshots, and a search catalog digest. It regenerates affected actor/surface
-pairs and copies unaffected rows into the next snapshot. History and catalog
-checks catch late commits and changed content. A filtered `--user` or
+snapshots, a search catalog digest, and a ranking settings digest covering the
+history cap, peer cap, peer minimum, and popularity window. It regenerates affected
+actor/surface pairs and copies unaffected rows into the next snapshot. History and
+catalog checks catch late commits and changed content. A filtered `--user` or
 `--surface` run preserves other rows and does not consume their pending global
-delta.
+delta or a pending ranking settings refresh.
 
 `recommendation_runs` records start time, duration in milliseconds, events
 read, new events, users covered, items scored, coverage, fallback share,
-high-water mark, catalog digest, history snapshots, state, and error.
+high-water mark, catalog digest, ranking digest, history snapshots, state, and error.
 `recommendations:status` prints the ten latest attempts. The committed
 million-event fixture has a 300-second generation budget; run its ignored
 budget test separately from ordinary application tests.
@@ -171,6 +181,12 @@ or `recent`), and shared-target titles only where the viewer can see them.
 It exposes no peer identity, peer interaction, or private evidence id. Stored
 evidence retains event provenance for derivation without exposing it in the
 display projection.
+
+New starter explanations retain every contributing positive event, including both
+actors' events on each shared target and repeated events whose scores were summed.
+Verify each stored id/digest pair with `Recommend::verify_provenance`; a deleted
+contributor returns `Removed`. Regenerate older recommendations to refresh their
+stored evidence.
 
 ## Read recommendations
 
@@ -197,6 +213,13 @@ identity, the guest scope applies. `Recommend::for_actor(actor)` supports a
 trusted guest actor too. The default surface is `home`, the limit is 10,
 zero returns no rows, and limits above 10000 fail. Before a completed run
 exists, materialized reads return no recommendations.
+
+Materialized reads hydrate only a page's candidate targets and shared evidence
+targets. They refill after authorization filtering until the requested limit is
+met or the ranked rows run out. On-demand similarity loads bounded histories only
+for the selected peers and the viewer, preserving peer selection and score order.
+Custom search engines support `SearchEngine::stored_keys` for keyed starter reads,
+as they do for graph reads, so removed search documents stay excluded.
 
 `Recommend::similar_to(RecommendationTarget { index: "notes".into(),
 key: "1".into() }).for_viewer(viewer).limit(10).get().await?` computes
@@ -232,7 +255,7 @@ search index:
 
 - **Shared engagement.** Two documents get a `co_engaged` edge when at least
   `RECOMMEND_MIN_PEERS` actors hold both among their most recent
-  `RECOMMEND_GRAPH_FANOUT` positives. Every event class counts, but only the
+  `RECOMMEND_GRAPH_FANOUT` positives. Positive events count, and only the
   aggregate is stored, so no edge describes one person.
 - **Public engagement.** For the event types `RECOMMEND_PUBLIC_EVENT_TYPES`
   lists, each signed-in actor gets an `engaged` edge to the documents they
@@ -272,6 +295,13 @@ in pages, and revokes each page's facts before the page goes, so a failed
 revocation leaves the events for a retry to find. A shared-engagement edge
 names its oldest event as provenance, so it goes as soon as one actor's
 event behind it does. A removed fact is never read, traversed or cited again.
+
+A document revision replaces its node in place before removing stale declared
+relations, so its event-backed engagement edges keep counting. If the job fails
+after saving the node, retrying the same revision finishes the relation writes.
+Custom graph stores handle `Revocation::DocumentRelationsBefore` by removing
+older relation-derived edges and auxiliary nodes while preserving the document
+node itself. `DocumentBefore` retains its existing broader removal behavior.
 
 ### Where the graph lives
 
@@ -338,7 +368,12 @@ saying why.
 A graph row's explanation has `engine` set to `graph` and `evidence` listing
 the stored facts it rests on: the viewer's own events, as id and digest, the
 edges of the path, and the seed documents, every one of which the viewer may
-see. It never names a peer or a followed actor.
+see. It never names a peer or a followed actor. Serialized explanations omit
+`engaged` and `co_engaged` edge references because their keys can be recomputed
+from known actors or documents. The server-side explanation retains those
+references for verification against the graph store; public counts remain
+available. Keep the server-side explanation when verifying engagement evidence:
+serializing and loading it again does not restore those private references.
 
 ### Social proximity
 
@@ -442,7 +477,7 @@ Extend your application's migration list with
 | `recommendation_events` | Immutable id, actor kind/id, target index/key, type, weight, surface, UTC microsecond time, access scope (the index scope's guest filter and the target's values for the index's `scope_fields` when the event was recorded), source version, dedupe key, class, and score. |
 | `recommendation_explanations` | Run id, event-id/digest provenance pairs, attribute values, peer count, shared-target count and references, and fallback tier. |
 | `starter_recommendations` | Run id, actor, surface, target index/key, score, rank, and explanation id. |
-| `recommendation_runs` | Publication state and batch statistics, watermarks, catalog digest, history snapshots, and error. |
+| `recommendation_runs` | Publication state and batch statistics, watermarks, catalog digest, ranking digest, history snapshots, and error. |
 | `recommendation_schema` | `recommendation_schema_version`, 2 once the graph migration runs. |
 | `recommendation_graph_generations` | Graph generations and which one readers use. |
 | `recommendation_graph_nodes` | Nodes per generation: key, type, target, scope, source version, and provenance. |

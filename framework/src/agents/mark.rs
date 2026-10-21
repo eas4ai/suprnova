@@ -45,6 +45,17 @@ pub(crate) struct CallContext {
     /// The Live action the tool runs, for a headless Live tool: what the
     /// `/__live/agent` route requires before it does anything (AGENT-013).
     pub(crate) live: Option<Arc<super::LiveTarget>>,
+    /// The endpoint's request budget, so Live never returns a stranded handle.
+    pub(crate) max_body_bytes: usize,
+}
+
+impl CallContext {
+    /// Measure the smallest modern follow-up with serde so envelope bytes cannot
+    /// strand state even when the sealed handle itself fits the request budget.
+    pub(crate) fn accepts_live_handle(&self, handle: &str) -> Result<bool, serde_json::Error> {
+        super::mcp::minimum_live_call_bytes(self.tool, handle)
+            .map(|bytes| bytes <= self.max_body_bytes)
+    }
 }
 
 impl AgentMark {

@@ -456,7 +456,7 @@ The framework builds the request's own origin from three parts:
 - **Host.** `Request::host()`: `X-Forwarded-Host` from a trusted proxy, otherwise the `Host` header.
 - **Port.** `Request::port()`, or 443 for `https` and 80 for `http` when the request names no port. An `Origin` without a port takes the same defaults, so `https://app.example.com` and `app.example.com:443` match.
 
-The framework itself speaks plain HTTP. When it can't tell which scheme the browser used, it refuses the upgrade. That happens in three cases:
+The framework itself serves plain HTTP. When it can't tell which scheme the browser used, it refuses the upgrade. That happens in three cases:
 
 - The peer is a trusted proxy and sends neither `X-Forwarded-Proto` nor `X-Forwarded-Ssl`.
 - The peer is a trusted proxy and `X-Forwarded-Proto` names a scheme other than `http` or `https`.

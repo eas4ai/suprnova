@@ -4,6 +4,196 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 4.5.1 - 2026-10-21
+
+### Fixed
+
+- **The locked dependency set no longer carries the webpki advisories
+  RUSTSEC-2026-0381, 0382 and 0383.** `rustls-webpki` 0.103.16, `webpki-roots`
+  1.0.10 and `webpki-root-certs` 1.0.10 replace versions whose bundled roots
+  trusted distrusted emSign intermediates. Binaries built from the tag with
+  `--locked`, the CLI among them, get the fixed versions.
+
+## 4.5.0 - 2026-10-21
+
+### Changed
+
+- **Three public enums have new variants.** `Revocation` gains
+  `DocumentRelationsBefore`, `RegistrationOutcome` gains `Unavailable` and
+  `MetadataErrorKind` gains `TooManyBrowserTools`. A `match` over one of them
+  with no wildcard arm no longer compiles. (#174, #167, #166)
+- **Database search vector delivery now uses retryable claims.** Concurrent
+  delivery reports an in-flight error, and a stalled vector call times out after
+  45 seconds. (#202)
+- **Search touches now report an error when a declared relation key is missing
+  or cannot be read from the model.** (#203)
+- **Eloquent counter updates now use the saved row to check search eligibility
+  and invalidate cached pages.** (#198)
+- **New starter kits offer more search results only when another accessible page
+  is available.** (#196)
+- **Successful search requests now bootstrap session and CSRF cookies for new
+  clients.** Reuse them when reporting search clicks. (#195)
+- **Event retries now resolve their original provenance before checking the
+  target's current existence or access scope.** (#192)
+- **Newly generated starter explanations retain every contributing history
+  event.** Regenerate existing recommendations to refresh their stored
+  provenance. (#193)
+- **Starter recommendation reads load ranked candidates in bounded pages and
+  load similarity histories only for selected peers and the viewer.** Custom
+  search engines now need key lookups for starter reads, as they do for graph
+  reads. (#194)
+- **Quoted phrases now constrain semantic and hybrid searches using each
+  engine's lexical phrase matching rules.** (#191)
+- **Indexing and semantic queries now require the provider's model id and
+  revision to match the generation.** Rebuild with `search:reindex` after
+  changing models. (#187)
+- **Worker boot now constructs configured search providers before validating
+  searchable indexes.** (#188)
+- **Configured search providers are now available inside application bootstrap
+  hooks for server, worker and console processes.** (#199)
+- **Qdrant now supports retained flush fences and index deletion through the
+  search maintenance commands.** Flush fences use the configured tombstone
+  lifetime. (#189)
+- **Qdrant generation deletion can now resume from the dropping state while
+  ordinary writes continue to reject that state.** (#190)
+- **Qdrant hash lookups now retain the source version when skipping unchanged
+  documents, preserving stale-write protection.** (#186)
+- **Loading a searchable model without timestamps now reads its content and
+  search version together.** Locking model reads keep their row locks until the
+  version is loaded; ordinary reads use one SELECT on Postgres, MySQL and
+  SQLite. (#178)
+- **Saving a searchable model without timestamps now updates the search version
+  carried by that same instance, including saves in an explicit transaction.**
+  (#177)
+- **Graph traversal now replaces earlier paths with stronger later paths,
+  including when the node limit is full.** (#176)
+- **`RecommendationRun` now exposes `ranking_digest`.** Apply the new
+  recommendation migration when upgrading. (#175)
+- **Custom graph stores must handle `DocumentRelationsBefore`, which removes
+  stale relation facts while keeping the document node and its engagement
+  edges.** (#174)
+- **Serialized recommendation explanations now omit social and shared-engagement
+  edge references.** Server-side explanations keep them for verification. (#173)
+- **On MySQL and MariaDB, an email address now matches an account only when it
+  equals the stored address after trimming and lowercasing.** Accent variants
+  and other collation folds, such as `ss` for `ß`, no longer match at sign-in,
+  password reset, email verification, passkeys or OAuth linking; Postgres and
+  SQLite already compared exactly. A user who typed an unaccented form of an
+  accented address types it exactly after upgrading. (#167)
+- **`UserProvider` gained `rehash_password_for_sign_in(user, credentials,
+  recorded_epoch)`, the rehash the session guard's `attempt` calls.** It checks
+  the stored epoch and the verified hash, writes atomically and returns the
+  snapshot it wrote. The default calls `rehash_password_if_required` only for a
+  user without a credential epoch, so a custom provider that upgrades hashes on
+  sign-in implements the new method; `once` and `logout_other_devices` still
+  call the old one. The built-in Eloquent and database providers implement it.
+  (#168)
+
+### Fixed
+
+- **Database search vector updates and deletions now release their SQL
+  connection before calling the vector store, avoiding deadlocks on shared
+  pools.** (#202)
+- **Search touches now find parent keys even when a child hides or renames them
+  in JSON output.** (#203)
+- **Retiring a database search generation now removes list tables for attributes
+  that have since been removed from the index definition.** (#201)
+- **Database search now detects MySQL and MariaDB separately for each named
+  connection, so generation tables use the correct collation.** (#200)
+- **Incrementing or decrementing a counter now adds or removes search results
+  when the new value crosses a model's indexing threshold.** (#198)
+- **Starter kit notes search now stops offering more results at the accessible
+  hit cap, even when more notes match the query.** (#196)
+- **A first JSON search without a cookie now returns an impression that a later
+  click from the same client can validate.** (#195)
+- **Retrying a recorded recommendation event now succeeds after its target is
+  deleted or its access scope changes.** (#192)
+- **Starter explanations now include peers' shared-target events and all
+  repeated positive events, so verification detects removed contributors.**
+  (#193)
+- **Reading a short starter recommendation list no longer loads the whole
+  visible catalog, and still fills the list after filtering inaccessible
+  targets.** (#194)
+- **Semantic and hybrid searches now exclude documents missing required quoted
+  phrases and refill filtered candidates to preserve result depth.** (#191)
+- **Replacing an embedding provider with another model of the same dimensions
+  now reports a rebuild error instead of silently mixing incompatible vectors.**
+  (#187)
+- **Workers with searchable models now start with an environment-selected HTTP
+  or fastembed provider.** (#188)
+- **Fresh starter kits can create the notes search generation with the
+  configured provider during bootstrap.** Initialization failures now name
+  likely causes. (#199)
+- **Qdrant flushes now block delayed writes, including keys absent at the start,
+  and deleting an index removes its collections and generation metadata.**
+  (#189)
+- **Pruning a retired Qdrant generation now removes its collection and metadata
+  instead of failing after deletion starts.** (#190)
+- **Unchanged Qdrant documents now keep their latest version, so delayed older
+  removals cannot delete them.** (#186)
+- **A concurrent save can no longer make a loaded search document carry a newer
+  version than the row content it contains.** (#178)
+- **A borrowed save no longer leaves a searchable model reporting its previous
+  search version after the database has saved a new revision.** (#177)
+- **Graph recommendations now use a stronger indirect route even when a weaker
+  direct route reached the item first, and explain the route used.** (#176)
+- **Recommendations created before an upgrade now obey the current peer minimum,
+  and changing ranking settings refreshes unchanged users on the next full
+  run.** (#175)
+- **Editing a document now keeps its recommendation engagement signals while
+  rebuilding declared relations, including when a document job is retried.**
+  (#174)
+- **Recommendation explanations no longer reveal which followed accounts engaged
+  through edge keys that a client can recompute.** (#173)
+- **Cancelling a text stream from a response callback now leaves its status
+  clear, and callbacks cannot overwrite a replacement request's state.** (#184)
+- **Event streams now stay open after a connection error so the browser can
+  reconnect and continue receiving messages.** (#183)
+- **Stream readers mounted together with the same id now share their text and
+  callbacks in all three Inertia kits.** (#182)
+- **Stream requests now use the fresh CSRF cookie after sign-in, so Inertia
+  navigation no longer leaves them sending a stale token.** (#181)
+- **Adding a source to a Content Security Policy now changes only the policy
+  containing its directive, keeping other policies in the header unchanged.**
+  (#180)
+- **Live now announces interrupted actions to screen readers in the shipped
+  browser bundles.** (#172)
+- **A sign-up whose address collides with an existing account only under the
+  database's looser comparison answers the same generic response as a registered
+  address and creates nothing, instead of a conflict error.** (#167)
+- **Schema watchers now report new form request refusals even when the generated
+  file stays unchanged, without repeating unchanged refusals on every edit.**
+  (#171)
+- **Postgres schema dumps now remove entire multiline extension comments even
+  when they contain semicolons, preventing invalid snapshots.** (#170)
+- **Live components now reject more than 64 browser tools on the server,
+  preventing oversized tool metadata from disabling ordinary clicks.** (#166)
+- **Headless Live tools now report when their growing state no longer fits a
+  follow-up request, so agents can restart instead of receiving an unusable
+  handle.** (#165)
+- **Concurrent fresh database migrations now recover when another migration
+  creates the authorization server or agent auth tables first on Postgres.**
+  (#164)
+- **Concurrent agent assertions now share one provider key-set fetch, preventing
+  unknown keys from triggering duplicate requests to the provider.** (#163)
+- **Live tool actions now accept optional dates and date-times, and date-times
+  in lists and maps, without failing before the action runs.** (#169)
+- **Password resets now cancel password sign-ins already in progress, so an old
+  password cannot create a new session after the reset.** (#168)
+- **Agent tools now refuse guards that use a different user provider from the
+  caller's default guard, preventing matching ids from signing in as another
+  person.** (#160)
+- **Built-in approval and agent claim forms now refuse agent tool submissions,
+  even when the tool has your signed-in session and a valid form token.** (#161)
+- **On MySQL and MariaDB, accent-insensitive email comparisons could let a
+  different mailbox receive a magic link for another account.** Account lookups
+  now require byte equality after trimming and lowercasing, and magic links go
+  to the stored account address. Conflicting registrations return the same
+  generic response without issuing a token. (#167)
+- **On MySQL and MariaDB, an email change that differed only by accents could
+  still receive a verification stamp for the old address.** Verification now
+  checks the exact address atomically, so that change refuses the stamp. (#162)
+
 ## 4.4.0 - 2026-10-20
 
 ### Added

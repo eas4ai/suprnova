@@ -240,37 +240,76 @@ where
         user: &dyn Authenticatable,
         credentials: &Value,
     ) -> Result<(), FrameworkError> {
+        self.rehash_password_for_sign_in(user, credentials, super::epoch::credential_epoch(user))
+            .await?;
+        Ok(())
+    }
+
+    async fn rehash_password_for_sign_in(
+        &self,
+        user: &dyn Authenticatable,
+        credentials: &Value,
+        recorded_epoch: Option<u64>,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
         let password = credentials.get("password").and_then(|v| v.as_str());
         let (Some(plaintext), Some(hash)) = (password, user.get_auth_password()) else {
-            return Ok(());
+            return Ok(None);
         };
         // While the application shares its database with Laravel, a sign-in
         // rewrites a hash Laravel's hasher would refuse (`$2b$`, Argon2id) as
         // the `$2y$` one it accepts, as Laravel itself rehashes on login,
-        // keeping a stored bcrypt cost above the configured one. If the
-        // rewrite cannot be minted or stored, the sign-in fails with that
-        // error: signing in on a hash Laravel refuses would leave a user
-        // Laravel cannot sign in (LDB-004). The stored hash is left as it
-        // was, and the next sign-in tries again.
+        // keeping a stored bcrypt cost above the configured one. A rewrite
+        // that cannot be minted or stored fails the sign-in: signing in on a
+        // hash Laravel refuses would leave a user Laravel cannot sign in
+        // (LDB-004). The stored hash stays, and the next sign-in tries again.
         if !(crate::LaravelDatabase::is_shared() && hashing::needs_rehash(hash)) {
-            return Ok(());
+            return Ok(None);
         }
-        let rewritten = match hashing::rehash_for_laravel_async(plaintext, hash).await {
-            Ok(rehashed) => {
-                self.set_password(&user.get_auth_identifier(), &rehashed)
-                    .await
+        let rehashed = hashing::rehash_for_laravel_async(plaintext, hash).await?;
+        let expected_hash = hash.to_owned();
+        let expected_epoch = recorded_epoch.or_else(|| super::epoch::credential_epoch(user));
+        let column = self
+            .identifier_column
+            .clone()
+            .unwrap_or_else(|| M::primary_key_name().to_owned());
+        let id = (self.id_parser)(&user.get_auth_identifier());
+        // The row lock covers both the epoch check and the narrow write.
+        // SQLite's transaction rejects a write over a concurrent commit.
+        // Return the write's model, since a reload could adopt a later reset.
+        let write = || async move {
+            let current = M::query()
+                .filter(column, id)
+                .lock_for_update()
+                .first()
+                .await?
+                .ok_or_else(crate::magnetar_integration::expired_host_sign_in)?;
+            if super::epoch::credential_epoch(&current) != expected_epoch
+                || current.get_auth_password() != Some(expected_hash.as_str())
+            {
+                return Err(crate::magnetar_integration::expired_host_sign_in());
             }
-            Err(error) => Err(error),
+            let mut changed = current.clone();
+            changed.set_password_hash(&rehashed);
+            let written = crate::eloquent::model::save_changed_columns(&current, changed).await?;
+            Ok(Some(Arc::new(written) as Arc<dyn Authenticatable>))
         };
-        if let Err(error) = rewritten {
+        let rewritten = if crate::database::after_commit::in_transaction() {
+            write().await
+        } else {
+            let transaction = crate::database::DB::transaction_ambient(write);
+            match M::default_connection_name() {
+                Some(name) => crate::database::DB::with_default_connection(name, transaction).await,
+                None => transaction.await,
+            }
+        };
+        if let Err(error) = &rewritten {
             tracing::warn!(
                 error = %error,
                 "the password hash could not be rewritten for Laravel after a \
                  valid password; the sign-in fails"
             );
-            return Err(error);
         }
-        Ok(())
+        rewritten
     }
 
     fn written_user<'a>(
