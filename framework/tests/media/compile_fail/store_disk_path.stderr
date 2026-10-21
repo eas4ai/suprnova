@@ -1,0 +1,19 @@
+error[E0308]: mismatched types
+ --> tests/media/compile_fail/store_disk_path.rs:6:26
+  |
+6 |         .store("images", "out.png")
+  |          -----           ^^^^^^^^^ expected `Option<&str>`, found `&str`
+  |          |
+  |          arguments to this method are incorrect
+  |
+  = note:   expected enum `std::option::Option<&str>`
+          found reference `&'static str`
+note: method defined here
+ --> src/media/mod.rs
+  |
+  |     pub async fn store(
+  |                  ^^^^^
+help: try wrapping the expression in `Some`
+  |
+6 |         .store("images", Some("out.png"))
+  |                          +++++         +
