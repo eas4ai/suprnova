@@ -8,6 +8,7 @@ mod filter;
 mod mysql;
 mod postgres;
 mod sqlite;
+mod vector_delivery;
 
 use super::{
     EngineCandidate, EngineCapabilities, EngineResult, GenerationId, IndexedDocument, SearchEngine,
@@ -1506,10 +1507,9 @@ impl SearchEngine for DatabaseSearchEngine {
         let tx = conn.inner().begin().await.map_err(db_error)?;
         Self::lock(&tx, dialect, index.name, "__control").await?;
         Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
-        let state: String = get(
-            &Self::metadata(&tx, dialect, index.name, generation.as_str()).await?,
-            "state",
-        )?;
+        let metadata = Self::metadata(&tx, dialect, index.name, generation.as_str()).await?;
+        vector_delivery::ensure_unclaimed(&metadata)?;
+        let state: String = get(&metadata, "state")?;
         if matches!(state.as_str(), "current" | "active" | "creating") {
             return Err(FrameworkError::param(format!(
                 "search index {}: cannot drop active or building generation {}",
@@ -2727,53 +2727,6 @@ async fn queue_vector(
     execute(tx,format!("UPDATE search_generations SET pending_vectors_json={pending} WHERE index_name={i} AND generation={g}"),sql).await?;
     Ok(())
 }
-impl DatabaseSearchEngine {
-    async fn drain_vectors(
-        &self,
-        index: &IndexDescriptor,
-        generation: &GenerationId,
-        table: &str,
-        dialect: Dialect,
-    ) -> Result<(), FrameworkError> {
-        let conn = DB::connection()?;
-        crate::render_cache::write_side_open(false).await?;
-        let tx = conn.inner().begin().await.map_err(db_error)?;
-        Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
-        let metadata = Self::metadata(&tx, dialect, index.name, generation.as_str()).await?;
-        let pending: BTreeSet<String> =
-            serde_json::from_str(&get::<String>(&metadata, "pending_vectors_json")?)
-                .map_err(db_error)?;
-        if pending.is_empty() {
-            return tx.commit().await.map_err(db_error);
-        }
-        let mut remaining = Vec::new();
-        let exists = sea_orm_migration::SchemaManager::new(&tx)
-            .has_table(table)
-            .await
-            .map_err(db_error)?;
-        for id in pending {
-            let mut sql = Sql::new(dialect);
-            let point = sql.bind(id.clone());
-            let text = format!(
-                "SELECT vector_id FROM {} WHERE vector_id={point} LIMIT 1",
-                sql.ident(table)
-            );
-            if !exists || rows(&tx, text, sql).await?.is_empty() {
-                remaining.push(id);
-            }
-        }
-        if !remaining.is_empty() {
-            vector_store(index.name)?.delete(remaining).await?;
-        }
-        let mut sql = Sql::new(dialect);
-        let empty = sql.bind("[]".to_owned());
-        let i = sql.bind(index.name.to_owned());
-        let g = sql.bind(generation.as_str().to_owned());
-        execute(&tx,format!("UPDATE search_generations SET pending_vectors_json={empty} WHERE index_name={i} AND generation={g}"),sql).await?;
-        advance_transaction(&tx, index.name).await?;
-        tx.commit().await.map_err(db_error)
-    }
-}
 
 fn vocabulary_step() -> Result<i64, FrameworkError> {
     crate::config::env_optional::<String>("SEARCH_VOCABULARY_REFRESH")
@@ -2810,54 +2763,4 @@ async fn drop_created<C: ConnectionTrait>(
             .map_err(db_error)?;
     }
     Ok(())
-}
-impl DatabaseSearchEngine {
-    async fn flush_vectors(
-        &self,
-        index: &IndexDescriptor,
-        generation: &GenerationId,
-        table: &str,
-        dialect: Dialect,
-    ) -> Result<(), FrameworkError> {
-        loop {
-            let conn = DB::connection()?;
-            crate::render_cache::write_side_open(false).await?;
-            let tx = conn.inner().begin().await.map_err(db_error)?;
-            Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
-            ensure_ready(&tx, dialect, index.name, generation).await?;
-            let mut sql = Sql::new(dialect);
-            let limit = sql.bind(512i64);
-            let text = format!(
-                "SELECT document_json,source_version,content_hash,vector_id,vector_dense_json FROM {} WHERE vector_pending=TRUE LIMIT {limit}",
-                sql.ident(table)
-            );
-            let pending = rows(&tx, text, sql).await?;
-            if pending.is_empty() {
-                return tx.commit().await.map_err(db_error);
-            }
-            let mut points = Vec::with_capacity(pending.len());
-            for row in &pending {
-                let document = decode(row)?;
-                let embedding: Vec<f32> =
-                    serde_json::from_str(&get::<String>(row, "vector_dense_json")?)
-                        .map_err(db_error)?;
-                let hash: String = get(row, "content_hash")?;
-                points.push(VectorItem::new(get::<String>(row,"vector_id")?,embedding,serde_json::json!({"index":index.name,"generation":generation.as_str(),"key":document.key,"content_hash":hash})));
-            }
-            vector_store(index.name)?.upsert(points).await?;
-            let mut sql = Sql::new(dialect);
-            let ids = pending
-                .iter()
-                .map(|r| Ok(sql.bind(get::<String>(r, "vector_id")?)))
-                .collect::<Result<Vec<_>, FrameworkError>>()?
-                .join(",");
-            let text = format!(
-                "UPDATE {} SET vector_pending=FALSE WHERE vector_id IN ({ids})",
-                sql.ident(table)
-            );
-            execute(&tx, text, sql).await?;
-            advance_transaction(&tx, index.name).await?;
-            tx.commit().await.map_err(db_error)?;
-        }
-    }
 }

@@ -222,3 +222,11 @@ async fn postgres_cleanup_remembers_removed_list_attributes() -> Result<(), Fram
     let _guard = live_database("PG_TEST_URL").await?;
     super::database_support::cleanup_removed_lists("database_pg_dropped_list").await
 }
+
+#[tokio::test]
+#[serial(search_database_postgres)]
+#[ignore = "requires disposable database at PG_TEST_URL"]
+async fn postgres_vector_delivery_releases_the_single_connection() -> Result<(), FrameworkError> {
+    let _guard = super::database_support::live_database_with_connections("PG_TEST_URL", 1).await?;
+    super::database_support::shared_pool_vector_delivery("database_pg_shared_vectors").await
+}

@@ -939,6 +939,123 @@ async fn sqlite_generation_cleanup_remembers_removed_list_attributes() -> Result
 }
 
 #[tokio::test]
+async fn sqlite_vector_delivery_releases_the_single_connection_and_retries_failures()
+-> Result<(), FrameworkError> {
+    let _db = TestDatabase::fresh::<Migrator>().await?;
+    super::database_support::shared_pool_vector_delivery("database_sqlite_shared_vectors").await
+}
+
+#[tokio::test]
+async fn sqlite_vector_acknowledgement_keeps_a_newer_sql_version_pending()
+-> Result<(), FrameworkError> {
+    use std::sync::atomic::Ordering;
+    let _db = TestDatabase::fresh::<Migrator>().await?;
+    let index = descriptor("database_sqlite_vector_fence");
+    let generation = create(&index).await?;
+    let store = super::database_support::connection_vector_driver(index.name);
+    store.advance_version.store(true, Ordering::SeqCst);
+    suprnova::vector::Vector::register(index.name, store.clone());
+    let mut doc = document(&index, "a", "orchard", "garden");
+    doc.dense = Some(vec![1.0, 0.0, 0.0]);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        engine().index(&index, &generation, &[doc]),
+    )
+    .await
+    .expect("concurrent SQL writes must not deadlock")?;
+    assert_eq!(
+        store.upsert_calls.load(Ordering::SeqCst),
+        2,
+        "the newer version must be delivered before its pending marker is cleared"
+    );
+    let outcome = engine()
+        .remove(&index, &generation, &[("a".into(), 1)])
+        .await?;
+    assert_eq!(outcome.skipped_older, 1);
+    assert_eq!(
+        suprnova::vector::Vector::store(index.name)?.count().await?,
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlite_expired_vector_claim_recovers_cancelled_delivery() -> Result<(), FrameworkError> {
+    use std::sync::atomic::Ordering;
+    let _db = TestDatabase::fresh::<Migrator>().await?;
+    let index = descriptor("database_sqlite_claim_expiry");
+    let generation = create(&index).await?;
+    let store = super::database_support::connection_vector_driver(index.name);
+    store.block_upsert.store(true, Ordering::SeqCst);
+    suprnova::vector::Vector::register(index.name, store.clone());
+    let mut doc = document(&index, "a", "orchard", "garden");
+    doc.dense = Some(vec![1.0, 0.0, 0.0]);
+    {
+        let driver = engine();
+        let docs = [doc.clone()];
+        let write = driver.index(&index, &generation, &docs);
+        tokio::pin!(write);
+        tokio::select! {
+            result = &mut write => panic!("delivery should block after claiming: {result:?}"),
+            _ = store.entered_upsert.notified() => {},
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("upsert was never entered"),
+        }
+        // Drop the worker future only after it has committed its durable claim.
+    }
+    let mut settings = engine().read_settings(&index, &generation).await?;
+    settings.query.hits_cap = 42;
+    engine()
+        .write_settings(&index, &generation, &settings)
+        .await?;
+    let error = engine()
+        .index(&index, &generation, &[doc.clone()])
+        .await
+        .expect_err("a settings write must not erase an in-flight claim");
+    assert!(error.to_string().contains("in flight"), "{error}");
+    DB::update("UPDATE search_generations SET settings_json=json_set(settings_json, '$._database_vector_claim.expires_at', 0) WHERE index_name=? AND generation=?", vec![index.name.into(), generation.as_str().into()]).await?;
+    vectors(index.name);
+    engine().index(&index, &generation, &[doc]).await?;
+    assert_eq!(
+        suprnova::vector::Vector::store(index.name)?.count().await?,
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlite_vector_cleanup_rechecks_skipped_ids_after_concurrent_removal()
+-> Result<(), FrameworkError> {
+    use std::sync::atomic::Ordering;
+    let _db = TestDatabase::fresh::<Migrator>().await?;
+    let index = descriptor("database_sqlite_delete_fence");
+    let generation = create(&index).await?;
+    let store = super::database_support::connection_vector_driver(index.name);
+    store.remove_current_on_delete.store(true, Ordering::SeqCst);
+    suprnova::vector::Vector::register(index.name, store);
+    let mut first = document(&index, "a", "orchard", "garden");
+    first.dense = Some(vec![1.0, 0.0, 0.0]);
+    let mut second = document(&index, "a", "basket", "garden");
+    second.document.source_version = 2;
+    second.dense = Some(vec![0.0, 1.0, 0.0]);
+    let mut restored = first.clone();
+    restored.document.source_version = 3;
+    // Returning to the original content queues an ID that is still referenced.
+    // The delete fake removes that reference while the other ID is dispatched.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        engine().index(&index, &generation, &[first, second, restored]),
+    )
+    .await
+    .expect("interleaved deletion must finish")?;
+    assert_eq!(
+        suprnova::vector::Vector::store(index.name)?.count().await?,
+        0,
+        "the ID that became unreferenced during dispatch must still be cleaned up"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlite_legacy_generation_cleanup_falls_back_to_its_descriptor()
 -> Result<(), FrameworkError> {
     use suprnova::search::{AttributeDecl, AttributeType};

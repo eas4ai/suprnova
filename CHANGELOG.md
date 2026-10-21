@@ -8,6 +8,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- Database search vector delivery now uses retryable claims. Concurrent delivery
+  reports an in-flight error, and a stalled vector call times out after 45 seconds. (#202)
+
 - Eloquent counter updates now use the saved row to check search eligibility and
   invalidate cached pages. (#198)
 - New starter kits offer more search results only when another accessible page
@@ -68,6 +71,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   (#168)
 
 ### Fixed
+
+- Database search vector updates and deletions now release their SQL connection
+  before calling the vector store, avoiding deadlocks on shared pools. (#202)
 
 - Retiring a database search generation now removes list tables for attributes
   that have since been removed from the index definition. (#201)
