@@ -380,9 +380,14 @@ edited the file.
 
 - **The locked dependency set no longer carries the webpki advisories
   RUSTSEC-2026-0381, 0382 and 0383.** Nothing to change in code. Your own
-  application's lock file is separate: run `cargo update -p rustls-webpki -p
-  webpki-roots@1.0.9 -p webpki-root-certs@1.0.9` (name the versions your lock
-  holds) and `cargo audit` to bring it the same fix. (4.5.1)
+  application's lock file is separate and keeps the versions it resolved when
+  you created the project, so the tag fixes nothing there. After the bump,
+  run `cargo update -p rustls-webpki -p webpki-roots@1.0.9 -p
+  webpki-root-certs@1.0.9 -p ammonia -p quinn-proto -p rustls` (append
+  `@<version>` from your lock wherever cargo calls a name ambiguous), then
+  `cargo audit` until it reports no vulnerabilities. Locks created from earlier
+  tags also hold `ammonia`, `quinn-proto` and `rustls` versions with open
+  advisories, which the framework's own lock left behind before 4.5.0. (4.5.1)
 - **Database search vector updates and deletions now release their SQL
   connection before calling the vector store, avoiding deadlocks on shared
   pools.** Nothing to change.
