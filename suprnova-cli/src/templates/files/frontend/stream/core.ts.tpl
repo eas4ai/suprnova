@@ -286,12 +286,21 @@ const textStreams = new Map<string, TextStream<unknown>>()
 
 /**
  * The text stream with `id`: the one the components reading it share,
- * or a new one. A new stream joins the shared set when its first reader
- * subscribes and leaves it, cancelled, when its last reader goes, so a
- * server render, which never subscribes, keeps nothing.
+ * or a new one. Browser acquisition registers it immediately, so readers
+ * rendered together share one engine before either subscribes. Its last
+ * reader cancels and removes it. Without `document`, acquisition never
+ * registers an engine, so server renders keep no shared state.
  */
 export function textStream<TJsonData = null>(id: string): TextStream<TJsonData> {
-  return (textStreams.get(id) as TextStream<TJsonData> | undefined) ?? new TextStream<TJsonData>(id)
+  const existing = textStreams.get(id) as TextStream<TJsonData> | undefined
+  if (existing) {
+    return existing
+  }
+  const stream = new TextStream<TJsonData>(id)
+  if (typeof document !== 'undefined') {
+    textStreams.set(id, stream as TextStream<unknown>)
+  }
+  return stream
 }
 
 /** A POST whose response is read as text: `useStream`'s engine. */

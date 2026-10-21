@@ -1,4 +1,4 @@
-import { createApp, defineComponent } from 'vue'
+import { createApp, defineComponent, h } from 'vue'
 import { afterEach, expect, test, vi } from 'vitest'
 import { csrfHeaders, useEventStream, useJsonEventStream, useJsonStream, useStream } from './src/lib/stream'
 import { FakeEventSource, fakeFetch, settle } from './fakes'
@@ -195,5 +195,36 @@ test('CSRF headers use the configured cookie and header names (#181)', () => {
       .toEqual({ 'X-CUSTOM-XSRF': 'custom/token' })
   } finally {
     document.cookie = 'CUSTOM-XSRF=; Max-Age=0; path=/'
+  }
+})
+
+
+test('readers mounted together share text and callbacks for one id (#182)', async () => {
+  const server = fakeFetch()
+  vi.stubGlobal('fetch', server.fetch)
+  const onData = [vi.fn(), vi.fn()]
+  const onFinish = [vi.fn(), vi.fn()]
+  const readers: Array<ReturnType<typeof useStream>> = []
+  const Reader = defineComponent({
+    props: { index: { type: Number, required: true } },
+    setup(props) {
+      readers[props.index] = useStream('/chat', {
+        id: 'shared-readers', onData: onData[props.index], onFinish: onFinish[props.index],
+      })
+      return () => null
+    },
+  })
+  const app = createApp({ render: () => [h(Reader, { index: 0 }), h(Reader, { index: 1 })] })
+  app.mount(document.createElement('div'))
+  try {
+    await step(() => void readers[0].send())
+    await step(() => server.requests[0].respond())
+    await step(() => server.requests[0].push('shared'))
+    expect(readers.map((reader) => reader.data.value)).toEqual(['shared', 'shared'])
+    for (const callback of onData) expect(callback).toHaveBeenCalledWith('shared')
+    await step(() => server.requests[0].end())
+    for (const callback of onFinish) expect(callback).toHaveBeenCalledTimes(1)
+  } finally {
+    app.unmount()
   }
 })

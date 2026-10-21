@@ -125,6 +125,7 @@ fn assert_stream_hooks(frontend: &Path, kit: &str) {
     copy(&format!("{kit}.test.ts"), "stream.test.ts");
     if kit == "svelte" {
         copy("StreamProbe.svelte", "StreamProbe.svelte");
+        copy("StreamReaders.svelte", "StreamReaders.svelte");
         copy("vitest.svelte.config.ts", "vitest.stream.config.ts");
     } else {
         copy("vitest.config.ts", "vitest.stream.config.ts");

@@ -25,6 +25,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Stream readers mounted together with the same id now share their text
+  and callbacks in all three Inertia kits. (#182)
 - Stream requests now use the fresh CSRF cookie after sign-in, so Inertia
   navigation no longer leaves them sending a stale token. (#181)
 - Adding a source to a Content Security Policy now changes only the policy

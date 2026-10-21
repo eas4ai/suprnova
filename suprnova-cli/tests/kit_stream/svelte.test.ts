@@ -2,6 +2,7 @@ import { flushSync, mount, unmount as destroy } from 'svelte'
 import { get } from 'svelte/store'
 import { afterEach, expect, test, vi } from 'vitest'
 import StreamProbe from './StreamProbe.svelte'
+import StreamReaders from './StreamReaders.svelte'
 import { csrfHeaders, useEventStream, useJsonEventStream, useJsonStream, useStream } from './src/lib/stream'
 import { FakeEventSource, fakeFetch, settle } from './fakes'
 
@@ -186,5 +187,36 @@ test('CSRF headers use the configured cookie and header names (#181)', () => {
       .toEqual({ 'X-CUSTOM-XSRF': 'custom/token' })
   } finally {
     document.cookie = 'CUSTOM-XSRF=; Max-Age=0; path=/'
+  }
+})
+
+
+test('readers mounted together share text and callbacks for one id (#182)', async () => {
+  const server = fakeFetch()
+  vi.stubGlobal('fetch', server.fetch)
+  const onData = [vi.fn(), vi.fn()]
+  const onFinish = [vi.fn(), vi.fn()]
+  const readers: Array<ReturnType<typeof useStream>> = []
+  const component = mount(StreamReaders, {
+    target: document.body,
+    props: {
+      readers: onData.map((callback, index) => () => {
+        readers[index] = useStream('/chat', {
+          id: 'shared-readers', onData: callback, onFinish: onFinish[index],
+        })
+      }),
+    },
+  })
+  flushSync()
+  try {
+    await step(() => void readers[0].send())
+    await step(() => server.requests[0].respond())
+    await step(() => server.requests[0].push('shared'))
+    expect(readers.map((reader) => get(reader).data)).toEqual(['shared', 'shared'])
+    for (const callback of onData) expect(callback).toHaveBeenCalledWith('shared')
+    await step(() => server.requests[0].end())
+    for (const callback of onFinish) expect(callback).toHaveBeenCalledTimes(1)
+  } finally {
+    await destroy(component)
   }
 })

@@ -1,8 +1,9 @@
-import { act, createElement } from 'react'
+import { act, createElement, Fragment } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, expect, test, vi } from 'vitest'
 import { csrfHeaders, useEventStream, useJsonEventStream, useJsonStream, useStream } from './src/lib/stream'
 import { FakeEventSource, fakeFetch, settle } from './fakes'
+import { textStream } from './src/lib/stream/core'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -187,5 +188,69 @@ test('CSRF headers use the configured cookie and header names (#181)', () => {
       .toEqual({ 'X-CUSTOM-XSRF': 'custom/token' })
   } finally {
     document.cookie = 'CUSTOM-XSRF=; Max-Age=0; path=/'
+  }
+})
+
+
+test('readers mounted together share text and callbacks for one id (#182)', async () => {
+  const server = fakeFetch()
+  vi.stubGlobal('fetch', server.fetch)
+  const onData = [vi.fn(), vi.fn()]
+  const onFinish = [vi.fn(), vi.fn()]
+  const readers: Array<ReturnType<typeof useStream>> = []
+  const Reader = ({ index }: { index: number }) => {
+    readers[index] = useStream('/chat', {
+      id: 'shared-readers', onData: onData[index], onFinish: onFinish[index],
+    })
+    return null
+  }
+  const root = createRoot(document.createElement('div'))
+  act(() => root.render(createElement(Fragment, null,
+    createElement(Reader, { index: 0 }), createElement(Reader, { index: 1 }),
+  )))
+  try {
+    await step(() => void readers[0].send())
+    await step(() => server.requests[0].respond())
+    await step(() => server.requests[0].push('shared'))
+    expect(readers.map((reader) => reader.data)).toEqual(['shared', 'shared'])
+    for (const callback of onData) expect(callback).toHaveBeenCalledWith('shared')
+    await step(() => server.requests[0].end())
+    for (const callback of onFinish) expect(callback).toHaveBeenCalledTimes(1)
+  } finally {
+    act(() => root.unmount())
+  }
+})
+
+test('server acquisition keeps no shared text engine (#182)', () => {
+  vi.stubGlobal('document', undefined)
+  try {
+    expect(textStream('server-reader')).not.toBe(textStream('server-reader'))
+  } finally {
+    vi.unstubAllGlobals()
+  }
+})
+
+test('only the last reader releases and cancels a shared engine (#182)', async () => {
+  const server = fakeFetch()
+  vi.stubGlobal('fetch', server.fetch)
+  const stream = textStream('reader-lifetime')
+  const first = stream.subscribe(() => undefined)
+  const second = stream.subscribe(() => undefined)
+  const done = stream.send('/chat', undefined, {})
+  try {
+    first()
+    expect(textStream(stream.id)).toBe(stream)
+    expect(server.requests[0].aborted()).toBe(false)
+  } finally {
+    second()
+  }
+  await done
+  expect(server.requests[0].aborted()).toBe(true)
+  const next = textStream(stream.id)
+  const release = next.subscribe(() => undefined)
+  try {
+    expect(next).not.toBe(stream)
+  } finally {
+    release()
   }
 })
