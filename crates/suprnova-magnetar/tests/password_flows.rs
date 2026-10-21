@@ -31,10 +31,11 @@ use magnetar::password::{
 };
 use magnetar::plugin::BearerCredential;
 use magnetar::plugins::password::{
-    PasswordAttempt, PasswordAuthProvider, RegisterInput, RegistrationOutcome, RehashReport,
+    PasswordAttempt, PasswordAuthProvider, PasswordAuthService, RegisterInput, RegistrationOutcome,
+    RehashReport,
 };
 use magnetar::sessions::{JwtConfig, JwtSessionProvider, SessionMetadata, SessionQueries};
-use magnetar::storage::{CredentialActor, UserStore};
+use magnetar::storage::{CredentialActor, NewUser, SeaOrmStorage, UserRecord, UserStore};
 use parking_lot::Mutex;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
@@ -169,6 +170,93 @@ async fn register_is_idempotent_and_existing_email_stays_generic() {
         .unwrap();
     assert!(
         matches!(&outcome, RegistrationOutcome::Existing { user_id } if user_id == &stored.user_id)
+    );
+}
+
+/// A store whose unique index compares addresses more loosely than the
+/// framework does: the insert collides while the exact lookup finds nothing,
+/// as MySQL and MariaDB do for an accent variant of a stored address.
+struct CollidingInsert(Arc<SeaOrmStorage<StorageSchema>>);
+
+#[async_trait::async_trait]
+impl UserStore for CollidingInsert {
+    async fn find_by_email(&self, email: &str) -> magnetar::Result<Option<UserRecord>> {
+        self.0.find_by_email(email).await
+    }
+    async fn find_by_id(&self, user_id: &str) -> magnetar::Result<Option<UserRecord>> {
+        self.0.find_by_id(user_id).await
+    }
+    async fn create_user(&self, _input: NewUser) -> magnetar::Result<UserRecord> {
+        Err(magnetar::Error::Conflict {
+            resource: "user".to_owned(),
+            message: "the unique email index matched another account".to_owned(),
+        })
+    }
+    async fn set_password_hash(
+        &self,
+        actor: &CredentialActor,
+        password_hash: &str,
+    ) -> magnetar::Result<()> {
+        self.0.set_password_hash(actor, password_hash).await
+    }
+    async fn mark_email_verified(
+        &self,
+        user_id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<()> {
+        self.0.mark_email_verified(user_id, at).await
+    }
+    async fn mark_email_verified_for(
+        &self,
+        user_id: &str,
+        email: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<bool> {
+        self.0.mark_email_verified_for(user_id, email, at).await
+    }
+    async fn lock_if_unlocked_by_email(
+        &self,
+        email: &str,
+        at: chrono::DateTime<chrono::Utc>,
+        window_start: chrono::DateTime<chrono::Utc>,
+    ) -> magnetar::Result<bool> {
+        self.0
+            .lock_if_unlocked_by_email(email, at, window_start)
+            .await
+    }
+    async fn set_locked_at_by_email(
+        &self,
+        email: &str,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> magnetar::Result<()> {
+        self.0.set_locked_at_by_email(email, at).await
+    }
+}
+
+#[tokio::test]
+async fn a_sign_up_colliding_without_an_exact_account_is_unavailable_and_creates_nothing() {
+    let world = harness().await;
+    let provider = PasswordAuthService::new(
+        Arc::new(CollidingInsert(world.storage.clone())),
+        world.storage.clone(),
+        world.verifier.clone(),
+    );
+    let outcome = provider
+        .register(RegisterInput {
+            email: "user@cafe.example".into(),
+            password: SecretString::from(PASSWORD),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(outcome, RegistrationOutcome::Unavailable));
+    assert!(
+        world
+            .storage
+            .find_by_email("user@cafe.example")
+            .await
+            .unwrap()
+            .is_none(),
+        "no account was created for the colliding address"
     );
 }
 

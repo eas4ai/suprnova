@@ -1202,6 +1202,10 @@ where
                 let _ = self.users.user_for_id(&user_id).await;
                 Ok(Registration::Accepted)
             }
+            // Another account holds the address under the database's looser
+            // comparison. There is no exact row to read back; the answer is
+            // the one a registered address gets.
+            RegistrationOutcome::Unavailable => Ok(Registration::Accepted),
         }
     }
     /// Mint one plaintext magic-link token through Magnetar's single-use

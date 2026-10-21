@@ -59,6 +59,12 @@ pub enum RegistrationOutcome {
         /// Existing user identifier.
         user_id: String,
     },
+    /// The store refused the insert as a duplicate while no account holds
+    /// this exact address: the database compares addresses more loosely
+    /// than the framework does (MySQL and MariaDB fold accents), so another
+    /// account occupies the address. Nothing changed, and the caller must
+    /// answer as for a registered address so the collision reveals nothing.
+    Unavailable,
 }
 
 /// One password sign-in attempt.
@@ -223,15 +229,23 @@ impl PasswordAuthProvider for PasswordAuthService {
             });
         }
         // A concurrent registration that created the account between the
-        // lookup above and this insert answers as any known address does.
-        let account = create_or_find_existing(
+        // lookup above and this insert answers as any known address does. A
+        // conflict with no exact account to read back is an address another
+        // account holds under the database's looser comparison; it answers
+        // the same way and creates nothing (#167).
+        let account = match create_or_find_existing(
             self.users.as_ref(),
             NewUser {
                 email: email.clone(),
                 password_hash: Some(hash),
             },
         )
-        .await?;
+        .await
+        {
+            Ok(account) => account,
+            Err(Error::Conflict { .. }) => return Ok(RegistrationOutcome::Unavailable),
+            Err(error) => return Err(error),
+        };
         Ok(match account {
             SignUpAccount::Created(created) => RegistrationOutcome::Created {
                 user_id: created.user_id,

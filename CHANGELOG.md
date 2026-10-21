@@ -8,6 +8,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- On MySQL and MariaDB, an email address now matches an account only when it
+  equals the stored address after trimming and lowercasing. Accent variants
+  and other collation folds, such as `ss` for `ß`, no longer match at sign-in,
+  password reset, email verification, passkeys or OAuth linking; Postgres and
+  SQLite already compared exactly. A user who typed an unaccented form of an
+  accented address types it exactly after upgrading. (#167)
 - `UserProvider` gained `rehash_password_for_sign_in(user, credentials,
   recorded_epoch)`, the rehash the session guard's `attempt` calls. It checks
   the stored epoch and the verified hash, writes atomically and returns the
@@ -19,6 +25,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- A sign-up whose address collides with an existing account only under the
+  database's looser comparison answers the same generic response as a
+  registered address and creates nothing, instead of a conflict error. (#167)
 - Schema watchers now report new form request refusals even when the generated
   file stays unchanged, without repeating unchanged refusals on every edit. (#171)
 - Postgres schema dumps now remove entire multiline extension comments even
