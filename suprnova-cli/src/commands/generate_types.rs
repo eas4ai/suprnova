@@ -3314,7 +3314,10 @@ pub fn run(output: Option<String>, watch: bool, routes: bool, options: GenerateO
     // Written beside `inertia-props.ts`, so a kit's form always finds its
     // request type's schema there.
     let tool_schemas_output = project_path.join(TOOL_SCHEMAS_OUTPUT);
-    match super::tool_schemas::generate_tool_schemas_to_file(project_path, &tool_schemas_output) {
+    let tool_schema_refusals = match super::tool_schemas::generate_tool_schemas_to_file(
+        project_path,
+        &tool_schemas_output,
+    ) {
         Ok(outcome) => {
             report_tool_schema_refusals(&outcome.refusals);
             if outcome.count > 0 {
@@ -3325,12 +3328,13 @@ pub fn run(output: Option<String>, watch: bool, routes: bool, options: GenerateO
             } else {
                 report_up_to_date(&tool_schemas_output);
             }
+            Some(outcome.refusals)
         }
         Err(e) => {
             ui::error(&e);
             std::process::exit(1);
         }
-    }
+    };
 
     // Route types are opt-in: dropping an unconsumed routes.ts into every
     // project that runs generate-types is churn, not a feature.
@@ -3347,6 +3351,7 @@ pub fn run(output: Option<String>, watch: bool, routes: bool, options: GenerateO
             &tool_schemas_output,
             options,
             augmentation,
+            tool_schema_refusals,
         ) {
             ui::error(&format!("Failed to start watcher: {}", e));
             std::process::exit(1);
@@ -3387,6 +3392,9 @@ fn generate_route_types(project_path: &Path) {
 ///
 /// `augmentation` holds what the first pass said about the project's own
 /// `@inertiajs/core` augmentation, so a regeneration repeats nothing.
+/// `tool_schema_refusals` remembers the last successful scan, including
+/// startup. Refused requests are absent from the module, so new refusals
+/// can leave its bytes unchanged and `wrote` cannot signal new diagnostics.
 fn start_watcher(
     project_path: &Path,
     output_path: &Path,
@@ -3394,6 +3402,7 @@ fn start_watcher(
     tool_schemas_output: &Path,
     options: GenerateOptions,
     mut augmentation: AugmentationNotice,
+    mut tool_schema_refusals: Option<Vec<super::tool_schemas::Refusal>>,
 ) -> Result<(), String> {
     use crate::commands::watcher::{REGEN_QUIET, RegenerationSchedule};
     use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
@@ -3469,20 +3478,24 @@ fn start_watcher(
                     ui::error(&format!("Failed to regenerate: {}", e));
                 }
             }
-            // A refusal is news only when the module changed; an edit that
-            // leaves it as it was says nothing new.
             match super::tool_schemas::generate_tool_schemas_to_file(
                 &project_path,
                 &tool_schemas_output,
             ) {
-                Ok(outcome) if outcome.wrote => {
-                    report_tool_schema_refusals(&outcome.refusals);
-                    ui::success(&format!(
-                        "Regenerated {} form request schema(s)",
-                        outcome.count
-                    ));
+                Ok(outcome) => {
+                    if tool_schema_refusals.as_ref() != Some(&outcome.refusals) {
+                        report_tool_schema_refusals(&outcome.refusals);
+                    }
+                    tool_schema_refusals = Some(outcome.refusals);
+                    if outcome.wrote {
+                        ui::success(&format!(
+                            "Regenerated {} form request schema(s)",
+                            outcome.count
+                        ));
+                    } else {
+                        report_up_to_date(&tool_schemas_output);
+                    }
                 }
-                Ok(_) => report_up_to_date(&tool_schemas_output),
                 Err(e) => {
                     ui::error(&format!(
                         "Failed to regenerate the form request schemas: {}",
