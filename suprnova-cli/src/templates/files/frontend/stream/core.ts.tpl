@@ -351,10 +351,14 @@ export class TextStream<TJsonData = null> {
   /**
    * Cancels a request in flight, clears the data and POSTs `body` as JSON
    * to `url`, with the `X-STREAM-ID` and CSRF headers. Resolves when the
-   * response has ended, failed or been cancelled.
+   * response has ended, failed or been cancelled. Callbacks may cancel or
+   * replace the request, so only its current controller may publish state.
    */
   send = async (url: string, body: object | undefined, options: StreamOptions<object>): Promise<void> => {
     this.cancel()
+    if (this.controller !== null) {
+      return
+    }
     const controller = new AbortController()
     const request: RequestInit = {
       method: 'POST',
@@ -368,21 +372,28 @@ export class TextStream<TJsonData = null> {
       },
       body: JSON.stringify(body ?? {}),
     }
-    let changed: RequestInit | null = null
-    for (const callbacks of this.callbacks) {
-      const result = callbacks.onBeforeSend?.(request)
-      if (result === false) {
-        return
-      }
-      if (typeof result === 'object' && result !== null) {
-        changed = result
-        break
-      }
-    }
     this.controller = controller
-    this.set({ data: '', jsonData: null, isFetching: true, isStreaming: false })
     const current = () => this.controller === controller
     try {
+      let changed: RequestInit | null = null
+      for (const callbacks of this.callbacks) {
+        const result = callbacks.onBeforeSend?.(request)
+        if (!current()) {
+          return
+        }
+        if (result === false) {
+          this.controller = null
+          return
+        }
+        if (typeof result === 'object' && result !== null) {
+          changed = result
+          break
+        }
+      }
+      this.set({ data: '', jsonData: null, isFetching: true, isStreaming: false })
+      if (!current()) {
+        return
+      }
       const response = await fetch(url, changed ?? request)
       if (!response.ok) {
         throw new StreamResponseError(response, await response.text())
@@ -393,8 +404,14 @@ export class TextStream<TJsonData = null> {
       if (!current()) {
         return
       }
-      this.each((callbacks) => callbacks.onResponse?.(response))
+      this.each((callbacks) => callbacks.onResponse?.(response), current)
+      if (!current()) {
+        return
+      }
       this.set({ isFetching: false, isStreaming: true })
+      if (!current()) {
+        return
+      }
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let data = ''
@@ -408,7 +425,10 @@ export class TextStream<TJsonData = null> {
         const text = done ? decoder.decode() : decoder.decode(value, { stream: true })
         if (text !== '') {
           data += text
-          this.each((callbacks) => callbacks.onData?.(text))
+          this.each((callbacks) => callbacks.onData?.(text), current)
+          if (!current()) {
+            return
+          }
         }
         if (done) {
           break
@@ -420,7 +440,10 @@ export class TextStream<TJsonData = null> {
         try {
           jsonData = JSON.parse(data) as TJsonData
         } catch (error) {
-          this.each((callbacks) => callbacks.onError?.(error as Error))
+          this.each((callbacks) => callbacks.onError?.(error as Error), current)
+          if (!current()) {
+            return
+          }
         }
       }
       this.controller = null
@@ -461,8 +484,11 @@ export class TextStream<TJsonData = null> {
     }
   }
 
-  private each(report: (callbacks: StreamCallbacks) => void): void {
+  private each(report: (callbacks: StreamCallbacks) => void, current?: () => boolean): void {
     for (const callbacks of this.callbacks) {
+      if (current && !current()) {
+        return
+      }
       report(callbacks)
     }
   }

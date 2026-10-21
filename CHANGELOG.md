@@ -25,6 +25,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Cancelling a text stream from a response callback now leaves its status
+  clear, and callbacks cannot overwrite a replacement request's state. (#184)
 - Event streams now stay open after a connection error so the browser can
   reconnect and continue receiving messages. (#183)
 - Stream readers mounted together with the same id now share their text

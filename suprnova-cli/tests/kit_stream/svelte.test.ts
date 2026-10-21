@@ -260,3 +260,26 @@ test('EventSource caller cancellation still closes the source (#183)', async () 
   expect(source.closed).toBe(true)
   await unmount()
 })
+
+
+test('cancelling from onResponse leaves both flags clear (#184)', async () => {
+  const server = fakeFetch()
+  vi.stubGlobal('fetch', server.fetch)
+  const onCancel = vi.fn()
+  const onFinish = vi.fn()
+  const { result, unmount } = probe(() => useStream('/chat', {
+    onResponse: () => result.current.cancel(), onCancel, onFinish,
+  }))
+  try {
+    await step(() => void result.current.send())
+    await step(() => server.requests[0].respond())
+    expect(get(result.current).isFetching).toBe(false)
+    expect(get(result.current).isStreaming).toBe(false)
+    expect(server.requests[0].aborted()).toBe(true)
+    await step(() => result.current.cancel())
+    expect(onCancel).toHaveBeenCalledTimes(1)
+    expect(onFinish).not.toHaveBeenCalled()
+  } finally {
+    await unmount()
+  }
+})

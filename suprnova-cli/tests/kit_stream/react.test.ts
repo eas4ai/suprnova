@@ -294,3 +294,131 @@ test('EventSource caller cancellation still closes the source (#183)', async () 
   expect(source.closed).toBe(true)
   await unmount()
 })
+
+
+test('cancelling from onResponse leaves both flags clear (#184)', async () => {
+  const server = fakeFetch()
+  vi.stubGlobal('fetch', server.fetch)
+  const onCancel = vi.fn()
+  const onFinish = vi.fn()
+  const { result, unmount } = probe(() => useStream('/chat', {
+    onResponse: () => result.current.cancel(), onCancel, onFinish,
+  }))
+  try {
+    await step(() => void result.current.send())
+    await step(() => server.requests[0].respond())
+    expect(result.current.isFetching).toBe(false)
+    expect(result.current.isStreaming).toBe(false)
+    expect(server.requests[0].aborted()).toBe(true)
+    await step(() => result.current.cancel())
+    expect(onCancel).toHaveBeenCalledTimes(1)
+    expect(onFinish).not.toHaveBeenCalled()
+  } finally {
+    await unmount()
+  }
+})
+
+
+test.each(['onResponse', 'onData', 'onError', 'onBeforeSend'] as const)(
+  'cancelling from %s cannot publish stale state or keep a controller (#184)',
+  async (callback) => {
+    const server = fakeFetch()
+    vi.stubGlobal('fetch', server.fetch)
+    const stream = textStream(`cancel-${callback}`)
+    const release = stream.subscribe(() => undefined)
+    const onFinish = vi.fn()
+    const cancel = vi.fn(() => stream.cancel())
+    const stop = stream.listen({ [callback]: cancel, onFinish })
+    try {
+      const done = stream.send('/chat', undefined, { json: callback === 'onError' })
+      if (callback !== 'onBeforeSend') {
+        server.requests[0].respond()
+        await settle()
+        if (callback !== 'onResponse') {
+          server.requests[0].push('invalid-json')
+          server.requests[0].end()
+        }
+      }
+      if (callback === 'onBeforeSend') {
+        expect(server.requests).toHaveLength(0)
+      } else {
+        await done
+      }
+      expect(cancel).toHaveBeenCalledTimes(1)
+      expect(stream.snapshot()).toEqual({
+        data: callback === 'onError' ? 'invalid-json' : '',
+        jsonData: null, isFetching: false, isStreaming: false,
+      })
+      expect(stream).toHaveProperty('controller', null)
+      expect(onFinish).not.toHaveBeenCalled()
+      if (callback === 'onBeforeSend') expect(server.requests).toHaveLength(0)
+    } finally {
+      stop()
+      release()
+    }
+  },
+)
+
+test.each(['onResponse', 'onData', 'onError', 'onBeforeSend'] as const)(
+  'a replacement sent from %s keeps its state and controller (#184)',
+  async (callback) => {
+    const server = fakeFetch()
+    vi.stubGlobal('fetch', server.fetch)
+    const stream = textStream(`replace-${callback}`)
+    const release = stream.subscribe(() => undefined)
+    const onFinish = vi.fn()
+    const replace = vi.fn(() => { void stream.send('/replacement', undefined, {}) })
+    const stop = stream.listen({ [callback]: replace.mockImplementationOnce(() => {
+      stop()
+      void stream.send('/replacement', undefined, {})
+    }), onFinish })
+    try {
+      const done = stream.send('/chat', undefined, { json: callback === 'onError' })
+      if (callback !== 'onBeforeSend') {
+        server.requests[0].respond()
+        await settle()
+        if (callback !== 'onResponse') {
+          server.requests[0].push('invalid-json')
+          server.requests[0].end()
+        }
+      }
+      if (callback === 'onBeforeSend') {
+        expect(server.requests).toHaveLength(1)
+      } else {
+        await done
+      }
+      expect(replace).toHaveBeenCalledTimes(1)
+      expect(stream.snapshot()).toEqual({
+        data: '', jsonData: null, isFetching: true, isStreaming: false,
+      })
+      const request = server.requests.at(-1)!
+      expect(request.url).toBe('/replacement')
+      expect(request.aborted()).toBe(false)
+      stream.cancel()
+      expect(request.aborted()).toBe(true)
+      expect(stream).toHaveProperty('controller', null)
+      expect(onFinish).not.toHaveBeenCalled()
+    } finally {
+      stop()
+      release()
+    }
+  },
+)
+
+
+test('onBeforeSend refusal releases the request without fetching (#184)', async () => {
+  const server = fakeFetch()
+  vi.stubGlobal('fetch', server.fetch)
+  const stream = textStream('refused-request')
+  const release = stream.subscribe(() => undefined)
+  const stop = stream.listen({ onBeforeSend: () => false })
+  try {
+    await stream.send('/chat', undefined, {})
+    expect(server.requests).toHaveLength(0)
+    expect(stream).toHaveProperty('controller', null)
+    expect(stream.snapshot()).toMatchObject({ isFetching: false, isStreaming: false })
+  } finally {
+    stop()
+    release()
+  }
+})
