@@ -273,6 +273,13 @@ revocation leaves the events for a retry to find. A shared-engagement edge
 names its oldest event as provenance, so it goes as soon as one actor's
 event behind it does. A removed fact is never read, traversed or cited again.
 
+A document revision replaces its node in place before removing stale declared
+relations, so its event-backed engagement edges keep counting. If the job fails
+after saving the node, retrying the same revision finishes the relation writes.
+Custom graph stores handle `Revocation::DocumentRelationsBefore` by removing
+older relation-derived edges and auxiliary nodes while preserving the document
+node itself. `DocumentBefore` retains its existing broader removal behavior.
+
 ### Where the graph lives
 
 The graph lives behind the `GraphStore` trait, which `RECOMMEND_GRAPH_STORE`

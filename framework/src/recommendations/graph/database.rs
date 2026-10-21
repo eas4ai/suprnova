@@ -309,6 +309,20 @@ impl GraphStore for DatabaseGraphStore {
                 )
                 .await?;
             }
+            Revocation::DocumentRelationsBefore(target, version) => {
+                let key = document_node_key(target);
+                let source = source_column(target);
+                removed += storage::execute(
+                    "DELETE FROM recommendation_graph_edges WHERE generation_id = ? AND provenance_source = ? AND provenance_version < ?",
+                    vec![generation_value(), source.clone().into(), (*version).into()],
+                )
+                .await?;
+                removed += storage::execute(
+                    "DELETE FROM recommendation_graph_nodes WHERE generation_id = ? AND node_key <> ? AND provenance_source = ? AND provenance_version < ?",
+                    vec![generation_value(), key.into(), source.into(), (*version).into()],
+                )
+                .await?;
+            }
             Revocation::Events(ids) => {
                 for chunk in ids.chunks(KEYS_PER_STATEMENT) {
                     let list = placeholders(chunk.len());

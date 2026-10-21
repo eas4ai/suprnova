@@ -8,6 +8,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- Custom graph stores must handle `DocumentRelationsBefore`, which removes stale
+  relation facts while keeping the document node and its engagement edges. (#174)
 - Serialized recommendation explanations now omit social and shared-engagement
   edge references. Server-side explanations keep them for verification. (#173)
 - On MySQL and MariaDB, an email address now matches an account only when it
@@ -27,6 +29,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Editing a document now keeps its recommendation engagement signals while
+  rebuilding declared relations, including when a document job is retried. (#174)
 - Recommendation explanations no longer reveal which followed accounts engaged
   through edge keys that a client can recompute. (#173)
 - Cancelling a text stream from a response callback now leaves its status

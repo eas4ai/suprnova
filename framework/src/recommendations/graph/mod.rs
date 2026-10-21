@@ -209,6 +209,9 @@ pub enum Revocation {
     Document(RecommendationTarget),
     /// A document's source version advanced: the facts read from an older version.
     DocumentBefore(RecommendationTarget, i64),
+    /// A document revision is being replaced: remove stale relation facts and their
+    /// auxiliary nodes, preserving the document node so event-backed edges survive.
+    DocumentRelationsBefore(RecommendationTarget, i64),
     /// Retention removed these events: the facts that rest on them.
     Events(Vec<i64>),
 }
