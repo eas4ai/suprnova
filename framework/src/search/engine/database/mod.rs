@@ -971,24 +971,74 @@ fn side_ddl(index: &IndexDescriptor, table: &str, dialect: Dialect) -> Vec<Strin
     }
     ddl
 }
+const CHILD_TABLES: &str = "_database_child_tables";
+
+type GenerationSettings = serde_json::Map<String, serde_json::Value>;
+
+fn settings_fields(settings: &IndexSettings) -> Result<GenerationSettings, FrameworkError> {
+    match serde_json::to_value(settings).map_err(db_error)? {
+        serde_json::Value::Object(fields) => Ok(fields),
+        _ => Err(db_error("generation settings must be an object")),
+    }
+}
+
+fn generation_settings(metadata: &QueryResult) -> Result<GenerationSettings, FrameworkError> {
+    serde_json::from_str(&get::<String>(metadata, "settings_json")?).map_err(db_error)
+}
+
+fn physical_children(index: &IndexDescriptor, table: &str) -> Vec<String> {
+    index
+        .attributes
+        .iter()
+        .filter(|attr| attr.ty == AttributeType::TextList)
+        .map(|attr| format!("{table}_{}", attr.name))
+        .collect()
+}
+
+async fn update_generation_settings<C: ConnectionTrait>(
+    conn: &C,
+    dialect: Dialect,
+    index: &str,
+    generation: &GenerationId,
+    settings: &GenerationSettings,
+) -> Result<(), FrameworkError> {
+    let mut sql = Sql::new(dialect);
+    let value = sql.bind(serde_json::to_string(settings).map_err(db_error)?);
+    let i = sql.bind(index.to_owned());
+    let g = sql.bind(generation.as_str().to_owned());
+    execute(conn, format!("UPDATE search_generations SET settings_json={value} WHERE index_name={i} AND generation={g}"), sql).await?;
+    Ok(())
+}
+
 async fn drop_tables<C: ConnectionTrait>(
     conn: &C,
     index: &IndexDescriptor,
+    generation: &GenerationId,
     table: &str,
     dialect: Dialect,
 ) -> Result<(), FrameworkError> {
+    let metadata =
+        DatabaseSearchEngine::metadata(conn, dialect, index.name, generation.as_str()).await?;
+    let settings = generation_settings(&metadata)?;
+    // Older generations have no ownership record, so retain their descriptor fallback.
+    let children: Vec<String> = match settings.get(CHILD_TABLES) {
+        Some(recorded) => serde_json::from_value(recorded.clone()).map_err(db_error)?,
+        None => physical_children(index, table),
+    };
+    for child in &children {
+        identifier(child)?;
+        if !child.starts_with(&format!("{table}_")) || child.len() > 63 {
+            return Err(db_error(format!(
+                "generation child table {child} does not belong to {table}"
+            )));
+        }
+    }
     let sql = Sql::new(dialect);
     let mut tables = Vec::new();
     if dialect == Dialect::Sqlite {
         tables.extend([format!("{table}_vocab"), format!("{table}_fts")]);
     }
-    tables.extend(
-        index
-            .attributes
-            .iter()
-            .filter(|a| a.ty == AttributeType::TextList)
-            .map(|a| format!("{table}_{}", a.name)),
-    );
+    tables.extend(children);
     tables.push(table.to_owned());
     for name in tables {
         conn.execute_unprepared(&format!("DROP TABLE IF EXISTS {}", sql.ident(&name)))
@@ -1181,6 +1231,8 @@ impl SearchEngine for DatabaseSearchEngine {
         let table = table(index, generation)?;
         super::collection::validate_settings(index, settings)?;
         let dialect = self.dialect().await?;
+        let mut persisted = settings_fields(settings)?;
+        persisted.insert(CHILD_TABLES.to_owned(), serde_json::json!(physical_children(index, &table)));
         let native_settings = native_settings(index, settings);
         let native = match dialect {
             Dialect::Sqlite => sqlite::ddl(&table, &native_settings)?,
@@ -1239,7 +1291,7 @@ impl SearchEngine for DatabaseSearchEngine {
             let i = sql.bind(index.name.to_owned());
             let g = sql.bind(generation.as_str().to_owned());
             let state = sql.bind("creating".to_owned());
-            let settings_json = sql.bind(serde_json::to_string(settings).map_err(db_error)?);
+            let settings_json = sql.bind(serde_json::to_string(&persisted).map_err(db_error)?);
             let digest = sql.bind(settings.index_time.digest());
             let model = sql.bind(settings.index_time.model.clone());
             let dimensions = sql.bind(
@@ -1262,7 +1314,8 @@ impl SearchEngine for DatabaseSearchEngine {
             let ddl = async {
                 if recovering {
                     renew_creation(conn.inner(),dialect,index.name,generation.as_str(),&owner).await?;
-                    drop_tables(conn.inner(),index,&table,dialect).await?;
+                    drop_tables(conn.inner(),index,generation,&table,dialect).await?;
+                    update_generation_settings(conn.inner(), dialect, index.name, generation, &persisted).await?;
                 }
                 for ddl in side_ddl(index,&table,dialect).into_iter().chain(native) {
                     renew_creation(conn.inner(),dialect,index.name,generation.as_str(),&owner).await?;
@@ -1515,7 +1568,7 @@ impl SearchEngine for DatabaseSearchEngine {
                 )
                 .await?;
         }
-        drop_tables(conn.inner(), index, &table, dialect).await?;
+        drop_tables(conn.inner(), index, generation, &table, dialect).await?;
         for metadata in [
             "search_vocabulary",
             "search_tombstones",
@@ -1540,26 +1593,33 @@ impl SearchEngine for DatabaseSearchEngine {
         generation: &GenerationId,
         settings: &IndexSettings,
     ) -> Result<(), FrameworkError> {
-        crate::search::render_cache::named_write(index.name, Box::pin(async {
-        super::collection::validate_settings(index, settings)?;
-        let (dialect, _, old) = self.context(index, generation).await?;
-        if old.index_time.digest() != settings.index_time.digest() {
-            return Err(FrameworkError::param(format!(
-                "search index {}: index-time settings require a new generation",
-                index.name
-            )));
-        }
-        let conn = DB::connection()?;
-        crate::render_cache::write_side_open(false).await?;
-        let tx = conn.inner().begin().await.map_err(db_error)?;
-        let mut sql = Sql::new(dialect);
-        let value = sql.bind(serde_json::to_string(settings).map_err(db_error)?);
-        let i = sql.bind(index.name.to_owned());
-        let g = sql.bind(generation.as_str().to_owned());
-        execute(&tx,format!("UPDATE search_generations SET settings_json={value} WHERE index_name={i} AND generation={g}"),sql).await?;
-        advance_transaction(&tx, index.name).await?;
-        tx.commit().await.map_err(db_error)
-        })).await
+        crate::search::render_cache::named_write(
+            index.name,
+            Box::pin(async {
+                super::collection::validate_settings(index, settings)?;
+                let (dialect, _, old) = self.context(index, generation).await?;
+                if old.index_time.digest() != settings.index_time.digest() {
+                    return Err(FrameworkError::param(format!(
+                        "search index {}: index-time settings require a new generation",
+                        index.name
+                    )));
+                }
+                let conn = DB::connection()?;
+                crate::render_cache::write_side_open(false).await?;
+                let tx = conn.inner().begin().await.map_err(db_error)?;
+                Self::lock(&tx, dialect, index.name, generation.as_str()).await?;
+                let metadata =
+                    Self::metadata(&tx, dialect, index.name, generation.as_str()).await?;
+                let mut persisted = generation_settings(&metadata)?;
+                // Query settings must not erase storage ownership or other engine metadata.
+                persisted.extend(settings_fields(settings)?);
+                update_generation_settings(&tx, dialect, index.name, generation, &persisted)
+                    .await?;
+                advance_transaction(&tx, index.name).await?;
+                tx.commit().await.map_err(db_error)
+            }),
+        )
+        .await
     }
     async fn record_flush(
         &self,

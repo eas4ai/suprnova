@@ -214,3 +214,11 @@ async fn postgres_index_writes_advance_the_render_cache_index() -> Result<(), Fr
     let _guard = live_database("PG_TEST_URL").await?;
     writes_advance_the_render_cache_index("database_postgres_render_cache").await
 }
+
+#[tokio::test]
+#[serial(search_database_postgres)]
+#[ignore = "requires disposable database at PG_TEST_URL"]
+async fn postgres_cleanup_remembers_removed_list_attributes() -> Result<(), FrameworkError> {
+    let _guard = live_database("PG_TEST_URL").await?;
+    super::database_support::cleanup_removed_lists("database_pg_dropped_list").await
+}

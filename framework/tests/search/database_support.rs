@@ -211,3 +211,43 @@ async fn render_generation(name: &str) -> Result<i64, FrameworkError> {
     )
     .await
 }
+
+pub(super) async fn cleanup_removed_lists(name: &'static str) -> Result<(), FrameworkError> {
+    use suprnova::search::{AttributeDecl, AttributeType};
+
+    let mut index = descriptor(name);
+    index.attributes.push(AttributeDecl {
+        name: "tags".into(),
+        ty: AttributeType::TextList,
+        searchable: None,
+        filterable: true,
+        sortable: false,
+        facet: false,
+    });
+    let generation = create(&index).await?;
+    // A query settings update must preserve the generation's physical ownership record.
+    let mut settings = engine().read_settings(&index, &generation).await?;
+    settings.query.hits_cap = 42;
+    engine()
+        .write_settings(&index, &generation, &settings)
+        .await?;
+    index
+        .attributes
+        .retain(|attribute| attribute.name != "tags");
+    engine().drop_generation(&index, &generation).await?;
+    let connection = DB::connection()?;
+    let manager = sea_orm_migration::SchemaManager::new(connection.inner());
+    assert!(
+        !manager
+            .has_table(format!("search_{name}_native_tags"))
+            .await
+            .map_err(|error| FrameworkError::database(error.to_string()))?
+    );
+    assert!(
+        !manager
+            .has_table(format!("search_{name}_native"))
+            .await
+            .map_err(|error| FrameworkError::database(error.to_string()))?
+    );
+    Ok(())
+}

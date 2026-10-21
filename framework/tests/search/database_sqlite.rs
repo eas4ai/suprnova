@@ -930,3 +930,38 @@ async fn sqlite_semantic_filters_before_taking_the_cosine_top() -> Result<(), Fr
     assert_eq!(result.candidates[0].document.key, "far");
     Ok(())
 }
+
+#[tokio::test]
+async fn sqlite_generation_cleanup_remembers_removed_list_attributes() -> Result<(), FrameworkError>
+{
+    let _db = TestDatabase::fresh::<Migrator>().await?;
+    super::database_support::cleanup_removed_lists("database_sqlite_dropped_list").await
+}
+
+#[tokio::test]
+async fn sqlite_legacy_generation_cleanup_falls_back_to_its_descriptor()
+-> Result<(), FrameworkError> {
+    use suprnova::search::{AttributeDecl, AttributeType};
+    let _db = TestDatabase::fresh::<Migrator>().await?;
+    let mut index = descriptor("database_sqlite_legacy_lists");
+    index.attributes.push(AttributeDecl {
+        name: "tags".into(),
+        ty: AttributeType::TextList,
+        searchable: None,
+        filterable: true,
+        sortable: false,
+        facet: false,
+    });
+    let generation = create(&index).await?;
+    DB::update("UPDATE search_generations SET settings_json=json_remove(settings_json, '$._database_child_tables') WHERE index_name=? AND generation=?", vec![index.name.into(), generation.as_str().into()]).await?;
+    engine().drop_generation(&index, &generation).await?;
+    let connection = DB::connection()?;
+    let manager = sea_orm_migration::SchemaManager::new(connection.inner());
+    assert!(
+        !manager
+            .has_table("search_database_sqlite_legacy_lists_native_tags")
+            .await
+            .map_err(|error| FrameworkError::database(error.to_string()))?
+    );
+    Ok(())
+}

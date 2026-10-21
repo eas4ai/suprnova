@@ -69,6 +69,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Retiring a database search generation now removes list tables for attributes
+  that have since been removed from the index definition. (#201)
+
 - Database search now detects MySQL and MariaDB separately for each named
   connection, so generation tables use the correct collation. (#200)
 

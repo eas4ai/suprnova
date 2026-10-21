@@ -159,3 +159,11 @@ async fn mysql_index_writes_advance_the_render_cache_index() -> Result<(), Frame
     let _guard = live_database("MYSQL_TEST_URL").await?;
     writes_advance_the_render_cache_index("database_mysql_render_cache").await
 }
+
+#[tokio::test]
+#[serial(search_database_mysql)]
+#[ignore = "requires disposable database at MYSQL_TEST_URL"]
+async fn mysql_cleanup_remembers_removed_list_attributes() -> Result<(), FrameworkError> {
+    let _guard = live_database("MYSQL_TEST_URL").await?;
+    super::database_support::cleanup_removed_lists("database_mysql_dropped_list").await
+}
