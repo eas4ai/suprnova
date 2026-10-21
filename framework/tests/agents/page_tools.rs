@@ -1212,6 +1212,7 @@ async fn agent_014_a_signed_in_users_stream_render_lists_the_user_tools() {
     let all = [
         "add_to_counter-main",
         "check_counter-main",
+        "grow_counter-main",
         "peek_counter-main",
         "rename_counter-main",
         "search_counter-main",
