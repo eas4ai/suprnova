@@ -14,6 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// SQL histories and registered search documents suffice before a graph has enough data.
 /// Reads enforce the current peer minimum before digest invalidation can regenerate old
 /// rows, so an upgrade never exposes a lone peer while waiting for the next batch.
+/// Ranked pages hydrate only candidates and their shared evidence to keep small reads
+/// independent of catalog size; loader and database failures remain errors.
 #[derive(Debug, Default)]
 pub struct StarterRecommender;
 #[async_trait]
@@ -32,38 +34,52 @@ impl Recommender for StarterRecommender {
             return Ok(Vec::new());
         }
         let config = RecommendConfig::current()?;
-        let (kind, actor_id) = actor.parts();
-        // Selection and row/evidence retrieval share one database statement and snapshot.
-        let rows = storage::rows("SELECT r.run_id, r.target_index, r.target_key, r.score, r.rank, e.peer_count, e.shared_target_count, e.attribute_values, e.shared_targets, e.fallback_tier FROM starter_recommendations r JOIN recommendation_explanations e ON e.id = r.explanation_id WHERE r.run_id = (SELECT id FROM recommendation_runs WHERE state = ? ORDER BY started_at DESC, id DESC LIMIT 1) AND r.actor_kind = ? AND r.actor_id = ? AND r.surface = ? ORDER BY r.rank", vec!["complete".into(), kind.into(), actor_id.into(), surface.into()]).await?;
-        if rows.is_empty() {
-            return Ok(Vec::new());
-        }
-        let catalog = documents::visible(viewer).await?;
+        let facts = super::graph::LiveFacts::new(viewer);
+        // A small lookahead absorbs filtered targets without loading the catalog. Cap
+        // each page so even a large request keeps SQL and document batches bounded.
+        let page_size = limit.saturating_add(8).min(500);
+        let mut run_id: Option<String> = None;
+        let mut after_rank = 0;
         let mut results = Vec::new();
-        for row in rows {
-            let target = storage::target(&row)?;
-            let Some(document) = catalog.get(&target) else {
-                continue;
+        loop {
+            let rows =
+                ranked_page(actor, surface, run_id.as_deref(), after_rank, page_size).await?;
+            let Some(first) = rows.first() else {
+                break;
             };
-            let reason = Reason {
-                peers: row.get_int("peer_count")? as usize,
-                shared: storage::decode(&row, "shared_targets")?,
-                attributes: storage::decode(&row, "attribute_values")?,
-                tier: row.get_string("fallback_tier")?,
-                event_ids: BTreeSet::new(),
-            };
-            if reason.tier == "collaborative" && reason.peers < config.min_peers {
-                continue;
+            run_id = Some(first.get_string("run_id")?);
+            let exhausted = rows.len() < page_size;
+            let mut targets = BTreeSet::new();
+            let mut candidates = Vec::new();
+            for row in rows {
+                after_rank = row.get_int("rank")?;
+                let target = storage::target(&row)?;
+                let reason = stored_reason(&row)?;
+                if reason.tier == "collaborative" && reason.peers < config.min_peers {
+                    continue;
+                }
+                targets.insert(target.clone());
+                targets.extend(reason.shared.iter().cloned());
+                candidates.push((row, target, reason));
             }
-            results.push(Recommendation {
-                run_id: Some(row.get_string("run_id")?),
-                target,
-                document: document.clone(),
-                score: row.get_int("score")?,
-                rank: results.len() + 1,
-                explanation: project(&reason, &catalog)?,
-            });
-            if results.len() == limit {
+            let catalog = facts.visible(&Vec::from_iter(targets)).await?;
+            for (row, target, reason) in candidates {
+                let Some(document) = catalog.get(&target) else {
+                    continue;
+                };
+                results.push(Recommendation {
+                    run_id: Some(row.get_string("run_id")?),
+                    target,
+                    document: document.clone(),
+                    score: row.get_int("score")?,
+                    rank: results.len() + 1,
+                    explanation: project(&reason, &catalog)?,
+                });
+                if results.len() == limit {
+                    return Ok(results);
+                }
+            }
+            if exhausted {
                 break;
             }
         }
@@ -90,8 +106,15 @@ impl Recommender for StarterRecommender {
             vec![],
         )
         .await?;
-        let histories = Histories::load(high_water, config.history).await?;
         let actor = viewer.id().map(|id| Actor::User(id.into()));
+        let histories = Histories::for_target(
+            target,
+            actor.as_ref(),
+            high_water,
+            config.history,
+            config.peers,
+        )
+        .await?;
         let excluded = actor
             .as_ref()
             .and_then(|actor| histories.actors.get(actor))
@@ -156,6 +179,43 @@ impl Recommender for StarterRecommender {
             .collect()
     }
 }
+/// Select a run with the first page's evidence, then pin refills to that run so
+/// concurrent publication cannot combine recommendations from different runs.
+async fn ranked_page(
+    actor: &Actor,
+    surface: &str,
+    run_id: Option<&str>,
+    after_rank: i64,
+    limit: usize,
+) -> Result<Vec<DynamicRow>, FrameworkError> {
+    let (run, mut bindings): (&str, Vec<sea_orm::Value>) = match run_id {
+        Some(id) => ("?", vec![id.into()]),
+        None => (
+            "(SELECT id FROM recommendation_runs WHERE state = ? ORDER BY started_at DESC, id DESC LIMIT 1)",
+            vec!["complete".into()],
+        ),
+    };
+    let (kind, actor_id) = actor.parts();
+    bindings.extend([
+        kind.into(),
+        actor_id.into(),
+        surface.into(),
+        after_rank.into(),
+        (limit as i64).into(),
+    ]);
+    storage::rows(&format!("SELECT r.run_id, r.target_index, r.target_key, r.score, r.rank, e.peer_count, e.shared_target_count, e.attribute_values, e.shared_targets, e.fallback_tier FROM starter_recommendations r JOIN recommendation_explanations e ON e.id = r.explanation_id WHERE r.run_id = {run} AND r.actor_kind = ? AND r.actor_id = ? AND r.surface = ? AND r.rank > ? ORDER BY r.rank LIMIT ?"), bindings).await
+}
+
+fn stored_reason(row: &DynamicRow) -> Result<Reason, FrameworkError> {
+    Ok(Reason {
+        peers: row.get_int("peer_count")? as usize,
+        shared: storage::decode(row, "shared_targets")?,
+        attributes: storage::decode(row, "attribute_values")?,
+        tier: row.get_string("fallback_tier")?,
+        event_ids: BTreeSet::new(),
+    })
+}
+
 fn project(
     reason: &Reason,
     catalog: &Catalog,

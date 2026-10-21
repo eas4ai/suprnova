@@ -154,8 +154,8 @@ backend when several processes generate recommendations. Contention returns
 
 Runs have `running`, `complete`, or `failed` states. A run stages rows under
 its own id and publishes by marking itself complete in one statement. Reads
-select only the latest completed run and retrieve rows and evidence in one
-database statement. Previous rows are removed only after publication. A failed
+select only the latest completed run and retrieve ranked rows and evidence together
+in bounded pages pinned to that run. Previous rows are removed only after publication. A failed
 run removes its staged rows and explanations, keeps an error record, and leaves
 the previous completed run current.
 
@@ -213,6 +213,13 @@ identity, the guest scope applies. `Recommend::for_actor(actor)` supports a
 trusted guest actor too. The default surface is `home`, the limit is 10,
 zero returns no rows, and limits above 10000 fail. Before a completed run
 exists, materialized reads return no recommendations.
+
+Materialized reads hydrate only a page's candidate targets and shared evidence
+targets. They refill after authorization filtering until the requested limit is
+met or the ranked rows run out. On-demand similarity loads bounded histories only
+for the selected peers and the viewer, preserving peer selection and score order.
+Custom search engines support `SearchEngine::stored_keys` for keyed starter reads,
+as they do for graph reads, so removed search documents stay excluded.
 
 `Recommend::similar_to(RecommendationTarget { index: "notes".into(),
 key: "1".into() }).for_viewer(viewer).limit(10).get().await?` computes

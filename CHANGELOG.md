@@ -12,6 +12,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   current existence or access scope. (#192)
 - Newly generated starter explanations retain every contributing history event.
   Regenerate existing recommendations to refresh their stored provenance. (#193)
+- Starter recommendation reads load ranked candidates in bounded pages and load
+  similarity histories only for selected peers and the viewer. Custom search engines
+  now need key lookups for starter reads, as they do for graph reads. (#194)
 - Quoted phrases now constrain semantic and hybrid searches using each engine's
   lexical phrase matching rules. (#191)
 - Indexing and semantic queries now require the provider's model id and revision
@@ -64,6 +67,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   or its access scope changes. (#192)
 - Starter explanations now include peers' shared-target events and all repeated
   positive events, so verification detects removed contributors. (#193)
+- Reading a short starter recommendation list no longer loads the whole visible
+  catalog, and still fills the list after filtering inaccessible targets. (#194)
 - Semantic and hybrid searches now exclude documents missing required quoted
   phrases and refill filtered candidates to preserve result depth. (#191)
 - Replacing an embedding provider with another model of the same dimensions now
