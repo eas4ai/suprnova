@@ -8,6 +8,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- Qdrant hash lookups now retain the source version when skipping unchanged
+  documents, preserving stale-write protection. (#186)
+
 - Loading a searchable model without timestamps now reads its content and search
   version together. Locking model reads keep their row locks until the version
   is loaded; ordinary reads use one SELECT on Postgres, MySQL and SQLite. (#178)
@@ -37,6 +40,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   (#168)
 
 ### Fixed
+
+- Unchanged Qdrant documents now keep their latest version, so delayed older
+  removals cannot delete them. (#186)
 
 - A concurrent save can no longer make a loaded search document carry a newer
   version than the row content it contains. (#178)

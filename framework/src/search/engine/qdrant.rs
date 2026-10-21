@@ -1576,48 +1576,88 @@ impl SearchEngine for QdrantSearchEngine {
         self.check_schema(index, generation, &settings).await?;
         Ok(settings)
     }
+    /// The coordinator skips matching documents, so the lookup must retain their
+    /// newest version under the same fences as writes and removals.
     async fn stored_hashes(
         &self,
         index: &IndexDescriptor,
         generation: &GenerationId,
         documents: &[IndexedDocument],
     ) -> Result<BTreeMap<String, String>, FrameworkError> {
-        let collection = collection_name(index, generation)?;
-        storage::settings(index.name, generation).await?;
-        let mut hashes = BTreeMap::new();
-        for batch in documents.chunks(256) {
-            let points = self
-                .client
-                .get_points(
-                    qb::GetPointsBuilder::new(
-                        &collection,
-                        batch
+        crate::search::render_cache::coordinated_write(
+            index.name,
+            Box::pin(async {
+                let _lock = self.mutations.lock().await;
+                let collection = collection_name(index, generation)?;
+                storage::settings(index.name, generation).await?;
+                let txn = storage::locked(index.name, generation).await?;
+                let mut hashes = BTreeMap::new();
+                for batch in documents.chunks(256) {
+                    let points = self
+                        .client
+                        .get_points(
+                            qb::GetPointsBuilder::new(
+                                &collection,
+                                batch
+                                    .iter()
+                                    .map(|d| QdrantVectorDriver::resolve_point_id(&d.document.key))
+                                    .collect::<Vec<_>>(),
+                            )
+                            .with_payload(
+                                qb::with_payload_selector::SelectorOptions::Include(
+                                    qb::PayloadIncludeSelector {
+                                        fields: vec![
+                                            "__key".into(),
+                                            "__content_hash".into(),
+                                            "__source_version".into(),
+                                        ],
+                                    },
+                                ),
+                            ),
+                        )
+                        .await
+                        .map_err(|e| error(&collection, e))?;
+                    for point in points.result {
+                        let data: Value = Payload::from(point.payload).into();
+                        let key = data["__key"]
+                            .as_str()
+                            .ok_or_else(|| error(&collection, "stored key missing"))?;
+                        let hash = data["__content_hash"]
+                            .as_str()
+                            .ok_or_else(|| error(&collection, "stored content hash missing"))?;
+                        let version = data["__source_version"]
+                            .as_i64()
+                            .ok_or_else(|| error(&collection, "stored source version missing"))?;
+                        if let Some(proposed) = batch
                             .iter()
-                            .map(|d| QdrantVectorDriver::resolve_point_id(&d.document.key))
-                            .collect::<Vec<_>>(),
-                    )
-                    .with_payload(
-                        qb::with_payload_selector::SelectorOptions::Include(
-                            qb::PayloadIncludeSelector {
-                                fields: vec!["__key".into(), "__content_hash".into()],
-                            },
-                        ),
-                    ),
-                )
-                .await
-                .map_err(|e| error(&collection, e))?;
-            for point in points.result {
-                let data: Value = Payload::from(point.payload).into();
-                let key = data["__key"]
-                    .as_str()
-                    .ok_or_else(|| error(&collection, "stored key missing"))?;
-                let hash = data["__content_hash"]
-                    .as_str()
-                    .ok_or_else(|| error(&collection, "stored content hash missing"))?;
-                hashes.insert(key.to_owned(), hash.to_owned());
-            }
-        }
-        Ok(hashes)
+                            .filter(|doc| doc.document.key == key && doc.content_hash == hash)
+                            .max_by_key(|doc| doc.document.source_version)
+                        {
+                            if proposed.document.source_version > version {
+                                self.client
+                                    .set_payload(
+                                        qb::SetPayloadPointsBuilder::new(
+                                            &collection,
+                                            Payload::try_from(json!({
+                                                "__source_version": proposed.document.source_version
+                                            }))
+                                            .map_err(|e| error(&collection, e))?,
+                                        )
+                                        .points_selector(vec![QdrantVectorDriver::resolve_point_id(key)])
+                                        .wait(true),
+                                    )
+                                    .await
+                                    .map_err(|e| error(&collection, e))?;
+                            }
+                        }
+                        hashes.insert(key.to_owned(), hash.to_owned());
+                    }
+                }
+                storage::commit_write(txn, index.name).await?;
+                Ok(hashes)
+            }),
+        )
+        .await
     }
     async fn index(
         &self,

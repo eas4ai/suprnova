@@ -2897,3 +2897,63 @@ async fn rec_006_native_recommend_and_discover_follow_the_stored_vectors_qdrant(
     })
     .await;
 }
+
+#[tokio::test]
+#[ignore = "requires Qdrant at QDRANT_TEST_URL"]
+async fn unchanged_content_advances_version_before_older_removal_qdrant() {
+    fixture(|engine, index, generation| {
+        Box::pin(async move {
+            engine
+                .create_generation(index, &index.index_settings(), generation)
+                .await
+                .unwrap();
+            let mut doc = document(index, "unchanged", "apple", 1);
+            doc.document.source_version = 10;
+            engine
+                .index(index, generation, &[doc.clone()])
+                .await
+                .unwrap();
+            doc.document.source_version = 30;
+            assert_eq!(
+                engine
+                    .stored_hashes(index, generation, &[doc.clone()])
+                    .await
+                    .unwrap()
+                    .get("unchanged"),
+                Some(&doc.content_hash)
+            );
+            // An old lookup must not lower the watermark established by the shortcut.
+            doc.document.source_version = 10;
+            engine
+                .stored_hashes(index, generation, &[doc])
+                .await
+                .unwrap();
+            let removed = engine
+                .remove(index, generation, &[("unchanged".into(), 20)])
+                .await
+                .unwrap();
+            assert_eq!(removed.skipped_older, 1);
+            let points = engine
+                .client()
+                .unwrap()
+                .get_points(
+                    qdrant_client::qdrant::GetPointsBuilder::new(
+                        format!("search_{}_{}", index.name, generation.as_str()),
+                        vec![
+                            suprnova::vector::qdrant::QdrantVectorDriver::resolve_point_id(
+                                "unchanged",
+                            ),
+                        ],
+                    )
+                    .with_payload(true),
+                )
+                .await
+                .unwrap();
+            assert_eq!(points.result.len(), 1);
+            let payload: serde_json::Value =
+                qdrant_client::Payload::from(points.result[0].payload.clone()).into();
+            assert_eq!(payload["__source_version"], 30);
+        })
+    })
+    .await;
+}
