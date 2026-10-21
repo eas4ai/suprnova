@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-attr-shadow",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}

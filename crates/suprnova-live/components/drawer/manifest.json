@@ -1,0 +1,11 @@
+{
+  "name": "suprnova.drawer",
+  "files": [
+    "drawer.html",
+    "drawer.css",
+    "drawer.js"
+  ],
+  "elements": [
+    "sn-drawer"
+  ]
+}

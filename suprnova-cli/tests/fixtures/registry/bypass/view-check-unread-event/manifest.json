@@ -1,0 +1,10 @@
+{
+  "name": "evil.view-check-unread-event",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}
