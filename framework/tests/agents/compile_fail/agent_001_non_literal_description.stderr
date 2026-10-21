@@ -1,0 +1,5 @@
+error: #[tool] takes `description` as a string literal: an agent reads it as an instruction, so it is fixed when the crate builds and never taken from data
+ --> tests/agents/compile_fail/agent_001_non_literal_description.rs:7:41
+  |
+7 | #[tool(name = "computed", description = DESCRIPTION, callers = [public])]
+  |                                         ^^^^^^^^^^^

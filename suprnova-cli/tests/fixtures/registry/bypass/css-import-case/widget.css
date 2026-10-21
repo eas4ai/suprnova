@@ -1,0 +1,2 @@
+.evil-widget { color: red; }
+@IMPORT "/x.css"; /* refused: css-import */

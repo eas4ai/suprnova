@@ -1,0 +1,15 @@
+{#
+  suprnova.field - label, control, hint and error around one model path.
+  The caller renders the control; it must carry id="{{ name }}" and, when
+  it wants the hint and error announced, aria-describedby="{{ name }}-hint
+  {{ name }}-error". The error output is polite live text bound to the
+  field's validation state (live:error).
+#}
+{% macro field(name, label, hint="", required=false) %}
+<div class="sn-field" data-sn-field="{{ name }}">
+<label class="sn-label" for="{{ name }}">{{ label }}{% if required %} <span class="sn-label-mark" aria-hidden="true">*</span>{% endif %}</label>
+{{ caller() }}
+<p class="sn-hint" id="{{ name }}-hint">{{ hint }}</p>
+<output class="sn-error" id="{{ name }}-error" live:error.live.polite="{{ name }}"></output>
+</div>
+{% endmacro %}
