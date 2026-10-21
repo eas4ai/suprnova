@@ -252,6 +252,7 @@ fn inject_eager_pivot_fields(item: &mut syn::ItemStruct) -> Result<()> {
 use syn::parse::Parser as _;
 
 fn emit_registry(input: &ModelInput) -> TokenStream {
+    let struct_ident = &input.item.ident;
     let type_name = input.struct_name_str();
     let table = &input.table;
     let primary_key = &input.primary_key;
@@ -263,6 +264,21 @@ fn emit_registry(input: &ModelInput) -> TokenStream {
                 table: #table,
                 module_path: module_path!(),
                 primary_key: #primary_key,
+            }
+        }
+        ::suprnova::inventory::submit! {
+            ::suprnova::eloquent::registry::ModelAttributeReader {
+                type_id: ::std::any::TypeId::of::<#struct_ident>,
+                read: |model, column| {
+                    let model = model.downcast_ref::<#struct_ident>().ok_or_else(|| {
+                        ::suprnova::FrameworkError::internal(
+                            ::std::format!("model attribute reader type mismatch for {}", #type_name)
+                        )
+                    })?;
+                    ::core::result::Result::Ok(
+                        <#struct_ident as ::suprnova::Model>::field_value(model, column)
+                    )
+                },
             }
         }
     }

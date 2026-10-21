@@ -685,11 +685,12 @@ async fn queued_scope_changes_refresh_guest_totals_and_facets_before_return() {
 
 #[suprnova::model(table = "search_touch_parents", timestamps = false, fillable = ["title"], relations = {
     children: HasMany<SearchTouchChild> { fk = "parent_id" },
+    renamed_children: HasMany<SearchRenamedTouchChild> { fk = "parent_id" },
 })]
 #[derive(Searchable)]
 #[searchable(
     index = "search_touch_parent_index",
-    touches("children"),
+    touches("children", "renamed_children"),
     with = "load_children"
 )]
 struct SearchTouchParent {
@@ -698,7 +699,7 @@ struct SearchTouchParent {
     title: String,
 }
 
-#[suprnova::model(table = "search_touch_children", timestamps = false, fillable = ["parent_id", "title"])]
+#[suprnova::model(table = "search_touch_children", timestamps = false, fillable = ["parent_id", "title"], hidden = ["parent_id"])]
 struct SearchTouchChild {
     id: i64,
     parent_id: i64,
@@ -2122,4 +2123,110 @@ async fn locking_search_versions_match_content_after_a_postgres_lock_wait() {
 #[ignore = "requires disposable MariaDB or MySQL at MYSQL_TEST_URL"]
 async fn locking_search_versions_match_current_content_after_a_mysql_snapshot() {
     locking_search_version_on("MYSQL_TEST_URL").await;
+}
+
+#[tokio::test]
+async fn touches_read_hidden_relation_keys() -> Result<(), FrameworkError> {
+    let _db = database().await;
+    DB::unprepared("CREATE TABLE search_touch_parents (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL)").await?;
+    DB::unprepared("CREATE TABLE search_touch_children (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER NOT NULL, title TEXT NOT NULL)").await?;
+    let _queue = Queue::fake();
+    SearchConfig::scope(
+        config(true),
+        SearchRegistry::isolated(async {
+            let parent = without_syncing_to_search(|| {
+                SearchTouchParent::create(suprnova::attrs! {title: "Parent"})
+            })
+            .await?;
+            let child =
+                SearchTouchChild::create(suprnova::attrs! {parent_id: parent.id, title: "Hidden"})
+                    .await?;
+            assert!(
+                serde_json::to_value(&child)
+                    .unwrap()
+                    .get("parent_id")
+                    .is_none()
+            );
+            let jobs = suprnova::queue::testing::pushed::<SearchIndexJob>();
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].key, parent.id.to_string());
+            Ok::<_, FrameworkError>(())
+        }),
+    )
+    .await?
+}
+
+#[suprnova::model(table = "search_bad_touch_parents", timestamps = false, relations = {
+    children: HasMany<SearchMissingTouchChild> { fk = "missing_parent_id" },
+})]
+#[derive(Searchable)]
+#[searchable(index = "search_bad_touch_parent_index", touches("children"))]
+struct SearchBadTouchParent {
+    id: i64,
+    #[searchable(text)]
+    title: String,
+}
+
+#[suprnova::model(table = "search_missing_touch_children", timestamps = false)]
+struct SearchMissingTouchChild {
+    id: i64,
+    title: String,
+}
+
+#[tokio::test]
+async fn touches_report_a_missing_declared_key_column() -> Result<(), FrameworkError> {
+    let _db = database().await;
+    SearchConfig::scope(
+        config(true),
+        SearchRegistry::isolated(async {
+            let child: SearchMissingTouchChild =
+                serde_json::from_value(serde_json::json!({"id":1,"title":"Missing"})).unwrap();
+            let error = after_model_write(&child, WriteKind::Created, None)
+                .await
+                .expect_err("a missing relation column is a configuration error");
+            let message = error.to_string();
+            assert!(
+                message.contains("search touches")
+                    && message.contains("children")
+                    && message.contains("missing_parent_id"),
+                "{message}"
+            );
+            Ok::<_, FrameworkError>(())
+        }),
+    )
+    .await?
+}
+
+#[suprnova::model(table = "search_renamed_touch_children", timestamps = false)]
+struct SearchRenamedTouchChild {
+    id: i64,
+    #[serde(rename = "owner")]
+    parent_id: Option<i64>,
+}
+
+#[tokio::test]
+async fn touches_read_renamed_keys_and_allow_null_foreign_keys() -> Result<(), FrameworkError> {
+    let _db = database().await;
+    DB::unprepared("CREATE TABLE search_touch_parents (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL)").await?;
+    let _queue = Queue::fake();
+    SearchConfig::scope(
+        config(true),
+        SearchRegistry::isolated(async {
+            let parent = without_syncing_to_search(|| {
+                SearchTouchParent::create(suprnova::attrs! {title: "Parent"})
+            })
+            .await?;
+            let child: SearchRenamedTouchChild =
+                serde_json::from_value(serde_json::json!({"id":1,"owner":parent.id})).unwrap();
+            after_model_write(&child, WriteKind::Created, None).await?;
+            let unowned: SearchRenamedTouchChild =
+                serde_json::from_value(serde_json::json!({"id":2,"owner":null})).unwrap();
+            after_model_write(&unowned, WriteKind::Created, None).await?;
+            let jobs = suprnova::queue::testing::pushed::<SearchIndexJob>();
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].key, parent.id.to_string());
+            Ok::<_, FrameworkError>(())
+        }),
+    )
+    .await?
 }
