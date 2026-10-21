@@ -14,6 +14,8 @@ impl Router {
     /// Results expose only declared attributes, scores and escaped formatted fields.
     /// The numeric `total` is accompanied by `total_estimated` so semantic windows
     /// cannot be confused with exact lexical counts. Impressions require a server session.
+    /// GET uses the CSRF bootstrap to mark a fresh session dirty and issue its cookies:
+    /// even this read must persist the session so a later click can validate its impression.
     /// POST `/search/click` accepts JSON `{impression, key, position}` with zero-based
     /// positions and is protected by CSRF. Attach session and optional authentication
     /// middleware to the application, and rate limiting through the application's
@@ -34,6 +36,7 @@ impl Router {
                 let allowed = Arc::clone(&allowed);
                 async move { search(request, &allowed).await.map_err(Into::into) }
             })?
+            .middleware(CsrfMiddleware::new())
             .into();
         Ok(router
             .try_post("/search/click", click)?

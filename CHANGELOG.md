@@ -8,6 +8,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- Successful search requests now bootstrap session and CSRF cookies for new
+  clients. Reuse them when reporting search clicks. (#195)
 - Event retries now resolve their original provenance before checking the target's
   current existence or access scope. (#192)
 - Newly generated starter explanations retain every contributing history event.
@@ -63,6 +65,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- A first JSON search without a cookie now returns an impression that a later
+  click from the same client can validate. (#195)
 - Retrying a recorded recommendation event now succeeds after its target is deleted
   or its access scope changes. (#192)
 - Starter explanations now include peers' shared-target events and all repeated

@@ -486,6 +486,59 @@ async fn analytics_endpoint_requires_a_nonempty_server_session_before_recording(
 }
 
 #[tokio::test]
+async fn analytics_cookieless_json_search_bootstraps_a_session_for_validated_clicks() {
+    let _db = setup().await;
+    let connection = DB::connection().unwrap();
+    suprnova::session::migrations::CreateSessionsTable::default()
+        .up(&SchemaManager::new(connection.inner()))
+        .await
+        .unwrap();
+    suprnova::Crypt::init(suprnova::EncryptionKey::try_generate().unwrap());
+    SearchConfig::scope(
+        config(true, false),
+        SearchRegistry::isolated(async {
+            let note = note("Searchable rust", true, 0).await;
+            index(&note).await;
+            let mut session_config = suprnova::SessionConfig::default();
+            session_config.cookie_secure = false;
+            let cookie_name = session_config.cookie_name.clone();
+            let client = suprnova::testing::TestClient::new(
+                Search::routes(&["test_search_notes"]).unwrap(),
+                suprnova::MiddlewareRegistry::new()
+                    .append(suprnova::SessionMiddleware::new(session_config)),
+            );
+            let response = client
+                .get("/search?index=test_search_notes&q=rust")
+                .header("Accept", "application/json")
+                .send()
+                .await;
+            response.assert_ok();
+            let body = response.json();
+            let impression = body["impression"].as_str().unwrap();
+            response.assert_cookie(&cookie_name);
+            let token = response
+                .cookie("XSRF-TOKEN")
+                .expect("search bootstraps CSRF");
+            assert_eq!(count("sessions").await, 1);
+            client
+                .post("/search/click")
+                .header("Accept", "application/json")
+                .header("X-XSRF-TOKEN", &token)
+                .json(&serde_json::json!({
+                    "impression": impression, "key": note.id.to_string(), "position": 0
+                }))
+                .send()
+                .await
+                .assert_ok();
+            assert_eq!(count("search_clicks").await, 1);
+            assert_eq!(count("sessions").await, 1);
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn click_route_runs_session_validation_and_csrf_through_handle_request() {
     let _db = setup().await;
     SearchConfig::scope(config(true, false), SearchRegistry::isolated(async {
