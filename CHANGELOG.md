@@ -19,6 +19,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Live now announces interrupted actions to screen readers in the shipped browser
+  bundles. (#172)
 - Schema watchers now report new form request refusals even when the generated
   file stays unchanged, without repeating unchanged refusals on every edit. (#171)
 - Postgres schema dumps now remove entire multiline extension comments even
