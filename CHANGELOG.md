@@ -19,6 +19,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Concurrent agent assertions now share one provider key-set fetch, preventing
+  unknown keys from triggering duplicate requests to the provider. (#163)
 - Live tool actions now accept optional dates and date-times, and date-times in
   lists and maps, without failing before the action runs. (#169)
 - Password resets now cancel password sign-ins already in progress, so an old

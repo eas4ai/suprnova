@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use jsonwebtoken::jwk::Jwk;
@@ -85,12 +85,23 @@ struct CachedKeySet {
     last_forced_refetch: Option<Instant>,
 }
 
+#[derive(Default)]
+struct PendingKeySet {
+    result: tokio::sync::Mutex<Option<Result<Vec<Jwk>, KeySetError>>>,
+}
+
+#[derive(Default)]
+struct KeySetCache {
+    entries: HashMap<String, CachedKeySet>,
+    in_flight: HashMap<String, Weak<PendingKeySet>>,
+}
+
 /// Fetches, caches and looks up provider keys.
 pub struct KeySetFetcher {
     resolver: Arc<dyn HostResolver>,
     client: Arc<dyn PinnedHttpClient>,
     policy: KeySetPolicy,
-    cache: Mutex<HashMap<String, CachedKeySet>>,
+    cache: Mutex<KeySetCache>,
     /// When each key set's last fetch failed, so the next tokens wait out
     /// [`KeySetPolicy::failure_ttl`] instead of each fetching again.
     failures: Mutex<HashMap<String, Instant>>,
@@ -109,7 +120,7 @@ impl KeySetFetcher {
             resolver,
             client,
             policy,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(KeySetCache::default()),
             failures: Mutex::new(HashMap::new()),
             address_allowed: is_public_address,
         }
@@ -128,11 +139,41 @@ impl KeySetFetcher {
     /// The key `kid` of the set at `jwks_uri`: from the cache, from a fetch
     /// when the set is not cached or has aged out, or from one refetch when
     /// the cached set lacks it.
+    ///
+    /// Reserve the URI and forced-refetch time before awaiting the fetch,
+    /// so concurrent unverified tokens share its result instead of sending
+    /// more provider requests. Cancellation keeps the spacing reservation.
+    /// Fetch failures and missing keys return errors because an unverified
+    /// token must not interrupt the server.
     pub(crate) async fn key(&self, jwks_uri: &str, kid: &str) -> Result<Jwk, KeySetError> {
+        let pending = {
+            let mut cache = self.lock();
+            // Weak entries do not keep completed results or idle URI locks alive.
+            cache
+                .in_flight
+                .retain(|_, pending| pending.strong_count() > 0);
+            match cache.in_flight.get(jwks_uri).and_then(Weak::upgrade) {
+                Some(pending) => pending,
+                None => {
+                    let pending = Arc::new(PendingKeySet::default());
+                    cache
+                        .in_flight
+                        .insert(jwks_uri.to_owned(), Arc::downgrade(&pending));
+                    pending
+                }
+            }
+        };
+        let mut shared = pending.result.lock().await;
+        if let Some(result) = shared.as_ref() {
+            return match result {
+                Ok(keys) => find(keys, kid).ok_or(KeySetError::UnknownKey),
+                Err(error) => Err(error.clone()),
+            };
+        }
         let now = Instant::now();
         let refetch = {
             let cache = self.lock();
-            match cache.get(jwks_uri) {
+            match cache.entries.get(jwks_uri) {
                 Some(entry) if now.duration_since(entry.fetched_at) < entry.ttl => {
                     if let Some(key) = find(&entry.keys, kid) {
                         return Ok(key);
@@ -162,6 +203,9 @@ impl KeySetFetcher {
                 "the last fetch failed; the key set is retried after a pause".to_owned(),
             ));
         }
+        if refetch && let Some(entry) = self.lock().entries.get_mut(jwks_uri) {
+            entry.last_forced_refetch = Some(now);
+        }
         let fetched = self.fetch(jwks_uri).await;
         let mut failures = match self.failures.lock() {
             Ok(failures) => failures,
@@ -179,10 +223,12 @@ impl KeySetFetcher {
                         .retain(|_, failed| now.duration_since(*failed) < self.policy.failure_ttl);
                 }
                 failures.insert(jwks_uri.to_owned(), Instant::now());
+                *shared = Some(Err(error.clone()));
                 return Err(error);
             }
         };
         let found = find(&keys, kid);
+        *shared = Some(Ok(keys.clone()));
         self.remember(jwks_uri, keys, ttl, refetch.then_some(now));
         found.ok_or(KeySetError::UnknownKey)
     }
@@ -258,7 +304,8 @@ impl KeySetFetcher {
         if self.policy.cache_capacity == 0 {
             return;
         }
-        let mut cache = self.lock();
+        let mut state = self.lock();
+        let cache = &mut state.entries;
         let previous_forced = cache
             .get(jwks_uri)
             .and_then(|entry| entry.last_forced_refetch);
@@ -282,7 +329,7 @@ impl KeySetFetcher {
         );
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, CachedKeySet>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, KeySetCache> {
         match self.cache.lock() {
             Ok(cache) => cache,
             Err(poisoned) => poisoned.into_inner(),
@@ -298,7 +345,11 @@ fn find(keys: &[Jwk], kid: &str) -> Option<Jwk> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use async_trait::async_trait;
+    use futures_util::future::join_all;
+    use tokio::sync::watch;
 
     use super::*;
     use crate::authorization_server::{PinnedResponse, ResponseBody};
@@ -342,6 +393,146 @@ mod tests {
             Arc::new(NoClient),
             KeySetPolicy::default(),
         )
+    }
+
+    struct PublicResolver;
+
+    #[async_trait]
+    impl HostResolver for PublicResolver {
+        async fn resolve(&self, _host: &str, _port: u16) -> crate::Result<Vec<IpAddr>> {
+            Ok(vec![IpAddr::from([8, 8, 8, 8])])
+        }
+    }
+
+    struct BlockingClient {
+        requests: AtomicUsize,
+        release: watch::Sender<bool>,
+        status: u16,
+    }
+
+    #[async_trait]
+    impl PinnedHttpClient for BlockingClient {
+        async fn get(
+            &self,
+            _url: &Url,
+            _address: std::net::SocketAddr,
+        ) -> crate::Result<PinnedResponse> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            self.release
+                .subscribe()
+                .wait_for(|released| *released)
+                .await
+                .expect("release fetch");
+            struct Body(Option<Vec<u8>>);
+            #[async_trait]
+            impl ResponseBody for Body {
+                async fn next_chunk(&mut self) -> crate::Result<Option<Vec<u8>>> {
+                    Ok(self.0.take())
+                }
+            }
+            Ok(PinnedResponse {
+                status: self.status,
+                cache_control: None,
+                body: Box::new(Body(Some(br#"{"keys":[]}"#.to_vec()))),
+            })
+        }
+    }
+
+    const JWKS_URI: &str = "https://trusted-provider.example/jwks";
+
+    fn blocking_fetcher(status: u16) -> (KeySetFetcher, Arc<BlockingClient>) {
+        let client = Arc::new(BlockingClient {
+            requests: AtomicUsize::new(0),
+            release: watch::channel(false).0,
+            status,
+        });
+        let fetcher = KeySetFetcher::new(
+            Arc::new(PublicResolver),
+            client.clone(),
+            KeySetPolicy::default(),
+        );
+        (fetcher, client)
+    }
+
+    async fn concurrent_unknown_keys_share_one_fetch(warm: bool, status: u16) {
+        const CALLERS: usize = 8;
+        let (fetcher, client) = blocking_fetcher(status);
+        if warm {
+            fetcher.remember(JWKS_URI, Vec::new(), Duration::from_secs(600), None);
+        }
+        let mut lookups: Vec<_> = (0..CALLERS)
+            .map(|_| Box::pin(fetcher.key(JWKS_URI, "unknown")))
+            .collect();
+        // Poll every caller into the blocked fetch or its waiter before release.
+        for lookup in &mut lookups {
+            assert!(futures_util::poll!(lookup).is_pending());
+        }
+        client.release.send_replace(true);
+        let answers = tokio::time::timeout(Duration::from_secs(2), join_all(lookups))
+            .await
+            .expect("all lookups finish");
+        let errors: Vec<_> = answers
+            .into_iter()
+            .map(|answer| answer.expect_err("unknown key cannot verify"))
+            .collect();
+        assert!(errors.iter().all(|error| error == &errors[0]));
+        if status == 200 {
+            assert_eq!(errors[0], KeySetError::UnknownKey);
+        } else {
+            assert!(matches!(errors[0], KeySetError::Unavailable(_)));
+        }
+        assert_eq!(client.requests.load(Ordering::SeqCst), 1);
+
+        if warm || status != 200 {
+            let second = fetcher.key(JWKS_URI, "another-unknown").await;
+            if warm {
+                assert_eq!(
+                    second.expect_err("forced refetch is spaced"),
+                    KeySetError::UnknownKey
+                );
+            } else {
+                assert!(matches!(second, Err(KeySetError::Unavailable(_))));
+            }
+            assert_eq!(client.requests.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_cold_unknown_keys_share_one_fetch() {
+        concurrent_unknown_keys_share_one_fetch(false, 200).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_forced_refetches_share_one_fetch_and_respect_the_interval() {
+        concurrent_unknown_keys_share_one_fetch(true, 200).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_cold_failures_share_one_fetch_and_pause() {
+        concurrent_unknown_keys_share_one_fetch(false, 503).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_forced_failures_share_one_fetch_and_respect_the_interval() {
+        concurrent_unknown_keys_share_one_fetch(true, 503).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_forced_refetch_keeps_its_reservation() {
+        let (fetcher, client) = blocking_fetcher(200);
+        fetcher.remember(JWKS_URI, Vec::new(), Duration::from_secs(600), None);
+        let mut lookup = Box::pin(fetcher.key(JWKS_URI, "unknown"));
+        assert!(futures_util::poll!(&mut lookup).is_pending());
+        drop(lookup);
+        client.release.send_replace(true);
+        assert_eq!(
+            fetcher
+                .key(JWKS_URI, "another-unknown")
+                .await
+                .expect_err("reservation survives cancellation"),
+            KeySetError::UnknownKey
+        );
+        assert_eq!(client.requests.load(Ordering::SeqCst), 1);
     }
 
     #[test]
