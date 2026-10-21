@@ -284,6 +284,9 @@ where
 /// body of [`Model::increment`] and [`Model::decrement`]. The operator is
 /// written rather than the amount negated, because `i64::MIN` has no
 /// negation.
+///
+/// Reloads the written row inside the transaction so search eligibility and
+/// render-cache invalidation use the new values rather than the caller's snapshot.
 async fn step_column<M>(
     model: &M,
     column: &str,
@@ -338,9 +341,11 @@ where
         ))
         .await
         .map_err(|e| FrameworkError::database(e.to_string()))?;
-        crate::render_cache::orm::after_model_write(model).await?;
-        crate::search::indexing::after_model_write(model, crate::search::WriteKind::Updated, None)
-            .await
+        let current = M::find(model.primary_key_value()).await?.ok_or_else(|| {
+            FrameworkError::not_found("increment/decrement: record no longer exists")
+        })?;
+        crate::render_cache::orm::after_model_write(&current).await?;
+        crate::search::indexing::after_model_update(model, &current, None).await
     })
     .await
 }

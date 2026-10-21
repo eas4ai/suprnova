@@ -1,6 +1,6 @@
 //! Index jobs reload rows and honor commit boundaries under both execution modes.
 
-use super::derive::{CHUNKS, EligibilityNote, SearchNote, database, note};
+use super::derive::{CHUNKS, CounterNote, EligibilityNote, SearchNote, database, note};
 use std::sync::{Arc, Mutex};
 use suprnova::{
     DB, FrameworkError, Model, Queue, SearchConfig, SearchDriver, SearchRegistry, Searchable,
@@ -426,6 +426,51 @@ async fn an_explicit_reimport_is_newer_than_manual_removal_and_stale_jobs() {
             assert_eq!(count(engine.as_ref()).await, 1);
             stale.handle().await.unwrap();
             assert_eq!(count(engine.as_ref()).await, 1);
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn should_index_increment_crossing_threshold_enqueues_index() {
+    assert_counter_step_should_index(9, 1, IndexOperation::Index).await;
+}
+
+#[tokio::test]
+async fn should_index_decrement_crossing_threshold_enqueues_remove() {
+    assert_counter_step_should_index(10, -1, IndexOperation::Remove).await;
+}
+
+#[tokio::test]
+async fn should_index_increment_staying_below_threshold_enqueues_remove() {
+    assert_counter_step_should_index(8, 1, IndexOperation::Remove).await;
+}
+
+async fn assert_counter_step_should_index(views: i64, step: i64, expected: IndexOperation) {
+    let _db = database().await;
+    let _queue = Queue::fake();
+    SearchConfig::scope(
+        config(true),
+        SearchRegistry::isolated(async {
+            let model = without_syncing_to_search(|| async {
+                CounterNote::create(suprnova::attrs! { title: "Counter", views: views }).await
+            })
+            .await
+            .unwrap();
+            assert!(suprnova::queue::testing::pushed::<SearchIndexJob>().is_empty());
+            if step > 0 {
+                model.increment("views", step).await.unwrap();
+            } else {
+                model.decrement("views", -step).await.unwrap();
+            }
+            let current = CounterNote::find(model.id).await.unwrap().unwrap();
+            assert_eq!(current.views, views + step);
+            let jobs = suprnova::queue::testing::pushed::<SearchIndexJob>();
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].index, CounterNote::descriptor().name);
+            assert_eq!(jobs[0].key, model.id.to_string());
+            assert_eq!(jobs[0].op, expected);
         }),
     )
     .await

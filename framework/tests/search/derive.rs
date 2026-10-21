@@ -84,6 +84,22 @@ impl EligibilityNote {
     }
 }
 
+#[suprnova::model(table = "search_counters", timestamps = false, fillable = ["title", "views"])]
+#[derive(Searchable)]
+#[searchable(should_index = "has_enough_views")]
+pub(crate) struct CounterNote {
+    pub id: i64,
+    #[searchable(text)]
+    pub title: String,
+    pub views: i64,
+}
+
+impl CounterNote {
+    fn has_enough_views(&self) -> Result<bool, FrameworkError> {
+        Ok(self.views >= 10)
+    }
+}
+
 pub(crate) struct SearchMigrator;
 struct SearchSchema;
 
@@ -101,6 +117,7 @@ impl MigrationTrait for SearchSchema {
             "CREATE TABLE search_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, body TEXT NULL, category TEXT NOT NULL, rank INTEGER NOT NULL, enabled BOOLEAN NOT NULL, owner_id INTEGER NOT NULL, tags TEXT NOT NULL, lat REAL NOT NULL, lng REAL NOT NULL, deleted_at TEXT NULL)"
         ).await?;
         manager.get_connection().execute_unprepared("CREATE TABLE search_eligibility (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, eligible BOOLEAN NOT NULL)").await?;
+        manager.get_connection().execute_unprepared("CREATE TABLE search_counters (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, views INTEGER NOT NULL)").await?;
         Ok(())
     }
 
@@ -113,6 +130,10 @@ impl MigrationTrait for SearchSchema {
         manager
             .get_connection()
             .execute_unprepared("DROP TABLE search_eligibility")
+            .await?;
+        manager
+            .get_connection()
+            .execute_unprepared("DROP TABLE search_counters")
             .await?;
         Ok(())
     }

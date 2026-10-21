@@ -8,6 +8,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- Eloquent counter updates now use the saved row to check search eligibility and
+  invalidate cached pages. (#198)
 - New starter kits offer more search results only when another accessible page
   is available. (#196)
 - Successful search requests now bootstrap session and CSRF cookies for new
@@ -67,6 +69,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Incrementing or decrementing a counter now adds or removes search results when
+  the new value crosses a model's indexing threshold. (#198)
 - Starter kit notes search now stops offering more results at the accessible hit
   cap, even when more notes match the query. (#196)
 - A first JSON search without a cookie now returns an impression that a later
