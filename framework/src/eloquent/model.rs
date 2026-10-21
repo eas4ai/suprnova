@@ -1423,6 +1423,16 @@ where
             Self::__decoded_values_equal,
             Some(&written_columns),
         )?;
+        // The kept search version lives outside RowState, so adopting the save's
+        // change history must also transfer its version to the borrowed instance.
+        if let (Some(saved), Some(version)) = (
+            self.__eager_cache(),
+            current
+                .__eager_cache()
+                .and_then(|cache| cache.__kept_version()),
+        ) {
+            saved.__keep_version(version);
+        }
         if let Some(written) = &rebinds {
             crate::auth::epoch::observe_user_write(written, &written_columns, None).await;
         }
@@ -2092,6 +2102,16 @@ where
             Self::__decoded_values_equal,
             Some(&written_columns),
         )?;
+        // The kept search version lives outside RowState, so adopting the save's
+        // change history must also transfer its version to the borrowed instance.
+        if let (Some(saved), Some(version)) = (
+            self.__eager_cache(),
+            current
+                .__eager_cache()
+                .and_then(|cache| cache.__kept_version()),
+        ) {
+            saved.__keep_version(version);
+        }
         if let Some(written) = &rebinds {
             crate::auth::epoch::observe_user_write(written, &written_columns, Some(tx)).await;
         }

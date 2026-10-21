@@ -8,6 +8,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- Saving a searchable model without timestamps now updates the search version
+  carried by that same instance, including saves in an explicit transaction. (#177)
 - Graph traversal now replaces earlier paths with stronger later paths, including
   when the node limit is full. (#176)
 - `RecommendationRun` now exposes `ranking_digest`. Apply the new
@@ -33,6 +35,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- A borrowed save no longer leaves a searchable model reporting its previous
+  search version after the database has saved a new revision. (#177)
 - Graph recommendations now use a stronger indirect route even when a weaker
   direct route reached the item first, and explain the route used. (#176)
 - Recommendations created before an upgrade now obey the current peer minimum,

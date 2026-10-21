@@ -1370,6 +1370,86 @@ async fn stored_version(id: i64) -> Option<i64> {
 }
 
 #[tokio::test]
+async fn borrowed_save_keeps_the_new_search_version_on_the_callers_instance() {
+    let _db = database().await;
+    let _queue = Queue::fake();
+    SearchConfig::scope(
+        config(true),
+        SearchRegistry::isolated(async {
+            let mut model = note("First", true, 0)
+                .await
+                .update(suprnova::attrs! { title: "Second" })
+                .await
+                .unwrap();
+            let previous = model.to_search_document().unwrap().source_version;
+            model.title = "Third".into();
+            model.save().await.unwrap();
+            let kept = stored_version(model.id).await.unwrap();
+            assert!(kept > previous);
+            assert_eq!(model.to_search_document().unwrap().source_version, kept);
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn borrowed_save_with_tx_keeps_the_new_search_version_on_the_callers_instance() {
+    let _db = database().await;
+    let _queue = Queue::fake();
+    SearchConfig::scope(
+        config(true),
+        SearchRegistry::isolated(async {
+            let mut model = note("First", true, 0)
+                .await
+                .update(suprnova::attrs! { title: "Second" })
+                .await
+                .unwrap();
+            let previous = model.to_search_document().unwrap().source_version;
+            model.title = "Third".into();
+            let tx = DB::begin_transaction().await.unwrap();
+            model.save_with_tx(&tx).await.unwrap();
+            let saved = model.to_search_document().unwrap().source_version;
+            tx.commit().await.unwrap();
+            let kept = stored_version(model.id).await.unwrap();
+            assert!(kept > previous);
+            assert_eq!(saved, kept);
+            assert_eq!(model.to_search_document().unwrap().source_version, kept);
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn update_returns_the_new_search_version_and_leaves_the_older_instance_version() {
+    let _db = database().await;
+    let _queue = Queue::fake();
+    SearchConfig::scope(
+        config(true),
+        SearchRegistry::isolated(async {
+            let older = note("First", true, 0)
+                .await
+                .update(suprnova::attrs! { title: "Second" })
+                .await
+                .unwrap();
+            let previous = older.to_search_document().unwrap().source_version;
+            let current = older
+                .clone()
+                .update(suprnova::attrs! { title: "Third" })
+                .await
+                .unwrap();
+            let kept = stored_version(current.id).await.unwrap();
+            assert!(kept > previous);
+            assert_eq!(current.to_search_document().unwrap().source_version, kept);
+            assert_eq!(older.to_search_document().unwrap().source_version, previous);
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn search_001_each_saved_revision_of_a_timestamp_free_model_carries_a_newer_version() {
     let _db = database().await;
     let _queue = Queue::fake();
