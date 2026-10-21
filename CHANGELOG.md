@@ -8,6 +8,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- Serialized recommendation explanations now omit social and shared-engagement
+  edge references. Server-side explanations keep them for verification. (#173)
 - On MySQL and MariaDB, an email address now matches an account only when it
   equals the stored address after trimming and lowercasing. Accent variants
   and other collation folds, such as `ss` for `ß`, no longer match at sign-in,
@@ -25,6 +27,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Recommendation explanations no longer reveal which followed accounts engaged
+  through edge keys that a client can recompute. (#173)
 - Cancelling a text stream from a response callback now leaves its status
   clear, and callbacks cannot overwrite a replacement request's state. (#184)
 - Event streams now stay open after a connection error so the browser can

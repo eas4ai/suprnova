@@ -338,7 +338,12 @@ saying why.
 A graph row's explanation has `engine` set to `graph` and `evidence` listing
 the stored facts it rests on: the viewer's own events, as id and digest, the
 edges of the path, and the seed documents, every one of which the viewer may
-see. It never names a peer or a followed actor.
+see. It never names a peer or a followed actor. Serialized explanations omit
+`engaged` and `co_engaged` edge references because their keys can be recomputed
+from known actors or documents. The server-side explanation retains those
+references for verification against the graph store; public counts remain
+available. Keep the server-side explanation when verifying engagement evidence:
+serializing and loading it again does not restore those private references.
 
 ### Social proximity
 
