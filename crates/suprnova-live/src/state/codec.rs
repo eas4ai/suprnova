@@ -18,6 +18,12 @@ use super::ModelPath;
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
+#[derive(Clone, Copy)]
+enum TimeEncoding {
+    Canonical,
+    Typed,
+}
+
 /// Closed reason a registered model value could not be converted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BindingIssueKind {
@@ -288,7 +294,7 @@ impl ModelCodec {
         if TypeId::of::<T>() == TypeId::of::<Uuid>() && matches!(self, Self::Uuid) {
             return downcast(uuid_value(value)?);
         }
-        let normalized = self.normalized_serde(value, limits, 0)?;
+        let normalized = self.normalized_serde(value, limits, 0, TimeEncoding::Typed)?;
         serde_json::from_value(normalized)
             .map_err(|_| BindingIssue::new(BindingIssueKind::TypeMismatch))
     }
@@ -311,7 +317,7 @@ impl ModelCodec {
         limits: &InputLimits,
     ) -> Result<serde_json::Value, BindingIssue> {
         validate_limits(value, limits)?;
-        self.normalized_serde(value, limits, 0)
+        self.normalized_serde(value, limits, 0, TimeEncoding::Canonical)
     }
 
     /// Encodes a registered Rust value into its bounded canonical representation.
@@ -418,7 +424,9 @@ impl ModelCodec {
             Self::Date => date_value(value).map(|_| ()),
             Self::DateTime => datetime_value(value).map(|_| ()),
             Self::Uuid => uuid_value(value).map(|_| ()),
-            _ => self.normalized_serde(value, limits, 0).map(|_| ()),
+            _ => self
+                .normalized_serde(value, limits, 0, TimeEncoding::Canonical)
+                .map(|_| ()),
         }
     }
 
@@ -461,6 +469,7 @@ impl ModelCodec {
         value: &CanonicalValue,
         limits: &InputLimits,
         depth: usize,
+        time_encoding: TimeEncoding,
     ) -> Result<serde_json::Value, BindingIssue> {
         if depth > limits.max_depth() {
             return Err(BindingIssue::new(BindingIssueKind::InputTooDeep));
@@ -485,6 +494,16 @@ impl ModelCodec {
             Self::Json => value
                 .to_serde_value()
                 .map_err(|_| BindingIssue::new(BindingIssueKind::InvalidValue)),
+            // Typed decoding follows time's compiled serde representation. Policies
+            // and wire values keep canonical strings, including inside collections.
+            Self::Date if matches!(time_encoding, TimeEncoding::Typed) => {
+                serde_json::to_value(date_value(value)?)
+                    .map_err(|_| BindingIssue::new(BindingIssueKind::TypeMismatch))
+            }
+            Self::DateTime if matches!(time_encoding, TimeEncoding::Typed) => {
+                serde_json::to_value(datetime_value(value)?)
+                    .map_err(|_| BindingIssue::new(BindingIssueKind::TypeMismatch))
+            }
             Self::Date => date_value(value).map(|value| serde_json::json!(value.to_string())),
             Self::DateTime => datetime_value(value).and_then(|value| {
                 value
@@ -504,7 +523,7 @@ impl ModelCodec {
             Self::List(codec) => match value {
                 CanonicalValue::Array(values) => values
                     .iter()
-                    .map(|value| codec.normalized_serde(value, limits, depth + 1))
+                    .map(|value| codec.normalized_serde(value, limits, depth + 1, time_encoding))
                     .collect::<Result<Vec<_>, _>>()
                     .map(serde_json::Value::Array),
                 _ => Err(BindingIssue::new(BindingIssueKind::InvalidType)),
@@ -514,7 +533,7 @@ impl ModelCodec {
                     .iter()
                     .map(|(key, value)| {
                         codec
-                            .normalized_serde(value, limits, depth + 1)
+                            .normalized_serde(value, limits, depth + 1, time_encoding)
                             .map(|value| (key.clone(), value))
                     })
                     .collect::<Result<serde_json::Map<_, _>, _>>()
@@ -682,4 +701,129 @@ fn downcast<T: 'static, V: Any>(value: V) -> Result<T, BindingIssue> {
         .downcast::<T>()
         .map(|value| *value)
         .map_err(|_| BindingIssue::new(BindingIssueKind::TypeMismatch))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::action::{
+        ActionArgumentField, ActionArgumentSchema, PreparedActionArguments, RawActionArguments,
+    };
+    use crate::identity::ModelField;
+
+    #[test]
+    fn wrapped_datetime_decodes_optional_list_and_map() {
+        let limits = InputLimits::default();
+        let expected = Date::from_calendar_date(2026, time::Month::October, 20)
+            .expect("date")
+            .with_hms_nano(12, 0, 0, 123_456_789)
+            .expect("time")
+            .assume_offset(time::UtcOffset::from_hms(5, 30, 0).expect("offset"));
+        let value = CanonicalValue::String("2026-10-20T12:00:00.123456789+05:30".to_owned());
+        assert_eq!(
+            ModelCodec::DateTime.normalize(&value, &limits),
+            Ok(serde_json::json!("2026-10-20T12:00:00.123456789+05:30"))
+        );
+        let decoded = ModelCodec::DateTime
+            .decode::<Option<OffsetDateTime>>(&value, &limits)
+            .expect("optional date-time")
+            .expect("present date-time");
+        assert_eq!(decoded.offset(), expected.offset());
+        assert_eq!(decoded, expected);
+        assert_eq!(
+            ModelCodec::list(ModelCodec::DateTime).decode::<Vec<OffsetDateTime>>(
+                &CanonicalValue::Array(vec![value.clone()]),
+                &limits,
+            ),
+            Ok(vec![expected])
+        );
+        assert_eq!(
+            ModelCodec::map(ModelCodec::DateTime).decode::<BTreeMap<String, OffsetDateTime>>(
+                &CanonicalValue::Object(BTreeMap::from([("at".to_owned(), value)])),
+                &limits,
+            ),
+            Ok(BTreeMap::from([("at".to_owned(), expected)]))
+        );
+    }
+
+    #[test]
+    fn wrapped_date_decodes_optional_and_nested_collections() {
+        let limits = InputLimits::default();
+        let expected = Date::from_calendar_date(2026, time::Month::October, 20).expect("date");
+        let value = CanonicalValue::String("2026-10-20".to_owned());
+        assert_eq!(
+            ModelCodec::Date.normalize(&value, &limits),
+            Ok(serde_json::json!("2026-10-20"))
+        );
+        assert_eq!(
+            ModelCodec::Date.decode::<Option<Date>>(&value, &limits),
+            Ok(Some(expected))
+        );
+        assert_eq!(
+            ModelCodec::map(ModelCodec::list(ModelCodec::Date))
+                .decode::<Option<BTreeMap<String, Vec<Date>>>>(
+                    &CanonicalValue::Object(BTreeMap::from([(
+                        "dates".to_owned(),
+                        CanonicalValue::Array(vec![value]),
+                    )])),
+                    &limits,
+                ),
+            Ok(Some(BTreeMap::from([("dates".to_owned(), vec![expected])])))
+        );
+    }
+
+    #[test]
+    fn wrapped_time_accepts_empty_values_and_refuses_invalid_strings() {
+        let limits = InputLimits::default();
+        assert_eq!(
+            ModelCodec::list(ModelCodec::DateTime)
+                .decode::<Vec<OffsetDateTime>>(&CanonicalValue::Array(vec![]), &limits),
+            Ok(vec![])
+        );
+        for codec in [ModelCodec::Date, ModelCodec::DateTime] {
+            let schema = ActionArgumentSchema::new(vec![
+                ActionArgumentField::new(
+                    ModelField::parse("at").expect("field"),
+                    codec.clone(),
+                    false,
+                )
+                .expect("argument"),
+            ])
+            .expect("schema");
+            for values in [
+                BTreeMap::new(),
+                BTreeMap::from([("at".to_owned(), CanonicalValue::Null)]),
+            ] {
+                let prepared = PreparedActionArguments::prepare(
+                    &schema,
+                    RawActionArguments::new(CanonicalValue::Object(values)),
+                    &limits,
+                )
+                .expect("optional argument");
+                if codec == ModelCodec::Date {
+                    assert_eq!(prepared.decode::<Option<Date>>("at").expect("none"), None);
+                } else {
+                    assert_eq!(
+                        prepared
+                            .decode::<Option<OffsetDateTime>>("at")
+                            .expect("none"),
+                        None
+                    );
+                }
+            }
+            let invalid = CanonicalValue::String("not-a-date".to_owned());
+            let issue = if codec == ModelCodec::Date {
+                codec
+                    .decode::<Option<Date>>(&invalid, &limits)
+                    .expect_err("invalid date")
+            } else {
+                codec
+                    .decode::<Option<OffsetDateTime>>(&invalid, &limits)
+                    .expect_err("invalid date-time")
+            };
+            assert_eq!(issue.kind(), BindingIssueKind::InvalidValue);
+        }
+    }
 }

@@ -19,6 +19,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Live tool actions now accept optional dates and date-times, and date-times in
+  lists and maps, without failing before the action runs. (#169)
 - Password resets now cancel password sign-ins already in progress, so an old
   password cannot create a new session after the reset. (#168)
 - Agent tools now refuse guards that use a different user provider from the
