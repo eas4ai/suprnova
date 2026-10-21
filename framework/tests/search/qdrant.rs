@@ -3280,7 +3280,7 @@ async fn bounded_version_cutoff_is_exact_qdrant() {
                 .await
                 .unwrap();
             assert_eq!(keys.len(), 4);
-            assert!(keys.iter().all(|(_, version)| *version <= i64::MAX - 1));
+            assert!(keys.iter().all(|(_, version)| *version < i64::MAX));
             assert_eq!(
                 engine
                     .keys_before_version(index, generation, i64::MAX, 1)
