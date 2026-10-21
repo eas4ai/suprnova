@@ -1092,6 +1092,61 @@ async fn postgres_concurrent_fresh_migrations_both_succeed() {
     live_concurrent_fresh_migrations(&url, "pg_concurrent").await;
 }
 
+/// Both migrations must recover a concurrent plugin table creation, just
+/// as they do for the default tables, without leaving a partial schema.
+#[cfg(all(
+    feature = "seaorm-postgres",
+    feature = "authorization-server",
+    feature = "agent-auth"
+))]
+#[tokio::test]
+#[ignore = "requires T2 live Postgres/MySQL database"]
+async fn postgres_concurrent_fresh_plugin_migrations_both_succeed() {
+    let url = std::env::var("MAGNETAR_POSTGRES_TEST_URL")
+        .expect("MAGNETAR_POSTGRES_TEST_URL is required");
+    let live = LiveDatabase::create(&url, "pg_plugins_concurrent").await;
+    let first = live.connect().await;
+    let second = live.connect().await;
+    let (left, right) = tokio::join!(
+        magnetar::default_schema::migrate(&first),
+        magnetar::default_schema::migrate(&second)
+    );
+    assert!(left.is_ok(), "first concurrent plugin migrate: {left:?}");
+    assert!(right.is_ok(), "second concurrent plugin migrate: {right:?}");
+
+    let tables = first
+        .query_all_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT table_name::text AS table_name FROM information_schema.tables \
+             WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'",
+        ))
+        .await
+        .expect("read tables after concurrent plugin migrations");
+    let tables: Vec<String> = tables
+        .into_iter()
+        .map(|row| row.try_get("", "table_name").expect("table name"))
+        .collect();
+    for table in [
+        "auth_oauth_clients",
+        "auth_oauth_authorizations",
+        "auth_oauth_grants",
+        "auth_oauth_tokens",
+        "auth_agent_registrations",
+        "auth_agent_grants",
+        "auth_agent_replays",
+        "auth_agent_events",
+    ] {
+        assert_eq!(
+            tables.iter().filter(|name| name.as_str() == table).count(),
+            1,
+            "{table} exists once after concurrent migrations; got {tables:?}"
+        );
+    }
+    first.close().await.expect("close the first pool");
+    second.close().await.expect("close the second pool");
+    live.drop_database().await;
+}
+
 #[cfg(feature = "seaorm-postgres")]
 #[tokio::test]
 #[ignore = "requires T2 live Postgres/MySQL database"]

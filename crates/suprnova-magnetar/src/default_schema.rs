@@ -2141,7 +2141,7 @@ async fn warn_about_over_long_emails(db: &DatabaseConnection) -> crate::Result<(
     Ok(())
 }
 
-async fn table_exists(db: &DatabaseConnection, table: &str) -> crate::Result<bool> {
+async fn table_exists<C: ConnectionTrait + ?Sized>(db: &C, table: &str) -> crate::Result<bool> {
     let backend = db.get_database_backend();
     let (query, values) = match backend {
         DbBackend::Sqlite => (
@@ -2267,13 +2267,14 @@ async fn column_exists(db: &DatabaseConnection, table: &str, column: &str) -> cr
         })
 }
 
-/// Run one default table's `CREATE TABLE IF NOT EXISTS`.
+/// Run one auth table's `CREATE TABLE IF NOT EXISTS`.
 ///
 /// Postgres refuses one of two concurrent `CREATE TABLE IF NOT EXISTS` for
 /// one table. The table the other run created is the table this run wanted;
-/// a failure that leaves no table is an error.
-async fn create_table_if_missing(
-    db: &DatabaseConnection,
+/// a failure that leaves no table returns an error so boot can report a
+/// database failure rather than panic or accept a partial schema.
+pub(crate) async fn create_table_if_missing<C: ConnectionTrait + ?Sized>(
+    db: &C,
     table: &str,
     statement: &sea_orm::sea_query::TableCreateStatement,
 ) -> crate::Result<()> {

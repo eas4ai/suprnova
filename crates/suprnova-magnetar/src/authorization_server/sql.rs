@@ -157,7 +157,7 @@ pub mod tokens {
 /// can run it on the connection its `SchemaManager` hands it, which is a
 /// transaction on PostgreSQL. A failed statement aborts a PostgreSQL
 /// transaction, so there the check that tolerates another process creating
-/// an index at the same moment cannot run, and the second of two
+/// a table or index at the same moment cannot run, and the second of two
 /// concurrent migrations fails instead.
 ///
 /// # Errors
@@ -176,29 +176,37 @@ pub async fn migrate<C: ConnectionTrait + ?Sized>(db: &C) -> Result<()> {
         });
     }
     let schema = Schema::new(backend);
-    for statement in [
-        schema
-            .create_table_from_entity(clients::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(authorizations::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(grants::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(tokens::Entity)
-            .if_not_exists()
-            .to_owned(),
+    for (table, statement) in [
+        (
+            "auth_oauth_clients",
+            schema
+                .create_table_from_entity(clients::Entity)
+                .if_not_exists()
+                .to_owned(),
+        ),
+        (
+            "auth_oauth_authorizations",
+            schema
+                .create_table_from_entity(authorizations::Entity)
+                .if_not_exists()
+                .to_owned(),
+        ),
+        (
+            "auth_oauth_grants",
+            schema
+                .create_table_from_entity(grants::Entity)
+                .if_not_exists()
+                .to_owned(),
+        ),
+        (
+            "auth_oauth_tokens",
+            schema
+                .create_table_from_entity(tokens::Entity)
+                .if_not_exists()
+                .to_owned(),
+        ),
     ] {
-        db.execute(&statement)
-            .await
-            .map_err(|error| Error::Internal {
-                message: format!("create authorization server table: {error}"),
-            })?;
+        crate::default_schema::create_table_if_missing(db, table, &statement).await?;
     }
     // The digest lookup must be unique: two tokens with one digest would let
     // a verification read either grant.

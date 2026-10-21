@@ -222,7 +222,7 @@ pub mod agent_events {
 /// can run it on the connection its `SchemaManager` hands it, which is a
 /// transaction on PostgreSQL. A failed statement aborts a PostgreSQL
 /// transaction, so there the check that tolerates another process creating
-/// an index at the same moment cannot run, and the second of two
+/// a table or index at the same moment cannot run, and the second of two
 /// concurrent migrations fails instead.
 ///
 /// # Errors
@@ -241,29 +241,37 @@ pub async fn migrate<C: ConnectionTrait + ?Sized>(db: &C) -> Result<()> {
         });
     }
     let schema = Schema::new(backend);
-    for statement in [
-        schema
-            .create_table_from_entity(registrations::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(agent_grants::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(replays::Entity)
-            .if_not_exists()
-            .to_owned(),
-        schema
-            .create_table_from_entity(agent_events::Entity)
-            .if_not_exists()
-            .to_owned(),
+    for (table, statement) in [
+        (
+            "auth_agent_registrations",
+            schema
+                .create_table_from_entity(registrations::Entity)
+                .if_not_exists()
+                .to_owned(),
+        ),
+        (
+            "auth_agent_grants",
+            schema
+                .create_table_from_entity(agent_grants::Entity)
+                .if_not_exists()
+                .to_owned(),
+        ),
+        (
+            "auth_agent_replays",
+            schema
+                .create_table_from_entity(replays::Entity)
+                .if_not_exists()
+                .to_owned(),
+        ),
+        (
+            "auth_agent_events",
+            schema
+                .create_table_from_entity(agent_events::Entity)
+                .if_not_exists()
+                .to_owned(),
+        ),
     ] {
-        db.execute(&statement)
-            .await
-            .map_err(|error| Error::Internal {
-                message: format!("create agent auth table: {error}"),
-            })?;
+        crate::default_schema::create_table_if_missing(db, table, &statement).await?;
     }
     // The one-time tokens and the delegation are looked up by digest, and a
     // digest must name one registration: unique keys, so the database

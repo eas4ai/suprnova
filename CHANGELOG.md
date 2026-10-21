@@ -19,6 +19,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Concurrent fresh database migrations now recover when another migration
+  creates the authorization server or agent auth tables first on Postgres. (#164)
 - Concurrent agent assertions now share one provider key-set fetch, preventing
   unknown keys from triggering duplicate requests to the provider. (#163)
 - Live tool actions now accept optional dates and date-times, and date-times in
