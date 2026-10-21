@@ -12,6 +12,8 @@ use async_trait::async_trait;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// SQL histories and registered search documents suffice before a graph has enough data.
+/// Reads enforce the current peer minimum before digest invalidation can regenerate old
+/// rows, so an upgrade never exposes a lone peer while waiting for the next batch.
 #[derive(Debug, Default)]
 pub struct StarterRecommender;
 #[async_trait]
@@ -29,6 +31,7 @@ impl Recommender for StarterRecommender {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let config = RecommendConfig::current()?;
         let (kind, actor_id) = actor.parts();
         // Selection and row/evidence retrieval share one database statement and snapshot.
         let rows = storage::rows("SELECT r.run_id, r.target_index, r.target_key, r.score, r.rank, e.peer_count, e.shared_target_count, e.attribute_values, e.shared_targets, e.fallback_tier FROM starter_recommendations r JOIN recommendation_explanations e ON e.id = r.explanation_id WHERE r.run_id = (SELECT id FROM recommendation_runs WHERE state = ? ORDER BY started_at DESC, id DESC LIMIT 1) AND r.actor_kind = ? AND r.actor_id = ? AND r.surface = ? ORDER BY r.rank", vec!["complete".into(), kind.into(), actor_id.into(), surface.into()]).await?;
@@ -49,6 +52,9 @@ impl Recommender for StarterRecommender {
                 tier: row.get_string("fallback_tier")?,
                 event_ids: BTreeSet::new(),
             };
+            if reason.tier == "collaborative" && reason.peers < config.min_peers {
+                continue;
+            }
             results.push(Recommendation {
                 run_id: Some(row.get_string("run_id")?),
                 target,
@@ -203,6 +209,7 @@ pub(crate) fn run_from_row(row: &DynamicRow) -> Result<RecommendationRun, Framew
         fallback_share: row.get_float("fallback_share")?,
         high_water_mark: row.get_int("high_water_mark")?,
         catalog_digest: row.get_string("catalog_digest")?,
+        ranking_digest: row.get_string("ranking_digest")?,
         state: row.get_string("state")?,
         error: row.get_optional_string("error")?,
     })

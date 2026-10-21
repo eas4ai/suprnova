@@ -106,6 +106,10 @@ names no peers. Otherwise a suggestion whose peer count is 1 would point at that
 one person, and the suggestion would be one of their own views or purchases.
 `Recommend::similar_to` counts co-occurrence under the same rule. Negative and
 previously seen/interacted targets are excluded.
+Materialized reads also enforce the current peer minimum, so older rows cannot
+reveal a lone peer while waiting for the next generation. That generation
+refreshes all actors when ranking settings change, replacing stale scores and
+explanations even when no history changed.
 Scores sort descending with `(index, key)` as a deterministic tie-break.
 
 When the higher tier is short, results fill in this order:
@@ -151,15 +155,16 @@ run removes its staged rows and explanations, keeps an error record, and leaves
 the previous completed run current.
 
 Generation tracks a completed high-water mark, new events, capped history
-snapshots, and a search catalog digest. It regenerates affected actor/surface
-pairs and copies unaffected rows into the next snapshot. History and catalog
-checks catch late commits and changed content. A filtered `--user` or
+snapshots, a search catalog digest, and a ranking settings digest covering the
+history cap, peer cap, peer minimum, and popularity window. It regenerates affected
+actor/surface pairs and copies unaffected rows into the next snapshot. History and
+catalog checks catch late commits and changed content. A filtered `--user` or
 `--surface` run preserves other rows and does not consume their pending global
-delta.
+delta or a pending ranking settings refresh.
 
 `recommendation_runs` records start time, duration in milliseconds, events
 read, new events, users covered, items scored, coverage, fallback share,
-high-water mark, catalog digest, history snapshots, state, and error.
+high-water mark, catalog digest, ranking digest, history snapshots, state, and error.
 `recommendations:status` prints the ten latest attempts. The committed
 million-event fixture has a 300-second generation budget; run its ignored
 budget test separately from ordinary application tests.
@@ -454,7 +459,7 @@ Extend your application's migration list with
 | `recommendation_events` | Immutable id, actor kind/id, target index/key, type, weight, surface, UTC microsecond time, access scope (the index scope's guest filter and the target's values for the index's `scope_fields` when the event was recorded), source version, dedupe key, class, and score. |
 | `recommendation_explanations` | Run id, event-id/digest provenance pairs, attribute values, peer count, shared-target count and references, and fallback tier. |
 | `starter_recommendations` | Run id, actor, surface, target index/key, score, rank, and explanation id. |
-| `recommendation_runs` | Publication state and batch statistics, watermarks, catalog digest, history snapshots, and error. |
+| `recommendation_runs` | Publication state and batch statistics, watermarks, catalog digest, ranking digest, history snapshots, and error. |
 | `recommendation_schema` | `recommendation_schema_version`, 2 once the graph migration runs. |
 | `recommendation_graph_generations` | Graph generations and which one readers use. |
 | `recommendation_graph_nodes` | Nodes per generation: key, type, target, scope, source version, and provenance. |

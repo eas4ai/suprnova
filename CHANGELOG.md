@@ -8,6 +8,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- `RecommendationRun` now exposes `ranking_digest`. Apply the new
+  recommendation migration when upgrading. (#175)
 - Custom graph stores must handle `DocumentRelationsBefore`, which removes stale
   relation facts while keeping the document node and its engagement edges. (#174)
 - Serialized recommendation explanations now omit social and shared-engagement
@@ -29,6 +31,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Recommendations created before an upgrade now obey the current peer minimum,
+  and changing ranking settings refreshes unchanged users on the next full run. (#175)
 - Editing a document now keeps its recommendation engagement signals while
   rebuilding declared relations, including when a document job is retried. (#174)
 - Recommendation explanations no longer reveal which followed accounts engaged

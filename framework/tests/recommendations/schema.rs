@@ -8,7 +8,7 @@ async fn versioned_schema_has_every_graph_input_column_and_batch_index() {
             ("recommendation_events", vec!["id", "actor_kind", "actor_id", "target_index", "target_key", "event_type", "weight", "surface", "occurred_at", "access_scope", "source_version", "dedupe_key", "event_class", "score"]),
             ("recommendation_explanations", vec!["id", "run_id", "event_ids", "attribute_values", "peer_count", "shared_target_count", "shared_targets", "fallback_tier"]),
             ("starter_recommendations", vec!["id", "run_id", "actor_kind", "actor_id", "surface", "target_index", "target_key", "score", "rank", "explanation_id"]),
-            ("recommendation_runs", vec!["id", "started_at", "duration_ms", "events_read", "new_events", "users_covered", "items_scored", "coverage", "fallback_share", "high_water_mark", "catalog_digest", "actor_history_snapshots", "state", "error"]),
+            ("recommendation_runs", vec!["id", "started_at", "duration_ms", "events_read", "new_events", "users_covered", "items_scored", "coverage", "fallback_share", "high_water_mark", "catalog_digest", "ranking_digest", "actor_history_snapshots", "state", "error"]),
             ("recommendation_schema", vec!["id", "recommendation_schema_version"]),
             ("recommendation_graph_generations", vec!["id", "state", "created_at"]),
             ("recommendation_graph_nodes", vec!["generation_id", "node_key", "kind", "target_index", "target_key", "scope_json", "source_version", "provenance_json", "provenance_event", "provenance_source", "provenance_version"]),

@@ -49,6 +49,10 @@ pub struct RecommendationRun {
     pub high_water_mark: i64,
     /// A search catalog digest invalidates copied rankings when indexed content changes.
     pub catalog_digest: String,
+    /// Ranking settings invalidate unchanged histories so stale scores and peer counts
+    /// are replaced. Empty legacy digests force a refresh after an upgrade.
+    #[serde(default)]
+    pub ranking_digest: String,
     /// Running, complete or failed explicitly separates staging from publication.
     pub state: String,
     /// Failures retain their actionable reason without publishing partial rows.
