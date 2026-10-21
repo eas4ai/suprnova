@@ -19,6 +19,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Postgres schema dumps now remove entire multiline extension comments even
+  when they contain semicolons, preventing invalid snapshots. (#170)
 - Live components now reject more than 64 browser tools on the server,
   preventing oversized tool metadata from disabling ordinary clicks. (#166)
 - Headless Live tools now report when their growing state no longer fits a
