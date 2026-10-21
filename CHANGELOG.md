@@ -8,6 +8,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Password resets now cancel password sign-ins already in progress, so an old
+  password cannot create a new session after the reset. (#168)
 - Agent tools now refuse guards that use a different user provider from the
   caller's default guard, preventing matching ids from signing in as another
   person. (#160)

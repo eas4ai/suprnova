@@ -2638,6 +2638,25 @@ impl UserProvider for EpochRememberProvider {
         }
         Ok(())
     }
+
+    async fn rehash_password_for_sign_in(
+        &self,
+        user: &dyn Authenticatable,
+        _credentials: &serde_json::Value,
+        _recorded_epoch: Option<u64>,
+    ) -> Result<Option<Arc<dyn Authenticatable>>, FrameworkError> {
+        if !self.rehash_on_sign_in {
+            return Ok(None);
+        }
+        let mut generation = self.generation.lock().unwrap();
+        let mut stored = self.user.lock().unwrap();
+        if Some(stored.password_hash.as_str()) != user.get_auth_password() {
+            return Err(FrameworkError::domain("the password snapshot expired", 401));
+        }
+        *generation += 1;
+        stored.password_hash = epoch_hash(*generation);
+        Ok(Some(Arc::new(stored.clone())))
+    }
 }
 
 /// Bind the default auth manager with `provider` as `"users"` in the

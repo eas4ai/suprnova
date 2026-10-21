@@ -105,9 +105,8 @@ impl SessionGuard {
     /// Read from the provider rather than from the user the caller holds,
     /// for two reasons. Every later request compares against what this
     /// provider returns, so the value recorded is exactly the value read
-    /// back. And `attempt` rehashes the password before it signs the user
-    /// in: the user it holds carries the hash the rehash replaced, and an
-    /// epoch read from it would end the sign-in on its next request.
+    /// back. Password sign-ins compare this fresh value with the epoch of
+    /// the snapshot they verified, rather than adopting a later reset.
     ///
     /// It costs one lookup by id per sign-in, which already paid a password
     /// verification or the lookup that found the user.
@@ -123,10 +122,33 @@ impl SessionGuard {
             .and_then(super::epoch::credential_epoch))
     }
 
-    /// Log `user` in, issuing its Magnetar session, when the engine is
-    /// installed, at `recorded_epoch`: the auth epoch read with the user's
-    /// password. A login with no password read passes `None` and is issued
-    /// at the epoch current now.
+    /// Keep the captured proof unless a conditional rehash returns its own
+    /// written snapshot. A rehash changes a hash-derived epoch; rereading
+    /// storage here could instead adopt a concurrent password reset.
+    async fn rehash_at_epoch(
+        &self,
+        user: Arc<dyn Authenticatable>,
+        credentials: &serde_json::Value,
+        captured: Option<u64>,
+    ) -> Result<(Arc<dyn Authenticatable>, Option<u64>), FrameworkError> {
+        let rehashed = self
+            .provider
+            .rehash_password_for_sign_in(&*user, credentials, captured)
+            .await?;
+        let epoch = match (captured, rehashed.as_deref()) {
+            (Some(_), Some(written)) => Some(
+                super::epoch::credential_epoch(written)
+                    .ok_or_else(crate::magnetar_integration::expired_host_sign_in)?,
+            ),
+            (captured, _) => captured,
+        };
+        Ok((rehashed.unwrap_or(user), epoch))
+    }
+
+    /// Log `user` in at the guard's `credential_epoch` and, when installed,
+    /// Magnetar's `recorded_epoch`, both read with the password. A login
+    /// with no password read passes `None` for both and is issued at the
+    /// epochs current now.
     ///
     /// The engine is asked first, before anything changes or any event
     /// fires: it refuses an account whose second factor this login did not
@@ -140,12 +162,20 @@ impl SessionGuard {
         user: Arc<dyn Authenticatable>,
         remember: bool,
         recorded_epoch: Option<u64>,
+        credential_epoch: Option<u64>,
     ) -> Result<(), FrameworkError> {
         let user_id = user.get_auth_identifier();
         // Read before anything changes: a provider error fails the login
         // with nothing committed, rather than committing a sign-in whose
         // epoch could not be read and would then go unchecked.
-        let sign_in_epoch = self.sign_in_epoch(&user_id).await?;
+        let current = self.sign_in_epoch(&user_id).await?;
+        let sign_in_epoch = match credential_epoch {
+            Some(captured) if current != Some(captured) => {
+                return Err(crate::magnetar_integration::expired_host_sign_in());
+            }
+            Some(captured) => Some(captured),
+            None => current,
+        };
         let host_auth_epoch = if self.name == Auth::default_guard_name() {
             let current = crate::magnetar_integration::admit_host_sign_in(&user_id).await?;
             match (recorded_epoch, current) {
@@ -315,6 +345,13 @@ impl StatefulGuard for SessionGuard {
 
         let creds = credentials.as_value();
         if let Some(user) = self.provider.retrieve_by_credentials(&creds).await? {
+            // Bind the proof to the snapshot whose password is checked. A
+            // later read may already carry a concurrent reset's epoch.
+            let credential_epoch = if super::epoch::magnetar_fences(&self.name) {
+                None
+            } else {
+                super::epoch::credential_epoch(&*user)
+            };
             // With the Magnetar engine installed, the sign-in is issued at
             // the auth epoch read with the password, so a reset that commits
             // after the password was read cancels it. Take the epoch from the
@@ -338,11 +375,10 @@ impl StatefulGuard for SessionGuard {
                 // After the password validates and before the user is signed
                 // in, as Laravel's `attempt` rehashes before `login`. A
                 // rewrite that fails fails the sign-in.
-                self.provider
-                    .rehash_password_if_required(&*user, &creds)
-                    .await?;
+                let (user, credential_epoch) =
+                    self.rehash_at_epoch(user, &creds, credential_epoch).await?;
                 // login_at_epoch() fires Login + Authenticated.
-                self.login_at_epoch(user.clone(), remember, recorded_epoch)
+                self.login_at_epoch(user.clone(), remember, recorded_epoch, credential_epoch)
                     .await?;
                 // The caller just proved the password, so stamp the
                 // confirmation window. Without this, reauth-gated actions
@@ -449,7 +485,7 @@ impl StatefulGuard for SessionGuard {
         user: Arc<dyn Authenticatable>,
         remember: bool,
     ) -> Result<(), FrameworkError> {
-        self.login_at_epoch(user, remember, None).await
+        self.login_at_epoch(user, remember, None, None).await
     }
 
     async fn login_using_id(
