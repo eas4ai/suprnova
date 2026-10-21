@@ -44,6 +44,60 @@ fn targets(rows: &[Recommendation]) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn a_stronger_two_hop_path_controls_the_score_and_explanation() {
+    let config = graph(|config| {
+        config.graph_surfaces.insert(
+            "home".into(),
+            GraphSurface {
+                affinity: 10_000,
+                semantic: 0,
+                social: 0,
+                freshness: 0,
+                feedback: 0,
+                trust: 0,
+                ..Default::default()
+            },
+        );
+    });
+    setup(with(config, async {
+        use suprnova::recommendations::graph::{document_node_key, edge_key};
+        let a = note("A", "a", true, "o", 1).await;
+        let b = note("B", "b", true, "o", 2).await;
+        let c = note("C", "c", true, "o", 3).await;
+        record("alice", &a, EventType::Like, "a").await;
+        peers_like(&["p1", "p2", "p3"], &[&a, &b, &c]).await;
+        Recommend::rebuild_graph().await.unwrap().unwrap();
+        let keys = [&a, &b, &c].map(|note| document_node_key(&key(note)));
+        let ab = edge_key("co_engaged", &keys[0], &keys[1]);
+        let ac = edge_key("co_engaged", &keys[0], &keys[2]);
+        let bc = edge_key("co_engaged", &keys[1], &keys[2]);
+        for (edge, confidence) in [(&ab, 9_000), (&ac, 1_000), (&bc, 9_000)] {
+            suprnova::DB::update(
+                "UPDATE recommendation_graph_edges SET confidence_bps = ? WHERE edge_key = ?",
+                vec![confidence.into(), edge.clone().into()],
+            )
+            .await
+            .unwrap();
+        }
+        let rows = for_alice(viewer("alice")).await;
+        let c = rows.iter().find(|row| row.target == key(&c)).unwrap();
+        assert_eq!(c.explanation.engine, "graph");
+        assert_eq!(c.score, 810_000);
+        let path: Vec<_> = c
+            .explanation
+            .evidence
+            .iter()
+            .filter_map(|evidence| match evidence {
+                ExplanationEvidence::Edge { key, .. } => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(path, [ab, bc]);
+    }))
+    .await;
+}
+
+#[tokio::test]
 async fn rec_007_a_fact_outside_the_viewer_scope_never_influences_a_score() {
     setup(with(graph(|_| {}), async {
         let a = note("A", "a", true, "o", 1).await;

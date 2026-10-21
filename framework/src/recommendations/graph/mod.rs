@@ -361,6 +361,8 @@ pub struct Reached {
 /// Walk the graph from `traversal.seeds` for `viewer`. A seed, edge or node the viewer's
 /// scope does not cover is never returned and never walked through (REC-007), and no
 /// path is longer than `traversal.depth`.
+/// A stronger later path replaces the earlier path and its evidence, so a weak direct
+/// edge cannot hide a stronger indirect route. Depth and node bounds keep cycles finite.
 ///
 /// # Errors
 ///
@@ -407,11 +409,11 @@ pub(crate) async fn traverse_with(
     let seeds = gate
         .nodes(store.nodes(generation, &traversal.seeds).await?)
         .await?;
-    let mut visited: HashSet<String> = HashSet::new();
+    let mut seed_keys: HashSet<String> = HashSet::new();
     let mut best: HashMap<String, Reached> = HashMap::new();
     let mut frontier: Vec<Reached> = Vec::new();
     for seed in seeds {
-        if !seed.scope.permits(viewer) || !visited.insert(seed.key.clone()) {
+        if !seed.scope.permits(viewer) || !seed_keys.insert(seed.key.clone()) {
             continue;
         }
         frontier.push(Reached {
@@ -421,8 +423,9 @@ pub(crate) async fn traverse_with(
             weight: 1.0,
         });
     }
+    frontier.truncate(traversal.max_nodes);
     for _ in 0..traversal.depth {
-        if frontier.is_empty() || best.len() >= traversal.max_nodes {
+        if frontier.is_empty() {
             break;
         }
         let sources: Vec<String> = frontier
@@ -440,7 +443,7 @@ pub(crate) async fn traverse_with(
             .edges(
                 edges
                     .into_iter()
-                    .filter(|edge| !visited.contains(&edge.target) && edge.scope.permits(viewer))
+                    .filter(|edge| !seed_keys.contains(&edge.target) && edge.scope.permits(viewer))
                     .collect(),
             )
             .await?;
@@ -468,6 +471,12 @@ pub(crate) async fn traverse_with(
                 continue;
             };
             let weight = from.weight * f64::from(edge.confidence_bps.clamp(0, 10_000)) / 10_000.0;
+            if best
+                .get(&edge.target)
+                .is_some_and(|current| weight <= current.weight)
+            {
+                continue;
+            }
             let replace = next
                 .get(&edge.target)
                 .is_none_or(|current| weight > current.weight);
@@ -491,10 +500,12 @@ pub(crate) async fn traverse_with(
                 .total_cmp(&a.weight)
                 .then_with(|| a.node.key.cmp(&b.node.key))
         });
-        reached.truncate(traversal.max_nodes.saturating_sub(best.len()));
-        frontier = Vec::with_capacity(reached.len());
+        frontier = Vec::with_capacity(traversal.max_nodes.min(reached.len()));
         for item in reached {
-            visited.insert(item.node.key.clone());
+            // Improvements reuse a slot even at the cap; only new nodes need room.
+            if !best.contains_key(&item.node.key) && best.len() >= traversal.max_nodes {
+                continue;
+            }
             best.insert(item.node.key.clone(), item.clone());
             frontier.push(item);
         }

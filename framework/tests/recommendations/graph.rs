@@ -95,6 +95,53 @@ fn reached_keys(reached: &[suprnova::recommendations::graph::Reached]) -> BTreeS
     reached.iter().map(|item| item.node.key.clone()).collect()
 }
 
+#[tokio::test]
+async fn a_stronger_later_path_replaces_the_first_path_even_at_the_node_cap() {
+    setup(async {
+        let store = DatabaseGraphStore;
+        let generation = store.begin_generation().await.unwrap();
+        let [a, b, c, d] = ["a", "b", "c", "d"].map(|key| node(key, true, "x", 1, 1));
+        store
+            .put_nodes(&generation, &[a.clone(), b.clone(), c.clone(), d.clone()])
+            .await
+            .unwrap();
+        let ab = edge("co_engaged", &a, &b, 9_000, event(1));
+        let bc = edge("co_engaged", &b, &c, 9_000, event(1));
+        store
+            .put_edges(
+                &generation,
+                &[
+                    edge("co_engaged", &a, &c, 1_000, event(1)),
+                    ab.clone(),
+                    bc.clone(),
+                    edge("co_engaged", &c, &a, 10_000, event(1)),
+                    edge("co_engaged", &c, &d, 8_000, event(1)),
+                ],
+            )
+            .await
+            .unwrap();
+        for max_nodes in [2, 100] {
+            let mut traversal = walk(&a, 3);
+            traversal.max_nodes = max_nodes;
+            let reached = traverse(&store, &generation, &traversal, &Viewer::Guest)
+                .await
+                .unwrap();
+            assert!(reached.len() <= max_nodes);
+            assert!(!reached.iter().any(|item| item.node.key == a.key));
+            let c = reached.iter().find(|item| item.node.key == c.key).unwrap();
+            assert!((c.weight - 0.81).abs() < 1e-9, "{}", c.weight);
+            assert_eq!(c.seed, a.key);
+            assert_eq!(c.path, [ab.clone(), bc.clone()]);
+            if max_nodes == 100 {
+                let d = reached.iter().find(|item| item.node.key == d.key).unwrap();
+                assert!((d.weight - 0.648).abs() < 1e-9);
+                assert_eq!(d.path.len(), 3);
+            }
+        }
+    })
+    .await;
+}
+
 /// Conformance: a store answers hops strongest first within its fan out.
 pub async fn a_store_answers_hops_strongest_first_within_its_fan_out(store: &dyn GraphStore) {
     let generation = store.begin_generation().await.unwrap();

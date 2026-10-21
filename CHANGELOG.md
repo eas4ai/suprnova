@@ -8,6 +8,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- Graph traversal now replaces earlier paths with stronger later paths, including
+  when the node limit is full. (#176)
 - `RecommendationRun` now exposes `ranking_digest`. Apply the new
   recommendation migration when upgrading. (#175)
 - Custom graph stores must handle `DocumentRelationsBefore`, which removes stale
@@ -31,6 +33,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Graph recommendations now use a stronger indirect route even when a weaker
+  direct route reached the item first, and explain the route used. (#176)
 - Recommendations created before an upgrade now obey the current peer minimum,
   and changing ranking settings refreshes unchanged users on the next full run. (#175)
 - Editing a document now keeps its recommendation engagement signals while
