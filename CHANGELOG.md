@@ -8,6 +8,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Changed
 
+- New starter kits offer more search results only when another accessible page
+  is available. (#196)
 - Successful search requests now bootstrap session and CSRF cookies for new
   clients. Reuse them when reporting search clicks. (#195)
 - Event retries now resolve their original provenance before checking the target's
@@ -65,6 +67,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Starter kit notes search now stops offering more results at the accessible hit
+  cap, even when more notes match the query. (#196)
 - A first JSON search without a cookie now returns an impression that a later
   click from the same client can validate. (#195)
 - Retrying a recorded recommendation event now succeeds after its target is deleted

@@ -24,6 +24,83 @@ mod backend {
 
     const KITS: [&str; 3] = ["svelte", "react", "vue"];
 
+    /// Run the templates' expressions because this harness does not seed or serve notes.
+    #[test]
+    fn kit_search_pagination_stops_at_the_accessible_hit_cap() {
+        let mut functions = String::new();
+        for (name, template) in [
+            (
+                "pages_more",
+                include_str!("../src/templates/files/backend/controllers/notes.rs.tpl"),
+            ),
+            (
+                "live_more",
+                include_str!("../src/templates/files/live/src/live/note_list.rs.tpl"),
+            ),
+        ] {
+            let search = template.split("let result = Note::search").nth(1).unwrap();
+            let expression = search
+                .lines()
+                .find(|line| line.trim_start().starts_with("let more = "))
+                .unwrap();
+            functions.push_str(&format!(
+                "fn {name}(result: &SearchResult, offset: usize) -> bool {{ {expression} more }}\n"
+            ));
+        }
+        let fixture = r#"
+#![allow(dead_code, unused_variables)]
+struct Total(u64);
+impl Total { fn value(&self) -> u64 { self.0 } }
+struct Pagination { has_more: bool }
+struct SearchResult { total: Total, hits: Vec<()>, pagination: Pagination }
+fn result(total: u64, hits: usize, has_more: bool) -> SearchResult {
+    SearchResult { total: Total(total), hits: vec![(); hits], pagination: Pagination { has_more } }
+}
+#[test]
+fn pages_stop_at_cap_despite_a_larger_total() {
+    assert!(!pages_more(&result(1001, 20, false), 980));
+}
+#[test]
+fn live_stops_at_cap_despite_a_larger_total() {
+    assert!(!live_more(&result(1001, 1000, false), 0));
+}
+#[test]
+fn pages_beyond_cap_offer_no_cursor() {
+    assert!(!pages_more(&result(1001, 0, false), 1000));
+}
+#[test]
+fn both_offer_more_before_cap_and_stop_at_exhaustion() {
+    assert!(pages_more(&result(1001, 20, true), 20));
+    assert!(live_more(&result(1001, 40, true), 0));
+    assert!(!pages_more(&result(15, 15, false), 0));
+    assert!(!live_more(&result(15, 15, false), 0));
+}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("pagination.rs");
+        let binary = dir.path().join("pagination");
+        std::fs::write(&source, format!("{fixture}\n{functions}")).unwrap();
+        let compile = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+            .arg("--edition=2024")
+            .arg("--test")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compile.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let run = Command::new(binary).output().unwrap();
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stdout)
+        );
+    }
+
     /// A project `suprnova new` wrote into a temporary directory.
     struct Scaffold {
         kit: &'static str,
@@ -653,7 +730,7 @@ mod backend {
             assert!(controller.contains("use suprnova::serde_json;"));
             assert!(!controller.contains("contains_pattern") && !controller.contains("LIKE ?"));
             assert!(controller.contains("cursor belongs to another search query"));
-            assert!(controller.contains("result.total.value()"));
+            assert!(controller.contains("result.pagination.has_more"));
             assert!(controller.contains(".limit(per_page)"));
             assert!(
                 !controller.contains("per_page + 1"),

@@ -134,7 +134,7 @@ impl NoteList {
         self.pages = self.pages.max(1).saturating_add(1);
     }
 
-    /// Reads the requested pages; search totals keep impressions limited to shown notes.
+    /// Reads the requested pages and stops loading at the accessible search hit cap.
     #[rendering]
     pub async fn load(&mut self) -> Result<(), ComponentError> {
         let user = current_user().await?;
@@ -161,7 +161,7 @@ impl NoteList {
                 .get()
                 .await
                 .map_err(|error| failed("searching notes", error))?;
-            let more = result.total.value() > result.hits.len() as u64;
+            let more = result.pagination.has_more;
             let rows = result
                 .hits
                 .into_iter()
