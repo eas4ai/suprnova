@@ -1,14 +1,49 @@
 //! Fresh processes prove provider construction is not supplied by another test.
 use std::process::Command;
-use suprnova::SearchRegistry;
+use std::sync::atomic::{AtomicBool, Ordering};
+use suprnova::{Application, FrameworkError, SearchRegistry, Searchable};
 
 const CHILD_MODE: &str = "SUPRNOVA_SEARCH_BOOT_CHILD";
+static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+#[suprnova::command(name = "search-boot:noop", description = "Checks search boot")]
+async fn provider_boot_noop(_args: Vec<String>) -> Result<(), FrameworkError> {
+    Ok(())
+}
+
+async fn initialize_generation() {
+    use sea_orm_migration::MigratorTrait;
+    suprnova::DB::init_with(
+        suprnova::DatabaseConfig::builder()
+            .url("sqlite::memory:")
+            .build(),
+    )
+    .await
+    .unwrap();
+    let connection = suprnova::DB::connection().unwrap();
+    super::database_support::Migrator::up(connection.inner(), None)
+        .await
+        .unwrap();
+    let index = super::derive::SearchNote::descriptor().name;
+    let engine = SearchRegistry::engine_for(index).unwrap();
+    assert!(engine.current_generation(index).await.unwrap().is_none());
+    suprnova::search::generations::create_index(index)
+        .await
+        .unwrap();
+    let generation = engine.current_generation(index).await.unwrap().unwrap();
+    let settings = engine
+        .read_settings(super::derive::SearchNote::descriptor(), &generation)
+        .await
+        .unwrap();
+    assert_eq!(settings.index_time.model.as_deref(), Some("boot-model"));
+    INITIALIZED.store(true, Ordering::SeqCst);
+}
 
 #[test]
 fn provider_boot_child() {
-    if std::env::var_os(CHILD_MODE).is_none() {
+    let Ok(mode) = std::env::var(CHILD_MODE) else {
         return;
-    }
+    };
     suprnova::boot::load_env().expect("load configuration before building the runtime");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -32,10 +67,40 @@ fn provider_boot_child() {
             )
             .unwrap();
         }
-        suprnova::Application::new()
-            .run_with_args(["app", "schedule:run"])
+        if mode == "worker-validation" {
+            Application::new()
+                .run_with_args(["app", "schedule:run"])
+                .await
+                .expect("worker validation must find the environment-selected provider");
+        } else if mode == "worker-bootstrap" {
+            Application::new()
+                .bootstrap(initialize_generation)
+                .run_with_args(["app", "schedule:run"])
+                .await
+                .expect("the application hook must be able to provision its first generation");
+            assert!(INITIALIZED.load(Ordering::SeqCst));
+        } else if mode == "console-bootstrap" {
+            suprnova::console::dispatch_argv_with_init(
+                vec!["console".into(), "search-boot:noop".into()],
+                initialize_generation,
+            )
             .await
-            .expect("worker validation must find the environment-selected provider");
+            .expect("the console hook must be able to provision its first generation");
+            assert!(INITIALIZED.load(Ordering::SeqCst));
+        } else if mode == "server-bootstrap" {
+            let result = Application::new()
+                .bootstrap(initialize_generation)
+                .try_routes_async(|| async {
+                    Err(FrameworkError::param("search boot reached routes"))
+                })
+                .run_with_args(["app", "serve", "--no-migrate"])
+                .await;
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("search boot reached routes"), "{error}");
+            assert!(INITIALIZED.load(Ordering::SeqCst));
+        } else {
+            panic!("unknown child mode: {mode}");
+        }
         assert_eq!(
             SearchRegistry::embedder_named("boot", "http")
                 .unwrap()
@@ -83,4 +148,19 @@ fn run_child(mode: &str) {
 #[test]
 fn worker_boot_constructs_environment_provider_before_validation() {
     run_child("worker-validation");
+}
+
+#[test]
+fn worker_boot_provisions_first_generation_in_application_hook() {
+    run_child("worker-bootstrap");
+}
+
+#[test]
+fn server_boot_provisions_first_generation_in_application_hook() {
+    run_child("server-bootstrap");
+}
+
+#[test]
+fn console_boot_provisions_first_generation_in_application_hook() {
+    run_child("console-bootstrap");
 }

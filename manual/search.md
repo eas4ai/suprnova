@@ -415,6 +415,11 @@ input kinds, and artifact files. The local media profile accepts image, audio
 and video parts. The HTTP provider and default local profile accept text only.
 Unsupported parts fail.
 
+Application boot constructs the environment-selected provider before the bootstrap
+hook, so the hook can provision a first generation. Register provider configuration
+in the application's `config` callback or environment. The bootstrap hook can still
+register a custom provider that replaces the constructed one.
+
 ### Local inference
 
 Enable the `search-fastembed` Cargo feature and select

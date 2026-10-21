@@ -919,7 +919,10 @@ where
     /// own migrations before this hook for the same reason. Register
     /// HTTP-only components - global middleware, `Inertia::install` - with
     /// [`http_bootstrap`](Self::http_bootstrap) instead, which only the
-    /// server path runs.
+    /// server path runs. The configured search provider is constructed before
+    /// this hook so the hook can create a first search generation. Configure
+    /// the provider in the environment or [`config`](Self::config); the hook
+    /// can still register a custom provider that replaces it.
     ///
     /// # Example
     ///
@@ -1724,6 +1727,8 @@ where
         routes_fn: Option<RoutesFn>,
         booted_fns: Vec<BootedFn>,
     ) -> Result<(), FrameworkError> {
+        // Hooks may create a search generation, so its configured provider must exist first.
+        crate::search::boot::boot().await?;
         // Run the process-wide hook, then the HTTP-only one.
         Self::run_boot_hooks(bootstrap_fn, http_bootstrap_fn).await;
 
@@ -2452,7 +2457,9 @@ where
     /// with the [`ProcessBoot`] that [`Commands::boot`] gives it, so a
     /// worker, a queue command and `down` cannot each assemble a different
     /// subset of the boot again.
-    /// The hook runs first: `QUEUE_DRIVER=database` resolves its connection
+    /// Search providers are constructed before the hook, which may create a
+    /// search generation. The remaining drivers follow the hook:
+    /// `QUEUE_DRIVER=database` resolves its connection
     /// out of the `DB` the hook initialized, and a log channel the hook
     /// defines can be `LOG_CHANNEL`. What the hook installs by hand is kept
     /// in exactly the same way under `serve` and under `queue:work`: a
@@ -2466,9 +2473,12 @@ where
         if boot == ProcessBoot::Migrations {
             return Ok(());
         }
-        if let Some(bootstrap_fn) = bootstrap_fn {
-            process_boot::run_hook(bootstrap_fn).await?;
-        }
+        process_boot::run_hook(|| async move {
+            if let Some(bootstrap_fn) = bootstrap_fn {
+                bootstrap_fn().await;
+            }
+        })
+        .await?;
         process_boot::boot_after_hook(boot).await
     }
 

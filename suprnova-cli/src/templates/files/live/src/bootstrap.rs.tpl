@@ -48,10 +48,10 @@ use crate::models::user::User;
 pub async fn register() {
     // Initialize database connection
     DB::init().await.expect("Failed to connect to database");
-    // Database migrations run before this hook; the engine generation does not.
+    // The framework constructs the provider before this hook; provision its first generation here.
     crate::models::note::Note::initialize_search()
         .await
-        .expect("Failed to initialize notes search index (on a new database, run `migrate` first)");
+        .expect("Failed to initialize notes search generation: check SEARCH_EMBEDDER provider configuration and run `migrate` with the search migrations installed");
 
     // Register reusable notes fixtures for `db:seed` and `--class=NotesSeeder`.
     suprnova::seed::register::<crate::seeders::notes::NotesSeeder>();

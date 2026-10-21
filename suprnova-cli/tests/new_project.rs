@@ -238,3 +238,28 @@ fn rdoc_006_the_dockerfile_of_a_new_project_copies_its_templates() {
         );
     }
 }
+
+/// All notes kits share the same infallible hook and need an actionable failure cause.
+#[test]
+fn search_provider_boot_failure_names_generation_and_provider_in_every_kit() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for frontend in ["svelte", "react", "vue", "live"] {
+        let project = scaffold(tmp.path(), &format!("search-{frontend}"), frontend);
+        let bootstrap = std::fs::read_to_string(project.join("src/bootstrap.rs")).unwrap();
+        syn::parse_file(&bootstrap).expect("generated bootstrap parses");
+        assert!(bootstrap.contains("pub async fn register()"));
+        assert!(bootstrap.contains("Note::initialize_search()"));
+        assert!(
+            bootstrap.contains("SEARCH_EMBEDDER"),
+            "{frontend}: missing provider cause"
+        );
+        assert!(
+            bootstrap.contains("search migrations"),
+            "{frontend}: missing migration cause"
+        );
+        assert!(
+            !bootstrap.contains("search::boot"),
+            "the framework owns provider construction"
+        );
+    }
+}

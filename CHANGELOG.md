@@ -12,6 +12,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   to match the generation. Rebuild with `search:reindex` after changing models. (#187)
 - Worker boot now constructs configured search providers before validating
   searchable indexes. (#188)
+- Configured search providers are now available inside application bootstrap
+  hooks for server, worker and console processes. (#199)
 
 - Qdrant now supports retained flush fences and index deletion through the search
   maintenance commands. Flush fences use the configured tombstone lifetime. (#189)
@@ -56,6 +58,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   reports a rebuild error instead of silently mixing incompatible vectors. (#187)
 - Workers with searchable models now start with an environment-selected HTTP or
   fastembed provider. (#188)
+- Fresh starter kits can create the notes search generation with the configured
+  provider during bootstrap. Initialization failures now name likely causes. (#199)
 
 - Qdrant flushes now block delayed writes, including keys absent at the start,
   and deleting an index removes its collections and generation metadata. (#189)

@@ -117,13 +117,16 @@ pub(crate) async fn boot_after_hook(boot: ProcessBoot) -> Result<(), BootError> 
 ///
 /// # Errors
 ///
-/// When `hook` panics, while it builds its future or while the future
-/// runs, with the panic's message.
+/// When the configured search provider cannot be constructed, or when `hook`
+/// panics while building or polling its future. Provider errors return before
+/// application code can try to provision a generation with a missing provider.
 pub(crate) async fn run_hook<F, Fut>(hook: F) -> Result<(), BootError>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = ()>,
 {
+    // Application hooks can provision a first generation, which resolves its embedder.
+    crate::search::boot::boot().await?;
     crate::error::catch_panic(async move { hook().await })
         .await
         .map_err(|panic| {
@@ -255,11 +258,7 @@ async fn bootstrap_runtime_drivers(report_failures: bool) -> Result<(), BootErro
         "queue",
         crate::queue::bootstrap_from_env().await.map_err(Into::into),
     )?;
-    // Construct the configured embedder before validation resolves searchable indexes.
-    settle(
-        "search",
-        crate::search::boot::boot().await.map_err(Into::into),
-    )?;
+    // Providers were constructed before the hook, so validation can resolve them here.
     settle("search", crate::search::boot().await.map_err(Into::into))?;
     settle(
         "rate limit",
