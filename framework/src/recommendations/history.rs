@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) struct Positive {
     pub score: i64,
     pub event_id: i64,
+    /// Every positive fact contributes to the sum and must remain verifiable.
+    pub event_ids: BTreeSet<i64>,
     pub time: i64,
 }
 #[derive(Debug, Default)]
@@ -48,7 +50,7 @@ impl Histories {
     pub fn snapshots(&self) -> HistorySnapshots {
         self.actors.iter().map(|(actor, history)| {
             let positives: Vec<_> = history.positive.iter().map(|(target, positive)| serde_json::json!({
-                "target": target, "score": positive.score, "id": positive.event_id, "time": positive.time,
+                "target": target, "score": positive.score, "ids": positive.event_ids, "time": positive.time,
             })).collect();
             let content = crate::search::document::canonical_json(serde_json::json!({
                 "positive": positives, "excluded": history.excluded, "surfaces": history.surfaces,
@@ -127,7 +129,12 @@ impl Histories {
         let mut evidence_ids = BTreeSet::new();
         for row in actors {
             if let Some(history) = self.actors.get(&storage::actor(row)?) {
-                evidence_ids.extend(history.positive.values().map(|positive| positive.event_id));
+                evidence_ids.extend(
+                    history
+                        .positive
+                        .values()
+                        .flat_map(|positive| positive.event_ids.iter().copied()),
+                );
             }
         }
         for row in rows {
@@ -168,6 +175,7 @@ impl Histories {
                 .entry(target)
                 .and_modify(|positive| {
                     positive.score = positive.score.saturating_add(score);
+                    positive.event_ids.insert(event_id);
                     if (time, event_id) > (positive.time, positive.event_id) {
                         positive.time = time;
                         positive.event_id = event_id;
@@ -176,6 +184,7 @@ impl Histories {
                 .or_insert(Positive {
                     score,
                     event_id,
+                    event_ids: [event_id].into(),
                     time,
                 });
         }

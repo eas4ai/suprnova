@@ -430,7 +430,7 @@ async fn leading(
                 continue;
             }
             if let Some(positive) = history.positive.get(seed) {
-                neighbor.reason.event_ids.insert(positive.event_id);
+                neighbor.reason.event_ids.extend(&positive.event_ids);
             }
             neighbors.push(neighbor);
         }

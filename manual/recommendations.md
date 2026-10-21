@@ -182,6 +182,12 @@ It exposes no peer identity, peer interaction, or private evidence id. Stored
 evidence retains event provenance for derivation without exposing it in the
 display projection.
 
+New starter explanations retain every contributing positive event, including both
+actors' events on each shared target and repeated events whose scores were summed.
+Verify each stored id/digest pair with `Recommend::verify_provenance`; a deleted
+contributor returns `Removed`. Regenerate older recommendations to refresh their
+stored evidence.
+
 ## Read recommendations
 
 Select the subject and surface, and let the request resolve the viewer:

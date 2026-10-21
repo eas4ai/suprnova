@@ -730,3 +730,42 @@ fn rec_002_the_peer_threshold_is_positive() {
     assert!(refused.to_string().contains("RECOMMEND_MIN_PEERS"));
     assert_eq!(suprnova::RecommendConfig::default().min_peers, 3);
 }
+#[tokio::test]
+async fn collaborative_provenance_keeps_every_event_on_both_sides_of_shared_targets() {
+    setup(async {
+        let a = note("A", "seed", true, "alice", 1).await;
+        let c = note("C", "candidate", true, "bob", 2).await;
+        let mut expected = Vec::new();
+        for (actor, target, dedupe) in [
+            ("alice", &a, "a1"),
+            ("alice", &a, "a2"),
+            ("bob", &a, "a1"),
+            ("bob", &a, "a2"),
+            ("bob", &c, "c1"),
+            ("bob", &c, "c2"),
+        ] {
+            expected.push(Recommend::record(event(actor, target, EventType::Like, dedupe).await).await.unwrap());
+        }
+        suprnova::RecommendConfig::scope(
+            suprnova::RecommendConfig { min_peers: 1, ..Default::default() },
+            async {
+                Recommend::generate(GenerateRun::default()).await.unwrap();
+                let rows = DB::select("SELECT e.event_ids FROM recommendation_explanations e JOIN starter_recommendations r ON r.explanation_id = e.id WHERE r.actor_id = ? AND r.target_key = ?", vec!["alice".into(), c.id.to_string().into()]).await.unwrap();
+                let refs: Vec<suprnova::EventProvenance> = serde_json::from_str(&rows[0].get_string("event_ids").unwrap()).unwrap();
+                assert_eq!(refs, expected);
+                for reference in &refs {
+                    assert_eq!(Recommend::verify_provenance(reference).await.unwrap(), suprnova::ProvenanceState::Intact);
+                }
+                let removed = &expected[2];
+                DB::delete("DELETE FROM recommendation_events WHERE id = ?", vec![removed.id.into()]).await.unwrap();
+                let mut changed = Vec::new();
+                for reference in &refs {
+                    if Recommend::verify_provenance(reference).await.unwrap() != suprnova::ProvenanceState::Intact {
+                        changed.push(reference.id);
+                    }
+                }
+                assert_eq!(changed, [removed.id]);
+            },
+        ).await.unwrap();
+    }).await;
+}
