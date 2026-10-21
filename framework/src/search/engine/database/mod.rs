@@ -3,6 +3,7 @@
 //! Generation metadata serializes mutations across processes. Dense points carry
 //! immutable generation and content identities, so a partial external write cannot
 //! replace another generation's vectors or expose content absent from the side table.
+mod connection_cache;
 mod filter;
 mod mysql;
 mod postgres;
@@ -22,6 +23,7 @@ use crate::{
     vector::{Vector, VectorItem, VectorMatch, VectorStore},
 };
 use async_trait::async_trait;
+use connection_cache::ConnectionCache;
 use sea_orm::{
     ConnectionTrait, DatabaseTransaction, DbBackend, QueryResult, Statement, TransactionTrait,
     Value,
@@ -31,7 +33,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
-use tokio::sync::OnceCell;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dialect {
@@ -324,7 +325,7 @@ fn escape_native(text: &str, settings: &IndexSettings) -> Result<String, Framewo
 /// Search on the configured DB connection without maintaining a second application pool.
 #[derive(Default)]
 pub struct DatabaseSearchEngine {
-    mysql_dialect: OnceCell<Dialect>,
+    mysql_dialect: ConnectionCache<Dialect>,
 }
 impl DatabaseSearchEngine {
     /// Defer backend discovery until the application's connection has been installed.
@@ -332,14 +333,15 @@ impl DatabaseSearchEngine {
         Self::default()
     }
     async fn dialect(&self) -> Result<Dialect, FrameworkError> {
-        match DB::connection()?.get_database_backend() {
+        let connection = DB::connection()?;
+        match connection.get_database_backend() {
             DbBackend::Sqlite => Ok(Dialect::Sqlite),
             DbBackend::Postgres => Ok(Dialect::Postgres),
-            DbBackend::MySql => Ok(*self
+            DbBackend::MySql => Ok(self
                 .mysql_dialect
-                .get_or_try_init(|| async {
+                .get_or_try_init(DB::default_connection(), async {
                     let result = rows(
-                        DB::connection()?.inner(),
+                        connection.inner(),
                         "SELECT VERSION() AS version".into(),
                         Sql::new(Dialect::Mysql),
                     )

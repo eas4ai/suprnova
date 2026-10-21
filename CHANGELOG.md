@@ -69,6 +69,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- Database search now detects MySQL and MariaDB separately for each named
+  connection, so generation tables use the correct collation. (#200)
+
 - Incrementing or decrementing a counter now adds or removes search results when
   the new value crosses a model's indexing threshold. (#198)
 - Starter kit notes search now stops offering more results at the accessible hit
