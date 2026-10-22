@@ -274,7 +274,7 @@ pub fn emit_event_dispatch_impl(struct_ident: &Ident) -> TokenStream {
                 ::suprnova::eloquent::events::dispatch_after_with(
                     || #module_name::events::Saved { model: ::core::clone::Clone::clone(model) },
                 ).await?;
-                ::suprnova::live::LiveTopics::__model_changed_with_tx::<Self>(model, transaction)
+                ::suprnova::live::LiveTopics::__model_changed_with_tx::<Self>(model, transaction).await
             }
 
             async fn __dispatch_updating(
@@ -337,7 +337,7 @@ pub fn emit_event_dispatch_impl(struct_ident: &Ident) -> TokenStream {
                         is_force,
                     },
                 ).await?;
-                ::suprnova::live::LiveTopics::__model_changed_with_tx::<Self>(model, transaction)
+                ::suprnova::live::LiveTopics::__model_changed_with_tx::<Self>(model, transaction).await
             }
 
             async fn __dispatch_trashed(

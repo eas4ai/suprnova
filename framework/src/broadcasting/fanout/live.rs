@@ -60,7 +60,9 @@ if not pending and now >= next_at then
         data = { topic = ARGV[5], cursor = cursor, props = props }
     }
     if ARGV[6] == '1' then
-        envelope.except = ARGV[7]
+        local exclusion = cjson.decode(ARGV[7])
+        envelope.except = exclusion.socket
+        envelope.data.exclusion = exclusion
     end
     redis.call('HSET', KEYS[1], 'next_at', now + interval)
     local written = redis.pcall('XADD', KEYS[4], '*', ARGV[9], encode_signal(envelope, #props == 0))
@@ -145,7 +147,9 @@ local envelope = {
     data = { topic = topic, cursor = cursor, props = props }
 }
 if redis.call('HGET', KEYS[1], 'except_mode') == 'some' then
-    envelope.except = redis.call('HGET', KEYS[1], 'except_value')
+    local exclusion = cjson.decode(redis.call('HGET', KEYS[1], 'except_value'))
+    envelope.except = exclusion.socket
+    envelope.data.exclusion = exclusion
 end
 
 redis.call('XADD', KEYS[4], '*', ARGV[4], encode_signal(envelope, #props == 0))
@@ -180,7 +184,7 @@ impl RedisLiveTopics {
         instance_id: Uuid,
         topic: &str,
         props: &[String],
-        except: Option<String>,
+        except: Option<crate::broadcasting::LiveTopicExclusion>,
         interval: Duration,
     ) -> Result<u64, FrameworkError> {
         let (meta, prop_set) = self.topic_keys(topic);
@@ -196,6 +200,16 @@ impl RedisLiveTopics {
                 "SeaStreamerBroadcastHub: failed to serialize live signal props: {error}"
             ))
         })?;
+        let exclusion_json = except
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| {
+                FrameworkError::internal(format!(
+                    "SeaStreamerBroadcastHub: failed to serialize Live sender: {error}"
+                ))
+            })?
+            .unwrap_or_default();
         let result: (u8, u64, u64) = Script::new(ACCEPT_SCRIPT)
             .key(meta)
             .key(prop_set)
@@ -207,7 +221,7 @@ impl RedisLiveTopics {
             .arg(LIVE_TOPIC_EVENT)
             .arg(topic)
             .arg(if except.is_some() { "1" } else { "0" })
-            .arg(except.unwrap_or_default())
+            .arg(exclusion_json)
             .arg(props_json)
             .arg(super::sea_streamer::MESSAGE_FIELD)
             .arg(MAX_REGISTERED_TOPIC_CHANGE_PROPS)

@@ -690,7 +690,7 @@ permits anonymous instances. A Live island can declare a stream topic such as
 key. A page supplies the key with the
 [Live response loader](frontend-pages.md#live-topic-bindings).
 `changed("notes.42", &["stats"]).await?` and
-`changed_with_tx(&tx, "notes.42", &["stats"])?` publish to the same instance.
+`changed_with_tx(&tx, "notes.42", &["stats"]).await?` publish to the same instance.
 Family names cannot overlap another family or one of its static instances.
 
 ```rust
@@ -726,7 +726,7 @@ belongs to its commit. Rollback and savepoint rollback discard this callback:
 ```rust
 let topics = LiveTopics::resolve()?;
 let tx = suprnova::DB::begin_transaction().await?;
-topics.changed_with_tx(&tx, "posts", &["posts"])?;
+topics.changed_with_tx(&tx, "posts", &["posts"]).await?;
 tx.commit().await?;
 ```
 
@@ -766,7 +766,7 @@ streams.refresh("posts").await?;
 ```
 
 For a manual transaction, use
-`LiveTopics::changed_with_tx(&tx, "posts", &[])?` to name the commit.
+`LiveTopics::changed_with_tx(&tx, "posts", &[]).await?` to name the commit.
 
 A component-stream page binding receives changes for its bound stream alias.
 It does not inherit the island's other named topics or typed browser events.

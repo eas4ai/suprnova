@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use super::async_updates::{AsyncState, StreamPayloadSpec};
 use super::{LiveRegistry, LiveRuntime};
-use crate::broadcasting::{BroadcastHub, InMemoryBroadcastHub, LiveTopicSignal};
+use crate::broadcasting::{
+    BroadcastHub, InMemoryBroadcastHub, LiveTopicExclusion, LiveTopicSender, LiveTopicSignal,
+};
 use crate::{App, FrameworkError};
 use sha2::{Digest, Sha256};
 use suprnova_live::async_updates::{
@@ -247,23 +249,23 @@ impl LiveTopics {
 
     /// Defers a change until its write commits and merges it into the current unit of work.
     pub async fn changed(&self, topic: &str, props: &[&str]) -> Result<(), FrameworkError> {
-        let (pending, buffer) = self.prepare_change(topic, props)?;
+        let (pending, buffer) = self.prepare_change(topic, props).await?;
         crate::DB::after_commit(move || pending.enqueue(buffer)).await
     }
 
     /// Defers a change on an explicit transaction handle, which is not ambient state.
-    pub fn changed_with_tx(
+    pub async fn changed_with_tx(
         &self,
         transaction: &crate::Transaction,
         topic: &str,
         props: &[&str],
     ) -> Result<(), FrameworkError> {
-        let (pending, buffer) = self.prepare_change(topic, props)?;
+        let (pending, buffer) = self.prepare_change(topic, props).await?;
         transaction.after_commit(move || pending.enqueue(buffer));
         Ok(())
     }
 
-    fn prepare_change(
+    async fn prepare_change(
         &self,
         topic: &str,
         props: &[&str],
@@ -275,11 +277,25 @@ impl LiveTopics {
             props.iter().map(|p| (*p).to_owned()).collect(),
         )
         .map_err(|_| FrameworkError::internal("invalid Live topic prop names"))?;
+        let except = if let Some(socket) = crate::broadcasting::request_socket::current() {
+            let sender = if let Some(session) = crate::session::session()
+                .filter(|session| crate::session::is_valid_session_id(&session.id))
+            {
+                Some(LiveTopicSender::Session(session.id))
+            } else {
+                crate::auth::Auth::route_principal()
+                    .await?
+                    .map(LiveTopicSender::Principal)
+            };
+            sender.map(|sender| LiveTopicExclusion { socket, sender })
+        } else {
+            None
+        };
         let pending = Pending {
             publisher: self.clone(),
             topic: topic.to_owned(),
             props: (!props.is_empty()).then(|| props.iter().map(|p| (*p).to_owned()).collect()),
-            except: crate::broadcasting::request_socket::current(),
+            except,
         };
         let buffer = CHANGES
             .try_with(|buffer| Registration::new(Arc::clone(buffer)))
@@ -411,7 +427,7 @@ impl LiveTopics {
 
     /// Called by generated hooks when a model write names a transaction handle.
     #[doc(hidden)]
-    pub fn __model_changed_with_tx<M: 'static>(
+    pub async fn __model_changed_with_tx<M: 'static>(
         model: &M,
         transaction: &crate::Transaction,
     ) -> Result<(), FrameworkError> {
@@ -420,11 +436,13 @@ impl LiveTopics {
         };
         for binding in bindings {
             let (topic, props) = binding(model)?;
-            publisher.changed_with_tx(
-                transaction,
-                &topic,
-                &props.iter().map(String::as_str).collect::<Vec<_>>(),
-            )?;
+            publisher
+                .changed_with_tx(
+                    transaction,
+                    &topic,
+                    &props.iter().map(String::as_str).collect::<Vec<_>>(),
+                )
+                .await?;
         }
         Ok(())
     }
@@ -452,7 +470,7 @@ struct Pending {
     publisher: LiveTopics,
     topic: String,
     props: Option<BTreeSet<String>>,
-    except: Option<String>,
+    except: Option<LiveTopicExclusion>,
 }
 impl Pending {
     async fn enqueue(self, buffer: Option<Registration>) -> Result<(), FrameworkError> {

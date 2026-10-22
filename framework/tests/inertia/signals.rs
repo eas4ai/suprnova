@@ -427,7 +427,7 @@ impl suprnova::broadcasting::BroadcastHub for BaselineHub {
         &self,
         topic: &str,
         props: &[String],
-        except: Option<String>,
+        except: Option<suprnova::broadcasting::LiveTopicExclusion>,
         interval: std::time::Duration,
     ) -> Result<(), FrameworkError> {
         self.inner

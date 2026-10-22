@@ -837,7 +837,7 @@ async fn send_live_signal_via_producer(
     producer: &Producer,
     instance_id: Uuid,
     signal: LiveTopicSignal,
-    except: Option<String>,
+    except: Option<crate::broadcasting::LiveTopicExclusion>,
 ) -> Result<(), FrameworkError> {
     let tagged = TaggedEnvelope {
         instance_id,
@@ -1294,7 +1294,7 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         &self,
         topic: &str,
         props: &[String],
-        except: Option<String>,
+        except: Option<crate::broadcasting::LiveTopicExclusion>,
         interval: Duration,
     ) -> Result<(), FrameworkError> {
         match &self.live_topics {
@@ -1489,7 +1489,10 @@ mod tests {
             .publish_live_topic(
                 "dashboard",
                 &["stats".to_owned()],
-                Some("socket-a".to_owned()),
+                Some(crate::broadcasting::LiveTopicExclusion {
+                    socket: "socket-a".to_owned(),
+                    sender: crate::broadcasting::LiveTopicSender::Principal("alice".to_owned()),
+                }),
                 interval,
             )
             .await
@@ -1498,7 +1501,10 @@ mod tests {
             .publish_live_topic(
                 "dashboard",
                 &["activity".to_owned()],
-                Some("socket-b".to_owned()),
+                Some(crate::broadcasting::LiveTopicExclusion {
+                    socket: "socket-b".to_owned(),
+                    sender: crate::broadcasting::LiveTopicSender::Principal("alice".to_owned()),
+                }),
                 interval,
             )
             .await

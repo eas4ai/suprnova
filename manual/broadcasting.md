@@ -424,9 +424,13 @@ hub.publish(
 ).await?;
 ```
 
-`LiveTopics::changed` captures the same `X-Socket-ID` before registering its
-after-commit callback. The id stays attached when publication is deferred until
-the request ends or a transaction commits. Rollback discards the change.
+`LiveTopics::changed` captures the same `X-Socket-ID` and the sender's session
+id before registering its after-commit callback. A sessionless request uses its
+authenticated principal. Both stay attached through deferred publication and
+fanout. Live excludes a document only when its instance and its session or
+principal match. A forged header cannot suppress another user's signal.
+`changed_with_tx` also awaits this identity capture before registering its
+callback. Rollback discards the change.
 Queue job attempts start without an inherited socket id and publish to every
 authorized transport. See [Topic signals](live.md#topic-signals) for the
 transaction and model registration examples.
@@ -740,15 +744,19 @@ whose caller stopped waiting is dropped instead of being written late.
 ### Inertia Live topic signals
 
 [Live topic signals](live.md#topic-signals) use the same hub so an island and
-an Inertia page see one ordered change stream. `BroadcastHub` exposes three
+an Inertia page see one ordered change stream. `BroadcastHub` exposes
 topic operations in addition to application event fanout:
 
 - `subscribe_live_topic(topic)` opens the typed signal feed.
 - `live_topic_cursor(topic)` reads the current monotonic position.
+- `live_topic_cursors(topics)` reads one baseline for every binding before
+  the page loader runs.
 - `publish_live_topic(topic, props, except, interval)` advances that position
   and publishes the change.
 
-The browser receives a data-free Live payload:
+`except` is a `LiveTopicExclusion` with a document instance and the sender
+identity. This routing metadata stays inside the trusted hub. The browser
+receives a data-free Live payload:
 
 ```json
 {

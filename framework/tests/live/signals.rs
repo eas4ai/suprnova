@@ -144,6 +144,9 @@ fn signal_runtime() -> (Arc<Router>, LiveRuntime, Arc<InMemoryBroadcastHub>) {
             .unwrap();
     let router: Router = Router::new().get("/signal/page", page_handler).into();
     let router: Router = router.post("/signal/write", write_handler).into();
+    let router: Router = router
+        .post("/signal/owned-write", socket_origin_write)
+        .into();
     let router = router.try_live().unwrap().try_live_mount(&mount).unwrap();
     let runtime = prepare_live_router_for_test(&router).unwrap();
     App::singleton(runtime.clone());
@@ -550,6 +553,7 @@ async fn signal_003_replay_waits_for_late_manual_commit_and_keeps_the_outer_unio
                     for prop in ["posts", "count", "total"] {
                         topics
                             .changed_with_tx(&tx, "signal.late-replay", &[prop])
+                            .await
                             .unwrap();
                     }
                 })
@@ -598,6 +602,7 @@ async fn signal_003_replay_late_manual_rollback_does_not_leak_props() {
         .suppress(|| async {
             topics
                 .changed_with_tx(&tx, "signal.replay-rollback", &["rolled_back"])
+                .await
                 .unwrap();
         })
         .await
@@ -637,6 +642,7 @@ async fn signal_003_replay_retains_one_union_after_its_batch_and_manual_commit()
                     for prop in ["posts", "count", "total"] {
                         topics
                             .changed_with_tx(&tx, "signal.closed-batch", &[prop])
+                            .await
                             .unwrap();
                     }
                 })
@@ -688,6 +694,7 @@ async fn signal_003_replay_late_rollback_releases_only_committed_props() {
                 .unwrap();
             topics
                 .changed_with_tx(&tx, "signal.replay-mixed", &["rolled_back"])
+                .await
                 .unwrap();
         })
         .await
@@ -1344,6 +1351,7 @@ async fn signal_003_manual_transaction_handle_waits_for_commit_and_discards_roll
     let tx = suprnova::DB::begin_transaction().await.unwrap();
     topics
         .changed_with_tx(&tx, "signal.manual", &["posts"])
+        .await
         .unwrap();
     assert_eq!(topics.cursor("signal.manual").await.unwrap(), 0);
     tx.rollback().await.unwrap();
@@ -1351,6 +1359,7 @@ async fn signal_003_manual_transaction_handle_waits_for_commit_and_discards_roll
     let tx = suprnova::DB::begin_transaction().await.unwrap();
     topics
         .changed_with_tx(&tx, "signal.manual", &["posts"])
+        .await
         .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(topics.cursor("signal.manual").await.unwrap(), 1);
@@ -1560,4 +1569,72 @@ async fn signal_fix_002_two_users_receive_only_their_own_model_changes_over_sse(
     assert_no_signal(&mut a_stream).await;
     assert_eq!(topics.cursor(&bindings[0].0).await.unwrap(), 2);
     assert_eq!(topics.cursor(&bindings[1].0).await.unwrap(), 1);
+}
+
+#[derive(Clone)]
+struct SocketOrigin(LiveTopics);
+async fn socket_origin_write(_request: Request) -> Response {
+    App::resolve::<SocketOrigin>()?
+        .0
+        .changed("signal.posts", &["posts"])
+        .await?;
+    Ok(HttpResponse::json(json!({"saved": true})))
+}
+
+async fn forged_socket_regression(second_runtime: bool) {
+    let (router, first, _) = signal_runtime();
+    if second_runtime {
+        App::singleton(prepare_live_router_for_test(&Router::new()).unwrap());
+    }
+    App::singleton(SocketOrigin(LiveTopics::from_runtime(&first)));
+    let server = spawn_server(router).await;
+    let alice = Identity::alice();
+    let bob = Identity::alice()
+        .with_principal("bob")
+        .with_session("bob-socket-session");
+    let binding = page_binding(&server).await;
+    let a = issue_page(&server, &binding, "ownership-alice-document", &alice).await;
+    let b = issue_page(&server, &binding, "ownership-bob-document", &bob).await;
+    let mut a_stream = open_membership(&server, &alice, &a, "ownership-alice-nonce").await;
+    let mut b_stream = open_membership(&server, &bob, &b, "ownership-bob-nonce").await;
+    let reply = send(
+        server.port,
+        &alice,
+        Method::POST,
+        "/signal/owned-write",
+        &[("x-socket-id", "ownership-bob-document")],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(next_signal(&mut a_stream).await["cursor"], 1);
+    assert_eq!(
+        next_signal(&mut b_stream).await["cursor"],
+        1,
+        "another principal cannot suppress this membership"
+    );
+    let reply = send(
+        server.port,
+        &alice,
+        Method::POST,
+        "/signal/owned-write",
+        &[("x-socket-id", "ownership-alice-document")],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(next_signal(&mut b_stream).await["cursor"], 2);
+    assert_no_signal(&mut a_stream).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn signal_fix_003_forged_socket_cannot_exclude_another_principal() {
+    forged_socket_regression(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn signal_fix_003_forged_socket_cannot_exclude_a_fanout_membership() {
+    forged_socket_regression(true).await;
 }

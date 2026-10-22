@@ -626,7 +626,10 @@ async fn signal_005_redis_live_topics_share_cursor_and_coalescing() {
         .publish_live_topic(
             "dashboard",
             &["stats".to_owned()],
-            Some("socket-a".to_owned()),
+            Some(suprnova::broadcasting::LiveTopicExclusion {
+                socket: "socket-a".to_owned(),
+                sender: suprnova::broadcasting::LiveTopicSender::Principal("alice".to_owned()),
+            }),
             interval,
         )
         .await
@@ -635,7 +638,10 @@ async fn signal_005_redis_live_topics_share_cursor_and_coalescing() {
         .publish_live_topic(
             "dashboard",
             &["activity".to_owned()],
-            Some("socket-b".to_owned()),
+            Some(suprnova::broadcasting::LiveTopicExclusion {
+                socket: "socket-b".to_owned(),
+                sender: suprnova::broadcasting::LiveTopicSender::Principal("alice".to_owned()),
+            }),
             interval,
         )
         .await
@@ -924,4 +930,58 @@ async fn redis_backend_reaches_a_tls_server_child() {
     let server = crate::redis_server::TlsRedis::start();
     crate::env_snapshot::set_env("SSL_CERT_FILE", Some(&server.ca.display().to_string()));
     cross_hub_round_trip(&format!("rediss://127.0.0.1:{}/0", server.port)).await;
+}
+
+#[tokio::test]
+async fn signal_fix_003_memory_fanout_preserves_owned_exclusions() {
+    let first = SeaStreamerBroadcastHub::new("memory://", "signal-owned-fanout")
+        .await
+        .unwrap();
+    let second = SeaStreamerBroadcastHub::new("memory://", "signal-owned-fanout")
+        .await
+        .unwrap();
+    owned_signal_fanout(&first, &second).await;
+}
+
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn signal_fix_003_redis_fanout_preserves_owned_exclusions() {
+    let server = crate::redis_server::PasswordRedis::start("signal-owned-test");
+    let url = format!("redis://:signal-owned-test@127.0.0.1:{}", server.port);
+    let stream = format!("signal-owned-{}", uuid::Uuid::new_v4());
+    let first = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    let second = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    owned_signal_fanout(&first, &second).await;
+}
+
+async fn owned_signal_fanout(first: &SeaStreamerBroadcastHub, second: &SeaStreamerBroadcastHub) {
+    use suprnova::broadcasting::{LiveTopicExclusion, LiveTopicSender, LiveTopicSignal};
+    let mut receiver = second.subscribe_live_topic("owned.42").unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let interval = Duration::from_millis(100);
+    for cursor in 1..=2 {
+        let owner = LiveTopicExclusion {
+            socket: "owned-document".into(),
+            sender: LiveTopicSender::Session("owned-session".into()),
+        };
+        first
+            .publish_live_topic("owned.42", &["stats".into()], Some(owner.clone()), interval)
+            .await
+            .unwrap();
+        let envelope = tokio::time::timeout(Duration::from_secs(3), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(envelope.except.as_deref(), Some("owned-document"));
+        let signal: LiveTopicSignal = serde_json::from_value(envelope.data).unwrap();
+        assert_eq!(signal.exclusion, Some(owner));
+        assert_eq!(signal.cursor, cursor);
+        assert_eq!(
+            second
+                .live_topic_cursors(&["owned.42".into(), "owned.99".into()])
+                .await
+                .unwrap(),
+            [cursor, 0]
+        );
+    }
 }

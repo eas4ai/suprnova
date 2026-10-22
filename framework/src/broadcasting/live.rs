@@ -21,6 +21,28 @@ pub struct LiveTopicSignal {
     pub cursor: u64,
     /// The page props to reload. An empty list requests a full reload.
     pub props: Vec<String>,
+    /// Internal hub routing metadata, removed before delivery to a browser.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusion: Option<LiveTopicExclusion>,
+}
+
+/// Sender identity used only to route an internal hub exclusion.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum LiveTopicSender {
+    /// A browser session owns the originating document.
+    Session(String),
+    /// A sessionless request owns the document through its authenticated principal.
+    Principal(String),
+}
+
+/// Binds an untrusted socket header to the request that published the signal.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LiveTopicExclusion {
+    /// The originating Live document instance.
+    pub socket: String,
+    /// The identity captured before deferring publication.
+    pub sender: LiveTopicSender,
 }
 
 /// Reserved hub channel prefix for Inertia Live topic signals.
@@ -38,19 +60,22 @@ pub(crate) fn live_topic_channel(topic: &str) -> String {
 /// serialization step.
 pub(crate) fn live_topic_envelope(
     signal: LiveTopicSignal,
-    except: Option<String>,
+    except: Option<LiveTopicExclusion>,
 ) -> BroadcastEnvelope {
     let channel = live_topic_channel(&signal.topic);
-    let data = serde_json::json!({
+    let mut data = serde_json::json!({
         "topic": signal.topic,
         "cursor": signal.cursor,
         "props": signal.props,
     });
+    if let Some(exclusion) = &except {
+        data["exclusion"] = serde_json::json!(exclusion);
+    }
     BroadcastEnvelope {
         channel,
         event: LIVE_TOPIC_EVENT.to_owned(),
         data,
-        except,
+        except: except.map(|exclusion| exclusion.socket),
     }
 }
 
@@ -59,7 +84,7 @@ pub(crate) enum AcceptedLiveTopicPublication {
     /// Publish this signal now.
     Immediate {
         signal: LiveTopicSignal,
-        except: Option<String>,
+        except: Option<LiveTopicExclusion>,
     },
     /// A task must flush the pending union at this deadline.
     Pending { deadline: Instant },
@@ -77,12 +102,12 @@ struct LiveTopicEntry {
 struct PendingLiveTopicSignal {
     /// `None` means one accepted publication requested every prop.
     props: Option<BTreeSet<String>>,
-    except: Option<String>,
+    except: Option<LiveTopicExclusion>,
     interval: Duration,
 }
 
 impl PendingLiveTopicSignal {
-    fn new(props: &[String], except: Option<String>, interval: Duration) -> Self {
+    fn new(props: &[String], except: Option<LiveTopicExclusion>, interval: Duration) -> Self {
         Self {
             props: normalized_props(props),
             except,
@@ -90,7 +115,7 @@ impl PendingLiveTopicSignal {
         }
     }
 
-    fn merge(&mut self, props: &[String], except: Option<String>, interval: Duration) {
+    fn merge(&mut self, props: &[String], except: Option<LiveTopicExclusion>, interval: Duration) {
         if let Some(current) = self.props.as_mut() {
             match normalized_props(props) {
                 Some(incoming) => current.extend(incoming),
@@ -107,7 +132,7 @@ impl PendingLiveTopicSignal {
         self.interval = interval;
     }
 
-    fn into_parts(self) -> (Vec<String>, Option<String>, Duration) {
+    fn into_parts(self) -> (Vec<String>, Option<LiveTopicExclusion>, Duration) {
         (
             self.props
                 .map(|props| props.into_iter().collect())
@@ -153,7 +178,7 @@ impl LiveTopicRuntime {
         &self,
         topic: &str,
         props: &[String],
-        except: Option<String>,
+        except: Option<LiveTopicExclusion>,
         interval: Duration,
     ) -> Result<AcceptedLiveTopicPublication, FrameworkError> {
         let now = Instant::now();
@@ -176,6 +201,7 @@ impl LiveTopicRuntime {
                 signal: LiveTopicSignal {
                     topic: topic.to_owned(),
                     cursor: entry.cursor,
+                    exclusion: None,
                     props: normalized_props(props)
                         .map(|props| props.into_iter().collect())
                         .unwrap_or_default(),
@@ -204,7 +230,7 @@ impl LiveTopicRuntime {
     pub(crate) async fn take_pending(
         &self,
         topic: &str,
-    ) -> Option<(LiveTopicSignal, Option<String>)> {
+    ) -> Option<(LiveTopicSignal, Option<LiveTopicExclusion>)> {
         let mut topics = self.topics.lock().await;
         let entry = topics.get_mut(topic)?;
         let pending = entry.pending.take()?;
@@ -214,6 +240,7 @@ impl LiveTopicRuntime {
             LiveTopicSignal {
                 topic: topic.to_owned(),
                 cursor: entry.cursor,
+                exclusion: None,
                 props,
             },
             except,

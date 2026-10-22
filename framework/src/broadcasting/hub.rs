@@ -14,8 +14,8 @@
 
 use crate::FrameworkError;
 use crate::broadcasting::live::{
-    AcceptedLiveTopicPublication, LiveTopicRuntime, LiveTopicSignal, live_topic_channel,
-    live_topic_envelope,
+    AcceptedLiveTopicPublication, LiveTopicExclusion, LiveTopicRuntime, LiveTopicSignal,
+    live_topic_channel, live_topic_envelope,
 };
 use crate::lock;
 use async_trait::async_trait;
@@ -154,7 +154,7 @@ pub trait BroadcastHub: Send + Sync + 'static {
         &self,
         _topic: &str,
         _props: &[String],
-        _except: Option<String>,
+        _except: Option<LiveTopicExclusion>,
         _interval: Duration,
     ) -> Result<(), FrameworkError> {
         Err(live_topics_unsupported())
@@ -350,7 +350,7 @@ impl BroadcastHub for InMemoryBroadcastHub {
         &self,
         topic: &str,
         props: &[String],
-        except: Option<String>,
+        except: Option<LiveTopicExclusion>,
         interval: Duration,
     ) -> Result<(), FrameworkError> {
         match self
@@ -430,7 +430,7 @@ impl BroadcastHub for InMemoryBroadcastHub {
 }
 
 impl InMemoryBroadcastHub {
-    fn publish_live_signal(&self, signal: LiveTopicSignal, except: Option<String>) {
+    fn publish_live_signal(&self, signal: LiveTopicSignal, except: Option<LiveTopicExclusion>) {
         self.publish_framework(live_topic_envelope(signal, except));
     }
 }
@@ -606,7 +606,10 @@ mod tests {
         hub.publish_live_topic(
             "orders.42",
             &["summary".to_owned(), "summary".to_owned()],
-            Some("socket-a".to_owned()),
+            Some(crate::broadcasting::LiveTopicExclusion {
+                socket: "socket-a".to_owned(),
+                sender: crate::broadcasting::LiveTopicSender::Principal("alice".to_owned()),
+            }),
             Duration::from_millis(100),
         )
         .await
@@ -618,7 +621,7 @@ mod tests {
         assert_eq!(envelope.except.as_deref(), Some("socket-a"));
         assert_eq!(
             envelope.data,
-            json!({"topic": "orders.42", "cursor": 1, "props": ["summary"]})
+            json!({"topic": "orders.42", "cursor": 1, "props": ["summary"], "exclusion": {"socket": "socket-a", "sender": {"kind": "principal", "id": "alice"}}})
         );
         assert_eq!(hub.live_topic_cursor("orders.42").await.unwrap(), 1);
     }
@@ -639,7 +642,10 @@ mod tests {
         hub.publish_live_topic(
             "dashboard",
             &["stats".to_owned()],
-            Some("socket-a".to_owned()),
+            Some(crate::broadcasting::LiveTopicExclusion {
+                socket: "socket-a".to_owned(),
+                sender: crate::broadcasting::LiveTopicSender::Principal("alice".to_owned()),
+            }),
             interval,
         )
         .await
@@ -647,7 +653,10 @@ mod tests {
         hub.publish_live_topic(
             "dashboard",
             &["activity".to_owned(), "stats".to_owned()],
-            Some("socket-b".to_owned()),
+            Some(crate::broadcasting::LiveTopicExclusion {
+                socket: "socket-b".to_owned(),
+                sender: crate::broadcasting::LiveTopicSender::Principal("alice".to_owned()),
+            }),
             interval,
         )
         .await

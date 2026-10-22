@@ -1050,6 +1050,7 @@ impl AsyncState {
                     topic: topic.clone(),
                     cursor,
                     props: Vec::new(),
+                    exclusion: None,
                 };
                 self.publish_selected(
                     &topic,
@@ -1825,11 +1826,22 @@ impl AsyncState {
                     }
                     let record = tables.issued.get(&id)?;
                     if let StreamPayloadSpec::TopicChange {
+                        signal,
                         except: Some(socket),
-                        ..
                     } = spec
+                        && let Some(exclusion) = &signal.exclusion
+                        && exclusion.socket == *socket
+                        && record.document_instance == *socket
                     {
-                        if record.document_instance == *socket {
+                        let owns_document = match &exclusion.sender {
+                            crate::broadcasting::LiveTopicSender::Session(id) => {
+                                record.session_id.as_ref() == Some(id)
+                            }
+                            crate::broadcasting::LiveTopicSender::Principal(id) => {
+                                record.principal.as_ref() == Some(id)
+                            }
+                        };
+                        if owns_document {
                             return None;
                         }
                     }
