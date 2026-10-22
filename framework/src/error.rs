@@ -1305,6 +1305,12 @@ impl FrameworkError {
         }
     }
 
+    /// Reports a stale state conflict so callers can distinguish it from a storage failure.
+    #[track_caller]
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::domain(message, 409)
+    }
+
     /// Create a Domain error with custom status code
     #[track_caller]
     pub fn domain(message: impl Into<String>, status_code: u16) -> Self {

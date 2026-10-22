@@ -61,14 +61,18 @@ async fn add() -> Result<(), FrameworkError> {
 
 `record` applies to a copy before accepting the fact. `persist` writes every
 recorded fact in one transaction. A stale writer gets an error with the aggregate
-UUID and the expected and observed versions. Its recorded facts remain available.
+UUID and the expected and observed versions, with HTTP status 409. Its recorded facts remain available.
 Reload state and decide whether to issue the command again.
 
 Persistence owns its transaction. Calling it from an outer `DB::transaction`
-returns an error. This prevents an outer rollback from leaving the in-memory
+returns an internal error naming the aggregate. Storage failures remain database
+errors. This prevents an outer rollback from leaving the in-memory
 version ahead of durable history. An after-commit error can occur after the write
 succeeds. The instance then records the committed version and clears its pending
-facts, so retrying the instance cannot duplicate them.
+facts, so retrying the instance cannot duplicate them. This bookkeeping update
+runs before delivery callbacks and survives caller cancellation after commit.
+Cancellation before commit retains pending facts and the prior durable version.
+`recorded()` returns a copy of the pending facts at the time of the call.
 
 ## Snapshots
 

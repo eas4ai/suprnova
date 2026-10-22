@@ -68,3 +68,5 @@ mod signals;
 mod commands;
 
 mod engine_projectors;
+
+mod persistence_outcomes;

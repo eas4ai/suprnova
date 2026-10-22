@@ -1,9 +1,10 @@
-//! Recording and persistence have separate state so failed writes retain pending facts.
+//! Shared bookkeeping follows the durable outcome when callback delivery is cancelled.
 use super::{DomainEvent, EventStore, Snapshot, StoredEvent, error, store::executor};
 use crate::{DB, FrameworkError};
 use sea_orm::sea_query::{Alias, OnConflict, Query};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Application state rebuilt by applying declared facts in version order.
 pub trait AggregateRoot:
@@ -38,6 +39,11 @@ impl AggregateEntry {
 pub struct Aggregate<A: AggregateRoot> {
     uuid: String,
     state: A,
+    bookkeeping: Arc<Mutex<Bookkeeping>>,
+}
+
+#[derive(Debug, Default)]
+struct Bookkeeping {
     expected: i64,
     pending: Vec<StoredEvent>,
 }
@@ -47,9 +53,13 @@ impl<A: AggregateRoot> Aggregate<A> {
         Ok(Self {
             uuid: EventStore::uuid(uuid)?,
             state: A::default(),
-            expected: 0,
-            pending: Vec::new(),
+            bookkeeping: Arc::new(Mutex::new(Bookkeeping::default())),
         })
+    }
+    fn bookkeeping(&self) -> MutexGuard<'_, Bookkeeping> {
+        self.bookkeeping
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
     /// Returns the current state, including recorded facts.
     pub fn state(&self) -> &A {
@@ -61,11 +71,11 @@ impl<A: AggregateRoot> Aggregate<A> {
     }
     /// Returns the last durable version known by this instance.
     pub fn persisted_version(&self) -> i64 {
-        self.expected
+        self.bookkeeping().expected
     }
-    /// Returns recorded facts that persistence has not committed yet.
-    pub fn recorded(&self) -> &[StoredEvent] {
-        &self.pending
+    /// Returns a copy of facts that persistence has not committed yet.
+    pub fn recorded(&self) -> Vec<StoredEvent> {
+        self.bookkeeping().pending.clone()
     }
     /// Applies a fact before recording it. Failure leaves state unchanged.
     pub fn record<E: DomainEvent>(&mut self, event: E) -> Result<&mut Self, FrameworkError> {
@@ -81,11 +91,16 @@ impl<A: AggregateRoot> Aggregate<A> {
             .as_object_mut()
             .ok_or_else(|| error("event metadata must be an object"))?;
         object.insert("aggregate_type".into(), A::NAME.into());
-        let version = self
-            .expected
-            .checked_add(i64::try_from(self.pending.len()).map_err(|e| error(e.to_string()))?)
-            .and_then(|v| v.checked_add(1))
-            .ok_or_else(|| error("aggregate version exhausted"))?;
+        let version = {
+            let bookkeeping = self.bookkeeping();
+            bookkeeping
+                .expected
+                .checked_add(
+                    i64::try_from(bookkeeping.pending.len()).map_err(|e| error(e.to_string()))?,
+                )
+                .and_then(|v| v.checked_add(1))
+                .ok_or_else(|| error("aggregate version exhausted"))?
+        };
         let event = StoredEvent {
             id: 0,
             aggregate_uuid: self.uuid.clone(),
@@ -100,7 +115,7 @@ impl<A: AggregateRoot> Aggregate<A> {
         let mut state = self.state.clone();
         state.apply(&event)?;
         self.state = state;
-        self.pending.push(event);
+        self.bookkeeping().pending.push(event);
         Ok(self)
     }
     /// Rebuilds from the latest snapshot and subsequent history.
@@ -131,15 +146,17 @@ impl<A: AggregateRoot> Aggregate<A> {
             }
             aggregate.state = serde_json::from_value(snapshot.state)
                 .map_err(|e| error(format!("aggregate '{}': {e}", A::NAME)))?;
-            aggregate.expected = snapshot.aggregate_version;
+            aggregate.bookkeeping().expected = snapshot.aggregate_version;
         }
         loop {
-            let page = EventStore::aggregate_page(&aggregate.uuid, aggregate.expected, 256).await?;
+            let page =
+                EventStore::aggregate_page(&aggregate.uuid, aggregate.persisted_version(), 256)
+                    .await?;
             if page.is_empty() {
                 break;
             }
             for event in page {
-                if event.aggregate_version != aggregate.expected + 1 {
+                if event.aggregate_version != aggregate.persisted_version() + 1 {
                     return Err(error("aggregate history has a version gap"));
                 }
                 if event.metadata.get("aggregate_type").and_then(Value::as_str) != Some(A::NAME) {
@@ -149,7 +166,7 @@ impl<A: AggregateRoot> Aggregate<A> {
                     )));
                 }
                 aggregate.state.apply(&event)?;
-                aggregate.expected = event.aggregate_version;
+                aggregate.bookkeeping().expected = event.aggregate_version;
             }
         }
         Ok(aggregate)
@@ -157,17 +174,34 @@ impl<A: AggregateRoot> Aggregate<A> {
     /// Commits all recorded facts atomically. This operation owns its transaction.
     pub async fn persist(&mut self) -> Result<Vec<StoredEvent>, FrameworkError> {
         if DB::transaction_level() > 0 {
-            return Err(error("aggregate persist must own its transaction"));
+            return Err(FrameworkError::internal(format!(
+                "aggregate '{}' persist must own its transaction",
+                self.uuid
+            )));
         }
-        if self.pending.is_empty() {
+        let (expected, pending) = {
+            let bookkeeping = self.bookkeeping();
+            (bookkeeping.expected, bookkeeping.pending.clone())
+        };
+        let Some(last) = pending.last() else {
             return Ok(Vec::new());
-        }
+        };
+        let committed = last.aggregate_version;
+        let attempted = pending
+            .first()
+            .map_or(committed, |event| event.aggregate_version);
+        let bookkeeping = Arc::clone(&self.bookkeeping);
         let uuid = self.uuid.clone();
-        let expected = self.expected;
-        let pending = self.pending.clone();
         let result = DB::transaction_with_isolation(None, move |_tx| Box::pin(async move {
-            EventStore::lock().await?;
-            let actual = EventStore::version(&uuid).await?;
+            // Register before writes can schedule projection delivery or cache callbacks.
+            DB::after_commit(move || async move {
+                let mut bookkeeping = bookkeeping.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                bookkeeping.expected = committed;
+                bookkeeping.pending.retain(|event| event.aggregate_version > committed);
+                Ok(())
+            }).await?;
+            EventStore::lock().await.map_err(|cause| storage(&uuid, attempted, cause))?;
+            let actual = EventStore::version(&uuid).await.map_err(|cause| storage(&uuid, attempted, cause))?;
             if actual != expected { return Err(conflict(&uuid, expected, actual)); }
             let mut stored = Vec::new();
             for event in pending {
@@ -180,31 +214,32 @@ impl<A: AggregateRoot> Aggregate<A> {
             Ok(stored)
         })).await??;
         let (events, callback_error) = result;
-        if let Some(last) = events.last() {
-            self.expected = last.aggregate_version;
-        }
-        self.pending.clear();
         if let Some(cause) = callback_error {
             return Err(error(format!(
                 "aggregate '{}' committed through version {}; after-commit delivery failed: {cause}",
-                self.uuid, self.expected
+                self.uuid,
+                self.persisted_version()
             )));
         }
         Ok(events)
     }
     /// Captures only persisted state. Repeating a capture at one version is safe.
     pub async fn snapshot(&self) -> Result<Snapshot, FrameworkError> {
-        if self.expected == 0 {
+        let (expected, pending_empty) = {
+            let bookkeeping = self.bookkeeping();
+            (bookkeeping.expected, bookkeeping.pending.is_empty())
+        };
+        if expected == 0 {
             return Err(error(
                 "cannot snapshot an aggregate without persisted history",
             ));
         }
-        if !self.pending.is_empty() {
+        if !pending_empty {
             return Err(error("persist recorded events before taking a snapshot"));
         }
         let snapshot = Snapshot {
             uuid: self.uuid.clone(),
-            aggregate_version: self.expected,
+            aggregate_version: expected,
             state: serde_json::to_value(&self.state).map_err(|e| error(e.to_string()))?,
             created_at: crate::clock::now().naive_utc(),
         };
@@ -234,7 +269,13 @@ impl<A: AggregateRoot> Aggregate<A> {
     }
 }
 fn conflict(uuid: &str, expected: i64, actual: i64) -> FrameworkError {
-    error(format!(
+    FrameworkError::conflict(format!(
         "aggregate '{uuid}' expected version {expected}, actual version {actual}"
+    ))
+}
+
+fn storage(uuid: &str, attempted: i64, cause: FrameworkError) -> FrameworkError {
+    FrameworkError::database(format!(
+        "aggregate '{uuid}' attempted version {attempted}: {cause}"
     ))
 }
