@@ -61,6 +61,7 @@ const ENV_VALUES: &[(&str, &str)] = &[
         "cdn.example, fonts.example",
     ),
     ("PAGE_BUDGET_MAX_RESOURCES", "7"),
+    ("PAGE_BUDGET_MAX_DISCOVERY_TOKENS", "11"),
     ("PAGE_BUDGET_MAX_RESPONSE_BYTES", "8"),
     ("PAGE_BUDGET_REQUEST_TIMEOUT_SECS", "9"),
     ("PAGE_BUDGET_COLLECTION_TIMEOUT_SECS", "10"),
@@ -94,6 +95,7 @@ fn budget_001_from_env_overrides_defaults_and_rejects_each_invalid_field() {
                         .collect()
                 );
                 assert_eq!(budget.max_resources, 7);
+                assert_eq!(budget.max_discovery_tokens, 11);
                 assert_eq!(budget.max_response_bytes, 8);
                 assert_eq!(budget.request_timeout, std::time::Duration::from_secs(9));
                 assert_eq!(

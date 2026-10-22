@@ -57,6 +57,7 @@ strict Vite convention described in [Page Budget](page-budget.md).
 | `PAGE_BUDGET_FINGERPRINT_PATTERN` | Strict Vite hash expression | regex | Match the filename stem. |
 | `PAGE_BUDGET_ALLOWED_THIRD_PARTY_HOSTS` | unset | comma-separated hosts | Restrict external hosts when set. Empty forbids all external hosts. |
 | `PAGE_BUDGET_MAX_RESOURCES` | `256` | usize | Bound discovery and queued resources. |
+| `PAGE_BUDGET_MAX_DISCOVERY_TOKENS` | `65536` | usize | Bound parser tokens and raw reference candidates across collection. |
 | `PAGE_BUDGET_MAX_RESPONSE_BYTES` | `16777216` | usize | Bound one response body. |
 | `PAGE_BUDGET_REQUEST_TIMEOUT_SECS` | `10` | u64 | Bound one HTTP request in seconds. |
 | `PAGE_BUDGET_COLLECTION_TIMEOUT_SECS` | `30` | u64 | Bound the complete collection in seconds. |

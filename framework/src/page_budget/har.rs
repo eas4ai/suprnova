@@ -72,7 +72,7 @@ pub(super) fn read(json: &str, budget: &PageBudget) -> Result<Capture, Framework
         .first()
         .ok_or_else(|| FrameworkError::bad_request("page budget HAR has no entries"))?;
     let page = parse_url(&first.request.url)?;
-    let mut capture = Capture::new(page.clone());
+    let mut capture = Capture::new(page.clone(), budget.max_discovery_tokens);
     let mut origin = page.clone();
     let mut documents = std::collections::BTreeSet::from([page.to_string()]);
     for (index, entry) in har.log.entries.into_iter().enumerate() {

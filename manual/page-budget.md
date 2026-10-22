@@ -110,9 +110,18 @@ cargo run --bin console -- budget:audit https://example.com/
 HTTP requests have a ten-second timeout. The whole collection has a thirty-second
 timeout, a limit of 256 resources and a 16 MiB response limit.
 `budget:audit` reads these collection limits through `PageBudget::from_env()`.
-Discovery deduplicates and caps references as it
-parses HTML, CSS and manifests. The pending queue is bounded too. Repeating
-one reference does not allocate another queue entry. Every `Cache-Control`
+The resource limit counts normalized HTTP and HTTPS URLs after deduplication.
+Data URLs and fragment-only references count zero. A separate limit of 65,536
+parser tokens and raw reference candidates bounds collection work, including
+duplicate and ignored candidates. Set `max_discovery_tokens` in Rust or
+`PAGE_BUDGET_MAX_DISCOVERY_TOKENS` for the command.
+Discovery stops HTML input on overflow, parses inline styles on their tags and
+processes complete CSS constructs from style blocks before later markup.
+Only an unfinished CSS construct is retained between character chunks; the
+response byte limit bounds its size. Manifest icons are decoded one at a time,
+and overflow refuses the remaining array before it is materialized.
+Each `image-set()` is a modern-plus-fallback group, like a picture or source set.
+The pending queue is bounded too. Repeating one reference does not allocate another queue entry. Every `Cache-Control`
 header line contributes to the policy; a second `no-cache` line fails the
 immutable rule. Redirects are recorded before following same-origin
 locations. The initial HTTP-to-HTTPS upgrade may be followed on the same host;
@@ -144,6 +153,7 @@ PAGE_BUDGET_TOTAL_BYTES=800000 PAGE_BUDGET_FONT_BYTES=80000 cargo run --bin cons
 | `PAGE_BUDGET_FINGERPRINT_PATTERN` | Strict Vite hash expression | regex | Match the filename stem. |
 | `PAGE_BUDGET_ALLOWED_THIRD_PARTY_HOSTS` | unset | comma-separated hosts | Restrict external hosts when set. Empty forbids all external hosts. |
 | `PAGE_BUDGET_MAX_RESOURCES` | `256` | usize | Bound discovery and queued resources. |
+| `PAGE_BUDGET_MAX_DISCOVERY_TOKENS` | `65536` | usize | Bound parser tokens and raw reference candidates across collection. |
 | `PAGE_BUDGET_MAX_RESPONSE_BYTES` | `16777216` | usize | Bound one response body. |
 | `PAGE_BUDGET_REQUEST_TIMEOUT_SECS` | `10` | u64 | Bound one HTTP request in seconds. |
 | `PAGE_BUDGET_COLLECTION_TIMEOUT_SECS` | `30` | u64 | Bound the complete collection in seconds. |

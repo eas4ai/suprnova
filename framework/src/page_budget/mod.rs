@@ -50,6 +50,8 @@ pub struct PageBudget {
     pub allowed_third_party_hosts: Option<BTreeSet<String>>,
     /// Stop cyclic or unusually large document graphs before an unbounded fetch.
     pub max_resources: usize,
+    /// Bound raw parser work independently of normalized resource count.
+    pub max_discovery_tokens: usize,
     /// Bound one response's memory use during collection.
     pub max_response_bytes: usize,
     /// Bound each outbound request.
@@ -75,6 +77,7 @@ impl Default for PageBudget {
             fingerprint_pattern: DEFAULT_FINGERPRINT_PATTERN.into(),
             allowed_third_party_hosts: None,
             max_resources: 256,
+            max_discovery_tokens: 65_536,
             max_response_bytes: 16 * 1024 * 1024,
             request_timeout: Duration::from_secs(10),
             collection_timeout: Duration::from_secs(30),
@@ -284,6 +287,7 @@ impl PageBudget {
         field!("PAGE_BUDGET_FORBID_FIRST_REDIRECT", forbid_first_redirect);
         field!("PAGE_BUDGET_FINGERPRINT_PATTERN", fingerprint_pattern);
         field!("PAGE_BUDGET_MAX_RESOURCES", max_resources);
+        field!("PAGE_BUDGET_MAX_DISCOVERY_TOKENS", max_discovery_tokens);
         field!("PAGE_BUDGET_MAX_RESPONSE_BYTES", max_response_bytes);
         if let Some(seconds) = env_value("PAGE_BUDGET_REQUEST_TIMEOUT_SECS")? {
             budget.request_timeout = Duration::from_secs(seconds);

@@ -13,12 +13,16 @@ pub(super) struct Capture {
     pub alternatives: BTreeSet<String>,
     pub image_groups: Vec<Vec<String>>,
     reference_urls: BTreeSet<String>,
+    work_limit: usize,
+    work_used: usize,
 }
 
 impl Capture {
-    pub(super) fn new(page: Url) -> Self {
+    pub(super) fn new(page: Url, work_limit: usize) -> Self {
         Self {
             reference_urls: BTreeSet::from([page.to_string()]),
+            work_limit,
+            work_used: 0,
             page,
             resources: Vec::new(),
             hosts: BTreeSet::new(),
@@ -35,17 +39,24 @@ impl Capture {
         let Some(bytes) = &resource.body else {
             return Ok(discover::References::default());
         };
+        let limits = discover::Limits {
+            resources: maximum,
+            tokens: self.work_limit,
+            used_tokens: self.work_used,
+            known: &self.reference_urls,
+        };
         let mut refs = if resource.document && resource.mime().eq_ignore_ascii_case("text/html") {
-            discover::html(&resource.url, &String::from_utf8_lossy(bytes), maximum)?
+            discover::html(&resource.url, &String::from_utf8_lossy(bytes), limits)?
         } else if resource.mime().eq_ignore_ascii_case("text/css")
             || resource.url.path().ends_with(".css")
         {
-            discover::css(&resource.url, &String::from_utf8_lossy(bytes), maximum)?
+            discover::css(&resource.url, &String::from_utf8_lossy(bytes), limits)?
         } else if resource.manifest {
-            discover::manifest(&resource.url, bytes, maximum)?
+            discover::manifest(&resource.url, bytes, limits)?
         } else {
             discover::References::default()
         };
+        self.work_used = self.work_used.saturating_add(refs.work_done);
         self.register_references(&mut refs, maximum)?;
         Ok(refs)
     }
@@ -70,11 +81,6 @@ impl Capture {
         self.alternatives.append(&mut refs.alternatives);
         for group in refs.image_groups.drain(..) {
             if !self.image_groups.contains(&group) {
-                if self.image_groups.len() >= maximum {
-                    return Err(FrameworkError::bad_request(
-                        "page budget exceeds resource groups",
-                    ));
-                }
                 self.image_groups.push(group);
             }
         }
@@ -149,7 +155,7 @@ where
 {
     super::fingerprint_regex(&budget.fingerprint_pattern)?;
     let collect = async {
-        let mut capture = Capture::new(page.clone());
+        let mut capture = Capture::new(page.clone(), budget.max_discovery_tokens);
         let mut origin = page.clone();
         if budget.max_resources == 0 {
             return Err(FrameworkError::bad_request(
