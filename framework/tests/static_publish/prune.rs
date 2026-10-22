@@ -334,3 +334,32 @@ async fn pub_008_failed_delete_leaves_live_manifest_and_objects_serving() {
         Bytes::from_static(b"live")
     );
 }
+
+#[tokio::test]
+async fn pub_008_fix_m_unchanged_attempt_prunes_and_reports_expired_objects() {
+    let (directory, disk) = local();
+    let publisher = Publisher::from_operator(
+        disk.clone(),
+        "v1",
+        PublishConfig {
+            grace_period: Duration::from_secs(60),
+            ..PublishConfig::default()
+        },
+    )
+    .unwrap();
+    let first = publisher.publish(vec![page("same")]).await.unwrap();
+    disk.write("_pub/failed/orphan.html", "orphan")
+        .await
+        .unwrap();
+    old(&directory, "_pub/failed/orphan.html");
+    let second = publisher.publish(vec![page("same")]).await.unwrap();
+    assert_eq!(first.version, second.version);
+    assert_eq!(second.uploaded, 0);
+    assert!(
+        second
+            .prune
+            .removed
+            .contains(&"_pub/failed/orphan.html".into())
+    );
+    assert!(!disk.exists("_pub/failed/orphan.html").await.unwrap());
+}

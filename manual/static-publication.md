@@ -45,7 +45,8 @@ suprnova::Inertia::public_shared(&["site"])?;
 Public rendering uses no visitor session. It skips session and CSRF middleware,
 excludes session props and uses the dependency collector to refuse a handler
 that reads session, identity or secret context. A refusal names the route and
-cause. It does not stop the server listener.
+cause. It fails the whole publication and keeps the previous inventory live. The failure
+and route appear in status. It does not stop the server listener.
 
 ## Configure a disk and boot publication
 
@@ -292,7 +293,7 @@ keep their existing representation. See [Images](images.md).
 
 ## Prune retired objects
 
-A successful publication prunes after switching. The same pass is available on
+Every successful attempt prunes, including an unchanged inventory. The same pass is available on
 demand. Reports list removed and kept keys. Live objects, stable aliases and
 versions inside the grace period stay protected. Grace starts when a version
 stops being live. Objects with no reliable age stay protected. A prune failure

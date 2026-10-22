@@ -133,11 +133,17 @@ impl StaticPublication {
     ) -> Result<PublishOutcome, FrameworkError> {
         let render = || async move {
             let refusals = &self.refusals;
+            if let Some((route, cause)) = refusals.first() {
+                return Err(error(format!(
+                    "route {route}: publication refused: {cause}"
+                )));
+            }
             let mut pages = Vec::new();
             for path in paths {
                 if let Some((route, cause)) = refusals.iter().find(|(route, _)| route == &path) {
-                    tracing::error!(route, cause, "public page refused");
-                    continue;
+                    return Err(error(format!(
+                        "route {route}: publication refused: {cause}"
+                    )));
                 }
                 match self.render(&path).await {
                     Ok(page) => {

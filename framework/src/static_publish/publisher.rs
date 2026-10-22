@@ -130,7 +130,6 @@ pub struct Publisher {
 struct Upload {
     entry: ObjectEntry,
     bytes: Bytes,
-    stable: Option<String>,
     source: Option<String>,
 }
 
@@ -317,6 +316,10 @@ impl Publisher {
         .await
         .map_err(|_| error("render or upload timed out"))??;
         if next.live == previous.live {
+            if self.driver.is_none() {
+                self.mirror(&previous).await;
+            }
+            outcome.prune = self.retention().await;
             return Ok(outcome);
         }
         if let Some(driver) = &self.driver {
@@ -346,24 +349,8 @@ impl Publisher {
             let failure = error(failure);
             return Err(self.rollback_cdn(&previous, failure).await);
         }
-        // Bucket aliases are a post-commit mirror. Origin delivery reads the manifest.
         if self.driver.is_none() {
-            for upload in &uploads {
-                if let Some(key) = &upload.stable {
-                    let bytes = self
-                        .disk
-                        .read(&upload.entry.path)
-                        .await
-                        .map(|v| v.to_bytes());
-                    let mirrored = match bytes {
-                        Ok(bytes) => self.write(key, &bytes, &upload.entry.headers).await,
-                        Err(failure) => Err(error(failure)),
-                    };
-                    if let Err(failure) = mirrored {
-                        tracing::error!(%failure, key, "static publication committed; stable mirror will converge on retry");
-                    }
-                }
-            }
+            self.mirror(&next).await;
         }
         if let Some(driver) = &self.driver {
             let capabilities = driver.capabilities();
@@ -391,17 +378,41 @@ impl Publisher {
                 tracing::error!(error = %e, "static publication switched but CDN purge failed");
             }
         }
-        outcome.prune = match self.prune_locked().await {
+        outcome.prune = self.retention().await;
+        Ok(outcome)
+    }
+    // Bucket mirrors are maintained only after the durable manifest selects complete objects.
+    async fn mirror(&self, manifest: &Manifest) {
+        if let Some(version) = manifest.versions.get(&manifest.live) {
+            for object in version.objects.iter().filter(|object| !object.asset) {
+                let key = if object.url.ends_with("/index.json") {
+                    object.url.trim_start_matches('/').to_string()
+                } else if object.url == "/" {
+                    "index.html".to_string()
+                } else {
+                    format!("{}/index.html", object.url.trim_matches('/'))
+                };
+                let mirrored = match self.disk.read(&object.path).await {
+                    Ok(bytes) => self.write(&key, &bytes.to_bytes(), &object.headers).await,
+                    Err(failure) => Err(error(failure)),
+                };
+                if let Err(failure) = mirrored {
+                    tracing::error!(%failure,key,"static publication committed; stable mirror will converge on retry");
+                }
+            }
+        }
+    }
+    async fn retention(&self) -> PruneOutcome {
+        match self.prune_locked().await {
             Ok(prune) => prune,
             Err(e) => {
-                tracing::error!(error = %e, "static publication prune failed; live objects retained");
+                tracing::error!(error=%e,"static publication prune failed; live objects retained");
                 PruneOutcome {
                     error: Some(e.to_string()),
                     ..PruneOutcome::default()
                 }
             }
-        };
-        Ok(outcome)
+        }
     }
     async fn rollback_cdn(&self, previous: &Manifest, failure: FrameworkError) -> FrameworkError {
         if let Some(driver) = &self.driver {
@@ -520,7 +531,6 @@ impl Publisher {
                         headers,
                     },
                     bytes,
-                    stable: Some(format!("{stable_base}index.{ext}")),
                     source: None,
                 });
             }
@@ -552,7 +562,6 @@ impl Publisher {
                         headers,
                     },
                     bytes,
-                    stable: None,
                     source: None,
                 });
             }
@@ -646,7 +655,6 @@ impl Publisher {
                 uploads.push(Upload {
                     entry: entry.clone(),
                     bytes: Bytes::new(),
-                    stable: None,
                     source: Some(old.path.clone()),
                 });
             }

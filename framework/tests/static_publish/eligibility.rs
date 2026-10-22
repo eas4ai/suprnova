@@ -392,3 +392,38 @@ async fn pub_001_nonce_override_without_global_policy_refuses() -> Result<(), Fr
     );
     Ok(())
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn pub_003_fix_d_refused_inventory_retains_live_and_records_route()
+-> Result<(), FrameworkError> {
+    let _container = suprnova::testing::TestContainer::fake();
+    Storage::register_memory("refused-inventory");
+    let publisher = Publisher::new("refused-inventory", "pub-test-v1", PublishConfig::default())?;
+    let first = publisher
+        .publish(vec![suprnova::static_publish::PageObject::new(
+            "/public",
+            bytes::Bytes::from_static(b"previous"),
+            bytes::Bytes::from_static(b"{}"),
+        )?])
+        .await?;
+    let router: Router = Router::new().get("/public", page).into();
+    let router = router.public_page::<PrivateProps>("/public", "Public")?;
+    let runtime = StaticPublication::install(&router, publisher)?;
+    let result = runtime.publish().await;
+    assert!(
+        result.is_err(),
+        "a refusal cannot publish a smaller inventory"
+    );
+    assert!(result.unwrap_err().to_string().contains("/public"));
+    let status = runtime.status().await;
+    assert_eq!(status.live_version, first.version);
+    assert!(status.last_outcome.contains("/public"));
+    let durable = Storage::disk("refused-inventory")?
+        .read("_pub/status.json")
+        .await
+        .map_err(|e| FrameworkError::internal(e.to_string()))?
+        .to_bytes();
+    assert!(String::from_utf8_lossy(&durable).contains("/public"));
+    Ok(())
+}
