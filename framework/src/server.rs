@@ -771,6 +771,11 @@ impl Server {
         // flush so listener spans land in the batch.
         crate::events::drain_queued_at_shutdown().await;
 
+        #[cfg(feature = "filesystem")]
+        if let Some(mut publication) = _static_publication {
+            publication.shutdown().await;
+        }
+
         // Work and listeners have stopped producing events, so the sender
         // can drain its final accepted reports before the runtime ends.
         crate::app::process_boot::flush_reporting().await;

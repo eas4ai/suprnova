@@ -6,9 +6,11 @@ pub mod cdn;
 mod console;
 #[cfg(feature = "media")]
 pub mod images;
+mod lease;
 mod manifest;
 mod publisher;
 mod runtime;
+mod work;
 
 pub use manifest::{Manifest, ObjectEntry, VersionEntry};
 pub use publisher::{

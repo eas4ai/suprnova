@@ -75,9 +75,12 @@ Concrete parameterized paths can be listed with `add_path`. A missing public
 path is also rendered and published when its first origin request arrives.
 
 `Server::run` starts publication after `TcpListener::bind`. Health checks can
-run while assets upload. Shutdown drops the worker guard and cancels unfinished
-staging. Rendering and staging have a timeout and a configured upload limit.
-An upload failure leaves the live manifest in place and logs an error.
+run while assets upload. Shutdown cancels rendering and staging. Once delivery
+starts, it runs as owned work; graceful shutdown waits for the switch and
+manifest commit or rollback. The configured timeout bounds this work, including
+cleanup. A quarter of the timeout, up to ten seconds, is reserved for recovery.
+Uploads have a configured concurrency limit. An upload failure leaves the live
+manifest in place and logs an error.
 
 ```bash
 suprnova static:publish
@@ -127,8 +130,34 @@ tags and response headers. Previous versions remain until their grace expires.
 All versioned uploads finish before the manifest PUT. Unchanged digests skip
 uploads. A CDN driver selects `_pub/<asset-version>/<revision>/` as the page
 origin path. Without a driver, stable `<path>/index.html` and
-`<path>/index.json` aliases are written one at a time after staging. The
-manifest is the origin switch; stable bucket aliases are a post-commit mirror that converges.
+`<path>/index.json` aliases are written one at a time after the manifest commit.
+The manifest is the origin switch; stable bucket aliases are a post-commit mirror that converges.
+
+## Publishers in separate processes
+
+Publication and pruning acquire `_pub/lease.json` before reading the manifest or
+planning work. The lease records an owner and an expiry. A held lease refuses a
+second publisher. Storage must support atomic object creation through OpenDAL's
+`write_with_if_not_exists` or `write_with_if_none_match` capability.
+
+When storage supports `write_with_if_match`, lease replacement and manifest
+replacement use the observed ETag. A changed manifest refuses the commit. S3
+supports these conditional writes. Without conditional replacement, the lease
+serializes cooperating publishers and a byte comparison detects earlier manifest
+changes. It cannot atomically fence a writer that ignores the lease. Filesystem
+and memory disks use this mode. An expired lease on these disks requires operator
+recovery: stop the previous owner, then delete `_pub/lease.json`. The framework
+never steals that lease. Keep the publication disk exclusive to this pipeline.
+
+Run the same command from the server deployment or a console process:
+
+```bash
+suprnova static:publish
+suprnova static:status
+```
+
+A refused lease or manifest commit appears in status. It leaves the live version
+in place. Boot continues serving the previous version.
 
 ## CDN drivers
 

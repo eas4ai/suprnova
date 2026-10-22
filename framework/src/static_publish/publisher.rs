@@ -25,7 +25,7 @@ const STATUS: &str = "_pub/status.json";
 pub struct PublishConfig {
     /// Maximum simultaneous disk uploads; zero is rejected.
     pub concurrency: usize,
-    /// Time budget for rendering, staging and delivery before the durable manifest commit.
+    /// Bounds rendering, staging, delivery and rollback so shutdown can drain owned work.
     pub timeout: Duration,
     /// Time between automatic page regenerations.
     pub revalidate: Duration,
@@ -119,14 +119,16 @@ pub struct PublishStatus {
 }
 
 /// A disk and an optional CDN share one serialized publication pipeline.
+#[derive(Clone)]
 pub struct Publisher {
     pub(crate) disk: opendal::Operator,
     pub(crate) asset_version: String,
     pub(crate) config: PublishConfig,
     driver: Option<Arc<dyn CdnDriver>>,
     fingerprint: regex::Regex,
-    serial: Mutex<()>,
-    status: Mutex<PublishStatus>,
+    serial: Arc<Mutex<()>>,
+    status: Arc<Mutex<PublishStatus>>,
+    work: Arc<super::work::Work>,
 }
 struct Upload {
     entry: ObjectEntry,
@@ -172,8 +174,9 @@ impl Publisher {
             fingerprint: crate::page_budget::fingerprint_regex(
                 crate::page_budget::DEFAULT_FINGERPRINT_PATTERN,
             )?,
-            serial: Mutex::new(()),
-            status: Mutex::new(PublishStatus::default()),
+            serial: Arc::new(Mutex::new(())),
+            status: Arc::new(Mutex::new(PublishStatus::default())),
+            work: Arc::new(super::work::Work::default()),
         })
     }
     /// Installs the same driver surface for switching and invalidation.
@@ -202,7 +205,8 @@ impl Publisher {
     }
     /// Reports the last outcome, including one recorded by an earlier process.
     pub async fn status(&self) -> PublishStatus {
-        let current = self.status.lock().await.clone();
+        let mut current = self.status.lock().await.clone();
+        current.pending = self.work.pending();
         if !current.last_outcome.is_empty() {
             return current;
         }
@@ -283,12 +287,82 @@ impl Publisher {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Vec<PageObject>, FrameworkError>>,
     {
-        self.status.lock().await.pending += 1;
-        let _guard = self.serial.lock().await;
-        let result = self.publish_locked(render, retain_omitted).await;
+        let work = self.work.begin();
+        let deadline = tokio::time::Instant::now()
+            .checked_add(self.config.timeout)
+            .ok_or_else(|| error("publication timeout exceeds the clock range"))?;
+        let forward = deadline
+            - self
+                .config
+                .timeout
+                .div_f64(4.0)
+                .min(Duration::from_secs(10));
+        let serial = tokio::time::timeout_at(forward, self.serial.clone().lock_owned())
+            .await
+            .map_err(|_| error("publication serialization timed out"))?;
+        let acquired = tokio::time::timeout_at(
+            forward,
+            super::lease::StorageLease::acquire(self.disk.clone(), self.config.timeout, deadline),
+        )
+        .await
+        .map_err(|_| error("publication lease acquisition timed out"))
+        .and_then(|result| result);
+        let mut lease = match acquired {
+            Ok(lease) => lease,
+            Err(failure) => {
+                let result = Err(failure);
+                self.record_result(&result, deadline).await;
+                return result;
+            }
+        };
+        lease.track(work);
+        let staged = tokio::time::timeout_at(forward, async {
+            let snapshot = super::lease::ManifestSnapshot::load(&self.disk).await?;
+            let previous = &snapshot.manifest;
+            self.status
+                .lock()
+                .await
+                .live_version
+                .clone_from(&previous.live);
+            let pages = render().await?;
+            let (next, uploads, outcome) = self.plan(previous, pages, retain_omitted)?;
+            self.stage(previous, &uploads).await?;
+            Ok::<_, FrameworkError>((snapshot, next, uploads, outcome))
+        })
+        .await
+        .map_err(|_| error("render or upload timed out"))
+        .and_then(|result| result);
+        let (snapshot, next, uploads, outcome) = match staged {
+            Ok(staged) => staged,
+            Err(failure) => {
+                let result = Err(failure);
+                self.record_result(&result, deadline).await;
+                self.release_lease(&mut lease, deadline).await;
+                return result;
+            }
+        };
+        // From this point caller cancellation drops only the join handle, not delivery.
+        let publisher = self.clone();
+        tokio::spawn(async move {
+            let _serial = serial;
+            let result = publisher
+                .deliver(snapshot, next, uploads, outcome, &lease, forward, deadline)
+                .await;
+            publisher.record_result(&result, deadline).await;
+            publisher.release_lease(&mut lease, deadline).await;
+            result
+        })
+        .await
+        .map_err(|failure| error(format!("publication delivery task failed: {failure}")))?
+    }
+    async fn record_result(
+        &self,
+        result: &Result<PublishOutcome, FrameworkError>,
+        deadline: tokio::time::Instant,
+    ) {
         let mut status = self.status.lock().await;
-        status.pending = status.pending.saturating_sub(1);
-        match &result {
+        status.pending = self.work.pending().saturating_sub(1);
+        match result {
             Ok(outcome) => {
                 status.live_version.clone_from(&outcome.version);
                 status.last_outcome = format!(
@@ -296,76 +370,89 @@ impl Publisher {
                     outcome.uploaded, outcome.skipped
                 );
             }
-            Err(e) => {
-                status.last_outcome = e.to_string();
-                tracing::error!(error = %e, "static publication failed; previous manifest remains live");
+            Err(failure) => {
+                status.last_outcome = failure.to_string();
+                tracing::error!(%failure,"static publication failed; previous manifest remains live");
             }
         }
         let snapshot = status.clone();
         drop(status);
-        self.persist_status(&snapshot).await;
-        result
-    }
-    async fn publish_locked<F, Fut>(
-        &self,
-        render: F,
-        retain_omitted: bool,
-    ) -> Result<PublishOutcome, FrameworkError>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<Vec<PageObject>, FrameworkError>>,
-    {
-        let deadline = tokio::time::Instant::now() + self.config.timeout;
-        let previous = self.manifest().await?;
-        self.status
-            .lock()
+        if tokio::time::timeout_at(deadline, self.persist_status(&snapshot))
             .await
-            .live_version
-            .clone_from(&previous.live);
-        let (mut next, uploads, mut outcome) = tokio::time::timeout_at(deadline, async {
-            let pages = render().await?;
-            let staged = self.plan(&previous, pages, retain_omitted)?;
-            self.stage(&previous, &staged.1).await?;
-            Ok::<_, FrameworkError>(staged)
+            .is_err()
+        {
+            tracing::error!("static publication status persistence timed out");
+        }
+    }
+    async fn release_lease(
+        &self,
+        lease: &mut super::lease::StorageLease,
+        deadline: tokio::time::Instant,
+    ) {
+        match tokio::time::timeout_at(deadline, lease.release()).await {
+            Ok(Ok(())) => {}
+            failure => tracing::error!(
+                ?failure,
+                "static publication lease release failed; expiry remains in force"
+            ),
+        }
+    }
+    pub(crate) async fn wait_for_delivery(&self) {
+        self.work.drain().await;
+    }
+    async fn deliver(
+        &self,
+        snapshot: super::lease::ManifestSnapshot,
+        mut next: Manifest,
+        uploads: Vec<Upload>,
+        mut outcome: PublishOutcome,
+        lease: &super::lease::StorageLease,
+        forward: tokio::time::Instant,
+        deadline: tokio::time::Instant,
+    ) -> Result<PublishOutcome, FrameworkError> {
+        tokio::time::timeout_at(forward, async {
+            lease.verify().await?;
+            snapshot.verify(&self.disk).await
         })
         .await
-        .map_err(|_| error("render or upload timed out"))??;
+        .map_err(|_| error("delivery validation timed out"))??;
+        let previous = &snapshot.manifest;
         if next.live == previous.live {
-            if self.driver.is_none() {
-                self.mirror(&previous).await;
-            }
-            outcome.prune = self.retention().await;
+            outcome.prune = self.maintenance(previous, deadline).await;
             return Ok(outcome);
         }
         if let Some(driver) = &self.driver {
-            let switched = tokio::time::timeout_at(deadline, driver.switch_version(&next.live))
+            let switched = tokio::time::timeout_at(forward, driver.switch_version(&next.live))
                 .await
                 .map_err(|_| error("CDN switch timed out"))
                 .and_then(|result| result);
             if let Err(failure) = switched {
-                return Err(self.rollback_cdn(&previous, failure).await);
+                return Err(self.rollback_cdn(previous, failure, deadline).await);
             }
         }
-        if tokio::time::Instant::now() >= deadline {
+        if tokio::time::Instant::now() >= forward {
             return Err(self
                 .rollback_cdn(
-                    &previous,
+                    previous,
                     error("publication timed out before manifest commit"),
+                    deadline,
                 )
                 .await);
         }
-        // Do not cancel a manifest PUT: its durable result decides whether the switch committed.
+        // Conditional commit fences both a changed manifest and a lost storage lease.
         let now = now_ms();
         if let Some(version) = next.versions.get_mut(&previous.live) {
             version.retired_at_ms = Some(now);
         }
-        let bytes = serde_json::to_vec(&next).map_err(error)?;
-        if let Err(failure) = self.disk.write(MANIFEST, bytes).await {
-            let failure = error(failure);
-            return Err(self.rollback_cdn(&previous, failure).await);
-        }
-        if self.driver.is_none() {
-            self.mirror(&next).await;
+        let committed = tokio::time::timeout_at(forward, async {
+            lease.verify().await?;
+            snapshot.commit(&self.disk, &next).await
+        })
+        .await
+        .map_err(|_| error("manifest commit timed out"))
+        .and_then(|result| result);
+        if let Err(failure) = committed {
+            return Err(self.rollback_cdn(previous, failure, deadline).await);
         }
         if let Some(driver) = &self.driver {
             let capabilities = driver.capabilities();
@@ -388,13 +475,36 @@ impl Publisher {
                 None
             };
             if let Some(request) = request
-                && let Err(e) = driver.purge(request).await
+                && let Err(e) = tokio::time::timeout_at(deadline, driver.purge(request))
+                    .await
+                    .map_err(|_| error("CDN purge timed out"))
+                    .and_then(|result| result)
             {
                 tracing::error!(error = %e, "static publication switched but CDN purge failed");
             }
         }
-        outcome.prune = self.retention().await;
+        outcome.prune = self.maintenance(&next, deadline).await;
         Ok(outcome)
+    }
+    async fn maintenance(
+        &self,
+        manifest: &Manifest,
+        deadline: tokio::time::Instant,
+    ) -> PruneOutcome {
+        if self.driver.is_none()
+            && tokio::time::timeout_at(deadline, self.mirror(manifest))
+                .await
+                .is_err()
+        {
+            tracing::error!("static publication mirror deadline exceeded; manifest remains live");
+        }
+        match tokio::time::timeout_at(deadline, self.retention()).await {
+            Ok(outcome) => outcome,
+            Err(_) => PruneOutcome {
+                error: Some("retention deadline exceeded; live objects retained".into()),
+                ..Default::default()
+            },
+        }
     }
     // Bucket mirrors are maintained only after the durable manifest selects complete objects.
     async fn mirror(&self, manifest: &Manifest) {
@@ -407,8 +517,30 @@ impl Publisher {
                 } else {
                     format!("{}/index.html", object.url.trim_matches('/'))
                 };
-                let mirrored = match self.disk.read(&object.path).await {
-                    Ok(bytes) => self.write(&key, &bytes.to_bytes(), &object.headers).await,
+                let source = self
+                    .disk
+                    .read(&object.path)
+                    .await
+                    .map(|bytes| bytes.to_bytes());
+                if let Ok(source) = &source
+                    && let Ok(current) = self.disk.read(&key).await
+                    && current.to_bytes() == *source
+                    && let Ok(metadata) = self.disk.stat(&key).await
+                    && (!self.disk.info().capability().write_with_cache_control
+                        || metadata.cache_control()
+                            == object.headers.get("cache-control").map(String::as_str))
+                    && (!self.disk.info().capability().write_with_user_metadata
+                        || metadata.user_metadata().is_some_and(|values| {
+                            object
+                                .headers
+                                .iter()
+                                .all(|(key, value)| values.get(key) == Some(value))
+                        }))
+                {
+                    continue;
+                }
+                let mirrored = match source {
+                    Ok(bytes) => self.write(&key, &bytes, &object.headers).await,
                     Err(failure) => Err(error(failure)),
                 };
                 if let Err(failure) = mirrored {
@@ -429,10 +561,15 @@ impl Publisher {
             }
         }
     }
-    async fn rollback_cdn(&self, previous: &Manifest, failure: FrameworkError) -> FrameworkError {
+    async fn rollback_cdn(
+        &self,
+        previous: &Manifest,
+        failure: FrameworkError,
+        deadline: tokio::time::Instant,
+    ) -> FrameworkError {
         if let Some(driver) = &self.driver {
-            let rollback = tokio::time::timeout(
-                self.config.timeout,
+            let rollback = tokio::time::timeout_at(
+                deadline,
                 driver.rollback_version(
                     (!previous.live.is_empty()).then_some(previous.live.as_str()),
                 ),
@@ -814,11 +951,36 @@ impl Publisher {
     }
     /// Uses the same retention pass as the successful publication path.
     pub async fn prune(&self) -> Result<PruneOutcome, FrameworkError> {
-        let _guard = self.serial.lock().await;
-        self.prune_locked().await
+        let work = self.work.begin();
+        let deadline = tokio::time::Instant::now()
+            .checked_add(self.config.timeout)
+            .ok_or_else(|| error("prune timeout exceeds the clock range"))?;
+        let serial = tokio::time::timeout_at(deadline, self.serial.clone().lock_owned())
+            .await
+            .map_err(|_| error("prune serialization timed out"))?;
+        let mut lease = tokio::time::timeout_at(
+            deadline,
+            super::lease::StorageLease::acquire(self.disk.clone(), self.config.timeout, deadline),
+        )
+        .await
+        .map_err(|_| error("prune lease timed out"))??;
+        lease.track(work);
+        let publisher = self.clone();
+        tokio::spawn(async move {
+            let _serial = serial;
+            let result = tokio::time::timeout_at(deadline, publisher.prune_locked())
+                .await
+                .map_err(|_| error("prune timed out; live references retained"))
+                .and_then(|result| result);
+            publisher.release_lease(&mut lease, deadline).await;
+            result
+        })
+        .await
+        .map_err(|failure| error(format!("prune task failed: {failure}")))?
     }
     async fn prune_locked(&self) -> Result<PruneOutcome, FrameworkError> {
-        let mut manifest = self.manifest().await?;
+        let snapshot = super::lease::ManifestSnapshot::load(&self.disk).await?;
+        let mut manifest = snapshot.manifest.clone();
         let now = now_ms();
         let grace = u64::try_from(self.config.grace_period.as_millis()).unwrap_or(u64::MAX);
         let retained: BTreeSet<_> = manifest
@@ -850,9 +1012,9 @@ impl Publisher {
             }
         }
         protected.insert(MANIFEST.to_string());
+        protected.insert(super::lease::LEASE.to_string());
         protected.insert("_pub/status.json".to_string());
-        // Stable aliases are the no-CDN delivery surface. A revision's page
-        // objects carry the URL needed to derive the currently active alias.
+        // Bucket mirrors converge after commit; retain the live page aliases.
         if let Some(live) = manifest.versions.get(&manifest.live) {
             for object in &live.objects {
                 if !object.asset
@@ -933,10 +1095,7 @@ impl Publisher {
         let before = manifest.versions.len();
         manifest.versions.retain(|id, _| retained.contains(id));
         if before != manifest.versions.len() {
-            self.disk
-                .write(MANIFEST, serde_json::to_vec(&manifest).map_err(error)?)
-                .await
-                .map_err(error)?;
+            snapshot.commit(&self.disk, &manifest).await?;
         }
         Ok(report)
     }

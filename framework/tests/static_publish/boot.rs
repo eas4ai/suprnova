@@ -124,3 +124,113 @@ async fn pub_003_listener_health_survives_stalled_and_failed_boot_publication()
     let _ = server.await;
     Ok(())
 }
+
+struct SwitchGate {
+    entered: Notify,
+    release: Notify,
+}
+#[async_trait::async_trait]
+impl suprnova::static_publish::cdn::CdnDriver for SwitchGate {
+    fn capabilities(&self) -> suprnova::static_publish::cdn::CdnCapabilities {
+        Default::default()
+    }
+    async fn switch_version(&self, _: &str) -> Result<(), FrameworkError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
+    }
+    async fn rollback_version(&self, _: Option<&str>) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+    async fn purge(&self, _: suprnova::static_publish::cdn::Purge) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn pub_003_fix_c_shutdown_preserves_an_in_progress_switch()
+-> Result<(), Box<dyn std::error::Error>> {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "pub_003_fix_c_shutdown_preserves_an_in_progress_switch",
+    )
+    .await
+    {
+        return Ok(());
+    }
+    let _env = crate::env_lock::lock_env_async().await;
+    let _snapshot = crate::env_snapshot::EnvSnapshot::capture(&[
+        "APP_ENV",
+        "CACHE_DRIVER",
+        "QUEUE_DRIVER",
+        "MAIL_DRIVER",
+        "RATE_LIMIT_DRIVER",
+    ]);
+    for (key, value) in [
+        ("APP_ENV", "testing"),
+        ("CACHE_DRIVER", "memory"),
+        ("QUEUE_DRIVER", "memory"),
+        ("MAIL_DRIVER", "log"),
+        ("RATE_LIMIT_DRIVER", "memory"),
+    ] {
+        crate::env_snapshot::set_env(key, Some(value));
+    }
+    let _container = suprnova::testing::TestContainer::fake();
+    let router: Router = Router::new()
+        .get("/public", |req: Request| async move {
+            suprnova::InertiaResponse::new("Public")
+                .with_config(
+                    suprnova::InertiaConfig::new()
+                        .version("v1")
+                        .development(true)
+                        .ssr_disabled(),
+                )
+                .cacheable(BootProps {
+                    title: "public".into(),
+                })
+                .map_err(HttpResponse::from)?
+                .resolve(&req)
+                .await
+                .map_err(HttpResponse::from)
+        })
+        .into();
+    let router = router.public_page::<BootProps>("/public", "Public")?;
+    Storage::register_memory("shutdown-switch");
+    let disk = Storage::disk("shutdown-switch")?;
+    let gate = Arc::new(SwitchGate {
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    StaticPublication::install(
+        &router,
+        Publisher::new(
+            "shutdown-switch",
+            "v1",
+            PublishConfig {
+                timeout: Duration::from_secs(2),
+                ..Default::default()
+            },
+        )?
+        .with_cdn(gate.clone()),
+    )?;
+    let probe = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = probe.local_addr()?;
+    drop(probe);
+    let server = tokio::spawn(
+        Server::new(router)
+            .host("127.0.0.1")
+            .port(addr.port())
+            .run(),
+    );
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified()).await?;
+    server.abort();
+    let _ = server.await;
+    gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !disk.exists("_pub/manifest.json").await.unwrap() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await?;
+    Ok(())
+}

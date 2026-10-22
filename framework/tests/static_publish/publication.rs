@@ -85,7 +85,7 @@ async fn pub_003_unchanged_targeted_pages_do_not_upload_or_switch() {
         .lock()
         .unwrap()
         .iter()
-        .filter(|key| key.as_str() != "_pub/status.json")
+        .filter(|key| key.as_str() != "_pub/status.json" && key.as_str() != "_pub/lease.json")
         .count();
     let events = driver.events().unwrap().len();
     let next = p.publish_partial(vec![page("one")]).await.unwrap();
@@ -98,7 +98,7 @@ async fn pub_003_unchanged_targeted_pages_do_not_upload_or_switch() {
             .lock()
             .unwrap()
             .iter()
-            .filter(|key| key.as_str() != "_pub/status.json")
+            .filter(|key| key.as_str() != "_pub/status.json" && key.as_str() != "_pub/lease.json")
             .count(),
         writes
     );
@@ -441,6 +441,8 @@ struct Probe {
     delay: AtomicBool,
     active: AtomicUsize,
     maximum: AtomicUsize,
+    force_cas: AtomicBool,
+    conditional_writes: Mutex<Vec<(String, String)>>,
     gate_manifest: AtomicBool,
     manifest_entered: tokio::sync::Notify,
     manifest_release: tokio::sync::Notify,
@@ -470,7 +472,11 @@ impl Service for ProbeService {
         self.inner.info()
     }
     fn capability(&self) -> Capability {
-        self.inner.capability()
+        let mut capability = self.inner.capability();
+        if self.state.force_cas.load(Ordering::SeqCst) {
+            capability.write_with_if_match = true;
+        }
+        capability
     }
     async fn create_dir(
         &self,
@@ -511,7 +517,13 @@ impl Service for ProbeService {
         path: &str,
         args: OpStat,
     ) -> opendal::Result<RpStat> {
-        self.inner.stat(ctx, path, args).await
+        self.inner.stat(ctx, path, args).await.map(|reply| {
+            if self.state.force_cas.load(Ordering::SeqCst) {
+                reply.map_metadata(|metadata| metadata.with_etag("\"test-etag\"".into()))
+            } else {
+                reply
+            }
+        })
     }
     fn list(
         &self,
@@ -541,8 +553,16 @@ impl Service for ProbeService {
         args: OpWrite,
     ) -> opendal::Result<Self::Writer> {
         self.state.writes.lock().unwrap().push(path.to_owned());
+        if let Some(etag) = args.if_match() {
+            self.state
+                .conditional_writes
+                .lock()
+                .unwrap()
+                .push((path.to_string(), etag.to_string()));
+        }
         let mut refuse = self.state.refuse.lock().unwrap();
-        if refuse.as_ref().is_some_and(|suffix| path.ends_with(suffix)) {
+        if path != "_pub/lease.json" && refuse.as_ref().is_some_and(|suffix| path.ends_with(suffix))
+        {
             refuse.take();
             return Err(opendal::Error::new(
                 opendal::ErrorKind::PermissionDenied,
@@ -550,8 +570,16 @@ impl Service for ProbeService {
             ));
         }
         drop(refuse);
-        let counted =
-            path.starts_with("_pub/") && path != "_pub/manifest.json" && path != "_pub/status.json";
+        let counted = path.starts_with("_pub/")
+            && path != "_pub/manifest.json"
+            && path != "_pub/status.json"
+            && path != "_pub/lease.json";
+        // The probe records the conditional argument; memory cannot execute it.
+        let args = if self.state.force_cas.load(Ordering::SeqCst) && args.if_match().is_some() {
+            OpWrite::default()
+        } else {
+            args
+        };
         let inner = self.inner.write(ctx, path, args)?;
         if counted {
             let active = self.state.active.fetch_add(1, Ordering::SeqCst) + 1;
@@ -976,6 +1004,64 @@ async fn pub_002_fix_h_refuses_vary_dimensions_missing_from_the_key() {
 }
 
 #[tokio::test]
+async fn pub_003_fix_b_separate_publishers_refuse_an_occupied_storage_lease() {
+    let disk = memory();
+    let first =
+        Arc::new(Publisher::from_operator(disk.clone(), "v1", PublishConfig::default()).unwrap());
+    let second = Publisher::from_operator(disk.clone(), "v1", PublishConfig::default()).unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let task = {
+        let entered = entered.clone();
+        let release = release.clone();
+        tokio::spawn(async move {
+            first
+                .publish_with(|| async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(vec![page("first")])
+                })
+                .await
+        })
+    };
+    entered.notified().await;
+    let competing = second.publish(vec![page("second")]).await;
+    release.notify_one();
+    task.await.unwrap().unwrap();
+    assert!(
+        competing.is_err(),
+        "separate instances must share a storage lease"
+    );
+    assert!(competing.unwrap_err().to_string().contains("lease"));
+}
+
+#[tokio::test]
+async fn pub_003_fix_b_changed_manifest_is_not_overwritten() {
+    let (publisher, disk) = publisher("v1");
+    let foreign = serde_json::to_vec(&suprnova::static_publish::Manifest {
+        live: "foreign".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    let bytes = foreign.clone();
+    let target = disk.clone();
+    let result = publisher
+        .publish_with(|| async move {
+            target
+                .write("_pub/manifest.json", bytes)
+                .await
+                .map_err(|e| FrameworkError::internal(e.to_string()))?;
+            Ok(vec![page("ours")])
+        })
+        .await;
+    assert!(
+        result.is_err(),
+        "a concurrent manifest write must refuse the commit"
+    );
+    assert_eq!(manifest_bytes(&disk).await, Bytes::from(foreign));
+}
+
+#[tokio::test]
 async fn pub_002_fix_l_fingerprints_follow_the_shared_vite_pattern() {
     let (publisher, _) = publisher("v1");
     let mut page = page("public");
@@ -1036,4 +1122,42 @@ async fn pub_002_fix_l_fingerprint_override_matches_static_files() {
             .headers["cache-control"]
             .contains("immutable")
     );
+}
+
+#[tokio::test]
+async fn pub_003_fix_b_conditional_backends_receive_the_manifest_etag() {
+    let state = Arc::new(Probe::default());
+    state.force_cas.store(true, Ordering::SeqCst);
+    let publisher = Publisher::from_operator(
+        memory().layer(ProbeLayer(state.clone())),
+        "v1",
+        PublishConfig::default(),
+    )
+    .unwrap();
+    publisher.publish(vec![page("one")]).await.unwrap();
+    publisher.publish(vec![page("two")]).await.unwrap();
+    assert!(
+        state
+            .conditional_writes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(path, etag)| path == "_pub/manifest.json" && etag == "\"test-etag\""),
+        "a conditional backend must receive the original manifest ETag"
+    );
+}
+
+#[tokio::test]
+async fn pub_003_fix_b_expired_lease_on_non_cas_storage_requires_recovery() {
+    let (publisher, disk) = publisher("v1");
+    disk.write(
+        "_pub/lease.json",
+        br#"{"owner":"previous","expires_at_ms":0}"#.as_slice(),
+    )
+    .await
+    .unwrap();
+    let result = publisher.publish(vec![page("ours")]).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("expired"));
+    assert!(!disk.exists("_pub/manifest.json").await.unwrap());
 }

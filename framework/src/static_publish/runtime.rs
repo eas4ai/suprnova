@@ -726,10 +726,20 @@ impl Drop for StaticPublication {
     }
 }
 
-pub(crate) struct PublicationTask(tokio::task::JoinHandle<()>);
+pub(crate) struct PublicationTask {
+    worker: tokio::task::JoinHandle<()>,
+    publisher: Publisher,
+}
+impl PublicationTask {
+    pub(crate) async fn shutdown(&mut self) {
+        self.worker.abort();
+        let _ = (&mut self.worker).await;
+        self.publisher.wait_for_delivery().await;
+    }
+}
 impl Drop for PublicationTask {
     fn drop(&mut self) {
-        self.0.abort();
+        self.worker.abort();
     }
 }
 
@@ -753,7 +763,8 @@ pub(crate) fn spawn_after_bind(middleware: &MiddlewareRegistry) -> Option<Public
     if let Err(failure) = runtime.listen_to_hub() {
         tracing::error!(%failure,"static publication hub consumer unavailable");
     }
-    Some(PublicationTask(tokio::spawn(async move {
+    let publisher = runtime.publisher.as_ref().clone();
+    let worker = tokio::spawn(async move {
         let _ = runtime.publish().await;
         let mut interval = tokio::time::interval(runtime.publisher.config.revalidate);
         interval.tick().await;
@@ -763,5 +774,6 @@ pub(crate) fn spawn_after_bind(middleware: &MiddlewareRegistry) -> Option<Public
                 _ = runtime.notify.notified() => { tokio::task::yield_now().await; let _ = runtime.regenerate_pending().await; }
             }
         }
-    })))
+    });
+    Some(PublicationTask { worker, publisher })
 }
