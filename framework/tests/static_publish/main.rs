@@ -3,6 +3,8 @@
 #[cfg(feature = "cdn-cloudfront")]
 mod cloudfront;
 mod eligibility;
+#[cfg(feature = "media")]
+mod images;
 mod publication;
 
 mod fallback;
