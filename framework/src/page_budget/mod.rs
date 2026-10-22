@@ -12,7 +12,7 @@ use std::fmt;
 use std::time::Duration;
 use url::Url;
 
-const DEFAULT_FINGERPRINT_PATTERN: &str = r"-[A-Za-z0-9_-]{8,}$";
+const DEFAULT_FINGERPRINT_PATTERN: &str = r"-[A-Za-z0-9_-]{8}$";
 
 /// Limits shared by the test helper and deployment audit.
 #[derive(Clone, Debug)]
@@ -229,6 +229,15 @@ pub(crate) fn fingerprinted(url: &Url, pattern: &Regex) -> bool {
     pattern.is_match(stem)
 }
 
+pub(crate) fn default_fingerprinted_path(path: &std::path::Path) -> bool {
+    static PATTERN: std::sync::LazyLock<Result<Regex, regex::Error>> =
+        std::sync::LazyLock::new(|| Regex::new(DEFAULT_FINGERPRINT_PATTERN));
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    PATTERN.as_ref().is_ok_and(|pattern| pattern.is_match(stem))
+}
+
 impl PageBudget {
     /// Apply the shared evaluator to a HAR export without any network requests.
     pub fn audit_har(&self, json: &str) -> Result<PageAudit, FrameworkError> {
@@ -244,6 +253,20 @@ impl PageBudget {
     fn evaluate(&self, capture: collect::Capture) -> Result<PageAudit, FrameworkError> {
         let pattern = fingerprint_regex(&self.fingerprint_pattern)?;
         let resources = capture.resources;
+        let by_url: std::collections::BTreeMap<_, _> =
+            resources.iter().map(|r| (r.url.as_str(), r)).collect();
+        let mut alternatives = capture.alternatives;
+        for group in capture.image_groups {
+            let variants: Vec<_> = group
+                .iter()
+                .filter_map(|url| by_url.get(url.as_str()).copied())
+                .collect();
+            if variants.iter().any(|r| is_modern(r))
+                && variants.iter().any(|r| is_raster(r) && !is_modern(r))
+            {
+                alternatives.extend(group);
+            }
+        }
         let total = resources
             .iter()
             .fold(0u64, |total, r| total.saturating_add(r.transfer));
@@ -289,11 +312,17 @@ impl PageBudget {
             if !(200..300).contains(&status) {
                 audit.fail(url, "asset-status", status, "2xx");
             }
-            if self.require_cookie_independent && matches!(status, 300..=399 | 401 | 403) {
+            if self.require_cookie_independent
+                && (resource.request_cookie || matches!(status, 300..=399 | 401 | 403))
+            {
                 audit.fail(
                     url,
                     "cookie-independent",
-                    format!("{status} without proven anonymous access"),
+                    if resource.request_cookie {
+                        "Cookie sent; anonymous access not proven".to_owned()
+                    } else {
+                        format!("{status} without proven anonymous access")
+                    },
                     "2xx without cookies",
                 );
             }
@@ -320,7 +349,7 @@ impl PageBudget {
                 );
             }
             if resource.decoded > self.raster_threshold_bytes && is_raster(resource) {
-                if !resource.manifest_icon && !capture.alternatives.contains(url) {
+                if !resource.manifest_icon && !alternatives.contains(url) {
                     audit.fail(
                         url,
                         "raster-format",
@@ -448,19 +477,34 @@ fn is_raster(r: &Resource) -> bool {
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "avif"
     )
 }
+fn is_modern(resource: &Resource) -> bool {
+    matches!(resource.mime(), "image/webp" | "image/avif")
+        || matches!(extension(resource), "webp" | "avif")
+}
+
 fn immutable(value: &str) -> bool {
     let directives: Vec<_> = value
         .split(',')
         .map(|s| s.trim().to_ascii_lowercase())
         .collect();
+    let mut ages = directives.iter().filter(|s| {
+        s.split('=')
+            .next()
+            .is_some_and(|key| key.trim() == "max-age")
+    });
+    let age = ages.next();
     directives.iter().any(|s| s == "public")
         && directives.iter().any(|s| s == "immutable")
-        && directives.iter().any(|s| {
-            s.split_once('=').is_some_and(|(k, v)| {
-                k.trim() == "max-age" && v.trim().trim_matches('"').parse::<u64>() == Ok(31_536_000)
+        && age.is_some_and(|s| {
+            s.split_once('=').is_some_and(|(_, value)| {
+                value.trim().trim_matches('"').parse::<u64>() == Ok(31_536_000)
             })
         })
-        && !directives
-            .iter()
-            .any(|s| matches!(s.as_str(), "private" | "no-store" | "no-cache"))
+        && ages.next().is_none()
+        && !directives.iter().any(|s| {
+            matches!(
+                s.split('=').next().unwrap_or("").trim(),
+                "private" | "no-store" | "no-cache"
+            )
+        })
 }

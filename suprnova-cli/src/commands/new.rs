@@ -690,6 +690,14 @@ fn write_inertia_kit(
     fs::create_dir_all(project_path.join("public/assets"))
         .map_err(|e| format!("Failed to create directories: {}", e))?;
 
+    fs::create_dir_all(project_path.join("tests"))
+        .map_err(|e| format!("Failed to create tests: {e}"))?;
+    fs::write(
+        project_path.join("tests/page_budget.rs"),
+        templates::page_budget_test(&to_snake_case(project_name)),
+    )
+    .map_err(|e| format!("Failed to write tests/page_budget.rs: {e}"))?;
+
     // Write .gitignore
     fs::write(project_path.join(".gitignore"), templates::gitignore())
         .map_err(|e| format!("Failed to write .gitignore: {}", e))?;

@@ -176,6 +176,7 @@ pub(super) fn read(json: &str, budget: &PageBudget) -> Result<Capture, Framework
     let mut resources = std::mem::take(&mut capture.resources);
     for resource in &resources {
         if !same_origin(&origin, &resource.url)
+            && !(resource.document && resource.url.host_str() == page.host_str())
             && let Some(host) = resource.url.host_str()
         {
             capture.hosts.insert(host.into());

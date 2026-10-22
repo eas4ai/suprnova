@@ -536,6 +536,9 @@ impl CsrfMiddleware {
     /// created by this request is marked for storage on a success or a
     /// redirect, and gets no token on a refusal or a failure.
     fn maybe_attach_xsrf_cookie(&self, response: Response) -> Response {
+        if crate::http::HttpResponse::is_static_asset_response(&response) {
+            return response;
+        }
         if !self.should_attach_xsrf_cookie() {
             return response;
         }

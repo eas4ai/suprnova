@@ -46,7 +46,10 @@ impl StaticFiles {
         }
     }
 
-    /// Attach a `Cache-Control` header to successful static file responses.
+    /// Set the lifetime of files without a fingerprint.
+    ///
+    /// Fingerprinted files always keep the one-year immutable policy, so a
+    /// shared cache can retain their content without revalidation.
     pub fn cache_control(mut self, value: impl Into<String>) -> Self {
         self.cache_control = Some(value.into());
         self
@@ -79,6 +82,7 @@ impl StaticFiles {
             return not_found();
         };
 
+        let fingerprinted = crate::page_budget::default_fingerprinted_path(&relative_path);
         let root = self.root.clone();
         let Ok(Some(OpenedFile {
             file,
@@ -105,11 +109,16 @@ impl StaticFiles {
             response
         };
 
-        if let Some(value) = &self.cache_control {
-            response = response.header("Cache-Control", value.clone());
-        }
+        let cache_control = if fingerprinted {
+            "public, max-age=31536000, immutable"
+        } else {
+            self.cache_control
+                .as_deref()
+                .unwrap_or("public, max-age=3600")
+        };
+        response = response.header("Cache-Control", cache_control);
 
-        Ok(response)
+        Ok(response.mark_static_asset())
     }
 }
 

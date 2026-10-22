@@ -1566,6 +1566,12 @@ impl SessionMiddleware {
             )
             .await;
 
+        // Static files are independent of visitor state. Do not persist the
+        // request's session or issue pending, refresh or stale-cookie headers.
+        if crate::http::HttpResponse::is_static_asset_response(&response) {
+            return response;
+        }
+
         previous_url.exempt = previous_url_exempt.load(std::sync::atomic::Ordering::Relaxed);
 
         retire_superseded_opaque_sessions(

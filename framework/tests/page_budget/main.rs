@@ -594,3 +594,227 @@ async fn budget_001_failed_fixture_matches_the_har_and_console() {
     run.assert_exit_code(1);
     assert!(run.output().contains(&audit.to_string()));
 }
+
+fn origin_client(root: &std::path::Path) -> (TestClient, std::sync::Arc<CountingSessionStore>) {
+    suprnova::testing::install_test_encryption_key();
+    let config = suprnova::SessionConfig::default();
+    let store = std::sync::Arc::new(CountingSessionStore::default());
+    let router = suprnova::fallback!(suprnova::StaticFiles::from_dir(root).handler()).register(
+        Router::new()
+            .get("/", |_req: Request| async {
+                Ok(HttpResponse::html(
+                    "<script src='/main-BjmpJyAU.js'></script>",
+                ))
+            })
+            .into(),
+    );
+    (
+        TestClient::new(
+            router,
+            MiddlewareRegistry::new()
+                .append(suprnova::SessionMiddleware::with_store(
+                    config.clone(),
+                    store.clone(),
+                ))
+                .append(suprnova::CsrfMiddleware::new().with_session_config(&config)),
+        ),
+        store,
+    )
+}
+
+#[derive(Default)]
+struct CountingSessionStore {
+    writes: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl suprnova::SessionStore for CountingSessionStore {
+    async fn read(
+        &self,
+        _: &str,
+    ) -> Result<Option<suprnova::SessionData>, suprnova::FrameworkError> {
+        Ok(None)
+    }
+    async fn write(&self, _: &suprnova::SessionData) -> Result<(), suprnova::FrameworkError> {
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    async fn destroy(&self, _: &str) -> Result<(), suprnova::FrameworkError> {
+        Ok(())
+    }
+    async fn destroy_for_user(&self, _: &str) -> Result<u64, suprnova::FrameworkError> {
+        Ok(0)
+    }
+    async fn gc(&self) -> Result<u64, suprnova::FrameworkError> {
+        Ok(0)
+    }
+}
+
+#[tokio::test]
+async fn budget_002_fingerprinted_first_visit_is_public_immutable_and_cookie_free() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main-BjmpJyAU.js"), "export {};").unwrap();
+    let (client, store) = origin_client(dir.path());
+    let response = client.get("/main-BjmpJyAU.js").send().await;
+    response.assert_ok();
+    assert_eq!(
+        response.header("Cache-Control"),
+        Some("public, max-age=31536000, immutable")
+    );
+    assert_eq!(response.header("Set-Cookie"), None);
+    assert_eq!(store.writes.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let head = client
+        .send(suprnova::Method::HEAD, "/main-BjmpJyAU.js")
+        .send()
+        .await;
+    assert_eq!(
+        head.header("Cache-Control"),
+        response.header("Cache-Control")
+    );
+    assert_eq!(head.header("Set-Cookie"), None);
+    client
+        .audit_page("/", &PageBudget::default())
+        .await
+        .unwrap()
+        .ensure_passes()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn budget_002_other_files_keep_short_or_configured_cache_lifetimes() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("logo.svg"), "<svg/>").unwrap();
+    for name in [
+        "apple-touch-icon.png",
+        "android-chrome-512x512.png",
+        "not-fingerprint.js",
+    ] {
+        std::fs::write(dir.path().join(name), "asset").unwrap();
+        let response = origin_client(dir.path())
+            .0
+            .get(format!("/{name}"))
+            .send()
+            .await;
+        assert_eq!(
+            response.header("Cache-Control"),
+            Some("public, max-age=3600"),
+            "{name}"
+        );
+    }
+    let response = origin_client(dir.path()).0.get("/logo.svg").send().await;
+    assert_eq!(
+        response.header("Cache-Control"),
+        Some("public, max-age=3600")
+    );
+    assert_eq!(response.header("Set-Cookie"), None);
+    let router = suprnova::fallback!(
+        suprnova::StaticFiles::from_dir(dir.path())
+            .cache_control("public, max-age=60")
+            .handler()
+    )
+    .register(Router::new());
+    let client = TestClient::new(router, MiddlewareRegistry::new());
+    assert_eq!(
+        client.get("/logo.svg").send().await.header("Cache-Control"),
+        Some("public, max-age=60")
+    );
+}
+
+#[tokio::test]
+async fn budget_002_pages_keep_their_session_and_csrf_cookies() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main-BjmpJyAU.js"), "export {};").unwrap();
+    let (client, store) = origin_client(dir.path());
+    let page = client.get("/").send().await;
+    assert!(page.cookie("suprnova_session").is_some());
+    assert!(page.cookie("XSRF-TOKEN").is_some());
+    assert_eq!(store.writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let asset = client.get("/main-BjmpJyAU.js").send().await;
+    assert_eq!(asset.header("Set-Cookie"), None);
+    assert_eq!(store.writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        asset.header("Cache-Control"),
+        Some("public, max-age=31536000, immutable")
+    );
+}
+
+#[test]
+fn budget_001_fallback_pairs_use_response_types_for_extensionless_images() {
+    let html = "<picture><source srcset='/modern'><img src='/fallback'></picture>";
+    let capture = har(vec![
+        entry("/", 200, "text/html", html, html.len() as u64, &[]),
+        entry("/modern", 200, "image/avif", "avif", 120_000, &[]),
+        entry("/fallback", 200, "image/jpeg", "jpeg", 120_000, &[]),
+    ]);
+    PageBudget::default()
+        .audit_har(&capture)
+        .unwrap()
+        .ensure_passes()
+        .unwrap();
+}
+
+#[test]
+fn budget_001_conflicting_cache_directives_fail_the_immutable_rule() {
+    for policy in [
+        "public, max-age=31536000, max-age=86400, immutable",
+        "public, max-age=31536000, immutable, no-cache=\"Content-Type\"",
+    ] {
+        let capture = har(vec![
+            entry("/", 200, "text/html", "", 1, &[]),
+            entry(
+                "/main-BjmpJyAU.js",
+                200,
+                "text/javascript",
+                "x",
+                1,
+                &[("Cache-Control", policy)],
+            ),
+        ]);
+        let audit = PageBudget::default().audit_har(&capture).unwrap();
+        assert!(
+            audit.findings.iter().any(|f| f.rule == "fingerprint-cache"),
+            "{policy}: {audit}"
+        );
+    }
+}
+
+#[test]
+fn budget_001_a_cookie_bearing_har_cannot_prove_cookie_independence() {
+    let mut asset = entry("/asset.js", 200, "text/javascript", "x", 1, &[]);
+    asset["request"]["headers"] = serde_json::json!([{"name":"Cookie","value":"redacted=1"}]);
+    let budget = PageBudget {
+        forbid_asset_request_cookie: false,
+        ..PageBudget::default()
+    };
+    let audit = budget
+        .audit_har(&har(vec![entry("/", 200, "text/html", "", 1, &[]), asset]))
+        .unwrap();
+    assert!(
+        audit
+            .findings
+            .iter()
+            .any(|f| f.rule == "cookie-independent"),
+        "{audit}"
+    );
+}
+
+#[test]
+fn budget_001_initial_https_upgrade_does_not_list_the_page_host_as_third_party() {
+    let first = entry(
+        "/",
+        302,
+        "text/html",
+        "",
+        0,
+        &[("Location", "https://localhost/page")],
+    );
+    let mut page = entry("/page", 200, "text/html", "<p>Page</p>", 11, &[]);
+    page["request"]["url"] = serde_json::json!("https://localhost/page");
+    let audit = PageBudget::default()
+        .audit_har(&har(vec![first, page]))
+        .unwrap();
+    assert!(audit.third_party_hosts.is_empty(), "{audit}");
+    assert_eq!(audit.findings.len(), 1);
+    assert_eq!(audit.findings[0].rule, "first-redirect");
+}

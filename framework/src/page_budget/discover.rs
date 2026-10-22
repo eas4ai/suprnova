@@ -10,6 +10,7 @@ use url::Url;
 pub(super) struct References {
     pub links: Vec<Link>,
     pub alternatives: BTreeSet<String>,
+    pub image_groups: Vec<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -186,6 +187,9 @@ pub(super) fn html(base: &Url, text: &str) -> References {
     }));
     for group in doc.groups.into_iter().chain(doc.picture) {
         let urls: Vec<_> = group.iter().filter_map(|s| resolve(&base, s)).collect();
+        result
+            .image_groups
+            .push(urls.iter().map(Url::to_string).collect());
         let modern = urls.iter().any(|u| modern(u.path()));
         let fallback = urls.iter().any(|u| legacy(u.path()));
         if modern && fallback {
@@ -223,6 +227,7 @@ pub(super) fn css(base: &Url, text: &str) -> References {
             })
             .collect(),
         alternatives: BTreeSet::new(),
+        image_groups: Vec::new(),
     }
 }
 
@@ -285,5 +290,6 @@ pub(super) fn manifest(base: &Url, bytes: &[u8]) -> Result<References, crate::Fr
     Ok(References {
         links,
         alternatives: BTreeSet::new(),
+        image_groups: Vec::new(),
     })
 }

@@ -11,6 +11,7 @@ pub(super) struct Capture {
     pub resources: Vec<Resource>,
     pub hosts: BTreeSet<String>,
     pub alternatives: BTreeSet<String>,
+    pub image_groups: Vec<Vec<String>>,
 }
 
 impl Capture {
@@ -20,6 +21,7 @@ impl Capture {
             resources: Vec::new(),
             hosts: BTreeSet::new(),
             alternatives: BTreeSet::new(),
+            image_groups: Vec::new(),
         }
     }
 
@@ -30,7 +32,7 @@ impl Capture {
         let Some(bytes) = &resource.body else {
             return Ok(discover::References::default());
         };
-        let refs = if resource.document && resource.mime().eq_ignore_ascii_case("text/html") {
+        let mut refs = if resource.document && resource.mime().eq_ignore_ascii_case("text/html") {
             discover::html(&resource.url, &String::from_utf8_lossy(bytes))
         } else if resource.mime().eq_ignore_ascii_case("text/css")
             || resource.url.path().ends_with(".css")
@@ -41,7 +43,8 @@ impl Capture {
         } else {
             discover::References::default()
         };
-        self.alternatives.extend(refs.alternatives.clone());
+        self.alternatives.append(&mut refs.alternatives);
+        self.image_groups.append(&mut refs.image_groups);
         Ok(refs)
     }
 }

@@ -54,6 +54,8 @@ pub struct HttpResponse {
     /// development error page leaves such a response alone, as an outer
     /// error-response middleware and the server's decision do.
     error_decided: bool,
+    // Only the static handler sets this mark. Request headers cannot forge it.
+    static_asset: bool,
 }
 
 /// The in-process mark of a response the Inertia error-response
@@ -85,6 +87,17 @@ pub type Response = Result<HttpResponse, HttpResponse>;
 pub(crate) const NOT_FOUND_BODY: &str = "404 Not Found";
 
 impl HttpResponse {
+    pub(crate) fn mark_static_asset(mut self) -> Self {
+        self.static_asset = true;
+        self
+    }
+
+    pub(crate) fn is_static_asset_response(response: &Response) -> bool {
+        match response {
+            Ok(http) | Err(http) => http.static_asset,
+        }
+    }
+
     /// Construct an empty `200 OK` response with no body and no headers.
     pub fn new() -> Self {
         Self {
@@ -93,6 +106,7 @@ impl HttpResponse {
             headers: Vec::new(),
             error_report: None,
             error_decided: false,
+            static_asset: false,
         }
     }
 
@@ -104,6 +118,7 @@ impl HttpResponse {
             headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
             error_report: None,
             error_decided: false,
+            static_asset: false,
         }
     }
 
@@ -120,6 +135,7 @@ impl HttpResponse {
             headers: vec![("Content-Type".to_string(), "application/json".to_string())],
             error_report: None,
             error_decided: false,
+            static_asset: false,
         }
     }
 
@@ -140,6 +156,7 @@ impl HttpResponse {
             headers: vec![("Content-Type".to_string(), content_type.into())],
             error_report: None,
             error_decided: false,
+            static_asset: false,
         }
     }
 
@@ -203,6 +220,7 @@ impl HttpResponse {
             )],
             error_report: None,
             error_decided: false,
+            static_asset: false,
         }
     }
 
@@ -295,6 +313,7 @@ impl HttpResponse {
             headers: Vec::new(),
             error_report: None,
             error_decided: false,
+            static_asset: false,
         }
     }
 
@@ -364,6 +383,7 @@ impl HttpResponse {
             headers: vec![("Content-Type".to_string(), content_type.into())],
             error_report: None,
             error_decided: false,
+            static_asset: false,
         }
     }
 
