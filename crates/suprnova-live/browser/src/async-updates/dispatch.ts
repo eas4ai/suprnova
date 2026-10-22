@@ -188,10 +188,10 @@ export class AsyncDispatcher implements AsyncEnvelopeDispatcher {
     completion?: (outcome: FreshRenderCompletion) => void,
   ): AsyncDispatchDisposition {
     try {
-      const previous = this.#topicPositions.get(change.topic);
-      if (previous?.generation === change.generation && change.cursor <= previous.cursor)
-        return "topic_changed";
       if (this.#island.dispatchTopicChange === undefined) {
+        const previous = this.#topicPositions.get(change.topic);
+        if (previous?.generation === change.generation && change.cursor <= previous.cursor)
+          return "topic_changed";
         let failed = false;
         const outcome = this.#refresh(subscriptionId, (result) => {
           failed = result !== "succeeded";
@@ -213,11 +213,8 @@ export class AsyncDispatcher implements AsyncEnvelopeDispatcher {
         }
         return outcome;
       }
+      // Page props have independent rendered positions, so the core checks staleness.
       this.#island.dispatchTopicChange(change);
-      this.#topicPositions.set(change.topic, {
-        generation: change.generation,
-        cursor: change.cursor,
-      });
       return "topic_changed";
     } catch {
       return "rejected";

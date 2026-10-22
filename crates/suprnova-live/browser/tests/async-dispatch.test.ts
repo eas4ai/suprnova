@@ -200,6 +200,24 @@ describe("closed asynchronous presentation dispatcher", () => {
     },
   );
 
+  it("forwards a lower full recovery after a higher partial page signal", () => {
+    const { calls, port } = fakePort();
+    const dispatcher = new AsyncDispatcher(port, fakeCapability);
+    const partial = {
+      generation: 1,
+      cursor: 11,
+      kind: "topic_change",
+      props: ["stats"],
+      topic: "posts",
+    };
+    const recovery = { ...partial, cursor: 10, props: [] };
+    expect(dispatcher.dispatch(envelope(partial))).toBe("topic_changed");
+    expect(dispatcher.dispatch(envelope(recovery))).toBe("topic_changed");
+    expect(calls.topicChange).toHaveBeenNthCalledWith(1, partial);
+    expect(calls.topicChange).toHaveBeenNthCalledWith(2, recovery);
+    expect(calls.refresh).not.toHaveBeenCalled();
+  });
+
   it("delivers a topic change only through the data-free topic port", () => {
     const { calls, port } = fakePort();
     const dispatcher = new AsyncDispatcher(port, fakeCapability);

@@ -307,6 +307,72 @@ describe("Inertia live client core", () => {
     },
   );
 
+  it("preserves per-prop recovery through the page dispatcher after a higher partial signal", async () => {
+    const { startInertiaLive } = await loadCore();
+    const { AsyncDispatcher } = await import(
+      new URL(
+        "../../crates/suprnova-live/browser/src/async-updates/dispatch.ts",
+        import.meta.url,
+      ).href
+    );
+    const app = fixture();
+    if (Bun.env.SIGNAL_LIVE_RETIRED_PAGE) {
+      const retired = await Bun.file(Bun.env.SIGNAL_LIVE_RETIRED_PAGE).json();
+      app.setPage(retired.recoveryPage);
+    } else {
+      app.page.liveBindings.notes.cursor = 5;
+    }
+    const topic = Object.keys(app.page.liveBindings)[0]!;
+    const binding = app.page.liveBindings[topic];
+    expect(binding.cursor).toBe(5);
+    connection = startInertiaLive({
+      clearTimer: app.clearTimer,
+      getPage: () => app.page,
+      router: app.router,
+      setTimer: app.setTimer,
+      transport: app.transport,
+    });
+    const dispatcher = new AsyncDispatcher(
+      {
+        dispatchTopicChange: (signal: unknown) => app.handlers.onSignal(signal),
+      },
+      () => null,
+    );
+    const dispatch = (cursor: number, props: string[]) =>
+      dispatcher.dispatch({
+        subscriptionId: "recovery-membership",
+        payload: {
+          kind: "topic_change",
+          topic,
+          generation: binding.generation,
+          cursor,
+          props,
+        },
+      });
+    dispatch(11, ["stats"]);
+    app.runNextTimer();
+    expect(app.reloads[0]?.only).toEqual(["stats"]);
+    const response = (prop: "stats" | "recent_notes") => ({
+      ...app.page,
+      liveBindings: { [topic]: { ...binding, cursor: 11 } },
+      props: { [prop]: app.page.props[prop] },
+    });
+    app.reloads[0]?.onSuccess?.(response("stats"));
+    app.reloads[0]?.onFinish?.();
+    dispatch(10, []);
+    expect(app.timerCount).toBe(1);
+    app.runNextTimer();
+    expect(app.reloads[1]?.only).toEqual(["recent_notes"]);
+    app.reloads[1]?.onSuccess?.(response("recent_notes"));
+    app.reloads[1]?.onFinish?.();
+    dispatch(9, ["stats"]);
+    expect(app.timerCount).toBe(0);
+    expect(app.reloads.map((reload) => reload.only)).toEqual([
+      ["stats"],
+      ["recent_notes"],
+    ]);
+  });
+
   it.skipIf(!Bun.env.SIGNAL_LIVE_BASELINE_PAGE)(
     "accepts the committed signal newer than the actual Rust loader page",
     async () => {

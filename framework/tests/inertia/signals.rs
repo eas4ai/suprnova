@@ -743,7 +743,8 @@ async fn retired_instance_fixture() -> Value {
             .build(),
     );
     let runtime = prepare_live_router_for_test(&Router::new()).unwrap();
-    for _ in 0..10 {
+    let mut recovery_page = Value::Null;
+    for cursor in 1..=10 {
         hub.publish_live_topic(
             "notes.42",
             &["stats".into()],
@@ -753,7 +754,11 @@ async fn retired_instance_fixture() -> Value {
         .await
         .unwrap();
         tokio::time::advance(std::time::Duration::from_millis(2)).await;
+        if cursor == 5 {
+            recovery_page = page().await;
+        }
     }
+    assert_eq!(recovery_page["liveBindings"]["notes.42"]["cursor"], 5);
     async fn page() -> Value {
         let request = Request::for_test_with_headers("GET", "/retired", [("X-Inertia", "true")]);
         json(
@@ -799,7 +804,7 @@ async fn retired_instance_fixture() -> Value {
         reset["liveBindings"]["notes.42"]["generation"]
     );
     let current = page().await;
-    serde_json::json!({ "oldPage": old, "resetPage": reset, "currentPage": current, "signal": signal })
+    serde_json::json!({ "oldPage": old, "resetPage": reset, "currentPage": current, "recoveryPage": recovery_page, "signal": signal })
 }
 
 #[tokio::test(start_paused = true)]

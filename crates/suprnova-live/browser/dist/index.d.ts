@@ -201,6 +201,7 @@ export interface AsyncRuntimeIslandPort extends RuntimeFeatureIslandPortBase {
   ): RegisteredBrowserEventDisposition;
   dispatchTopicChange?(change: Readonly<{
     cursor: number;
+    generation: number;
     kind: "topic_change";
     props: readonly string[];
     topic: string;
@@ -730,6 +731,7 @@ export interface TopicSubscriptionBinding {
 export type TopicSubscriptionBindings = Readonly<Record<string, TopicSubscriptionBinding>>;
 export interface TopicChangeSignal {
   readonly cursor: number;
+  readonly generation: number;
   readonly props: readonly string[];
   readonly topic: string;
 }

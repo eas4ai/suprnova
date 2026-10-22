@@ -777,8 +777,12 @@ retry after 1, 2, 4, 8, and 16 seconds, then every 30 seconds. A successful
 reload resets this backoff. The page keeps its polling fallback during retries.
 A changed generation reloads every prop bound to that topic regardless of
 its old cursor. Each prop keeps its own rendered generation and cursor, so a partial response cannot consume
-a change for a prop it did not reload. Every Inertia visit carries the Live
-document identity in `X-Socket-ID` while the adapter is mounted.
+a change for a prop it did not reload. Page subscriptions pass every signal
+to these per-prop checks. A full recovery signal with a lower cursor can
+therefore refresh props that an earlier partial signal did not refresh.
+Full island refreshes use one position for the whole island. Every Inertia
+visit carries the Live document identity in `X-Socket-ID` while the adapter
+is mounted.
 
 A private binding is included only when the current principal has its topic
 or stream ability. Otherwise the page renders without that binding or cursor
