@@ -97,6 +97,8 @@ pub mod security_headers;
 #[cfg(feature = "database-mongodb")]
 pub mod mongodb;
 pub mod notifications;
+/// Static file fallback serving.
+pub mod page_budget;
 pub mod pagination;
 pub mod payments;
 pub mod prelude;
@@ -125,7 +127,6 @@ pub mod session;
 /// daemons already draining correctly.
 pub(crate) mod signals;
 pub mod sse;
-/// Static file fallback serving.
 pub mod static_files;
 mod strings;
 pub mod supervisor;

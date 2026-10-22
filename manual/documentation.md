@@ -155,3 +155,5 @@
 ---
 
 *[API Documentation (rustdoc)](https://docs.rs/suprnova) - once published.*
+
+- [Page Budget](page-budget.md) - test page weight and asset policies.

@@ -243,6 +243,10 @@ subtle = "2"
 zeroize = { version = "1.8.2", features = ["derive"] }
 comrak = { version = "0.52.0", default-features = false, features = ["syntect"] }
 ammonia = "4.1.4"
+# The audit needs tokens without sanitizing URLs or building a browser DOM.
+# Both parsers are already dependencies of ammonia in the lockfile.
+html5ever = "0.40.1"
+cssparser = "0.38.0"
 
 # The image subsystem's backend: the pure-Rust OxideAV framework, and
 # zune-jpeg for decoding JPEG (see below). Eight OxideAV crates rather than
@@ -705,3 +709,7 @@ path = "tests/search/main.rs"
 name = "recommendations"
 path = "tests/recommendations/main.rs"
 required-features = ["testing", "database-sqlite"]
+
+[[test]]
+name = "page_budget"
+path = "tests/page_budget/main.rs"

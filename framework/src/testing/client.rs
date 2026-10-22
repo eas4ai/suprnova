@@ -100,6 +100,59 @@ pub struct TestClient {
 }
 
 impl TestClient {
+    /// Audit a document and its assets with anonymous in-process requests.
+    ///
+    /// This returns all failures together and leaves this client's cookies intact.
+    pub async fn audit_page(
+        &self,
+        url: &str,
+        budget: &crate::page_budget::PageBudget,
+    ) -> Result<crate::page_budget::PageAudit, FrameworkError> {
+        crate::page_budget::collect::audit_test(self, budget, crate::page_budget::parse_url(url)?)
+            .await
+    }
+
+    pub(crate) async fn budget_resource(
+        &self,
+        url: url::Url,
+        max_bytes: usize,
+        timeout: Duration,
+    ) -> Result<crate::page_budget::Resource, FrameworkError> {
+        let mut client = self.clone();
+        client.cookies = Arc::new(Mutex::new(Vec::new()));
+        client.default_headers.clear();
+        client.acting_as = None;
+        let request = hyper::Request::builder()
+            .method(Method::GET)
+            .uri(url.as_str())
+            .header(
+                "Host",
+                &url[url::Position::BeforeHost..url::Position::AfterPort],
+            )
+            .header("Accept-Encoding", "identity")
+            .body(Full::new(Bytes::new()))
+            .map_err(|e| FrameworkError::bad_request(format!("page budget request {url}: {e}")))?;
+        let response = tokio::time::timeout(timeout, client.exchange(request, max_bytes))
+            .await
+            .map_err(|_| {
+                FrameworkError::bad_request(format!("page budget request {url} timed out"))
+            })?
+            .map_err(|e| FrameworkError::bad_request(format!("page budget request {url}: {e}")))?;
+        let size = response.body.len() as u64;
+        Ok(crate::page_budget::Resource {
+            url,
+            status: response.status,
+            headers: response.headers,
+            body: Some(response.body.to_vec()),
+            transfer: size,
+            decoded: size,
+            request_cookie: false,
+            document: false,
+            manifest_icon: false,
+            manifest: false,
+        })
+    }
+
     /// A client for `router` behind `registry`, the same two values
     /// [`crate::handle_request`] takes. Build the registry the way the
     /// application does (`MiddlewareRegistry::from_global()` after the
@@ -398,7 +451,8 @@ impl TestClient {
     async fn exchange(
         &self,
         request: hyper::Request<Full<Bytes>>,
-    ) -> Result<Exchanged, hyper::Error> {
+        max_bytes: usize,
+    ) -> Result<Exchanged, Box<dyn std::error::Error + Send + Sync>> {
         let (client_io, server_io) = tokio::io::duplex(PIPE_CAPACITY);
         // The report lives in the response's extensions, which hyper drops
         // when it writes the response to the wire; the service takes it out
@@ -442,8 +496,11 @@ impl TestClient {
             let exchange = async move {
                 let response = sender.send_request(request).await?;
                 let (parts, body) = response.into_parts();
-                let body = body.collect().await?.to_bytes();
-                Ok::<_, hyper::Error>((parts, body))
+                let body = http_body_util::Limited::new(body, max_bytes)
+                    .collect()
+                    .await?
+                    .to_bytes();
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>((parts, body))
             };
             let (result, _closed) = tokio::join!(exchange, connection);
             result
@@ -763,7 +820,12 @@ impl TestRequest {
             .find(|(name, _)| name.eq_ignore_ascii_case(FORWARDED_PREFIX_HEADER))
             .map(|(_, value)| value.clone());
         let request = build_request(&method, &path, headers, body, &client.cookie_pairs());
-        let exchanged = match tokio::time::timeout(client.timeout, client.exchange(request)).await {
+        let exchanged = match tokio::time::timeout(
+            client.timeout,
+            client.exchange(request, usize::MAX),
+        )
+        .await
+        {
             Ok(Ok(exchanged)) => exchanged,
             Ok(Err(e)) => panic!("TestClient: {method} {path} failed: {e}"),
             Err(_) => panic!(
