@@ -72,6 +72,9 @@ impl<T: CacheableInertiaProps + ?Sized> CacheableInertiaProps for &T {
 ///
 /// Ordinary serializable values keep eager props. A cacheable props derive
 /// implements this contract with its checked public and request boundaries.
+///
+/// The macro borrows through wrappers before calling this trait by its qualified
+/// path, so an inherent `apply_props` does not replace the checked conversion.
 pub trait InertiaPageProps {
     /// Adds props without serializing a lazy resolver or losing its cache boundary.
     fn apply_props(&self, response: InertiaResponse) -> Result<InertiaResponse, FrameworkError>;

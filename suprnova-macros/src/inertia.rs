@@ -308,8 +308,15 @@ fn render_inertia_response_expansion(input: &InertiaResponseInput) -> proc_macro
             return quote! {{
                 let mut __response = ::suprnova::InertiaResponse::new(#component_lit);
                 #configure
-                use ::suprnova::inertia::InertiaPageProps as _;
-                (#props).apply_props(__response)?
+                // Borrow through wrappers before the qualified conversion. A user's
+                // inherent apply_props must not take part in method lookup.
+                trait __SuprnovaInertiaPropsBorrow {
+                    fn __suprnova_inertia_props_borrow(&self) -> &Self { self }
+                }
+                impl<T: ::suprnova::inertia::InertiaPageProps + ?Sized> __SuprnovaInertiaPropsBorrow for T {}
+                ::suprnova::inertia::InertiaPageProps::apply_props(
+                    (#props).__suprnova_inertia_props_borrow(), __response
+                )?
                     .resolve(#request_expr).await.map_err(::core::convert::Into::into)
             }};
         }
@@ -538,7 +545,7 @@ mod tests {
             "typed-props branch must not panic via .expect; got: {rendered}"
         );
         assert!(
-            rendered.contains("InertiaPageProps as _") && rendered.contains("apply_props"),
+            rendered.contains("suprnova :: inertia :: InertiaPageProps :: apply_props"),
             "typed-props branch must preserve checked cache declarations; got: {rendered}"
         );
         assert!(
@@ -562,7 +569,7 @@ mod tests {
         );
         // The conversion owns object validation so cacheable props can preserve resolvers.
         assert!(
-            rendered.contains("InertiaPageProps as _") && rendered.contains("apply_props"),
+            rendered.contains("suprnova :: inertia :: InertiaPageProps :: apply_props"),
             "the checked conversion must validate the object shape; got: {rendered}"
         );
         assert!(

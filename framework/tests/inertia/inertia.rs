@@ -4994,3 +4994,168 @@ async fn page_object_carries_the_manifest_derived_version() {
     let page: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(page["version"], expected);
 }
+
+#[tokio::test]
+async fn cache_review_4_macro_uses_framework_conversion_for_owned_and_borrowed_props() {
+    #[derive(suprnova::InertiaProps)]
+    struct Props {
+        message: String,
+    }
+    impl Props {
+        // The collision must exist after the macro selects the framework trait.
+        #[allow(dead_code)]
+        fn apply_props(
+            &self,
+            response: InertiaResponse,
+        ) -> Result<InertiaResponse, suprnova::FrameworkError> {
+            response.try_with("message", "inherent")
+        }
+    }
+    async fn render(request: &MockReq, borrowed: bool) -> suprnova::Response {
+        let props = Props {
+            message: "framework".into(),
+        };
+        if borrowed {
+            let props = &props;
+            suprnova::inertia_response!(request, "__tests__/TypedProps", props)
+        } else {
+            suprnova::inertia_response!(request, "__tests__/TypedProps", props)
+        }
+    }
+    let _guard = suprnova::testing::TestContainer::fake();
+    let request = MockReq::new("/shadow").inertia();
+    for borrowed in [false, true] {
+        let response = render(&request, borrowed)
+            .await
+            .ok()
+            .expect("typed response succeeds");
+        AssertableInertia::from_response(&response).where_("message", "framework");
+    }
+}
+
+// The macro must preserve receiver lookup across these concrete wrapper types.
+mod cacheable_macro_fixture {
+    use super::MockReq;
+    use suprnova::InertiaResponse;
+
+    #[derive(suprnova::InertiaProps)]
+    #[inertia(cacheable)]
+    pub(super) struct Props {
+        #[inertia(public)]
+        message: String,
+        #[inertia(per_request)]
+        viewer: suprnova::Prop,
+    }
+    impl Props {
+        // The collision must exist after the macro selects the framework trait.
+        #[allow(dead_code)]
+        fn apply_props(
+            &self,
+            response: InertiaResponse,
+        ) -> Result<InertiaResponse, suprnova::FrameworkError> {
+            response.try_with("message", "inherent")
+        }
+    }
+    struct Wrapped<T>(T);
+    impl<T> std::ops::Deref for Wrapped<T> {
+        type Target = T;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+    #[derive(serde::Serialize)]
+    struct EagerWrapped<T> {
+        message: &'static str,
+        viewer: &'static str,
+        #[serde(skip)]
+        props: T,
+    }
+    impl<T> std::ops::Deref for EagerWrapped<T> {
+        type Target = T;
+        fn deref(&self) -> &Self::Target {
+            &self.props
+        }
+    }
+    fn make_props() -> Props {
+        Props {
+            message: "framework".into(),
+            viewer: suprnova::Prop::lazy(|| async { serde_json::json!("current visitor") }),
+        }
+    }
+    pub(super) async fn render(request: &MockReq, form: u8) -> suprnova::Response {
+        let mut props = make_props();
+        match form {
+            0 => suprnova::inertia_response!(request, "__tests__/TypedProps", props),
+            1 => {
+                let props = &props;
+                suprnova::inertia_response!(request, "__tests__/TypedProps", props)
+            }
+            2 => {
+                let props = &mut props;
+                suprnova::inertia_response!(request, "__tests__/TypedProps", props)
+            }
+            3 => {
+                let props = &&props;
+                suprnova::inertia_response!(request, "__tests__/TypedProps", props)
+            }
+            4 => {
+                let props = Box::new(props);
+                suprnova::inertia_response!(request, "__tests__/TypedProps", props)
+            }
+            5 => {
+                let props = std::rc::Rc::new(props);
+                suprnova::inertia_response!(request, "__tests__/TypedProps", props)
+            }
+            6 => {
+                let props = std::sync::Arc::new(props);
+                suprnova::inertia_response!(request, "__tests__/TypedProps", props)
+            }
+            7 => {
+                let props = Wrapped(props);
+                suprnova::inertia_response!(request, "__tests__/TypedProps", props)
+            }
+            8 => {
+                let props = &&mut props;
+                suprnova::inertia_response!(request, "__tests__/TypedProps", props)
+            }
+            9 => {
+                let props: &dyn suprnova::inertia::InertiaPageProps = &props;
+                suprnova::inertia_response!(request, "__tests__/TypedProps", props)
+            }
+            10 => suprnova::inertia_response!(request, "__tests__/TypedProps", make_props()),
+            _ => {
+                props.message = "wrong autoderef".into();
+                let props = EagerWrapped {
+                    message: "framework",
+                    viewer: "current visitor",
+                    props,
+                };
+                suprnova::inertia_response!(request, "__tests__/TypedProps", props)
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn cache_review_4_macro_keeps_owned_and_borrowed_cacheable_props() {
+    use cacheable_macro_fixture::{Props, render};
+
+    let _guard = suprnova::testing::TestContainer::fake();
+    suprnova::Inertia::cache_page::<Props>(
+        "/shadow",
+        "__tests__/TypedProps",
+        &[],
+        &["errors", "flash"],
+    )
+    .unwrap();
+    let request = MockReq::new("/shadow").inertia();
+    for form in 0..12 {
+        let response = render(&request, form)
+            .await
+            .ok()
+            .expect("typed response succeeds");
+        AssertableInertia::from_response(&response)
+            .where_("message", "framework")
+            .where_("viewer", "current visitor");
+    }
+}
