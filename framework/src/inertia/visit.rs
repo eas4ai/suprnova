@@ -202,6 +202,15 @@ pub(crate) fn is_prefetch<'a>(header: impl Fn(&str) -> Option<&'a str>) -> bool 
         .any(|name| header(name).is_some_and(|value| value.eq_ignore_ascii_case("prefetch")))
 }
 
+/// The outer header middleware applies privacy after cache publication is decided.
+pub(crate) fn mark_cacheable() {
+    let _ = VISIT.try_with(|visit| {
+        visit
+            .cacheable
+            .store(true, std::sync::atomic::Ordering::Relaxed)
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,13 +248,4 @@ mod tests {
         assert!(!is_prefetch(|_| None));
         assert!(!is_prefetch(|_| Some("prerender")));
     }
-}
-
-/// The outer header middleware applies privacy after cache publication is decided.
-pub(crate) fn mark_cacheable() {
-    let _ = VISIT.try_with(|visit| {
-        visit
-            .cacheable
-            .store(true, std::sync::atomic::Ordering::Relaxed)
-    });
 }
