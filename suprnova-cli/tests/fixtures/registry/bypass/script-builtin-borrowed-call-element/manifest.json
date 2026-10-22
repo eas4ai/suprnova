@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-builtin-borrowed-call-element",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

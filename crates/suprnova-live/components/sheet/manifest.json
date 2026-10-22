@@ -1,0 +1,11 @@
+{
+  "name": "suprnova.sheet",
+  "files": [
+    "sheet.html",
+    "sheet.css",
+    "sheet.js"
+  ],
+  "elements": [
+    "sn-sheet"
+  ]
+}

@@ -1,0 +1,10 @@
+{#
+  suprnova.spinner - indeterminate activity for work in flight (FDB-002).
+  Bound through live:loading.show to a registered action and authored
+  hidden, so the runtime's anti-flicker timing decides when it shows; or
+  the placeholder of a lazy island (lazy=true). The ring is decorative,
+  the label is the accessible content.
+#}
+{% macro spinner(action="", lazy=false, label="Loading") %}
+<span class="sn-spinner" role="status" {% if lazy %}data-sn-placeholder="lazy"{% else %}live:loading.show="{{ action }}" hidden{% endif %}><span class="sn-spinner-ring" aria-hidden="true"></span><span class="sn-spinner-label">{{ label }}</span></span>
+{% endmacro %}
