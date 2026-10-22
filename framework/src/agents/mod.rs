@@ -653,9 +653,29 @@ pub fn __empty_input_schema() -> serde_json::Value {
     serde_json::json!({ "type": "object", "additionalProperties": false })
 }
 
+/// Clients do not recognize Rust's integer formats. Bounds already describe
+/// the limits, so integer schemas keep their bounds without a format.
+#[derive(Clone)]
+struct RemoveIntegerFormats;
+
+impl schemars::transform::Transform for RemoveIntegerFormats {
+    fn transform(&mut self, schema: &mut schemars::Schema) {
+        schemars::transform::transform_subschemas(self, schema);
+        let integer = match schema.get("type") {
+            Some(serde_json::Value::String(kind)) => kind == "integer",
+            Some(serde_json::Value::Array(kinds)) => kinds.iter().any(|kind| kind == "integer"),
+            _ => false,
+        };
+        if integer {
+            schema.remove("format");
+        }
+    }
+}
+
 /// The draft 2020-12 schema of `T`.
 fn schema_of<T: schemars::JsonSchema>() -> serde_json::Value {
     schemars::generate::SchemaSettings::draft2020_12()
+        .with_transform(RemoveIntegerFormats)
         .into_generator()
         .into_root_schema_for::<T>()
         .to_value()

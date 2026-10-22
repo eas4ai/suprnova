@@ -152,7 +152,6 @@ export const toolSchemas = {
       },
       "limit": {
         "type": ["integer", "null"],
-        "format": "uint32",
         "minimum": 1,
         "description": "How many notes to answer, 1 to 50. Ten when left out.",
         "maximum": 50,

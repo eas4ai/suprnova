@@ -48,3 +48,129 @@ fn agent_001_schema_documents_fields_from_doc_comments() {
         "{schema:#}"
     );
 }
+
+/// Integer formats are Rust names that schema clients do not recognize.
+#[allow(dead_code, reason = "only the published schemas are under test")]
+#[suprnova::tool_input]
+struct IntegerFields {
+    /// A byte.
+    small: u8,
+    /// An unsigned count.
+    count: u32,
+    /// A large unsigned count.
+    large: u64,
+    /// A signed count with exclusive schema bounds.
+    #[schemars(extend("exclusiveMinimum" = -100, "exclusiveMaximum" = 100))]
+    signed: i32,
+    /// A large signed count.
+    signed_large: i64,
+    /// An optional count.
+    optional: Option<u64>,
+    /// A list of counts.
+    values: Vec<u16>,
+    /// A nested count.
+    nested: NestedInteger,
+    /// A count from 1 to 100.
+    #[validate(range(min = 1, max = 100))]
+    bounded: u32,
+    /// An email address.
+    #[validate(email)]
+    email: String,
+    /// A fraction.
+    fraction: f64,
+}
+
+/// A referenced schema also needs portable integer fields.
+#[allow(dead_code, reason = "only the published schemas are under test")]
+#[suprnova::tool_schema]
+#[derive(serde::Deserialize)]
+struct NestedInteger {
+    /// A nested unsigned count.
+    count: u64,
+}
+
+fn assert_integer_formats_absent(schema: &Value) {
+    match schema {
+        Value::Object(object) => {
+            let integer = match object.get("type") {
+                Some(Value::String(kind)) => kind == "integer",
+                Some(Value::Array(kinds)) => kinds.iter().any(|kind| kind == "integer"),
+                _ => false,
+            };
+            if integer {
+                assert!(!object.contains_key("format"), "{schema:#}");
+            }
+            for subschema in object.values() {
+                assert_integer_formats_absent(subschema);
+            }
+        }
+        Value::Array(schemas) => {
+            for subschema in schemas {
+                assert_integer_formats_absent(subschema);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn assert_portable_integer_schema(schema: &Value) {
+    assert_integer_formats_absent(schema);
+    let properties = &schema["properties"];
+    for field in ["small", "count", "large"] {
+        assert_eq!(properties[field]["type"], "integer", "{schema:#}");
+        assert_eq!(properties[field]["minimum"], 0, "{schema:#}");
+    }
+    for field in ["signed", "signed_large"] {
+        assert_eq!(properties[field]["type"], "integer", "{schema:#}");
+    }
+    assert_eq!(properties["signed"]["exclusiveMinimum"], -100, "{schema:#}");
+    assert_eq!(properties["signed"]["exclusiveMaximum"], 100, "{schema:#}");
+    assert_eq!(properties["small"]["maximum"], 255, "{schema:#}");
+    assert_eq!(
+        properties["optional"]["type"],
+        serde_json::json!(["integer", "null"])
+    );
+    assert_eq!(properties["optional"]["minimum"], 0, "{schema:#}");
+    assert_eq!(
+        properties["values"]["items"]["type"], "integer",
+        "{schema:#}"
+    );
+    assert_eq!(properties["values"]["items"]["minimum"], 0, "{schema:#}");
+    assert_eq!(
+        properties["values"]["items"]["maximum"], 65535,
+        "{schema:#}"
+    );
+    assert_eq!(
+        properties["nested"]["$ref"], "#/$defs/NestedInteger",
+        "{schema:#}"
+    );
+    assert_eq!(
+        schema["$defs"]["NestedInteger"]["properties"]["count"]["type"],
+        "integer"
+    );
+    assert_eq!(
+        schema["$defs"]["NestedInteger"]["properties"]["count"]["minimum"],
+        0
+    );
+    assert_eq!(properties["bounded"]["minimum"], 1, "{schema:#}");
+    assert_eq!(properties["bounded"]["maximum"], 100, "{schema:#}");
+    assert_eq!(properties["email"]["type"], "string", "{schema:#}");
+    assert_eq!(properties["email"]["format"], "email", "{schema:#}");
+    assert_eq!(properties["fraction"]["format"], "double", "{schema:#}");
+}
+
+#[test]
+fn agent_001_input_integer_schemas_keep_bounds_without_formats() {
+    assert_portable_integer_schema(&__input_schema::<IntegerFields>());
+}
+
+#[test]
+fn agent_001_output_integer_schemas_keep_bounds_without_formats() {
+    assert_portable_integer_schema(&suprnova::agents::__output_schema::<IntegerFields>());
+    assert_integer_formats_absent(&suprnova::agents::__output_schema::<u64>());
+}
+
+#[test]
+fn agent_001_browser_integer_schemas_keep_bounds_without_formats() {
+    assert_portable_integer_schema(&suprnova_webmcp::input_schema::<IntegerFields>());
+}

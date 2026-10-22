@@ -3,19 +3,9 @@
 //! and neither does this test: the attribute alone points the derives at
 //! the framework's own copies.
 
-use serde_json::Value;
 use suprnova::ToolCaller;
 
-use crate::fixture::{self, PostView, TestUser, scope};
-
-/// The draft 2020-12 schema `schemars` derives for `T`, the settings a
-/// `#[tool]`'s schemas use.
-fn schemars_schema<T: schemars::JsonSchema>() -> Value {
-    schemars::generate::SchemaSettings::draft2020_12()
-        .into_generator()
-        .into_root_schema_for::<T>()
-        .to_value()
-}
+use crate::fixture::{self, TestUser, scope};
 
 #[tokio::test]
 async fn agent_001_a_tool_output_type_publishes_its_output_schema() {
@@ -30,7 +20,16 @@ async fn agent_001_a_tool_output_type_publishes_its_output_schema() {
         .and_then(|tools| tools.into_iter().find(|tool| tool["name"] == "create_post"))
         .expect("create_post is listed");
     let published = &create["outputSchema"];
-    assert_eq!(*published, schemars_schema::<PostView>(), "{create:#}");
+    assert_eq!(
+        published["properties"]["id"],
+        serde_json::json!({ "type": "integer", "minimum": 0 }),
+        "{published:#}"
+    );
+    assert_eq!(
+        published["properties"]["title"],
+        serde_json::json!({ "type": "string" }),
+        "{published:#}"
+    );
     assert_eq!(published["type"], "object", "{published:#}");
     assert_eq!(
         published["required"],

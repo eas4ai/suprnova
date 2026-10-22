@@ -177,8 +177,10 @@ marked handler that no route serves is left out, with a warning at boot.
 
 `#[tool_input]` makes a struct a form request and derives its JSON Schema
 (draft 2020-12) from the struct, its `serde` attributes and its `validator`
-attributes. The schema an agent reads names the same fields, required flags
-and bounds the server enforces:
+attributes. Integer fields are published as `type: integer` with their bounds
+and no `format`, because clients do not know Rust's integer formats. The schema
+an agent reads names the same fields, required flags and bounds the server
+enforces:
 
 ```rust
 use suprnova::tool_input;

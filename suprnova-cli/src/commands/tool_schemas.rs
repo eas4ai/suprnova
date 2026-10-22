@@ -718,7 +718,7 @@ enum Shape {
     Vec(Box<Shape>),
 }
 
-/// A number type and the schema `schemars` writes for it.
+/// A number type and the schema the framework publishes for it.
 #[derive(Clone, Copy)]
 struct Number {
     /// The Rust type's name.
@@ -814,7 +814,7 @@ impl Shape {
         matches!(self, Self::Option(_))
     }
 
-    /// The type's schema, as its `JsonSchema` impl writes it.
+    /// The type's schema, as the framework publishes it.
     fn schema(&self) -> Json {
         match self {
             Self::Base("String") => Json::Object(vec![("type".into(), Json::str("string"))]),
@@ -827,10 +827,10 @@ impl Shape {
                     .find(|number| number.rust == *name)
                     .copied()
                     .unwrap_or(number("f64", "number", "double", None));
-                let mut schema = Json::Object(vec![
-                    ("type".into(), Json::str(number.json)),
-                    ("format".into(), Json::str(number.format)),
-                ]);
+                let mut schema = Json::Object(vec![("type".into(), Json::str(number.json))]);
+                if number.json != "integer" {
+                    schema.insert("format", Json::str(number.format));
+                }
                 match number.bounds {
                     Some((min, max)) => {
                         schema.insert("minimum", Json::Int(min));
