@@ -733,6 +733,10 @@ reuses the document's WebSocket when Live already owns one. Live's hybrid
 polling takes over when push continuity fails; `usePoll` also works when the
 async artifact cannot load. Unmounting releases the page's subscriptions.
 Signals within 25 milliseconds become one reload of the affected prop union.
+Only props present in the response advance their rendered cursors. A rescued
+or omitted deferred prop keeps its invalidation. Failed or canceled reloads
+retry after 1, 2, 4, 8, and 16 seconds, then every 30 seconds. A successful
+reload resets this backoff. The page keeps its polling fallback during retries.
 Each prop keeps its own rendered cursor, so a partial response cannot consume
 a change for a prop it did not reload. Every Inertia visit carries the Live
 document identity in `X-Socket-ID` while the adapter is mounted.

@@ -55,6 +55,8 @@ export type InertiaLivePage<
   Props extends Record<string, unknown> = Record<string, unknown>,
 > = {
   liveBindings?: InertiaLiveBindings;
+  rescuedProps?: readonly string[];
+  deferredProps?: Record<string, readonly string[]>;
   props: Props;
 };
 
@@ -262,6 +264,8 @@ export function startInertiaLive(
   let closed = false;
   let timer: TimerHandle | null = null;
   let reloading = false;
+  let retryAttempt = 0;
+  let retryMilliseconds = 0;
   let transport: InertiaLiveTransportConnection | null = null;
   const activeCompletions = new Set<InertiaLivePollCompletion>();
   const pending = new Map<string, PendingTopic>();
@@ -345,7 +349,15 @@ export function startInertiaLive(
       bindingShape = nextShape;
       connect();
     }
-    const reloaded = new Set(reloadedProps);
+    const omitted = new Set([
+      ...(page.rescuedProps ?? []),
+      ...Object.values(page.deferredProps ?? {}).flat(),
+    ]);
+    const reloaded = new Set(
+      reloadedProps.filter(
+        (prop) => Object.hasOwn(page.props, prop) && !omitted.has(prop),
+      ),
+    );
     for (const topic of [...renderedCursors.keys()]) {
       if (bindings[topic] === undefined) renderedCursors.delete(topic);
     }
@@ -391,6 +403,11 @@ export function startInertiaLive(
         pending.delete(topic);
       }
     }
+    if (pending.size === 0 && timer !== null) {
+      clear(timer);
+      timer = null;
+    }
+    return reloaded;
   };
 
   const flush = () => {
@@ -416,31 +433,65 @@ export function startInertiaLive(
     };
     reloading = true;
     let succeeded = false;
+    let incomplete = false;
+    let finished = false;
+    const restoreBatch = (rendered = new Set<string>()) => {
+      let restored = false;
+      for (const [topic, entry] of batch) {
+        for (const [prop, cursor] of entry.props) {
+          if (rendered.has(prop)) continue;
+          queue(topic, [prop], cursor);
+          restored ||= pending.get(topic)?.props.has(prop) ?? false;
+        }
+      }
+      return restored;
+    };
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      if (closed) {
+        reloading = false;
+        return;
+      }
+      if (!succeeded) {
+        completeBatch("failed");
+        restoreBatch();
+      }
+      if ((!succeeded || incomplete) && pending.size > 0) {
+        retryMilliseconds = Math.min(1_000 * 2 ** retryAttempt, 30_000);
+        retryAttempt = Math.min(retryAttempt + 1, 5);
+      } else {
+        retryAttempt = 0;
+        retryMilliseconds = 0;
+      }
+      reloading = false;
+      arm();
+    };
     const headers: Record<string, string> = {};
     if (transport?.documentInstance) {
       headers["X-Socket-ID"] = transport.documentInstance;
     }
-    options.router.reload({
-      headers,
-      only,
-      onFinish() {
-        reloading = false;
-        if (!succeeded) completeBatch("failed");
-        // A failed batch remains represented by the rendered cursor. A later
-        // signal or the dashboard's poll retries without a tight error loop.
-        arm();
-      },
-      onSuccess(page) {
-        succeeded = true;
-        reconcile(page, only);
-        completeBatch("succeeded");
-      },
-    });
+    try {
+      options.router.reload({
+        headers,
+        only,
+        onFinish: finish,
+        onSuccess(page) {
+          if (closed || finished) return;
+          succeeded = true;
+          const rendered = reconcile(page, only);
+          incomplete = restoreBatch(rendered);
+          completeBatch(incomplete ? "failed" : "succeeded");
+        },
+      });
+    } catch {
+      finish();
+    }
   };
 
   function arm() {
     if (closed || reloading || timer !== null || pending.size === 0) return;
-    timer = schedule(flush, delay);
+    timer = schedule(flush, retryMilliseconds || delay);
   }
 
   const removeLifecycleListeners = [

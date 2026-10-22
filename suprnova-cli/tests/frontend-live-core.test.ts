@@ -86,7 +86,7 @@ function fixture() {
         stream: "changes",
       },
     },
-    props: {},
+    props: { stats: { notes: 0 }, recent_notes: [], auth: {} },
   };
 
   return {
@@ -358,7 +358,7 @@ describe("Inertia live client core", () => {
         ...app.page.liveBindings,
         notes: { ...app.page.liveBindings.notes, cursor: 12 },
       },
-      props: {},
+      props: { stats: { notes: 1 } },
     };
     app.setPage(returned);
     app.reloads[0]?.onSuccess?.(returned);
@@ -379,7 +379,7 @@ describe("Inertia live client core", () => {
         ...returned.liveBindings,
         notes: { ...returned.liveBindings.notes, cursor: 12 },
       },
-      props: {},
+      props: { recent_notes: [] },
     });
     app.reloads[1]?.onFinish?.();
     app.handlers.onSignal({ topic: "notes", cursor: 12, props: ["stats"] });
@@ -456,6 +456,156 @@ describe("Inertia live client core", () => {
     assert.equal(app.timerCount, 1);
     app.runNextTimer();
     assert.deepEqual(app.reloads[0]?.only, ["stats"]);
+  });
+
+  it("keeps rescued requested props invalidated while advancing rendered props", async () => {
+    const { startInertiaLive } = await loadCore();
+    const app = fixture();
+    connection = startInertiaLive({
+      clearTimer: app.clearTimer,
+      setTimer: app.setTimer,
+      router: app.router,
+      transport: app.transport,
+      getPage: () => app.page,
+    });
+    app.handlers.onSignal({
+      topic: "notes",
+      cursor: 11,
+      props: ["stats", "recent_notes"],
+    });
+    app.runNextTimer();
+    app.reloads[0]?.onSuccess?.({
+      liveBindings: {
+        ...app.page.liveBindings,
+        notes: { ...app.page.liveBindings.notes, cursor: 11 },
+      },
+      props: { stats: { notes: 1 }, recent_notes: ["old merged value"] },
+      rescuedProps: ["recent_notes"],
+    });
+    app.reloads[0]?.onFinish?.();
+    app.handlers.onSignal({ topic: "notes", cursor: 11, props: ["stats"] });
+    assert.equal(app.timerCount, 1);
+    app.runNextTimer();
+    assert.deepEqual(app.reloads[1]?.only, ["recent_notes"]);
+    app.reloads[1]?.onSuccess?.({
+      liveBindings: {
+        ...app.page.liveBindings,
+        notes: { ...app.page.liveBindings.notes, cursor: 11 },
+      },
+      props: { recent_notes: ["fresh"] },
+    });
+    app.reloads[1]?.onFinish?.();
+    app.handlers.onSignal({
+      topic: "notes",
+      cursor: 11,
+      props: ["stats", "recent_notes"],
+    });
+    assert.equal(app.timerCount, 0);
+  });
+
+  it("does not advance an omitted deferred prop on an external reload", async () => {
+    const { startInertiaLive } = await loadCore();
+    const app = fixture();
+    connection = startInertiaLive({
+      clearTimer: app.clearTimer,
+      setTimer: app.setTimer,
+      router: app.router,
+      transport: app.transport,
+      getPage: () => app.page,
+    });
+    const visit = app.beginVisit({ only: ["stats", "recent_notes"] });
+    app.setPage({
+      ...app.page,
+      liveBindings: {
+        ...app.page.liveBindings,
+        notes: { ...app.page.liveBindings.notes, cursor: 20 },
+      },
+      props: { stats: { notes: 2 } },
+      deferredProps: { later: ["recent_notes"] },
+    });
+    app.renderVisit("success", visit);
+    app.finishVisit(visit);
+    app.handlers.onSignal({
+      topic: "notes",
+      cursor: 15,
+      props: ["stats", "recent_notes"],
+    });
+    assert.equal(app.timerCount, 1);
+    app.runNextTimer();
+    assert.deepEqual(app.reloads[0]?.only, ["recent_notes"]);
+  });
+
+  for (const outcome of ["failed", "canceled"]) {
+    it(`retries a ${outcome} reload without another publication`, async () => {
+      const { startInertiaLive } = await loadCore();
+      const app = fixture();
+      connection = startInertiaLive({
+        clearTimer: app.clearTimer,
+        setTimer: app.setTimer,
+        router: app.router,
+        transport: app.transport,
+        getPage: () => app.page,
+      });
+      app.handlers.onSignal({ topic: "notes", cursor: 11, props: ["stats"] });
+      assert.equal(app.runNextTimer(), 25);
+      app.reloads[0]?.onFinish?.();
+      assert.equal(app.timerCount, 1);
+      assert.equal(app.runNextTimer(), 1_000);
+      assert.deepEqual(app.reloads[1]?.only, ["stats"]);
+      app.reloads[1]?.onSuccess?.({
+        liveBindings: {
+          ...app.page.liveBindings,
+          notes: { ...app.page.liveBindings.notes, cursor: 11 },
+        },
+        props: { stats: { notes: 1 } },
+      });
+      app.reloads[1]?.onFinish?.();
+      assert.equal(app.timerCount, 0);
+      app.handlers.onSignal({ topic: "notes", cursor: 11, props: ["stats"] });
+      assert.equal(app.timerCount, 0);
+    });
+  }
+
+  it("caps retry backoff, merges concurrent invalidations and resets after success", async () => {
+    const { startInertiaLive } = await loadCore();
+    const app = fixture();
+    connection = startInertiaLive({
+      clearTimer: app.clearTimer,
+      setTimer: app.setTimer,
+      router: app.router,
+      transport: app.transport,
+      getPage: () => app.page,
+    });
+    app.handlers.onSignal({ topic: "notes", cursor: 11, props: ["stats"] });
+    app.runNextTimer();
+    app.handlers.onSignal({
+      topic: "notes",
+      cursor: 12,
+      props: ["recent_notes"],
+    });
+    for (const [index, milliseconds] of [
+      1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000,
+    ].entries()) {
+      app.reloads[index]?.onFinish?.();
+      assert.equal(app.runNextTimer(), milliseconds);
+      assert.deepEqual(app.reloads[index + 1]?.only, ["recent_notes", "stats"]);
+    }
+    app.reloads[7]?.onSuccess?.({
+      liveBindings: {
+        ...app.page.liveBindings,
+        notes: { ...app.page.liveBindings.notes, cursor: 12 },
+      },
+      props: { stats: { notes: 1 }, recent_notes: [] },
+    });
+    app.reloads[7]?.onFinish?.();
+    assert.equal(app.timerCount, 0);
+    app.handlers.onSignal({ topic: "notes", cursor: 13, props: ["stats"] });
+    assert.equal(app.runNextTimer(), 25);
+    app.reloads[8]?.onFinish?.();
+    assert.equal(app.runNextTimer(), 1_000);
+    connection.close();
+    connection = null;
+    assert.equal(app.timerCount, 0);
   });
 
   it("removes every Inertia lifecycle listener on close", async () => {
