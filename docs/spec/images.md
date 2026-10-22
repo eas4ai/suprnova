@@ -189,3 +189,12 @@ Falsifier: a struct literal of `ImageConfig` or an exhaustive match on `Transfor
 Mechanism: `images`.
 Rationale: Ruled 2026-10-05: the manual's promise that no ImageMagick argument position is reachable stays.
 Status: Agreed 2026-10-05
+
+[IMG-009] The media pipeline's default encode quality MUST be 85 for every
+lossy output (JPEG, WebP and AVIF), the `quality` setter MUST keep
+accepting `1..=100`, and the manual MUST state the default and that it
+departs from Laravel's 70.
+Falsifier: an encode with no quality set produces output at a quality other than 85; or the manual states 70 as the default.
+Mechanism: `images`.
+Rationale: the developer, 2026-10-21: "85% should be the default" and "yeah 70% is too low"; Laravel's `Image::quality()` default is 70.
+Status: Agreed 2026-10-21

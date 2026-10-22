@@ -102,3 +102,34 @@ Falsifier: a render whose `begin` failed is published after its fallback generat
 Mechanism: `cache-snapshot-failure`.
 Rationale: Refines: Live spec 18, "failed rebuild preserves the prior atomic entry and releases/times out its singleflight ownership safely".
 Status: Agreed 2026-09-13
+
+[CACHE-011] RenderCache MUST give an Inertia page representations of its
+own: the HTML document and the page JSON, full and partial, are distinct
+representations whose key declares `X-Inertia`, the partial `only` and
+`except` set and the asset version as dimensions, so an Inertia route is
+stored and replayed under the same safety rules as any other route and
+its `Vary: X-Inertia` no longer declines publication.
+Falsifier: a JSON page is replayed to a document request or the reverse; a partial reload is replayed to a full request; a stale asset version is replayed; or an eligible Inertia route is declined for its `Vary`.
+Mechanism: `cache-inertia`.
+Rationale: backlog item `inertia-render-cache`, drafted 2026-10-21; publication chooses composite assembly only for a Live document today (`framework/src/render_cache/middleware.rs:2847`) and `InertiaProps` emits serialization only (`suprnova-macros/src/inertia.rs:216`).
+Status: Agreed 2026-10-21
+
+[CACHE-012] An Inertia page MUST be able to declare per-request props:
+they are resolved on every request after the route's guards run, their
+dependencies recorded apart from the shared shell, and the shared shell
+(the document and the public props) stored once and reused for every
+requester through the same stitched assembly Live documents use, the
+assembled response sent private and its SSR output matching the page JSON
+it hydrates.
+Falsifier: a per-request prop's value reaches another requester; a per-request prop resolves before a guard; a dependency of a per-request prop invalidates the shell, or a shell dependency invalidates only the slot; or SSR HTML and page JSON disagree.
+Mechanism: `cache-inertia`.
+Rationale: Live spec 16 (cache variance, privacy and stitching); `Collector::slot_scope` already separates slot work (`framework/src/render_cache/collector.rs:488`).
+Status: Agreed 2026-10-21
+
+[CACHE-013] The public and per-request declarations MUST be checked at
+compile time against the page's `InertiaProps` struct, and
+`suprnova generate-types` MUST carry them into the generated page types,
+the same for the React, Vue and Svelte kits.
+Falsifier: a declaration naming a prop the struct lacks compiles; or the generated types of one kit omit a declaration another kit's carry.
+Mechanism: `cache-inertia`.
+Status: Agreed 2026-10-21

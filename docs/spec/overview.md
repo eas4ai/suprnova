@@ -91,7 +91,7 @@ rather than duplicates.
 
 | Domain | Prefix | File | State |
 |---|---|---|---|
-| RenderCache (document cache: policy, keys, storage, coherence) | CACHE | render-cache.md | Agreed 2026-09-13; ten requirements from the audit of that day, each refining Live specs 15-18; reference: `crates/suprnova-live/docs/specs/suprnova-live/15-...` to `18-...` and `manual/render-cache.md` |
+| RenderCache (document cache: policy, keys, storage, coherence) | CACHE | render-cache.md | Agreed 2026-09-13; ten requirements from the audit of that day, each refining Live specs 15-18; CACHE-011 to CACHE-013 (Inertia pages) Agreed 2026-10-21; reference: `crates/suprnova-live/docs/specs/suprnova-live/15-...` to `18-...` and `manual/render-cache.md` |
 | Live (engine, facade, browser runtime, tooling) | LIVE | live.md | Observed; reference: `crates/suprnova-live/docs/specs/suprnova-live/` (26 numbered specs, glossary, conventions, iteration contracts 001-006) and `manual/live.md` |
 | Component library - foundations (inherited by every commitment) | UI | component-library-foundations.md | Draft; refines Live spec 20 |
 | Component library - form and input | FORM | component-library-forms.md | Draft; refines Live spec 21; the first commitment with foundations |
@@ -108,7 +108,7 @@ rather than duplicates.
 | Inertia root template (an application-owned first-visit document, per-request choice, view data, the nonce; issue #143) | RDOC | inertia-root-template.md | RDOC-001 to RDOC-004 and RDOC-006 Agreed 2026-10-07, RDOC-002 revised 2026-10-08; RDOC-005 Agreed 2026-10-15 |
 | Security headers (a built-in middleware for CSP with nonces, HSTS and the rest; issue #143's last item) | SEC | security-headers.md | Agreed 2026-10-15 |
 | Error reporting (a `Reporter` trait with a Sentry-protocol driver for Rustrak, Sentry and GlitchTip, every unhandled error reported, scrubbing, bounded delivery, opt-in logs and traces, browser reporting in the kits) | REPORT | error-reporting.md | Agreed 2026-10-15 |
-| Images (EXIF orientation, metadata stripping, and the rest of Laravel's Image API; issue #145) | IMG | images.md | Agreed |
+| Images (EXIF orientation, metadata stripping, and the rest of Laravel's Image API; issue #145) | IMG | images.md | Agreed; IMG-009 (default quality 85) Agreed 2026-10-21 |
 | Running on a Laravel database (the whole database Laravel 13 created: Laravel's layouts for the framework's tables, the application's data, and sharing the database with a Laravel application; issue #141) | LDB | laravel-database.md | Agreed |
 | Data cache (the developer's original design: query results keyed by hash, deleted by writes to their tables, triggered by the route; apart from any rendering; built with the search work) | QCACHE | data-cache.md | Draft |
 | Runtime contention (one limit for hash work, one blocking task per streamed file, the in-memory rate limiter's sweep, the WebSocket task registry; issues #146 to #149) | RTC | runtime-contention.md | Agreed 2026-10-07 |
@@ -117,6 +117,10 @@ rather than duplicates.
 | Search (searchable models, two settings classes, each engine's native full-text ranking behind one builder over the database and Qdrant engines, query expansion for typos and synonyms, the embedder and its default model with provenance, facets, highlights, scopes, the Live search box and JSON endpoint, analytics and suggestions, the per-engine relevance and latency baseline) | SEARCH | search.md | Agreed 2026-10-14 |
 | Recommendations (the immutable event stream, the starter SQL recommender, the versioned data contract it builds, its manual chapter; the knowledge-graph recommender that follows) | REC | recommendations.md | REC-001 to REC-004 and REC-008 Agreed 2026-10-14; REC-005 to REC-007 Draft until their own commitment |
 | Agents (tools marked on handlers and Live actions, the MCP endpoint, WebMCP in the browser for Live, the Inertia kits and WebAssembly front ends, headless Live tools, public, user and agent callers, the Magnetar authorization server and agent auth plugins after auth.md) | AGENT | agents.md | Agreed 2026-10-18 |
+| Static publication (public Inertia pages rendered at the origin and published as HTML and JSON objects with their assets to a storage disk the CDN serves; manifest switch after every upload; boot task after the listener; regeneration by dependency tag and by time; image transcoding at quality 85 and oxipng) | PUB | static-publish.md | Agreed 2026-10-21; model: `reference/inertia-static-main` |
+| Page budget audit (one rule set as a testing helper and a console command over a page, a live URL or a HAR file: weight, image formats, immutable caching, cookie-free assets, redirects, fonts; shipped in the kits) | BUDGET | page-budget.md | Agreed 2026-10-21; baseline `reference/har.json` |
+| Inertia live bindings (a topic bound to a page's props, data-free signals with a per-topic cursor, after-commit coalesced flush, sender exclusion, fail-closed private topics, one client core with three adapters, Live's topic layer shared) | SIGNAL | inertia-live.md | Agreed 2026-10-21; model: `reference/inertia-live-laravel-0.1.0` |
+| Event sourcing (aggregate roots with expected-version persistence, stored events, snapshots, projectors and reactors, replay, console commands, a dogfood aggregate) | ES | event-sourcing.md | Agreed 2026-10-21; model: `reference/laravel-event-sourcing-7.15.2` |
 
 Domains with no spec file yet, and the manual chapters that are their
 published reference:

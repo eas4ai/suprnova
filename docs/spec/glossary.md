@@ -188,3 +188,54 @@ REC-007): typed nodes and edges with scope, provenance and confidence,
 embeddings in the search collection, a blended score, a fallback to the
 starter engine under a confidence threshold. Avoid: large engine, RAG
 recommender (retrieval is one of its inputs).
+
+**Public page.** A GET route an application marks for publication: its
+render reads no session and carries no `auth`, flash, errors or
+per-request credential, so one rendering serves every visitor
+(static-publish.md, PUB-001). Agreed 2026-10-21. Avoid: static route,
+cached route.
+
+**Publication.** One run of the static publish task: render every public
+page, upload the HTML and JSON objects and the fingerprinted assets to the
+configured disk, then switch the live manifest in one write (PUB-002,
+PUB-003). Agreed 2026-10-21. Avoid: deploy, build.
+
+**Manifest.** The record of a publication: for each object its path,
+content digest, asset version and dependency tags; the live manifest is
+the one the CDN serves (PUB-002). Agreed 2026-10-21.
+
+**Page budget.** A configured limit the page budget audit asserts on a
+page and the assets it references: total weight, per-asset size, image
+format against size, cache lifetime, cookies, redirects, fonts and third
+party hosts (page-budget.md, BUDGET-001). Agreed 2026-10-21.
+
+**Signal.** A data-free message on a Live topic naming the topic, its
+cursor and the affected prop names; a bound Inertia page answers it with a
+partial reload through its own controller (inertia-live.md, SIGNAL-002).
+Agreed 2026-10-21. Avoid: event, broadcast, push.
+
+**Topic cursor.** The monotonic per-topic counter the framework owns; a
+render carries the cursor of each bound topic, and a client drops a signal
+at or below it (SIGNAL-002, SIGNAL-004). Agreed 2026-10-21. Avoid:
+version, sequence (the subscription log's sequence is a different
+counter).
+
+**Aggregate root.** An object that records domain events, applies them to
+its own state and persists them with an expected-version check; rebuilt
+from its stored events, from a snapshot when one exists (event-sourcing.md,
+ES-001). Agreed 2026-10-21. Avoid: entity, model.
+
+**Stored event.** One row of an aggregate's history: aggregate uuid and
+version, event version, a stable type name, payload, metadata and recorded
+time (ES-002). Agreed 2026-10-21.
+
+**Projector.** A handler that builds a read model from stored events and
+can be replayed from the first event after a reset (ES-003). Draft
+2026-10-21.
+
+**Reactor.** A handler that causes a side effect from a stored event and
+never runs during a replay (ES-003). Agreed 2026-10-21.
+
+**Replay.** Feeding stored events to projectors again from a position,
+with an explicit start and finish, reactors silent and live signals
+suppressed until it ends (ES-003, SIGNAL-003). Agreed 2026-10-21.
