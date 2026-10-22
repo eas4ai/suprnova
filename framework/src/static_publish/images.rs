@@ -351,7 +351,9 @@ pub async fn prepare(
                     }
                 }
             }
-        } else if name == "link" {
+        } else if name == "link"
+            && crate::page_budget::asset_link(attribute(&tag, "rel").unwrap_or_default())
+        {
             let rel = attribute(&tag, "rel")
                 .unwrap_or_default()
                 .to_ascii_lowercase();
@@ -360,10 +362,12 @@ pub async fn prepare(
             {
                 let replacement = if rel.split_ascii_whitespace().any(|part| part == "manifest") {
                     Some(preparation.manifest(&path).await?)
-                } else if rel
-                    .split_ascii_whitespace()
-                    .any(|part| part == "icon" || part == "apple-touch-icon")
-                    && (is_raster(&path) || raster_data_mime(&path).is_some())
+                } else if rel.split_ascii_whitespace().any(|part| {
+                    matches!(
+                        part,
+                        "icon" | "apple-touch-icon" | "apple-touch-icon-precomposed" | "mask-icon"
+                    )
+                }) && (is_raster(&path) || raster_data_mime(&path).is_some())
                 {
                     Some(preparation.image(&path, true).await?.original)
                 } else {
@@ -379,7 +383,11 @@ pub async fn prepare(
             "video" => &["src", "poster"],
             "audio" | "track" | "embed" => &["src"],
             "object" => &["data"],
-            "link" => &["href", "imagesrcset"],
+            "link"
+                if crate::page_budget::asset_link(attribute(&tag, "rel").unwrap_or_default()) =>
+            {
+                &["href", "imagesrcset"]
+            }
             _ => &[],
         };
         for field in fields {

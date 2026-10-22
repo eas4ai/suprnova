@@ -222,17 +222,7 @@ impl Document {
                 .split_ascii_whitespace()
                 .any(|r| r.eq_ignore_ascii_case(value))
         };
-        let linked = name == "link"
-            && [
-                "stylesheet",
-                "icon",
-                "apple-touch-icon",
-                "manifest",
-                "preload",
-                "modulepreload",
-            ]
-            .iter()
-            .any(|value| rel(value));
+        let linked = name == "link" && super::asset_link(attr("rel"));
         let fields: &[&str] = match name {
             "video" => &["src", "poster"],
             "audio" | "script" | "img" | "source" => &["src"],

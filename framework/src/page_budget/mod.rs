@@ -19,6 +19,25 @@ use url::Url;
 /// pattern; configure the pattern to match that naming convention.
 pub(crate) const DEFAULT_FINGERPRINT_PATTERN: &str = r"-(?:[A-Z0-9_-][A-Za-z0-9_-]{7}|[a-z][A-Z0-9_-][A-Za-z0-9_-]{6}|[a-z]{2}[A-Z0-9_-][A-Za-z0-9_-]{5}|[a-z]{3}[A-Z0-9_-][A-Za-z0-9_-]{4}|[a-z]{4}[A-Z0-9_-][A-Za-z0-9_-]{3}|[a-z]{5}[A-Z0-9_-][A-Za-z0-9_-]{2}|[a-z]{6}[A-Z0-9_-][A-Za-z0-9_-]|[a-z]{7}[A-Z0-9_-])$";
 
+/// Link relations that fetch asset objects rather than describe page navigation.
+pub(crate) fn asset_link(rel: &str) -> bool {
+    const RELATIONS: &[&str] = &[
+        "stylesheet",
+        "icon",
+        "apple-touch-icon",
+        "apple-touch-icon-precomposed",
+        "mask-icon",
+        "manifest",
+        "preload",
+        "modulepreload",
+    ];
+    rel.split_ascii_whitespace().any(|token| {
+        RELATIONS
+            .iter()
+            .any(|relation| token.eq_ignore_ascii_case(relation))
+    })
+}
+
 /// Limits shared by the test helper and deployment audit.
 #[derive(Clone, Debug)]
 pub struct PageBudget {

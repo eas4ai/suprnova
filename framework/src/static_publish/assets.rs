@@ -131,7 +131,11 @@ pub(crate) fn referenced_assets(
         let fields: &[&str] = match tag.name.as_str() {
             "img" | "source" => &["src", "srcset"],
             "script" | "video" | "audio" | "track" | "embed" => &["src", "poster"],
-            "link" => &["href", "imagesrcset"],
+            "link"
+                if crate::page_budget::asset_link(attribute(&tag, "rel").unwrap_or_default()) =>
+            {
+                &["href", "imagesrcset"]
+            }
             "object" => &["data"],
             _ => &[],
         };
@@ -436,7 +440,11 @@ pub(crate) fn version_assets(
         let fields: &[&str] = match tag.name.as_str() {
             "img" | "source" => &["src", "srcset"],
             "script" | "video" | "audio" | "track" | "embed" => &["src", "poster"],
-            "link" => &["href", "imagesrcset"],
+            "link"
+                if crate::page_budget::asset_link(attribute(&tag, "rel").unwrap_or_default()) =>
+            {
+                &["href", "imagesrcset"]
+            }
             "object" => &["data"],
             _ => &[],
         };
@@ -477,7 +485,7 @@ mod tests {
 
     #[test]
     fn pub_007_asset_parser_ignores_fake_markup_and_decodes_real_attributes() {
-        let paths = referenced_assets(br#"<script>const x = '<img src="/fake.png">';</script><!-- <img src='/fake.png'> --><link href='/app.123.css'><img src='../images/a&amp;b.png' srcset='/small.png 1x, /large.png 2x'><script src='/app.123.js'></script>"#, "/nested/page").expect("parsed assets");
+        let paths = referenced_assets(br#"<script>const x = '<img src="/fake.png">';</script><!-- <img src='/fake.png'> --><link rel='stylesheet' href='/app.123.css'><img src='../images/a&amp;b.png' srcset='/small.png 1x, /large.png 2x'><script src='/app.123.js'></script>"#, "/nested/page").expect("parsed assets");
         assert_eq!(
             paths.into_iter().collect::<Vec<_>>(),
             [
