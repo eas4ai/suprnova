@@ -47,8 +47,12 @@ fn agent_001_budget_warnings_allow_a_64_character_name_to_build() {
 /// The unmangled name proves `no_mangle` applied; without it the name is
 /// v0-mangled. The linker rejects two global definitions of one name during
 /// resolution. The executable localizes the survivor afterwards, so this
-/// test does not check its final binding.
+/// test does not check its final binding. A Windows executable carries no
+/// symbol table to read, so the test runs only where the executable records
+/// its symbols; the MSVC linker refuses two definitions of one name all the
+/// same.
 #[test]
+#[cfg(not(windows))]
 fn agent_001_tool_has_an_unmangled_one_byte_data_symbol() {
     use object::{Object, ObjectSymbol, SymbolKind};
 
