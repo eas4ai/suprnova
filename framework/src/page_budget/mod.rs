@@ -347,7 +347,7 @@ impl PageBudget {
                 );
             }
             if resource.decoded > self.raster_threshold_bytes && is_raster(resource) {
-                if !resource.manifest_icon && !alternatives.contains(url) {
+                if !alternatives.contains(url) {
                     audit.fail(
                         url,
                         "raster-format",

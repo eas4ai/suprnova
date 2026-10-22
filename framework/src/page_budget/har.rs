@@ -1,6 +1,6 @@
 //! Read transfer measurements without guessing that omitted bodies are empty.
 
-use super::{PageBudget, Resource, collect::Capture, discover, parse_url, same_origin};
+use super::{PageBudget, Resource, collect::Capture, parse_url, same_origin};
 use crate::FrameworkError;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
@@ -195,8 +195,8 @@ pub(super) fn read(json: &str, budget: &PageBudget) -> Result<Capture, Framework
     for resource in &mut resources {
         if manifest_urls.contains(resource.url.as_str()) {
             resource.manifest = true;
-            if let Some(body) = &resource.body {
-                for link in discover::manifest(&resource.url, body)?.links {
+            if resource.body.is_some() {
+                for link in capture.references(resource)?.links {
                     if !same_origin(&origin, &link.url)
                         && let Some(host) = link.url.host_str()
                     {

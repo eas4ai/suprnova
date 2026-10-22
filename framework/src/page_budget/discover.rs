@@ -274,22 +274,48 @@ pub(super) fn manifest(base: &Url, bytes: &[u8]) -> Result<References, crate::Fr
     let json: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| {
         crate::FrameworkError::bad_request(format!("page budget manifest {base}: {e}"))
     })?;
-    let links = json
+    let mut result = References::default();
+    let mut groups: BTreeMap<BTreeSet<String>, (bool, bool, Vec<String>)> = BTreeMap::new();
+    for icon in json
         .get("icons")
         .and_then(|v| v.as_array())
         .into_iter()
         .flatten()
-        .filter_map(|icon| icon.get("src").and_then(|v| v.as_str()))
-        .filter_map(|s| resolve(base, s))
-        .map(|url| Link {
+    {
+        let Some(url) = icon
+            .get("src")
+            .and_then(|v| v.as_str())
+            .and_then(|src| resolve(base, src))
+        else {
+            continue;
+        };
+        let sizes = icon
+            .get("sizes")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .split_ascii_whitespace()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        let mime = icon.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if !sizes.is_empty() {
+            let group = groups.entry(sizes).or_default();
+            group.0 |= matches!(mime, "image/webp" | "image/avif");
+            group.1 |= !matches!(mime, "image/webp" | "image/avif")
+                && (matches!(mime, "image/png" | "image/jpeg" | "image/gif" | "image/bmp")
+                    || legacy(url.path()));
+            group.2.push(url.to_string());
+        }
+        result.links.push(Link {
             url,
             manifest_icon: true,
             manifest: false,
-        })
-        .collect();
-    Ok(References {
-        links,
-        alternatives: BTreeSet::new(),
-        image_groups: Vec::new(),
-    })
+        });
+    }
+    // Manifest alternatives describe the same icon size and declare a modern type.
+    for (_, (modern, fallback, urls)) in groups {
+        if modern && fallback {
+            result.image_groups.push(urls);
+        }
+    }
+    Ok(result)
 }

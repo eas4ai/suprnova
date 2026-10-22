@@ -478,7 +478,7 @@ fn budget_001_large_modern_images_require_a_fallback_and_host_limits_apply() {
 
 #[cfg(feature = "media")]
 #[test]
-fn budget_001_png_fast_margin_and_manifest_exception_use_real_bytes() {
+fn budget_001_png_fast_margin_and_manifest_alternatives_use_real_bytes() {
     use base64::Engine;
     let mut pixels = Vec::new();
     for y in 0..64 {
@@ -519,11 +519,12 @@ fn budget_001_png_fast_margin_and_manifest_exception_use_real_bytes() {
                 "/app.webmanifest",
                 200,
                 "application/manifest+json",
-                r#"{"icons":[{"src":"icon.png"}]}"#,
+                r#"{"icons":[{"src":"icon.png","sizes":"64x64","type":"image/png"},{"src":"icon.webp","sizes":"64x64","type":"image/webp"}]}"#,
                 30,
                 &[],
             ),
             png,
+            entry("/icon.webp", 200, "image/webp", "webp", 1, &[]),
         ])
     };
     let strict = PageBudget {
@@ -538,7 +539,7 @@ fn budget_001_png_fast_margin_and_manifest_exception_use_real_bytes() {
     );
     assert!(
         !audit.findings.iter().any(|f| f.rule == "raster-format"),
-        "manifest icons can remain PNG: {audit}"
+        "matching manifest alternatives must pass: {audit}"
     );
     strict
         .audit_har(&capture(&fast))
@@ -820,3 +821,5 @@ fn budget_001_initial_https_upgrade_does_not_list_the_page_host_as_third_party()
     assert_eq!(audit.findings.len(), 1);
     assert_eq!(audit.findings[0].rule, "first-redirect");
 }
+
+mod review_manifest;

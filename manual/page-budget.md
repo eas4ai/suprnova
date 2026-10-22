@@ -43,8 +43,10 @@ The defaults use decimal bytes. Total transferred response bodies are limited
 to 1,000,000 bytes. An asset is limited to 250,000 bytes. Fonts together are
 limited to 100,000 bytes. A raster above 100,000 decoded bytes needs a WebP or
 AVIF alternative and a fallback. A retained PNG above that threshold must be
-within 10 percent of oxipng's fast preset. Manifest icons may remain PNG;
-the PNG compression rule still applies.
+within 10 percent of oxipng's fast preset. Manifest icons follow the same
+raster rule. A PNG fallback needs another entry in the same manifest with
+`type` `image/webp` or `image/avif` and the same `sizes`. The PNG compression
+rule still applies to that fallback.
 
 ```rust
 use suprnova::page_budget::PageBudget;
