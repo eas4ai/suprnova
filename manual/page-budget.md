@@ -61,13 +61,28 @@ the media pipeline's colour and metadata policy. Lossy media output keeps
 the framework's default quality of 85.
 
 Fingerprint detection uses a configurable regular expression against the file
-name without its extension. The default matches Vite's eight-character hash, including hashes with an
-internal hyphen, in names such as
+name without its extension. The default matches Vite's eight-character hash when it contains a digit,
+uppercase letter, underscore or hyphen, in names such as
 `main-BjmpJyAU.js`. Fingerprinted assets require
 `public, max-age=31536000, immutable`. Other static files default to
 `public, max-age=3600`, or the handler's configured cache policy. Static file
-responses issue no session or CSRF cookie. Page responses keep their normal
-session behavior.
+responses leave an untouched session unwritten and issue no session or CSRF
+cookie. If a request rotates a remember credential, regenerates a session or
+changes identity, security finalization still persists the change and delivers
+its required cookies. That response becomes private. Page responses keep their
+normal session behavior.
+
+Select another naming convention on both the audit and the static handler.
+The expression matches the filename without its extension. An invalid handler
+pattern returns an error on its first request.
+
+```rust
+use suprnova::{StaticFiles, page_budget::PageBudget};
+
+let pattern = r"\.v[0-9]+$";
+let files = StaticFiles::public().fingerprint(pattern).handler();
+let budget = PageBudget { fingerprint_pattern: pattern.into(), ..PageBudget::default() };
+```
 
 ## Audit a capture or URL
 

@@ -19,7 +19,7 @@ use url::Url;
 /// and is never served as immutable. A real hash that is all lowercase
 /// letters is rare (about one in a thousand) and only loses the long
 /// lifetime.
-const DEFAULT_FINGERPRINT_PATTERN: &str = r"-(?:[A-Z0-9_-][A-Za-z0-9_-]{7}|[a-z][A-Z0-9_-][A-Za-z0-9_-]{6}|[a-z]{2}[A-Z0-9_-][A-Za-z0-9_-]{5}|[a-z]{3}[A-Z0-9_-][A-Za-z0-9_-]{4}|[a-z]{4}[A-Z0-9_-][A-Za-z0-9_-]{3}|[a-z]{5}[A-Z0-9_-][A-Za-z0-9_-]{2}|[a-z]{6}[A-Z0-9_-][A-Za-z0-9_-]|[a-z]{7}[A-Z0-9_-])$";
+pub(crate) const DEFAULT_FINGERPRINT_PATTERN: &str = r"-(?:[A-Z0-9_-][A-Za-z0-9_-]{7}|[a-z][A-Z0-9_-][A-Za-z0-9_-]{6}|[a-z]{2}[A-Z0-9_-][A-Za-z0-9_-]{5}|[a-z]{3}[A-Z0-9_-][A-Za-z0-9_-]{4}|[a-z]{4}[A-Z0-9_-][A-Za-z0-9_-]{3}|[a-z]{5}[A-Z0-9_-][A-Za-z0-9_-]{2}|[a-z]{6}[A-Z0-9_-][A-Za-z0-9_-]|[a-z]{7}[A-Z0-9_-])$";
 
 /// Limits shared by the test helper and deployment audit.
 #[derive(Clone, Debug)]
@@ -234,15 +234,6 @@ pub(crate) fn fingerprinted(url: &Url, pattern: &Regex) -> bool {
     let file = url.path().rsplit('/').next().unwrap_or("");
     let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
     pattern.is_match(stem)
-}
-
-pub(crate) fn default_fingerprinted_path(path: &std::path::Path) -> bool {
-    static PATTERN: std::sync::LazyLock<Result<Regex, regex::Error>> =
-        std::sync::LazyLock::new(|| Regex::new(DEFAULT_FINGERPRINT_PATTERN));
-    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-        return false;
-    };
-    PATTERN.as_ref().is_ok_and(|pattern| pattern.is_match(stem))
 }
 
 impl PageBudget {

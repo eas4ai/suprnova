@@ -1466,6 +1466,9 @@ impl SessionMiddleware {
                 .and_then(serde_json::Value::as_str)
                 .is_some();
 
+        let loaded_user_id = session.user_id.clone();
+        let loaded_session_id = session.id.clone();
+
         // Age only this request's copy. A mark set later by route middleware
         // prevents this copy, including consumed flash, from reaching the store.
         if !request.is_precognitive() {
@@ -1566,9 +1569,22 @@ impl SessionMiddleware {
             )
             .await;
 
-        // Static files are independent of visitor state. Do not persist the
-        // request's session or issue pending, refresh or stale-cookie headers.
-        if crate::http::HttpResponse::is_static_asset_response(&response) {
+        // An untouched asset needs no session write or refresh cookie. Security
+        // changes must still commit, including credentials consumed before next.
+        let unchanged = !slot.is_poisoned()
+            && crate::lock::recover(&slot).as_ref().is_some_and(|session| {
+                !session.is_dirty()
+                    && session.id == loaded_session_id
+                    && session.user_id == loaded_user_id
+            })
+            && crate::lock::recover(&pending).is_empty()
+            && crate::lock::recover(&pending_remember_revocations).is_empty()
+            && crate::lock::recover(&pending_opaque_session).is_empty()
+            && {
+                let transition = crate::lock::recover(&identity_transition);
+                transition.signed_in.is_none() && transition.retired.is_empty()
+            };
+        if crate::http::HttpResponse::is_static_asset_response(&response) && unchanged {
             return response;
         }
 

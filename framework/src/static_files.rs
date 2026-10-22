@@ -30,6 +30,8 @@ const SNIFF_PREFIX_BYTES: usize = 8 * 1024;
 pub struct StaticFiles {
     root: PathBuf,
     cache_control: Option<String>,
+    fingerprint_pattern: String,
+    fingerprint_regex: std::sync::OnceLock<Result<regex::Regex, String>>,
 }
 
 impl StaticFiles {
@@ -43,6 +45,8 @@ impl StaticFiles {
         Self {
             root: root.into(),
             cache_control: None,
+            fingerprint_pattern: crate::page_budget::DEFAULT_FINGERPRINT_PATTERN.into(),
+            fingerprint_regex: std::sync::OnceLock::new(),
         }
     }
 
@@ -52,6 +56,16 @@ impl StaticFiles {
     /// shared cache can retain their content without revalidation.
     pub fn cache_control(mut self, value: impl Into<String>) -> Self {
         self.cache_control = Some(value.into());
+        self
+    }
+
+    /// Select the file-stem convention used for immutable caching.
+    ///
+    /// Invalid patterns return an error on the first request, so building the
+    /// route does not panic and configuration failures remain visible.
+    pub fn fingerprint(mut self, pattern: impl Into<String>) -> Self {
+        self.fingerprint_pattern = pattern.into();
+        self.fingerprint_regex = std::sync::OnceLock::new();
         self
     }
 
@@ -82,7 +96,21 @@ impl StaticFiles {
             return not_found();
         };
 
-        let fingerprinted = crate::page_budget::default_fingerprinted_path(&relative_path);
+        let pattern = self
+            .fingerprint_regex
+            .get_or_init(|| {
+                regex::Regex::new(&self.fingerprint_pattern).map_err(|error| error.to_string())
+            })
+            .as_ref()
+            .map_err(|error| {
+                crate::FrameworkError::bad_request(format!(
+                    "static file fingerprint pattern: {error}"
+                ))
+            })?;
+        let fingerprinted = relative_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| pattern.is_match(stem));
         let root = self.root.clone();
         let Ok(Some(OpenedFile {
             file,

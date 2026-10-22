@@ -363,6 +363,10 @@ stays inside `public/`, and the server opens each file through the
 directories it checked, so a directory replaced by a link while a request
 is in flight cannot redirect the request. `public/` itself may be a link.
 
+`StaticFiles::fingerprint(pattern)` selects the filename-stem expression for
+one-year immutable caching. The default matches Vite hashes. Keep this expression
+in sync with `PageBudget::fingerprint_pattern`. See [Page Budget](page-budget.md).
+
 ## Directories you'll add as the app grows
 
 The scaffold gives you the minimum - enough to ship the welcome flow
