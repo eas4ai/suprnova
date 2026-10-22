@@ -542,11 +542,21 @@ async fn budget_002_invalid_fingerprint_returns_an_error_on_use() {
     let handler = suprnova::StaticFiles::from_dir(dir.path())
         .fingerprint("[")
         .handler();
-    let response = handler(suprnova::Request::for_test_with_headers(
-        "GET",
-        "/app.js",
-        Vec::<(&str, &str)>::new(),
-    ))
-    .await;
-    assert!(response.is_err(), "invalid patterns must return an error");
+    for _ in 0..2 {
+        let response = handler(suprnova::Request::for_test_with_headers(
+            "GET",
+            "/app.js",
+            Vec::<(&str, &str)>::new(),
+        ))
+        .await;
+        let error = match response {
+            Err(error) => error,
+            Ok(_) => panic!("invalid patterns must return an error"),
+        };
+        assert_eq!(
+            error.status_code(),
+            500,
+            "invalid handler configuration is a server error on every request"
+        );
+    }
 }

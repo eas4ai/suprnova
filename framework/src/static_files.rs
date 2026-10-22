@@ -61,8 +61,9 @@ impl StaticFiles {
 
     /// Select the file-stem convention used for immutable caching.
     ///
-    /// Invalid patterns return an error on the first request, so building the
-    /// route does not panic and configuration failures remain visible.
+    /// An invalid pattern is cached and fails every eligible request with a server
+    /// error. Building the route does not panic, so configuration failures
+    /// remain visible on the request path.
     pub fn fingerprint(mut self, pattern: impl Into<String>) -> Self {
         self.fingerprint_pattern = pattern.into();
         self.fingerprint_regex = std::sync::OnceLock::new();
@@ -103,9 +104,7 @@ impl StaticFiles {
             })
             .as_ref()
             .map_err(|error| {
-                crate::FrameworkError::bad_request(format!(
-                    "static file fingerprint pattern: {error}"
-                ))
+                crate::FrameworkError::internal(format!("static file fingerprint pattern: {error}"))
             })?;
         let fingerprinted = relative_path
             .file_stem()
