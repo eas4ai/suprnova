@@ -117,6 +117,7 @@
     - [HTTP Tests](http-tests.md)
     - [Database Tests](database-testing.md)
     - [Mocking & Fakes](mocking.md)
+    - [Page Budget](page-budget.md)
 - ## Payments
     - [Overview](payments.md)
     - [Stripe](payments-stripe.md)
@@ -155,5 +156,3 @@
 ---
 
 *[API Documentation (rustdoc)](https://docs.rs/suprnova) - once published.*
-
-- [Page Budget](page-budget.md) - test page weight and asset policies.

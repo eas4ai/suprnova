@@ -1395,7 +1395,6 @@ A short list of footguns that catch first-time authors:
 | Panic-boundary test pattern | `framework/tests/middleware/panic_safety.rs` |
 | Auth + middleware end-to-end pattern | `framework/tests/auth_flows/email_verified_middleware.rs` |
 
-
 ## Page budgets
 
 `TestClient::audit_page` follows a document and its assets through the same

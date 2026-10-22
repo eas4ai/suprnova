@@ -728,7 +728,6 @@ with cargo's. Database tests run in parallel by default - the
 thread-local container and per-test in-memory SQLite are designed for
 exactly that.
 
-
 See [Page Budget](page-budget.md) to audit a document and its assets together.
 
 ## Next

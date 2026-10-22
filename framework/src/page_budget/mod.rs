@@ -12,7 +12,14 @@ use std::fmt;
 use std::time::Duration;
 use url::Url;
 
-const DEFAULT_FINGERPRINT_PATTERN: &str = r"-[A-Za-z0-9_-]{8}$";
+/// Vite's default `[name]-[hash]` output: a hyphen and eight base64url
+/// characters. At least one of the eight must be a digit, an uppercase
+/// letter, an underscore or a hyphen, so an eight-letter word after a
+/// hyphen (`site-manifest.json`, `app-settings.js`) is not a fingerprint
+/// and is never served as immutable. A real hash that is all lowercase
+/// letters is rare (about one in a thousand) and only loses the long
+/// lifetime.
+const DEFAULT_FINGERPRINT_PATTERN: &str = r"-(?:[A-Z0-9_-][A-Za-z0-9_-]{7}|[a-z][A-Z0-9_-][A-Za-z0-9_-]{6}|[a-z]{2}[A-Z0-9_-][A-Za-z0-9_-]{5}|[a-z]{3}[A-Z0-9_-][A-Za-z0-9_-]{4}|[a-z]{4}[A-Z0-9_-][A-Za-z0-9_-]{3}|[a-z]{5}[A-Z0-9_-][A-Za-z0-9_-]{2}|[a-z]{6}[A-Z0-9_-][A-Za-z0-9_-]|[a-z]{7}[A-Z0-9_-])$";
 
 /// Limits shared by the test helper and deployment audit.
 #[derive(Clone, Debug)]

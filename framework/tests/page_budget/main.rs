@@ -689,6 +689,8 @@ async fn budget_002_other_files_keep_short_or_configured_cache_lifetimes() {
         "apple-touch-icon.png",
         "android-chrome-512x512.png",
         "not-fingerprint.js",
+        "site-manifest.json",
+        "app-settings.js",
     ] {
         std::fs::write(dir.path().join(name), "asset").unwrap();
         let response = origin_client(dir.path())
