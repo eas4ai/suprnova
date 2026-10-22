@@ -2605,6 +2605,17 @@ async fn lead_render(
         let _ = runtime.coordinator.release(lease).await;
         return response;
     };
+    // Request prop reads are slot-scoped, so only their registered stitched
+    // representation can publish. A Complete entry would retain private bytes.
+    if let Some(facts) = &report.inertia_document
+        && (!is_stitched(policy)
+            || facts.route.is_empty()
+            || facts.route != job.input.route_pattern)
+    {
+        LookupOutcome::Declined(LookupDeclineReason::InertiaWithoutRegisteredStitching).record();
+        let _ = runtime.coordinator.release(lease).await;
+        return Ok(response);
+    }
     let search_decline = if report.context.viewer_scoped_search {
         Some(LookupDeclineReason::ViewerScopedSearch)
     } else if report.context.analytics_search {

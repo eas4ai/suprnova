@@ -108,6 +108,7 @@ pub struct InertiaResponse {
     pub(super) component: String,
     pub(super) props: IndexMap<String, Prop>,
     pub(super) cache_page: Option<Arc<super::cache::CachePage>>,
+    pub(super) cache_declared: bool,
     flash: serde_json::Map<String, Value>,
     config: InertiaConfig,
     title: Option<String>,
@@ -385,6 +386,7 @@ impl InertiaResponse {
             component: component.into(),
             props: IndexMap::new(),
             cache_page: None,
+            cache_declared: false,
             flash: serde_json::Map::new(),
             // One `RwLock` read and one clone of the config per response:
             // a few short strings and paths, the version (a `String`
@@ -1383,7 +1385,11 @@ impl InertiaResponse {
     ) -> Result<HttpResponse, FrameworkError> {
         self.prepare_component()
             .map_err(reflash_session_values_after_eager_error)?;
-        let cache = super::cache::PageAssembly::new(self.cache_page.clone(), &self.component);
+        let cache = super::cache::PageAssembly::new(
+            self.cache_page.clone(),
+            &self.component,
+            self.cache_declared,
+        );
         let cacheable = cache.enabled();
         if cache.observes_public_session() && crate::session::middleware::session_scope_installed()
         {
@@ -1437,6 +1443,7 @@ impl InertiaResponse {
             component,
             props,
             cache_page: _,
+            cache_declared: _,
             flash: response_flash,
             config,
             title,
@@ -1840,6 +1847,7 @@ impl InertiaResponse {
             component,
             props,
             cache_page: _,
+            cache_declared: _,
             flash: response_flash,
             config,
             title: _,

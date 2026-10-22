@@ -180,21 +180,26 @@ impl CachePage {
 pub(crate) struct PageAssembly {
     schema: Option<Arc<CachePage>>,
     cached: Option<Value>,
+    declared: bool,
 }
 
 impl PageAssembly {
     /// A contract mismatch resolves public props afresh.
-    pub(crate) fn new(schema: Option<Arc<CachePage>>, component: &str) -> Self {
+    pub(crate) fn new(schema: Option<Arc<CachePage>>, component: &str, declared: bool) -> Self {
         let cached = schema.as_ref().and_then(|schema| {
             cached_shell(component)
                 .filter(|shell| shell["contract"].as_str() == Some(schema.contract().as_str()))
         });
-        Self { schema, cached }
+        Self {
+            schema,
+            cached,
+            declared,
+        }
     }
 
-    /// Session and response work need request attribution only for stitched pages.
+    /// Declared pages keep session and response work out of a reusable shell.
     pub(crate) fn enabled(&self) -> bool {
-        self.schema.is_some()
+        self.declared
     }
 
     /// A public session-derived share must retain the ordinary privacy refusal.
@@ -225,9 +230,9 @@ impl PageAssembly {
 
     /// Request fields must not contribute observations to the public shell.
     pub(crate) fn request_slot(&self, key: &str) -> bool {
-        self.schema
-            .as_ref()
-            .is_some_and(|schema| !schema.is_public(key.split('.').next().unwrap_or(key)))
+        self.schema.as_ref().map_or(self.declared, |schema| {
+            !schema.is_public(key.split('.').next().unwrap_or(key))
+        })
     }
 
     /// Missing optional or expired values still run their current resolver.
@@ -262,6 +267,11 @@ impl PageAssembly {
     ) -> Result<(), FrameworkError> {
         if let Some(schema) = &self.schema {
             capture(&schema.shell(page), response.body(), &schema.route)?;
+        } else if self.declared {
+            // An unregistered alias renders privately and must never publish as Complete.
+            capture(&Value::Null, response.body(), "")?;
+        }
+        if self.declared {
             super::visit::mark_cacheable();
         }
         Ok(())
@@ -353,31 +363,19 @@ impl Inertia {
 impl InertiaResponse {
     /// Attaches props whose cache boundaries the derive checked.
     ///
-    /// The component must have a matching `Inertia::cache_page` registration.
+    /// Only the registered request route can reuse public props. Other routes
+    /// render all props privately and decline publication.
     /// Lazy public props run on a miss; per-request props run on every visit.
     pub fn cacheable<P: CacheableInertiaProps>(mut self, props: P) -> Result<Self, FrameworkError> {
         let registry = App::inertia_registry();
         let pages = crate::lock::read(&registry.cache_pages, "Inertia cache pages")?;
         let route = CACHE_ROUTE.try_with(Clone::clone).ok();
-        let mut matches = pages.iter().filter(|((registered_route, component), _)| {
-            component == &self.component
-                && route.as_ref().is_none_or(|route| route == registered_route)
-        });
-        let page = matches
-            .next()
-            .map(|(_, page)| page.clone())
-            .ok_or_else(|| {
-                FrameworkError::internal(format!(
-                    "Inertia cache page `{}` was not registered for this route at boot",
-                    self.component
-                ))
-            })?;
-        if matches.next().is_some() {
-            return Err(FrameworkError::internal(format!(
-                "Inertia cache page `{}` needs a request route to select its registration",
-                self.component
-            )));
-        }
+        let page = pages
+            .iter()
+            .find(|((registered_route, component), _)| {
+                component == &self.component && route.as_ref() == Some(registered_route)
+            })
+            .map(|(_, page)| page.clone());
         drop(pages);
         let names = |values: &[&str]| {
             values
@@ -385,14 +383,17 @@ impl InertiaResponse {
                 .map(|v| (*v).to_owned())
                 .collect::<BTreeSet<_>>()
         };
-        if page.public != names(P::PUBLIC) || page.per_request != names(P::PER_REQUEST) {
+        if let Some(page) = &page
+            && (page.public != names(P::PUBLIC) || page.per_request != names(P::PER_REQUEST))
+        {
             return Err(FrameworkError::internal(format!(
                 "Inertia cache route `{}` uses a different props declaration",
                 page.route
             )));
         }
         self.props.extend(props.cache_props()?);
-        self.cache_page = Some(page);
+        self.cache_page = page;
+        self.cache_declared = true;
         Ok(self)
     }
 }
@@ -466,7 +467,7 @@ pub struct InertiaDocumentFacts {
     pub shell: Bytes,
     /// Digest of the actual response, to decline post-render body rewrites.
     pub digest: [u8; 32],
-    /// The registered route pattern, used to bind the request slot.
+    /// The registered route pattern, or empty when no registration matches.
     pub route: String,
 }
 

@@ -97,10 +97,14 @@ pub(crate) async fn serve_prepared(request: Request, next: Next) -> Response {
     let registered = crate::lock::read(&registry.cache_pages, "Inertia cache pages")
         .map(|pages| pages.keys().any(|(pattern, _)| pattern == &route))
         .unwrap_or(false);
-    if !registered {
-        return next(request).await;
-    }
-    crate::inertia::cache::with_route(route, serve_registered(request, next)).await
+    crate::inertia::cache::with_route(route, async move {
+        if registered {
+            serve_registered(request, next).await
+        } else {
+            next(request).await
+        }
+    })
+    .await
 }
 
 async fn serve_registered(mut request: Request, next: Next) -> Response {

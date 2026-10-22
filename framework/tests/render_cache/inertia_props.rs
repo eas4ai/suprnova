@@ -483,3 +483,84 @@ async fn cache_012_large_request_prop_uses_current_values_without_repeating_work
     assert_eq!(PRIVATE_RUNS.load(Ordering::SeqCst), 2);
     assert_eq!(SHARED_RUNS.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn cache_review_1_unregistered_alias_never_stores_request_props() {
+    PUBLIC_RUNS.store(0, Ordering::SeqCst);
+    PRIVATE_RUNS.store(0, Ordering::SeqCst);
+    let router: Router = Router::new()
+        .get("/safe", page)
+        .get("/alias", page)
+        .middleware(SessionAndGuard)
+        .into();
+    let policy = |class| {
+        RenderCachePolicy::builder(class)
+            .freshness(FreshnessPolicy::new(60_000, 0, 0).unwrap())
+            .vary(VarianceDimension::Locale)
+            .build()
+            .unwrap()
+    };
+    let router = router
+        .try_render_cache("/safe", policy(RepresentationClass::PublicShellStitched))
+        .unwrap()
+        .try_render_cache("/alias", policy(RepresentationClass::PublicShared))
+        .unwrap();
+    let harness = support::boot_with_inertia_routes_setup(router, || {
+        Inertia::install(
+            &InertiaConfig::new()
+                .development(true)
+                .version("cache-v1")
+                .ssr_disabled(),
+        )
+        .unwrap();
+        Inertia::cache_page::<PageProps>("/safe", "Cache/Stitched", &[], &["errors", "flash"])
+            .unwrap();
+    })
+    .await;
+    Post::create(attrs! { title: "shared article" })
+        .await
+        .unwrap();
+    User::create(attrs! { name: "Alice" }).await.unwrap();
+    User::create(attrs! { name: "Bob" }).await.unwrap();
+    for user in ["1", "2"] {
+        let response = dispatch_get(&harness, "/safe", &headers(user, user)).await;
+        assert_eq!(response.status.as_u16(), 200);
+    }
+    assert_eq!(
+        PUBLIC_RUNS.load(Ordering::SeqCst),
+        1,
+        "registered shell replays"
+    );
+    suprnova::render_cache::telemetry::reset_recorded_lookups_for_test();
+    let first = dispatch_get(&harness, "/alias", &headers("1", "alice")).await;
+    let second = dispatch_get(&harness, "/alias", &headers("2", "bob")).await;
+    assert_eq!(first.status.as_u16(), 200);
+    assert_eq!(second.status.as_u16(), 200);
+    let first_page: Value = serde_json::from_slice(&first.body).unwrap();
+    let second_page: Value = serde_json::from_slice(&second.body).unwrap();
+    assert_eq!(first_page["props"]["viewer"]["name"], "Alice");
+    assert_eq!(second_page["props"]["viewer"]["name"], "Bob");
+    assert_eq!(second_page["props"]["viewer"]["session"], "bob");
+    for response in [first, second] {
+        assert_eq!(response.header("cache-control"), Some("private, no-store"));
+        assert!(response.header("age").is_none());
+    }
+    assert_eq!(PUBLIC_RUNS.load(Ordering::SeqCst), 3);
+    assert_eq!(PRIVATE_RUNS.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        suprnova::render_cache::RenderCache::store_inspection()
+            .await
+            .unwrap()
+            .entries,
+        1
+    );
+    let declines = suprnova::render_cache::telemetry::recorded_lookups_for_test();
+    assert_eq!(
+        declines
+            .iter()
+            .filter(|event| event.reason == Some("inertia_without_registered_stitching"))
+            .count(),
+        2
+    );
+}

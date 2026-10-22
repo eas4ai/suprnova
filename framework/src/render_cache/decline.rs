@@ -67,6 +67,8 @@ pub(crate) enum LookupDeclineReason {
     InvalidStitchCapture,
     /// A rendered document declared `NoStore`.
     NoStoreIntent,
+    /// Cacheable Inertia facts do not belong to this registered stitched route.
+    InertiaWithoutRegisteredStitching,
     /// A public-seed island's promotion deadline could not be resolved.
     UnresolvableSeedDeadline,
     // Invariants over the key.
@@ -159,6 +161,7 @@ impl LookupDeclineReason {
             Self::IdentityBoundWithoutStitching => "identity_bound_without_stitching",
             Self::InvalidStitchCapture => "invalid_stitch_capture",
             Self::NoStoreIntent => "no_store_intent",
+            Self::InertiaWithoutRegisteredStitching => "inertia_without_registered_stitching",
             Self::UnresolvableSeedDeadline => "unresolvable_seed_deadline",
             Self::UnreasonedPrivateClass => "unreasoned_private_class",
             Self::PrincipalUndeclared => "principal_undeclared",
@@ -212,6 +215,7 @@ impl LookupDeclineReason {
         Self::IdentityBoundWithoutStitching,
         Self::InvalidStitchCapture,
         Self::NoStoreIntent,
+        Self::InertiaWithoutRegisteredStitching,
         Self::UnresolvableSeedDeadline,
         Self::UnreasonedPrivateClass,
         Self::PrincipalUndeclared,
