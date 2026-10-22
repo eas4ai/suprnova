@@ -326,13 +326,20 @@ pub(crate) fn rewrite_public_image_urls(
                 }
                 None => false,
             },
-            serde_json::Value::Array(values) => values.iter_mut().fold(false, |changed, value| {
-                rewrite(value, replacements) || changed
-            }),
+            // Every element is visited: `any` would stop at the first rewrite.
+            serde_json::Value::Array(values) => {
+                let mut changed = false;
+                for value in values.iter_mut() {
+                    changed |= rewrite(value, replacements);
+                }
+                changed
+            }
             serde_json::Value::Object(values) => {
-                values.values_mut().fold(false, |changed, value| {
-                    rewrite(value, replacements) || changed
-                })
+                let mut changed = false;
+                for value in values.values_mut() {
+                    changed |= rewrite(value, replacements);
+                }
+                changed
             }
             _ => false,
         }

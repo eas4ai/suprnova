@@ -270,8 +270,7 @@ async fn pub_003_round2_2_takeover_fences_old_commit_and_rollback() {
                 .events()
                 .unwrap()
                 .into_iter()
-                .filter(|event| event.starts_with("switch:"))
-                .last()
+                .rfind(|event| event.starts_with("switch:"))
                 .unwrap(),
             format!("switch:{live}")
         );

@@ -691,7 +691,8 @@ fn compile_manual_example(example: &str) {
         .arg("-L")
         .arg(format!("dependency={}", deps.display()))
         .env("CARGO_MANIFEST_DIR", directory.path());
-    for name in ["suprnova"] {
+    {
+        let name = "suprnova";
         let library = std::fs::read_dir(&deps)
             .unwrap()
             .filter_map(Result::ok)

@@ -267,26 +267,22 @@ impl LiveTopics {
         {
             return Ok(());
         }
-        if let Some((component, stream)) = topic.split_once("::") {
-            if let Ok(component) = ComponentName::parse(component) {
-                if self
-                    .state
-                    .topics
-                    .registry
-                    .topic_for_component(&component)
-                    .is_none()
-                    && let Ok(descriptor) = self.state.topics.registry.engine().resolve(&component)
-                {
-                    if descriptor
-                        .metadata()
-                        .subscriptions()
-                        .iter()
-                        .any(|s| s.stream().as_str() == stream)
-                    {
-                        return Ok(());
-                    }
-                }
-            }
+        if let Some((component, stream)) = topic.split_once("::")
+            && let Ok(component) = ComponentName::parse(component)
+            && self
+                .state
+                .topics
+                .registry
+                .topic_for_component(&component)
+                .is_none()
+            && let Ok(descriptor) = self.state.topics.registry.engine().resolve(&component)
+            && descriptor
+                .metadata()
+                .subscriptions()
+                .iter()
+                .any(|s| s.stream().as_str() == stream)
+        {
+            return Ok(());
         }
         Err(FrameworkError::internal(format!(
             "Live topic `{topic}` is not registered"
@@ -676,10 +672,10 @@ async fn flush_batch(mut batch: Option<ReadyBatch>) -> Result<(), FrameworkError
             batch = release(&mut buffer);
         } else {
             for change in changes {
-                if let Err(error) = change.publish().await {
-                    if failure.is_none() {
-                        failure = Some(error);
-                    }
+                if let Err(error) = change.publish().await
+                    && failure.is_none()
+                {
+                    failure = Some(error);
                 }
             }
         }
