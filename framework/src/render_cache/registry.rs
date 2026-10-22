@@ -17,7 +17,11 @@ pub(crate) fn has_a_producer(dimension: &VarianceDimension) -> bool {
         | VarianceDimension::Media
         | VarianceDimension::Encoding
         | VarianceDimension::Tenant
-        | VarianceDimension::Principal => true,
+        | VarianceDimension::Principal
+        | VarianceDimension::Inertia
+        | VarianceDimension::InertiaPartial
+        | VarianceDimension::InertiaVersion
+        | VarianceDimension::InertiaProtocol => true,
         VarianceDimension::FeatureVersion
         | VarianceDimension::ConfigVersion
         | VarianceDimension::Application(_) => false,

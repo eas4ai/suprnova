@@ -37,6 +37,7 @@ pub mod collector;
 pub mod file_store;
 pub mod hardening;
 pub mod hints;
+mod inertia;
 pub mod ledger;
 pub mod live;
 pub mod middleware;

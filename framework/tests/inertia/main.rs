@@ -6,6 +6,7 @@
 pub mod backlog_defects;
 pub mod backlog_defects_feature_map;
 // `install_test_encryption_key` and `TestClock` compile with the `testing` feature alone.
+mod cache_representations;
 #[cfg(feature = "testing")]
 pub mod devtools;
 #[path = "../support/env_lock.rs"]

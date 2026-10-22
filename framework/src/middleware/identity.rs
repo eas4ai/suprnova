@@ -319,6 +319,28 @@ pub(crate) fn sort_by_priority(
         }
     });
 
+    // An asset mismatch must answer before a stored page can short-circuit it.
+    let protocol = [
+        TypeId::of::<crate::InertiaMiddleware>(),
+        TypeId::of::<crate::InertiaHeadersMiddleware>(),
+        TypeId::of::<crate::InertiaVersionMiddleware>(),
+        TypeId::of::<crate::inertia::VersionChangeHook>(),
+    ];
+    for id in protocol {
+        if let (Some(cache), Some(check)) = (
+            order.iter().position(|index| {
+                type_of(&chain[*index])
+                    == Some(TypeId::of::<crate::render_cache::RenderCacheMiddleware>())
+            }),
+            order
+                .iter()
+                .position(|index| type_of(&chain[*index]) == Some(id)),
+        ) && check > cache
+        {
+            let index = order.remove(check);
+            order.insert(cache, index);
+        }
+    }
     let mut slots: Vec<Option<BoxedMiddleware>> = chain.into_iter().map(Some).collect();
     order
         .into_iter()

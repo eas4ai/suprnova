@@ -432,6 +432,30 @@ for `suprnova::Cache` when you have a specific value you want to compute
 once and reuse; reach for RenderCache when you have a whole route whose
 response is expensive to render and safe to share.
 
+### Inertia representations
+
+Install Inertia before serving cached pages. RenderCache declares `X-Inertia`,
+the partial component, sorted `only` and `except` sets, and the current and
+requested asset versions in every Inertia key. List entries retain whitespace,
+as the Inertia protocol requires. Reset, once exclusions, error bags, and scroll
+intent also partition entries. A stale GET version returns 409 before lookup.
+An Inertia response keeps `Vary: X-Inertia` and JSON hits keep `X-Inertia: true`.
+The usual eligibility and privacy rules still apply. Session reads decline a
+Complete page. Declare `Locale` for document shells.
+
+```rust,no_run
+use suprnova::render_cache::{FreshnessPolicy, RenderCachePolicy, RepresentationClass, VarianceDimension};
+
+fn page_policy() -> Result<RenderCachePolicy, suprnova_live::render_cache::RenderCacheError> {
+    RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0)?)
+        .vary(VarianceDimension::Locale)
+        .build()
+}
+```
+
+See [Inertia responses](frontend-inertia-responses.md) and [Representations](render-cache-representations.md).
+
 ### Why Suprnova diverges
 
 Laravel has no equivalent in the framework itself. Response caching is a

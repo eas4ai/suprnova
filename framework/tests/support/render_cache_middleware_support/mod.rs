@@ -3285,16 +3285,44 @@ async fn dispatch_recording(
     frames: Option<FrameLog>,
     server_timings: Option<ServerTimingLog>,
 ) -> TestResponse {
+    let mut headers = hyper::HeaderMap::new();
+    for (name, value) in extra_headers {
+        headers.append(
+            hyper::header::HeaderName::from_bytes(name.as_bytes()).expect("header name"),
+            hyper::header::HeaderValue::from_str(value).expect("header value"),
+        );
+    }
+    dispatch_with_headers(harness, method, path, headers, frames, server_timings).await
+}
+
+/// Raw protocol bytes use the same wire path as every cache integration test.
+pub async fn dispatch_inertia_bytes(harness: &Harness, path: &str, value: &[u8]) -> TestResponse {
+    let mut headers = hyper::HeaderMap::new();
+    headers.insert(
+        "x-inertia",
+        hyper::header::HeaderValue::from_bytes(value).expect("header bytes"),
+    );
+    headers.insert(
+        "x-inertia-version",
+        hyper::header::HeaderValue::from_static("cache-v1"),
+    );
+    dispatch_with_headers(harness, hyper::Method::GET, path, headers, None, None).await
+}
+
+async fn dispatch_with_headers(
+    harness: &Harness,
+    method: hyper::Method,
+    path: &str,
+    headers: hyper::HeaderMap,
+    frames: Option<FrameLog>,
+    server_timings: Option<ServerTimingLog>,
+) -> TestResponse {
     let mut builder = hyper::Request::builder().method(method).uri(path);
-    // A test that names the host sends that host and no second one.
-    if !extra_headers
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
-    {
+    if !headers.contains_key("host") {
         builder = builder.header("host", "127.0.0.1");
     }
-    for (name, value) in extra_headers {
-        builder = builder.header(*name, *value);
+    for (name, value) in &headers {
+        builder = builder.header(name, value);
     }
     let request = builder
         .body(Full::new(Bytes::new()))
@@ -3403,4 +3431,26 @@ pub async fn dispatch_get(
 /// Dispatches a `HEAD` request to `path`.
 pub async fn dispatch_head(harness: &Harness, path: &str) -> TestResponse {
     dispatch(harness, hyper::Method::HEAD, path, &[]).await
+}
+
+/// Installs protocol middleware after the cache to exercise enforced ordering.
+pub async fn boot_with_inertia_routes(router: Router) -> Arc<Harness> {
+    let harness = boot_with_render_cache().await;
+    let mut harness = Arc::try_unwrap(harness).ok().expect("sole harness owner");
+    let mut config = RenderCacheConfig::from_env().expect("cache config");
+    config.enabled = true;
+    config.l1 = suprnova::render_cache::L1Config::Disabled;
+    harness.router = Arc::new(
+        RenderCache::install(router, config)
+            .await
+            .expect("cache install"),
+    );
+    suprnova::Inertia::install(
+        &suprnova::InertiaConfig::new()
+            .development(true)
+            .version("cache-v1"),
+    )
+    .expect("Inertia install");
+    harness.middleware = Arc::new(MiddlewareRegistry::from_global());
+    Arc::new(harness)
 }

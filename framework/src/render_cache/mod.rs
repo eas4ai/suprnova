@@ -37,6 +37,7 @@ pub mod console;
 pub(crate) mod decline;
 pub mod file_store;
 pub mod hints;
+mod inertia;
 pub mod ledger;
 pub mod live;
 pub mod middleware;

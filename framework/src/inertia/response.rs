@@ -198,7 +198,9 @@ impl StagedInertiaSessionValues {
 
     fn stage() -> Self {
         let new_flash_data = flash::flash_data_new_key();
-        let entries = crate::session::session()
+        let entries = crate::session::middleware::session_scope_installed()
+            .then(crate::session::session)
+            .flatten()
             .map(|session| {
                 session
                     .data
@@ -270,6 +272,9 @@ impl StagedInertiaSessionValues {
     /// the session still holds what was staged (a handler that pulled the
     /// flash data before the render sends none).
     fn page_flash(&self) -> serde_json::Map<String, Value> {
+        if self.entries.is_empty() {
+            return serde_json::Map::new();
+        }
         let visible = flash::drain_session_flash_for_page();
         let mut out: serde_json::Map<String, Value> = self
             .entries
@@ -295,6 +300,10 @@ impl StagedInertiaSessionValues {
     }
 
     fn commit(mut self) {
+        if self.entries.is_empty() {
+            self.committed = true;
+            return;
+        }
         crate::session::session_mut(|session| {
             for (key, staged_value) in &self.entries {
                 if session.data.get(key) == Some(staged_value) {
@@ -312,6 +321,9 @@ impl StagedInertiaSessionValues {
     }
 
     fn reflash(&self) {
+        if self.entries.is_empty() {
+            return;
+        }
         crate::session::session_mut(|session| {
             for (old_key, staged_value) in &self.entries {
                 if session.data.get(old_key) != Some(staged_value) {
@@ -3063,7 +3075,10 @@ fn build_html_response<P: Serialize + ?Sized>(
     head: Option<&crate::view::head::InertiaHead>,
 ) -> Result<HttpResponse, FrameworkError> {
     let title = title_override.unwrap_or(&config.default_title);
-    let csrf = csrf_token().unwrap_or_default();
+    let csrf = crate::session::middleware::session_scope_installed()
+        .then(csrf_token)
+        .flatten()
+        .unwrap_or_default();
     let csrf_attr = escape_html_attr(&csrf);
     let title_html = escape_html_text(title);
 
@@ -3172,7 +3187,10 @@ fn build_template_response(
     view_data: &super::root_template::InertiaViewData,
     head: Option<&crate::view::head::InertiaHead>,
 ) -> Result<HttpResponse, FrameworkError> {
-    let csrf = csrf_token().unwrap_or_default();
+    let csrf = crate::session::middleware::session_scope_installed()
+        .then(csrf_token)
+        .flatten()
+        .unwrap_or_default();
     let ssr_head = ssr.map(|s| s.head.join("\n")).unwrap_or_default();
     let title = (!contains_title_element(&ssr_head) && !head.is_some_and(|h| h.has_title()))
         .then(|| title_override.unwrap_or(config.default_title.as_str()));

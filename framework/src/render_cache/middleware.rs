@@ -1298,8 +1298,27 @@ fn variance_descriptor(
     let mut variance = VarianceDescriptor::new();
     let mut media = "text/html".to_owned();
     let mut encoding: Option<String> = None;
-    for dimension in policy.vary() {
+    let mut dimensions = policy.vary().clone();
+    if crate::App::inertia_registry().installed_config().is_some()
+        || facts.header("X-Inertia").is_some()
+    {
+        for dimension in [
+            VarianceDimension::Inertia,
+            VarianceDimension::InertiaPartial,
+            VarianceDimension::InertiaVersion,
+            VarianceDimension::InertiaProtocol,
+        ] {
+            dimensions.insert(dimension);
+        }
+    }
+    for dimension in &dimensions {
         let value = match dimension {
+            VarianceDimension::Inertia
+            | VarianceDimension::InertiaPartial
+            | VarianceDimension::InertiaVersion
+            | VarianceDimension::InertiaProtocol => {
+                DimensionValue::Public(super::inertia::dimension(facts, dimension))
+            }
             VarianceDimension::Locale => DimensionValue::Public(facts.locale()),
             // The default guard's id, keyed as its bare principal: the value
             // every default-guard read records, and never the
@@ -1384,6 +1403,10 @@ pub(super) const SEEDED_EPOCH: u64 = 1;
 /// the two derive a key by the same code and cannot disagree about which
 /// dimension a key holds or how its value is resolved.
 pub(super) trait KeyFacts {
+    /// Protocol headers are normalized before they enter a descriptor.
+    fn header(&self, _name: &str) -> Option<&str> {
+        None
+    }
     /// The locale the route is rendered in.
     fn locale(&self) -> String;
     /// The signed-in user's identifier, or `None` when nobody is.
@@ -1425,6 +1448,12 @@ pub(super) fn ambient_locale() -> String {
 struct RequestFacts<'a>(&'a Request);
 
 impl KeyFacts for RequestFacts<'_> {
+    fn header(&self, name: &str) -> Option<&str> {
+        // Inertia accepts non-text header bytes too; keep protocol truthiness identical.
+        self.0.header(name).or_else(|| {
+            (name.eq_ignore_ascii_case("X-Inertia") && self.0.is_inertia()).then_some("true")
+        })
+    }
     fn locale(&self) -> String {
         ambient_locale()
     }
