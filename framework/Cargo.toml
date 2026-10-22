@@ -294,6 +294,10 @@ ammonia = "4.1.4"
 # muxer, so it can read three of the five formats and write exactly one.
 # The driver drives the codec registry directly instead, so there is
 # nothing left for the facade to do. See `media/oxideav.rs`.
+
+# Lossless PNG recompression uses the library only. A shared Rayon pool
+# runs compression trials in parallel; Zopfli serves Maximum.
+oxipng = { version = "=10.1.1", default-features = false, features = ["parallel", "zopfli"], optional = true }
 oxideav-core = { version = "=0.1.39", optional = true }
 oxideav-image-filter = { version = "=0.1.2", optional = true }
 oxideav-pixfmt = { version = "=0.1.7", optional = true }
@@ -463,6 +467,7 @@ filesystem-gcs = ["filesystem", "opendal/services-gcs"]
 # removes the eight OxideAV crates and `compcol` from the tree;
 # `scripts/check-feature-matrix.sh` asserts exactly that.
 media = [
+    "dep:oxipng",
     "dep:compcol",
     "dep:oxideav-core",
     "dep:oxideav-image-filter",

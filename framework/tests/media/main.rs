@@ -10,6 +10,7 @@ pub mod images;
 pub mod interop;
 pub mod laravel_infra_gaps;
 pub mod magick_coder;
+pub mod png;
 pub mod quality;
 // The stand-in `magick` binaries that use it are unix shell scripts.
 #[cfg(all(feature = "media", unix))]

@@ -173,7 +173,7 @@ fn icc_segments(profile: &[u8]) -> Vec<Vec<u8>> {
 }
 
 /// `png` with `chunks` inserted after its header chunk.
-fn png_with(png: &[u8], chunks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+pub(crate) fn png_with(png: &[u8], chunks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
     // Signature (8) and IHDR (12 + 13).
     let mut out = png[..33].to_vec();
     for (kind, data) in chunks {
