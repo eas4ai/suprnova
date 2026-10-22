@@ -8,18 +8,18 @@ async fn wait_count(counter: &AtomicUsize, event: &tokio::sync::Notify, count: u
 }
 
 #[tokio::test(start_paused = true)]
-async fn pub_003_round4_2_non_cas_takers_settle_before_one_can_render() {
+async fn pub_003_round5_1_delayed_taker_cannot_displace_a_settled_holder() {
     let raw = memory();
     raw.write(
-        "_pub/lease.json",
-        br#"{"owner":"crashed","expires_at_ms":0}"#.to_vec(),
+        &lease_key(1),
+        br#"{"owner":"crashed","epoch":1,"expires_at_ms":0}"#.to_vec(),
     )
     .await
     .unwrap();
     let probe = Arc::new(Probe::default());
     let race = Arc::new(LeaseRace::default());
     *probe.lease_race.lock().unwrap() = Some(race.clone());
-    let disk = raw.clone().layer(ProbeLayer(probe));
+    let disk = raw.clone().layer(ProbeLayer(probe.clone()));
     let render_release = Arc::new(tokio::sync::Semaphore::new(0));
     let started = Arc::new(AtomicUsize::new(0));
     let mut tasks = Vec::new();
@@ -49,13 +49,16 @@ async fn pub_003_round4_2_non_cas_takers_settle_before_one_can_render() {
         }));
         wait_count(&race.entered, &race.entered_event, i + 1).await;
     }
-    race.gates[0].notify_one();
-    wait_count(&race.created, &race.created_event, 1).await;
-    // Let the first holder verify and enter render in the unfixed implementation.
-    tokio::time::sleep(Duration::from_millis(1)).await;
+    // B acquires while A's create remains stalled beyond the old settle window.
     race.gates[1].notify_one();
-    wait_count(&race.created, &race.created_event, 2).await;
+    wait_count(&race.created, &race.created_event, 1).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+    let winner = highest_lease(&raw).await;
+    assert_eq!(winner["epoch"], 2);
+    race.gates[0].notify_one();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let acquisition_deletes = probe.deleted.lock().unwrap().len();
     render_release.add_permits(2);
     let mut failures = Vec::new();
     for task in tasks {
@@ -64,7 +67,11 @@ async fn pub_003_round4_2_non_cas_takers_settle_before_one_can_render() {
     assert_eq!(
         started.load(Ordering::SeqCst),
         1,
-        "only the taker that survives the settle verification can render"
+        "the delayed taker must not acquire after another holder settles"
+    );
+    assert_eq!(
+        acquisition_deletes, 0,
+        "neither acquisition deletes a lease"
     );
     assert_eq!(
         failures
@@ -84,7 +91,7 @@ async fn pub_003_round4_2_non_cas_takers_settle_before_one_can_render() {
 }
 
 #[tokio::test]
-async fn pub_008_round4_2_prune_stops_before_deletion_after_lease_replacement() {
+async fn pub_008_round5_2_prune_stops_when_a_higher_epoch_appears() {
     let raw = memory();
     let probe = Arc::new(Probe::default());
     let disk = raw.clone().layer(ProbeLayer(probe.clone()));
@@ -262,8 +269,8 @@ async fn pub_008_round4_3_refused_prune_manifest_leaves_all_objects_present() {
     assert!(p.prune().await.is_err());
     assert_eq!(
         probe.deleted.lock().unwrap().len() - before,
-        1,
-        "only the lease release may delete after a failed prune commit"
+        0,
+        "a failed prune commit permits no deletion; release overwrites its own epoch"
     );
     assert_eq!(p.manifest().await.unwrap(), manifest);
     for object in manifest
@@ -304,8 +311,9 @@ async fn stalled_status_releases_lease(render_failure: bool) {
         })
         .await;
     assert_eq!(result.is_err(), render_failure);
-    assert!(
-        !raw.exists("_pub/lease.json").await.unwrap(),
+    assert_eq!(
+        highest_lease(&raw).await["expires_at_ms"],
+        0,
         "slow status persistence must not exhaust the lease release budget"
     );
     assert_eq!(
@@ -320,4 +328,188 @@ async fn pub_003_round4_4_success_releases_lease_before_stalled_status() {
 #[tokio::test(start_paused = true)]
 async fn pub_003_round4_4_render_failure_releases_lease_before_stalled_status() {
     stalled_status_releases_lease(true).await;
+}
+
+#[tokio::test]
+async fn pub_003_round5_2_crashed_epoch_advances_and_fences_the_stale_holder() {
+    let raw = memory();
+    raw.write(
+        &lease_key(5),
+        serde_json::json!({"owner":"crashed", "epoch":5, "expires_at_ms":0}).to_string(),
+    )
+    .await
+    .unwrap();
+    let probe = Arc::new(Probe::default());
+    let disk = raw.clone().layer(ProbeLayer(probe.clone()));
+    let holder = Publisher::from_operator(disk.clone(), "v1", PublishConfig::default()).unwrap();
+    let next = Publisher::from_operator(disk, "v1", PublishConfig::default()).unwrap();
+    let mut committed = None;
+    let failure = holder
+        .publish_with(|| async {
+            let record = highest_lease(&raw).await;
+            assert_eq!(record["epoch"], 6);
+            let at = chrono::DateTime::from_timestamp_millis(
+                record["expires_at_ms"].as_i64().unwrap() + 10000,
+            )
+            .unwrap();
+            let outcome = suprnova::testing::TestClock::scope(at, |_| async {
+                next.publish(vec![page("successor")]).await
+            })
+            .await
+            .unwrap();
+            assert_eq!(highest_lease(&raw).await["epoch"], 7);
+            committed = Some(outcome.version);
+            Ok(vec![page("stale holder")])
+        })
+        .await
+        .unwrap_err();
+    assert!(failure.to_string().contains("epoch 7"), "{failure}");
+    assert_eq!(holder.manifest().await.unwrap().live, committed.unwrap());
+    let current = highest_lease(&raw).await;
+    assert_eq!(current["epoch"], 7);
+    assert_eq!(current["expires_at_ms"], 0);
+    assert!(
+        probe
+            .deleted
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|path| path != &lease_key(7))
+    );
+}
+
+#[tokio::test]
+async fn pub_008_round5_3_release_preserves_epochs_and_prune_keeps_the_highest() {
+    let raw = memory();
+    let probe = Arc::new(Probe::default());
+    let p = Publisher::from_operator(
+        raw.clone().layer(ProbeLayer(probe.clone())),
+        "v1",
+        PublishConfig::default(),
+    )
+    .unwrap();
+    let mut acquired_owner = None;
+    p.publish_with(|| async {
+        let record = highest_lease(&raw).await;
+        acquired_owner = Some(record["owner"].clone());
+        assert_eq!(record["epoch"], 1);
+        assert_ne!(record["expires_at_ms"], 0);
+        Ok(vec![page("one")])
+    })
+    .await
+    .unwrap();
+    let first = highest_lease(&raw).await;
+    assert_eq!(first["epoch"], 1);
+    assert_eq!(first["expires_at_ms"], 0);
+    assert_eq!(Some(first["owner"].clone()), acquired_owner);
+    assert!(probe.deleted.lock().unwrap().is_empty());
+    assert!(
+        p.publish_with(|| async {
+            assert_eq!(highest_lease(&raw).await["epoch"], 2);
+            Err::<Vec<PageObject>, _>(FrameworkError::internal("stop before maintenance"))
+        })
+        .await
+        .is_err()
+    );
+    assert!(raw.exists(&lease_key(1)).await.unwrap());
+    assert_eq!(highest_lease(&raw).await["expires_at_ms"], 0);
+    let report = p.prune().await.unwrap();
+    assert!(report.removed.contains(&lease_key(1)));
+    assert!(report.removed.contains(&lease_key(2)));
+    assert!(report.kept.contains(&lease_key(3)));
+    assert!(!report.removed.contains(&lease_key(3)));
+    let current = highest_lease(&raw).await;
+    assert_eq!(current["epoch"], 3);
+    assert_eq!(current["expires_at_ms"], 0);
+    assert_eq!(raw.list("_pub/lease/").await.unwrap().len(), 1);
+
+    assert!(
+        probe.conditional_writes.lock().unwrap().is_empty(),
+        "memory epochs do not need conditional replacement"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn pub_003_round5_4_foreign_lease_keys_are_ignored_and_epochs_are_not_public_assets() {
+    let _container = suprnova::testing::TestContainer::fake();
+    let raw = memory();
+    let foreign = [
+        "_pub/lease/readme.json".to_string(),
+        "_pub/lease/00000000000000000002.json.tmp".into(),
+        "_pub/lease/999999999999999999999.json".into(),
+        format!("_pub/lease/_assets/{}/foreign", "f".repeat(64)),
+    ];
+    for key in &foreign {
+        raw.write(key, "foreign bytes").await.unwrap();
+    }
+    let p = Publisher::from_operator(raw.clone(), "v1", PublishConfig::default()).unwrap();
+    p.publish(vec![page("public")]).await.unwrap();
+    assert_eq!(highest_lease(&raw).await["epoch"], 1);
+    for key in &foreign {
+        assert!(raw.exists(key).await.unwrap());
+    }
+    let original = manifest_bytes(&raw).await;
+    let mut manifest = p.manifest().await.unwrap();
+    let bytes = raw.read(&lease_key(1)).await.unwrap().to_bytes();
+    manifest
+        .versions
+        .get_mut(&manifest.live)
+        .unwrap()
+        .objects
+        .push(suprnova::static_publish::ObjectEntry {
+            path: lease_key(1),
+            url: format!("/{}", lease_key(1)),
+            asset: true,
+            digest: "not-public".into(),
+            asset_version: "v1".into(),
+            dependency_tags: vec![],
+            headers: std::collections::BTreeMap::from([
+                ("content-type".into(), "application/json".into()),
+                ("content-length".into(), bytes.len().to_string()),
+            ]),
+        });
+    raw.write("_pub/manifest.json", serde_json::to_vec(&manifest).unwrap())
+        .await
+        .unwrap();
+    let router: suprnova::Router = suprnova::Router::new()
+        .get("/_pub/lease/00000000000000000001.json", |_| async {
+            Ok(suprnova::HttpResponse::text("lease fallback must not run"))
+        })
+        .into();
+    suprnova::static_publish::StaticPublication::install(&router, p.clone()).unwrap();
+    let client = suprnova::testing::TestClient::new(router, suprnova::MiddlewareRegistry::new());
+    let response = client.get(format!("/{}", lease_key(1))).send().await;
+    response.assert_status(404);
+    assert!(!response.body_text().contains("expires_at_ms"));
+    raw.write("_pub/manifest.json", original).await.unwrap();
+    p.prune().await.unwrap();
+    assert_eq!(highest_lease(&raw).await["epoch"], 2);
+    for key in &foreign {
+        assert!(
+            raw.exists(key).await.unwrap(),
+            "foreign lease keys are not orphan-swept"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pub_003_round5_epoch_exhaustion_returns_an_error_without_reusing_a_key() {
+    let raw = memory();
+    raw.write(
+        &lease_key(u64::MAX),
+        serde_json::json!({"owner":"last", "epoch":u64::MAX, "expires_at_ms":0}).to_string(),
+    )
+    .await
+    .unwrap();
+    let p = Publisher::from_operator(raw.clone(), "v1", PublishConfig::default()).unwrap();
+    assert!(
+        p.publish(vec![page("refused")])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("epoch is exhausted")
+    );
+    assert_eq!(highest_lease(&raw).await["epoch"], u64::MAX);
+    assert_eq!(raw.list("_pub/lease/").await.unwrap().len(), 1);
 }

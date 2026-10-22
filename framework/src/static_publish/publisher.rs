@@ -1317,7 +1317,6 @@ impl Publisher {
             }
         }
         protected.insert(MANIFEST.to_string());
-        protected.insert(super::lease::LEASE.to_string());
         protected.insert("_pub/status.json".to_string());
         // Bucket mirrors converge after commit; retain the live page aliases.
         if let Some(live) = manifest.versions.get(&manifest.live) {
@@ -1382,16 +1381,28 @@ impl Publisher {
             snapshot.verify(&self.disk).await?;
         }
         let orphan_set = |key: &str| {
-            key.strip_prefix("_pub/")
-                .and_then(|key| key.split_once("/_assets/"))
-                .and_then(|(_, key)| key.split_once('/'))
-                .is_some_and(|(hash, _)| {
-                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                })
+            !key.starts_with(super::lease::LEASE_PREFIX)
+                && key
+                    .strip_prefix("_pub/")
+                    .and_then(|key| key.split_once("/_assets/"))
+                    .and_then(|(_, key)| key.split_once('/'))
+                    .is_some_and(|(hash, _)| {
+                        hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
                 && !protected_sets.iter().any(|root| key.starts_with(root))
         };
         let mut report = PruneOutcome::default();
         for key in paths {
+            if key.starts_with(super::lease::LEASE_PREFIX) {
+                if super::lease::epoch_from_key(&key).is_some_and(|epoch| epoch < lease.epoch()) {
+                    lease.verify().await?;
+                    self.disk.delete(&key).await.map_err(error)?;
+                    report.removed.push(key);
+                } else {
+                    report.kept.push(key);
+                }
+                continue;
+            }
             if protected.contains(&key) || protected_sets.iter().any(|root| key.starts_with(root)) {
                 report.kept.push(key);
                 continue;

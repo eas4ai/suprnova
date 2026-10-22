@@ -135,16 +135,32 @@ The manifest is the origin switch; stable bucket aliases are a post-commit mirro
 
 ## Publishers in separate processes
 
-Publication and pruning acquire `_pub/lease.json` before reading the manifest or
-planning work. The lease records an owner and an expiry. A held lease refuses a
-second publisher. Storage must support atomic object creation through OpenDAL's
-`write_with_if_not_exists` or `write_with_if_none_match` capability.
+Publication and pruning acquire an epoch record under `_pub/lease/` before
+reading the manifest or planning work. Keys use a zero-padded 20-digit unsigned
+integer, such as `_pub/lease/00000000000000000001.json`. A record contains
+`owner`, `epoch` and `expires_at_ms`. The highest epoch is the current lease;
+foreign keys are ignored and no lease key is served by the origin.
 
-When storage supports `write_with_if_match`, lease replacement and manifest
-replacement use the observed ETag. A changed manifest refuses the commit. S3
-supports these conditional writes. Without conditional replacement, the lease
-serializes cooperating publishers and a byte comparison detects earlier manifest
-changes. It cannot atomically fence a writer that ignores the lease.
+If no record exists, acquisition atomically creates epoch 1. An unexpired
+highest record refuses another publisher. An expired record permits atomic
+creation of the next epoch. A competing creation of that same key refuses as
+held. Acquisition never deletes or replaces a record. Takeover needs only
+`write_with_if_not_exists` or `write_with_if_none_match` and works the same on
+every disk. Every publisher sharing the disk must use this epoch protocol.
+
+Verification lists the chain and checks the highest epoch, owner and acquired
+expiry. Release overwrites only the holder's own record with expiry zero, so
+the next acquisition advances the epoch instead of reusing its key. Bounded
+Drop cleanup does the same; failed release leaves expiry as the fallback.
+Prune verifies ownership before deleting records below the highest, which it
+always retains. All other keys in the lease namespace stay outside orphan
+cleanup.
+
+The manifest retains its separate conditional write: `write_with_if_match`
+uses the observed manifest ETag when available; otherwise a byte comparison
+detects a changed manifest. Atomic epoch creation does not require conditional
+replacement. A process that ignores the lease must not write the publication
+disk.
 
 Hosts must use NTP and keep their clock difference below
 `STATIC_PUBLISH_CLOCK_SKEW` seconds, which defaults to 10; non-integer settings refuse publication setup. A holder stops using
@@ -156,12 +172,9 @@ window expires, it leaves the CDN to the new owner and records the failure.
 STATIC_PUBLISH_CLOCK_SKEW=10 suprnova static:publish
 ```
 
-Filesystem and memory disks take over an expired lease by deleting it, creating
-it atomically, waiting the configured skew interval and verifying ownership
-again. Takeover without conditional replacement is best-effort and relies on
-the settle period and on the exclusive publication disk. Mirror writes, prune
-deletions and prune manifest commits verify ownership before each operation;
-a lost lease stops maintenance and reports the current owner.
+Mirror writes, prune deletions and prune manifest commits verify ownership
+before each operation; a lost lease stops maintenance and reports the current
+owner.
 
 Run the same command from the server deployment or a console process:
 

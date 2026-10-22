@@ -173,8 +173,7 @@ async fn pub_003_round2_2_clock_margin_refuses_an_early_taker() {
     )
     .unwrap();
     p.publish_with(|| async {
-        let lease: serde_json::Value =
-            serde_json::from_slice(&raw.read("_pub/lease.json").await.unwrap().to_bytes()).unwrap();
+        let lease = highest_lease(&raw).await;
         let expires = lease["expires_at_ms"].as_i64().unwrap();
         for at in [
             chrono::Utc::now() + chrono::Duration::seconds(9),
@@ -214,10 +213,7 @@ impl CdnDriver for TakeoverDriver {
     async fn switch_version(&self, version: &str) -> Result<(), FrameworkError> {
         self.ledger.switch_version(version).await?;
         if self.armed.swap(false, Ordering::SeqCst) {
-            let record: serde_json::Value = serde_json::from_slice(
-                &self.disk.read("_pub/lease.json").await.unwrap().to_bytes(),
-            )
-            .unwrap();
+            let record = highest_lease(&self.disk).await;
             let at = chrono::DateTime::from_timestamp_millis(
                 record["expires_at_ms"].as_i64().unwrap() + 10000,
             )
@@ -279,9 +275,7 @@ async fn pub_003_round2_2_takeover_fences_old_commit_and_rollback() {
                 .unwrap(),
             format!("switch:{live}")
         );
-        let owner: serde_json::Value =
-            serde_json::from_slice(&disk.read("_pub/lease.json").await.unwrap().to_bytes())
-                .unwrap();
+        let owner = highest_lease(&disk).await;
         assert!(
             failure
                 .to_string()
@@ -309,9 +303,7 @@ async fn pub_003_round2_2_clock_skew_setting_is_loaded() {
     let (publisher, disk) = publisher("v1");
     publisher
         .publish_with(|| async {
-            let lease: serde_json::Value =
-                serde_json::from_slice(&disk.read("_pub/lease.json").await.unwrap().to_bytes())
-                    .unwrap();
+            let lease = highest_lease(&disk).await;
             assert!(
                 lease["expires_at_ms"].as_i64().unwrap()
                     > chrono::Utc::now().timestamp_millis() + 300000,
@@ -348,7 +340,7 @@ async fn pub_003_round4_1_cached_success_cannot_skip_another_publishers_unknown_
     probe.commit_mode.store(4, Ordering::SeqCst);
     assert!(b.publish(vec![page("uncommitted")]).await.is_err());
     assert_eq!(b.status().await.outcome, "unknown");
-    assert!(!raw.exists("_pub/lease.json").await.unwrap());
+    assert_eq!(highest_lease(&raw).await["expires_at_ms"], 0);
     assert_ne!(
         driver.events().unwrap().last().unwrap(),
         &format!("switch:{old}")

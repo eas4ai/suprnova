@@ -38,6 +38,29 @@ fn page_at(path: &str, text: &str) -> PageObject {
 fn page(text: &str) -> PageObject {
     page_at("/about", text)
 }
+fn lease_key(epoch: u64) -> String {
+    format!("_pub/lease/{epoch:020}.json")
+}
+async fn highest_lease(disk: &Operator) -> serde_json::Value {
+    let key = disk
+        .list("_pub/lease/")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.path().to_string())
+        .filter(|key| {
+            key.strip_prefix("_pub/lease/")
+                .and_then(|key| key.strip_suffix(".json"))
+                .is_some_and(|epoch| {
+                    epoch.len() == 20
+                        && epoch.bytes().all(|byte| byte.is_ascii_digit())
+                        && epoch.parse::<u64>().is_ok()
+                })
+        })
+        .max()
+        .expect("a lease epoch exists");
+    serde_json::from_slice(&disk.read(&key).await.unwrap().to_bytes()).unwrap()
+}
 async fn manifest_bytes(disk: &Operator) -> Bytes {
     disk.read("_pub/manifest.json").await.unwrap().to_bytes()
 }
@@ -85,7 +108,7 @@ async fn pub_003_unchanged_targeted_pages_do_not_upload_or_switch() {
         .lock()
         .unwrap()
         .iter()
-        .filter(|key| key.as_str() != "_pub/status.json" && key.as_str() != "_pub/lease.json")
+        .filter(|key| key.as_str() != "_pub/status.json" && !key.starts_with("_pub/lease/"))
         .count();
     let events = driver.events().unwrap().len();
     let next = p.publish_partial(vec![page("one")]).await.unwrap();
@@ -98,7 +121,7 @@ async fn pub_003_unchanged_targeted_pages_do_not_upload_or_switch() {
             .lock()
             .unwrap()
             .iter()
-            .filter(|key| key.as_str() != "_pub/status.json" && key.as_str() != "_pub/lease.json")
+            .filter(|key| key.as_str() != "_pub/status.json" && !key.starts_with("_pub/lease/"))
             .count(),
         writes
     );
@@ -591,6 +614,7 @@ impl Service for ProbeService {
         Ok(ProbeLister {
             inner: self.inner.list(ctx, path, args)?,
             state: self.state.clone(),
+            inject: path.is_empty() || path == "/",
         })
     }
     fn delete(&self, ctx: &OperationContext) -> opendal::Result<Self::Deleter> {
@@ -655,7 +679,8 @@ impl Service for ProbeService {
                 .push((path.to_string(), etag.to_string()));
         }
         let mut refuse = self.state.refuse.lock().unwrap();
-        if path != "_pub/lease.json" && refuse.as_ref().is_some_and(|suffix| path.ends_with(suffix))
+        if !path.starts_with("_pub/lease/")
+            && refuse.as_ref().is_some_and(|suffix| path.ends_with(suffix))
         {
             refuse.take();
             return Err(opendal::Error::new(
@@ -667,7 +692,7 @@ impl Service for ProbeService {
         let counted = path.starts_with("_pub/")
             && path != "_pub/manifest.json"
             && path != "_pub/status.json"
-            && path != "_pub/lease.json";
+            && !path.starts_with("_pub/lease/");
         let expected = args.if_match().map(str::to_string);
         let absent = args.if_not_exists() || args.if_none_match() == Some("*");
         let semantic = self.state.force_cas.load(Ordering::SeqCst);
@@ -715,15 +740,23 @@ impl Service for ProbeService {
 struct ProbeLister {
     inner: oio::Lister,
     state: Arc<Probe>,
+    inject: bool,
 }
 impl oio::List for ProbeLister {
     async fn next(&mut self) -> opendal::Result<Option<oio::Entry>> {
-        let disk = self.state.replace_lease_on_list.lock().unwrap().take();
+        let disk = if self.inject {
+            self.state.replace_lease_on_list.lock().unwrap().take()
+        } else {
+            None
+        };
         if let Some(disk) = disk {
-            disk.write(
-                "_pub/lease.json",
-                serde_json::json!({"owner":"replacement", "expires_at_ms":u64::MAX}).to_string(),
+            let epoch = highest_lease(&disk).await["epoch"].as_u64().unwrap() + 1;
+            disk.write_with(
+                &lease_key(epoch),
+                serde_json::json!({"owner":"replacement", "epoch":epoch, "expires_at_ms":u64::MAX})
+                    .to_string(),
             )
+            .if_not_exists(true)
             .await?;
         }
         self.inner.next().await
@@ -737,17 +770,7 @@ struct ProbeDelete {
 impl oio::OneShotDelete for ProbeDelete {
     async fn delete_once(&self, path: String, args: opendal::raw::OpDelete) -> opendal::Result<()> {
         use oio::Delete as _;
-        let race = self.state.lease_race.lock().unwrap().clone();
-        if path == "_pub/lease.json"
-            && let Some(race) = race
-        {
-            let index = race.entered.fetch_add(1, Ordering::SeqCst);
-            if index < 2 {
-                race.entered_event.notify_one();
-                race.gates[index].notified().await;
-            }
-        }
-        if path != "_pub/lease.json" {
+        if !path.starts_with("_pub/lease/") {
             let observer = self.state.observe_delete_manifest.lock().unwrap().clone();
             if let Some(disk) = observer {
                 let bytes = disk.read("_pub/manifest.json").await?.to_bytes();
@@ -768,9 +791,6 @@ impl oio::OneShotDelete for ProbeDelete {
                     "injected object deletion failure",
                 ));
             }
-        }
-        if path == "_pub/lease.json" && self.state.delay_lease_release.load(Ordering::SeqCst) {
-            tokio::time::sleep(Duration::from_millis(1)).await;
         }
         let mut deleter = self.inner.delete(&self.ctx)?;
         deleter.delete(&path, args).await?;
@@ -802,6 +822,12 @@ impl oio::Write for ProbeWriter {
         if self.path == "_pub/status.json" && self.state.stall_status.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
+        if self.path.starts_with("_pub/lease/")
+            && !self.absent
+            && self.state.delay_lease_release.load(Ordering::SeqCst)
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         if self.counted && self.state.stall.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
@@ -811,6 +837,16 @@ impl oio::Write for ProbeWriter {
         self.inner.write(bytes).await
     }
     async fn close(&mut self) -> opendal::Result<Metadata> {
+        if self.path == lease_key(2) && self.absent {
+            let race = self.state.lease_race.lock().unwrap().clone();
+            if let Some(race) = race {
+                let index = race.entered.fetch_add(1, Ordering::SeqCst);
+                if index < 2 {
+                    race.entered_event.notify_one();
+                    race.gates[index].notified().await;
+                }
+            }
+        }
         if self.manifest && self.state.gate_manifest.load(Ordering::SeqCst) {
             self.state.manifest_entered.notify_one();
             self.state.manifest_release.notified().await;
@@ -882,7 +918,7 @@ impl oio::Write for ProbeWriter {
         } else {
             self.inner.close().await?
         };
-        if self.path == "_pub/lease.json" {
+        if self.path.starts_with("_pub/lease/") && self.absent {
             let race = self.state.lease_race.lock().unwrap().clone();
             if let Some(race) = race {
                 race.created.fetch_add(1, Ordering::SeqCst);
@@ -1420,14 +1456,23 @@ async fn pub_003_fix_b_conditional_backends_receive_the_manifest_etag() {
             .any(|(path, etag)| path == "_pub/manifest.json" && etag.starts_with("\"cas-")),
         "a conditional backend must receive the original manifest ETag"
     );
+    assert!(
+        state
+            .conditional_writes
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(path, _)| !path.starts_with("_pub/lease/")),
+        "epochs use only atomic creation and plain owner release, never if_match"
+    );
 }
 
 #[tokio::test]
 async fn pub_003_round2_2_memory_crashed_owner_is_recovered() {
     let (publisher, disk) = publisher("v1");
     disk.write(
-        "_pub/lease.json",
-        br#"{"owner":"previous","expires_at_ms":0}"#.as_slice(),
+        &lease_key(1),
+        br#"{"owner":"previous","epoch":1,"expires_at_ms":0}"#.as_slice(),
     )
     .await
     .unwrap();

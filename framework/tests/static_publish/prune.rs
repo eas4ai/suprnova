@@ -79,6 +79,7 @@ async fn pub_008_command_removes_old_orphans_assets_and_pages_and_reports_kept()
     assert_eq!(
         report.removed,
         [
+            "_pub/lease/00000000000000000001.json",
             "_pub/v0/failed/about.html",
             "assets/orphan-aaaaaaaa.js",
             "gone/index.json"

@@ -1,4 +1,4 @@
-//! Storage fencing keeps independent server and console publishers from racing.
+//! Epoch records fence publishers using atomic creation on every storage backend.
 
 use bytes::Bytes;
 use opendal::{ErrorKind, Operator};
@@ -8,18 +8,20 @@ use std::time::Duration;
 use super::{Manifest, error};
 use crate::FrameworkError;
 
-pub(crate) const LEASE: &str = "_pub/lease.json";
+/// Delivery and retention exclude this namespace from public objects.
+pub(crate) const LEASE_PREFIX: &str = "_pub/lease/";
 const MANIFEST: &str = "_pub/manifest.json";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Record {
     owner: String,
+    epoch: u64,
     expires_at_ms: u64,
 }
 
 pub(crate) struct StorageLease {
     disk: Operator,
-    owner: String,
+    record: Record,
     released: bool,
     deadline: tokio::time::Instant,
     skew_ms: u64,
@@ -28,6 +30,42 @@ pub(crate) struct StorageLease {
 
 fn now_ms() -> u64 {
     u64::try_from(crate::clock::now().timestamp_millis()).unwrap_or(0)
+}
+
+fn key(epoch: u64) -> String {
+    format!("{LEASE_PREFIX}{epoch:020}.json")
+}
+
+/// Foreign keys cannot participate in ownership or epoch retention.
+pub(crate) fn epoch_from_key(path: &str) -> Option<u64> {
+    let epoch = path.strip_prefix(LEASE_PREFIX)?.strip_suffix(".json")?;
+    (epoch.len() == 20 && epoch.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| epoch.parse().ok())
+        .flatten()
+}
+
+async fn highest(disk: &Operator) -> Result<Option<Record>, FrameworkError> {
+    let entries = match disk.list(LEASE_PREFIX).await {
+        Ok(entries) => entries,
+        Err(failure) if failure.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(failure) => return Err(error(failure)),
+    };
+    let Some(epoch) = entries
+        .iter()
+        .filter_map(|entry| epoch_from_key(entry.path()))
+        .max()
+    else {
+        return Ok(None);
+    };
+    let bytes = disk.read(&key(epoch)).await.map_err(error)?.to_bytes();
+    let record: Record = serde_json::from_slice(&bytes).map_err(error)?;
+    if record.epoch != epoch {
+        return Err(error(format!(
+            "publication lease epoch {epoch} has mismatched record {}",
+            record.epoch
+        )));
+    }
+    Ok(Some(record))
 }
 
 async fn optional_bytes(disk: &Operator, key: &str) -> Result<Option<Bytes>, FrameworkError> {
@@ -52,9 +90,24 @@ impl StorageLease {
             ));
         }
         let skew_ms = u64::try_from(skew.as_millis()).unwrap_or(u64::MAX);
-        let owner = uuid::Uuid::now_v7().to_string();
+        let epoch = match highest(&disk).await? {
+            Some(previous) => {
+                if now_ms() < previous.expires_at_ms.saturating_add(skew_ms) {
+                    return Err(error(format!(
+                        "publication lease is held by {} at epoch {}",
+                        previous.owner, previous.epoch
+                    )));
+                }
+                previous
+                    .epoch
+                    .checked_add(1)
+                    .ok_or_else(|| error("publication lease epoch is exhausted"))?
+            }
+            None => 1,
+        };
         let record = Record {
-            owner: owner.clone(),
+            owner: uuid::Uuid::now_v7().to_string(),
+            epoch,
             expires_at_ms: now_ms().saturating_add(
                 u64::try_from(timeout.as_millis())
                     .unwrap_or(u64::MAX)
@@ -63,72 +116,34 @@ impl StorageLease {
                     .saturating_add(1000),
             ),
         };
-        let bytes = serde_json::to_vec(&record).map_err(error)?;
-        let mut settle = false;
-        match create(&disk, bytes.clone()).await {
-            Ok(_) => {}
-            Err(failure)
-                if matches!(
-                    failure.kind(),
-                    ErrorKind::AlreadyExists | ErrorKind::ConditionNotMatch
-                ) =>
-            {
-                let metadata = disk.stat(LEASE).await.map_err(error)?;
-                let previous = optional_bytes(&disk, LEASE)
-                    .await?
-                    .ok_or_else(|| error("publication lease changed while acquiring"))?;
-                let record: Record = serde_json::from_slice(&previous).map_err(error)?;
-                if now_ms() < record.expires_at_ms.saturating_add(skew_ms) {
-                    return Err(error("publication lease is held by another publisher"));
-                }
-                if capability.write_with_if_match {
-                    let etag = metadata
-                        .etag()
-                        .ok_or_else(|| error("conditional lease replacement requires an ETag"))?;
-                    disk.write_with(LEASE, bytes)
-                        .if_match(etag)
-                        .await
-                        .map_err(|failure| {
-                            error(format!("publication lease changed: {failure}"))
-                        })?;
-                } else {
-                    // Recheck before the non-atomic takeover so a visible new owner wins.
-                    if optional_bytes(&disk, LEASE).await?.as_ref() != Some(&previous) {
-                        return Err(error("publication lease is held by another taker"));
-                    }
-                    disk.delete(LEASE).await.map_err(error)?;
-                    create(&disk, bytes).await.map_err(|failure| {
-                        error(format!(
-                            "publication lease is held by another taker: {failure}"
-                        ))
-                    })?;
-                    settle = true;
-                }
+        let path = key(epoch);
+        let write = disk.write_with(&path, serde_json::to_vec(&record).map_err(error)?);
+        let write = if capability.write_with_if_not_exists {
+            write.if_not_exists(true)
+        } else {
+            write.if_none_match("*")
+        };
+        write.await.map_err(|failure| {
+            if matches!(
+                failure.kind(),
+                ErrorKind::AlreadyExists | ErrorKind::ConditionNotMatch
+            ) {
+                error(format!(
+                    "publication lease is held by another taker at epoch {epoch}: {failure}"
+                ))
+            } else {
+                error(failure)
             }
-            Err(failure) => return Err(error(failure)),
-        }
+        })?;
         let lease = Self {
             disk,
-            owner,
+            record,
             released: false,
             deadline,
             skew_ms,
             work: None,
         };
-        lease.verify().await.map_err(|failure| {
-            error(format!(
-                "publication lease is held or changed while acquiring: {failure}"
-            ))
-        })?;
-        if settle {
-            // Other non-CAS takers must become visible before this holder starts side effects.
-            tokio::time::sleep(skew).await;
-            lease.verify().await.map_err(|failure| {
-                error(format!(
-                    "publication lease is held by another taker after settling: {failure}"
-                ))
-            })?;
-        }
+        lease.verify().await?;
         Ok(lease)
     }
 
@@ -136,71 +151,51 @@ impl StorageLease {
         self.work = Some(work);
     }
 
+    /// Retention keeps this epoch and verifies ownership before deleting earlier records.
+    pub(crate) fn epoch(&self) -> u64 {
+        self.record.epoch
+    }
+
     pub(crate) async fn verify(&self) -> Result<(), FrameworkError> {
-        let bytes = optional_bytes(&self.disk, LEASE)
+        let current = highest(&self.disk)
             .await?
             .ok_or_else(|| error("publication lease disappeared"))?;
-        let record: Record = serde_json::from_slice(&bytes).map_err(error)?;
-        if record.owner != self.owner
-            || now_ms() >= record.expires_at_ms.saturating_sub(self.skew_ms)
+        if current.epoch != self.record.epoch
+            || current.owner != self.record.owner
+            || current.expires_at_ms != self.record.expires_at_ms
+            || now_ms() >= current.expires_at_ms.saturating_sub(self.skew_ms)
         {
             return Err(error(format!(
-                "publication lease unusable: holder {}, current owner {}, expiry {}",
-                self.owner, record.owner, record.expires_at_ms
+                "publication lease unusable: holder {} epoch {}, current owner {} epoch {}, expiry {}",
+                self.record.owner,
+                self.record.epoch,
+                current.owner,
+                current.epoch,
+                current.expires_at_ms
             )));
         }
         Ok(())
     }
 
     pub(crate) async fn release(&mut self) -> Result<(), FrameworkError> {
-        release(&self.disk, &self.owner, self.skew_ms).await?;
+        release(&self.disk, &self.record).await?;
         self.released = true;
         Ok(())
     }
 }
 
-async fn create(disk: &Operator, bytes: Vec<u8>) -> opendal::Result<()> {
-    let write = disk.write_with(LEASE, bytes);
-    let write = if disk.info().capability().write_with_if_not_exists {
-        write.if_not_exists(true)
-    } else {
-        write.if_none_match("*")
+async fn release(disk: &Operator, acquired: &Record) -> Result<(), FrameworkError> {
+    // The owner releases only its own epoch; a successor's record is never overwritten.
+    let record = Record {
+        expires_at_ms: 0,
+        ..acquired.clone()
     };
-    write.await.map(|_| ())
-}
-
-async fn release(disk: &Operator, owner: &str, skew_ms: u64) -> Result<(), FrameworkError> {
-    let metadata = match disk.stat(LEASE).await {
-        Ok(metadata) => metadata,
-        Err(failure) if failure.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(failure) => return Err(error(failure)),
-    };
-    let Some(bytes) = optional_bytes(disk, LEASE).await? else {
-        return Ok(());
-    };
-    let record: Record = serde_json::from_slice(&bytes).map_err(error)?;
-    if record.owner != owner {
-        return Ok(());
-    }
-    if disk.info().capability().write_with_if_match {
-        let etag = metadata
-            .etag()
-            .ok_or_else(|| error("conditional lease release requires an ETag"))?;
-        let record = Record {
-            owner: owner.to_string(),
-            expires_at_ms: 0,
-        };
-        disk.write_with(LEASE, serde_json::to_vec(&record).map_err(error)?)
-            .if_match(etag)
-            .await
-            .map_err(error)?;
-    } else {
-        // An expired holder cannot delete a lease while another process takes over.
-        if now_ms() >= record.expires_at_ms.saturating_sub(skew_ms) {
-            return Ok(());
-        }
-        disk.delete(LEASE).await.map_err(error)?;
-    }
+    disk.write(
+        &key(record.epoch),
+        serde_json::to_vec(&record).map_err(error)?,
+    )
+    .await
+    .map_err(error)?;
     Ok(())
 }
 
@@ -210,14 +205,13 @@ impl Drop for StorageLease {
             return;
         }
         let disk = self.disk.clone();
-        let owner = self.owner.clone();
+        let record = self.record.clone();
         let work = self.work.take();
         let deadline = self.deadline;
-        let skew_ms = self.skew_ms;
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 let _work = work;
-                match tokio::time::timeout_at(deadline, release(&disk, &owner, skew_ms)).await {
+                match tokio::time::timeout_at(deadline, release(&disk, &record)).await {
                     Ok(Ok(())) => {}
                     failure => tracing::error!(
                         ?failure,

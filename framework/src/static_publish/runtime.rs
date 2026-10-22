@@ -508,6 +508,17 @@ impl StaticPublication {
         headers: &hyper::HeaderMap,
         query: Option<&str>,
     ) -> Result<Option<HttpResponse>, FrameworkError> {
+        if path
+            .trim_start_matches('/')
+            .starts_with(super::lease::LEASE_PREFIX)
+        {
+            // Reserved lease keys must not fall through to an application or file handler.
+            return Ok(Some(
+                HttpResponse::text("Not Found")
+                    .status(404)
+                    .header("Cache-Control", "no-store"),
+            ));
+        }
         let manifest = self.publisher.manifest().await?;
         if let Some(asset) = manifest
             .versions
@@ -515,6 +526,7 @@ impl StaticPublication {
             .flat_map(|v| &v.objects)
             .find(|o| {
                 o.asset
+                    && !o.path.starts_with(super::lease::LEASE_PREFIX)
                     && (o.path == path.trim_start_matches('/')
                         || (!o.path.starts_with("_pub/") && o.url == path))
             })
@@ -602,6 +614,9 @@ impl StaticPublication {
         let manifest = self.publisher.manifest().await?;
         let object = manifest.versions.get(&manifest.live).and_then(|version| {
             version.objects.iter().find(|o| {
+                if o.path.starts_with(super::lease::LEASE_PREFIX) {
+                    return false;
+                }
                 if json {
                     o.url
                         == if canonical == "/" {
