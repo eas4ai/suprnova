@@ -63,6 +63,7 @@ rand = { version = "0.10", features = ["std", "std_rng"] }
 aes-gcm = "0.10"
 base64 = "0.22"
 sha2 = "0.11"
+html5ever = "=0.40.1"
 clap = { version = "4", features = ["derive"] }
 # The `ERROR`, `WARN` and `INFO` labels of console output: `anstyle` writes
 # the style and `anstream` drops it where the stream takes none. Both are in
@@ -150,8 +151,10 @@ infer = "0.19"
 # BMP.
 imagesize = { version = "=0.15.0", default-features = false, features = ["gif", "png", "webp"] }
 multer = "3"
-# Signing and the AWS credential chain for the `sqs` queue driver, at the
-# revision opendal's S3 service already uses, so the two share one copy.
+# CloudFront distribution XML keeps fields the framework does not model.
+quick-xml = { version = "=0.41.0", optional = true }
+# Signing and the AWS credential chain for SQS and CloudFront, at the
+# revision opendal's S3 service already uses, so the drivers share one copy.
 reqsign-aws-v4 = { version = "3.0.0", git = "https://github.com/apache/opendal-reqsign.git", rev = "b49cd2996b9d2d9944e84481f8835ff55b188b97", optional = true, default-features = false }
 reqsign-core = { version = "3.0.1", git = "https://github.com/apache/opendal-reqsign.git", rev = "b49cd2996b9d2d9944e84481f8835ff55b188b97", optional = true, default-features = false }
 reqsign-file-read-tokio = { version = "3.0.1", git = "https://github.com/apache/opendal-reqsign.git", rev = "b49cd2996b9d2d9944e84481f8835ff55b188b97", optional = true, default-features = false }
@@ -389,6 +392,7 @@ default = [
     "magnetar-oauth",
     "media",
     "queue-sqs",
+    "cdn-cloudfront",
     "agents",
 ]
 # The `sqs` queue driver. Default-on because SQS is one of Laravel's queue
@@ -397,6 +401,8 @@ default = [
 # S3 service already brings the same reqsign crates.
 reporting-sentry = ["dep:sentry"]
 queue-sqs = ["filesystem", "dep:reqsign-aws-v4", "dep:reqsign-core", "dep:reqsign-file-read-tokio"]
+# CloudFront uses the same AWS credential chain as S3 without requiring SQS.
+cdn-cloudfront = ["filesystem", "dep:reqsign-aws-v4", "dep:reqsign-core", "dep:reqsign-file-read-tokio", "dep:quick-xml"]
 # Exposes framework test hooks such as encryption-key installation, a
 # force-the-next-encrypt-call-to-fail switch, and request query overrides.
 # Filesystem fakes additionally require `filesystem`.

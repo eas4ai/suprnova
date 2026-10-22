@@ -1383,6 +1383,9 @@ impl InertiaResponse {
         mut self,
         req: &R,
     ) -> Result<HttpResponse, FrameworkError> {
+        if super::publication::active() {
+            return self.resolve_public(req).await;
+        }
         self.prepare_component()
             .map_err(reflash_session_values_after_eager_error)?;
         let cache = super::cache::PageAssembly::new(
@@ -1806,6 +1809,106 @@ impl InertiaResponse {
         Ok(cache.finish(response))
     }
 
+    /// Public publication resolves no session, credential provider or request prop.
+    async fn resolve_public<R: InertiaRequestExt>(
+        mut self,
+        req: &R,
+    ) -> Result<HttpResponse, FrameworkError> {
+        if crate::security_headers::CspNonce::current().is_some()
+            || crate::security_headers::public_render_uses_nonce()
+        {
+            return Err(super::publication::refusal("nonce CSP cannot be published"));
+        }
+        self.prepare_component()?;
+        let shares =
+            super::publication::shares(&self.component, &self.props, !self.providers.is_empty())?;
+        let mut props = IndexMap::new();
+        let shared_keys = if self.config.expose_shared_props {
+            shares.iter().map(|(key, _)| key.clone()).collect()
+        } else {
+            Vec::new()
+        };
+        props.extend(shares);
+        props.extend(self.props);
+        let filter = PartialFilter::default();
+        let (mut materialized, metadata) = resolve_props(
+            props,
+            &filter,
+            &[],
+            &[],
+            None,
+            None,
+            &self.lazy_owned,
+            self.config.max_concurrent_resolvers,
+            false,
+            serde_json::Map::new(),
+            super::cache::ResolveContext {
+                request: req,
+                cache: None,
+            },
+        )
+        .await?;
+        materialized.remove(ERRORS_KEY);
+        let head = crate::view::head::InertiaHead::for_response(
+            &|| crate::routing::url::current_at(&crate::routing::url::root(), req.path()),
+            self.head_status,
+        );
+        if let Some(head) = &head
+            && !materialized.contains_key(head.prop())
+            && let Some(tags) = head.prop_value()
+        {
+            materialized.insert(head.prop().to_string(), tags);
+        }
+        let preserve_big_integers = self
+            .preserve_big_integers
+            .unwrap_or(self.config.preserve_big_integers);
+        if preserve_big_integers {
+            encode_big_integers_in(&mut materialized);
+        }
+        let page = build_page_object(
+            &self.component,
+            ResolvedProps {
+                props: materialized,
+                metadata,
+            },
+            &self.config,
+            page_url(self.config.url_resolver.as_ref(), req),
+            serde_json::Map::new(),
+            PageObjectFlags {
+                encrypt_history: false,
+                clear_history: false,
+                preserve_fragment: false,
+                preserve_big_integers,
+            },
+            shared_keys,
+        );
+        let json = build_json_response(&page)?;
+        let ssr = self.config.ssr_for_dispatch();
+        let ssr_result = super::ssr_gateway::gateway()
+            .dispatch(&ssr, req, &page)
+            .await?;
+        let html = match self.config.root_template_for(req).application() {
+            Some(template) => build_template_response(
+                template,
+                &page,
+                &self.config,
+                self.title.as_deref(),
+                ssr_result.as_ref(),
+                &self.view_data,
+                head.as_ref(),
+            )?,
+            None => build_html_response(
+                &page,
+                &self.config,
+                self.title.as_deref(),
+                ssr_result.as_ref(),
+                head.as_ref(),
+            )?,
+        };
+        super::publication::capture(&html, json.body())?;
+        Ok(if req.is_inertia() { json } else { html })
+    }
+
     /// The steps of Laravel's `ResponseFactory::render` that settle the
     /// component before the page is built: the transformer
     /// [`Inertia::transform_component_using`](crate::Inertia::transform_component_using)
@@ -1816,7 +1919,7 @@ impl InertiaResponse {
         // replaces the configured version for this page, as the version
         // check compares against it, and a `url_resolver` the configured
         // one.
-        if let Some(visit) = super::visit::current() {
+        if let Some(visit) = super::visit::current().filter(|_| !super::publication::active()) {
             if let Some(version) = visit.version() {
                 self.config.version = super::config::VersionResolver::Static(version.to_string());
             }
@@ -3119,10 +3222,11 @@ fn build_html_response<P: Serialize + ?Sized>(
     head: Option<&crate::view::head::InertiaHead>,
 ) -> Result<HttpResponse, FrameworkError> {
     let title = title_override.unwrap_or(&config.default_title);
-    let csrf = crate::session::middleware::session_scope_installed()
-        .then(csrf_token)
-        .flatten()
-        .unwrap_or_default();
+    let csrf = (!super::publication::active()
+        && crate::session::middleware::session_scope_installed())
+    .then(csrf_token)
+    .flatten()
+    .unwrap_or_default();
     let csrf_attr = escape_html_attr(&csrf);
     let title_html = escape_html_text(title);
 
@@ -3231,10 +3335,11 @@ fn build_template_response(
     view_data: &super::root_template::InertiaViewData,
     head: Option<&crate::view::head::InertiaHead>,
 ) -> Result<HttpResponse, FrameworkError> {
-    let csrf = crate::session::middleware::session_scope_installed()
-        .then(csrf_token)
-        .flatten()
-        .unwrap_or_default();
+    let csrf = (!super::publication::active()
+        && crate::session::middleware::session_scope_installed())
+    .then(csrf_token)
+    .flatten()
+    .unwrap_or_default();
     let ssr_head = ssr.map(|s| s.head.join("\n")).unwrap_or_default();
     let title = (!contains_title_element(&ssr_head) && !head.is_some_and(|h| h.has_title()))
         .then(|| title_override.unwrap_or(config.default_title.as_str()));

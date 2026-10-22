@@ -370,6 +370,12 @@ impl InertiaResponse {
     /// render all props privately and decline publication.
     /// Lazy public props run on a miss; per-request props run on every visit.
     pub fn cacheable<P: CacheableInertiaProps>(mut self, props: P) -> Result<Self, FrameworkError> {
+        if super::publication::active() && !P::PER_REQUEST.is_empty() {
+            return Err(super::publication::refusal(format!(
+                "render uses per-request props: {}",
+                P::PER_REQUEST.join(", ")
+            )));
+        }
         let registry = App::inertia_registry();
         let pages = crate::lock::read(&registry.cache_pages, "Inertia cache pages")?;
         let route = CACHE_ROUTE.try_with(Clone::clone).ok();

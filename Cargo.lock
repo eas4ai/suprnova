@@ -8948,6 +8948,7 @@ dependencies = [
  "percent-encoding",
  "prometheus-client",
  "qdrant-client",
+ "quick-xml",
  "rand 0.10.1",
  "redis 1.2.1",
  "regex",

@@ -164,6 +164,11 @@ pub struct InertiaRegistry {
     /// Shared with every [`SharedOnceProp`] handle, which writes its
     /// options through to the entry it was returned for.
     shares: Arc<RwLock<Vec<StaticEntry>>>,
+    /// Typed page declarations checked independently from publication route markers.
+    pub(crate) public_pages:
+        RwLock<std::collections::BTreeMap<(String, String), super::publication::PublicPage>>,
+    /// Named shares explicitly allowed to enter a public document.
+    pub(crate) public_shared: RwLock<std::collections::BTreeSet<String>>,
     pub(crate) cache_pages:
         RwLock<std::collections::BTreeMap<(String, String), Arc<super::cache::CachePage>>>,
     /// Shared [`ProvidesInertiaProperties`] values, expanded per render
@@ -196,6 +201,8 @@ impl InertiaRegistry {
         Self {
             shares: Arc::new(RwLock::new(Vec::new())),
             cache_pages: RwLock::new(std::collections::BTreeMap::new()),
+            public_pages: RwLock::new(std::collections::BTreeMap::new()),
+            public_shared: RwLock::new(std::collections::BTreeSet::new()),
             providers: RwLock::new(Vec::new()),
             provider: RwLock::new(None),
             config: RwLock::new(None),

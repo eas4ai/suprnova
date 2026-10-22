@@ -26,6 +26,7 @@ mod manifest;
 mod pages;
 mod prop;
 mod providers;
+pub(crate) mod publication;
 mod response;
 mod root_share;
 mod root_template;

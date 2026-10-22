@@ -137,6 +137,76 @@ impl ContentSecurityPolicy {
         }
     }
 
+    /// Removes per-request nonce sources before a public render creates tags.
+    pub(crate) fn for_public_render(self) -> Self {
+        let template = self
+            .template
+            .split(',')
+            .map(|policy| {
+                policy
+                    .split(';')
+                    .map(|directive| {
+                        let mut words = directive.split_whitespace();
+                        let name = words.next().unwrap_or_default();
+                        let mut sources: Vec<&str> = words
+                            .filter(|source| {
+                                !source.starts_with("'nonce-") && *source != "'strict-dynamic'"
+                            })
+                            .collect();
+                        if name.eq_ignore_ascii_case("script-src") && !sources.contains(&"'self'") {
+                            sources.retain(|source| *source != "'none'");
+                            sources.push("'self'");
+                        }
+                        std::iter::once(name)
+                            .chain(sources)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Self { template }
+    }
+
+    /// Every enforced policy must authorize the trusted inline script hashes.
+    pub(crate) fn with_public_script_hashes(self, hashes: &[String]) -> Self {
+        let template = policy_list(&self.template)
+            .map(|policy| {
+                let target = if first_directive(policy, "script-src-elem").is_some() {
+                    "script-src-elem"
+                } else {
+                    "script-src"
+                };
+                let inherited = first_directive(policy, target)
+                    .or_else(|| first_directive(policy, "script-src"))
+                    .or_else(|| first_directive(policy, "default-src"));
+                let Some((_, inherited)) = inherited else {
+                    return policy.to_owned();
+                };
+                let mut sources: Vec<&str> = inherited
+                    .split_whitespace()
+                    .skip(1)
+                    .filter(|source| *source != "'none'" && *source != "'unsafe-inline'")
+                    .collect();
+                sources.extend(hashes.iter().map(String::as_str));
+                let replacement = std::iter::once(target)
+                    .chain(sources)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let mut directives: Vec<String> = policy.split(';').map(str::to_owned).collect();
+                match first_directive(policy, target) {
+                    Some((at, _)) => directives[at] = replacement,
+                    None => directives.push(replacement),
+                }
+                directives.join("; ")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Self { template }
+    }
+
     pub(crate) fn uses_nonce(&self) -> bool {
         self.template.contains("'nonce-{nonce}'")
     }
