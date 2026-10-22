@@ -114,13 +114,13 @@ impl OutcomeHooks {
                 hook.failed
             };
             // Publication cannot change an outcome the database has established.
-            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)).is_err() {
+                let outcome = if committed { "committed" } else { "failed" };
                 tracing::error!(
                     target: "suprnova::database",
                     connection_name,
-                    committed,
-                    panic = %crate::server::panic_payload_message(&payload),
-                    "Transaction outcome hook panicked; continuing with the known outcome",
+                    outcome,
+                    "an outcome hook panicked",
                 );
             }
         }
@@ -2971,6 +2971,37 @@ mod outcome_hook_tests {
         );
         outcome.0.extend(hooks(trace).0);
         outcome
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn es_001_outcome_hook_panic_log_has_no_payload() {
+        const PAYLOAD: &str = "private-application-payload-marker";
+        for committed in [true, false] {
+            OutcomeHooks::new(|| panic!("{PAYLOAD}"), || panic!("{PAYLOAD}"))
+                .run(committed, "outcome-log-connection");
+        }
+        logs_assert(|lines| {
+            let records: Vec<_> = lines
+                .iter()
+                .filter(|line| line.contains("outcome hook panicked"))
+                .collect();
+            if records.len() != 2 {
+                return Err("both known outcomes must log the hook panic".to_owned());
+            }
+            if records.iter().any(|line| line.contains(PAYLOAD)) {
+                return Err("the outcome hook log exposes application data".to_owned());
+            }
+            for outcome in ["committed", "failed"] {
+                if !records.iter().any(|line| {
+                    line.contains("connection_name=\"outcome-log-connection\"")
+                        && line.contains(&format!("outcome=\"{outcome}\""))
+                }) {
+                    return Err(format!("missing connection and known {outcome} outcome"));
+                }
+            }
+            Ok(())
+        });
     }
 
     async fn concurrent_savepoint_transfer(rollback_during_transfer: bool) {
