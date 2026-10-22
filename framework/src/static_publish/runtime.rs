@@ -490,6 +490,53 @@ impl StaticPublication {
         headers: &hyper::HeaderMap,
         query: Option<&str>,
     ) -> Result<Option<HttpResponse>, FrameworkError> {
+        let manifest = self.publisher.manifest().await?;
+        if let Some(asset) = manifest
+            .versions
+            .values()
+            .flat_map(|v| &v.objects)
+            .find(|o| {
+                o.asset
+                    && (o.path == path.trim_start_matches('/')
+                        || (!o.path.starts_with("_pub/") && o.url == path))
+            })
+        {
+            use futures::StreamExt;
+            let length = match asset.headers.get("content-length") {
+                Some(length) => length.parse::<u64>().map_err(error)?,
+                None => self
+                    .publisher
+                    .disk
+                    .stat(&asset.path)
+                    .await
+                    .map_err(error)?
+                    .content_length(),
+            };
+            let reader = self
+                .publisher
+                .disk
+                .reader_with(&asset.path)
+                .chunk(65536)
+                .await
+                .map_err(error)?;
+            let stream = reader.into_bytes_stream(0..length).await.map_err(error)?;
+            let stream = stream.scan((), |_, chunk| {
+                futures::future::ready(match chunk {
+                    Ok(bytes) => Some(Ok::<_, std::convert::Infallible>(bytes)),
+                    Err(failure) => {
+                        // Content-Length makes a short stream fail the transfer instead of appearing complete.
+                        tracing::error!(%failure, "static publication asset stream failed");
+                        None
+                    }
+                })
+            });
+            let mut response =
+                HttpResponse::stream_bytes(stream).header("Content-Length", length.to_string());
+            for (name, value) in &asset.headers {
+                response = response.replace_header(name, value);
+            }
+            return Ok(Some(response));
+        }
         if query.is_some_and(|query| !query.is_empty())
             || {
                 let directives = crate::render_cache::middleware::header_cache_directives(
@@ -524,37 +571,6 @@ impl StaticPublication {
             && version != self.publisher.asset_version
         {
             return Ok(None);
-        }
-        let manifest = self.publisher.manifest().await?;
-        if let Some(asset) = manifest
-            .versions
-            .values()
-            .flat_map(|v| &v.objects)
-            .find(|o| {
-                o.asset
-                    && (o.path == path.trim_start_matches('/')
-                        || (!o.path.starts_with("_pub/") && o.url == path))
-            })
-        {
-            let body = self
-                .publisher
-                .disk
-                .read(&asset.path)
-                .await
-                .map_err(error)?
-                .to_bytes();
-            let mut response = HttpResponse::bytes(
-                body,
-                asset
-                    .headers
-                    .get("content-type")
-                    .map(String::as_str)
-                    .unwrap_or("application/octet-stream"),
-            );
-            for (name, value) in &asset.headers {
-                response = response.replace_header(name, value);
-            }
-            return Ok(Some(response));
         }
         let canonical = if path.ends_with("/index.json") {
             path.trim_end_matches("index.json").trim_end_matches('/')

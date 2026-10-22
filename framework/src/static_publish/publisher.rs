@@ -714,6 +714,8 @@ impl Publisher {
                 let fingerprinted = self.fingerprinted(&key);
                 let headers = BTreeMap::from([
                     ("content-type".into(), content_type),
+                    ("content-length".into(), bytes.len().to_string()),
+                    ("etag".into(), format!("\"{}\"", digest(&bytes))),
                     (
                         "cache-control".into(),
                         if fingerprinted {

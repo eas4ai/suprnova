@@ -441,6 +441,7 @@ struct Probe {
     delay: AtomicBool,
     active: AtomicUsize,
     maximum: AtomicUsize,
+    maximum_asset_read: std::sync::atomic::AtomicU64,
     force_cas: AtomicBool,
     conditional_writes: Mutex<Vec<(String, String)>>,
     gate_manifest: AtomicBool,
@@ -463,7 +464,7 @@ struct ProbeService {
     state: Arc<Probe>,
 }
 impl Service for ProbeService {
-    type Reader = oio::Reader;
+    type Reader = ProbeReader;
     type Writer = ProbeWriter;
     type Lister = oio::Lister;
     type Deleter = oio::Deleter;
@@ -509,7 +510,11 @@ impl Service for ProbeService {
         path: &str,
         args: OpRead,
     ) -> opendal::Result<Self::Reader> {
-        self.inner.read(ctx, path, args)
+        Ok(ProbeReader {
+            inner: self.inner.read(ctx, path, args)?,
+            state: self.state.clone(),
+            tracked: path.ends_with("large.bin"),
+        })
     }
     async fn stat(
         &self,
@@ -1160,4 +1165,161 @@ async fn pub_003_fix_b_expired_lease_on_non_cas_storage_requires_recovery() {
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("expired"));
     assert!(!disk.exists("_pub/manifest.json").await.unwrap());
+}
+
+fn asset_router() -> suprnova::Router {
+    #[derive(suprnova::InertiaProps)]
+    #[inertia(cacheable)]
+    struct Props {
+        #[inertia(public)]
+        title: String,
+    }
+    let router: suprnova::Router = suprnova::Router::new()
+        .get("/about", |_| async {
+            Ok(suprnova::HttpResponse::text("unexpected render"))
+        })
+        .into();
+    router.public_page::<Props>("/about", "About").unwrap()
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn pub_002_round2_4_asset_queries_bypass_page_private_rules() {
+    let _container = suprnova::testing::TestContainer::fake();
+    let router = asset_router();
+    let (publisher, disk) = publisher("v1");
+    let mut rendered = page("public");
+    rendered.html = Bytes::from_static(br#"<link rel="stylesheet" href="/theme.css?v=1">"#);
+    rendered.assets.insert(
+        "theme.css".into(),
+        (Bytes::from_static(b"body{}"), "text/css".into()),
+    );
+    publisher.publish(vec![rendered]).await.unwrap();
+    let manifest = publisher.manifest().await.unwrap();
+    let asset = manifest.versions[&manifest.live]
+        .objects
+        .iter()
+        .find(|object| object.asset)
+        .unwrap();
+    suprnova::static_publish::StaticPublication::install(
+        &router,
+        Publisher::from_operator(disk, "v1", PublishConfig::default()).unwrap(),
+    )
+    .unwrap();
+    let client = suprnova::testing::TestClient::new(router, suprnova::MiddlewareRegistry::new());
+    let response = client
+        .get(format!("/{}?v=1", asset.path))
+        .header("Cache-Control", "no-store")
+        .header("X-Inertia-Partial-Data", "title")
+        .send()
+        .await;
+    response.assert_ok();
+    assert_eq!(response.body_text(), "body{}");
+    assert_eq!(
+        response.header("Cache-Control"),
+        Some(asset.headers["cache-control"].as_str())
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn pub_002_round2_7_origin_assets_stream_in_bounded_chunks() {
+    let _container = suprnova::testing::TestContainer::fake();
+    let router = asset_router();
+    let disk = memory();
+    let state = Arc::new(Probe::default());
+    let disk = disk.layer(ProbeLayer(state.clone()));
+    let publisher = Publisher::from_operator(disk.clone(), "v1", PublishConfig::default()).unwrap();
+    let mut rendered = page("public");
+    let bytes = Bytes::from(vec![b'z'; 3 * 1024 * 1024]);
+    rendered.assets.insert(
+        "large.bin".into(),
+        (bytes.clone(), "application/octet-stream".into()),
+    );
+    publisher.publish(vec![rendered]).await.unwrap();
+    let manifest = publisher.manifest().await.unwrap();
+    let asset = manifest.versions[&manifest.live]
+        .objects
+        .iter()
+        .find(|object| object.asset)
+        .unwrap();
+    suprnova::static_publish::StaticPublication::install(
+        &router,
+        Publisher::from_operator(disk, "v1", PublishConfig::default()).unwrap(),
+    )
+    .unwrap();
+    use http_body_util::BodyExt;
+    use hyper::body::Body;
+    use hyper_util::rt::TokioIo;
+    let streamed = Arc::new(AtomicBool::new(false));
+    let observed = streamed.clone();
+    let (server_io, client_io) = tokio::io::duplex(65536);
+    let router = Arc::new(router);
+    let registry = Arc::new(suprnova::MiddlewareRegistry::new());
+    let service = hyper::service::service_fn(move |request| {
+        let (router, registry, observed) = (router.clone(), registry.clone(), observed.clone());
+        async move {
+            let response = suprnova::handle_request(router, registry, request).await;
+            observed.store(
+                response.body().size_hint().exact().is_none(),
+                Ordering::SeqCst,
+            );
+            Ok::<_, std::convert::Infallible>(response)
+        }
+    });
+    let server = tokio::spawn(async move {
+        hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(server_io), service)
+            .await
+    });
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(client_io))
+        .await
+        .unwrap();
+    let connection = tokio::spawn(connection);
+    let request = hyper::Request::builder()
+        .uri(format!("/{}", asset.path))
+        .body(http_body_util::Empty::<Bytes>::new())
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-length"], "3145728");
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        bytes
+    );
+    assert!(
+        streamed.load(Ordering::SeqCst),
+        "origin must return a streaming body before collection"
+    );
+    assert!(
+        state.maximum_asset_read.load(Ordering::SeqCst) <= 65536,
+        "asset reads must stay bounded"
+    );
+    server.abort();
+    connection.abort();
+}
+
+struct ProbeReader {
+    inner: oio::Reader,
+    state: Arc<Probe>,
+    tracked: bool,
+}
+impl oio::Read for ProbeReader {
+    async fn open(
+        &self,
+        range: opendal::BytesRange,
+    ) -> opendal::Result<(opendal::raw::RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        self.inner.open(range).await
+    }
+    async fn read(
+        &self,
+        range: opendal::BytesRange,
+    ) -> opendal::Result<(opendal::raw::RpRead, Buffer)> {
+        if self.tracked {
+            self.state
+                .maximum_asset_read
+                .fetch_max(range.size().unwrap_or(u64::MAX), Ordering::SeqCst);
+        }
+        self.inner.read(range).await
+    }
 }
