@@ -343,6 +343,20 @@ the `ranking_digest` entry above describes the refresh.
 **Do:** run your migrations, as that entry says. Expect shorter collaborative
 lists until the next full run.
 
+### Tool schemas publish integer fields with their bounds and no JSON Schema format.
+
+**Before:** an integer field's schema carried the Rust type's format, such as
+`"format": "uint64"`, which clients do not know; Claude Code logged
+`unknown format "uint64" ignored` for each one.
+
+**Now:** the schema says `"type": "integer"` with the field's `minimum` and
+`maximum` and no `format`. The bounds carry the same information, and the
+WebMCP browser schemas follow the same rule. [Agents](agents.md) says so beside
+`#[tool_input]`. (4.5.2)
+
+**Do:** run `suprnova generate-types` once after the bump, so the frontend's
+`tool-schemas.ts` matches what the server publishes.
+
 ## Starter kit edits to copy
 
 These fixes changed files that `suprnova new` writes into a project. Your
@@ -378,6 +392,11 @@ edited the file.
 
 ## Fixed entries with no upgrade step
 
+- **Two tools with one name in different crates now fail the build at link
+  time.** An application that built and booted before has no such duplicate,
+  because the boot check refused it; the change moves the failure to the link
+  step, where the duplicate symbol `__suprnova_tool_<name>` names the tool. A
+  crate that forbids unsafe code still builds. (4.5.2)
 - **The locked dependency set no longer carries the webpki advisories
   RUSTSEC-2026-0381, 0382 and 0383.** Nothing to change in code. Your own
   application's lock file is separate and keeps the versions it resolved when
