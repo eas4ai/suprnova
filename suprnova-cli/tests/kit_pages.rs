@@ -695,7 +695,9 @@ fn both_offer_more_before_cap_and_stop_at_exhaustion() {
             let dashboard = app.read("src/controllers/dashboard.rs");
             let index = function(&dashboard, "index");
             for needle in [
-                r#"InertiaResponse::new("Dashboard")"#,
+                r#"InertiaResponse::live::<DashboardProps>("Dashboard")"#,
+                r#".scope("notes", user_id)"#,
+                ".load_with(move |response| async move",
                 r#".defer("stats", "#,
                 r#".optional("recent_notes", "#,
             ] {
