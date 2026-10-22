@@ -164,6 +164,8 @@ pub struct InertiaRegistry {
     /// Shared with every [`SharedOnceProp`] handle, which writes its
     /// options through to the entry it was returned for.
     shares: Arc<RwLock<Vec<StaticEntry>>>,
+    pub(crate) cache_pages:
+        RwLock<std::collections::BTreeMap<(String, String), Arc<super::cache::CachePage>>>,
     /// Shared [`ProvidesInertiaProperties`] values, expanded per render
     /// after the keyed shares, in registration order.
     providers: RwLock<Vec<Arc<dyn ProvidesInertiaProperties>>>,
@@ -193,6 +195,7 @@ impl InertiaRegistry {
     pub fn new() -> Self {
         Self {
             shares: Arc::new(RwLock::new(Vec::new())),
+            cache_pages: RwLock::new(std::collections::BTreeMap::new()),
             providers: RwLock::new(Vec::new()),
             provider: RwLock::new(None),
             config: RwLock::new(None),

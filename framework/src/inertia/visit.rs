@@ -37,6 +37,7 @@ pub(crate) struct Visit {
     path: String,
     /// The component the page render answered with, when one rendered.
     rendered_component: Mutex<Option<String>>,
+    cacheable: std::sync::atomic::AtomicBool,
     /// The application's middleware hooks, when it installed any.
     hooks: Option<Arc<dyn InertiaMiddlewareHooks>>,
     /// Where the application installed the hooks, the share source
@@ -58,6 +59,7 @@ impl Visit {
             public_root: request.public_root().to_string(),
             path: request.path().to_string(),
             rendered_component: Mutex::new(None),
+            cacheable: std::sync::atomic::AtomicBool::new(false),
             hooks: None,
             hooks_location: None,
             version: None,
@@ -95,6 +97,10 @@ impl Visit {
     /// The `version` hook's answer for this request.
     pub(crate) fn version(&self) -> Option<&str> {
         self.version.as_deref()
+    }
+
+    pub(crate) fn is_cacheable(&self) -> bool {
+        self.cacheable.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The hooks' shared props for this request.
@@ -233,4 +239,13 @@ mod tests {
         assert!(!is_prefetch(|_| None));
         assert!(!is_prefetch(|_| Some("prerender")));
     }
+}
+
+/// The outer header middleware applies privacy after cache publication is decided.
+pub(crate) fn mark_cacheable() {
+    let _ = VISIT.try_with(|visit| {
+        visit
+            .cacheable
+            .store(true, std::sync::atomic::Ordering::Relaxed)
+    });
 }

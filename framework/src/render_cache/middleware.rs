@@ -1236,7 +1236,7 @@ fn variance_depends_on_ambient_context(policy: &RenderCachePolicy) -> bool {
 
 /// A purpose-separated digest of a registered route pattern. See
 /// [`ROUTE_IDENTITY_DOMAIN`].
-fn route_identity(pattern: &str) -> RouteIdentity {
+pub(super) fn route_identity(pattern: &str) -> RouteIdentity {
     let mut hasher = Sha256::new();
     hasher.update(ROUTE_IDENTITY_DOMAIN);
     hasher.update(pattern.as_bytes());
@@ -1298,8 +1298,27 @@ fn variance_descriptor(
     let mut variance = VarianceDescriptor::new();
     let mut media = "text/html".to_owned();
     let mut encoding: Option<String> = None;
-    for dimension in policy.vary() {
+    let mut dimensions = policy.vary().clone();
+    if crate::App::inertia_registry().installed_config().is_some()
+        || facts.header("X-Inertia").is_some()
+    {
+        for dimension in [
+            VarianceDimension::Inertia,
+            VarianceDimension::InertiaPartial,
+            VarianceDimension::InertiaVersion,
+            VarianceDimension::InertiaProtocol,
+        ] {
+            dimensions.insert(dimension);
+        }
+    }
+    for dimension in &dimensions {
         let value = match dimension {
+            VarianceDimension::Inertia
+            | VarianceDimension::InertiaPartial
+            | VarianceDimension::InertiaVersion
+            | VarianceDimension::InertiaProtocol => {
+                DimensionValue::Public(super::inertia::dimension(facts, dimension))
+            }
             VarianceDimension::Locale => DimensionValue::Public(facts.locale()),
             // The default guard's id, keyed as its bare principal: the value
             // every default-guard read records, and never the
@@ -1384,6 +1403,10 @@ pub(super) const SEEDED_EPOCH: u64 = 1;
 /// the two derive a key by the same code and cannot disagree about which
 /// dimension a key holds or how its value is resolved.
 pub(super) trait KeyFacts {
+    /// Protocol headers are normalized before they enter a descriptor.
+    fn header(&self, _name: &str) -> Option<&str> {
+        None
+    }
     /// The locale the route is rendered in.
     fn locale(&self) -> String;
     /// The signed-in user's identifier, or `None` when nobody is.
@@ -1425,6 +1448,12 @@ pub(super) fn ambient_locale() -> String {
 struct RequestFacts<'a>(&'a Request);
 
 impl KeyFacts for RequestFacts<'_> {
+    fn header(&self, name: &str) -> Option<&str> {
+        // Inertia accepts non-text header bytes too; keep protocol truthiness identical.
+        self.0.header(name).or_else(|| {
+            (name.eq_ignore_ascii_case("X-Inertia") && self.0.is_inertia()).then_some("true")
+        })
+    }
     fn locale(&self) -> String {
         ambient_locale()
     }
@@ -2576,6 +2605,17 @@ async fn lead_render(
         let _ = runtime.coordinator.release(lease).await;
         return response;
     };
+    // Request prop reads are slot-scoped, so only their registered stitched
+    // representation can publish. A Complete entry would retain private bytes.
+    if let Some(facts) = &report.inertia_document
+        && (!is_stitched(policy)
+            || facts.route.is_empty()
+            || facts.route != job.input.route_pattern)
+    {
+        LookupOutcome::Declined(LookupDeclineReason::InertiaWithoutRegisteredStitching).record();
+        let _ = runtime.coordinator.release(lease).await;
+        return Ok(response);
+    }
     let search_decline = if report.context.viewer_scoped_search {
         Some(LookupDeclineReason::ViewerScopedSearch)
     } else if report.context.analytics_search {
@@ -2852,8 +2892,17 @@ async fn lead_render(
     // class, and a stitched route whose render mounted no Live document at
     // all and so recorded nothing to check - publishes the response's own
     // bytes as a Complete representation, exactly as before.
-    let published = match (is_stitched(policy), report.live_document.as_ref()) {
-        (true, Some(facts)) => {
+    let published = match (
+        is_stitched(policy),
+        report.live_document.as_ref(),
+        report.inertia_document.as_ref(),
+    ) {
+        (true, Some(_), Some(_)) => Err(stitch::CompositeBuildError::CaptureInvalid),
+        (true, None, Some(facts)) => {
+            super::inertia_page::build_entry(runtime, header, response.body(), facts)
+                .map_err(|_| stitch::CompositeBuildError::CaptureInvalid)
+        }
+        (true, Some(facts), _) => {
             stitch::build_composite_entry(runtime, header, response.body(), facts).await
         }
         // CACHE-004: a Complete entry replays its stored CSP and body to
@@ -2930,7 +2979,11 @@ async fn lead_render(
     // request that produced it. See fix round 2, item 2.
     finish_fresh_render(
         response,
-        if_none_match.as_deref(),
+        if report.inertia_document.is_some() {
+            None
+        } else {
+            if_none_match.as_deref()
+        },
         policy,
         entry.header(),
         &validator,

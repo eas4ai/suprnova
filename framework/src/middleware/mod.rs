@@ -26,6 +26,7 @@
 mod aliases;
 mod chain;
 mod identity;
+pub(crate) use identity::inertia_hooks_of;
 mod pipeline;
 mod registry;
 mod terminable;
@@ -121,14 +122,8 @@ pub(crate) use identity::{MiddlewareExclusion, alias_of, boxed_as, inherit_ident
 
 /// Convert a Middleware trait object into a BoxedMiddleware
 ///
-/// The box does not remember which middleware type it wraps, so the
-/// middleware priority list leaves it where it stands in a chain. The
-/// registration methods, such as `.middleware(M)` on a route and
-/// `global_middleware!`, register the type as well.
+/// Retains the type and framework metadata so preboxed middleware follows
+/// the same ordering and boot checks as typed registrations.
 pub fn into_boxed<M: Middleware + 'static>(middleware: M) -> BoxedMiddleware {
-    let middleware = Arc::new(middleware);
-    Arc::new(move |req, next| {
-        let mw = middleware.clone();
-        Box::pin(async move { mw.handle(req, next).await })
-    })
+    identity::boxed_as(middleware)
 }

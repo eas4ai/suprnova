@@ -15,12 +15,31 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   Pixels, transparency, indexed palettes, the ICC profile and the colour chunks
   are kept; text, time and location metadata are removed; the output is never
   larger than the input. The `media` feature carries the dependency.
+- **Inertia pages in RenderCache.** A page declares its cache shape on the
+  `InertiaProps` struct: `#[inertia(cacheable)]` on the struct, and
+  `#[inertia(public)]` or `#[inertia(per_request)]` on every field (a field
+  without a marker, an unknown field name or the marker on a non-props type
+  fails to compile). `Inertia::cache_page::<Props>(route, component, public_shared,
+  per_request_shared)` registers the page at boot. RenderCache stores the public
+  shell and stitches the per-request props in after the route guards run; the
+  assembled response is `private, no-store`. Representations are keyed on
+  `X-Inertia`, the partial set, the asset version and the other protocol
+  headers, which the response lists in `Vary`; a stale asset version answers
+  409 before any cached bytes leave. `suprnova generate-types` writes the
+  declarations into `inertia-props.ts` as `inertiaPropCache`
+  (`manual/render-cache.md`, `manual/frontend-typescript-types.md`).
 
 ### Changed
 
 - **The default lossy encode quality is 85, not 70.** JPEG and lossy WebP
   encoded without an explicit `quality` call now use 85, which
   `DEFAULT_IMAGE_QUALITY` names. Quality below 85 blurs images.
+- **Inertia protocol middleware runs before RenderCache** whatever order the
+  application registered them in, so an asset mismatch is answered before a
+  stored page could be replayed. A cacheable Inertia route with an opaque
+  share hook or provider fails boot with the route name; declare the shared
+  props by name instead. Middleware boxed through the public `into_boxed`
+  keeps its type identity, so ordering and boot checks see it.
 
 ### Fixed
 

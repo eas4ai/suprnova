@@ -293,6 +293,8 @@ pub struct CollectorReport {
     pub undeclared: Vec<String>,
     /// Facts a rendered Live document recorded, if the render mounted one.
     pub live_document: Option<super::live::LiveDocumentFacts>,
+    /// Public Inertia data captured before response middleware.
+    pub inertia_document: Option<crate::inertia::InertiaDocumentFacts>,
     /// Test-only: see [`strip_classification_reasons_for_test`]'s own doc.
     /// Lives on the report itself, not a separate collector field, because
     /// `lead_render` reads it from the *extracted* report after the
@@ -509,6 +511,11 @@ pub fn begin_handler() {
 #[doc(hidden)]
 pub async fn slot_scope<F: std::future::Future>(future: F) -> F::Output {
     IN_SLOT.scope((), future).await
+}
+
+/// Eager field serialization has the same request attribution as an async resolver.
+pub(crate) fn slot_call<T>(call: impl FnOnce() -> T) -> T {
+    IN_SLOT.sync_scope((), call)
 }
 
 /// Fix the render's SQL read view before any external search data is read.
@@ -1096,4 +1103,17 @@ pub fn current_report() -> Option<CollectorReport> {
 #[cfg(any(test, feature = "testing"))]
 pub fn strip_classification_reasons_for_test() {
     with_state(|state| state.report.strip_classification_reasons = true);
+}
+
+/// Records a structured public shell without retaining any request prop values.
+pub(crate) fn observe_inertia_document(facts: crate::inertia::InertiaDocumentFacts) {
+    with_state(|state| {
+        if state.report.inertia_document.is_some() {
+            state
+                .report
+                .undeclared
+                .push("multiple_inertia_documents".to_owned());
+        }
+        state.report.inertia_document = Some(facts);
+    });
 }

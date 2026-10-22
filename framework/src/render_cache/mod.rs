@@ -37,6 +37,8 @@ pub mod console;
 pub(crate) mod decline;
 pub mod file_store;
 pub mod hints;
+mod inertia;
+pub(crate) mod inertia_page;
 pub mod ledger;
 pub mod live;
 pub mod middleware;
@@ -575,6 +577,7 @@ impl RenderCache {
         }
         let keys = crate::live::build_key_ring()?;
         let table = router.render_cache_policies().clone();
+        crate::inertia::cache::validate_boot(&router, &table)?;
         let l0 = MemoryRenderStore::new(MemoryStoreLimits {
             max_entries: config.l0.max_entries,
             max_bytes: config.l0.max_bytes,

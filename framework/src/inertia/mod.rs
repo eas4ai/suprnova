@@ -6,7 +6,11 @@
 //! deferred / lazy / encrypted history props, shared data, asset
 //! versioning, flash messages, and SSR.
 
+pub(crate) mod cache;
 mod config;
+#[doc(hidden)]
+pub use cache::InertiaDocumentFacts;
+pub use cache::{CacheableInertiaProps, InertiaPageProps, IntoInertiaCacheProp};
 mod conversion_middleware;
 mod devtools;
 mod dotted;
@@ -17,6 +21,7 @@ mod facade;
 pub(crate) mod flash;
 mod headers_middleware;
 mod hooks;
+pub(crate) use hooks::VersionChangeHook;
 mod manifest;
 mod pages;
 mod prop;
@@ -92,4 +97,9 @@ pub async fn flash_scope_for_test<F: std::future::Future>(
     fut: F,
 ) -> F::Output {
     flash::FLASH_BAG.scope(bag, fut).await
+}
+
+/// The version the current middleware visit and page share.
+pub(crate) fn visit_version() -> String {
+    visit::scoped_version().unwrap_or_else(crate::Inertia::get_version)
 }

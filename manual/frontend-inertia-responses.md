@@ -2935,6 +2935,106 @@ Other Rust-shaped choices worth flagging:
   initial-visit-skipped behavior the name "lazy" suggests if you're
   coming from Laravel.
 
+## Cacheable pages
+
+A cacheable page separates public data from request data. Add
+`#[inertia(cacheable)]` to an `InertiaProps` struct. Mark every field
+`#[inertia(public)]` or `#[inertia(per_request)]`. An unmarked field fails
+compilation and names the field. Without `cacheable`, the derive keeps its
+ordinary serialization behavior. Cacheable props use the typed response
+conversion, through the builder below or `inertia_response!`.
+
+Register every shared prop at boot. Public shared props use the public list;
+all other shared props use the per-request list. List `errors` and `flash`
+there too unless the application explicitly lists them public. A public
+declaration never hides a session dependency; that dependency declines the
+shell. The framework's `root` prop is public and already belongs to the
+key. A missing shared declaration stops boot with the route and prop name.
+Register named shares before `Inertia::cache_page`, then install RenderCache.
+A second boot check catches named shares added after page registration.
+Opaque shared providers and middleware hooks cannot prove their keys at boot and are refused.
+Page providers are refused when the response resolves. Use named props for
+cacheable pages. Ordinary pages keep provider support.
+
+With the RenderCache migration applied and the `Cache/Article` frontend page
+present, add this handler and registration to the application's bootstrap:
+
+```rust,no_run
+use suprnova::{App, Auth, FrameworkError, Inertia, InertiaConfig, InertiaProps,
+    InertiaResponse, Prop, Request, Response, Router};
+use suprnova::render_cache::{FreshnessPolicy, RenderCache, RenderCachePolicy,
+    RepresentationClass, VarianceDimension};
+use suprnova::render_cache::config::RenderCacheConfig;
+use suprnova::serde_json::json;
+
+#[derive(InertiaProps)]
+#[inertia(cacheable)]
+struct ArticleProps {
+    #[inertia(public)]
+    article: Prop,
+    #[inertia(per_request)]
+    viewer: Prop,
+}
+
+async fn article(request: Request) -> Response {
+    InertiaResponse::new("Cache/Article")
+        .cacheable(ArticleProps {
+            article: Prop::lazy(|| async { json!({"title": "Public article"}) }),
+            viewer: Prop::lazy(|| async { json!({"id": Auth::id()}) }),
+        })?
+        .resolve(&request).await.map_err(Into::into)
+}
+
+async fn cache_routes() -> Result<Router, FrameworkError> {
+    Inertia::install(&InertiaConfig::new())?;
+    Inertia::share("appName", "Articles")?;
+    App::inertia_share_lazy("auth", || async {
+        Ok::<_, FrameworkError>(json!({"id": Auth::id()}))
+    });
+    Inertia::cache_page::<ArticleProps>("/article", "Cache/Article",
+        &["appName"], &["auth", "errors", "flash"])?;
+    let freshness = FreshnessPolicy::new(60_000, 0, 0)
+        .map_err(|e| FrameworkError::internal(e.to_string()))?;
+    let policy = RenderCachePolicy::builder(RepresentationClass::PublicShellStitched)
+        .freshness(freshness).vary(VarianceDimension::Locale).build()
+        .map_err(|e| FrameworkError::internal(e.to_string()))?;
+    let router: Router = Router::new().get("/article", article).into();
+    let router = router.try_render_cache("/article", policy)?;
+    RenderCache::install(router, RenderCacheConfig::from_env()?).await
+}
+```
+
+Attach the route's guards as usual. They run before any request prop resolves,
+on misses and hits. The handler still runs on hits to register this request's
+resolvers. Lazy public props skip their work on a hit. Eager work done before
+constructing the response still runs, so put database and identity reads inside
+the appropriate lazy prop. Session, flash, and error staging also run in the
+request slot. Their reads do not become shell dependencies. Request slots run
+again after every write; a write to public data invalidates the shared shell.
+Public declarations never override an observed private dependency.
+
+The entry holds public JSON and one typed request slot. It never stores a
+previous visitor's props, flash, history flags, SSR markup, or CSRF token.
+Assembly uses the composite engine before writing the final page. Both JSON
+and HTML responses are `Cache-Control: private, no-store` and never answer a
+conditional 304. HTML assembly runs SSR against the assembled page on every
+request when SSR is enabled, then writes the root template and hydration JSON
+from that same page. This costs one SSR render and document encoding per HTML
+visit. With SSR disabled, there is no SSR render or worker request. Nonce CSP
+pages render without storing an Inertia shell, as SEC-005 requires.
+
+Field names use serde's wire renames. Cacheable fields require nonempty
+top-level names; dotted shared keys use their top-level declaration.
+Register each route and component pair before installing RenderCache. See
+[RenderCache](render-cache.md), [Representations](render-cache-representations.md),
+and [TypeScript types](frontend-typescript-types.md).
+
+### Why Suprnova diverges
+
+Laravel does not have a typed Inertia page cache. Suprnova requires complete
+prop classification so a new private field cannot enter a shared shell by
+default. It retains public data and assembles request data on the server.
+
 ## Next
 
 - [Page Components](frontend-pages.md) - how the frontend resolves a

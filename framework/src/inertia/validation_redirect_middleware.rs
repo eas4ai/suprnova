@@ -122,7 +122,9 @@ pub(crate) fn back_target(
     if let Some(from_referer) = referer.and_then(|r| same_origin_path(r, host, root)) {
         return from_referer;
     }
-    if let Some(previous) = crate::session::session().and_then(|s| s.previous_url()) {
+    if crate::session::middleware::session_scope_installed()
+        && let Some(previous) = crate::session::session().and_then(|s| s.previous_url())
+    {
         return previous;
     }
     root_relative_or_none(current).unwrap_or_else(|| format!("{root}/"))

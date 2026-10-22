@@ -26,6 +26,14 @@ pub enum VarianceDimension {
     Media,
     /// Negotiated content encoding.
     Encoding,
+    /// Inertia document or page JSON protocol.
+    Inertia,
+    /// Normalized Inertia partial component, only set, and except set.
+    InertiaPartial,
+    /// Current server and requested Inertia asset versions.
+    InertiaVersion,
+    /// Other Inertia request instructions that affect page metadata.
+    InertiaProtocol,
     /// Tenant, as opaque material.
     Tenant,
     /// Principal, as opaque material bound to the permission version.
@@ -46,6 +54,14 @@ impl VarianceDimension {
             Self::Locale => Some("Accept-Language"),
             Self::Media => Some("Accept"),
             Self::Encoding => Some("Accept-Encoding"),
+            Self::Inertia => Some("X-Inertia"),
+            Self::InertiaPartial => Some(
+                "X-Inertia-Partial-Data, X-Inertia-Partial-Except, X-Inertia-Partial-Component",
+            ),
+            Self::InertiaVersion => Some("X-Inertia-Version"),
+            Self::InertiaProtocol => Some(
+                "X-Inertia-Except-Once-Props, X-Inertia-Reset, X-Inertia-Error-Bag, X-Inertia-Infinite-Scroll-Merge-Intent",
+            ),
             _ => None,
         }
     }
@@ -60,6 +76,10 @@ impl VarianceDimension {
             Self::Locale => ("locale", ""),
             Self::Media => ("media", ""),
             Self::Encoding => ("encoding", ""),
+            Self::Inertia => ("inertia", ""),
+            Self::InertiaPartial => ("inertia_partial", ""),
+            Self::InertiaVersion => ("inertia_version", ""),
+            Self::InertiaProtocol => ("inertia_protocol", ""),
             Self::Tenant => ("tenant", ""),
             Self::Principal => ("principal", ""),
             Self::FeatureVersion => ("feature_version", ""),
@@ -107,6 +127,10 @@ impl<'de> serde::Deserialize<'de> for VarianceDimension {
             "locale" => Ok(Self::Locale),
             "media" => Ok(Self::Media),
             "encoding" => Ok(Self::Encoding),
+            "inertia" => Ok(Self::Inertia),
+            "inertia_partial" => Ok(Self::InertiaPartial),
+            "inertia_version" => Ok(Self::InertiaVersion),
+            "inertia_protocol" => Ok(Self::InertiaProtocol),
             "tenant" => Ok(Self::Tenant),
             "principal" => Ok(Self::Principal),
             "feature_version" => Ok(Self::FeatureVersion),
@@ -273,6 +297,7 @@ impl VarianceDescriptor {
             .dimensions
             .keys()
             .filter_map(VarianceDimension::vary_header)
+            .flat_map(|headers| headers.split(", "))
             .collect();
         headers.sort_unstable();
         headers.dedup();
@@ -476,4 +501,29 @@ pub fn classify(
         );
     }
     ClassificationOutcome { class, reasons }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DimensionValue, VarianceDescriptor, VarianceDimension};
+
+    #[test]
+    fn cache_review_2_protocol_dimension_declares_every_http_vary_header() {
+        let mut descriptor = VarianceDescriptor::new();
+        descriptor
+            .declare(
+                VarianceDimension::InertiaProtocol,
+                DimensionValue::Public("protocol".into()),
+            )
+            .unwrap();
+        assert_eq!(
+            descriptor.vary_headers(),
+            vec![
+                "X-Inertia-Error-Bag",
+                "X-Inertia-Except-Once-Props",
+                "X-Inertia-Infinite-Scroll-Merge-Intent",
+                "X-Inertia-Reset",
+            ]
+        );
+    }
 }

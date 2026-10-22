@@ -67,7 +67,7 @@ pub struct SafeHeaders(BTreeMap<String, String>);
 /// same bytes served without it behave differently in a browser. An HTML
 /// attachment that downloaded on the render would otherwise run inline
 /// under the application's origin on the hit (audit finding ASTRA-11).
-pub const REPLAYABLE_HEADERS: [&str; 14] = [
+pub const REPLAYABLE_HEADERS: [&str; 15] = [
     "cache-control",
     "content-language",
     "content-security-policy",
@@ -82,6 +82,7 @@ pub const REPLAYABLE_HEADERS: [&str; 14] = [
     "cross-origin-resource-policy",
     "permissions-policy",
     "x-frame-options",
+    "x-inertia",
 ];
 
 /// Whether `value` is a valid HTTP header value byte for byte: horizontal

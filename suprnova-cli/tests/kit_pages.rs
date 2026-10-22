@@ -1067,6 +1067,38 @@ fn both_offer_more_before_cap_and_stop_at_exhaustion() {
         });
     }
 
+    #[test]
+    fn cache_013_each_kit_ships_a_cache_record_for_every_page() {
+        each_kit(|app| {
+            let types = app.read("frontend/src/types/inertia-props.ts");
+            let pages = types
+                .split("export interface Pages {\n")
+                .nth(1)
+                .unwrap()
+                .split("}\n")
+                .next()
+                .unwrap();
+            let record = types
+                .split("export const inertiaPropCache = {\n")
+                .nth(1)
+                .unwrap_or_else(|| panic!("{}: cache record is missing", app.kit))
+                .split("} as const;")
+                .next()
+                .unwrap();
+            assert!(!pages.trim().is_empty());
+            for page in pages.lines() {
+                let component = page.trim().split(": ").next().unwrap();
+                assert!(
+                    record.contains(&format!(
+                        "  {component}: {{ cacheable: false, public: [], perRequest: [] }},"
+                    )),
+                    "{}: no boundary record for {component}",
+                    app.kit
+                );
+            }
+        });
+    }
+
     /// PAR-078: `suprnova generate-types` on a fresh scaffold names the
     /// flash struct as `flashDataType`, adds `auth` to the shared props,
     /// types the note pages, and warns about no prop type.

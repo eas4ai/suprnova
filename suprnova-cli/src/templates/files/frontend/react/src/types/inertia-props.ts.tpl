@@ -157,6 +157,19 @@ export interface Pages {
   "auth/VerifyEmail": VerifyEmailProps;
 }
 
+export const inertiaPropCache = {
+  "Agents/Approve": { cacheable: false, public: [], perRequest: [] },
+  "Agents/Claim": { cacheable: false, public: [], perRequest: [] },
+  "Agents/Connected": { cacheable: false, public: [], perRequest: [] },
+  "Home": { cacheable: false, public: [], perRequest: [] },
+  "Notes/Show": { cacheable: false, public: [], perRequest: [] },
+  "auth/ForgotPassword": { cacheable: false, public: [], perRequest: [] },
+  "auth/Login": { cacheable: false, public: [], perRequest: [] },
+  "auth/Register": { cacheable: false, public: [], perRequest: [] },
+  "auth/ResetPassword": { cacheable: false, public: [], perRequest: [] },
+  "auth/VerifyEmail": { cacheable: false, public: [], perRequest: [] },
+} as const;
+
 export interface SharedProps {
   root: string;
   auth: Auth;

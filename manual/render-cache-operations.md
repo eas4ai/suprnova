@@ -141,6 +141,8 @@ provider, or a backend:
     `secret_context_read`, `undeclared_context`.
   - Search (see [Search pages in RenderCache](search.md#search-pages-in-rendercache)):
     `viewer_scoped_search`, `analytics_search`, `search_opt_out`.
+  - Cacheable Inertia facts outside their registered stitched route:
+    `inertia_without_registered_stitching`.
   - Live document facts: `identity_bound_without_stitching`,
     `invalid_stitch_capture`, `no_store_intent`,
     `unresolvable_seed_deadline`.

@@ -87,8 +87,8 @@ if a foreground rebuild fails outright. The two windows are not stacked; see
 
 `RepresentationClass` runs from widest to narrowest sharing: `PublicShared`
 (one representation for everyone who matches the declared variance),
-`PublicShellStitched` (a Live document whose shared shell is stored once and
-whose islands are re-mounted for whoever is asking; see
+`PublicShellStitched` (a Live document or typed Inertia page whose public shell
+is stored once and whose request slots resolve after the route guards; see
 [Representations](render-cache-representations.md)),
 `PrivateCached` (one representation per signed-in visitor or tenant), and
 `Uncacheable`.
@@ -431,6 +431,38 @@ nothing to recompute. Reach
 for `suprnova::Cache` when you have a specific value you want to compute
 once and reuse; reach for RenderCache when you have a whole route whose
 response is expensive to render and safe to share.
+
+### Inertia representations
+
+Install Inertia before serving cached pages. RenderCache declares `X-Inertia`,
+the partial component, sorted `only` and `except` sets, and the current and
+requested asset versions in every Inertia key. List entries retain whitespace,
+as the Inertia protocol requires. Reset, once exclusions, error bags, and scroll
+intent also partition entries. A stale GET version returns 409 before lookup.
+An Inertia response keeps `Vary: X-Inertia` and JSON hits keep `X-Inertia: true`.
+Cacheable pages use `#[inertia(cacheable)]` and classify every field as
+`#[inertia(public)]` or `#[inertia(per_request)]`. Register their shared prop
+lists with `Inertia::cache_page` before installing a `PublicShellStitched`
+policy. Boot refuses an unlisted shared prop with the route and prop name.
+The assembled response stays `private, no-store`. See the complete runnable
+[cacheable page example](frontend-inertia-responses.md#cacheable-pages).
+
+The usual eligibility and privacy rules still apply. Session reads decline a
+Complete page. Declare `Locale` for document shells.
+
+```rust,no_run
+use suprnova::render_cache::{FreshnessPolicy, RenderCachePolicy, RepresentationClass, VarianceDimension};
+
+fn page_policy() -> Result<RenderCachePolicy, suprnova::FrameworkError> {
+    let freshness = FreshnessPolicy::new(60_000, 0, 0)
+        .map_err(|e| suprnova::FrameworkError::internal(e.to_string()))?;
+    RenderCachePolicy::builder(RepresentationClass::PublicShared)
+        .freshness(freshness).vary(VarianceDimension::Locale).build()
+        .map_err(|e| suprnova::FrameworkError::internal(e.to_string()))
+}
+```
+
+See [Inertia responses](frontend-inertia-responses.md) and [Representations](render-cache-representations.md).
 
 ### Why Suprnova diverges
 

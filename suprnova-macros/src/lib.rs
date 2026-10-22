@@ -21,6 +21,7 @@ mod domain_error;
 mod factory;
 mod handler;
 mod inertia;
+mod inertia_cache;
 mod inertia_pages;
 mod inertia_root;
 mod injectable;
@@ -177,7 +178,7 @@ pub fn derive_data(input: TokenStream) -> TokenStream {
 ///     current_user: User, // sent as `currentUser`
 /// }
 /// ```
-#[proc_macro_derive(InertiaProps, attributes(serde, inertia_props))]
+#[proc_macro_derive(InertiaProps, attributes(serde, inertia_props, inertia))]
 pub fn derive_inertia_props(input: TokenStream) -> TokenStream {
     inertia::derive_inertia_props_impl(input)
 }

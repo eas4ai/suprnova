@@ -79,6 +79,11 @@ impl InertiaHeadersMiddleware {
         }
     }
 
+    /// Cache boot checks must see hooks held by route-local configurations.
+    pub(crate) fn has_hooks(&self) -> bool {
+        self.hooks.is_some()
+    }
+
     /// Build the middleware with the settings of `config` that it reads:
     /// [`InertiaConfig::store_previous_url`] and the
     /// [`hooks`](InertiaConfig::hooks), whose request hooks it runs before
@@ -263,6 +268,9 @@ impl InertiaHeadersMiddleware {
 #[async_trait]
 impl Middleware for InertiaHeadersMiddleware {
     async fn handle(&self, mut request: Request, next: Next) -> Response {
+        if self.has_hooks() {
+            super::cache::refuse_request_hooks(&request)?;
+        }
         // Capture before `next` consumes the request.
         let facts = RequestFacts::capture(&mut request);
         let visit = Arc::new(match &self.hooks {
@@ -283,6 +291,9 @@ impl Middleware for InertiaHeadersMiddleware {
         let was_ok = response.is_ok();
         let rewrap = |http| if was_ok { Ok(http) } else { Err(http) };
         let mut http = response.unwrap_or_else(|e| e);
+        if visit.is_cacheable() {
+            http = http.replace_header("Cache-Control", "private, no-store");
+        }
 
         let was_redirect = is_redirect_status(http.status_code());
 

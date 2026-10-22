@@ -17,10 +17,9 @@
 //!
 //! Registrations and request-boundary wrappers of known middleware write
 //! the table. Dropped wrappers are swept with the other weak entries.
-//! [`into_boxed`] itself writes nothing, because ordinary request wrappers
-//! have no registration metadata to retain. A middleware boxed
-//! by hand or by `into_boxed` has no known type, and the priority list
-//! leaves it where it is.
+//! Public [`super::into_boxed`] uses the same registration path, so its type,
+//! security policy, Inertia hooks and page tools remain visible. Only a raw
+//! closure built by hand has no known type and keeps its place.
 //!
 //! An entry holds a `Weak`, never the middleware. The address of a dropped
 //! box can be given to a new one, and the `Weak` is how a lookup tells that
@@ -39,7 +38,7 @@
 //! from the table: [`MiddlewareExclusion::matches`] compares the type
 //! [`boxed_as`] remembered or the alias [`name_as`] remembered.
 
-use super::{BoxedMiddleware, Middleware, MiddlewareFuture, Next, into_boxed};
+use super::{BoxedMiddleware, Middleware, MiddlewareFuture, Next};
 use crate::FrameworkError;
 use crate::http::Request;
 use std::any::TypeId;
@@ -56,6 +55,7 @@ struct Known {
     /// route named it.
     alias: Option<String>,
     security_headers: Option<crate::SecurityHeaders>,
+    inertia_hooks: bool,
     /// The tools a `with_tools` layer offers, which the router checks at
     /// boot (AGENT-014).
     #[cfg(feature = "agents")]
@@ -92,7 +92,17 @@ pub(crate) fn boxed_as<M: Middleware + 'static>(middleware: M) -> BoxedMiddlewar
     let page_tools = (&middleware as &dyn std::any::Any)
         .downcast_ref::<crate::agents::page_tools::PageToolsLayer>()
         .map(crate::agents::page_tools::PageToolsLayer::names);
-    let boxed = into_boxed(middleware);
+    let inertia_hooks = (&middleware as &dyn std::any::Any)
+        .downcast_ref::<crate::InertiaMiddleware>()
+        .is_some_and(crate::InertiaMiddleware::has_hooks)
+        || (&middleware as &dyn std::any::Any)
+            .downcast_ref::<crate::InertiaHeadersMiddleware>()
+            .is_some_and(crate::InertiaHeadersMiddleware::has_hooks);
+    let middleware = Arc::new(middleware);
+    let boxed: BoxedMiddleware = Arc::new(move |request, next| {
+        let middleware = Arc::clone(&middleware);
+        Box::pin(async move { middleware.handle(request, next).await })
+    });
     // A poisoned table is recovered, as the registries beside it are: a
     // panic elsewhere must not stop middleware from being registered.
     let mut table = table().write().unwrap_or_else(|p| p.into_inner());
@@ -104,6 +114,7 @@ pub(crate) fn boxed_as<M: Middleware + 'static>(middleware: M) -> BoxedMiddlewar
             type_id: Some(TypeId::of::<M>()),
             alias: None,
             security_headers,
+            inertia_hooks,
             #[cfg(feature = "agents")]
             page_tools,
         },
@@ -131,6 +142,7 @@ pub(crate) fn name_as(boxed: &BoxedMiddleware, identity: String) {
                     type_id: None,
                     alias: Some(identity),
                     security_headers: None,
+                    inertia_hooks: false,
                     #[cfg(feature = "agents")]
                     page_tools: None,
                 },
@@ -152,6 +164,7 @@ pub(crate) fn inherit_identity(source: &BoxedMiddleware, wrapper: &BoxedMiddlewa
             type_id: known.type_id,
             alias: known.alias.clone(),
             security_headers: known.security_headers.clone(),
+            inertia_hooks: known.inertia_hooks,
             #[cfg(feature = "agents")]
             page_tools: known.page_tools.clone(),
         })
@@ -179,6 +192,15 @@ pub(crate) fn security_headers_of(boxed: &BoxedMiddleware) -> Option<crate::Secu
     is_entry_of(known, boxed)
         .then(|| known.security_headers.clone())
         .flatten()
+}
+
+/// Boot validation checks the configuration held by a route's own middleware.
+pub(crate) fn inertia_hooks_of(boxed: &BoxedMiddleware) -> bool {
+    let table = table().read().unwrap_or_else(|p| p.into_inner());
+    table
+        .known
+        .get(&key(boxed))
+        .is_some_and(|known| is_entry_of(known, boxed) && known.inertia_hooks)
 }
 
 /// The tools `boxed` offers, when it is a `with_tools` layer.
@@ -319,6 +341,28 @@ pub(crate) fn sort_by_priority(
         }
     });
 
+    // An asset mismatch must answer before a stored page can short-circuit it.
+    let protocol = [
+        TypeId::of::<crate::InertiaMiddleware>(),
+        TypeId::of::<crate::InertiaHeadersMiddleware>(),
+        TypeId::of::<crate::InertiaVersionMiddleware>(),
+        TypeId::of::<crate::inertia::VersionChangeHook>(),
+    ];
+    for id in protocol {
+        if let (Some(cache), Some(check)) = (
+            order.iter().position(|index| {
+                type_of(&chain[*index])
+                    == Some(TypeId::of::<crate::render_cache::RenderCacheMiddleware>())
+            }),
+            order
+                .iter()
+                .position(|index| type_of(&chain[*index]) == Some(id)),
+        ) && check > cache
+        {
+            let index = order.remove(check);
+            order.insert(cache, index);
+        }
+    }
     let mut slots: Vec<Option<BoxedMiddleware>> = chain.into_iter().map(Some).collect();
     order
         .into_iter()
@@ -418,19 +462,15 @@ mod tests {
     }
 
     #[test]
-    fn a_registered_box_knows_its_type_and_a_plain_box_does_not() {
+    fn registered_and_public_boxes_keep_their_type() {
         let first = boxed_as(First);
         let second = boxed_as(Second);
-        let plain = into_boxed(First);
+        let public = super::super::into_boxed(First);
 
         assert_eq!(type_of(&first), Some(TypeId::of::<First>()));
         assert_eq!(type_of(&second), Some(TypeId::of::<Second>()));
         assert_eq!(type_of(&first.clone()), Some(TypeId::of::<First>()));
-        assert_eq!(
-            type_of(&plain),
-            None,
-            "into_boxed writes nothing: the request path calls it for every request"
-        );
+        assert_eq!(type_of(&public), Some(TypeId::of::<First>()));
     }
 
     #[test]
