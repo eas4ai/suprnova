@@ -102,8 +102,7 @@ fn validate_name(name: &str) -> Result<(), FrameworkError> {
     Ok(())
 }
 
-pub(crate) async fn checkpoint(name: &str) -> Result<i64, FrameworkError> {
-    let exec = executor().await?;
+fn checkpoint_insert(name: &str) -> Result<sea_orm::sea_query::InsertStatement, FrameworkError> {
     let insert = Query::insert()
         .into_table(Alias::new("projector_checkpoints"))
         .columns([Alias::new("name"), Alias::new("last_event_id")])
@@ -111,10 +110,16 @@ pub(crate) async fn checkpoint(name: &str) -> Result<i64, FrameworkError> {
         .map_err(|e| error(e.to_string()))?
         .on_conflict(
             OnConflict::column(Alias::new("name"))
-                .do_nothing()
+                .do_nothing_on([Alias::new("name")])
                 .to_owned(),
         )
         .to_owned();
+    Ok(insert)
+}
+
+pub(crate) async fn checkpoint(name: &str) -> Result<i64, FrameworkError> {
+    let exec = executor().await?;
+    let insert = checkpoint_insert(name)?;
     let inserted = exec.run(exec.backend().build(&insert)).await?;
     if inserted.rows_affected() > 0 {
         crate::render_cache::orm::after_table_write("projector_checkpoints").await?;
@@ -254,5 +259,27 @@ impl Job for QueuedProjector {
             })
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::DbBackend;
+
+    #[test]
+    fn es_003_checkpoint_insert_is_portable_without_ignore() {
+        let insert = checkpoint_insert("es.portable").unwrap();
+        for backend in [DbBackend::Sqlite, DbBackend::Postgres, DbBackend::MySql] {
+            let sql = backend.build(&insert).sql;
+            assert!(!sql.contains("IGNORE"), "{backend:?}: {sql}");
+            match backend {
+                DbBackend::MySql => assert!(
+                    sql.contains("ON DUPLICATE KEY UPDATE `name` = `name`"),
+                    "{sql}"
+                ),
+                _ => assert!(sql.contains("ON CONFLICT (\"name\") DO NOTHING"), "{sql}"),
+            }
+        }
     }
 }

@@ -43,6 +43,7 @@ async fn database() -> TestDatabase {
         .up(&SchemaManager::new(db.conn()))
         .await
         .unwrap();
+    engine_projectors::tables(db.conn()).await;
     db
 }
 fn uuid() -> String {
@@ -65,3 +66,5 @@ mod live_async_support;
 mod signals;
 
 mod commands;
+
+mod engine_projectors;
