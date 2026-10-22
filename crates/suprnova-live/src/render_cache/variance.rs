@@ -59,6 +59,9 @@ impl VarianceDimension {
                 "X-Inertia-Partial-Data, X-Inertia-Partial-Except, X-Inertia-Partial-Component",
             ),
             Self::InertiaVersion => Some("X-Inertia-Version"),
+            Self::InertiaProtocol => Some(
+                "X-Inertia-Except-Once-Props, X-Inertia-Reset, X-Inertia-Error-Bag, X-Inertia-Infinite-Scroll-Merge-Intent",
+            ),
             _ => None,
         }
     }
@@ -498,4 +501,29 @@ pub fn classify(
         );
     }
     ClassificationOutcome { class, reasons }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DimensionValue, VarianceDescriptor, VarianceDimension};
+
+    #[test]
+    fn cache_review_2_protocol_dimension_declares_every_http_vary_header() {
+        let mut descriptor = VarianceDescriptor::new();
+        descriptor
+            .declare(
+                VarianceDimension::InertiaProtocol,
+                DimensionValue::Public("protocol".into()),
+            )
+            .unwrap();
+        assert_eq!(
+            descriptor.vary_headers(),
+            vec![
+                "X-Inertia-Error-Bag",
+                "X-Inertia-Except-Once-Props",
+                "X-Inertia-Infinite-Scroll-Merge-Intent",
+                "X-Inertia-Reset",
+            ]
+        );
+    }
 }

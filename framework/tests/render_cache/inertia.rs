@@ -6,12 +6,17 @@ use suprnova::{InertiaResponse, Request, Response, Router};
 static RENDERS: AtomicUsize = AtomicUsize::new(0);
 async fn page(req: Request) -> Response {
     RENDERS.fetch_add(1, Ordering::SeqCst);
-    InertiaResponse::new("Cache/Page")
+    let response = InertiaResponse::new("Cache/Page")
         .with("a", 1)
         .with("b", 2)
         .resolve(&req)
         .await
-        .map_err(Into::into)
+        .map_err(suprnova::HttpResponse::from)?;
+    Ok(if req.header("x-test-protocol-vary") == Some("yes") {
+        response.header("Vary", "X-Inertia-Except-Once-Props, X-Inertia-Reset, X-Inertia-Error-Bag, X-Inertia-Infinite-Scroll-Merge-Intent")
+    } else {
+        response
+    })
 }
 async fn boot() -> std::sync::Arc<crate::render_cache_middleware_support::Harness> {
     RENDERS.store(0, Ordering::SeqCst);
@@ -133,5 +138,39 @@ async fn cache_011_document_partial_headers_have_their_own_key_in_both_warming_o
             b.body
         );
         assert_eq!(RENDERS.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn cache_review_2_protocol_vary_is_complete_and_manual_declarations_publish() {
+    for manual_vary in [false, true] {
+        let harness = boot().await;
+        let mut headers = vec![("X-Inertia", "true"), ("X-Inertia-Version", "cache-v1")];
+        if manual_vary {
+            headers.push(("x-test-protocol-vary", "yes"));
+        }
+        let first = dispatch_get(&harness, "/inertia-cache", &headers).await;
+        let second = dispatch_get(&harness, "/inertia-cache", &headers).await;
+        for response in [first, second] {
+            assert_eq!(response.status.as_u16(), 200);
+            let vary = response.header("vary").unwrap().to_ascii_lowercase();
+            for name in [
+                "x-inertia-except-once-props",
+                "x-inertia-reset",
+                "x-inertia-error-bag",
+                "x-inertia-infinite-scroll-merge-intent",
+            ] {
+                assert!(
+                    vary.split(',').any(|part| part.trim() == name),
+                    "missing {name}: {vary}"
+                );
+            }
+        }
+        assert_eq!(
+            RENDERS.load(Ordering::SeqCst),
+            1,
+            "declared protocol Vary permits replay"
+        );
     }
 }
