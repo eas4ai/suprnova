@@ -113,14 +113,15 @@ fn signal_002_binding_to_a_missing_prop_fails_to_build() {
 }
 
 #[test]
+#[ignore = "requires Node 24"]
 fn signal_004_shared_client_drops_stale_cursors_and_coalesces_bounded_reloads() {
     let suite = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../suprnova-cli/tests/frontend-live-core.test.ts");
-    let output = std::process::Command::new("bun")
-        .arg("test")
+    let output = std::process::Command::new("node")
+        .arg("--test")
         .arg(suite)
         .output()
-        .expect("Bun runs the kit client regression suite");
+        .expect("Node 24 runs the kit client regression suite");
     assert!(
         output.status.success(),
         "{}{}",

@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { stripTypeScriptTypes } from "node:module";
 
 type Timer = { callback: () => void; milliseconds: number };
 
@@ -26,11 +29,8 @@ async function loadCore() {
     "../src/templates/files/frontend/live/core.ts.tpl",
     import.meta.url,
   );
-  const source = await Bun.file(url).text();
-  const javascript = new Bun.Transpiler({
-    loader: "ts",
-    target: "browser",
-  }).transformSync(source);
+  const source = await readFile(url, "utf8");
+  const javascript = stripTypeScriptTypes(source, { mode: "strip" });
   return import(
     `data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`
   );
@@ -216,11 +216,11 @@ describe("Inertia live client core", () => {
       setTimer: app.setTimer,
       transport: app.transport,
     });
-    expect(Object.hasOwn(app.subscribedBindings, "__proto__")).toBe(true);
+    assert.equal(Object.hasOwn(app.subscribedBindings, "__proto__"), true);
     app.handlers.onSignal({ topic: "__proto__", cursor: 11, props: ["stats"] });
-    expect(app.timerCount).toBe(1);
+    assert.equal(app.timerCount, 1);
     app.runNextTimer();
-    expect(app.reloads[0]?.only).toEqual(["stats"]);
+    assert.deepEqual(app.reloads[0]?.only, ["stats"]);
   });
 
   it("subscribes every binding when a page has 33 topics", async () => {
@@ -240,10 +240,10 @@ describe("Inertia live client core", () => {
       setTimer: app.setTimer,
       transport: app.transport,
     });
-    expect(Object.keys(app.subscribedBindings)).toHaveLength(33);
+    assert.equal(Object.keys(app.subscribedBindings).length, 33);
     app.handlers.onSignal({ topic: "topic-32", cursor: 11, props: ["stats"] });
     app.runNextTimer();
-    expect(app.reloads[0]?.only).toEqual(["stats"]);
+    assert.deepEqual(app.reloads[0]?.only, ["stats"]);
   });
 
   it("reloads every bound prop when one topic covers 257 props", async () => {
@@ -260,7 +260,7 @@ describe("Inertia live client core", () => {
     });
     app.handlers.onSignal({ topic: "notes", cursor: 11, props: [] });
     app.runNextTimer();
-    expect(app.reloads[0]?.only).toEqual([...only].sort());
+    assert.deepEqual(app.reloads[0]?.only, [...only].sort());
   });
 
   it("takes a reset baseline without requeueing a completed push batch", async () => {
@@ -278,23 +278,23 @@ describe("Inertia live client core", () => {
     app.page.liveBindings.notes.cursor = 0;
     app.reloads[0]?.onSuccess?.(app.page);
     app.reloads[0]?.onFinish?.();
-    expect(app.timerCount).toBe(0);
+    assert.equal(app.timerCount, 0);
 
     app.handlers.onSignal({
       topic: "notes",
       cursor: 1,
       props: ["recent_notes"],
     });
-    expect(app.timerCount).toBe(1);
+    assert.equal(app.timerCount, 1);
     app.handlers.onSignal({ topic: "notes", cursor: 1, props: ["stats"] });
-    expect(app.timerCount).toBe(1);
+    assert.equal(app.timerCount, 1);
     app.runNextTimer();
-    expect(app.reloads[1]?.only).toEqual(["recent_notes", "stats"]);
+    assert.deepEqual(app.reloads[1]?.only, ["recent_notes", "stats"]);
     app.page.liveBindings.notes.cursor = 1;
     app.reloads[1]?.onSuccess?.(app.page);
     app.reloads[1]?.onFinish?.();
-    expect(app.timerCount).toBe(0);
-    expect(app.reloads).toHaveLength(2);
+    assert.equal(app.timerCount, 0);
+    assert.equal(app.reloads.length, 2);
   });
 
   it("drops rendered cursors and coalesces a burst into one bounded partial reload", async () => {
@@ -310,7 +310,7 @@ describe("Inertia live client core", () => {
     });
 
     app.handlers.onSignal({ topic: "notes", cursor: 10, props: ["stats"] });
-    expect(app.timerCount).toBe(0);
+    assert.equal(app.timerCount, 0);
 
     app.handlers.onSignal({ topic: "notes", cursor: 11, props: [] });
     app.handlers.onSignal({ topic: "profile", cursor: 4, props: ["auth"] });
@@ -319,15 +319,15 @@ describe("Inertia live client core", () => {
       cursor: 12,
       props: ["stats", "not_bound"],
     });
-    expect(app.timerCount).toBe(1);
-    expect(app.runNextTimer()).toBe(25);
+    assert.equal(app.timerCount, 1);
+    assert.equal(app.runNextTimer(), 25);
 
-    expect(app.reloads).toHaveLength(1);
-    expect(app.reloads[0]?.only).toEqual(["auth", "recent_notes", "stats"]);
-    expect(app.reloads[0]?.headers).toEqual({
+    assert.equal(app.reloads.length, 1);
+    assert.deepEqual(app.reloads[0]?.only, ["auth", "recent_notes", "stats"]);
+    assert.deepEqual(app.reloads[0]?.headers, {
       "X-Socket-ID": "socket-document-1",
     });
-    expect(app.visit().headers).toEqual({
+    assert.deepEqual(app.visit().headers, {
       Existing: "kept",
       "X-Socket-ID": "socket-document-1",
     });
@@ -351,7 +351,7 @@ describe("Inertia live client core", () => {
       cursor: 12,
       props: ["recent_notes"],
     });
-    expect(app.timerCount).toBe(0);
+    assert.equal(app.timerCount, 0);
 
     const returned = {
       liveBindings: {
@@ -363,16 +363,16 @@ describe("Inertia live client core", () => {
     app.setPage(returned);
     app.reloads[0]?.onSuccess?.(returned);
     app.reloads[0]?.onFinish?.();
-    expect(app.timerCount).toBe(1);
+    assert.equal(app.timerCount, 1);
     app.handlers.onSignal({
       topic: "notes",
       cursor: 12,
       props: ["recent_notes"],
     });
     app.handlers.onSignal({ topic: "notes", cursor: 12, props: ["stats"] });
-    expect(app.timerCount).toBe(1);
+    assert.equal(app.timerCount, 1);
     app.runNextTimer();
-    expect(app.reloads[1]?.only).toEqual(["recent_notes"]);
+    assert.deepEqual(app.reloads[1]?.only, ["recent_notes"]);
 
     app.reloads[1]?.onSuccess?.({
       liveBindings: {
@@ -388,7 +388,7 @@ describe("Inertia live client core", () => {
       cursor: 12,
       props: ["recent_notes"],
     });
-    expect(app.timerCount).toBe(0);
+    assert.equal(app.timerCount, 0);
   });
 
   it("reconciles an external partial reload per rendered prop", async () => {
@@ -412,9 +412,9 @@ describe("Inertia live client core", () => {
       cursor: 15,
       props: ["stats", "recent_notes"],
     });
-    expect(app.timerCount).toBe(1);
+    assert.equal(app.timerCount, 1);
     app.runNextTimer();
-    expect(app.reloads[0]?.only).toEqual(["recent_notes"]);
+    assert.deepEqual(app.reloads[0]?.only, ["recent_notes"]);
   });
 
   it("reconciles an external partial reload that renders errors", async () => {
@@ -434,7 +434,7 @@ describe("Inertia live client core", () => {
     app.finishVisit(poll);
 
     app.handlers.onSignal({ topic: "notes", cursor: 15, props: ["stats"] });
-    expect(app.timerCount).toBe(0);
+    assert.equal(app.timerCount, 0);
   });
 
   it("does not advance cursors when an external reload only finishes", async () => {
@@ -453,9 +453,9 @@ describe("Inertia live client core", () => {
     app.finishVisit(canceled);
 
     app.handlers.onSignal({ topic: "notes", cursor: 15, props: ["stats"] });
-    expect(app.timerCount).toBe(1);
+    assert.equal(app.timerCount, 1);
     app.runNextTimer();
-    expect(app.reloads[0]?.only).toEqual(["stats"]);
+    assert.deepEqual(app.reloads[0]?.only, ["stats"]);
   });
 
   it("removes every Inertia lifecycle listener on close", async () => {
@@ -469,10 +469,10 @@ describe("Inertia live client core", () => {
       transport: app.transport,
     });
 
-    expect(app.listenerCount()).toBe(4);
+    assert.equal(app.listenerCount(), 4);
     connection.close();
     connection = null;
-    expect(app.listenerCount()).toBe(0);
+    assert.equal(app.listenerCount(), 0);
   });
 
   it("reloads the bound props on the transport polling fallback and cleans up on close", async () => {
@@ -493,12 +493,12 @@ describe("Inertia live client core", () => {
     app.handlers.onPoll("profile", (outcome) =>
       outcomes.push(`profile:${outcome}`),
     );
-    expect(app.timerCount).toBe(1);
+    assert.equal(app.timerCount, 1);
     app.runNextTimer();
-    expect(app.reloads[0]?.only).toEqual(["auth", "recent_notes", "stats"]);
+    assert.deepEqual(app.reloads[0]?.only, ["auth", "recent_notes", "stats"]);
     app.reloads[0]?.onSuccess?.(app.page);
     app.reloads[0]?.onFinish?.();
-    expect(outcomes).toEqual(["notes:succeeded", "profile:succeeded"]);
+    assert.deepEqual(outcomes, ["notes:succeeded", "profile:succeeded"]);
 
     app.handlers.onPoll("notes", (outcome) =>
       outcomes.push(`pending:${outcome}`),
@@ -506,14 +506,14 @@ describe("Inertia live client core", () => {
 
     connection.close();
     connection = null;
-    expect(app.closed).toBe(1);
-    expect(outcomes).toEqual([
+    assert.equal(app.closed, 1);
+    assert.deepEqual(outcomes, [
       "notes:succeeded",
       "profile:succeeded",
       "pending:canceled",
     ]);
-    expect(app.visit().headers).toEqual({ Existing: "kept" });
+    assert.deepEqual(app.visit().headers, { Existing: "kept" });
     app.handlers.onSignal({ topic: "notes", cursor: 20, props: ["stats"] });
-    expect(app.timerCount).toBe(0);
+    assert.equal(app.timerCount, 0);
   });
 });
