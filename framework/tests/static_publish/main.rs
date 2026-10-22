@@ -5,6 +5,7 @@ mod cloudfront;
 mod eligibility;
 mod publication;
 
+mod fallback;
 mod regeneration;
 
 mod boot;
