@@ -76,12 +76,16 @@ uppercase letter, underscore or hyphen, in names such as
 `public, max-age=3600`, or the handler's configured cache policy. Static file
 responses skip session persistence and cookie issuance only when the handler
 changes no session state, issues no CSRF token and queues no security work.
-Automatic flash aging alone does not count as a change. Stored flash survives
+Automatic flash aging still marks the request copy dirty for CSRF and other
+readers. It does not advance the separate framework mutation marker used by
+the asset gate. Aging alone does not force asset persistence. Stored flash survives
 the asset request for the following page. Token issuance finalizes normally
 and sends the response as `private, no-store`. Remember credential rotation,
 regeneration, identity changes and queued sign-in rebinds also finalize normally
-and deliver any required cookies. Responses carrying those cookies become private. Page responses keep their
-normal session behavior.
+and deliver any required cookies. Responses carrying those cookies become private.
+On an ordinary shared-cacheable page with loaded flash, CSRF sees the dirty
+session and issues its XSRF cookie. The cookie makes the response private with
+`Cache-Control: private, no-store`.
 
 Select another naming convention on both the audit and the static handler.
 The expression matches the filename without its extension. An invalid handler

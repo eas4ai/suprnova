@@ -269,7 +269,7 @@ pub(crate) fn bind_issued_session(
         if password_confirmed {
             session.password_confirmed();
         }
-        session.dirty = true;
+        session.mark_dirty();
     });
     crate::auth::request_state::set_guard_user_id(&default_guard, user_id);
     crate::auth::request_state::set_guard_via_remember(&default_guard, false);

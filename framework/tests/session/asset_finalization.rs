@@ -187,3 +187,117 @@ async fn budget_002_static_flash_aging_does_not_consume_redirect_flash() {
     });
     serve(&middleware, &config, Some(&cookie), page).await;
 }
+
+#[tokio::test]
+async fn budget_002_flash_aging_remains_dirty_for_shared_page_csrf() {
+    for cache_policy in ["public, max-age=60", "s-maxage=60"] {
+        let config = config();
+        let store = Arc::new(Store::default());
+        let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+        let redirect: Next = Arc::new(|_| {
+            Box::pin(async {
+                suprnova::session::session_mut(|session| session.flash("notice", "saved"));
+                Ok(HttpResponse::text("")
+                    .status(302)
+                    .header("Location", "/done"))
+            })
+        });
+        let response = serve(&middleware, &config, None, redirect).await;
+        let prefix = format!("{}=", config.cookie_name);
+        let cookie = response
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .find_map(|value| {
+                value
+                    .to_str()
+                    .ok()?
+                    .strip_prefix(&prefix)?
+                    .split(';')
+                    .next()
+            })
+            .unwrap()
+            .to_owned();
+        let page: Next = Arc::new(move |_| {
+            Box::pin(
+                async move { Ok(HttpResponse::text("page").header("Cache-Control", cache_policy)) },
+            )
+        });
+        let csrf_page: Next = Arc::new(move |request| {
+            let page = page.clone();
+            Box::pin(async move {
+                suprnova::csrf::CsrfMiddleware::new()
+                    .handle(request, page)
+                    .await
+            })
+        });
+        let response = serve(&middleware, &config, Some(&cookie), csrf_page).await;
+        assert!(
+            response
+                .headers()
+                .get_all("set-cookie")
+                .iter()
+                .any(|value| value.to_str().unwrap().starts_with("XSRF-TOKEN=")),
+            "loaded flash must remain dirty for CSRF: {cache_policy}"
+        );
+        assert_eq!(
+            response.headers().get("cache-control").unwrap(),
+            "private, no-store",
+            "a shared response carrying XSRF must become private"
+        );
+    }
+}
+
+#[tokio::test]
+async fn budget_002_static_flash_explicit_mutation_still_persists() {
+    let config = config();
+    let store = Arc::new(Store::default());
+    let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+    let setup: Next = Arc::new(|_| {
+        Box::pin(async {
+            suprnova::session::session_mut(|session| session.flash("notice", "saved"));
+            Ok(HttpResponse::text("setup"))
+        })
+    });
+    let response = serve(&middleware, &config, None, setup).await;
+    let prefix = format!("{}=", config.cookie_name);
+    let cookie = response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .find_map(|value| {
+            value
+                .to_str()
+                .ok()?
+                .strip_prefix(&prefix)?
+                .split(';')
+                .next()
+        })
+        .unwrap()
+        .to_owned();
+    let writes = store.writes.load(Ordering::SeqCst);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("asset.js"), "export default 1").unwrap();
+    let asset = static_next(dir.path(), false);
+    let mutated_asset: Next = Arc::new(move |request| {
+        let asset = asset.clone();
+        Box::pin(async move {
+            suprnova::session::session_mut(|session| session.put("explicit", "retained"));
+            asset(request).await
+        })
+    });
+    serve(&middleware, &config, Some(&cookie), mutated_asset).await;
+    assert_eq!(store.writes.load(Ordering::SeqCst), writes + 1);
+    assert_eq!(
+        store
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .get::<String>("explicit")
+            .as_deref(),
+        Some("retained")
+    );
+}

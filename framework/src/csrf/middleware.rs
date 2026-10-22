@@ -575,7 +575,7 @@ impl CsrfMiddleware {
                 if !bootstrap {
                     return None;
                 }
-                session.dirty = true;
+                session.mark_dirty();
             }
             Some(session.csrf_token.clone())
         })
