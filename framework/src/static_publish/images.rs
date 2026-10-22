@@ -230,7 +230,9 @@ impl Preparation<'_> {
         let mut all_webp = true;
         let mut all_avif = true;
         for (url, descriptor) in candidates {
-            let variants = if let Some(path) = image_path(&url, &self.options.document_path)?
+            let variants = if raster_data_mime(&url).is_some() {
+                Some(self.image(&url, keep).await?)
+            } else if let Some(path) = local_path(&url, &self.options.document_path)?
                 && !is_vector_or_icon(&path)
             {
                 Some(self.image(&path, keep).await?)

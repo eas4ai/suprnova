@@ -581,3 +581,67 @@ async fn pub_007_percent_encoded_inline_png_can_be_kept_and_recompressed() {
         .unwrap();
     assert_eq!(prepared.assets[0].bytes.as_ref(), expected);
 }
+
+#[suprnova::inertia_root(path = "static_publish/malformed-raster.html")]
+struct MalformedRasterDocument;
+
+#[tokio::test]
+async fn pub_007_review_raster_data_extensions_never_bypass_decoding() {
+    let _container = suprnova::testing::TestContainer::fake();
+    for suffix in ["svg", "ico"] {
+        for srcset in [false, true] {
+            let image = format!("data:image/png;base64,AAAA.{suffix}");
+            let router: suprnova::Router = suprnova::Router::new()
+                .get("/malformed", move |request: suprnova::Request| {
+                    let image = image.clone();
+                    async move {
+                        let response = suprnova::InertiaResponse::new("Images")
+                            .with_config(
+                                suprnova::InertiaConfig::new()
+                                    .development(true)
+                                    .version("v1")
+                                    .ssr_disabled()
+                                    .vite_dev_server("http://localhost:5173")
+                                    .root_template(suprnova::InertiaRootTemplate::of::<
+                                        MalformedRasterDocument,
+                                    >()),
+                            )
+                            .with_view_data("image", image.clone())
+                            .try_with("image", image)
+                            .unwrap();
+                        let response = if srcset {
+                            response.with_view_data("srcset", true)
+                        } else {
+                            response
+                        };
+                        response.resolve(&request).await.map_err(Into::into)
+                    }
+                })
+                .into();
+            let router = router
+                .public_page::<ImageProps>("/malformed", "Images")
+                .unwrap();
+            let disk = opendal::Operator::new(opendal::services::Memory::default()).unwrap();
+            let runtime = suprnova::static_publish::StaticPublication::install(
+                &router,
+                suprnova::static_publish::Publisher::from_operator(
+                    disk.clone(),
+                    "v1",
+                    suprnova::static_publish::PublishConfig::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let cause = runtime
+                .publish()
+                .await
+                .expect_err("malformed raster must refuse publication")
+                .to_string();
+            assert!(
+                cause.contains("/malformed") && cause.contains("raster data URL"),
+                "{suffix}, srcset={srcset}: {cause}"
+            );
+            assert!(!disk.exists("_pub/manifest.json").await.unwrap());
+        }
+    }
+}
