@@ -4,10 +4,29 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
-## 4.5.2 - 2026-10-21
+## 4.6.0 - 2026-10-21
+
+### Added
+
+- **Lossless PNG recompression.** `Image::recompress_png(PngEffort)` runs
+  oxipng over a PNG after the pipeline's pixel operations, and the synchronous
+  `suprnova::recompress_png` helper does the same on PNG bytes. `PngEffort::Fast`
+  is oxipng's default level; `PngEffort::Maximum` is level 6 with Zopfli.
+  Pixels, transparency, indexed palettes, the ICC profile and the colour chunks
+  are kept; text, time and location metadata are removed; the output is never
+  larger than the input. The `media` feature carries the dependency.
+
+### Changed
+
+- **The default lossy encode quality is 85, not 70.** JPEG and lossy WebP
+  encoded without an explicit `quality` call now use 85, which
+  `DEFAULT_IMAGE_QUALITY` names. Quality below 85 blurs images.
 
 ### Fixed
 
+- **The built-in driver honours the JPEG quality setting.** The OxideAV
+  registry encoder ignored the quality option and wrote every JPEG at 75. The
+  driver now calls the JPEG encoder directly with the pipeline's quality.
 - **Two tools with one name in different crates now fail the build at link
   time.** Every `#[tool]` emits one marker symbol, `__suprnova_tool_` followed
   by the tool's name, so the linker reports a duplicate symbol that names the
