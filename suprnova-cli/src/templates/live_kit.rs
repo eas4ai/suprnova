@@ -150,6 +150,10 @@ const FILES: &[(&str, &str)] = &[
         include_str!("files/live/src/live/verify_email.rs.tpl"),
     ),
     (
+        "tests/page_budget.rs",
+        include_str!("files/live/tests/page_budget.rs.tpl"),
+    ),
+    (
         "tests/documents.rs",
         include_str!("files/live/tests/documents.rs.tpl"),
     ),

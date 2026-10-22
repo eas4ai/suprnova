@@ -34,6 +34,9 @@ All `srcset` candidates count; the helper does not choose a viewport.
 Every asset request carries no cookie. The client's login and cookie jar do
 not affect the audit. A refused or redirected asset fails the audit.
 
+React, Vue, Svelte and Live kits ship `tests/page_budget.rs` over their five
+public entry pages. The API kit has no public pages and ships no page test.
+
 ## Set limits
 
 The defaults use decimal bytes. Total transferred response bodies are limited

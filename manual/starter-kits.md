@@ -758,12 +758,13 @@ Built something reusable on top of Suprnova and want to upstream it as a
 canonical kit? See [Contributions](contributions.md). We're happy to take a
 real implementation and round it into a generic kit.
 
-The React, Vue and Svelte scaffolds also ship `tests/page_budget.rs`. It audits
+The React, Vue, Svelte and Live scaffolds also ship `tests/page_budget.rs`. It audits
 `/`, `/login`, `/register`, `/forgot-password` and `/reset-password` through the
 application router and middleware. It creates an isolated test database and
 sets the test environment in a child process before runtime threads start.
-The test follows built assets when a Vite manifest exists. A fresh scaffold
-can run it before the frontend build. See [Page Budget](page-budget.md).
+The Inertia tests follow built assets when a Vite manifest exists and run
+before the frontend build on a fresh scaffold. The Live test boots its
+component registry and runtime and audits its served styles and scripts. See [Page Budget](page-budget.md).
 
 ```bash
 cargo test --test page_budget

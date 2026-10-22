@@ -1,4 +1,4 @@
-//! The three Inertia scaffolds ship the test and serve their assets anonymously.
+//! The page-bearing scaffolds ship the test and serve their assets anonymously.
 
 use std::process::Command;
 use suprnova::testing::{PageBudget, TestClient, TestDatabase};
@@ -10,9 +10,9 @@ use suprnova::{
 const BIN: &str = env!("CARGO_BIN_EXE_suprnova");
 
 #[tokio::test]
-async fn budget_every_inertia_kit_ships_the_public_page_test_and_origin_policy() {
+async fn budget_every_page_kit_ships_the_public_page_test_and_origin_policy() {
     suprnova::testing::install_test_encryption_key();
-    for kit in ["react", "vue", "svelte"] {
+    for kit in ["react", "vue", "svelte", "live"] {
         let dir = tempfile::tempdir().unwrap();
         let output = Command::new(BIN)
             .args([
@@ -34,10 +34,33 @@ async fn budget_every_inertia_kit_ships_the_public_page_test_and_origin_policy()
         );
         let root = dir.path().join("budget_app");
         let test = std::fs::read_to_string(root.join("tests/page_budget.rs")).unwrap();
-        assert_eq!(
-            test,
-            suprnova_cli::templates::page_budget_test("budget_app")
-        );
+        if kit != "live" {
+            assert_eq!(
+                test,
+                suprnova_cli::templates::page_budget_test("budget_app")
+            );
+        } else {
+            for path in [
+                "src/bootstrap.rs",
+                "src/migrations/mod.rs",
+                "src/models/user.rs",
+                "src/live/mod.rs",
+            ] {
+                assert!(
+                    root.join(path).exists(),
+                    "missing Live bootstrap dependency: {path}"
+                );
+            }
+            for required in [
+                "budget_app::live::registry()",
+                "budget_app::migrations::Migrator",
+                "budget_app::models::user::User",
+                "prepare_live_router_for_test",
+                "routes_with_render_cache",
+            ] {
+                assert!(test.contains(required), "Live budget test needs {required}");
+            }
+        }
         for required in [
             "budget_app::routes::register()",
             "budget_app::bootstrap::try_register_http_stack()",
@@ -56,15 +79,28 @@ async fn budget_every_inertia_kit_ships_the_public_page_test_and_origin_policy()
         assert!(routes.contains("fallback!(StaticFiles::public().handler())"));
         // A scaffold has source files before Vite runs. Serve its real entry source
         // under a build-shaped name to exercise the origin policy without a build.
-        let entry = if kit == "react" {
+        let entry = if kit == "live" {
+            "public/css/app.css"
+        } else if kit == "react" {
             "frontend/src/main.tsx"
         } else {
             "frontend/src/main.ts"
         };
         let source = std::fs::read(root.join(entry)).unwrap();
+        if kit == "live" {
+            assert!(
+                std::fs::read_to_string(root.join("src/models/mod.rs"))
+                    .unwrap()
+                    .contains("user")
+            );
+        }
         let public = root.join("public");
         std::fs::write(public.join("main-BjmpJyAU.js"), &source).unwrap();
         std::fs::write(public.join("icon.svg"), "<svg/>").unwrap();
+        if kit != "live" {
+            std::fs::create_dir_all(public.join("css")).unwrap();
+            std::fs::write(public.join("css/app.css"), "body{}").unwrap();
+        }
         let _db = TestDatabase::sqlite_memory().await.unwrap();
         suprnova::session::migrations::CreateSessionsTable::new(
             suprnova::session::migrations::SessionUserKey::Integer,
@@ -74,7 +110,7 @@ async fn budget_every_inertia_kit_ships_the_public_page_test_and_origin_policy()
         .unwrap();
         let config = SessionConfig::default();
         let router = fallback!(StaticFiles::from_dir(&public).handler()).register(Router::new().get("/", |_req: Request| async {
-            Ok(HttpResponse::html("<script src='/main-BjmpJyAU.js'></script><link rel='icon' href='/icon.svg'>"))
+            Ok(HttpResponse::html("<script src='/main-BjmpJyAU.js'></script><link rel='icon' href='/icon.svg'><link rel='stylesheet' href='/css/app.css'>"))
         }).into());
         let client = TestClient::new(
             router,

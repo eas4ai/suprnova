@@ -1400,7 +1400,7 @@ A short list of footguns that catch first-time authors:
 `TestClient::audit_page` follows a document and its assets through the same
 request path. It returns every failed rule with measured and allowed values.
 See [Page Budget](page-budget.md) for a runnable test and the default limits.
-The React, Vue and Svelte scaffolds include `tests/page_budget.rs`; the dogfood
+The React, Vue, Svelte and Live scaffolds include `tests/page_budget.rs`; the dogfood
 application runs the same audit in `app/tests/page_budget.rs`.
 
 ## Next
