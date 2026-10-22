@@ -5,9 +5,9 @@ use suprnova::{Aggregate, EventReplay, Model, Projector, attrs};
 
 #[domain_event(name = "es.cache.title", version = 1)]
 #[derive(Serialize, Deserialize)]
-struct Title {
-    id: i64,
-    title: String,
+pub(super) struct Title {
+    pub(super) id: i64,
+    pub(super) title: String,
 }
 
 #[suprnova::projector]

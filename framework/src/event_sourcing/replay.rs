@@ -88,56 +88,62 @@ impl Replay {
             }
             entries.retain(|entry| names.iter().any(|name| name == entry.projector.name()));
         }
-        let finished = crate::live::topics::replay_scope(|| {
-            REPLAYING.scope(
-                true,
-                DB::transaction(move |_tx| {
-                    Box::pin(async move {
-                        EventStore::lock().await?;
-                        let through = EventStore::last_position().await?;
-                        let start = ReplayStarted {
-                            projectors: entries
-                                .iter()
-                                .map(|entry| entry.projector.name().to_owned())
-                                .collect(),
-                            from: self.from,
-                            through,
-                        };
-                        EventFacade::dispatch(start).await?;
-                        for entry in &entries {
-                            entry.projector.replay_started().await?;
-                            projections::checkpoint(entry.projector.name()).await?;
-                            if self.from == 0 {
-                                entry.projector.reset().await?;
-                                projections::set_checkpoint(entry.projector.name(), 0).await?;
-                            }
-                        }
-                        let mut after = self.from;
-                        let mut count = 0;
-                        loop {
-                            let page = EventStore::page(after, through, self.page_size).await?;
-                            if page.is_empty() {
-                                break;
-                            }
-                            for event in page {
-                                for entry in &entries {
-                                    projections::apply(entry.projector.as_ref(), &event).await?;
-                                }
-                                after = event.id;
-                                count += 1;
-                            }
-                        }
-                        for entry in &entries {
-                            entry.projector.replay_finished().await?;
-                        }
-                        let finished = ReplayFinished { events: count };
-                        Ok(finished)
-                    })
-                }),
-            )
-        })
-        .await??;
+        let finished =
+            crate::live::topics::replay_scope(|| self.run_transaction(entries)).await??;
         EventFacade::dispatch(finished.clone()).await?;
         Ok(finished)
+    }
+
+    // Erase the transaction future before the generic buffering scope proves Send.
+    fn run_transaction(
+        self,
+        entries: Vec<projections::Registration>,
+    ) -> futures::future::BoxFuture<'static, Result<ReplayFinished, FrameworkError>> {
+        Box::pin(REPLAYING.scope(
+            true,
+            DB::transaction(move |_tx| {
+                Box::pin(async move {
+                    EventStore::lock().await?;
+                    let through = EventStore::last_position().await?;
+                    let start = ReplayStarted {
+                        projectors: entries
+                            .iter()
+                            .map(|entry| entry.projector.name().to_owned())
+                            .collect(),
+                        from: self.from,
+                        through,
+                    };
+                    EventFacade::dispatch(start).await?;
+                    for entry in &entries {
+                        entry.projector.replay_started().await?;
+                        projections::checkpoint(entry.projector.name()).await?;
+                        if self.from == 0 {
+                            entry.projector.reset().await?;
+                            projections::set_checkpoint(entry.projector.name(), 0).await?;
+                        }
+                    }
+                    let mut after = self.from;
+                    let mut count = 0;
+                    loop {
+                        let page = EventStore::page(after, through, self.page_size).await?;
+                        if page.is_empty() {
+                            break;
+                        }
+                        for event in page {
+                            for entry in &entries {
+                                projections::apply(entry.projector.as_ref(), &event).await?;
+                            }
+                            after = event.id;
+                            count += 1;
+                        }
+                    }
+                    for entry in &entries {
+                        entry.projector.replay_finished().await?;
+                    }
+                    let finished = ReplayFinished { events: count };
+                    Ok(finished)
+                })
+            }),
+        ))
     }
 }

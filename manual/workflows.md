@@ -207,7 +207,8 @@ more than once in two situations:
    the lease expires, another worker reclaims, sees no cached output
    at that step index, and runs the body again.
 
-The framework persists step **outputs** durably, but it cannot observe
+The framework persists step **outputs** durably. [Event sourcing](event-sourcing.md)
+keeps domain history for aggregate reconstruction instead. The workflow cannot observe
 the side effect itself. Step bodies are your responsibility to make
 idempotent. Two patterns work for almost every case.
 
@@ -231,6 +232,9 @@ after a restart on a different host. See the
 all valid wrappers around a step body.
 
 ## Determinism contract
+
+Workflow replay reuses recorded step outputs. [Event sourcing](event-sourcing.md)
+replays domain facts to rebuild aggregate state and read models.
 
 Workflows must be deterministic across replays. Each step is keyed by
 `(step_name, step_index)`, where `#[workflow_step]` names a step by its

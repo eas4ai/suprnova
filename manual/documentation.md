@@ -54,6 +54,7 @@
     - [Concurrency](concurrency.md)
     - [Data Objects](data.md)
     - [Events](events.md)
+    - [Event Sourcing](event-sourcing.md)
     - [File Storage](filesystem.md)
     - [HTTP Client](http-client.md)
     - [Images](images.md)

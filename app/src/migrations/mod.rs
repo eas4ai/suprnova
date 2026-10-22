@@ -16,6 +16,7 @@ mod m_2026_08_01_bench_tables;
 mod m_2026_08_01_queue_tables;
 mod m_2026_08_02_bench_tick_task;
 mod m_2026_10_14_search_dogfood;
+mod m_2026_10_22_event_sourcing;
 
 pub struct Migrator;
 
@@ -139,6 +140,8 @@ impl MigratorTrait for Migrator {
             suprnova::auth::migrations::UniqueEmailIgnoringCase::on("users", "email"),
         ));
         migrations.extend(suprnova::agents::migrations());
+        migrations.extend(suprnova::event_sourcing::migrations());
+        migrations.push(Box::new(m_2026_10_22_event_sourcing::Migration));
         migrations
     }
 }

@@ -41,7 +41,8 @@ impl AggregateRoot for Tally {
     const NAME: &'static str = "tally";
     fn apply(&mut self, fact: &StoredEvent) -> Result<(), FrameworkError> {
         if let Some(added) = fact.decode::<Added>()? {
-            self.total += added.amount;
+            self.total = self.total.checked_add(added.amount)
+                .ok_or_else(|| FrameworkError::bad_request("tally total is too large"))?;
         }
         Ok(())
     }
@@ -139,7 +140,8 @@ impl Projector for Totals {
         if let Some(added) = fact.decode::<Added>()? {
             match Total::find(fact.aggregate_uuid.clone()).await? {
                 Some(mut row) => {
-                    row.total += added.amount;
+                    row.total = row.total.checked_add(added.amount)
+                        .ok_or_else(|| FrameworkError::bad_request("projected total is too large"))?;
                     row.save().await?;
                 }
                 None => {
@@ -179,7 +181,8 @@ CREATE TABLE tally_totals (id VARCHAR(36) PRIMARY KEY, total BIGINT NOT NULL);
 
 The attributes register `Default` handlers through inventory. Names are stable
 checkpoint identities. Names must be ASCII, at most 191 bytes and cannot start
-with `__`. Duplicate handler names fail. Handlers run in name order.
+with `__`. Leading or trailing whitespace and control characters are rejected,
+so checkpoint names stay distinct on every engine. Duplicate handler names fail. Handlers run in name order.
 
 A reactor runs after commit. It never runs during replay. Use the stored event id
 as an idempotency key for external effects. A reactor failure reports an error
@@ -285,6 +288,53 @@ changes. `batch(future)` coalesces an explicit unit of work. `suppress(|| future
 keeps one final change per topic through replay. Replay installs this buffer even
 in a worker with no HTTP runtime. It preserves ORM cache invalidation and carries
 no model values to the browser. Live streams reload their full server view.
+
+## Console commands
+
+Run these through the [console binary](console.md) from the application
+directory after migrating its tables:
+
+```sh
+cargo run --bin console -- event-sourcing:replay
+cargo run --bin console -- event-sourcing:replay --projector tally.totals
+cargo run --bin console -- event-sourcing:replay --projector tally.totals --from 120
+cargo run --bin console -- event-sourcing:events 7d200fce-d107-4a12-8b9b-7e642209aa01
+cargo run --bin console -- event-sourcing:snapshot 7d200fce-d107-4a12-8b9b-7e642209aa01
+```
+
+`replay` defaults to all registered projectors. Repeat `--projector` to select
+several. `--from` is an exclusive global event position. Omitting it performs a
+full reset and replay. `events` prints JSON lines with the original payload,
+metadata and schema version. `snapshot` finds the aggregate by its stable name
+in history, reconstructs it and writes a snapshot. Unknown names and invalid
+positions fail before replay changes a read model.
+
+## The dogfood tally
+
+The application registers the framework migration and two application tables:
+`event_tally_totals` for the read model and `event_tally_activity` for the reactor.
+Its aggregate is `app::event_sourcing::TallyState`, and its stable fact is
+`dogfood.tally.added`. The demo UUID is
+`a9c9bce3-8b35-4530-b215-14cbb0d46f01`.
+
+Sign in and open `/live/event-tally` in two windows. **Add one** sends a protected
+POST to `/live/event-tally/add`. The aggregate records a fact. The projector saves
+the new total and calls `LiveTopics::changed("event-tally", &["total"])`. The
+reactor records activity once per stored event. Both pages subscribe to the Live
+stream, and a refresh runs the component's rendering hook to read the new total.
+The form uses an ordinary POST because aggregate persistence owns its transaction.
+
+The example uses a Live page. It needs no Inertia live binding. Rebuild its read
+model and inspect the same history with:
+
+```sh
+cargo run --bin console -- event-sourcing:replay --projector dogfood.tally-total
+cargo run --bin console -- event-sourcing:events a9c9bce3-8b35-4530-b215-14cbb0d46f01
+cargo run --bin console -- event-sourcing:snapshot a9c9bce3-8b35-4530-b215-14cbb0d46f01
+```
+
+Replay rebuilds the total and sends one final refresh. It leaves reactor activity
+in place and never records that activity again.
 
 ### Why Suprnova diverges
 

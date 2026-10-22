@@ -63,3 +63,5 @@ mod render_cache_middleware_support;
 #[path = "../support/live_async_support/mod.rs"]
 mod live_async_support;
 mod signals;
+
+mod commands;

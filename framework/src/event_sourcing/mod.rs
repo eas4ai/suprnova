@@ -1,6 +1,7 @@
 //! Durable domain histories, aggregate snapshots and replayable read models.
 
 mod aggregate;
+mod commands;
 mod migrations;
 mod projections;
 mod replay;

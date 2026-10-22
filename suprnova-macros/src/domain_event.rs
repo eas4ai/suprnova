@@ -48,7 +48,7 @@ pub fn domain_event(args: TokenStream, input: TokenStream) -> TokenStream {
         }
         let ident = &item.ident;
         let upgrade = upgrade.map(|path| quote! {
-            fn upgrade(version: i32, value: ::suprnova::serde_json::Value) -> Result<::suprnova::serde_json::Value, ::suprnova::FrameworkError> {
+            fn upgrade(version: i32, value: ::suprnova::serde_json::Value) -> ::std::result::Result<::suprnova::serde_json::Value, ::suprnova::FrameworkError> {
                 #path(version, value)
             }
         });
@@ -107,11 +107,11 @@ pub fn handler(args: TokenStream, input: TokenStream, reactor: bool) -> TokenStr
     let ident = &item.ident;
     let entry = if reactor {
         quote! {
-            ::suprnova::ReactorEntry { build: || Box::new(<#ident as Default>::default()) }
+            ::suprnova::ReactorEntry { build: || ::std::boxed::Box::new(<#ident as ::std::default::Default>::default()) }
         }
     } else {
         quote! {
-            ::suprnova::ProjectorEntry { build: || Box::new(<#ident as Default>::default()), queued: #queued }
+            ::suprnova::ProjectorEntry { build: || ::std::boxed::Box::new(<#ident as ::std::default::Default>::default()), queued: #queued }
         }
     };
     quote! { #item ::suprnova::inventory::submit! { #entry } }.into()

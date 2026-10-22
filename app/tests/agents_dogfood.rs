@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
-use sea_orm_migration::MigratorTrait;
+use sea_orm_migration::{MigrationName, MigratorTrait};
 use serde_json::json;
 use suprnova::live::testing::prepare_live_router_for_test;
 use suprnova::render_cache::{CoordinatorConfig, L1Config, RenderCacheConfig};
@@ -991,10 +991,16 @@ async fn agent_dogfood_registration_ignores_a_foreign_return_to() {
 #[tokio::test]
 async fn agent_dogfood_an_existing_database_takes_the_agents_tables_on_the_next_migrate() {
     let app = boot().await;
-    let total = Migrator::migrations().len();
-    // The agents migrations and the address index come last, so a database
-    // migrated before them has every other one.
-    let added = 3;
+    let migrations = Migrator::migrations();
+    let total = migrations.len();
+    // Start before the address index and agents tables, including migrations
+    // appended after them, so this still tests an application upgrading to agents.
+    let first = suprnova::auth::migrations::UniqueEmailIgnoringCase::on("users", "email");
+    let before = migrations
+        .iter()
+        .position(|migration| migration.name() == first.name())
+        .expect("the address index starts the agents upgrade");
+    let added = total - before;
     let existing = sea_orm::Database::connect("sqlite::memory:")
         .await
         .expect("connect sqlite::memory:");

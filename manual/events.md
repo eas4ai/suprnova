@@ -1,6 +1,7 @@
 # Events
 
-Events are Suprnova's typed in-process pub/sub. A controller fires
+Events are Suprnova's typed in-process pub/sub. Persisted domain history lives in
+[Event sourcing](event-sourcing.md). A controller fires
 `UserRegistered { user_id }`; one listener emails the user, another
 writes an audit row, a third publishes a broadcast. All three see the
 same payload, run in registration order, and have no compile-time
@@ -162,6 +163,9 @@ dispatching, returning the count dropped. Mirrors
 `Event::forgetPushed()`.
 
 ## defer - buffer every dispatch inside a callback
+
+This buffers in-process dispatches. [Event sourcing](event-sourcing.md) covers
+stored domain facts and projector replay.
 
 `defer(only, async { … })` runs the callback with a task-local
 buffer in scope. Every `dispatch` / `dispatch_best_effort` call made

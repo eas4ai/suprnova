@@ -89,7 +89,14 @@ fn reactors() -> Result<Vec<Box<dyn Reactor>>, FrameworkError> {
     Ok(result)
 }
 fn validate_name(name: &str) -> Result<(), FrameworkError> {
-    if name.is_empty() || name.len() > 191 || !name.is_ascii() || name.starts_with("__") {
+    // MySQL's binary collation pads trailing spaces, so handler identities cannot contain padding.
+    if name.is_empty()
+        || name.len() > 191
+        || !name.is_ascii()
+        || name.starts_with("__")
+        || name.trim() != name
+        || name.bytes().any(|byte| byte.is_ascii_control())
+    {
         return Err(error(format!("invalid event handler name '{name}'")));
     }
     Ok(())
@@ -156,23 +163,23 @@ pub(crate) async fn apply(
 pub(crate) async fn persisted(events: &[StoredEvent]) -> Result<(), FrameworkError> {
     let projectors = projectors()?;
     let reactors = reactors()?;
-    for registration in &projectors {
-        if registration.queued {
-            if events
-                .iter()
-                .any(|event| registration.projector.handles(event))
-                && let Some(last) = events.last()
-            {
-                Queue::push_after_commit(QueuedProjector::new(
-                    registration.projector.name(),
-                    last.id,
-                )?)
-                .await?;
-            }
-        } else {
-            for event in events {
-                apply(registration.projector.as_ref(), event).await?;
-            }
+    // Live persistence uses the same event order and handler order as replay.
+    for event in events {
+        for registration in projectors.iter().filter(|entry| !entry.queued) {
+            apply(registration.projector.as_ref(), event).await?;
+        }
+    }
+    for registration in projectors.iter().filter(|entry| entry.queued) {
+        if events
+            .iter()
+            .any(|event| registration.projector.handles(event))
+            && let Some(last) = events.last()
+        {
+            Queue::push_after_commit(QueuedProjector::new(
+                registration.projector.name(),
+                last.id,
+            )?)
+            .await?;
         }
     }
     for reactor in reactors {

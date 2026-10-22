@@ -43,6 +43,7 @@ pub fn authorize_live() {
                 .is_some()
     });
     Gate::define::<String, String>("live:app.activity-feed.stream.activity", |_, _| true);
+    Gate::define::<String, String>("live:app.event-tally.stream.changes", |_, _| true);
     Gate::define::<String, String>("live:app.live-native-gallery.stream.activity", |_, _| true);
     for control in UPLOAD_CONTROLS {
         Gate::define::<String, String>(

@@ -107,7 +107,7 @@ impl Reactor for Notify {
     }
 }
 
-async fn setup() -> TestDatabase {
+pub(super) async fn setup() -> TestDatabase {
     let db = database().await;
     db.execute_unprepared("CREATE TABLE es_projection (id INTEGER PRIMARY KEY, total BIGINT NOT NULL); INSERT INTO es_projection VALUES (1, 0); CREATE TABLE es_order (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id BIGINT NOT NULL, amount BIGINT NOT NULL); CREATE TABLE es_reactions (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id BIGINT NOT NULL); CREATE TABLE es_lifecycle (id INTEGER PRIMARY KEY AUTOINCREMENT, stage TEXT NOT NULL)").await.unwrap();
     db
@@ -279,4 +279,79 @@ async fn es_003_reactor_failure_preserves_the_committed_version_without_recordin
     assert_eq!(EventStore::events(root.uuid()).await.unwrap().len(), 1);
     assert!(root.persist().await.unwrap().is_empty());
     assert_eq!(ReadModel::find(1i64).await.unwrap().unwrap().total, 2);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn es_003_checkpoint_names_reject_padding_and_control_characters() {
+    let _db = database().await;
+    for name in ["es.queued ", " es.queued", "es.\0queued"] {
+        assert!(
+            QueuedProjector::new(name, 1).is_err(),
+            "ambiguous checkpoint name: {name:?}"
+        );
+    }
+    assert!(QueuedProjector::new("es.queued", 1).is_ok());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn es_003_live_and_replay_keep_the_same_projector_event_order() {
+    use crate::render_cache_middleware_support::{Post, post};
+    use std::sync::{Arc, Mutex};
+    use suprnova::{EventFacade, Listener};
+    let _queue = Queue::fake();
+    let db = setup().await;
+    db.execute_unprepared("CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, views BIGINT NOT NULL DEFAULT 0)").await.unwrap();
+    let post = Post::create(attrs! { title: "initial" }).await.unwrap();
+    struct Trace(Arc<Mutex<Vec<String>>>);
+    #[suprnova::async_trait]
+    impl Listener<read_model::events::Saved> for Trace {
+        async fn handle(&self, event: &read_model::events::Saved) -> Result<(), FrameworkError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("total:{}", event.model.total));
+            Ok(())
+        }
+    }
+    #[suprnova::async_trait]
+    impl Listener<post::events::Saved> for Trace {
+        async fn handle(&self, event: &post::events::Saved) -> Result<(), FrameworkError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("title:{}", event.model.title));
+            Ok(())
+        }
+    }
+    struct Cleanup;
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            EventFacade::forget::<read_model::events::Saved>();
+            EventFacade::forget::<post::events::Saved>();
+        }
+    }
+    let _cleanup = Cleanup;
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    EventFacade::listen::<read_model::events::Saved, _>(Arc::new(Trace(trace.clone()))).await;
+    EventFacade::listen::<post::events::Saved, _>(Arc::new(Trace(trace.clone()))).await;
+    let mut root = Aggregate::<Tally>::new(&uuid()).unwrap();
+    root.record(Projected { amount: 2 }).unwrap();
+    root.record(super::cache::Title {
+        id: post.id,
+        title: "middle".into(),
+    })
+    .unwrap();
+    root.record(Projected { amount: 3 }).unwrap();
+    root.persist().await.unwrap();
+    let live = trace.lock().unwrap().clone();
+    assert_eq!(live, ["total:2", "title:middle", "total:5"]);
+    trace.lock().unwrap().clear();
+    EventReplay::projectors(["es.inline", "es.titles"])
+        .page_size(1)
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(*trace.lock().unwrap(), live);
 }
