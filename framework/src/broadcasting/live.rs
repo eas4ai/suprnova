@@ -94,6 +94,7 @@ pub(crate) enum AcceptedLiveTopicPublication {
 
 struct LiveTopicEntry {
     last_activity: Instant,
+    idle_deadline: Option<Instant>,
     retention: Option<Duration>,
     memberships: usize,
     cursor: u64,
@@ -105,6 +106,7 @@ impl LiveTopicEntry {
     fn new(retention: Option<Duration>) -> Self {
         Self {
             last_activity: Instant::now(),
+            idle_deadline: None,
             retention,
             memberships: 0,
             cursor: 0,
@@ -207,12 +209,20 @@ fn normalized_props(props: &[String]) -> Option<BTreeSet<String>> {
     (!props.is_empty() && props.len() <= 256).then_some(props)
 }
 
-/// Shared cursor and coalescing state for one in-process authority.
+#[derive(Default)]
+struct LiveTopicTable {
+    topics: HashMap<String, LiveTopicEntry>,
+    idle: BTreeSet<(Instant, String)>,
+    last_prune: Option<Instant>,
+}
+
+/// Shared cursor, expiry index and coalescing state for one authority.
 #[derive(Clone, Default)]
 pub(crate) struct LiveTopicRuntime {
-    topics: Arc<Mutex<HashMap<String, LiveTopicEntry>>>,
+    table: Arc<Mutex<LiveTopicTable>>,
     retention: LiveTopicRetention,
-    last_prune: Arc<Mutex<Option<Instant>>>,
+    sweeps: Arc<std::sync::atomic::AtomicU64>,
+    visits: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl LiveTopicRuntime {
@@ -224,60 +234,95 @@ impl LiveTopicRuntime {
         self.retention.configure(family, retention)
     }
 
-    fn prune_on_activity(&self) {
-        let due = {
-            let mut last = self
-                .last_prune
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if last.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
-                *last = Some(Instant::now());
-                true
-            } else {
-                false
-            }
-        };
-        if due {
-            self.prune();
-        }
-    }
-
-    fn entry<'a>(
+    fn with_entry<R>(
         &self,
-        topics: &'a mut HashMap<String, LiveTopicEntry>,
+        table: &mut LiveTopicTable,
         topic: &str,
-    ) -> &'a mut LiveTopicEntry {
-        if topics.get(topic).is_some_and(LiveTopicEntry::expired) {
-            topics.remove(topic);
+        update: impl FnOnce(&mut LiveTopicEntry) -> R,
+    ) -> R {
+        if let Some(deadline) = table
+            .topics
+            .get(topic)
+            .and_then(|entry| entry.idle_deadline)
+        {
+            table.idle.remove(&(deadline, topic.to_owned()));
         }
-        let entry = topics
+        if table.topics.get(topic).is_some_and(LiveTopicEntry::expired) {
+            table.topics.remove(topic);
+        }
+        let entry = table
+            .topics
             .entry(topic.to_owned())
             .or_insert_with(|| LiveTopicEntry::new(self.retention.window(topic)));
         entry.last_activity = Instant::now();
-        entry
+        let result = update(entry);
+        entry.idle_deadline = entry
+            .retention
+            .filter(|_| entry.memberships == 0 && entry.pending.is_none())
+            .and_then(|window| entry.last_activity.checked_add(window));
+        if let Some(deadline) = entry.idle_deadline {
+            table.idle.insert((deadline, topic.to_owned()));
+        }
+        result
     }
 
     pub(crate) fn membership(&self, topic: &str, active: bool) {
-        let mut topics = self
-            .topics
+        let mut table = self
+            .table
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entry = self.entry(&mut topics, topic);
-        if active {
-            entry.memberships += 1;
-        } else {
-            entry.memberships = entry.memberships.saturating_sub(1);
-        }
+        self.with_entry(&mut table, topic, |entry| {
+            if active {
+                entry.memberships += 1;
+            } else {
+                entry.memberships = entry.memberships.saturating_sub(1);
+            }
+        });
     }
 
+    pub(crate) fn sweep_stats(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering;
+        (
+            self.sweeps.load(Ordering::Relaxed),
+            self.visits.load(Ordering::Relaxed),
+        )
+    }
+
+    /// All callers share one throttle and visit only eligible candidates.
     pub(crate) fn prune(&self) -> usize {
-        let mut topics = self
-            .topics
+        self.sweep().unwrap_or(0)
+    }
+
+    pub(crate) fn sweep(&self) -> Option<usize> {
+        let mut table = self
+            .table
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let before = topics.len();
-        topics.retain(|_, entry| !entry.expired());
-        before - topics.len()
+        if table
+            .last_prune
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(1))
+        {
+            return None;
+        }
+        table.last_prune = Some(Instant::now());
+        self.sweeps
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let now = Instant::now();
+        let mut retired = 0;
+        while table
+            .idle
+            .first()
+            .is_some_and(|(deadline, _)| *deadline <= now)
+        {
+            let Some((_, topic)) = table.idle.pop_first() else {
+                break;
+            };
+            self.visits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            table.topics.remove(&topic);
+            retired += 1;
+        }
+        Some(retired)
     }
 
     /// Reads count as activity, so a rendered instance keeps its baseline for the window.
@@ -287,14 +332,14 @@ impl LiveTopicRuntime {
 
     /// Captures all requested baselines under one authority lock before a loader runs.
     pub(crate) async fn cursors(&self, names: &[String]) -> Vec<u64> {
-        self.prune_on_activity();
-        let mut topics = self
-            .topics
+        self.prune();
+        let mut table = self
+            .table
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         names
             .iter()
-            .map(|name| self.entry(&mut topics, name).cursor)
+            .map(|name| self.with_entry(&mut table, name, |entry| entry.cursor))
             .collect()
     }
 
@@ -306,53 +351,54 @@ impl LiveTopicRuntime {
         except: Option<LiveTopicExclusion>,
         interval: Duration,
     ) -> Result<AcceptedLiveTopicPublication, FrameworkError> {
-        self.prune_on_activity();
+        self.prune();
         let now = Instant::now();
         let interval = interval.max(Duration::from_millis(1));
-        let mut topics = self
-            .topics
+        let mut table = self
+            .table
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entry = self.entry(&mut topics, topic);
-        entry.cursor = entry.cursor.checked_add(1).ok_or_else(|| {
-            FrameworkError::internal(format!(
-                "BroadcastHub::publish_live_topic: cursor exhausted for topic '{topic}'"
-            ))
-        })?;
+        self.with_entry(&mut table, topic, |entry| {
+            entry.cursor = entry.cursor.checked_add(1).ok_or_else(|| {
+                FrameworkError::internal(format!(
+                    "BroadcastHub::publish_live_topic: cursor exhausted for topic '{topic}'"
+                ))
+            })?;
 
-        if entry
-            .next_publication
-            .is_none_or(|deadline| deadline <= now)
-            && entry.pending.is_none()
-        {
-            entry.next_publication = Some(now + interval);
-            return Ok(AcceptedLiveTopicPublication::Immediate {
-                signal: LiveTopicSignal {
-                    topic: topic.to_owned(),
-                    cursor: entry.cursor,
-                    exclusion: None,
-                    props: normalized_props(props)
-                        .map(|props| props.into_iter().collect())
-                        .unwrap_or_default(),
-                },
-                except,
-            });
-        }
-
-        let needs_task = entry.pending.is_none();
-        match entry.pending.as_mut() {
-            Some(pending) => pending.merge(props, except, interval),
-            None => {
-                entry.pending = Some(PendingLiveTopicSignal::new(props, except, interval));
+            if entry
+                .next_publication
+                .is_none_or(|deadline| deadline <= now)
+                && entry.pending.is_none()
+            {
+                entry.next_publication = Some(now + interval);
+                return Ok(AcceptedLiveTopicPublication::Immediate {
+                    signal: LiveTopicSignal {
+                        topic: topic.to_owned(),
+                        cursor: entry.cursor,
+                        exclusion: None,
+                        props: normalized_props(props)
+                            .map(|props| props.into_iter().collect())
+                            .unwrap_or_default(),
+                    },
+                    except,
+                });
             }
-        }
-        if needs_task {
-            Ok(AcceptedLiveTopicPublication::Pending {
-                deadline: entry.next_publication.unwrap_or(now),
-            })
-        } else {
-            Ok(AcceptedLiveTopicPublication::Coalesced)
-        }
+
+            let needs_task = entry.pending.is_none();
+            match entry.pending.as_mut() {
+                Some(pending) => pending.merge(props, except, interval),
+                None => {
+                    entry.pending = Some(PendingLiveTopicSignal::new(props, except, interval));
+                }
+            }
+            if needs_task {
+                Ok(AcceptedLiveTopicPublication::Pending {
+                    deadline: entry.next_publication.unwrap_or(now),
+                })
+            } else {
+                Ok(AcceptedLiveTopicPublication::Coalesced)
+            }
+        })
     }
 
     /// Take the pending union and start its next rate window.
@@ -360,23 +406,27 @@ impl LiveTopicRuntime {
         &self,
         topic: &str,
     ) -> Option<(LiveTopicSignal, Option<LiveTopicExclusion>)> {
-        let mut topics = self
-            .topics
+        let mut table = self
+            .table
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entry = topics.get_mut(topic)?;
-        let pending = entry.pending.take()?;
-        entry.last_activity = Instant::now();
-        let (props, except, interval) = pending.into_parts();
-        entry.next_publication = Some(Instant::now() + interval);
-        Some((
-            LiveTopicSignal {
-                topic: topic.to_owned(),
-                cursor: entry.cursor,
-                exclusion: None,
-                props,
-            },
-            except,
-        ))
+        if !table.topics.contains_key(topic) {
+            return None;
+        }
+        self.with_entry(&mut table, topic, |entry| {
+            let pending = entry.pending.take()?;
+            entry.last_activity = Instant::now();
+            let (props, except, interval) = pending.into_parts();
+            entry.next_publication = Some(Instant::now() + interval);
+            Some((
+                LiveTopicSignal {
+                    topic: topic.to_owned(),
+                    cursor: entry.cursor,
+                    exclusion: None,
+                    props,
+                },
+                except,
+            ))
+        })
     }
 }

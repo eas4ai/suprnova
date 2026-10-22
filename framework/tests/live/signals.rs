@@ -1838,3 +1838,54 @@ fn signal_fix2_001_retention_environment_is_checked() {
         );
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn signal_fix3_003_sweep_is_shared_throttled_and_visits_only_idle_candidates() {
+    let hub = InMemoryBroadcastHub::new();
+    hub.configure_live_topic_family("sweep", Duration::from_secs(2))
+        .unwrap();
+    for key in 0..1000 {
+        hub.live_topic_membership(&format!("sweep.active.{key}"), true)
+            .unwrap();
+    }
+    for key in 0..20 {
+        hub.live_topic_cursor(&format!("sweep.idle.{key}"))
+            .await
+            .unwrap();
+    }
+    hub.live_topic_cursor("static").await.unwrap();
+    let before = hub.live_topic_sweep_stats_for_test();
+    for key in 0..100 {
+        hub.prune_live_topics().unwrap();
+        let _receiver = hub
+            .subscribe_live_topic(&format!("unrelated.{key}"))
+            .unwrap();
+        hub.live_topic_cursors(&[format!("sweep.active.{key}")])
+            .await
+            .unwrap();
+    }
+    let now = hub.live_topic_sweep_stats_for_test();
+    assert!(
+        now.0 - before.0 <= 1,
+        "sweep ran per caller: {before:?} -> {now:?}"
+    );
+    assert_eq!(now.1 - before.1, 0, "nothing is eligible yet");
+    tokio::time::advance(Duration::from_millis(1100)).await;
+    hub.prune_live_topics().unwrap();
+    let middle = hub.live_topic_sweep_stats_for_test();
+    assert_eq!(middle.0 - now.0, 1);
+    assert_eq!(
+        middle.1 - now.1,
+        0,
+        "active instances must not enter the idle index"
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(hub.prune_live_topics().unwrap(), 20);
+    let after = hub.live_topic_sweep_stats_for_test();
+    assert_eq!(after.0 - middle.0, 1);
+    assert_eq!(after.1 - middle.1, 20);
+    for _ in 0..100 {
+        assert_eq!(hub.prune_live_topics().unwrap(), 0);
+    }
+    assert_eq!(hub.live_topic_sweep_stats_for_test(), after);
+}

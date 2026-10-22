@@ -324,6 +324,13 @@ impl InMemoryBroadcastHub {
         self.channels.read().map(|m| m.len()).unwrap_or(0)
     }
 
+    /// Reports shared sweep executions and visited expiry candidates for deterministic tests.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn live_topic_sweep_stats_for_test(&self) -> (u64, u64) {
+        self.live_topics.sweep_stats()
+    }
+
     /// Number of channels the presence member map holds. Exposed for tests
     /// of the empty-channel removal; `list_members` cannot distinguish "no
     /// entry" from "an empty entry".
@@ -374,7 +381,9 @@ impl BroadcastHub for InMemoryBroadcastHub {
     }
 
     fn prune_live_topics(&self) -> Result<usize, FrameworkError> {
-        let retired = self.live_topics.prune();
+        let Some(retired) = self.live_topics.sweep() else {
+            return Ok(0);
+        };
         let mut channels = self
             .channels
             .write()

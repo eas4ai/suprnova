@@ -803,7 +803,9 @@ Zero is rejected. A publication, baseline read or membership renews activity.
 In-memory pruning retains active memberships and pending rate-limited signals;
 Redis renews the instance hash TTL on publication, baseline reads and membership
 heartbeats. Pending signals survive until their permitted publication. Static
-topics never expire. Configure the same retention window on every replica:
+topics never expire. All callers share one sweep per second. The ordered idle
+index excludes active memberships, pending work and static topics, so a sweep
+visits only instances whose idle deadline has passed. Configure the same retention window on every replica:
 
 ```rust
 let config = suprnova::live::LiveConfig::builder()
