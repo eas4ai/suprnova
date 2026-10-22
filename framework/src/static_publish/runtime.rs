@@ -13,6 +13,8 @@ use std::{
 };
 use tokio::sync::{Mutex, Notify};
 
+const GENERATION_CHANNEL: &str = "suprnova.static-publication.generations";
+
 static RUNTIME: OnceLock<RwLock<Option<Arc<StaticPublication>>>> = OnceLock::new();
 
 /// Application publication settings and pending dependency regenerations.
@@ -28,6 +30,9 @@ pub struct StaticPublication {
     notify: Notify,
     paths: RwLock<BTreeSet<String>>,
     scheduled_at: Mutex<Option<tokio::time::Instant>>,
+    node: String,
+    hub: Option<Arc<dyn crate::BroadcastHub>>,
+    hub_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 struct PublicRoute {
@@ -74,12 +79,53 @@ impl StaticPublication {
             notify: Notify::new(),
             paths: RwLock::new(paths),
             scheduled_at: Mutex::new(None),
+            node: uuid::Uuid::now_v7().to_string(),
+            hub: crate::App::make::<dyn crate::BroadcastHub>(),
+            hub_task: std::sync::Mutex::new(None),
         });
         *crate::lock::write(
             RUNTIME.get_or_init(|| RwLock::new(None)),
             "static publication runtime",
         )? = Some(runtime.clone());
+        runtime.listen_to_hub()?;
         Ok(runtime)
+    }
+    fn listen_to_hub(self: &Arc<Self>) -> Result<(), FrameworkError> {
+        let Some(hub) = &self.hub else { return Ok(()) };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return Ok(());
+        };
+        let mut task = self
+            .hub_task
+            .lock()
+            .map_err(|_| error("publication hub task lock poisoned"))?;
+        if task.is_some() {
+            return Ok(());
+        }
+        let mut receiver = hub.subscribe(GENERATION_CHANNEL);
+        let weak = Arc::downgrade(self);
+        *task = Some(handle.spawn(async move {
+            loop {
+                let message = match receiver.recv().await {
+                    Ok(message) => message,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        tracing::error!(count,"static publication invalidation receiver lagged; timed revalidation covers missed tags");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
+                let Some(runtime) = weak.upgrade() else { break };
+                if message.event != "generations" || message.data.get("source").and_then(serde_json::Value::as_str) == Some(&runtime.node) { continue; }
+                let tags = message.data.get("tags").cloned().and_then(|value|serde_json::from_value::<Vec<String>>(value).ok());
+                match tags {
+                    Some(tags) if tags.iter().all(|tag|tag.len()==64 && tag.bytes().all(|b|b.is_ascii_hexdigit())) => {
+                        if let Err(failure) = runtime.invalidate(tags).await {tracing::error!(%failure,"static publication hub invalidation failed");}
+                    }
+                    _ => tracing::error!("static publication hub received malformed dependency tags"),
+                }
+            }
+        }));
+        Ok(())
     }
     /// Installs a configured source disk for Vite assets and referenced images.
     pub fn assets(&self, source: opendal::Operator) -> Result<(), FrameworkError> {
@@ -627,12 +673,38 @@ fn public_middleware(middleware: &BoxedMiddleware) -> bool {
 }
 
 pub(crate) async fn committed_generations(digests: Vec<[u8; 32]>) -> Result<(), FrameworkError> {
-    if let Some(runtime) = StaticPublication::current()? {
-        runtime
-            .invalidate(digests.into_iter().map(hex::encode))
-            .await?;
+    let runtime = StaticPublication::current()?;
+    let tags: Vec<String> = digests.into_iter().map(hex::encode).collect();
+    if let Some(runtime) = &runtime {
+        runtime.invalidate(tags.clone()).await?;
+    }
+    let hub = crate::App::make::<dyn crate::BroadcastHub>()
+        .or_else(|| runtime.as_ref().and_then(|runtime| runtime.hub.clone()));
+    if let Some(hub) = hub {
+        let source = runtime
+            .as_ref()
+            .map(|runtime| runtime.node.clone())
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        hub.publish(crate::BroadcastEnvelope::new(
+            GENERATION_CHANNEL,
+            "generations",
+            serde_json::json!({"source":source,"tags":tags}),
+        ))
+        .await?;
     }
     Ok(())
+}
+
+impl Drop for StaticPublication {
+    fn drop(&mut self) {
+        let task = self
+            .hub_task
+            .get_mut()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(task) = task.take() {
+            task.abort();
+        }
+    }
 }
 
 pub(crate) struct PublicationTask(tokio::task::JoinHandle<()>);
@@ -658,6 +730,9 @@ pub(crate) fn spawn_after_bind(middleware: &MiddlewareRegistry) -> Option<Public
             tracing::error!(error = %e,"static publication middleware unavailable");
             return None;
         }
+    }
+    if let Err(failure) = runtime.listen_to_hub() {
+        tracing::error!(%failure,"static publication hub consumer unavailable");
     }
     Some(PublicationTask(tokio::spawn(async move {
         let _ = runtime.publish().await;

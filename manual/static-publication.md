@@ -275,6 +275,23 @@ fn scheduled(publication: &Arc<StaticPublication>, schedule: &mut Schedule) -> R
 }
 ```
 
+Bind the application's `Arc<dyn BroadcastHub>` before installing publication to
+carry committed dependency tags from standalone workers to serving nodes. The
+publication subscriber uses the same configured hub transport as other framework
+broadcasting and queues each received tag for the serving worker. For example:
+
+```rust
+use std::sync::Arc;
+use suprnova::{App, BroadcastHub, InMemoryBroadcastHub};
+let hub: Arc<dyn BroadcastHub> = Arc::new(InMemoryBroadcastHub::new());
+App::bind::<dyn BroadcastHub>(hub);
+```
+
+Use a cross-process hub driver in a worker deployment. Without a configured hub,
+notifications remain process-local and the revalidate interval bounds freshness.
+A disconnected or lagging hub also falls back to timed revalidation and logs the
+failure. Only dependency digests travel through the hub, never rendered props.
+
 ## Prepare images
 
 Publication resolves local image URLs against the document path. It emits

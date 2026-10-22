@@ -537,3 +537,57 @@ async fn pub_004_scheduler_respects_configured_revalidate_interval() -> Result<(
     assert_eq!(renders.load(Ordering::SeqCst), 2);
     Ok(())
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn pub_004_fix_j_committed_worker_tags_reach_another_runtime_over_the_hub()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _container = suprnova::testing::TestContainer::fake();
+    let _database = boot().await;
+    let hub: Arc<dyn suprnova::BroadcastHub> = Arc::new(suprnova::InMemoryBroadcastHub::new());
+    suprnova::App::bind::<dyn suprnova::BroadcastHub>(hub.clone());
+    let disk = opendal::Operator::new(opendal::services::Memory::default())?;
+    let count = Arc::new(AtomicUsize::new(0));
+    let serving = runtime(
+        count.clone(),
+        disk.clone(),
+        Arc::new(MemoryCdnDriver::default()),
+    );
+    serving.publish().await?;
+    let _worker = runtime(
+        Arc::new(AtomicUsize::new(0)),
+        disk.clone(),
+        Arc::new(MemoryCdnDriver::default()),
+    );
+    DB::transaction(|_| {
+        Box::pin(async {
+            DB::statement(
+                "UPDATE publication_content SET title = 'worker change' WHERE id = 1",
+                vec![],
+            )
+            .await?;
+            advance_in_current_transaction(&[DependencyIdentity::table("publication_content")])
+                .await
+        })
+    })
+    .await?;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while serving.status().await.pending == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    serving.regenerate_pending().await?;
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    let manifest: suprnova::static_publish::Manifest =
+        serde_json::from_slice(&disk.read("_pub/manifest.json").await?.to_bytes())?;
+    for object in &manifest.versions[&manifest.live].objects {
+        if !object.asset {
+            assert!(
+                String::from_utf8_lossy(&disk.read(&object.path).await?.to_bytes())
+                    .contains("worker change")
+            );
+        }
+    }
+    Ok(())
+}
