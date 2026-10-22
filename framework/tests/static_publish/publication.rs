@@ -462,6 +462,12 @@ async fn pub_003_uploads_run_in_parallel_within_the_configured_bound() {
     assert_eq!(state.maximum.load(Ordering::SeqCst), 2);
 }
 
+async fn fixture_wait<T>(label: &str, future: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(5), future)
+        .await
+        .unwrap_or_else(|_| panic!("fixture timed out waiting for {label}"))
+}
+
 #[derive(Debug)]
 struct FsLeaseRace {
     snapshots: tokio::sync::Barrier,
@@ -483,6 +489,7 @@ struct LeaseRace {
     entered: AtomicUsize,
     entered_event: tokio::sync::Notify,
     gates: [tokio::sync::Notify; 2],
+    conditional: Mutex<Vec<bool>>,
     created: AtomicUsize,
     created_event: tokio::sync::Notify,
 }
@@ -748,6 +755,7 @@ impl Service for ProbeService {
             ctx: ctx.clone(),
             expected,
             absent,
+            lease_release: false,
             manifest: path == "_pub/manifest.json",
             inner,
             state: self.state.clone(),
@@ -823,6 +831,7 @@ struct ProbeWriter {
     ctx: OperationContext,
     expected: Option<String>,
     absent: bool,
+    lease_release: bool,
     manifest: bool,
     inner: oio::Writer,
     state: Arc<Probe>,
@@ -837,6 +846,13 @@ impl Drop for ProbeWriter {
 }
 impl oio::Write for ProbeWriter {
     async fn write(&mut self, bytes: Buffer) -> opendal::Result<()> {
+        // Release bytes distinguish cleanup from an unconditional acquisition regression.
+        if self.path.starts_with("_pub/lease/") {
+            self.lease_release = serde_json::from_slice::<serde_json::Value>(&bytes.to_bytes())
+                .ok()
+                .and_then(|record| record["expires_at_ms"].as_u64())
+                == Some(0);
+        }
         if self.path == "_pub/status.json" && self.state.stall_status.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
@@ -857,28 +873,49 @@ impl oio::Write for ProbeWriter {
     async fn close(&mut self) -> opendal::Result<Metadata> {
         let fs_race = self.state.fs_lease_race.lock().unwrap().clone();
         if self.path == lease_key(2)
-            && self.absent
+            && !self.lease_release
             && let Some(race) = fs_race
         {
-            if race.closes.fetch_add(1, Ordering::SeqCst) == 0 {
-                tokio::time::timeout(Duration::from_secs(5), race.holder_started.notified())
-                    .await
-                    .expect("the competing Fs close must reach its holder first");
+            let index = race.closes.fetch_add(1, Ordering::SeqCst);
+            if index < 2 {
+                assert!(
+                    self.absent,
+                    "Fs lease acquisition must request exclusive creation"
+                );
+            }
+            if index == 0 {
+                fixture_wait("the competing Fs holder", race.holder_started.notified()).await;
             }
         }
-        if self.path == lease_key(2) && self.absent {
+        let acquisition = if self.path == lease_key(2) && !self.lease_release {
             let race = self.state.lease_race.lock().unwrap().clone();
             if let Some(race) = race {
                 let index = race.entered.fetch_add(1, Ordering::SeqCst);
                 if index < 2 {
+                    race.conditional.lock().unwrap().push(self.absent);
                     race.entered_event.notify_one();
-                    race.gates[index].notified().await;
+                    fixture_wait(
+                        "lease acquisition gate release",
+                        race.gates[index].notified(),
+                    )
+                    .await;
+                    Some(race)
+                } else {
+                    None
                 }
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
         if self.manifest && self.state.gate_manifest.load(Ordering::SeqCst) {
             self.state.manifest_entered.notify_one();
-            self.state.manifest_release.notified().await;
+            fixture_wait(
+                "manifest commit gate release",
+                self.state.manifest_release.notified(),
+            )
+            .await;
         }
         let mode = if self.manifest {
             self.state.commit_mode.swap(0, Ordering::SeqCst)
@@ -947,12 +984,9 @@ impl oio::Write for ProbeWriter {
         } else {
             self.inner.close().await?
         };
-        if self.path.starts_with("_pub/lease/") && self.absent {
-            let race = self.state.lease_race.lock().unwrap().clone();
-            if let Some(race) = race {
-                race.created.fetch_add(1, Ordering::SeqCst);
-                race.created_event.notify_one();
-            }
+        if let Some(race) = acquisition {
+            race.created.fetch_add(1, Ordering::SeqCst);
+            race.created_event.notify_one();
         }
         if mode == 3 {
             self.state.fail_manifest_read.store(true, Ordering::SeqCst);
@@ -1277,7 +1311,7 @@ async fn pub_003_fix_1_manifest_is_the_only_origin_switch_and_assets_exist() {
             .publish(vec![make("/about", "new"), make("/other", "new")])
             .await
     });
-    state.manifest_entered.notified().await;
+    fixture_wait("manifest upload", state.manifest_entered.notified()).await;
     let old = client.get("/about").send().await;
     assert!(old.body_text().contains("old"));
     let html = old.body_text();
@@ -1297,7 +1331,10 @@ async fn pub_003_fix_1_manifest_is_the_only_origin_switch_and_assets_exist() {
         "old document keeps its own asset before commit"
     );
     state.manifest_release.notify_one();
-    work.await.unwrap().unwrap();
+    fixture_wait("publication task completion", work)
+        .await
+        .unwrap()
+        .unwrap();
     for path in ["/about", "/other"] {
         let response = client.get(path).send().await;
         let html = response.body_text();
@@ -1358,16 +1395,19 @@ async fn pub_003_fix_b_separate_publishers_refuse_an_occupied_storage_lease() {
             first
                 .publish_with(|| async move {
                     entered.notify_one();
-                    release.notified().await;
+                    fixture_wait("holder render release", release.notified()).await;
                     Ok(vec![page("first")])
                 })
                 .await
         })
     };
-    entered.notified().await;
+    fixture_wait("holder render entry", entered.notified()).await;
     let competing = second.publish(vec![page("second")]).await;
     release.notify_one();
-    task.await.unwrap().unwrap();
+    fixture_wait("holder task completion", task)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         competing.is_err(),
         "separate instances must share a storage lease"
@@ -1672,9 +1712,7 @@ impl oio::Read for ProbeReader {
         if self.expired_lease
             && let Some(race) = race
         {
-            tokio::time::timeout(Duration::from_secs(5), race.snapshots.wait())
-                .await
-                .expect("both Fs takers must read the expired epoch");
+            fixture_wait("both Fs expired-epoch snapshots", race.snapshots.wait()).await;
         }
         Ok(reply)
     }

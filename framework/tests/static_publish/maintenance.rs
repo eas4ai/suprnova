@@ -2,9 +2,12 @@
 use super::*;
 
 async fn wait_count(counter: &AtomicUsize, event: &tokio::sync::Notify, count: usize) {
-    while counter.load(Ordering::SeqCst) < count {
-        event.notified().await;
-    }
+    fixture_wait("acquisition progress", async {
+        while counter.load(Ordering::SeqCst) < count {
+            event.notified().await;
+        }
+    })
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -40,7 +43,9 @@ async fn pub_003_round5_1_delayed_taker_cannot_displace_a_settled_holder() {
             publisher
                 .publish_with(|| async {
                     started.fetch_add(1, Ordering::SeqCst);
-                    let _permit = render_release.acquire().await.unwrap();
+                    let _permit = fixture_wait("holder render release", render_release.acquire())
+                        .await
+                        .unwrap();
                     Err::<Vec<PageObject>, _>(FrameworkError::internal(
                         "render observed acquired lease",
                     ))
@@ -48,6 +53,11 @@ async fn pub_003_round5_1_delayed_taker_cannot_displace_a_settled_holder() {
                 .await
         }));
         wait_count(&race.entered, &race.entered_event, i + 1).await;
+        assert_eq!(
+            *race.conditional.lock().unwrap(),
+            vec![true; i + 1],
+            "lease acquisition must request exclusive creation"
+        );
     }
     // B acquires while A's create remains stalled beyond the old settle window.
     race.gates[1].notify_one();
@@ -62,7 +72,13 @@ async fn pub_003_round5_1_delayed_taker_cannot_displace_a_settled_holder() {
     render_release.add_permits(2);
     let mut failures = Vec::new();
     for task in tasks {
-        failures.push(task.await.unwrap().unwrap_err().to_string());
+        failures.push(
+            fixture_wait("lease contender completion", task)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string(),
+        );
     }
     assert_eq!(
         started.load(Ordering::SeqCst),
@@ -535,7 +551,6 @@ async fn pub_003_round6_1_fs_atomic_staging_cannot_replace_an_acquired_epoch() {
     *probe.fs_lease_race.lock().unwrap() = Some(race.clone());
     let disk = raw.clone().layer(ProbeLayer(probe));
     let started = Arc::new(AtomicUsize::new(0));
-    let release = Arc::new(tokio::sync::Semaphore::new(0));
     let mut tasks = Vec::new();
     for _ in 0..2 {
         let publisher = Publisher::from_operator(
@@ -547,15 +562,13 @@ async fn pub_003_round6_1_fs_atomic_staging_cannot_replace_an_acquired_epoch() {
             },
         )
         .unwrap();
-        let (race, started, release) = (race.clone(), started.clone(), release.clone());
+        let (race, started) = (race.clone(), started.clone());
         tasks.push(tokio::spawn(async move {
             publisher
                 .publish_with(|| async {
                     started.fetch_add(1, Ordering::SeqCst);
                     race.holder_started.notify_one();
-                    tokio::time::timeout(Duration::from_millis(500), release.acquire())
-                        .await
-                        .ok();
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                     Err::<Vec<PageObject>, _>(FrameworkError::internal(
                         "render observed acquired lease",
                     ))
@@ -687,4 +700,66 @@ async fn pub_008_round6_2_normal_asset_version_still_publishes_serves_and_prunes
     let retained = p.manifest().await.unwrap();
     assert_eq!(retained.live, live);
     assert_eq!(retained.versions.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pub_003_round6_3_fixture_observes_unconditional_acquisition_attempts() {
+    let race = Arc::new(LeaseRace::default());
+    let state = Arc::new(Probe::default());
+    *state.lease_race.lock().unwrap() = Some(race.clone());
+    let disk = memory().layer(ProbeLayer(state));
+    let task = tokio::spawn(async move {
+        disk.write(&lease_key(2), b"unconditional write".to_vec())
+            .await
+            .unwrap();
+    });
+    fixture_wait(
+        "unconditional acquisition attempt to enter its gate",
+        async {
+            while race.entered.load(Ordering::SeqCst) < 1 {
+                race.entered_event.notified().await;
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        *race.conditional.lock().unwrap(),
+        vec![false],
+        "the fixture records the conditional flag independently of gating"
+    );
+    race.gates[0].notify_one();
+    fixture_wait("unconditional acquisition writer to finish", task)
+        .await
+        .unwrap();
+    assert_eq!(race.created.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn pub_003_round6_4_reserved_lease_url_precedes_application_routing_and_is_documented() {
+    let _container = suprnova::testing::TestContainer::fake();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let router: suprnova::Router = suprnova::Router::new()
+        .get("/_pub/lease/application", move |_| {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(suprnova::HttpResponse::text(
+                    "unreachable application route",
+                ))
+            }
+        })
+        .into();
+    suprnova::static_publish::StaticPublication::install(&router, publisher("v1").0).unwrap();
+    let client = suprnova::testing::TestClient::new(router, suprnova::MiddlewareRegistry::new());
+    let response = client.get("/_pub/lease/application").send().await;
+    response.assert_status(404);
+    assert_eq!(response.header("Cache-Control"), Some("no-store"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let manual = include_str!("../../../manual/static-publication.md").replace('\n', " ");
+    assert!(
+        manual.contains("Installing static publication reserves the `/_pub/lease/` URL prefix.")
+    );
+    assert!(manual.contains("receives 404 before application routing"));
+    assert!(manual.contains("an application route declared there is never reached"));
 }

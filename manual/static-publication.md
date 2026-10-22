@@ -144,6 +144,9 @@ integer, such as `_pub/lease/00000000000000000001.json`. A record contains
 `owner`, `epoch` and `expires_at_ms`. The highest epoch is the current lease;
 foreign keys are ignored and no lease key is served by the origin.
 
+Installing static publication reserves the `/_pub/lease/` URL prefix.
+A request below it receives 404 before application routing, so an application route declared there is never reached.
+
 If no record exists, acquisition atomically creates epoch 1. An unexpired
 highest record refuses another publisher. An expired record permits atomic
 creation of the next epoch. A competing creation of that same key refuses as
