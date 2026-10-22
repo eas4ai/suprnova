@@ -765,6 +765,13 @@ impl LiveTopics {
     ) -> Result<serde_json::Value, FrameworkError> {
         let runtime = LiveRuntime::bind()?;
         let registry = &self.state.topics.registry;
+        for family in scopes.keys() {
+            if !registry.is_family(family) {
+                return Err(FrameworkError::internal(format!(
+                    "Live page `{page_component}` supplies scope for non-family topic `{family}`"
+                )));
+            }
+        }
         let principal = super::ports::route_principal().await;
         let mut selected: BTreeMap<String, (Vec<String>, String, String, Option<String>)> =
             BTreeMap::new();
@@ -822,7 +829,7 @@ impl LiveTopics {
                 )
             };
             if !authority.allows(principal.as_deref()).await {
-                omitted_binding(page_component, &topic);
+                omitted_binding(page_component, binding.topic, &topic);
                 continue;
             }
             let entry = selected
@@ -853,14 +860,24 @@ impl LiveTopics {
     }
 }
 
-fn omitted_binding(page_component: &str, topic: &str) {
-    static WARNED: std::sync::OnceLock<Mutex<BTreeSet<(String, String)>>> =
-        std::sync::OnceLock::new();
+static WARNED: std::sync::OnceLock<Mutex<BTreeSet<(String, String)>>> = std::sync::OnceLock::new();
+
+pub(crate) fn warning_entries(page_component: &str) -> usize {
+    WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .filter(|(page, _)| page == page_component)
+        .count()
+}
+
+fn omitted_binding(page_component: &str, declared_topic: &str, topic: &str) {
     let first = WARNED
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert((page_component.to_owned(), topic.to_owned()));
+        .insert((page_component.to_owned(), declared_topic.to_owned()));
     if first {
         tracing::warn!(
             page_component,

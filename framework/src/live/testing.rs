@@ -2403,3 +2403,10 @@ impl<'result> ActionAssertion<'result> {
         );
     }
 }
+
+/// Counts the finite declaration keys retained for denied bindings on one page.
+#[doc(hidden)]
+#[must_use]
+pub fn live_binding_warning_entries(page_component: &str) -> usize {
+    super::topics::warning_entries(page_component)
+}

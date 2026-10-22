@@ -507,3 +507,82 @@ fn signal_fix_008_live_binding_public_types_are_exported_from_the_root() {
     let _: Option<suprnova::LiveTopicSignal> = None;
     assert_eq!(bindings::<Page>()[0].topic, "signal.render");
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn signal_fix2_002_denied_family_instances_share_one_warning() {
+    let _guard = TestContainer::fake();
+    suprnova::Crypt::init(suprnova::EncryptionKey::generate());
+    suprnova::Gate::define::<String, String>("live:topic.signal.scoped", |_, _| false);
+    TestContainer::singleton(
+        LiveRegistry::builder()
+            .topic_family("signal.scoped")
+            .unwrap()
+            .public_topic_family("signal.public-scoped")
+            .unwrap()
+            .build(),
+    );
+    prepare_live_router_for_test(&Router::new()).unwrap();
+    let log = SignalLog(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+    let writer = log.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    for key in ["first", "second"] {
+        InertiaResponse::live::<ScopedPage>("DeniedInstances")
+            .scope("signal.scoped", key)
+            .scope("signal.public-scoped", key)
+            .load(|| async { Ok(ScopedPage { posts: vec![] }) })
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        suprnova::live::testing::live_binding_warning_entries("DeniedInstances"),
+        1
+    );
+    let output = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.contains("WARN") && line.contains("DeniedInstances"))
+            .count(),
+        1,
+        "{output}"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn signal_fix2_003_static_unknown_and_duplicate_scopes_fail_before_loading() {
+    let _guard = TestContainer::fake();
+    suprnova::Crypt::init(suprnova::EncryptionKey::generate());
+    TestContainer::singleton(
+        LiveRegistry::builder()
+            .public_topic("signal.render")
+            .unwrap()
+            .build(),
+    );
+    prepare_live_router_for_test(&Router::new()).unwrap();
+    for scopes in [
+        vec!["signal.render"],
+        vec!["unknown"],
+        vec!["signal.render", "signal.render"],
+    ] {
+        let mut builder = InertiaResponse::live::<Page>("ScopeValidation");
+        for scope in &scopes {
+            builder = builder.scope(*scope, "key");
+        }
+        let result = builder
+            .load(|| async { panic!("invalid scope ran the loader") })
+            .await;
+        let error = result.err().expect("invalid scope accepted").to_string();
+        assert!(
+            error.contains("ScopeValidation") && error.contains(scopes[0]),
+            "{error}"
+        );
+    }
+}
