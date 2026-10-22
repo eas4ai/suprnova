@@ -26,3 +26,6 @@ pub mod precognition;
 pub mod previous_url_open_redirect;
 pub mod previous_url_route_match;
 pub mod store_container_binding;
+
+#[cfg(feature = "testing")]
+mod asset_finalization;

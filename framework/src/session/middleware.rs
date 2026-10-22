@@ -1469,11 +1469,14 @@ impl SessionMiddleware {
         let loaded_user_id = session.user_id.clone();
         let loaded_session_id = session.id.clone();
 
-        // Age only this request's copy. A mark set later by route middleware
-        // prevents this copy, including consumed flash, from reaching the store.
+        // Age the request copy without letting automatic aging count as a
+        // handler mutation. An unchanged asset must leave stored flash alone.
+        let dirty_before_aging = session.is_dirty();
         if !request.is_precognitive() {
             session.age_flash_data();
         }
+        let flash_aged = session.is_dirty();
+        session.dirty = dirty_before_aging;
 
         // Per-request bag of cookies handlers want attached. Populated
         // by `push_pending_cookie` (called from `Auth::login_remember`
@@ -1574,6 +1577,8 @@ impl SessionMiddleware {
         let unchanged = !slot.is_poisoned()
             && crate::lock::recover(&slot).as_ref().is_some_and(|session| {
                 !session.is_dirty()
+                    && !session.token_issued
+                    && session.pending_sign_in_rebinds.is_empty()
                     && session.id == loaded_session_id
                     && session.user_id == loaded_user_id
             })
@@ -1586,6 +1591,10 @@ impl SessionMiddleware {
             };
         if crate::http::HttpResponse::is_static_asset_response(&response) && unchanged {
             return response;
+        }
+
+        if flash_aged && let Some(session) = crate::lock::recover(&slot).as_mut() {
+            session.dirty = true;
         }
 
         previous_url.exempt = previous_url_exempt.load(std::sync::atomic::Ordering::Relaxed);

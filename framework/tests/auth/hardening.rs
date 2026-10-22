@@ -1945,3 +1945,73 @@ fn hardening_stale_named_guard_sign_in_ends_only_that_guard_child() {
         },
     );
 }
+
+#[test]
+fn budget_002_static_committed_sign_in_rebind_is_applied() {
+    if !crate::own_process::is_child() {
+        crate::own_process::run_alone(
+            "hardening::budget_002_static_committed_sign_in_rebind_is_applied",
+        );
+        return;
+    }
+    let provider = Arc::new(EloquentUserProvider::<TestUser>::new());
+    let store = Arc::new(RevocationFailsStore::default());
+    in_scope(
+        AuthConfig::default(),
+        vec![("users", provider as Arc<dyn UserProvider>)],
+        store.clone(),
+        async move {
+            let _db = eloquent_user().await;
+            let config = session_config();
+            let middleware = SessionMiddleware::with_store(config.clone(), store.clone());
+            let cookie = sign_in(&middleware, &config).await;
+            for session in store.sessions.lock().unwrap().values_mut() {
+                session.mark_clean();
+            }
+            let before = store.guard_entries("web", "1")[0]["auth_epoch"].clone();
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("asset.js"), "export default 1").unwrap();
+            let files = suprnova::StaticFiles::from_dir(dir.path()).handler();
+            let change = transactional_change_route();
+            let handler: Next = Arc::new(move |request| {
+                let change = change.clone();
+                let files = files.clone();
+                Box::pin(async move {
+                    change(request).await?;
+                    assert!(
+                        !suprnova::session::session().unwrap().is_dirty(),
+                        "the queued rebind alone needs finalization"
+                    );
+                    files(suprnova::Request::for_test_with_headers(
+                        "GET",
+                        "/asset.js",
+                        Vec::<(&str, &str)>::new(),
+                    ))
+                    .await
+                })
+            });
+            assert_eq!(
+                serve(&middleware, &config, Some(&cookie), handler)
+                    .await
+                    .status,
+                200
+            );
+            assert_ne!(
+                store.guard_entries("web", "1")[0]["auth_epoch"],
+                before,
+                "the committed epoch must persist"
+            );
+            assert_eq!(
+                serve(
+                    &middleware,
+                    &config,
+                    Some(&cookie),
+                    authenticated_route(None)
+                )
+                .await
+                .status,
+                200
+            );
+        },
+    );
+}

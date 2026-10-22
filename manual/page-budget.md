@@ -74,10 +74,13 @@ uppercase letter, underscore or hyphen, in names such as
 `main-BjmpJyAU.js`. Fingerprinted assets require
 `public, max-age=31536000, immutable`. Other static files default to
 `public, max-age=3600`, or the handler's configured cache policy. Static file
-responses leave an untouched session unwritten and issue no session or CSRF
-cookie. If a request rotates a remember credential, regenerates a session or
-changes identity, security finalization still persists the change and delivers
-its required cookies. That response becomes private. Page responses keep their
+responses skip session persistence and cookie issuance only when the handler
+changes no session state, issues no CSRF token and queues no security work.
+Automatic flash aging alone does not count as a change. Stored flash survives
+the asset request for the following page. Token issuance finalizes normally
+and sends the response as `private, no-store`. Remember credential rotation,
+regeneration, identity changes and queued sign-in rebinds also finalize normally
+and deliver any required cookies. Responses carrying those cookies become private. Page responses keep their
 normal session behavior.
 
 Select another naming convention on both the audit and the static handler.
