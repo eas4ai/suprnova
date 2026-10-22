@@ -1569,6 +1569,23 @@ impl ClientResponse {
         }
     }
 
+    // Collection must retain every policy header, including repeated lines.
+    pub(crate) fn header_values(&self, name: &str) -> Vec<String> {
+        match &self.inner {
+            ClientResponseInner::Real(response) => response
+                .headers()
+                .get_all(name)
+                .iter()
+                .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+                .collect(),
+            ClientResponseInner::Fake { headers, .. } => headers
+                .iter()
+                .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.clone())
+                .collect(),
+        }
+    }
+
     /// Read the full body and parse as JSON, enforcing the response-body
     /// cap (see [`Http::set_max_response_bytes`] /
     /// [`RequestBuilder::max_response_bytes`]).

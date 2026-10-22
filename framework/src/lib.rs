@@ -97,6 +97,9 @@ pub mod security_headers;
 #[cfg(feature = "database-mongodb")]
 pub mod mongodb;
 pub mod notifications;
+/// The page weight audit: a budget, the evaluator behind the test helper,
+/// the HTTP and HAR collectors and the `budget:audit` command.
+pub mod page_budget;
 pub mod pagination;
 pub mod payments;
 pub mod prelude;

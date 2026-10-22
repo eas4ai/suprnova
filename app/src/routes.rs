@@ -325,4 +325,6 @@ routes! {
             |req| format!("ip:{}", client_ip_key(req)),
         )
     }),
+    // Built assets use the same anonymous origin policy as every starter kit.
+    suprnova::fallback!(suprnova::StaticFiles::public().handler()),
 }

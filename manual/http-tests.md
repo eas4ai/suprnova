@@ -1395,6 +1395,14 @@ A short list of footguns that catch first-time authors:
 | Panic-boundary test pattern | `framework/tests/middleware/panic_safety.rs` |
 | Auth + middleware end-to-end pattern | `framework/tests/auth_flows/email_verified_middleware.rs` |
 
+## Page budgets
+
+`TestClient::audit_page` follows a document and its assets through the same
+request path. It returns every failed rule with measured and allowed values.
+See [Page Budget](page-budget.md) for a runnable test and the default limits.
+The React, Vue, Svelte and Live scaffolds include `tests/page_budget.rs`; the dogfood
+application runs the same audit in `app/tests/page_budget.rs`.
+
 ## Next
 
 - [Testing](testing.md) - `#[suprnova_test]`, `TestDatabase`, the

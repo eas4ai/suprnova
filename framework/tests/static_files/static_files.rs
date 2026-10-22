@@ -511,3 +511,52 @@ async fn hardening_a_fifo_is_a_404_without_waiting_for_a_writer() {
     let response = answered.expect("the request answered without waiting for a writer");
     assert_eq!(response.status(), 404);
 }
+
+#[tokio::test]
+async fn budget_002_custom_fingerprint_controls_immutable_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["app.v12.js", "main-BjmpJyAU.js"] {
+        std::fs::write(dir.path().join(name), "export default 1").unwrap();
+    }
+    let router = Arc::new(
+        fallback!(
+            suprnova::StaticFiles::from_dir(dir.path())
+                .fingerprint(r"\.v[0-9]+$")
+                .handler()
+        )
+        .register(Router::new()),
+    );
+    let custom = drive_get(router.clone(), "/app.v12.js").await;
+    assert_eq!(
+        header(&custom, "cache-control"),
+        "public, max-age=31536000, immutable"
+    );
+    let default = drive_get(router, "/main-BjmpJyAU.js").await;
+    assert_eq!(header(&default, "cache-control"), "public, max-age=3600");
+}
+
+#[tokio::test]
+async fn budget_002_invalid_fingerprint_returns_an_error_on_use() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("app.js"), "export default 1").unwrap();
+    let handler = suprnova::StaticFiles::from_dir(dir.path())
+        .fingerprint("[")
+        .handler();
+    for _ in 0..2 {
+        let response = handler(suprnova::Request::for_test_with_headers(
+            "GET",
+            "/app.js",
+            Vec::<(&str, &str)>::new(),
+        ))
+        .await;
+        let error = match response {
+            Err(error) => error,
+            Ok(_) => panic!("invalid patterns must return an error"),
+        };
+        assert_eq!(
+            error.status_code(),
+            500,
+            "invalid handler configuration is a server error on every request"
+        );
+    }
+}

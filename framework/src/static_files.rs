@@ -30,6 +30,8 @@ const SNIFF_PREFIX_BYTES: usize = 8 * 1024;
 pub struct StaticFiles {
     root: PathBuf,
     cache_control: Option<String>,
+    fingerprint_pattern: String,
+    fingerprint_regex: std::sync::OnceLock<Result<regex::Regex, String>>,
 }
 
 impl StaticFiles {
@@ -43,12 +45,28 @@ impl StaticFiles {
         Self {
             root: root.into(),
             cache_control: None,
+            fingerprint_pattern: crate::page_budget::DEFAULT_FINGERPRINT_PATTERN.into(),
+            fingerprint_regex: std::sync::OnceLock::new(),
         }
     }
 
-    /// Attach a `Cache-Control` header to successful static file responses.
+    /// Set the lifetime of files without a fingerprint.
+    ///
+    /// Fingerprinted files always keep the one-year immutable policy, so a
+    /// shared cache can retain their content without revalidation.
     pub fn cache_control(mut self, value: impl Into<String>) -> Self {
         self.cache_control = Some(value.into());
+        self
+    }
+
+    /// Select the file-stem convention used for immutable caching.
+    ///
+    /// An invalid pattern is cached and fails every eligible request with a server
+    /// error. Building the route does not panic, so configuration failures
+    /// remain visible on the request path.
+    pub fn fingerprint(mut self, pattern: impl Into<String>) -> Self {
+        self.fingerprint_pattern = pattern.into();
+        self.fingerprint_regex = std::sync::OnceLock::new();
         self
     }
 
@@ -79,6 +97,19 @@ impl StaticFiles {
             return not_found();
         };
 
+        let pattern = self
+            .fingerprint_regex
+            .get_or_init(|| {
+                regex::Regex::new(&self.fingerprint_pattern).map_err(|error| error.to_string())
+            })
+            .as_ref()
+            .map_err(|error| {
+                crate::FrameworkError::internal(format!("static file fingerprint pattern: {error}"))
+            })?;
+        let fingerprinted = relative_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| pattern.is_match(stem));
         let root = self.root.clone();
         let Ok(Some(OpenedFile {
             file,
@@ -105,11 +136,16 @@ impl StaticFiles {
             response
         };
 
-        if let Some(value) = &self.cache_control {
-            response = response.header("Cache-Control", value.clone());
-        }
+        let cache_control = if fingerprinted {
+            "public, max-age=31536000, immutable"
+        } else {
+            self.cache_control
+                .as_deref()
+                .unwrap_or("public, max-age=3600")
+        };
+        response = response.header("Cache-Control", cache_control);
 
-        Ok(response)
+        Ok(response.mark_static_asset())
     }
 }
 

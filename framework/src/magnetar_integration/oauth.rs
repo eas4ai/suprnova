@@ -93,7 +93,7 @@ impl OAuthAuth {
         // as a JSON or POST request, would otherwise be neither stored nor
         // sent as a cookie, and the callback would arrive under another
         // session and fail the binding.
-        crate::session::session_mut(|session| session.dirty = true);
+        crate::session::session_mut(|session| session.mark_dirty());
         Ok(OAuthKickoff {
             authorization_url: begun.authorization_url,
             state: begun.state,

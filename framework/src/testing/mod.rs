@@ -33,6 +33,7 @@ mod response;
 pub use crate::clock::{TestClock, TestClockGuard, TestClockHandle};
 pub use crate::container::testing::{TestContainer, TestContainerGuard};
 pub use crate::database::testing::TestDatabase;
+pub use crate::page_budget::{BudgetFinding, PageAudit, PageBudget};
 pub use client::{ActingUser, TestClient, TestRequest};
 pub use expect::{Expect, set_current_test_name};
 pub use inertia::{AssertableInertia, ReloadRequest};

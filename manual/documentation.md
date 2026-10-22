@@ -117,6 +117,7 @@
     - [HTTP Tests](http-tests.md)
     - [Database Tests](database-testing.md)
     - [Mocking & Fakes](mocking.md)
+    - [Page Budget](page-budget.md)
 - ## Payments
     - [Overview](payments.md)
     - [Stripe](payments-stripe.md)

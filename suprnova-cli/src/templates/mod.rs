@@ -205,6 +205,11 @@ pub fn email_address_rs() -> &'static str {
     include_str!("files/backend/email_address.rs.tpl")
 }
 
+/// Generate a page budget test against the application's own public routes.
+pub fn page_budget_test(crate_name: &str) -> String {
+    include_str!("files/backend/tests/page_budget.rs.tpl").replace("{crate}", crate_name)
+}
+
 /// `src/agents.rs`, which the Inertia and Live kits share: the MCP endpoint,
 /// the OAuth server and agent auth, with the kit's own consent pages.
 pub fn agents_rs() -> &'static str {

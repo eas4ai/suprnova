@@ -310,7 +310,7 @@ impl StagedInertiaSessionValues {
             for (key, staged_value) in &self.entries {
                 if session.data.get(key) == Some(staged_value) {
                     session.data.remove(key);
-                    session.dirty = true;
+                    session.mark_dirty();
                 }
             }
         });
@@ -351,7 +351,7 @@ impl StagedInertiaSessionValues {
                         session.data.insert(new_key, staged_value.clone());
                     }
                 }
-                session.dirty = true;
+                session.mark_dirty();
             }
         });
     }

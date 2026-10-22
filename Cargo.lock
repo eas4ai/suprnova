@@ -1926,8 +1926,10 @@ version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11119743ad110e8c1bdccd930d7f5c30c99e5fc76a7b63ec9807e84eef0c5f59"
 dependencies = [
+ "cssparser-macros",
  "dtoa-short",
  "itoa",
+ "phf 0.14.0",
  "smallvec",
 ]
 
@@ -8871,6 +8873,7 @@ dependencies = [
  "compcol",
  "comrak",
  "crypto_secretbox",
+ "cssparser 0.38.0",
  "dashmap 6.2.1",
  "deunicode",
  "dhat",
@@ -8893,6 +8896,7 @@ dependencies = [
  "hf-hub",
  "hmac 0.13.0",
  "hound",
+ "html5ever 0.40.1",
  "http 1.4.1",
  "http-body-util",
  "httpdate",

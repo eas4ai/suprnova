@@ -735,7 +735,7 @@ impl Auth {
         clear_guard_auth_user(guard_name);
         session_mut(|session| {
             session.csrf_token = generate_csrf_token();
-            session.dirty = true;
+            session.mark_dirty();
         });
         // The session survives this guard's logout, so the Live memberships
         // it opened for this guard's user end here (LIVE-021).
@@ -811,7 +811,7 @@ impl Auth {
         }
         session_mut(|session| {
             session.csrf_token = generate_csrf_token();
-            session.dirty = true;
+            session.mark_dirty();
         });
         if let Some(session_id) = live_session_id {
             crate::live::revocation::session_deauthenticated(

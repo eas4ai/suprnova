@@ -758,6 +758,22 @@ Built something reusable on top of Suprnova and want to upstream it as a
 canonical kit? See [Contributions](contributions.md). We're happy to take a
 real implementation and round it into a generic kit.
 
+The React, Vue, Svelte and Live scaffolds also ship `tests/page_budget.rs`. It audits
+`/`, `/login`, `/register`, `/forgot-password` and `/reset-password` through the
+application router and middleware. It creates an isolated test database and
+sets the test environment in a child process before runtime threads start.
+The Inertia tests follow built assets when a Vite manifest exists and run
+before the frontend build on a fresh scaffold. The Live test boots its
+component registry and runtime and audits its served styles and scripts. See [Page Budget](page-budget.md).
+
+```bash
+cargo test --test page_budget
+```
+
+The repository checks the generated tests and origin asset policy in
+`suprnova-cli/tests/kit_budget.rs`. The dogfood application has its own
+`app/tests/page_budget.rs` test over its public entry pages.
+
 Every kit is held to the browser suite in `suprnova-cli/tests/kit_browser/`.
 Run `cargo test -p suprnova-cli --test kit_browser -- --ignored --test-threads=1`
 from the repository root. The harness scaffolds all three kits, builds one

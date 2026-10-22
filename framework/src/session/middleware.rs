@@ -1099,7 +1099,7 @@ async fn record_unread_sign_in_epochs(slot: &Arc<Mutex<Option<SessionData>>>) {
                     session.user_id = None;
                 }
                 session.csrf_token = generate_csrf_token();
-                session.dirty = true;
+                session.mark_dirty();
                 tracing::warn!(
                     target: "suprnova::auth",
                     guard = %guard,
@@ -1466,11 +1466,16 @@ impl SessionMiddleware {
                 .and_then(serde_json::Value::as_str)
                 .is_some();
 
-        // Age only this request's copy. A mark set later by route middleware
-        // prevents this copy, including consumed flash, from reaching the store.
+        let loaded_user_id = session.user_id.clone();
+        let loaded_session_id = session.id.clone();
+
+        // Aging remains dirty for CSRF and persistence readers. The asset gate
+        // separately tracks explicit mutations, leaving stored flash untouched.
+        let dirty_before_aging = session.is_dirty();
         if !request.is_precognitive() {
             session.age_flash_data();
         }
+        let mutation_version_after_aging = session.mutation_version;
 
         // Per-request bag of cookies handlers want attached. Populated
         // by `push_pending_cookie` (called from `Auth::login_remember`
@@ -1565,6 +1570,28 @@ impl SessionMiddleware {
                 ),
             )
             .await;
+
+        // An untouched asset needs no session write or refresh cookie. Security
+        // changes must still commit, including credentials consumed before next.
+        let unchanged = !slot.is_poisoned()
+            && crate::lock::recover(&slot).as_ref().is_some_and(|session| {
+                !dirty_before_aging
+                    && session.mutation_version == mutation_version_after_aging
+                    && !session.token_issued
+                    && session.pending_sign_in_rebinds.is_empty()
+                    && session.id == loaded_session_id
+                    && session.user_id == loaded_user_id
+            })
+            && crate::lock::recover(&pending).is_empty()
+            && crate::lock::recover(&pending_remember_revocations).is_empty()
+            && crate::lock::recover(&pending_opaque_session).is_empty()
+            && {
+                let transition = crate::lock::recover(&identity_transition);
+                transition.signed_in.is_none() && transition.retired.is_empty()
+            };
+        if crate::http::HttpResponse::is_static_asset_response(&response) && unchanged {
+            return response;
+        }
 
         previous_url.exempt = previous_url_exempt.load(std::sync::atomic::Ordering::Relaxed);
 
@@ -1742,7 +1769,7 @@ impl SessionMiddleware {
                     let lost_user_id = session.user_id.take();
                     session.remove_auth_guard(&default_guard_name);
                     session.clear_magnetar_web_binding();
-                    session.dirty = true;
+                    session.mark_dirty();
                     crate::auth::request_state::clear_guard_user(&default_guard_name);
                     // The session survives and loses its user, as a plain
                     // logout does, so the Live memberships it opened for
@@ -2431,7 +2458,7 @@ impl SessionMiddleware {
         if let Some(session) = crate::lock::recover(slot).as_mut() {
             session.set_auth_guard_magnetar_binding(&guard_name, issued.web_binding.clone());
             session.set_magnetar_web_binding(issued.web_binding);
-            session.dirty = true;
+            session.mark_dirty();
         }
         Ok(())
     }
@@ -2557,7 +2584,7 @@ impl SessionMiddleware {
             if let Some(s) = session.as_mut()
                 && !s.loaded_from_store
             {
-                s.dirty = true;
+                s.mark_dirty();
             }
             match response {
                 Ok(r) => Ok(r.replace_header("Cache-Control", "private, no-store")),
@@ -3033,7 +3060,7 @@ pub fn regenerate_csrf_token() -> Option<String> {
     session_mut(|session| {
         let token = generate_csrf_token();
         session.csrf_token = token.clone();
-        session.dirty = true;
+        session.mark_dirty();
         token
     })
 }
@@ -3214,7 +3241,7 @@ pub(crate) fn set_guard_auth_user(guard_name: &str, user_id: impl Into<String>) 
         if is_default {
             session.clear_magnetar_web_binding();
             session.user_id = Some(user_id.clone());
-            session.dirty = true;
+            session.mark_dirty();
         }
     });
     if is_default {
@@ -3345,7 +3372,7 @@ fn apply_committed_sign_in_rebinds(slot: &Arc<Mutex<Option<SessionData>>>) {
             Some(epoch) => session.set_auth_guard_epoch(&rebind.guard, epoch),
             None => session.clear_auth_guard_epoch(&rebind.guard),
         }
-        session.dirty = true;
+        session.mark_dirty();
     }
 }
 
@@ -3410,7 +3437,7 @@ pub(crate) fn clear_guard_auth_user(guard_name: &str) {
         if is_default {
             session.user_id = None;
             session.clear_magnetar_web_binding();
-            session.dirty = true;
+            session.mark_dirty();
         }
     });
     if is_default {
@@ -3458,7 +3485,7 @@ pub fn set_two_factor_pending(user_id: impl Into<String>) {
             TWO_FACTOR_PENDING_KEY.to_string(),
             serde_json::Value::String(user_id),
         );
-        session.dirty = true;
+        session.mark_dirty();
     });
 }
 
@@ -3471,7 +3498,7 @@ pub fn clear_two_factor_pending() {
         let pending = session.data.remove(TWO_FACTOR_PENDING_KEY).is_some();
         let epoch = session.data.remove(TWO_FACTOR_PENDING_EPOCH_KEY).is_some();
         if pending || epoch {
-            session.dirty = true;
+            session.mark_dirty();
         }
     });
 }
@@ -3496,7 +3523,7 @@ pub(crate) fn set_two_factor_pending_epoch(auth_epoch: Option<u64>) {
                 session.data.remove(TWO_FACTOR_PENDING_EPOCH_KEY);
             }
         }
-        session.dirty = true;
+        session.mark_dirty();
     });
 }
 
@@ -3559,7 +3586,7 @@ pub fn set_two_factor_pending_remember(remember: bool) {
                 TWO_FACTOR_PENDING_REMEMBER_KEY.to_string(),
                 serde_json::Value::Bool(true),
             );
-            session.dirty = true;
+            session.mark_dirty();
         });
     } else {
         clear_two_factor_pending_remember();
@@ -3577,7 +3604,7 @@ pub fn clear_two_factor_pending_remember() {
             .remove(TWO_FACTOR_PENDING_REMEMBER_KEY)
             .is_some()
         {
-            session.dirty = true;
+            session.mark_dirty();
         }
     });
 }

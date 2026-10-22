@@ -3058,3 +3058,122 @@ fn hardening_session_guard_unknown_to_the_manager_issues_no_remember_credential(
         );
     });
 }
+
+#[cfg(feature = "testing")]
+#[test]
+fn budget_002_static_legacy_remember_delivers_replacement_and_keeps_authentication() {
+    use suprnova::middleware::Middleware;
+    in_database(async {
+        let user_id = "budget-static-remember";
+        let plaintext = suprnova::auth::remember::issue(user_id, 1440)
+            .await
+            .unwrap();
+        let cookie = Cookie::encrypted("remember_me", &plaintext).unwrap();
+        let mut config = SessionConfig::default();
+        config.cookie_secure = false;
+        let middleware = suprnova::SessionMiddleware::new(config);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("asset.js"), "export default 1").unwrap();
+        let handler = suprnova::StaticFiles::from_dir(dir.path()).handler();
+        let next: suprnova::middleware::Next = Arc::new(move |req| Box::pin(handler(req)));
+        let header = format!("remember_me={}", cookie.value());
+        let response = middleware
+            .handle(
+                suprnova::Request::for_test_with_headers(
+                    "GET",
+                    "/asset.js",
+                    [("cookie", header.as_str())],
+                ),
+                next,
+            )
+            .await
+            .unwrap_or_else(|_| panic!("static request failed"))
+            .into_hyper();
+        let replacement = response
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|h| h.to_str().ok())
+            .find_map(|h| h.split(';').next()?.strip_prefix("remember_me="))
+            .expect("consumed legacy credential must deliver its replacement")
+            .to_owned();
+        assert_ne!(replacement, cookie.value());
+        let next: suprnova::middleware::Next = Arc::new(move |_| {
+            Box::pin(async move {
+                assert_eq!(Auth::id().as_deref(), Some(user_id));
+                Ok(suprnova::HttpResponse::text("authenticated"))
+            })
+        });
+        middleware
+            .handle(request_with_remember_cookie(&replacement).await, next)
+            .await
+            .unwrap_or_else(|_| panic!("page request failed"));
+    });
+}
+
+#[cfg(feature = "testing")]
+#[test]
+fn budget_002_static_regeneration_persists_new_session_and_destroys_old() {
+    use suprnova::middleware::Middleware;
+    in_database(async {
+        let mut config = SessionConfig::default();
+        config.cookie_secure = false;
+        let middleware = suprnova::SessionMiddleware::new(config.clone());
+        let mut session = suprnova::session::SessionData::new("b".repeat(40), "c".repeat(40));
+        session.put("retained", "value");
+        let cookie = persist_session_cookie(&middleware, &session).await;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("asset.js"), "export default 1").unwrap();
+        let handler = suprnova::StaticFiles::from_dir(dir.path()).handler();
+        let new_id = Arc::new(std::sync::Mutex::new(String::new()));
+        let observed = new_id.clone();
+        let next: suprnova::middleware::Next = Arc::new(move |req| {
+            let handler = handler.clone();
+            let observed = observed.clone();
+            Box::pin(async move {
+                suprnova::session::regenerate_session_id();
+                *observed.lock().unwrap() = suprnova::session::session().unwrap().id;
+                handler(req).await
+            })
+        });
+        let header = format!("{}={cookie}", config.cookie_name);
+        let response = middleware
+            .handle(
+                suprnova::Request::for_test_with_headers(
+                    "GET",
+                    "/asset.js",
+                    [("cookie", header.as_str())],
+                ),
+                next,
+            )
+            .await
+            .unwrap_or_else(|_| panic!("static request failed"))
+            .into_hyper();
+        let new_id = new_id.lock().unwrap().clone();
+        assert_ne!(new_id, session.id);
+        assert!(
+            middleware
+                .store()
+                .read(&session.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "old session must be destroyed"
+        );
+        let persisted = middleware
+            .store()
+            .read(&new_id)
+            .await
+            .unwrap()
+            .expect("new session must persist");
+        assert_eq!(
+            persisted.get::<String>("retained").as_deref(),
+            Some("value")
+        );
+        assert!(response.headers().get_all("set-cookie").iter().any(|h| {
+            h.to_str()
+                .unwrap()
+                .starts_with(&format!("{}=", config.cookie_name))
+        }));
+    });
+}

@@ -71,6 +71,9 @@ pub struct SessionData {
     pub csrf_token: String,
     /// Whether the session has been modified
     pub dirty: bool,
+    /// Distinguish explicit changes from automatic flash aging for the asset gate.
+    /// Framework drivers do not persist this marker.
+    pub(crate) mutation_version: u64,
     /// Whether this value was loaded from an existing store row under
     /// [`Self::id`] (`true`), or is a session that has never been
     /// persisted under the current id (`false` - a brand-new session,
@@ -131,6 +134,7 @@ impl SessionData {
             user_id: None,
             csrf_token,
             dirty: false,
+            mutation_version: 0,
             loaded_from_store: false,
             pending_sign_in_rebinds: Vec::new(),
             token_issued: false,
@@ -165,7 +169,7 @@ impl SessionData {
     pub fn rotate_id(&mut self, new_id: impl Into<String>) {
         self.id = new_id.into();
         self.loaded_from_store = false;
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     fn auth_guard_field(&self, guard: &str, field: &str) -> Option<&serde_json::Value> {
@@ -200,7 +204,7 @@ impl SessionData {
                 state.insert(field.to_owned(), value);
             }
         }
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     /// Whether the guard `guard` is signed in as `user_id` in this session.
@@ -304,7 +308,7 @@ impl SessionData {
             .and_then(serde_json::Value::as_object_mut)
             .is_some_and(|state| state.remove(AUTH_GUARD_EPOCH_KEY).is_some());
         if removed {
-            self.dirty = true;
+            self.mark_dirty();
         }
     }
 
@@ -379,7 +383,7 @@ impl SessionData {
             self.data.remove(AUTH_GUARDS_KEY);
         }
         if removed {
-            self.dirty = true;
+            self.mark_dirty();
         }
     }
 
@@ -411,7 +415,7 @@ impl SessionData {
     pub fn put<T: Serialize>(&mut self, key: &str, value: T) {
         if let Ok(v) = serde_json::to_value(value) {
             self.data.insert(key.to_string(), v);
-            self.dirty = true;
+            self.mark_dirty();
         }
     }
 
@@ -424,7 +428,7 @@ impl SessionData {
         // forgetting an absent key must leave a read-only request clean so it
         // isn't forced through the write (and fail-closed) path needlessly.
         if removed.is_some() {
-            self.dirty = true;
+            self.mark_dirty();
         }
         removed
     }
@@ -501,7 +505,7 @@ impl SessionData {
     pub fn flush(&mut self) {
         self.data.clear();
         self.user_id = None;
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     /// Persist a digest-only Magnetar web-session binding.
@@ -527,6 +531,12 @@ impl SessionData {
     /// Remove the Magnetar web-session binding from this framework session.
     pub fn clear_magnetar_web_binding(&mut self) {
         self.forget(MAGNETAR_WEB_BINDING_KEY);
+    }
+
+    /// Keep dirty readers informed while identifying explicit request mutations.
+    pub(crate) fn mark_dirty(&mut self) {
+        self.dirty = true;
+        self.mutation_version = self.mutation_version.wrapping_add(1);
     }
 
     /// Check if the session has been modified
@@ -571,7 +581,7 @@ impl SessionData {
         arr.push(v);
         self.data
             .insert(key.to_string(), serde_json::Value::Array(arr));
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     /// Increment a numeric session value, creating it as `0 + amount`
@@ -709,7 +719,7 @@ impl SessionData {
     pub fn now<T: Serialize>(&mut self, key: &str, value: T) {
         if let Ok(v) = serde_json::to_value(value) {
             self.data.insert(format!("_flash.old.{}", key), v);
-            self.dirty = true;
+            self.mark_dirty();
         }
     }
 
@@ -734,7 +744,7 @@ impl SessionData {
             }
         }
         if had {
-            self.dirty = true;
+            self.mark_dirty();
         }
     }
 
@@ -751,7 +761,7 @@ impl SessionData {
             }
         }
         if moved {
-            self.dirty = true;
+            self.mark_dirty();
         }
     }
 
@@ -833,7 +843,7 @@ impl SessionData {
                 None => continue,
             };
             if let Some(value) = self.data.remove(&full_key) {
-                self.dirty = true;
+                self.mark_dirty();
                 out.insert(bag, value);
             }
         }
