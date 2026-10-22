@@ -9,7 +9,7 @@ mod store;
 
 pub use aggregate::{Aggregate, AggregateEntry, AggregateRoot};
 pub use migrations::{CreateEventSourcingTables, migrations};
-pub use store::{DomainEvent, DomainEventEntry, EventStore, Snapshot, StoredEvent};
+pub use store::{DomainEvent, DomainEventEntry, EventStore, Fact, Snapshot, StoredEvent};
 
 use crate::FrameworkError;
 

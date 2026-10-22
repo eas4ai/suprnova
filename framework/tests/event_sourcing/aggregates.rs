@@ -166,3 +166,59 @@ async fn es_002_future_payload_version_fails_by_name() {
         "{error}"
     );
 }
+
+#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
+struct EveryFactField {
+    seen: Vec<serde_json::Value>,
+}
+impl AggregateRoot for EveryFactField {
+    const NAME: &'static str = "es.every-fact-field";
+    fn apply(&mut self, event: &Fact<'_>) -> Result<(), FrameworkError> {
+        self.seen.push(
+            serde_json::to_value(event)
+                .map_err(|cause| FrameworkError::internal(cause.to_string()))?,
+        );
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn es_001_fact_view_matches_recording_snapshot_and_full_rebuild() {
+    let _db = database().await;
+    let mut root = Aggregate::<EveryFactField>::new(&uuid()).unwrap();
+    for amount in 1..=3 {
+        root.record_with_metadata(
+            RenamedAddition { amount },
+            serde_json::json!({"source":amount}),
+        )
+        .unwrap();
+    }
+    let recorded = root.state().clone();
+    root.persist().await.unwrap();
+    let snapshot = root.snapshot().await.unwrap();
+    let full = Aggregate::<EveryFactField>::retrieve_without_snapshot(root.uuid())
+        .await
+        .unwrap();
+    let snap = Aggregate::<EveryFactField>::retrieve(root.uuid())
+        .await
+        .unwrap();
+    assert_eq!(recorded, *full.state());
+    assert_eq!(snap.state(), full.state());
+    assert_eq!(snapshot.state, serde_json::to_value(full.state()).unwrap());
+    for (index, fact) in recorded.seen.iter().enumerate() {
+        let fields = fact.as_object().unwrap();
+        assert_eq!(
+            fields.len(),
+            5,
+            "Fact contains only stable application fields"
+        );
+        assert!(!fields.contains_key("id"));
+        assert!(!fields.contains_key("created_at"));
+        assert_eq!(fact["event_type"], "es.added");
+        assert_eq!(fact["event_version"], 2);
+        assert_eq!(fact["aggregate_version"], index as i64 + 1);
+        assert_eq!(fact["payload"]["amount"], index as i64 + 1);
+        assert_eq!(fact["metadata"]["source"], index as i64 + 1);
+    }
+}

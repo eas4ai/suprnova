@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use suprnova::live::LiveTopics;
 use suprnova::{
-    Aggregate, AggregateRoot, FirstOrCreate, FrameworkError, Model, Projector, Reactor,
+    Aggregate, AggregateRoot, Fact, FirstOrCreate, FrameworkError, Model, Projector, Reactor,
     StoredEvent, attrs,
 };
 
@@ -30,7 +30,7 @@ pub struct TallyState {
 }
 impl AggregateRoot for TallyState {
     const NAME: &'static str = "dogfood.event-tally";
-    fn apply(&mut self, fact: &StoredEvent) -> Result<(), FrameworkError> {
+    fn apply(&mut self, fact: &Fact<'_>) -> Result<(), FrameworkError> {
         if let Some(fact) = fact.decode::<TallyAdded>()? {
             if fact.amount <= 0 {
                 return Err(FrameworkError::bad_request(

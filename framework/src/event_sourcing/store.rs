@@ -50,6 +50,33 @@ impl DomainEventEntry {
     }
 }
 
+/// Storage-independent input keeps recording and reconstruction deterministic.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct Fact<'a> {
+    /// Stable domain event identity.
+    pub event_type: &'a str,
+    /// Original payload schema version.
+    pub event_version: i32,
+    /// Aggregate version after this fact.
+    pub aggregate_version: i64,
+    /// Original serialized fact.
+    pub payload: &'a Value,
+    /// Application context recorded with the fact.
+    pub metadata: &'a Value,
+}
+impl Fact<'_> {
+    /// Reads a typed fact only when its stable identity matches.
+    pub fn decode<E: DomainEvent>(&self) -> Result<Option<E>, FrameworkError> {
+        if self.event_type != E::NAME {
+            return Ok(None);
+        }
+        let value = DomainEventEntry::decode::<E>(self.event_version, (*self.payload).clone())?;
+        serde_json::from_value(value)
+            .map(Some)
+            .map_err(|e| error(e.to_string()))
+    }
+}
+
 /// A durable event envelope. Payloads remain in their stored schema until decoded.
 #[derive(Clone, Debug, Serialize, serde::Deserialize, FromQueryResult)]
 pub struct StoredEvent {
@@ -72,15 +99,19 @@ pub struct StoredEvent {
 }
 
 impl StoredEvent {
+    /// Excludes storage-assigned fields so aggregate state does not depend on persistence.
+    pub fn fact(&self) -> Fact<'_> {
+        Fact {
+            event_type: &self.event_type,
+            event_version: self.event_version,
+            aggregate_version: self.aggregate_version,
+            payload: &self.payload,
+            metadata: &self.metadata,
+        }
+    }
     /// Reads a typed fact only when its stable identity matches.
     pub fn decode<E: DomainEvent>(&self) -> Result<Option<E>, FrameworkError> {
-        if self.event_type != E::NAME {
-            return Ok(None);
-        }
-        let value = DomainEventEntry::decode::<E>(self.event_version, self.payload.clone())?;
-        serde_json::from_value(value)
-            .map(Some)
-            .map_err(|e| error(e.to_string()))
+        self.fact().decode::<E>()
     }
 
     pub(crate) fn validate(&self) -> Result<(), FrameworkError> {

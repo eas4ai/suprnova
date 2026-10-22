@@ -1,5 +1,5 @@
 //! Shared bookkeeping follows the durable outcome when callback delivery is cancelled.
-use super::{DomainEvent, EventStore, Snapshot, StoredEvent, error, store::executor};
+use super::{DomainEvent, EventStore, Fact, Snapshot, StoredEvent, error, store::executor};
 use crate::{DB, FrameworkError};
 use sea_orm::sea_query::{Alias, OnConflict, Query};
 use serde::{Serialize, de::DeserializeOwned};
@@ -13,7 +13,7 @@ pub trait AggregateRoot:
     /// Stable aggregate name used to route snapshot commands.
     const NAME: &'static str;
     /// Applies a fact without producing external effects.
-    fn apply(&mut self, event: &StoredEvent) -> Result<(), FrameworkError>;
+    fn apply(&mut self, event: &Fact<'_>) -> Result<(), FrameworkError>;
 }
 
 /// Snapshot registration emitted by `#[aggregate]`.
@@ -113,7 +113,7 @@ impl<A: AggregateRoot> Aggregate<A> {
         };
         event.validate()?;
         let mut state = self.state.clone();
-        state.apply(&event)?;
+        state.apply(&event.fact())?;
         self.state = state;
         self.bookkeeping().pending.push(event);
         Ok(self)
@@ -165,7 +165,7 @@ impl<A: AggregateRoot> Aggregate<A> {
                         aggregate.uuid
                     )));
                 }
-                aggregate.state.apply(&event)?;
+                aggregate.state.apply(&event.fact())?;
                 aggregate.bookkeeping().expected = event.aggregate_version;
             }
         }

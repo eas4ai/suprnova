@@ -5,7 +5,7 @@ mod migrations;
 use sea_orm_migration::{MigrationTrait, SchemaManager};
 use serde::{Deserialize, Serialize};
 use suprnova::testing::TestDatabase;
-use suprnova::{AggregateRoot, FrameworkError, StoredEvent, domain_event};
+use suprnova::{AggregateRoot, Fact, FrameworkError, StoredEvent, domain_event};
 
 #[domain_event(name = "es.added", version = 2, upgrade = "upgrade_added")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -29,7 +29,7 @@ struct Tally {
 }
 impl AggregateRoot for Tally {
     const NAME: &'static str = "es.tally";
-    fn apply(&mut self, event: &StoredEvent) -> Result<(), FrameworkError> {
+    fn apply(&mut self, event: &Fact<'_>) -> Result<(), FrameworkError> {
         if let Some(event) = event.decode::<RenamedAddition>()? {
             self.total += event.amount;
         }

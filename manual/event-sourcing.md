@@ -26,7 +26,7 @@ The attribute registers a stable event name. Renaming the Rust struct preserves
 stored history. Declare a new schema version when the payload changes.
 
 ```rust
-use suprnova::{aggregate, domain_event, Aggregate, AggregateRoot, FrameworkError, StoredEvent};
+use suprnova::{aggregate, domain_event, Aggregate, AggregateRoot, Fact, FrameworkError};
 use suprnova::serde::{Deserialize, Serialize};
 
 #[domain_event(name = "tally.added", version = 1)]
@@ -39,7 +39,7 @@ struct Tally { total: i64 }
 
 impl AggregateRoot for Tally {
     const NAME: &'static str = "tally";
-    fn apply(&mut self, fact: &StoredEvent) -> Result<(), FrameworkError> {
+    fn apply(&mut self, fact: &Fact<'_>) -> Result<(), FrameworkError> {
         if let Some(added) = fact.decode::<Added>()? {
             self.total = self.total.checked_add(added.amount)
                 .ok_or_else(|| FrameworkError::bad_request("tally total is too large"))?;
@@ -58,6 +58,12 @@ async fn add() -> Result<(), FrameworkError> {
     Ok(())
 }
 ```
+
+`AggregateRoot::apply` receives a `Fact` view with the stable event name, payload
+schema version, aggregate version, payload and metadata. It excludes the storage
+id and recording time, so recording and rebuilding receive identical values.
+Projectors, reactors and event listings still receive `StoredEvent`, which exposes
+this view through `fact()`.
 
 `record` applies to a copy before accepting the fact. `persist` writes every
 recorded fact in one transaction. A stale writer gets an error with the aggregate

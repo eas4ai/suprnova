@@ -1130,7 +1130,7 @@ pub use search::load_search_media;
 // Domain history names remain separate from the idempotency Replay facade.
 pub use event_sourcing::{
     Aggregate, AggregateEntry, AggregateRoot, CreateEventSourcingTables, DomainEvent,
-    DomainEventEntry, EventStore, Snapshot, StoredEvent,
+    DomainEventEntry, EventStore, Fact, Snapshot, StoredEvent,
 };
 pub use suprnova_macros::{aggregate, domain_event};
 
