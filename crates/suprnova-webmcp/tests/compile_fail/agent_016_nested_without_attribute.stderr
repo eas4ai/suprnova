@@ -1,0 +1,18 @@
+error[E0277]: `OrderLine` is nested in a page tool input but has no `#[suprnova_webmcp::tool_input]`
+  --> tests/compile_fail/agent_016_nested_without_attribute.rs:16:21
+   |
+16 |     line_items: Vec<OrderLine>,
+   |                     ^^^^^^^^^ the type of a `#[validate(nested)]` field
+   |
+help: the trait `suprnova_webmcp::__private::InputNames` is not implemented for `OrderLine`
+  --> tests/compile_fail/agent_016_nested_without_attribute.rs:7:1
+   |
+ 7 | struct OrderLine {
+   | ^^^^^^^^^^^^^^^^
+   = note: add `#[suprnova_webmcp::tool_input]` to `OrderLine`, so its validation errors use the names the client sends
+help: the trait `suprnova_webmcp::__private::InputNames` is implemented for `PlaceOrder`
+  --> tests/compile_fail/agent_016_nested_without_attribute.rs:13:1
+   |
+13 | #[suprnova_webmcp::tool_input]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `suprnova_webmcp::tool_input` (in Nightly builds, run with -Z macro-backtrace for more info)

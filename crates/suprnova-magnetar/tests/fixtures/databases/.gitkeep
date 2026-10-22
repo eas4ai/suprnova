@@ -1,0 +1,2 @@
+# Whole-database fixtures are intentionally absent.
+# They remain blocked until pinned live-source generators emit deterministic dumps.
