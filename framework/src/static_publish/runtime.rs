@@ -438,6 +438,37 @@ impl StaticPublication {
         {
             return Ok(None);
         }
+        let manifest = self.publisher.manifest().await?;
+        if let Some(asset) = manifest
+            .versions
+            .values()
+            .flat_map(|v| &v.objects)
+            .find(|o| {
+                o.asset
+                    && (o.path == path.trim_start_matches('/')
+                        || (!o.path.starts_with("_pub/") && o.url == path))
+            })
+        {
+            let body = self
+                .publisher
+                .disk
+                .read(&asset.path)
+                .await
+                .map_err(error)?
+                .to_bytes();
+            let mut response = HttpResponse::bytes(
+                body,
+                asset
+                    .headers
+                    .get("content-type")
+                    .map(String::as_str)
+                    .unwrap_or("application/octet-stream"),
+            );
+            for (name, value) in &asset.headers {
+                response = response.replace_header(name, value);
+            }
+            return Ok(Some(response));
+        }
         let canonical = if path.ends_with("/index.json") {
             path.trim_end_matches("index.json").trim_end_matches('/')
         } else {
@@ -481,17 +512,54 @@ impl StaticPublication {
             }
         };
         self.validate_assets(&page)?;
-        let response = object_response(
-            if json {
-                page.json.clone()
-            } else {
-                page.html.clone()
-            },
+        let body = if json {
+            page.json.clone()
+        } else {
+            page.html.clone()
+        };
+        let normalized = self.publisher.representation_headers(
             &page.headers,
-            json,
+            if json {
+                "application/json"
+            } else {
+                "text/html; charset=utf-8"
+            },
+            &body,
         );
-        if let Err(e) = self.publisher.publish_partial(vec![page]).await {
-            tracing::error!(route=canonical,error=%e,"origin fallback publication failed");
+        let mut response = object_response(body, &normalized, json);
+        match self.publisher.publish_partial(vec![page]).await {
+            Ok(_) => {
+                let committed = self.publisher.manifest().await?;
+                if let Some(object) = committed.versions.get(&committed.live).and_then(|v| {
+                    v.objects.iter().find(|o| {
+                        !o.asset
+                            && o.url
+                                == if json {
+                                    if canonical == "/" {
+                                        "/index.json".to_string()
+                                    } else {
+                                        format!("{canonical}/index.json")
+                                    }
+                                } else {
+                                    canonical.to_string()
+                                }
+                    })
+                }) {
+                    response = object_response(
+                        self.publisher
+                            .disk
+                            .read(&object.path)
+                            .await
+                            .map_err(error)?
+                            .to_bytes(),
+                        &object.headers,
+                        json,
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(route=canonical,error=%e,"origin fallback publication failed")
+            }
         }
         Ok(Some(response))
     }

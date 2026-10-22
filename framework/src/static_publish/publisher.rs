@@ -133,11 +133,6 @@ struct Upload {
     stable: Option<String>,
     source: Option<String>,
 }
-struct AliasBackup {
-    key: String,
-    bytes: Option<Bytes>,
-    headers: BTreeMap<String, String>,
-}
 
 impl Publisher {
     /// Uses any registered disk; no service-specific storage restriction applies.
@@ -324,53 +319,6 @@ impl Publisher {
         if next.live == previous.live {
             return Ok(outcome);
         }
-        let changed_aliases: Vec<_> = uploads
-            .iter()
-            .filter(|upload| {
-                upload.stable.is_some()
-                    && (self.driver.is_none() || upload.entry.asset)
-                    && !previous
-                        .versions
-                        .get(&previous.live)
-                        .is_some_and(|version| {
-                            version.objects.iter().any(|old| {
-                                old.url == upload.entry.url
-                                    && old.digest == upload.entry.digest
-                                    && old.headers == upload.entry.headers
-                            })
-                        })
-            })
-            .collect();
-        // Mutable assets use the same backed-up alias phase, including with a CDN asset origin.
-        let mut aliases = Vec::new();
-        for upload in &changed_aliases {
-            if let Some(key) = &upload.stable {
-                let bytes = match tokio::time::timeout_at(deadline, self.disk.read(key))
-                    .await
-                    .map_err(|_| error("stable alias backup timed out"))?
-                {
-                    Ok(bytes) => Some(bytes.to_bytes()),
-                    Err(failure) if failure.kind() == opendal::ErrorKind::NotFound => None,
-                    Err(failure) => return Err(error(failure)),
-                };
-                let headers = previous
-                    .versions
-                    .get(&previous.live)
-                    .and_then(|version| {
-                        version
-                            .objects
-                            .iter()
-                            .find(|object| object.url == upload.entry.url)
-                    })
-                    .map(|object| object.headers.clone())
-                    .unwrap_or_default();
-                aliases.push(AliasBackup {
-                    key: key.clone(),
-                    bytes,
-                    headers,
-                });
-            }
-        }
         if let Some(driver) = &self.driver {
             let switched = tokio::time::timeout_at(deadline, driver.switch_version(&next.live))
                 .await
@@ -380,26 +328,11 @@ impl Publisher {
                 return Err(self.rollback_cdn(&previous, failure).await);
             }
         }
-        for upload in &changed_aliases {
-            if let Some(key) = &upload.stable {
-                let written = tokio::time::timeout_at(
-                    deadline,
-                    self.write(key, &upload.bytes, &upload.entry.headers),
-                )
-                .await
-                .map_err(|_| error("stable alias switch timed out"))
-                .and_then(|result| result);
-                if let Err(failure) = written {
-                    return Err(self.rollback_delivery(&previous, &aliases, failure).await);
-                }
-            }
-        }
         if tokio::time::Instant::now() >= deadline {
             return Err(self
-                .rollback_delivery(
+                .rollback_cdn(
                     &previous,
-                    &aliases,
-                    error("publication timed out before the manifest commit"),
+                    error("publication timed out before manifest commit"),
                 )
                 .await);
         }
@@ -411,7 +344,26 @@ impl Publisher {
         let bytes = serde_json::to_vec(&next).map_err(error)?;
         if let Err(failure) = self.disk.write(MANIFEST, bytes).await {
             let failure = error(failure);
-            return Err(self.rollback_delivery(&previous, &aliases, failure).await);
+            return Err(self.rollback_cdn(&previous, failure).await);
+        }
+        // Bucket aliases are a post-commit mirror. Origin delivery reads the manifest.
+        if self.driver.is_none() {
+            for upload in &uploads {
+                if let Some(key) = &upload.stable {
+                    let bytes = self
+                        .disk
+                        .read(&upload.entry.path)
+                        .await
+                        .map(|v| v.to_bytes());
+                    let mirrored = match bytes {
+                        Ok(bytes) => self.write(key, &bytes, &upload.entry.headers).await,
+                        Err(failure) => Err(error(failure)),
+                    };
+                    if let Err(failure) = mirrored {
+                        tracing::error!(%failure, key, "static publication committed; stable mirror will converge on retry");
+                    }
+                }
+            }
         }
         if let Some(driver) = &self.driver {
             let capabilities = driver.capabilities();
@@ -451,19 +403,6 @@ impl Publisher {
         };
         Ok(outcome)
     }
-    async fn rollback_delivery(
-        &self,
-        previous: &Manifest,
-        aliases: &[AliasBackup],
-        failure: FrameworkError,
-    ) -> FrameworkError {
-        let failure = self.rollback_aliases(aliases, failure).await;
-        if self.driver.is_some() {
-            self.rollback_cdn(previous, failure).await
-        } else {
-            failure
-        }
-    }
     async fn rollback_cdn(&self, previous: &Manifest, failure: FrameworkError) -> FrameworkError {
         if let Some(driver) = &self.driver {
             let rollback = tokio::time::timeout(
@@ -482,29 +421,21 @@ impl Publisher {
         }
         failure
     }
-    async fn rollback_aliases(
+    pub(crate) fn representation_headers(
         &self,
-        aliases: &[AliasBackup],
-        failure: FrameworkError,
-    ) -> FrameworkError {
-        let mut rollback_errors = Vec::new();
-        for alias in aliases {
-            let result = match &alias.bytes {
-                Some(bytes) => self.write(&alias.key, bytes, &alias.headers).await,
-                None => self.disk.delete(&alias.key).await.map_err(error),
-            };
-            if let Err(rollback) = result {
-                rollback_errors.push(format!("{}: {rollback}", alias.key));
-            }
-        }
-        if rollback_errors.is_empty() {
-            failure
-        } else {
-            error(format!(
-                "{failure}; alias rollback failed: {}",
-                rollback_errors.join("; ")
-            ))
-        }
+        original: &BTreeMap<String, String>,
+        content_type: &str,
+        bytes: &Bytes,
+    ) -> BTreeMap<String, String> {
+        let mut headers: BTreeMap<_, _> = original
+            .iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+            .collect();
+        headers.insert("content-type".into(), content_type.into());
+        headers.insert("content-length".into(), bytes.len().to_string());
+        headers.insert("cache-control".into(), self.page_control());
+        headers.insert("etag".into(), format!("\"{}\"", digest(bytes)));
+        headers
     }
     fn plan(
         &self,
@@ -515,7 +446,30 @@ impl Publisher {
         let revision = format!("{}/{}", self.asset_version, uuid::Uuid::now_v7().simple());
         let mut uploads = Vec::new();
         let mut seen = BTreeSet::new();
-        for page in pages {
+        for mut page in pages {
+            let mut asset_paths = BTreeMap::new();
+            for (key, (bytes, content_type)) in &page.assets {
+                let fingerprinted = fingerprinted_asset(key);
+                let old = previous.versions.get(&previous.live).and_then(|version| {
+                    version.objects.iter().find(|entry| {
+                        entry.asset
+                            && entry.url == format!("/{key}")
+                            && entry.digest == digest(bytes)
+                            && entry.headers.get("content-type") == Some(content_type)
+                            && entry.headers.get("cache-control") == Some(&self.page_control())
+                    })
+                });
+                let target = if fingerprinted {
+                    key.clone()
+                } else if let Some(old) = old {
+                    old.path.clone()
+                } else {
+                    format!("_pub/{revision}/_assets/{key}")
+                };
+                asset_paths.insert(key.clone(), format!("/{target}"));
+            }
+            (page.html, page.json) =
+                super::assets::version_assets(&page.html, &page.json, &page.path, &asset_paths)?;
             let path = safe_path(&page.path)?;
             if !seen.insert(path.clone()) {
                 return Err(error(format!("duplicate page {path}")));
@@ -544,16 +498,8 @@ impl Publisher {
                 ("html", "text/html; charset=utf-8", page.html),
                 ("json", "application/json", page.json),
             ] {
-                let mut headers: BTreeMap<String, String> = page
-                    .headers
-                    .iter()
-                    .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
-                    .collect();
+                let headers = self.representation_headers(&page.headers, content_type, &bytes);
                 let content_digest = digest(&bytes);
-                headers.remove("content-length");
-                headers.insert("content-type".into(), content_type.into());
-                headers.insert("cache-control".into(), self.page_control());
-                headers.insert("etag".into(), format!("\"{content_digest}\""));
                 let stable_base = if path == "/" {
                     String::new()
                 } else {
@@ -597,11 +543,7 @@ impl Publisher {
                 ]);
                 uploads.push(Upload {
                     entry: ObjectEntry {
-                        path: if fingerprinted {
-                            key.clone()
-                        } else {
-                            format!("_pub/{revision}/_assets/{key}")
-                        },
+                        path: asset_paths[&key].trim_start_matches('/').to_string(),
                         url: format!("/{key}"),
                         digest: digest(&bytes),
                         asset: true,
@@ -610,7 +552,7 @@ impl Publisher {
                         headers,
                     },
                     bytes,
-                    stable: if fingerprinted { None } else { Some(key) },
+                    stable: None,
                     source: None,
                 });
             }

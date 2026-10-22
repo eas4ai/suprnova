@@ -94,8 +94,7 @@ Pages use `_pub/<asset-version>/<revision>/<path>.html` and
 The extra revision keeps regeneration from overwriting the currently live
 page. Fingerprinted assets retain their names and receive
 `public, max-age=31536000, immutable`. Other assets, such as an SVG favicon,
-receive bounded cache directives. Their bytes stage under the revision before
-their canonical aliases change, and a failed publication restores those aliases.
+receive bounded cache directives. Pages reference their versioned keys, so every referenced object exists before delivery begins.
 
 Page objects never receive `immutable`. Their `Cache-Control` contains
 `s-maxage`, `stale-while-revalidate` and `stale-if-error`. Browser `max-age`
@@ -126,8 +125,7 @@ All versioned uploads finish before the manifest PUT. Unchanged digests skip
 uploads. A CDN driver selects `_pub/<asset-version>/<revision>/` as the page
 origin path. Without a driver, stable `<path>/index.html` and
 `<path>/index.json` aliases are written one at a time after staging. The
-manifest is written last. A plain object store has no operation that changes
-all stable aliases at once.
+manifest is the origin switch; stable bucket aliases are a post-commit mirror that converges.
 
 ## CDN drivers
 

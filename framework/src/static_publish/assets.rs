@@ -264,14 +264,12 @@ pub(super) fn attribute<'a>(tag: &'a HtmlTag, name: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
-#[cfg(feature = "media")]
 pub(super) fn set_attribute(tag: &mut HtmlTag, name: &str, value: &str) {
     if let Some((_, attribute)) = tag.attrs.iter_mut().find(|(key, _)| key == name) {
         *attribute = value.to_string();
     }
 }
 
-#[cfg(feature = "media")]
 pub(super) fn escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -279,7 +277,6 @@ pub(super) fn escape(value: &str) -> String {
         .replace('<', "&lt;")
 }
 
-#[cfg(feature = "media")]
 pub(super) fn serialize_tag(tag: &HtmlTag) -> String {
     let mut output = format!("<{}", tag.name);
     for (name, value) in &tag.attrs {
@@ -474,4 +471,86 @@ mod tests {
             ]
         );
     }
+}
+
+/// Rewrites only parsed asset attributes; executable script text remains trusted and unchanged.
+pub(crate) fn version_assets(
+    html: &bytes::Bytes,
+    json: &bytes::Bytes,
+    document: &str,
+    paths: &BTreeMap<String, String>,
+) -> Result<(bytes::Bytes, bytes::Bytes), FrameworkError> {
+    let replace = |value: &str| -> Result<Option<String>, FrameworkError> {
+        let Some(path) = local_path(value, document)? else {
+            return Ok(None);
+        };
+        Ok(paths.get(&path).map(|target| {
+            let suffix = value.find(['?', '#']).map(|at| &value[at..]).unwrap_or("");
+            format!("{target}{suffix}")
+        }))
+    };
+    fn strings(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(value) => out.push(value.clone()),
+            serde_json::Value::Array(values) => values.iter().for_each(|v| strings(v, out)),
+            serde_json::Value::Object(values) => values.values().for_each(|v| strings(v, out)),
+            _ => {}
+        }
+    }
+    let mut values = Vec::new();
+    strings(
+        &serde_json::from_slice(json)
+            .map_err(|e| FrameworkError::internal(format!("publication JSON: {e}")))?,
+        &mut values,
+    );
+    let mut replacements = BTreeMap::new();
+    for value in values {
+        if let Some(target) = replace(&value)? {
+            replacements.insert(value, target);
+        }
+    }
+    let (html, json) =
+        crate::inertia::publication::rewrite_public_image_urls(html, json, &replacements)?;
+    let text = std::str::from_utf8(&html).map_err(|e| FrameworkError::internal(e.to_string()))?;
+    let mut output = String::new();
+    let mut cursor = 0;
+    for (start, end, mut tag) in tags(text) {
+        if tag.kind != TagKind::StartTag {
+            continue;
+        }
+        let fields: &[&str] = match tag.name.as_str() {
+            "img" | "source" => &["src", "srcset"],
+            "script" | "video" | "audio" | "track" | "embed" => &["src", "poster"],
+            "link" => &["href"],
+            "object" => &["data"],
+            _ => &[],
+        };
+        let mut changed = false;
+        for field in fields {
+            if let Some(value) = attribute(&tag, field) {
+                let target = if *field == "srcset" {
+                    let mut candidates = Vec::new();
+                    for (url, descriptor) in parse_srcset(value) {
+                        candidates.push(
+                            format!("{} {}", replace(&url)?.unwrap_or(url), descriptor)
+                                .trim()
+                                .to_string(),
+                        );
+                    }
+                    candidates.join(", ")
+                } else {
+                    replace(value)?.unwrap_or_else(|| value.to_string())
+                };
+                changed |= target != value;
+                set_attribute(&mut tag, field, &target);
+            }
+        }
+        if changed {
+            output.push_str(&text[cursor..start]);
+            output.push_str(&serialize_tag(&tag));
+            cursor = end;
+        }
+    }
+    output.push_str(&text[cursor..]);
+    Ok((bytes::Bytes::from(output), json))
 }

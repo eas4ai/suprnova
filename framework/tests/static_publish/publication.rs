@@ -306,7 +306,7 @@ async fn pub_003_switch_failure_restores_previous_cdn_revision_and_keeps_manifes
 }
 
 #[tokio::test]
-async fn pub_003_manifest_or_alias_failure_restores_both_previous_representations() {
+async fn pub_003_manifest_failure_preserves_live_and_mirror_failure_is_post_commit() {
     for refusal in ["_pub/manifest.json", "about/index.json"] {
         let disk = memory();
         let state = Arc::new(Probe::default());
@@ -321,16 +321,29 @@ async fn pub_003_manifest_or_alias_failure_restores_both_previous_representation
         let html = disk.read("about/index.html").await.unwrap().to_bytes();
         let json = disk.read("about/index.json").await.unwrap().to_bytes();
         *state.refuse.lock().unwrap() = Some(refusal.into());
-        assert!(p.publish(vec![page("two")]).await.is_err());
-        assert_eq!(manifest_bytes(&disk).await, before);
-        assert_eq!(
-            disk.read("about/index.html").await.unwrap().to_bytes(),
-            html
-        );
-        assert_eq!(
-            disk.read("about/index.json").await.unwrap().to_bytes(),
-            json
-        );
+        let result = p.publish(vec![page("two")]).await;
+        if refusal == "_pub/manifest.json" {
+            assert!(result.is_err());
+            assert_eq!(manifest_bytes(&disk).await, before);
+            assert_eq!(
+                disk.read("about/index.html").await.unwrap().to_bytes(),
+                html
+            );
+            assert_eq!(
+                disk.read("about/index.json").await.unwrap().to_bytes(),
+                json
+            );
+        } else {
+            assert!(
+                result.is_ok(),
+                "a mirror failure does not undo the manifest commit"
+            );
+            assert_ne!(manifest_bytes(&disk).await, before);
+            let manifest = p.manifest().await.unwrap();
+            for object in &manifest.versions[&manifest.live].objects {
+                assert!(disk.exists(&object.path).await.unwrap());
+            }
+        }
     }
 }
 
@@ -428,6 +441,9 @@ struct Probe {
     delay: AtomicBool,
     active: AtomicUsize,
     maximum: AtomicUsize,
+    gate_manifest: AtomicBool,
+    manifest_entered: tokio::sync::Notify,
+    manifest_release: tokio::sync::Notify,
 }
 #[derive(Clone, Debug)]
 struct ProbeLayer(Arc<Probe>);
@@ -542,6 +558,7 @@ impl Service for ProbeService {
             self.state.maximum.fetch_max(active, Ordering::SeqCst);
         }
         Ok(ProbeWriter {
+            manifest: path == "_pub/manifest.json",
             inner,
             state: self.state.clone(),
             counted,
@@ -549,6 +566,7 @@ impl Service for ProbeService {
     }
 }
 struct ProbeWriter {
+    manifest: bool,
     inner: oio::Writer,
     state: Arc<Probe>,
     counted: bool,
@@ -571,6 +589,10 @@ impl oio::Write for ProbeWriter {
         self.inner.write(bytes).await
     }
     async fn close(&mut self) -> opendal::Result<Metadata> {
+        if self.manifest && self.state.gate_manifest.load(Ordering::SeqCst) {
+            self.state.manifest_entered.notify_one();
+            self.state.manifest_release.notified().await;
+        }
         self.inner.close().await
     }
     async fn abort(&mut self) -> opendal::Result<()> {
@@ -690,7 +712,7 @@ async fn pub_003_cdn_switch_timeout_rolls_back_without_changing_manifest() {
 
 #[tokio::test]
 async fn pub_002_representation_headers_match_final_bytes() {
-    let (p, _) = publisher("v1");
+    let (p, disk) = publisher("v1");
     let mut rendered = page("one");
     rendered
         .headers
@@ -700,7 +722,15 @@ async fn pub_002_representation_headers_match_final_bytes() {
     let manifest = p.manifest().await.unwrap();
     for object in &manifest.versions[&manifest.live].objects {
         assert_eq!(object.headers["etag"], format!("\"{}\"", object.digest));
-        assert!(!object.headers.contains_key("content-length"));
+        assert_eq!(
+            object.headers["content-length"],
+            disk.read(&object.path)
+                .await
+                .unwrap()
+                .to_bytes()
+                .len()
+                .to_string()
+        );
     }
 }
 
@@ -746,7 +776,7 @@ fn with_icon(text: &str) -> PageObject {
 }
 
 #[tokio::test]
-async fn pub_003_mutable_assets_stage_privately_and_restore_their_alias_on_failure() {
+async fn pub_003_mutable_assets_use_versioned_keys_and_keep_previous_objects_on_failure() {
     for cdn in [false, true] {
         let disk = memory();
         let state = Arc::new(Probe::default());
@@ -760,8 +790,17 @@ async fn pub_003_mutable_assets_stage_privately_and_restore_their_alias_on_failu
             p = p.with_cdn(Arc::new(MemoryCdnDriver::default()));
         }
         p.publish(vec![with_icon("old icon")]).await.unwrap();
+        let old_manifest = p.manifest().await.unwrap();
+        let old_asset = old_manifest.versions[&old_manifest.live]
+            .objects
+            .iter()
+            .find(|o| o.asset)
+            .unwrap()
+            .path
+            .clone();
+        assert!(!disk.exists("favicon.svg").await.unwrap());
         assert_eq!(
-            disk.read("favicon.svg").await.unwrap().to_bytes(),
+            disk.read(&old_asset).await.unwrap().to_bytes(),
             Bytes::from_static(b"old icon")
         );
         let before = manifest_bytes(&disk).await;
@@ -769,29 +808,29 @@ async fn pub_003_mutable_assets_stage_privately_and_restore_their_alias_on_failu
             *state.refuse.lock().unwrap() = Some(refusal.into());
             let mut changed = with_icon("new icon");
             changed.html = Bytes::from_static(b"changed page");
-            changed.json = Bytes::from_static(b"changed JSON");
+            changed.json = page("changed").json;
             assert!(p.publish(vec![changed]).await.is_err());
             assert_eq!(manifest_bytes(&disk).await, before);
             assert_eq!(
-                disk.read("favicon.svg").await.unwrap().to_bytes(),
+                disk.read(&old_asset).await.unwrap().to_bytes(),
                 Bytes::from_static(b"old icon")
             );
         }
         p.publish(vec![with_icon("new icon")]).await.unwrap();
-        assert_eq!(
-            disk.read("favicon.svg").await.unwrap().to_bytes(),
-            Bytes::from_static(b"new icon")
-        );
         let manifest = p.manifest().await.unwrap();
         let asset = manifest.versions[&manifest.live]
             .objects
             .iter()
             .find(|object| object.asset)
             .unwrap();
+        assert_eq!(
+            disk.read(&asset.path).await.unwrap().to_bytes(),
+            Bytes::from_static(b"new icon")
+        );
         assert!(asset.path.contains("/_assets/favicon.svg"));
         assert!(!asset.headers["cache-control"].contains("immutable"));
         p.publish(vec![page("page")]).await.unwrap();
-        assert!(disk.exists("favicon.svg").await.unwrap());
+        assert!(disk.exists(&old_asset).await.unwrap());
         let mut manifest = p.manifest().await.unwrap();
         for (id, version) in &mut manifest.versions {
             if id != &manifest.live {
@@ -802,7 +841,119 @@ async fn pub_003_mutable_assets_stage_privately_and_restore_their_alias_on_failu
             .await
             .unwrap();
         let report = p.prune().await.unwrap();
-        assert!(report.removed.contains(&"favicon.svg".into()));
-        assert!(!disk.exists("favicon.svg").await.unwrap());
+        assert!(report.removed.contains(&old_asset));
+        assert!(!disk.exists(&old_asset).await.unwrap());
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn pub_003_fix_1_manifest_is_the_only_origin_switch_and_assets_exist() {
+    use suprnova::static_publish::StaticPublication;
+    use suprnova::{HttpResponse, InertiaProps, MiddlewareRegistry, Router};
+    let _container = suprnova::testing::TestContainer::fake();
+    #[derive(InertiaProps)]
+    #[inertia(cacheable)]
+    struct Props {
+        #[inertia(public)]
+        title: String,
+    }
+    let router: Router = Router::new()
+        .get("/about", |_| async {
+            Ok(HttpResponse::text("unexpected render"))
+        })
+        .get("/other", |_| async {
+            Ok(HttpResponse::text("unexpected render"))
+        })
+        .into();
+    let router = router
+        .public_page::<Props>("/about", "About")
+        .unwrap()
+        .public_page::<Props>("/other", "About")
+        .unwrap();
+    let disk = memory();
+    let state = Arc::new(Probe::default());
+    let writer = Arc::new(
+        Publisher::from_operator(
+            disk.clone().layer(ProbeLayer(state.clone())),
+            "v1",
+            PublishConfig::default(),
+        )
+        .unwrap(),
+    );
+    let make = |path: &str, text: &str| {
+        let mut page = page_at(path, text);
+        page.html = Bytes::from(format!(
+            r#"<html><link rel="stylesheet" href="/theme.css">{text}</html>"#
+        ));
+        page.assets.insert(
+            "theme.css".into(),
+            (Bytes::copy_from_slice(text.as_bytes()), "text/css".into()),
+        );
+        page
+    };
+    writer
+        .publish(vec![make("/about", "old"), make("/other", "old")])
+        .await
+        .unwrap();
+    StaticPublication::install(
+        &router,
+        Publisher::from_operator(disk.clone(), "v1", PublishConfig::default()).unwrap(),
+    )
+    .unwrap();
+    let client = suprnova::testing::TestClient::new(router, MiddlewareRegistry::new());
+    state.gate_manifest.store(true, Ordering::SeqCst);
+    let publish = writer.clone();
+    let work = tokio::spawn(async move {
+        publish
+            .publish(vec![make("/about", "new"), make("/other", "new")])
+            .await
+    });
+    state.manifest_entered.notified().await;
+    let old = client.get("/about").send().await;
+    assert!(old.body_text().contains("old"));
+    let html = old.body_text();
+    let asset = html
+        .split("href=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    assert_eq!(
+        disk.read(asset.trim_start_matches('/'))
+            .await
+            .unwrap()
+            .to_bytes(),
+        Bytes::from_static(b"old"),
+        "old document keeps its own asset before commit"
+    );
+    state.manifest_release.notify_one();
+    work.await.unwrap().unwrap();
+    for path in ["/about", "/other"] {
+        let response = client.get(path).send().await;
+        let html = response.body_text();
+        assert!(html.contains("new"));
+        let asset = html
+            .split("href=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        assert!(
+            asset.starts_with("/_pub/v1/"),
+            "mutable assets use versioned keys: {asset}"
+        );
+        assert_eq!(
+            disk.read(asset.trim_start_matches('/'))
+                .await
+                .unwrap()
+                .to_bytes(),
+            Bytes::from_static(b"new")
+        );
+        let delivered = client.get(asset).send().await;
+        delivered.assert_ok();
+        assert_eq!(delivered.body_text(), "new");
     }
 }

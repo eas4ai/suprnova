@@ -16,7 +16,7 @@ struct PublicProps {
 }
 
 #[tokio::test]
-async fn pub_006_unpublished_path_renders_once_and_next_visit_reads_storage() {
+async fn pub_006_fix_g_first_response_matches_stored() {
     let _container = TestContainer::fake();
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = calls.clone();
@@ -65,6 +65,14 @@ async fn pub_006_unpublished_path_renders_once_and_next_visit_reads_storage() {
     second.assert_ok();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(first.body_text(), second.body_text());
+    for name in ["Cache-Control", "ETag", "Content-Length"] {
+        assert_eq!(
+            first.header(name),
+            second.header(name),
+            "first fallback {name} matches storage"
+        );
+    }
+    assert!(first.header("ETag").is_some());
     let json = client.get("/articles/first/index.json").send().await;
     json.assert_ok();
     assert_eq!(json.header("X-Inertia"), Some("true"));
