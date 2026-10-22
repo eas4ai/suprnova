@@ -114,6 +114,9 @@ impl<A: AggregateRoot> Aggregate<A> {
     async fn rebuild(uuid: &str, snapshot: bool) -> Result<Self, FrameworkError> {
         let mut aggregate = Self::new(uuid)?;
         if snapshot && let Some(snapshot) = EventStore::snapshot(uuid).await? {
+            if snapshot.aggregate_version < 1 {
+                return Err(error("snapshot version must be positive"));
+            }
             let fact =
                 EventStore::aggregate_page(&aggregate.uuid, snapshot.aggregate_version - 1, 1)
                     .await?;
@@ -173,6 +176,7 @@ impl<A: AggregateRoot> Aggregate<A> {
                 })?;
                 stored.push(event);
             }
+            super::projections::persisted(&stored).await?;
             Ok(stored)
         })).await??;
         let (events, callback_error) = result;
@@ -180,8 +184,11 @@ impl<A: AggregateRoot> Aggregate<A> {
             self.expected = last.aggregate_version;
         }
         self.pending.clear();
-        if let Some(error) = callback_error {
-            return Err(error);
+        if let Some(cause) = callback_error {
+            return Err(error(format!(
+                "aggregate '{}' committed through version {}; after-commit delivery failed: {cause}",
+                self.uuid, self.expected
+            )));
         }
         Ok(events)
     }
@@ -201,25 +208,29 @@ impl<A: AggregateRoot> Aggregate<A> {
             state: serde_json::to_value(&self.state).map_err(|e| error(e.to_string()))?,
             created_at: crate::clock::now().naive_utc(),
         };
-        let exec = executor().await?;
-        let query = Query::insert()
-            .into_table(Alias::new("snapshots"))
-            .columns(["uuid", "aggregate_version", "state", "created_at"].map(Alias::new))
-            .values([
-                snapshot.uuid.clone().into(),
-                snapshot.aggregate_version.into(),
-                snapshot.state.clone().into(),
-                snapshot.created_at.into(),
-            ])
-            .map_err(|e| error(e.to_string()))?
-            .on_conflict(
-                OnConflict::columns([Alias::new("uuid"), Alias::new("aggregate_version")])
-                    .update_columns([Alias::new("state"), Alias::new("created_at")])
-                    .to_owned(),
-            )
-            .to_owned();
-        exec.run(exec.backend().build(&query)).await?;
-        Ok(snapshot)
+        crate::render_cache::orm::atomic(None, || async move {
+            let exec = executor().await?;
+            let query = Query::insert()
+                .into_table(Alias::new("snapshots"))
+                .columns(["uuid", "aggregate_version", "state", "created_at"].map(Alias::new))
+                .values([
+                    snapshot.uuid.clone().into(),
+                    snapshot.aggregate_version.into(),
+                    snapshot.state.clone().into(),
+                    snapshot.created_at.into(),
+                ])
+                .map_err(|e| error(e.to_string()))?
+                .on_conflict(
+                    OnConflict::columns([Alias::new("uuid"), Alias::new("aggregate_version")])
+                        .update_columns([Alias::new("state"), Alias::new("created_at")])
+                        .to_owned(),
+                )
+                .to_owned();
+            exec.run(exec.backend().build(&query)).await?;
+            crate::render_cache::orm::after_table_write("snapshots").await?;
+            Ok(snapshot)
+        })
+        .await
     }
 }
 fn conflict(uuid: &str, expected: i64, actual: i64) -> FrameworkError {

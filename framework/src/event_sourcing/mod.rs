@@ -2,6 +2,8 @@
 
 mod aggregate;
 mod migrations;
+mod projections;
+mod replay;
 mod store;
 
 pub use aggregate::{Aggregate, AggregateEntry, AggregateRoot};
@@ -13,3 +15,6 @@ use crate::FrameworkError;
 fn error(message: impl Into<String>) -> FrameworkError {
     FrameworkError::database(message)
 }
+
+pub use projections::{Projector, ProjectorEntry, QueuedProjector, Reactor, ReactorEntry};
+pub use replay::{Replay, ReplayFinished, ReplayStarted};

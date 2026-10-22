@@ -48,3 +48,18 @@ async fn database() -> TestDatabase {
 fn uuid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
+
+mod cache;
+mod projectors;
+#[path = "../support/render_cache_feature_evaluator_support.rs"]
+mod render_cache_feature_evaluator_support;
+#[allow(
+    unused_imports,
+    reason = "the shared cache harness exports helpers for other test binaries"
+)]
+#[path = "../support/render_cache_middleware_support/mod.rs"]
+mod render_cache_middleware_support;
+
+#[path = "../support/live_async_support/mod.rs"]
+mod live_async_support;
+mod signals;

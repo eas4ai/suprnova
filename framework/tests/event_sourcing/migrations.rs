@@ -39,6 +39,7 @@ async fn constraint(db: &sea_orm::DatabaseConnection) {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn es_002_sqlite_tables_and_unique_constraint() {
     let db = database().await;
     constraint(db.conn()).await;
@@ -70,11 +71,13 @@ async fn engine(variable: &str) {
     constraint(&db).await;
 }
 #[tokio::test]
+#[serial_test::serial]
 #[ignore = "requires PG_TEST_URL"]
 async fn es_002_postgres_tables_and_unique_constraint() {
     engine("PG_TEST_URL").await;
 }
 #[tokio::test]
+#[serial_test::serial]
 #[ignore = "requires MYSQL_TEST_URL"]
 async fn es_002_mysql_tables_and_unique_constraint() {
     engine("MYSQL_TEST_URL").await;

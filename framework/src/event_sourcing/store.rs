@@ -155,6 +155,7 @@ impl EventStore {
         after: i64,
         limit: u64,
     ) -> Result<Vec<StoredEvent>, FrameworkError> {
+        crate::render_cache::collector::observe_table_read("stored_events");
         let exec = executor().await?;
         let query = Query::select()
             .column(sea_orm::sea_query::Asterisk)
@@ -173,6 +174,7 @@ impl EventStore {
 
     /// Reads the latest snapshot. Multiple captures at different versions are retained.
     pub async fn snapshot(uuid: &str) -> Result<Option<Snapshot>, FrameworkError> {
+        crate::render_cache::collector::observe_table_read("snapshots");
         let uuid = Self::uuid(uuid)?;
         let exec = executor().await?;
         let query = Query::select()
@@ -183,6 +185,42 @@ impl EventStore {
             .limit(1)
             .to_owned();
         Ok(rows::<Snapshot>(exec.query_all(exec.backend().build(&query)).await?)?.pop())
+    }
+
+    /// Returns the latest committed global event position, or zero for an empty store.
+    pub async fn last_position() -> Result<i64, FrameworkError> {
+        crate::render_cache::collector::observe_table_read("stored_events");
+        let exec = executor().await?;
+        let query = Query::select()
+            .expr(Expr::col(Alias::new("id")).max())
+            .from(Alias::new("stored_events"))
+            .to_owned();
+        let row = exec
+            .query_one(exec.backend().build(&query))
+            .await?
+            .ok_or_else(|| error("missing event position result"))?;
+        Ok(row.try_get_by_index::<Option<i64>>(0)?.unwrap_or(0))
+    }
+
+    pub(crate) async fn page(
+        after: i64,
+        through: i64,
+        limit: u64,
+    ) -> Result<Vec<StoredEvent>, FrameworkError> {
+        let exec = executor().await?;
+        let query = Query::select()
+            .column(sea_orm::sea_query::Asterisk)
+            .from(Alias::new("stored_events"))
+            .and_where(Expr::col(Alias::new("id")).gt(after))
+            .and_where(Expr::col(Alias::new("id")).lte(through))
+            .order_by(Alias::new("id"), Order::Asc)
+            .limit(limit)
+            .to_owned();
+        let events: Vec<StoredEvent> = rows(exec.query_all(exec.backend().build(&query)).await?)?;
+        for event in &events {
+            event.validate()?;
+        }
+        Ok(events)
     }
 
     pub(crate) async fn lock() -> Result<(), FrameworkError> {
@@ -197,6 +235,20 @@ impl EventStore {
             .and_where(Expr::col(Alias::new("name")).eq("__event_store__"))
             .to_owned();
         exec.run(exec.backend().build(&query)).await?;
+        let query = Query::select()
+            .column(Alias::new("name"))
+            .from(Alias::new("projector_checkpoints"))
+            .and_where(Expr::col(Alias::new("name")).eq("__event_store__"))
+            .to_owned();
+        if exec
+            .query_one(exec.backend().build(&query))
+            .await?
+            .is_none()
+        {
+            return Err(error(
+                "event store lock row is missing; restore __event_store__ before appending or replaying",
+            ));
+        }
         Ok(())
     }
 
@@ -242,6 +294,7 @@ impl EventStore {
             .map_err(|e| error(e.to_string()))?
             .to_owned();
         exec.run(exec.backend().build(&query)).await?;
+        crate::render_cache::orm::after_table_write("stored_events").await?;
         let query = Query::select()
             .column(sea_orm::sea_query::Asterisk)
             .from(Alias::new("stored_events"))

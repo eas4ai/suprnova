@@ -2,6 +2,7 @@ use super::*;
 use suprnova::{Aggregate, DB, EventStore};
 
 #[tokio::test]
+#[serial_test::serial]
 async fn es_001_recording_rebuilds_exact_state() {
     let _db = database().await;
     let mut tally = Aggregate::<Tally>::new(&uuid()).unwrap();
@@ -15,6 +16,7 @@ async fn es_001_recording_rebuilds_exact_state() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn es_001_snapshot_plus_tail_equals_full_rebuild() {
     let _db = database().await;
     let mut tally = Aggregate::<Tally>::new(&uuid()).unwrap();
@@ -42,6 +44,7 @@ async fn es_001_snapshot_plus_tail_equals_full_rebuild() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
 async fn es_001_concurrent_persists_have_one_winner() {
     use suprnova::testing::TestContainer;
     TestContainer::scope(async {
@@ -77,6 +80,7 @@ async fn es_001_concurrent_persists_have_one_winner() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn es_002_stable_name_reads_renamed_type_and_upgrades_old_payload() {
     let _db = database().await;
     let id = uuid();
@@ -98,6 +102,7 @@ async fn es_002_stable_name_reads_renamed_type_and_upgrades_old_payload() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn es_002_unknown_type_fails_by_name() {
     let _db = database().await;
     let mut tally = Aggregate::<Tally>::new(&uuid()).unwrap();
@@ -117,6 +122,7 @@ async fn es_002_unknown_type_fails_by_name() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn es_001_failed_batch_rolls_back_and_keeps_recorded_facts() {
     let db = database().await;
     let mut tally = Aggregate::<Tally>::new(&uuid()).unwrap();
@@ -142,6 +148,7 @@ async fn es_001_failed_batch_rolls_back_and_keeps_recorded_facts() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn es_002_future_payload_version_fails_by_name() {
     let _db = database().await;
     let mut tally = Aggregate::<Tally>::new(&uuid()).unwrap();

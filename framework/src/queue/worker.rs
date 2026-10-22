@@ -115,6 +115,10 @@ fn framework_jobs() -> HashMap<String, Registration> {
     use crate::search::indexing::{SearchFlushJob, SearchIndexBatchJob, SearchIndexJob};
     HashMap::from([
         (
+            crate::QueuedProjector::job_name().to_string(),
+            registration_for::<crate::QueuedProjector>(),
+        ),
+        (
             GraphDeriveJob::job_name().to_string(),
             registration_for::<GraphDeriveJob>(),
         ),

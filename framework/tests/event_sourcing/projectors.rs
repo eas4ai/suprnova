@@ -1,0 +1,282 @@
+use super::*;
+use suprnova::{
+    Aggregate, DB, EventReplay, EventStore, Job, Model, Projector, Queue, QueuedProjector, Reactor,
+    attrs,
+};
+
+#[domain_event(name = "es.projection.added", version = 1)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Projected {
+    amount: i64,
+}
+
+#[suprnova::model(table = "es_projection", timestamps = false, fillable = ["total"])]
+struct ReadModel {
+    pub id: i64,
+    pub total: i64,
+}
+
+#[suprnova::projector]
+#[derive(Default)]
+struct Inline;
+#[suprnova::async_trait]
+impl Projector for Inline {
+    fn name(&self) -> &'static str {
+        "es.inline"
+    }
+    fn handles(&self, event: &StoredEvent) -> bool {
+        event.event_type == "es.projection.added"
+    }
+    async fn project(&self, event: &StoredEvent) -> Result<(), FrameworkError> {
+        if let Some(event) = event.decode::<Projected>()? {
+            let mut row = ReadModel::find(1i64)
+                .await?
+                .ok_or_else(|| FrameworkError::internal("read model missing"))?;
+            row.total += event.amount;
+            row.save().await?;
+        }
+        Ok(())
+    }
+    async fn reset(&self) -> Result<(), FrameworkError> {
+        ReadModel::query()
+            .update_all(attrs! { total: 0i64 })
+            .await?;
+        DB::table("es_lifecycle")
+            .insert(attrs! { stage: "reset" })
+            .await?;
+        Ok(())
+    }
+    async fn replay_started(&self) -> Result<(), FrameworkError> {
+        DB::table("es_lifecycle")
+            .insert(attrs! { stage: "start" })
+            .await?;
+        Ok(())
+    }
+    async fn replay_finished(&self) -> Result<(), FrameworkError> {
+        DB::table("es_lifecycle")
+            .insert(attrs! { stage: "finish" })
+            .await?;
+        Ok(())
+    }
+}
+#[suprnova::projector(queued)]
+#[derive(Default)]
+struct Deferred;
+#[suprnova::async_trait]
+impl Projector for Deferred {
+    fn name(&self) -> &'static str {
+        "es.queued"
+    }
+    fn handles(&self, event: &StoredEvent) -> bool {
+        event.event_type == "es.projection.added"
+    }
+    async fn project(&self, event: &StoredEvent) -> Result<(), FrameworkError> {
+        if let Some(fact) = event.decode::<Projected>()? {
+            DB::table("es_order")
+                .insert(attrs! { event_id: event.id, amount: fact.amount })
+                .await?;
+        }
+        Ok(())
+    }
+    async fn reset(&self) -> Result<(), FrameworkError> {
+        DB::table("es_order").delete().await?;
+        Ok(())
+    }
+}
+#[suprnova::reactor]
+#[derive(Default)]
+struct Notify;
+#[suprnova::async_trait]
+impl Reactor for Notify {
+    fn name(&self) -> &'static str {
+        "es.notify"
+    }
+    async fn react(&self, event: &StoredEvent) -> Result<(), FrameworkError> {
+        if event.decode::<Projected>()?.is_some() {
+            if DB::transaction_level() != 0 || EventReplay::is_running() {
+                return Err(FrameworkError::internal(
+                    "reactor ran before commit or during replay",
+                ));
+            }
+            assert!(!EventStore::events(&event.aggregate_uuid).await?.is_empty());
+            DB::table("es_reactions")
+                .insert(attrs! { event_id: event.id })
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+async fn setup() -> TestDatabase {
+    let db = database().await;
+    db.execute_unprepared("CREATE TABLE es_projection (id INTEGER PRIMARY KEY, total BIGINT NOT NULL); INSERT INTO es_projection VALUES (1, 0); CREATE TABLE es_order (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id BIGINT NOT NULL, amount BIGINT NOT NULL); CREATE TABLE es_reactions (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id BIGINT NOT NULL); CREATE TABLE es_lifecycle (id INTEGER PRIMARY KEY AUTOINCREMENT, stage TEXT NOT NULL)").await.unwrap();
+    db
+}
+async fn append(amounts: &[i64]) -> Vec<StoredEvent> {
+    let mut root = Aggregate::<Tally>::new(&uuid()).unwrap();
+    for amount in amounts {
+        root.record(Projected { amount: *amount }).unwrap();
+    }
+    root.persist().await.unwrap()
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn es_003_replay_resets_without_double_counting_or_reactors() {
+    let _queue = Queue::fake();
+    let _db = setup().await;
+    append(&[2, 3, 5]).await;
+    assert_eq!(ReadModel::find(1i64).await.unwrap().unwrap().total, 10);
+    assert_eq!(DB::table("es_reactions").count().await.unwrap(), 3);
+    for _ in 0..2 {
+        assert_eq!(
+            EventReplay::projectors(["es.inline"])
+                .page_size(1)
+                .run()
+                .await
+                .unwrap()
+                .events,
+            3
+        );
+        assert_eq!(ReadModel::find(1i64).await.unwrap().unwrap().total, 10);
+    }
+    assert_eq!(DB::table("es_reactions").count().await.unwrap(), 3);
+    let stages = DB::table("es_lifecycle")
+        .order_by_asc("id")
+        .get()
+        .await
+        .unwrap();
+    let stages: Vec<String> = stages
+        .iter()
+        .map(|row| row.get_string("stage").unwrap())
+        .collect();
+    assert_eq!(
+        stages,
+        ["start", "reset", "finish", "start", "reset", "finish"]
+    );
+    assert!(!EventReplay::is_running());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn es_003_projector_failure_rolls_back_facts_and_read_models() {
+    let _queue = Queue::fake();
+    let db = setup().await;
+    db.execute_unprepared("CREATE TRIGGER fail_projection BEFORE UPDATE ON es_projection WHEN NEW.total > 3 BEGIN SELECT RAISE(ABORT, 'projection refused'); END").await.unwrap();
+    let mut root = Aggregate::<Tally>::new(&uuid()).unwrap();
+    root.record(Projected { amount: 2 }).unwrap();
+    root.record(Projected { amount: 3 }).unwrap();
+    assert!(root.persist().await.is_err());
+    assert!(EventStore::events(root.uuid()).await.unwrap().is_empty());
+    assert_eq!(ReadModel::find(1i64).await.unwrap().unwrap().total, 0);
+    assert_eq!(DB::table("es_reactions").count().await.unwrap(), 0);
+    assert!(suprnova::queue::testing::pushed::<QueuedProjector>().is_empty());
+    assert_eq!(root.recorded().len(), 2);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn es_003_queued_projector_shuffled_delivery_retries_in_order_once() {
+    let _queue = Queue::fake();
+    let db = setup().await;
+    let first = append(&[10]).await;
+    let second = append(&[20]).await;
+    let third = append(&[30]).await;
+    let jobs = suprnova::queue::testing::pushed::<QueuedProjector>();
+    assert_eq!(jobs.len(), 3);
+    assert_eq!(DB::table("es_order").count().await.unwrap(), 0);
+    db.execute_unprepared("CREATE TRIGGER fail_queue BEFORE INSERT ON es_order WHEN NEW.amount = 20 BEGIN SELECT RAISE(ABORT, 'transient queue error'); END").await.unwrap();
+    let dispatch = |job: &QueuedProjector| {
+        let value = serde_json::to_value(job).unwrap();
+        suprnova::queue::worker::dispatch_by_name(QueuedProjector::job_name(), value)
+    };
+    assert!(dispatch(&jobs[2]).await.is_err());
+    assert_eq!(DB::table("es_order").count().await.unwrap(), 0);
+    db.execute_unprepared("DROP TRIGGER fail_queue")
+        .await
+        .unwrap();
+    dispatch(&jobs[2]).await.unwrap();
+    dispatch(&jobs[0]).await.unwrap();
+    dispatch(&jobs[1]).await.unwrap();
+    dispatch(&jobs[2]).await.unwrap();
+    let rows = DB::table("es_order")
+        .order_by_asc("id")
+        .get()
+        .await
+        .unwrap();
+    let ids: Vec<i64> = rows
+        .iter()
+        .map(|row| row.get_int("event_id").unwrap())
+        .collect();
+    assert_eq!(ids, [first[0].id, second[0].id, third[0].id]);
+    assert_eq!(QueuedProjector::max_tries(), 5);
+    assert_eq!(
+        DB::table("projector_checkpoints")
+            .filter("name", "es.queued")
+            .first()
+            .await
+            .unwrap()
+            .unwrap()
+            .get_int("last_event_id")
+            .unwrap(),
+        third[0].id
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn es_003_replay_failure_rolls_back_reset_and_checkpoint() {
+    let _queue = Queue::fake();
+    let db = setup().await;
+    append(&[1, 2]).await;
+    let checkpoint = DB::table("projector_checkpoints")
+        .filter("name", "es.inline")
+        .first()
+        .await
+        .unwrap()
+        .unwrap()
+        .get_int("last_event_id")
+        .unwrap();
+    db.execute_unprepared("CREATE TRIGGER fail_replay BEFORE UPDATE ON es_projection WHEN NEW.total = 1 BEGIN SELECT RAISE(ABORT, 'replay failed'); END").await.unwrap();
+    assert!(
+        EventReplay::projectors(["es.inline"])
+            .page_size(1)
+            .run()
+            .await
+            .is_err()
+    );
+    assert_eq!(ReadModel::find(1i64).await.unwrap().unwrap().total, 3);
+    assert_eq!(
+        DB::table("projector_checkpoints")
+            .filter("name", "es.inline")
+            .first()
+            .await
+            .unwrap()
+            .unwrap()
+            .get_int("last_event_id")
+            .unwrap(),
+        checkpoint
+    );
+    assert!(!EventReplay::is_running());
+    db.execute_unprepared("DROP TRIGGER fail_replay")
+        .await
+        .unwrap();
+    EventReplay::projectors(["es.inline"]).run().await.unwrap();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn es_003_reactor_failure_preserves_the_committed_version_without_recording_twice() {
+    let _queue = Queue::fake();
+    let db = setup().await;
+    db.execute_unprepared("CREATE TRIGGER fail_reactor BEFORE INSERT ON es_reactions BEGIN SELECT RAISE(ABORT, 'reactor failed'); END").await.unwrap();
+    let mut root = Aggregate::<Tally>::new(&uuid()).unwrap();
+    root.record(Projected { amount: 2 }).unwrap();
+    let error = root.persist().await.unwrap_err().to_string();
+    assert!(error.contains("reactor failed"), "{error}");
+    assert_eq!(root.persisted_version(), 1);
+    assert!(root.recorded().is_empty());
+    assert_eq!(EventStore::events(root.uuid()).await.unwrap().len(), 1);
+    assert!(root.persist().await.unwrap().is_empty());
+    assert_eq!(ReadModel::find(1i64).await.unwrap().unwrap().total, 2);
+}

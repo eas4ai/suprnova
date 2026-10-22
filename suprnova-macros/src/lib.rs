@@ -1833,3 +1833,15 @@ pub fn domain_event(args: TokenStream, input: TokenStream) -> TokenStream {
 pub fn aggregate(args: TokenStream, input: TokenStream) -> TokenStream {
     domain_event::aggregate(args, input)
 }
+
+/// Registers a Default projector; `queued` selects ordered durable queue delivery.
+#[proc_macro_attribute]
+pub fn projector(args: TokenStream, input: TokenStream) -> TokenStream {
+    domain_event::handler(args, input, false)
+}
+
+/// Registers a Default reactor for post-commit effects outside replay.
+#[proc_macro_attribute]
+pub fn reactor(args: TokenStream, input: TokenStream) -> TokenStream {
+    domain_event::handler(args, input, true)
+}

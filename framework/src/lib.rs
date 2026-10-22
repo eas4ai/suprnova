@@ -1136,3 +1136,11 @@ pub use suprnova_macros::{aggregate, domain_event};
 
 /// SeaORM migration contracts for application-owned migrators.
 pub use ::sea_orm_migration;
+
+pub use event_sourcing::{
+    Projector, ProjectorEntry, QueuedProjector, Reactor, ReactorEntry, Replay as EventReplay,
+    ReplayFinished, ReplayStarted,
+};
+pub use suprnova_macros::{projector, reactor};
+
+pub use live::LiveTopics;

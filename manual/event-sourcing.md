@@ -111,6 +111,181 @@ fn upgrade(version: i32, mut payload: Value) -> Result<Value, FrameworkError> {
 struct Addition { amount: i64 }
 ```
 
+## Projectors and reactors
+
+A projector builds a read model with ordinary ORM writes. It shares the event
+transaction by default. Its reset clears only the state it owns.
+
+```rust
+use suprnova::{Projector, Reactor, Model, FrameworkError, StoredEvent, attrs};
+
+#[suprnova::model(
+    table = "tally_totals", key_type = "String", timestamps = false,
+    fillable = ["id", "total"]
+)]
+struct Total { pub id: String, pub total: i64 }
+
+#[suprnova::projector]
+#[derive(Default)]
+struct Totals;
+
+#[suprnova::async_trait]
+impl Projector for Totals {
+    fn name(&self) -> &'static str { "tally.totals" }
+    fn handles(&self, fact: &StoredEvent) -> bool {
+        fact.event_type == "tally.added"
+    }
+    async fn project(&self, fact: &StoredEvent) -> Result<(), FrameworkError> {
+        if let Some(added) = fact.decode::<Added>()? {
+            match Total::find(fact.aggregate_uuid.clone()).await? {
+                Some(mut row) => {
+                    row.total += added.amount;
+                    row.save().await?;
+                }
+                None => {
+                    Total::create(attrs! { id: fact.aggregate_uuid.clone(), total: added.amount }).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+    async fn reset(&self) -> Result<(), FrameworkError> {
+        Total::query().delete_all().await?;
+        Ok(())
+    }
+}
+
+#[suprnova::reactor]
+#[derive(Default)]
+struct Announce;
+
+#[suprnova::async_trait]
+impl Reactor for Announce {
+    fn name(&self) -> &'static str { "tally.announce" }
+    async fn react(&self, fact: &StoredEvent) -> Result<(), FrameworkError> {
+        if fact.decode::<Added>()?.is_some() {
+            println!("Committed tally event {}", fact.id);
+        }
+        Ok(())
+    }
+}
+```
+
+Create `tally_totals` in an application migration before persisting:
+
+```sql
+CREATE TABLE tally_totals (id VARCHAR(36) PRIMARY KEY, total BIGINT NOT NULL);
+```
+
+The attributes register `Default` handlers through inventory. Names are stable
+checkpoint identities. Names must be ASCII, at most 191 bytes and cannot start
+with `__`. Duplicate handler names fail. Handlers run in name order.
+
+A reactor runs after commit. It never runs during replay. Use the stored event id
+as an idempotency key for external effects. A reactor failure reports an error
+without undoing the committed history. Reactors are direct after-commit effects;
+queue a separate job when delivery needs durable retries.
+
+## Queued projectors
+
+Replace `#[suprnova::projector]` on `Totals` with
+`#[suprnova::projector(queued)]`. Run a [queue worker](queues.md). Each persistence
+queues a `QueuedProjector` wake-up after commit. The worker type is registered by
+the framework and retries failures up to five attempts with the queue backoff.
+
+The job reads the stored history after its checkpoint in pages of 256 facts.
+Writes and checkpoint advancement share a transaction. A duplicate wake-up skips
+facts at or below that checkpoint. Shuffled wake-ups still apply facts in global
+id order. `handles` avoids queueing irrelevant facts.
+
+A queue push can fail after the history commits. The durable facts remain the
+recovery source. Requeue a catch-up wake-up after restoring the queue:
+
+```rust
+use suprnova::{EventStore, FrameworkError, Queue, QueuedProjector};
+async fn catch_up() -> Result<(), FrameworkError> {
+    let job = QueuedProjector::new("tally.totals", EventStore::last_position().await?)?;
+    Queue::push(job).await?;
+    Ok(())
+}
+```
+
+The queue wake-up and the database commit are separate operations. A process
+failure between them requires this catch-up or a projector replay. Monitor queue
+push errors and run catch-up after recovering a failed writer.
+
+## Replay
+
+A full replay calls `replay_started`, resets each selected read model and its
+checkpoint, reads ordered pages, then calls `replay_finished`. A failed replay
+rolls back the reset, writes and checkpoints. A successful replay emits
+`ReplayFinished` after commit. Reactors are excluded.
+
+```rust
+use suprnova::{EventReplay, FrameworkError};
+async fn rebuild() -> Result<(), FrameworkError> {
+    EventReplay::projectors(["tally.totals"]).page_size(128).run().await?;
+    EventReplay::all().run().await?;
+    Ok(())
+}
+```
+
+`EventReplay` is also `suprnova::event_sourcing::Replay`. `from(position)` resumes
+strictly after that global event id and does not reset state. Use a checkpoint
+from a prior run when resuming. A repeated resume skips facts already committed.
+
+Replay holds the append lock for its transaction. Live persistence and queued
+projection wait until it completes. Use replay as maintenance work on large
+histories. Reads remain bounded by the page size, from one to ten thousand facts.
+ORM writes advance [RenderCache generations](render-cache-generations.md) inside
+the same transaction. Suppressing notifications does not suppress invalidation.
+
+## Live signals from projection writes and ordinary models
+
+Declare a [Live](live.md) stream on the page's component. A component named
+`app.tally` can use a stream named `changes` and the topic `tally`.
+Its rendering hook reloads the read model after a refresh. The dogfood page at
+`/live/event-tally` shows this flow.
+
+Register a normal saved listener to signal a model write:
+
+```rust
+use std::sync::Arc;
+use suprnova::{EventFacade, FrameworkError, Listener, LiveTopics};
+
+struct TotalChanged;
+#[suprnova::async_trait]
+impl Listener<total::events::Saved> for TotalChanged {
+    async fn handle(&self, _: &total::events::Saved) -> Result<(), FrameworkError> {
+        LiveTopics::resolve()?.changed("tally", &["total"]).await
+    }
+}
+async fn bind_total() {
+    EventFacade::listen::<total::events::Saved, _>(Arc::new(TotalChanged)).await;
+}
+```
+
+The same listener works when a projector saves `Total` or when a controller saves
+it directly. It does not need an aggregate, a stored event or the event store
+migration. An explicit call also signals without a model event. For example,
+notify after an ordinary bulk write:
+
+```rust
+async fn clear_total() -> Result<(), FrameworkError> {
+    suprnova::DB::transaction(|_| Box::pin(async {
+        Total::query().update_all(suprnova::attrs! { total: 0i64 }).await?;
+        LiveTopics::resolve()?.changed("tally", &["total"]).await?;
+        Ok(())
+    })).await
+}
+```
+
+`changed` waits for the owning transaction's commit and discards rolled-back
+changes. `batch(future)` coalesces an explicit unit of work. `suppress(|| future)`
+keeps one final change per topic through replay. Replay installs this buffer even
+in a worker with no HTTP runtime. It preserves ORM cache invalidation and carries
+no model values to the browser. Live streams reload their full server view.
+
 ### Why Suprnova diverges
 
 Spatie's package finds event handlers and public aggregate state through PHP

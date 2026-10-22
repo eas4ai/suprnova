@@ -91,3 +91,28 @@ pub fn aggregate(args: TokenStream, input: TokenStream) -> TokenStream {
     }
     .into()
 }
+
+pub fn handler(args: TokenStream, input: TokenStream, reactor: bool) -> TokenStream {
+    let item = parse_macro_input!(input as ItemStruct);
+    let args: proc_macro2::TokenStream = args.into();
+    let queued = args.to_string() == "queued";
+    if !item.generics.params.is_empty() || (!args.is_empty() && (!queued || reactor)) {
+        return syn::Error::new_spanned(
+            &item.ident,
+            "event handlers require a concrete Default type; only projector accepts queued",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let ident = &item.ident;
+    let entry = if reactor {
+        quote! {
+            ::suprnova::ReactorEntry { build: || Box::new(<#ident as Default>::default()) }
+        }
+    } else {
+        quote! {
+            ::suprnova::ProjectorEntry { build: || Box::new(<#ident as Default>::default()), queued: #queued }
+        }
+    };
+    quote! { #item ::suprnova::inventory::submit! { #entry } }.into()
+}
