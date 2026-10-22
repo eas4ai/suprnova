@@ -5,6 +5,7 @@ mod cloudfront;
 mod eligibility;
 #[cfg(feature = "media")]
 mod images;
+mod prune;
 mod publication;
 
 mod fallback;
