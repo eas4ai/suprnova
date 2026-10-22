@@ -757,7 +757,7 @@ pub(crate) async fn scope_publication<F: std::future::Future<Output = Response>>
                 let decorate = |response| {
                     policy.decorate(
                         response,
-                        false,
+                        true,
                         local,
                         nonce.get().as_deref(),
                         origin.as_deref(),

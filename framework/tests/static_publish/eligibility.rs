@@ -514,3 +514,56 @@ async fn pub_001_fix_o_all_script_directives_remove_broad_inline_sources()
     assert!(csp.contains("sha256-"));
     Ok(())
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn pub_001_fix_f_hsts_is_recorded_and_applied_at_secure_delivery()
+-> Result<(), FrameworkError> {
+    let _container = suprnova::testing::TestContainer::fake();
+    suprnova::Config::register(
+        suprnova::AppConfig::builder()
+            .environment(suprnova::Environment::Production)
+            .debug(false)
+            .build(),
+    );
+    let policy = SecurityHeaders::balanced().hash_public_pages();
+    suprnova::global_middleware!(policy.clone());
+    let router: Router = Router::new().get("/secure", hash_page).into();
+    let router = router.public_page::<PublicProps>("/secure", "Public")?;
+    let runtime = runtime(&router)?;
+    Storage::register_memory("hsts-assets");
+    let source = Storage::disk("hsts-assets")?;
+    for key in ["assets/main.css", "assets/main.js"] {
+        source
+            .write(key, "asset")
+            .await
+            .map_err(|e| FrameworkError::internal(e.to_string()))?;
+    }
+    runtime.assets(source)?;
+    let client = suprnova::testing::TestClient::new(
+        router,
+        suprnova::MiddlewareRegistry::new().append(policy),
+    );
+    let secure = client.get("https://localhost/secure").send().await;
+    secure.assert_ok();
+    assert!(
+        secure.header("strict-transport-security").is_some(),
+        "public HTTPS preserves HSTS"
+    );
+    let stored = runtime.render("/secure").await?;
+    assert!(
+        stored.headers.contains_key("strict-transport-security"),
+        "the CDN needs the configured value"
+    );
+    let insecure = client
+        .get("http://localhost/secure")
+        .header("X-Forwarded-Proto", "https")
+        .send()
+        .await;
+    insecure.assert_ok();
+    assert!(
+        insecure.header("strict-transport-security").is_none(),
+        "untrusted HTTP cannot enable HSTS"
+    );
+    Ok(())
+}

@@ -36,6 +36,13 @@ pub enum Purge {
 pub trait CdnDriver: Send + Sync + 'static {
     /// Advertises supported invalidation operations.
     fn capabilities(&self) -> CdnCapabilities;
+    /// Rejects response headers the provider cannot preserve before any upload or switch.
+    fn validate_headers(
+        &self,
+        _headers: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), FrameworkError> {
+        Ok(())
+    }
     /// Points the page origin at `_pub/<version>/` after uploads finish.
     async fn switch_version(&self, version: &str) -> Result<(), FrameworkError>;
     /// Restores the previous live revision after a failed switch or manifest write.

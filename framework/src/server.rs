@@ -1363,13 +1363,23 @@ async fn handle_request_inner(
     if matches!(method, hyper::Method::GET | hyper::Method::HEAD)
         && let Ok(Some(runtime)) = crate::static_publish::StaticPublication::current()
     {
-        let (headers, query) = match &req {
-            Inbound::Wire(request) => (request.headers(), request.uri().query()),
+        let trusted = Config::get::<crate::config::AppConfig>()
+            .is_some_and(|config| config.trusted_proxies.trusts(peer_ip));
+        let (uri, headers, query) = match &req {
+            Inbound::Wire(request) => (request.uri(), request.headers(), request.uri().query()),
             #[cfg(feature = "agents")]
-            Inbound::Internal(request) => (request.headers(), request.query()),
+            Inbound::Internal(request) => (request.uri(), request.headers(), request.query()),
         };
+        let secure = Request::head_is_secure(uri, headers, trusted);
         match runtime.respond(path, headers, query).await {
-            Ok(Some(response)) => return into_hyper_in_scope(response),
+            Ok(Some(response)) => {
+                let response = if secure {
+                    response
+                } else {
+                    response.without_header("strict-transport-security")
+                };
+                return into_hyper_in_scope(response);
+            }
             Ok(None) => {}
             Err(error) => {
                 tracing::error!(route = path, %error, "static origin lookup failed; serving origin")

@@ -213,15 +213,18 @@ aws cloudfront publish-function --name suprnova-public-headers \
 Associate its ARN with the `viewer-response` event on each cache behavior
 that uses the public page origin. Pass that ARN to
 `with_response_headers_function`. The driver refuses a switch if any matching
-behavior lacks the function. The function restores CSP and other public security
-headers, then removes the metadata headers. It blocks scripts in an HTML object
+behavior lacks the function. The function replays every validated recorded header, including Content-Disposition,
+Reporting-Endpoints and HSTS, then removes the metadata headers. Headers the
+viewer-response function cannot carry refuse publication before switching.
+The origin applies HSTS only for trusted HTTPS delivery. It blocks scripts in an HTML object
 that has lost its CSP metadata. This follows the
 [CloudFront response event format](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/functions-event-structure.html).
 
 A local static server or another CDN must likewise serve the manifest's
 `headers` as HTTP headers. A plain S3 website exposes custom headers only as
 metadata; place a header bridge in front of it before serving public documents.
-The Suprnova origin fallback already serves the headers directly.
+The Suprnova origin fallback already serves the headers directly. Header restrictions
+follow the [AWS edge function contract](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/edge-function-restrictions-all.html).
 
 ## CSP and private requests
 

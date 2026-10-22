@@ -522,3 +522,48 @@ async fn pub_002_fix_a_cloudfront_maps_the_s3_root_and_validates_it() {
         );
     }
 }
+
+#[test]
+fn pub_002_fix_e_header_bridge_replays_the_recorded_contract() {
+    let event = serde_json::json!({"response":{"statusCode":200,"headers":{
+        "content-type":{"value":"text/html"},
+        "x-amz-meta-content-security-policy":{"value":"script-src 'self'"},
+        "x-amz-meta-content-disposition":{"value":"inline; filename=about.html"},
+        "x-amz-meta-reporting-endpoints":{"value":"csp=\"https://reports.test/csp\""},
+        "x-amz-meta-x-public-contract":{"value":"retained"},
+        "x-amz-meta-strict-transport-security":{"value":"max-age=31536000"}
+    }}});
+    let js = format!(
+        "{}\nconst response=handler({event}); const assert=require('node:assert/strict'); assert.equal(response.headers['content-disposition'].value,'inline; filename=about.html'); assert.equal(response.headers['reporting-endpoints'].value,'csp=\\\"https://reports.test/csp\\\"'); assert.equal(response.headers['x-public-contract'].value,'retained'); assert.equal(response.headers['strict-transport-security'].value,'max-age=31536000');",
+        suprnova::static_publish::cdn::RESPONSE_HEADERS_FUNCTION
+    );
+    let result = std::process::Command::new("bun")
+        .args(["--no-env-file", "-e", &js])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[tokio::test]
+async fn pub_002_fix_e_unrepresentable_header_refuses_before_any_switch() {
+    use suprnova::static_publish::{PageObject, PublishConfig, Publisher};
+    let mock = Mock::start(vec![]).await;
+    let disk = opendal::Operator::new(opendal::services::Memory::default()).unwrap();
+    let publisher = Publisher::from_operator(disk, "v1", PublishConfig::default())
+        .unwrap()
+        .with_cdn(Arc::new(mock.driver()));
+    let mut page = PageObject::new(
+        "/about",
+        Bytes::from_static(b"public"),
+        Bytes::from_static(b"{}"),
+    )
+    .unwrap();
+    page.headers.insert("Via".into(), "unrepresentable".into());
+    let cause = publisher.publish(vec![page]).await.unwrap_err().to_string();
+    assert!(cause.contains("via"), "{cause}");
+    assert!(mock.requests().is_empty());
+}

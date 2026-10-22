@@ -616,6 +616,9 @@ impl Publisher {
                 .filter(|o| o.headers == upload.entry.headers && o.digest == upload.entry.digest)
         };
         for upload in &uploads {
+            if let Some(driver) = &self.driver {
+                driver.validate_headers(&upload.entry.headers)?;
+            }
             if upload
                 .entry
                 .headers

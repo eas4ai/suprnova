@@ -303,6 +303,50 @@ impl CdnDriver for CloudFrontDriver {
         }
     }
 
+    fn validate_headers(
+        &self,
+        headers: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), FrameworkError> {
+        for (name, value) in headers {
+            let lower = name.to_ascii_lowercase();
+            let blocked = [
+                "connection",
+                "expect",
+                "keep-alive",
+                "proxy-authenticate",
+                "proxy-authorization",
+                "proxy-connection",
+                "trailer",
+                "upgrade",
+                "warning",
+                "via",
+                "host",
+                "te",
+                "transfer-encoding",
+                "x-cache",
+                "x-forwarded-proto",
+                "x-real-ip",
+                "cloudfront-viewer-cert-pem",
+                "client-cert",
+                "client-cert-chain",
+                "set-cookie",
+            ];
+            if blocked.contains(&lower.as_str())
+                || ["x-amz-cf-", "x-amzn-", "x-edge-", "x-accel-", "x-amz-meta-"]
+                    .iter()
+                    .any(|prefix| lower.starts_with(prefix))
+            {
+                return Err(failure(format!(
+                    "header {lower} cannot be carried by the viewer-response function"
+                )));
+            }
+            http::HeaderName::from_bytes(lower.as_bytes())
+                .map_err(|_| failure(format!("invalid public header {lower}")))?;
+            http::HeaderValue::from_str(value)
+                .map_err(|_| failure(format!("invalid public header value for {lower}")))?;
+        }
+        Ok(())
+    }
     async fn switch_version(&self, version: &str) -> Result<(), FrameworkError> {
         if version.is_empty()
             || version.split('/').any(|part| {
