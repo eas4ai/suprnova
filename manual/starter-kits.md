@@ -81,7 +81,7 @@ marketplace of listings, with or without paid placement.
 | Accounts and a place to build | **Nebula** |
 | A full product site - landing, docs, blog, community, RBAC | **Pulsar** |
 | A directory or marketplace of listings, free or paid | **Directory starter** |
-| Server-rendered pages with no Node toolchain | `suprnova new my-app --frontend live` |
+| Server-rendered pages with no Bun toolchain | `suprnova new my-app --frontend live` |
 | An API-only backend (token auth, no frontend) | `suprnova new my-api --api` |
 
 All three kits track the framework as a git dependency and run on the same stack you
@@ -97,7 +97,7 @@ email verification, password reset, session authentication with the
 `authenticate` middleware, CSRF protection, and a protected `/dashboard`
 route - on any of the three frontends (Svelte 5,
 React 19, Vue 3.5) with Tailwind v4 and Inertia v3, or on the
-[Live starter kit](#the-live-starter-kit), which needs no Node toolchain. See
+[Live starter kit](#the-live-starter-kit), which needs no Bun toolchain. See
 [Installation](installation.md) for the scaffold output and
 [Quickstart](quickstart.md) for the first-five-minutes walkthrough.
 
@@ -564,7 +564,7 @@ application that adds a frontend adds the helpers with it.
 
 `suprnova new my-app --frontend live` scaffolds the same application as the
 Inertia kits without a frontend build: no `frontend/` directory, no
-`package.json`, and no Node toolchain. Every page is a server-rendered
+`package.json`, and no Bun toolchain. Every page is a server-rendered
 [Live](live.md) document. The application serves the Live browser runtime
 under `/__live/assets/` and the library components' stylesheets and scripts
 under `/suprnova-ui/`, so the backend is the only process you run.

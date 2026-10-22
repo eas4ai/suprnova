@@ -120,25 +120,15 @@ fn signal_002_binding_to_a_missing_prop_fails_to_build() {
 }
 
 #[test]
-#[ignore = "requires Node 24.22.1 or later"]
+#[ignore = "requires Bun"]
 fn signal_004_shared_client_drops_stale_cursors_and_coalesces_bounded_reloads() {
-    let version = std::process::Command::new("node")
+    let available = std::process::Command::new("bun")
         .arg("--version")
         .output()
-        .expect("requires Node 24.22.1 or later");
-    let version_text = String::from_utf8_lossy(&version.stdout);
-    let version_parts = version_text
-        .trim()
-        .trim_start_matches('v')
-        .split('.')
-        .map(str::parse::<u64>)
-        .collect::<Result<Vec<_>, _>>();
+        .expect("requires Bun on PATH to run the client core regression suite");
     assert!(
-        version.status.success()
-            && version_parts
-                .is_ok_and(|parts| parts.len() == 3 && parts.as_slice() >= [24, 22, 1].as_slice()),
-        "requires Node 24.22.1 or later; found {}",
-        version_text.trim()
+        available.status.success(),
+        "requires Bun: bun --version failed"
     );
     let suite = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../suprnova-cli/tests/frontend-live-core.test.ts");
@@ -151,13 +141,14 @@ fn signal_004_shared_client_drops_stale_cursors_and_coalesces_bounded_reloads() 
         .block_on(loader_race_page());
     std::fs::write(&fixture, serde_json::to_vec(&page).expect("page JSON"))
         .expect("write actual baseline page");
-    let output = std::process::Command::new("node")
-        .arg("--test")
+    let output = std::process::Command::new("bun")
+        .arg("test")
         .arg(suite)
         .env("SIGNAL_LIVE_BASELINE_PAGE", fixture)
         .output()
-        .expect("Node 24.22.1 or later runs the kit client regression suite");
+        .expect("requires Bun on PATH to run the client core regression suite");
     print!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
     assert!(
         output.status.success(),
         "{}{}",
@@ -167,18 +158,8 @@ fn signal_004_shared_client_drops_stale_cursors_and_coalesces_bounded_reloads() 
 }
 
 #[test]
-#[cfg(unix)]
-fn signal_fix_007_older_node_is_refused_before_the_client_suite() {
-    use std::os::unix::fs::PermissionsExt;
+fn signal_fix_007_missing_bun_is_refused_before_the_client_suite() {
     let directory = tempfile::tempdir().unwrap();
-    let executable = directory.path().join("node");
-    let marker = directory.path().join("suite-ran");
-    std::fs::write(
-        &executable,
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.22.0; else : > \"$SIGNAL_NODE_MARKER\"; fi\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--ignored",
@@ -187,15 +168,10 @@ fn signal_fix_007_older_node_is_refused_before_the_client_suite() {
             "--nocapture",
         ])
         .env("PATH", directory.path())
-        .env("SIGNAL_NODE_MARKER", &marker)
         .output()
         .unwrap();
-    assert!(!output.status.success(), "an older Node must be refused");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("requires Node 24.22.1 or later"));
-    assert!(
-        !marker.exists(),
-        "the unsupported runtime must not run the suite"
-    );
+    assert!(!output.status.success(), "missing Bun must be refused");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires Bun on PATH"));
 }
 
 #[derive(Clone)]

@@ -782,6 +782,15 @@ or stream ability. Otherwise the page renders without that binding or cursor
 and keeps its polling fallback. The framework logs the page component and
 topic once at warn per process, then at debug on later denied renders.
 
+The client core regression suite uses Bun. Run it from the repository root:
+
+```sh
+bun test suprnova-cli/tests/frontend-live-core.test.ts
+```
+
+The ignored Rust wrapper requires Bun on PATH and supplies a real rendered
+page to the same suite. Its ignore reason is `requires Bun`.
+
 ### Why Suprnova diverges
 
 Laravel has no built-in equivalent for topic-driven Inertia partial reloads.
