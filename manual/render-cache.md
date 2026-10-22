@@ -189,6 +189,24 @@ A group whose policy declares one of the three is refused even when every
 route under it has a patch that replaces the dimensions. Take the dimension
 out of the group's policy.
 
+## Publish public Inertia pages
+
+[Static Publication](static-publication.md) uses the same checked
+`#[inertia(cacheable)]` props contract and dependency collector. A route must
+also opt in with `public_page`. All fields and registered shared props must
+be public. Public rendering reads no session. Per-request fields and nonce
+CSP documents refuse publication. The origin still answers these routes.
+
+Published page objects carry bounded browser lifetimes and the configured
+`s-maxage`, `stale-while-revalidate` and `stale-if-error` directives. They
+never receive `immutable`. Fingerprinted assets receive the immutable
+one-year lifetime. Separate HTML and JSON objects preserve Inertia's
+representation boundary on storage disks that cannot vary on `X-Inertia`.
+
+```rust
+let router = router.public_page::<AboutProps>("/about", "About")?;
+```
+
 ## Reading the response headers
 
 A served hit carries `ETag` (a strong validator your client can send back as

@@ -5,6 +5,8 @@ mod cloudfront;
 mod eligibility;
 mod publication;
 
+mod regeneration;
+
 mod boot;
 #[path = "../support/env_lock.rs"]
 mod env_lock;
