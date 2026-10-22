@@ -239,7 +239,7 @@ impl<A: AggregateRoot> Aggregate<A> {
             .first()
             .map_or(committed, |event| event.aggregate_version);
         let bookkeeping = Arc::clone(&self.bookkeeping);
-        let timeout = DB::connection()?.transaction_timeout();
+        let timeout = DB::connection()?.outcome_settle_timeout();
         let (status, receiver) = watch::channel(PersistenceResult::Pending);
         self.unsettled = Some(PendingPersistence { receiver, timeout });
         let failed = status.clone();
@@ -365,18 +365,18 @@ mod settlement_tests {
         const VERSION: i32 = 1;
     }
     #[tokio::test]
-    async fn es_001_unresolved_outcome_is_bounded_by_the_connection_timeout() {
+    async fn es_001_unresolved_outcome_is_bounded_by_the_settlement_wait() {
         let config = crate::DatabaseConfig::builder()
             .url("sqlite::memory:")
-            .transaction_timeout(1)
+            .outcome_settle_timeout(1)
             .build();
         let connection = crate::DbConnection::connect(&config).await.unwrap();
-        assert_eq!(connection.transaction_timeout(), Duration::from_secs(1));
+        assert_eq!(connection.outcome_settle_timeout(), Duration::from_secs(1));
         let mut root = Aggregate::<State>::new("30436483-b26b-4d9e-8cd2-46177926f838").unwrap();
         let (status, receiver) = watch::channel(PersistenceResult::Pending);
         root.unsettled = Some(PendingPersistence {
             receiver,
-            timeout: connection.transaction_timeout(),
+            timeout: connection.outcome_settle_timeout(),
         });
         let started = std::time::Instant::now();
         let error = root.record(Added).await.unwrap_err();
@@ -393,7 +393,7 @@ mod settlement_tests {
         assert_eq!(root.persisted_version(), 0);
         assert!(
             crate::DatabaseConfig::builder()
-                .transaction_timeout(0)
+                .outcome_settle_timeout(0)
                 .build()
                 .validate_pool()
                 .is_err()

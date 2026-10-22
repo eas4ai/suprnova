@@ -87,11 +87,13 @@ call. These calls are async because they first await the owned transaction's
 outcome. `is_settled()` remains false until that reconciliation completes.
 Rollback retains pending facts and the prior durable version.
 
-The wait uses the connection's `DatabaseConfig::transaction_timeout` in seconds,
-set with `.transaction_timeout(seconds)` or `DB_TRANSACTION_TIMEOUT` (default 30).
-A timeout returns an internal error naming the aggregate and stating that the
-outcome is unknown. It prevents reuse and does not cancel COMMIT. Retry settlement
-after the owned finalizer completes. Snapshots require a settled instance.
+The wait uses the connection's `DatabaseConfig::outcome_settle_timeout` in seconds,
+set with `.outcome_settle_timeout(seconds)` or `DB_OUTCOME_SETTLE_TIMEOUT` (default 30;
+zero is rejected). This setting bounds the wait in seconds for the physical outcome
+of a transaction whose caller was dropped during finalization; if the wait expires,
+the outcome is reported as unknown. It never cancels or bounds a transaction, query
+or commit. A timeout returns an internal error naming the aggregate and prevents
+reuse. Retry settlement after the owned finalizer completes. Snapshots require a settled instance.
 `recorded()` returns a copy of the pending facts at the time of the call.
 
 ## Snapshots

@@ -30,7 +30,7 @@ pub struct DbConnection {
     ///
     /// [`TestDatabase::refresh`]: crate::database::testing::TestDatabase::refresh
     in_test_transaction: bool,
-    transaction_timeout: Duration,
+    outcome_settle_timeout: Duration,
 }
 
 impl DbConnection {
@@ -188,7 +188,7 @@ impl DbConnection {
         let result = Self {
             inner: Arc::new(conn),
             in_test_transaction: false,
-            transaction_timeout: Duration::from_secs(config.transaction_timeout),
+            outcome_settle_timeout: Duration::from_secs(config.outcome_settle_timeout),
         };
         // Fire ConnectionEstablished. The default pool reaches this
         // path with __primary__ semantics; named pools flow through
@@ -221,13 +221,15 @@ impl DbConnection {
         Self {
             inner: Arc::new(conn),
             in_test_transaction: false,
-            transaction_timeout: Duration::from_secs(30),
+            outcome_settle_timeout: Duration::from_secs(30),
         }
     }
 
-    /// Bounds reconciliation while an owned finalizer continues independently.
-    pub(crate) fn transaction_timeout(&self) -> Duration {
-        self.transaction_timeout
+    /// This setting bounds the wait in seconds for the physical outcome of a transaction whose caller
+    /// was dropped during finalization; if the wait expires, the outcome is reported as unknown.
+    /// It never cancels or bounds a transaction, query or commit.
+    pub(crate) fn outcome_settle_timeout(&self) -> Duration {
+        self.outcome_settle_timeout
     }
 
     /// Get a reference to the underlying SeaORM connection

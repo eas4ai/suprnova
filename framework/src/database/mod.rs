@@ -42,7 +42,10 @@
 //! DB_MAX_CONNECTIONS=10
 //! DB_MIN_CONNECTIONS=1
 //! DB_CONNECT_TIMEOUT=30
-//! DB_TRANSACTION_TIMEOUT=30
+//! DB_OUTCOME_SETTLE_TIMEOUT=30
+//! # This setting bounds the wait in seconds for the physical outcome of a transaction whose caller
+//! # was dropped during finalization; if the wait expires, the outcome is reported as unknown.
+//! # It never cancels or bounds a transaction, query or commit.
 //! DB_LOGGING=false
 //! DB_IDLE_TIMEOUT=600
 //! DB_MAX_LIFETIME=1800
