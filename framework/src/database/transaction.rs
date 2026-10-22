@@ -156,8 +156,8 @@ pub(crate) struct TxState {
     /// run when the transaction rolls back. The after-commit list is discarded
     /// in that case.
     pub(crate) on_rollback: std::sync::Mutex<Vec<super::after_commit::AfterCommitCallback>>,
-    /// Where both registries stood at each [`Transaction::savepoint`] still in
-    /// scope, innermost last.
+    /// Where callback registries and outcome hooks stood at each
+    /// [`Transaction::savepoint`] still in scope, innermost last.
     ///
     /// A savepoint rollback undoes the rows a deferred dispatch was waiting on,
     /// so it has to undo the dispatch too - and without a recorded length there
@@ -217,6 +217,24 @@ impl Drop for PublicationGenerationEntry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.id);
+    }
+}
+
+impl TxState {
+    /// Captures the hook boundary so savepoint rollback preserves earlier work.
+    pub(crate) fn outcome_len(&self) -> usize {
+        self.outcome
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .0
+            .len()
+    }
+
+    /// Removes discarded work before the enclosing transaction can publish it.
+    pub(crate) fn take_outcomes_since(&self, boundary: usize) -> OutcomeHooks {
+        let mut outcome = self.outcome.lock().unwrap_or_else(|e| e.into_inner());
+        let boundary = boundary.min(outcome.0.len());
+        OutcomeHooks(outcome.0.split_off(boundary))
     }
 }
 
@@ -1634,8 +1652,11 @@ impl Transaction {
         // Registry after SQL, never before: a refused `ROLLBACK TO` leaves the
         // rows in place, and callbacks discarded for it could not be recovered.
         match super::after_commit::rollback_to_savepoint(&self.registry, &validated) {
-            Some(compensations) => {
-                super::after_commit::run_rollback(compensations).await;
+            Some((compensations, outcome)) => {
+                let callbacks =
+                    super::after_commit::GuardedCallbacks::compensating(Vec::new(), compensations);
+                outcome.failed(&self.connection_name);
+                callbacks.compensate().await;
             }
             None => tracing::warn!(
                 target: "suprnova::database",
@@ -3162,6 +3183,67 @@ mod outcome_hook_tests {
         .unwrap_err();
         assert!(error.to_string().contains("roll back parent"));
         assert_eq!(*trace.lock().unwrap(), ["failed", "failed"]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_savepoint_rollback_fails_inner_hooks_before_outer_commit() {
+        let db = TestDatabase::sqlite_memory().await.unwrap();
+        db.execute_unprepared("CREATE TABLE savepoint_writes (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        let outer: Trace = Arc::new(Mutex::new(Vec::new()));
+        let inner: Trace = Arc::new(Mutex::new(Vec::new()));
+        let inner_in_scope = inner.clone();
+        let outer_delivery = outer.clone();
+        DB::transaction_with_outcome(None, hooks(&outer), move |tx| {
+            Box::pin(async move {
+                DB::statement("INSERT INTO savepoint_writes VALUES (1)", vec![]).await?;
+                DB::after_commit(move || async move {
+                    outer_delivery.lock().unwrap().push("delivery");
+                    Ok(())
+                })
+                .await?;
+                tx.savepoint("discard_inner").await?;
+                let inner_delivery = inner_in_scope.clone();
+                let inner_compensation = inner_in_scope.clone();
+                DB::transaction_with_outcome(None, hooks(&inner_in_scope), move |_tx| {
+                    Box::pin(async move {
+                        DB::statement("INSERT INTO savepoint_writes VALUES (2)", vec![]).await?;
+                        DB::after_commit(move || async move {
+                            inner_delivery.lock().unwrap().push("delivery");
+                            Ok(())
+                        })
+                        .await?;
+                        DB::after_rollback(move || async move {
+                            inner_compensation.lock().unwrap().push("compensation");
+                            Ok(())
+                        })
+                        .await?;
+                        Ok(())
+                    })
+                })
+                .await??;
+                assert!(inner_in_scope.lock().unwrap().is_empty());
+                tx.rollback_to("discard_inner").await?;
+                assert_eq!(*inner_in_scope.lock().unwrap(), ["failed", "compensation"]);
+                // Reusing the mark must not publish the failed outcome twice.
+                tx.rollback_to("discard_inner").await?;
+                assert_eq!(*inner_in_scope.lock().unwrap(), ["failed", "compensation"]);
+                Ok(())
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(*inner.lock().unwrap(), ["failed", "compensation"]);
+        assert_eq!(*outer.lock().unwrap(), ["committed", "delivery"]);
+        assert_eq!(
+            DB::scalar::<i64>("SELECT SUM(id) FROM savepoint_writes", vec![])
+                .await
+                .unwrap(),
+            1
+        );
     }
     #[tokio::test]
     #[serial_test::serial]

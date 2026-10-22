@@ -204,7 +204,7 @@ fn push_to(state: &super::transaction::TxState, cb: AfterCommitCallback, registr
     vec.lock().unwrap_or_else(|e| e.into_inner()).push(cb);
 }
 
-/// Where both callback registries stood when a `SAVEPOINT` was issued.
+/// Where callbacks and outcome hooks stood when a `SAVEPOINT` was issued.
 ///
 /// Laravel keys the same bookkeeping by integer nesting level, because its
 /// manager owns the counter. Suprnova's caller names the point instead
@@ -222,10 +222,11 @@ pub(crate) struct SavepointMark {
     after_commit_len: usize,
     /// Length of the rollback registry at the savepoint.
     on_rollback_len: usize,
+    /// Hooks above this boundary belong to writes the savepoint can discard.
+    outcome_len: usize,
 }
 
-/// Record where both registries stand, so a later `rollback_to` on `name` can
-/// tell what was registered above this point.
+/// Records callback and hook boundaries so rollback only discards later work.
 ///
 /// Called only after the `SAVEPOINT` statement itself succeeded: a mark for a
 /// savepoint the database never established would discard callbacks the rows
@@ -233,16 +234,17 @@ pub(crate) struct SavepointMark {
 pub(crate) fn mark_savepoint(state: &super::transaction::TxState, name: &str) {
     let after_commit_len = registry_len(&state.after_commit);
     let on_rollback_len = registry_len(&state.on_rollback);
+    let outcome_len = state.outcome_len();
     let mut marks = state.savepoints.lock().unwrap_or_else(|e| e.into_inner());
     marks.push(SavepointMark {
         name: name.to_owned(),
         after_commit_len,
         on_rollback_len,
+        outcome_len,
     });
 }
 
-/// Unwind both registries to `name`'s mark and hand back the rollback callbacks
-/// that compensate for what was discarded.
+/// Unwinds to the mark and returns compensation and failed outcome hooks.
 ///
 /// Returns `None` when no mark carries `name`, which means the savepoint was
 /// established out of band (raw `SAVEPOINT` SQL rather than
@@ -257,30 +259,34 @@ pub(crate) fn mark_savepoint(state: &super::transaction::TxState, name: &str) {
 pub(crate) fn rollback_to_savepoint(
     state: &super::transaction::TxState,
     name: &str,
-) -> Option<Vec<AfterCommitCallback>> {
-    let (after_commit_len, on_rollback_len) = {
+) -> Option<(Vec<AfterCommitCallback>, super::transaction::OutcomeHooks)> {
+    let (after_commit_len, on_rollback_len, outcome_len) = {
         let mut marks = state.savepoints.lock().unwrap_or_else(|e| e.into_inner());
         // From the top: a repeated name means the innermost savepoint shadows
         // the outer one, which is exactly how the database resolves it.
         let idx = marks.iter().rposition(|m| m.name == name)?;
-        let mark = (marks[idx].after_commit_len, marks[idx].on_rollback_len);
+        let mark = (
+            marks[idx].after_commit_len,
+            marks[idx].on_rollback_len,
+            marks[idx].outcome_len,
+        );
         marks.truncate(idx + 1);
         mark
     };
 
-    // Both guards are taken and released without an `.await` between them: the
-    // compensations run in the caller, after every lock is back.
+    // Hooks and compensation run in the caller after every registry lock is released.
     {
         let mut after_commit = state.after_commit.lock().unwrap_or_else(|e| e.into_inner());
         // `truncate` is a no-op when the list is already shorter, which is the
         // case for a `rollback_to` that follows another one on the same name.
         after_commit.truncate(after_commit_len);
     }
-    let mut on_rollback = state.on_rollback.lock().unwrap_or_else(|e| e.into_inner());
-    if on_rollback_len >= on_rollback.len() {
-        return Some(Vec::new());
-    }
-    Some(on_rollback.split_off(on_rollback_len))
+    let compensations = {
+        let mut on_rollback = state.on_rollback.lock().unwrap_or_else(|e| e.into_inner());
+        let boundary = on_rollback_len.min(on_rollback.len());
+        on_rollback.split_off(boundary)
+    };
+    Some((compensations, state.take_outcomes_since(outcome_len)))
 }
 
 /// Current length of one registry.
