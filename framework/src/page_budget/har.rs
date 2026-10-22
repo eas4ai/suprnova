@@ -81,10 +81,10 @@ pub(super) fn read(json: &str, budget: &PageBudget) -> Result<Capture, Framework
         let document = index == 0 || documents.contains(url.as_str());
         if document && (300..400).contains(&entry.response.status) {
             for header in &entry.response.headers {
-                if header.name.eq_ignore_ascii_case("location") {
-                    if let Ok(next) = url.join(&header.value) {
-                        documents.insert(next.to_string());
-                    }
+                if header.name.eq_ignore_ascii_case("location")
+                    && let Ok(next) = url.join(&header.value)
+                {
+                    documents.insert(next.to_string());
                 }
             }
         }

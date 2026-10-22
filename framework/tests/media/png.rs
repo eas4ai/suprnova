@@ -73,7 +73,14 @@ async fn recompression_shrinks_and_preserves_every_pixel_and_transparency() {
     assert!(fast.len() < source.len());
     assert!(maximum.len() <= fast.len());
     let before = decoded_rgba(&source).await;
-    assert!(before.2.chunks_exact(4).any(|pixel| pixel[3] != 255));
+    assert!(
+        before
+            .2
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| pixel[3] != 255)
+    );
     for output in [&fast, &maximum] {
         assert_eq!(decoded_rgba(output).await, before);
         for kind in [b"tEXt", b"zTXt", b"iTXt", b"tIME", b"eXIf"] {
