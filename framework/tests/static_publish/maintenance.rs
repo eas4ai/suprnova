@@ -758,9 +758,9 @@ async fn pub_003_round6_4_reserved_lease_url_precedes_application_routing_and_is
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let manual = include_str!("../../../manual/static-publication.md").replace('\n', " ");
     assert!(
-        manual.contains("Installing static publication reserves the `/_pub/lease/` URL prefix for\nGET and HEAD requests.")
+        manual.contains("Installing static publication reserves the `/_pub/lease/` URL prefix for GET and HEAD requests.")
     );
-    assert!(manual.contains("receives 404 before application\nrouting"));
+    assert!(manual.contains("receives 404 before application routing"));
     assert!(manual.contains("Other methods are not intercepted."));
-    assert!(manual.contains("an application route declared there is never reached"));
+    assert!(manual.contains("a GET or HEAD application route declared there is never reached"));
 }
