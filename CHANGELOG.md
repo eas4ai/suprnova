@@ -4,6 +4,23 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 4.5.2 - 2026-10-21
+
+### Fixed
+
+- **Two tools with one name in different crates now fail the build at link
+  time.** Every `#[tool]` emits one marker symbol, `__suprnova_tool_` followed
+  by the tool's name, so the linker reports a duplicate symbol that names the
+  tool when two crates declare the same name. Before, such a duplicate was only
+  refused when the application booted; that check stays as a second net. A crate
+  that forbids unsafe code still builds its tools.
+- **Tool schemas publish integer fields with their bounds and no JSON Schema
+  format.** `schemars` wrote Rust's integer formats such as `uint64` and `int32`,
+  which clients do not know: Claude Code logged `unknown format "uint64" ignored`
+  for every such field, and strict clients reject the schema. The bounds carry
+  the same information. The WebMCP browser schemas and the `tool-schemas.ts`
+  file that `suprnova generate-types` writes follow the same rule.
+
 ## 4.5.1 - 2026-10-21
 
 ### Fixed

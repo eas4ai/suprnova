@@ -168,6 +168,25 @@ pub mod __private {
     pub use validator;
 }
 
+/// Clients do not recognize Rust's integer formats. Bounds already describe
+/// the limits, so integer schemas keep their bounds without a format.
+#[derive(Clone)]
+struct RemoveIntegerFormats;
+
+impl schemars::transform::Transform for RemoveIntegerFormats {
+    fn transform(&mut self, schema: &mut schemars::Schema) {
+        schemars::transform::transform_subschemas(self, schema);
+        let integer = match schema.get("type") {
+            Some(serde_json::Value::String(kind)) => kind == "integer",
+            Some(serde_json::Value::Array(kinds)) => kinds.iter().any(|kind| kind == "integer"),
+            _ => false,
+        };
+        if integer {
+            schema.remove("format");
+        }
+    }
+}
+
 /// The input schema of a typed tool: the JSON Schema (draft 2020-12)
 /// `schemars` derives from `T`, its `serde` attributes and its `validator`
 /// attributes.
@@ -178,6 +197,7 @@ pub mod __private {
 /// to keep the agent's context focused on the input fields.
 pub fn input_schema<T: schemars::JsonSchema>() -> serde_json::Value {
     let mut schema = schemars::generate::SchemaSettings::draft2020_12()
+        .with_transform(RemoveIntegerFormats)
         .into_generator()
         .into_root_schema_for::<T>()
         .to_value();

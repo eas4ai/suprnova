@@ -15,8 +15,11 @@
 //!   not empty. Anything else fails the build.
 //! - Two tools with one name in a crate fail the build: each tool also
 //!   emits a `#[macro_export]` macro named after its name, and a crate cannot
-//!   export two macros of one name. Tools of two crates with one name are
-//!   refused when the application boots.
+//!   export two macros of one name. Across crates the link fails on a
+//!   duplicate symbol: `__suprnova_tool_` followed by the escaped tool name.
+//!   The unsafe `no_mangle` attribute reserves that symbol across crates.
+//!   It is safe here because the static holds one zero byte, nothing reads
+//!   it, and the prefix keeps it separate from application symbols.
 //! - `scopes = [...]` takes paths to the constants `tool_scopes!` declares,
 //!   so a scope nobody declared is an unresolved name and fails the build.
 //! - The schemas come from the `input` and `output` types through
@@ -298,6 +301,9 @@ pub(crate) fn marker_macro(spec: &ToolSpec) -> TokenStream {
         macro_rules! #marker {
             () => {};
         }
+        #[unsafe(no_mangle)]
+        #[doc(hidden)]
+        pub static #marker: u8 = 0;
     }
 }
 

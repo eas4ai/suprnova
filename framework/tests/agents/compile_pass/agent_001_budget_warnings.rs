@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use suprnova::{handler, tool, Response};
 
 #[tool(
