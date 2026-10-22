@@ -3017,7 +3017,7 @@ mod tests {
                 },
             ],
             format: Some(OutputFormat::Jpeg),
-            quality: 70,
+            quality: 85,
             settings: TransformationSettings::default(),
         };
         for arg in process_args(

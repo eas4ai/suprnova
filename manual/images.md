@@ -92,9 +92,12 @@ filled memory.
 | `grayscale()` | Desaturate. Spelled the Laravel way |
 | `to_format(format)` | Choose the output container: `Jpeg`, `Png`, `WebP`, `WebPLossless`, `Gif` or `Bmp` |
 | `to_webp()`, `to_jpg()`, `to_jpeg()`, `to_png()`, `to_gif()`, `to_bmp()` | Shortcuts for `to_format` |
-| `quality(q)` | Encode quality, clamped to `1..=100`, default `70` |
+| `quality(q)` | Encode quality, clamped to `1..=100`, default `85` |
 | `optimize(format, q)` | `to_format(format).quality(q)` in one call |
 | `using(driver)` | Process this image with the `oxideav` or `magick` driver (see [Backends](#backends)) |
+
+The default departs from Laravel's 70 on the developer's ruling that quality
+below 85 blurs images.
 
 Values that would be nonsense are clamped rather than rejected:
 `blur(500)` records `100`, `quality(0)` records `1`, and a side of `0`
@@ -412,7 +415,7 @@ converts cleanly rather than erroring.
 ### WebP
 
 `OutputFormat::WebP` is lossy and uses the quality of the pipeline, the
-same dial JPEG has. The quality is `70` when you set none.
+same dial JPEG has. The quality is `85` when you set none.
 `OutputFormat::WebPLossless` is always lossless and ignores the quality.
 Use it when the pixels of the file must be exact. Both variants have the
 content type `image/webp` and the extension `webp`.

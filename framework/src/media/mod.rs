@@ -732,7 +732,7 @@ impl Image {
         self
     }
 
-    /// Set the encode quality. Clamped to `1..=100`; defaults to 70.
+    /// Set the encode quality. Clamped to `1..=100`; defaults to 85.
     ///
     /// Only the lossy encoders read it - see [`ImagePipeline::quality`].
     pub fn quality(mut self, quality: u8) -> Self {

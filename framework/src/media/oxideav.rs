@@ -70,8 +70,8 @@
 //! the transformation pipeline only ever deals with one layout.
 
 use oxideav_core::{
-    CodecId, CodecParameters, DecoderLimits, Encoder, Frame, Packet, PixelFormat, RuntimeContext,
-    TimeBase, VideoFrame, VideoPlane,
+    CodecId, CodecParameters, DecoderLimits, Frame, Packet, PixelFormat, RuntimeContext, TimeBase,
+    VideoFrame, VideoPlane,
 };
 use oxideav_image_filter::{
     Blur, Crop, Flip, Flop, Grayscale, ImageFilter, Interpolation, Resize, Rotate, Sharpen,
@@ -626,44 +626,36 @@ impl OxideAvImageDriver {
             return encode_lossy_webp(canvas, quality, reserve);
         }
 
-        let (width, height) = (canvas.width, canvas.height);
-        let (codec, frame, pixel_format) = match format {
-            // The MJPEG encoder rejects RGBA outright, so the conversion is
-            // mandatory rather than an optimisation. See `jpeg_frame` for why
-            // it is YCbCr.
-            OutputFormat::Jpeg => ("mjpeg", jpeg_frame(canvas)?, PixelFormat::Yuv444P),
-            // PNG, BMP and lossless WebP are written by their crates' own
-            // encoders, which read the pixels where they lie: the registry
-            // encoders copy the frame they are lent into an image of their
-            // own first, a whole copy of the pixels (MEM-003). `WebP`
-            // reaches the WebP arm only when `webp_is_lossy` says no.
-            OutputFormat::Png => {
-                return encode_png(canvas.width, canvas.height, canvas.pixels, reserve).map_err(
-                    |e| FrameworkError::internal(format!("image encode failed: png: {e}")),
-                );
+        match format {
+            OutputFormat::Jpeg => {
+                let (width, height) = (canvas.width, canvas.height);
+                let frame = jpeg_frame(canvas)?;
+                // The registry encoder ignores CodecParameters.options and
+                // fixes quality at 75. The direct API accepts our quality.
+                let mut output = oxideav_mjpeg::encoder::encode_jpeg(
+                    &frame,
+                    width,
+                    height,
+                    PixelFormat::Yuv444P,
+                    quality,
+                )
+                .map_err(|e| {
+                    FrameworkError::internal(format!("image encode failed: mjpeg: {e}"))
+                })?;
+                output.try_reserve_exact(reserve).map_err(|e| {
+                    FrameworkError::internal(format!("image metadata reserve failed: {e}"))
+                })?;
+                Ok(output)
             }
-            OutputFormat::Bmp => return encode_bmp(canvas, None, reserve),
+            // These encoders borrow the pixels instead of making a full copy.
+            OutputFormat::Png => encode_png(canvas.width, canvas.height, canvas.pixels, reserve)
+                .map_err(|e| FrameworkError::internal(format!("image encode failed: png: {e}"))),
+            OutputFormat::Bmp => encode_bmp(canvas, None, reserve),
             OutputFormat::WebP | OutputFormat::WebPLossless => {
-                return encode_lossless_webp(canvas, reserve);
+                encode_lossless_webp(canvas, reserve)
             }
-            OutputFormat::Gif => return encode_gif(canvas),
-        };
-
-        let mut params = CodecParameters::video(CodecId::new(codec));
-        params.width = Some(width);
-        params.height = Some(height);
-        params.pixel_format = Some(pixel_format);
-        // Only JPEG has a quality knob that does anything here. Passing the
-        // option to PNG is not merely useless, it is fatal: that encoder
-        // rejects unknown options outright.
-        if matches!(format, OutputFormat::Jpeg) {
-            params.options = params.options.set("quality", quality.to_string());
+            OutputFormat::Gif => encode_gif(canvas),
         }
-
-        let mut encoder = self.context.codecs.first_encoder(&params).map_err(|e| {
-            FrameworkError::internal(format!("image encode failed: no {codec} encoder: {e}"))
-        })?;
-        encode_frame(encoder.as_mut(), frame, codec, reserve)
     }
 }
 
@@ -1775,73 +1767,6 @@ fn quantise_for_gif(canvas: Canvas) -> Result<VideoFrame, FrameworkError> {
             data: pixels,
         }],
     })
-}
-
-/// Feed a still image's one frame to `encoder` and collect the file it
-/// emits, with `reserve` bytes of room after it.
-fn encode_frame(
-    encoder: &mut dyn Encoder,
-    frame: VideoFrame,
-    codec: &str,
-    reserve: usize,
-) -> Result<Vec<u8>, FrameworkError> {
-    encoder
-        .send_frame(&Frame::Video(frame))
-        .map_err(|e| FrameworkError::internal(format!("image encode failed: {codec}: {e}")))?;
-    encoder
-        .flush()
-        .map_err(|e| FrameworkError::internal(format!("image encode failed: {codec}: {e}")))?;
-    drain(encoder, codec, reserve)
-}
-
-/// Collect the encoded file out of an encoder.
-///
-/// Every still-image encoder here emits the complete file as a single packet.
-/// The drain has to tolerate one upstream wart: `oxideav-gif` signals "no
-/// more packets" with `Error::InvalidData` instead of `NeedMore`/`Eof`, so a
-/// naive loop reads a successful encode as a failure. Errors are therefore
-/// only fatal before the first packet arrives - after that they mean the
-/// stream is drained.
-///
-/// The first packet's buffer becomes the output, so the encoded file is
-/// never copied (MEM-003). When the metadata added afterwards needs
-/// `reserve` bytes of room that the encoder did not leave, that buffer
-/// grows once, by exactly that much; with no room to add, nothing moves.
-/// A later packet, which no encoder here emits, is appended.
-fn drain(
-    encoder: &mut dyn Encoder,
-    codec: &str,
-    reserve: usize,
-) -> Result<Vec<u8>, FrameworkError> {
-    let mut out: Option<Vec<u8>> = None;
-    loop {
-        match encoder.receive_packet() {
-            Ok(packet) => match out.as_mut() {
-                Some(out) => out.extend_from_slice(&packet.data),
-                None => {
-                    let mut data = packet.data;
-                    data.reserve_exact(reserve);
-                    out = Some(data);
-                }
-            },
-            Err(oxideav_core::Error::NeedMore) | Err(oxideav_core::Error::Eof) => break,
-            Err(e) => {
-                if out.as_ref().is_none_or(Vec::is_empty) {
-                    return Err(FrameworkError::internal(format!(
-                        "image encode failed: {codec}: {e}"
-                    )));
-                }
-                break;
-            }
-        }
-    }
-    let out = out.unwrap_or_default();
-    if out.is_empty() {
-        return Err(FrameworkError::internal(format!(
-            "image encode failed: {codec} produced no output"
-        )));
-    }
-    Ok(out)
 }
 
 /// The mean colour of the canvas as `#rrggbb`.
