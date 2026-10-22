@@ -432,11 +432,9 @@ fn fallback_format(mime: &str, path: &str) -> Result<OutputFormat, FrameworkErro
         "image/webp" => Ok(OutputFormat::WebP),
         "image/gif" => Ok(OutputFormat::Gif),
         "image/bmp" | "image/x-ms-bmp" => Ok(OutputFormat::Bmp),
-        _ => {
-            return Err(FrameworkError::param(format!(
-                "publication image `{path}` cannot retain its original format `{mime}`"
-            )));
-        }
+        _ => Err(FrameworkError::param(format!(
+            "publication image `{path}` cannot retain its original format `{mime}`"
+        ))),
     }
 }
 // Inventory-only rasters retain their keys so CSS and module references stay valid.

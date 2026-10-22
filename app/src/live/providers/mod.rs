@@ -35,6 +35,9 @@ const UPLOAD_CONTROLS: [&str; 14] = [
 /// answers. A signed-in user may start a tally at any count; a call whose
 /// `start` the policy cannot read as a count is refused.
 pub fn authorize_live() {
+    Gate::define::<String, String>("live:topic.event-tally", |principal, _| {
+        !principal.is_empty()
+    });
     Gate::define::<ToolCaller, LiveMountRequest>("live:app.tally.mount", |caller, mount| {
         caller.is_user()
             && mount
@@ -43,6 +46,7 @@ pub fn authorize_live() {
                 .is_some()
     });
     Gate::define::<String, String>("live:app.activity-feed.stream.activity", |_, _| true);
+    Gate::define::<String, String>("live:app.event-tally.stream.changes", |_, _| true);
     Gate::define::<String, String>("live:app.live-native-gallery.stream.activity", |_, _| true);
     for control in UPLOAD_CONTROLS {
         Gate::define::<String, String>(

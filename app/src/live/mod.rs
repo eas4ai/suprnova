@@ -16,7 +16,7 @@ pub mod search_notes;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use suprnova::live::{LiveMount, LiveRegistry, LiveTenantMiddleware, RegistryError};
+use suprnova::live::{LiveMount, LiveRegistry, LiveTenantMiddleware};
 use suprnova::rate_limit::memory::InMemoryRateLimiter;
 use suprnova::render_cache::{
     FreshnessPolicy, RenderCache, RenderCacheConfig, RenderCachePolicy, RepresentationClass,
@@ -33,6 +33,7 @@ use components::avatar_uploader::AvatarUploader;
 use components::counter::Counter;
 use components::data_display_gallery::DataDisplayGallery;
 use components::datatable_gallery::DatatableGallery;
+use components::event_tally::EventTally;
 use components::feedback_gallery::FeedbackGallery;
 use components::form_gallery::FormGallery;
 use components::live_native_gallery::LiveNativeGallery;
@@ -44,6 +45,8 @@ use suprnova::live::components::SearchBox;
 
 /// The authenticated dashboard document.
 pub const DASHBOARD_PATH: &str = "/live";
+/// The shared tally rebuilt from domain facts.
+pub const EVENT_TALLY_PATH: &str = "/live/event-tally";
 /// The scoped framework search component, mounted by index identity.
 pub const SEARCH_PATH: &str = "/live/search";
 /// The form gallery: every presentational library component on one page.
@@ -72,10 +75,12 @@ pub const ME_PATH: &str = "/live/me";
 pub const REACQUIRE_PATH: &str = "/account/uploads/{handle}/reacquire";
 
 /// Builds the registry of every Live component in this application.
-pub fn registry() -> Result<LiveRegistry, RegistryError> {
+pub fn registry() -> Result<LiveRegistry, FrameworkError> {
     let registry = LiveRegistry::builder()
+        .topic(crate::event_sourcing::TALLY_TOPIC)?
         .register::<SearchBox>()?
         .register::<Counter>()?
+        .register::<EventTally>()?
         .register::<AvatarUploader>()?
         .register::<ActivityFeed>()?
         .register::<FormGallery>()?
@@ -331,6 +336,8 @@ fn tenant() -> LiveTenantMiddleware {
 /// rate-limit middleware, the authenticated reacquisition route, and the two
 /// document routes with their islands.
 pub fn routes(router: Router) -> Result<Router, FrameworkError> {
+    let event_tally =
+        LiveMount::<EventTally>::identity_bound(EVENT_TALLY_PATH, "event-tally", "event-tally")?;
     let dashboard = DashboardMounts::declare()?;
     let search = SearchMounts::declare()?;
     let forms = FormsMounts::declare()?;
@@ -361,6 +368,25 @@ pub fn routes(router: Router) -> Result<Router, FrameworkError> {
         .middleware(tenant())
         .middleware(live_rate_limit())
         .into();
+
+    let handler_tally = event_tally.clone();
+    let router: Router = router
+        .get(EVENT_TALLY_PATH, move |request: Request| {
+            let mount = handler_tally.clone();
+            async move { pages::event_tally(request, &mount).await }
+        })
+        .middleware(AuthMiddleware::redirect_to("/login"))
+        .middleware(tenant())
+        .into();
+    let router: Router = router
+        .post(
+            crate::event_sourcing::ADD_PATH,
+            crate::event_sourcing::increment,
+        )
+        .middleware(AuthMiddleware::redirect_to("/login"))
+        .middleware(tenant())
+        .into();
+    let router = router.try_live_mount(&event_tally)?;
 
     let handler_mounts = dashboard.clone();
     let router: Router = router

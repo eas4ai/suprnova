@@ -13,3 +13,5 @@ pub mod live_native_gallery;
 pub mod navigation_gallery;
 pub mod overlay_gallery;
 pub mod tally;
+
+pub mod event_tally;

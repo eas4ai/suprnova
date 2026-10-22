@@ -108,6 +108,33 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   bind `stats` to the per-user `notes` family (`manual/live.md`,
   `manual/frontend-pages.md`).
 
+- **Event sourcing.** `#[suprnova::domain_event(name, version)]` declares a
+  fact with a stable stored name and schema version, `#[suprnova::aggregate]`
+  plus the `AggregateRoot` trait rebuild an aggregate from its history, and
+  `Aggregate::record(..).await` then `Aggregate::persist().await` appends facts
+  in their own transaction with an optimistic version check, so two writers
+  never record the same aggregate version (a stale version is a 409 conflict).
+  `apply` receives a `Fact` view that is identical when recording and when
+  rebuilding, so a snapshot always equals a full rebuild. `Projector` handlers
+  keep read models and `Reactor` handlers run side effects once; a
+  `QueuedProjector` runs on the queue worker and never reads a synchronous
+  projection. Projectors checkpoint by stored event id and `EventReplay`
+  rebuilds them from the start in event order, synchronous handlers before
+  queued ones per page, while reactors stay silent. Snapshots shorten rebuilds.
+  Three tables (`stored_events`, `snapshots`, `projector_checkpoints`) ship as
+  a framework migration for SQLite, PostgreSQL and MySQL/MariaDB; rolling it
+  back drops the history. Two domain events with one stored name refuse to
+  boot. The console commands are `event-sourcing:replay`,
+  `event-sourcing:events` and `event-sourcing:snapshot`. A projector that
+  changes a Live-bound topic signals once after the transaction commits, never
+  on rollback and never during replay. The dogfood app shows a shared tally on
+  a Live page (`manual/event-sourcing.md`).
+- **`DB_OUTCOME_SETTLE_TIMEOUT`** (`DatabaseConfig::outcome_settle_timeout`,
+  default 30 s) bounds how long a caller whose `persist` was cancelled during
+  the commit waits, on its next call, for the transaction's real outcome
+  before reporting it as unknown; `Aggregate::is_settled()` says whether that
+  wait is pending. It never cancels or bounds a transaction, query or commit.
+
 ### Changed
 
 - **The default lossy encode quality is 85, not 70.** JPEG and lossy WebP

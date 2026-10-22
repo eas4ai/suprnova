@@ -221,8 +221,10 @@ async fn pub_007_transcodes_real_images_rewrites_picture_and_preserves_stripped_
 #[tokio::test]
 async fn pub_007_quality_floor_and_configured_encode_are_enforced() {
     let source = source().await;
-    let mut options = ImageOptions::default();
-    options.quality = 84;
+    let mut options = ImageOptions {
+        quality: 84,
+        ..ImageOptions::default()
+    };
     let error = prepare(b"<img src='/images/photo.png'>", &source, &options)
         .await
         .expect_err("reject quality below 85");
@@ -281,8 +283,10 @@ async fn pub_007_kept_png_uses_maximum_lossless_recompression() {
 async fn pub_007_manifest_icons_keep_png_and_relative_references_resolve() {
     let source = source().await;
     source.write("site.webmanifest", br#"{"name":"site","icons":[{"src":"images/photo.png","sizes":"8x8","type":"image/png"}]}"#.to_vec()).await.expect("manifest source");
-    let mut options = ImageOptions::default();
-    options.document_path = "/nested/page".into();
+    let options = ImageOptions {
+        document_path: "/nested/page".into(),
+        ..ImageOptions::default()
+    };
     let prepared = prepare(
         b"<link rel='manifest' href='../site.webmanifest'><img src='../images/photo.png'>",
         &source,
@@ -349,8 +353,10 @@ async fn pub_007_remote_images_remain_external_and_missing_local_images_fail() {
 #[tokio::test]
 async fn pub_007_avif_requires_magick_configuration() {
     let source = source().await;
-    let mut options = ImageOptions::default();
-    options.avif = true;
+    let options = ImageOptions {
+        avif: true,
+        ..ImageOptions::default()
+    };
     if suprnova::media::default_driver().expect("driver").name() == "magick" {
         return;
     }
@@ -382,8 +388,10 @@ async fn pub_007_avif_magick_publishes_enabled_alternative_and_strips_metadata()
         return;
     }
     let source = source().await;
-    let mut options = ImageOptions::default();
-    options.avif = true;
+    let options = ImageOptions {
+        avif: true,
+        ..ImageOptions::default()
+    };
     let prepared = prepare(b"<img src='/images/photo.png'>", &source, &options)
         .await
         .expect("configured Magick AVIF encode");

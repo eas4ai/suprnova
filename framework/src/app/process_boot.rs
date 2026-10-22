@@ -86,6 +86,7 @@ pub(crate) async fn boot_after_hook(boot: ProcessBoot) -> Result<(), BootError> 
     App::init();
     App::boot_services()?;
     crate::authorization::init_policies();
+    crate::event_sourcing::init_registry()?;
     match boot {
         ProcessBoot::Migrations | ProcessBoot::Core => {}
         ProcessBoot::Interrupt => bootstrap_cache_store()

@@ -232,10 +232,10 @@ impl Server {
         Self::finish_boot(router, &runtime, config)
     }
 
-    /// The boot prologue both fallible constructors share: framework
-    /// services first, then the immutable Live runtime, both before any
-    /// route-construction closure runs.
+    /// Validates inventories before services and route constructors can access history.
+    /// Both fallible constructors then bind the immutable Live runtime.
     fn prepare_boot() -> Result<(ServerConfig, crate::live::LiveRuntime), crate::FrameworkError> {
+        crate::event_sourcing::init_registry()?;
         let config = Self::prepare_config()?;
         let runtime = crate::live::LiveRuntime::bind()?;
         Ok((config, runtime))
@@ -453,6 +453,7 @@ impl Server {
 
         // Register all #[policy] gates collected via inventory::submit!
         crate::authorization::init_policies();
+        crate::event_sourcing::init_registry()?;
 
         // Register the MongoDB connections when `MONGODB_URI` is set or a
         // `MongoConfig` is registered. Before the cache and the queue, so
@@ -3297,6 +3298,39 @@ async fn check_database_health() -> Result<(), String> {
     Ok(())
 }
 
+/// Redirected private visits must keep their cache bypass through the final GET.
+fn private_origin_response(mut response: HttpResponse, origin: &str) -> HttpResponse {
+    for header in ["location", "x-inertia-location"] {
+        if let Some(location) = response.header_value(header).map(str::to_owned)
+            && let Ok(base) = url::Url::parse(origin)
+            && let Ok(mut url) = base.join(&location)
+            && url.origin() == base.origin()
+            && url.username().is_empty()
+            && url.password().is_none()
+        {
+            let mut query: Vec<_> = url
+                .query_pairs()
+                .filter(|(key, _)| key != "__suprnova_origin")
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            query.push(("__suprnova_origin".into(), "1".into()));
+            url.query_pairs_mut().clear().extend_pairs(query);
+            let location = if location.starts_with('/') && !location.starts_with("//") {
+                format!(
+                    "{}{}{}",
+                    url.path(),
+                    url.query().map(|q| format!("?{q}")).unwrap_or_default(),
+                    url.fragment().map(|f| format!("#{f}")).unwrap_or_default()
+                )
+            } else {
+                url.to_string()
+            };
+            response = response.replace_header(header, location);
+        }
+    }
+    response.replace_header("Cache-Control", "private, no-store")
+}
+
 #[cfg(test)]
 mod tests {
     //! Invalid `Server::host()` strings used to panic at boot via
@@ -4118,37 +4152,4 @@ mod tests {
              and shuts the runtime down"
         );
     }
-}
-
-/// Redirected private visits must keep their cache bypass through the final GET.
-fn private_origin_response(mut response: HttpResponse, origin: &str) -> HttpResponse {
-    for header in ["location", "x-inertia-location"] {
-        if let Some(location) = response.header_value(header).map(str::to_owned)
-            && let Ok(base) = url::Url::parse(origin)
-            && let Ok(mut url) = base.join(&location)
-            && url.origin() == base.origin()
-            && url.username().is_empty()
-            && url.password().is_none()
-        {
-            let mut query: Vec<_> = url
-                .query_pairs()
-                .filter(|(key, _)| key != "__suprnova_origin")
-                .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                .collect();
-            query.push(("__suprnova_origin".into(), "1".into()));
-            url.query_pairs_mut().clear().extend_pairs(query);
-            let location = if location.starts_with('/') && !location.starts_with("//") {
-                format!(
-                    "{}{}{}",
-                    url.path(),
-                    url.query().map(|q| format!("?{q}")).unwrap_or_default(),
-                    url.fragment().map(|f| format!("#{f}")).unwrap_or_default()
-                )
-            } else {
-                url.to_string()
-            };
-            response = response.replace_header(header, location);
-        }
-    }
-    response.replace_header("Cache-Control", "private, no-store")
 }

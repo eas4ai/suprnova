@@ -59,6 +59,10 @@ pub enum UrlSource {
 /// - `DB_MAX_CONNECTIONS` - Maximum pool connections (default: 10)
 /// - `DB_MIN_CONNECTIONS` - Minimum pool connections (default: 1)
 /// - `DB_CONNECT_TIMEOUT` - Connection timeout in seconds (default: 30)
+/// - `DB_OUTCOME_SETTLE_TIMEOUT` - Outcome settlement wait in seconds (default: 30)
+///   This setting bounds the wait in seconds for the physical outcome of a transaction whose caller
+///   was dropped during finalization; if the wait expires, the outcome is reported as unknown.
+///   It never cancels or bounds a transaction, query or commit.
 /// - `DB_LOGGING` - Enable SQL logging (default: false)
 /// - `DB_IDLE_TIMEOUT` - Seconds before an idle pooled connection is closed (default: sqlx's 600; `0` disables)
 /// - `DB_MAX_LIFETIME` - Seconds a pooled connection may live (default: sqlx's 1800; `0` disables)
@@ -94,6 +98,10 @@ pub struct DatabaseConfig {
     pub min_connections: u32,
     /// Connection timeout in seconds
     pub connect_timeout: u64,
+    /// This setting bounds the wait in seconds for the physical outcome of a transaction whose caller
+    /// was dropped during finalization; if the wait expires, the outcome is reported as unknown.
+    /// It never cancels or bounds a transaction, query or commit.
+    pub outcome_settle_timeout: u64,
     /// Enable SQL query logging
     pub logging: bool,
     /// Seconds a pooled connection may sit idle before the pool closes
@@ -231,6 +239,7 @@ impl DatabaseConfig {
             max_connections: env("DB_MAX_CONNECTIONS", 10),
             min_connections: env("DB_MIN_CONNECTIONS", 1),
             connect_timeout: env("DB_CONNECT_TIMEOUT", 30),
+            outcome_settle_timeout: env("DB_OUTCOME_SETTLE_TIMEOUT", 30),
             logging: env("DB_LOGGING", false),
             idle_timeout: env_optional("DB_IDLE_TIMEOUT"),
             max_lifetime: env_optional("DB_MAX_LIFETIME"),
@@ -345,6 +354,11 @@ impl DatabaseConfig {
                 "DB_CONNECT_TIMEOUT must be > 0; a zero-second timeout fails immediately on any latency",
             ));
         }
+        if self.outcome_settle_timeout == 0 {
+            return Err(FrameworkError::param(
+                "DB_OUTCOME_SETTLE_TIMEOUT must be > 0",
+            ));
+        }
         if self.acquire_timeout == Some(0) {
             return Err(FrameworkError::param(
                 "DB_ACQUIRE_TIMEOUT must be > 0; a zero-second acquire timeout fails every \
@@ -390,6 +404,7 @@ pub struct DatabaseConfigBuilder {
     max_connections: Option<u32>,
     min_connections: Option<u32>,
     connect_timeout: Option<u64>,
+    outcome_settle_timeout: Option<u64>,
     logging: Option<bool>,
     idle_timeout: Option<u64>,
     max_lifetime: Option<u64>,
@@ -422,6 +437,14 @@ impl DatabaseConfigBuilder {
     /// Set connection timeout in seconds
     pub fn connect_timeout(mut self, seconds: u64) -> Self {
         self.connect_timeout = Some(seconds);
+        self
+    }
+
+    /// This setting bounds the wait in seconds for the physical outcome of a transaction whose caller
+    /// was dropped during finalization; if the wait expires, the outcome is reported as unknown.
+    /// It never cancels or bounds a transaction, query or commit.
+    pub fn outcome_settle_timeout(mut self, seconds: u64) -> Self {
+        self.outcome_settle_timeout = Some(seconds);
         self
     }
 
@@ -500,6 +523,9 @@ impl DatabaseConfigBuilder {
             max_connections: self.max_connections.unwrap_or(defaults.max_connections),
             min_connections: self.min_connections.unwrap_or(defaults.min_connections),
             connect_timeout: self.connect_timeout.unwrap_or(defaults.connect_timeout),
+            outcome_settle_timeout: self
+                .outcome_settle_timeout
+                .unwrap_or(defaults.outcome_settle_timeout),
             logging: self.logging.unwrap_or(defaults.logging),
             idle_timeout: self.idle_timeout.or(defaults.idle_timeout),
             max_lifetime: self.max_lifetime.or(defaults.max_lifetime),

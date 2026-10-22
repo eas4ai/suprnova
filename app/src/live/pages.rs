@@ -523,3 +523,38 @@ async fn initialize_search_gallery() -> Result<(), FrameworkError> {
     }
     Ok(())
 }
+
+#[suprnova::view(path = "live/event-tally-page.html")]
+struct EventTallyView<'a> {
+    bootstrap: &'a TrustedHtml,
+    tally: &'a TrustedHtml,
+    csrf: String,
+}
+
+/// Renders the shared tally with a stream that reloads the projector's total.
+pub async fn event_tally(
+    request: Request,
+    mount: &suprnova::live::LiveMount<super::components::event_tally::EventTally>,
+) -> Response {
+    let result: Result<HttpResponse, FrameworkError> = async {
+        let mut document = LiveDocument::from_request(&request)?;
+        let tally = document
+            .mount(mount, parameters(), MountFlags::empty())
+            .await?;
+        let bootstrap = document.bootstrap(LiveBootstrapOptions::esm())?;
+        document
+            .render(
+                view("live/event-tally-page.html")?,
+                &EventTallyView {
+                    bootstrap: bootstrap.html(),
+                    tally: tally.html(),
+                    csrf: suprnova::try_csrf_token()?,
+                },
+                intent()?,
+                AssetSet::empty(),
+            )
+            .map_err(FrameworkError::from)
+    }
+    .await;
+    result.map_err(failed)
+}

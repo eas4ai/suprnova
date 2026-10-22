@@ -1056,7 +1056,7 @@ impl AsyncState {
             let cursor = self
                 .topics
                 .hub
-                .live_topic_positions(&[topic.clone()])
+                .live_topic_positions(std::slice::from_ref(&topic))
                 .await
                 .map_err(|_| AsyncErrorKind::Unavailable)?;
             if let Some(position) = cursor

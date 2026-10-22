@@ -6,6 +6,7 @@ pub mod broadcasting;
 pub mod commands;
 pub mod config;
 pub mod controllers;
+pub mod event_sourcing;
 pub mod events;
 pub mod factories;
 pub mod features;

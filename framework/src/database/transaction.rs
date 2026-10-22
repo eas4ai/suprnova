@@ -71,6 +71,72 @@ use sea_orm::{ConnectionTrait, DatabaseTransaction, IsolationLevel, TransactionT
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Publishes the physical outcome before async observers can delay it.
+#[derive(Default)]
+pub(crate) struct OutcomeHooks(Vec<OutcomeHook>);
+struct OutcomeHook {
+    committed: Box<dyn FnOnce() + Send>,
+    failed: Box<dyn FnOnce() + Send>,
+}
+impl OutcomeHooks {
+    /// Keeps savepoint boundaries in the same unit as callback boundaries.
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Leaves earlier hooks registered when a savepoint discards later work.
+    pub(crate) fn split_off(&mut self, boundary: usize) -> Self {
+        let boundary = boundary.min(self.0.len());
+        Self(self.0.split_off(boundary))
+    }
+
+    /// Keeps publication synchronous and separate from delivery callbacks.
+    pub(crate) fn new(
+        committed: impl FnOnce() + Send + 'static,
+        failed: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        Self(vec![OutcomeHook {
+            committed: Box::new(committed),
+            failed: Box::new(failed),
+        }])
+    }
+    fn committed(self, connection_name: &str) {
+        self.run(true, connection_name);
+    }
+    fn failed(self, connection_name: &str) {
+        self.run(false, connection_name);
+    }
+    fn run(self, committed: bool, connection_name: &str) {
+        for hook in self.0 {
+            let callback = if committed {
+                hook.committed
+            } else {
+                hook.failed
+            };
+            // Publication cannot change an outcome the database has established.
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)).is_err() {
+                let outcome = if committed { "committed" } else { "failed" };
+                tracing::error!(
+                    target: "suprnova::database",
+                    connection_name,
+                    outcome,
+                    "an outcome hook panicked",
+                );
+            }
+        }
+    }
+}
+
+// Cancellation before BEGIN returns cannot have committed application writes.
+struct UnstartedOutcome(Option<OutcomeHooks>, Arc<str>);
+impl Drop for UnstartedOutcome {
+    fn drop(&mut self) {
+        if let Some(hooks) = self.0.take() {
+            hooks.failed(&self.1);
+        }
+    }
+}
+
 /// Internal state shared by [`Transaction`], [`TxHandle`], and the
 /// task-local [`CURRENT_TX`]. Pairs the SeaORM transaction handle with
 /// the logical connection name the transaction was opened against, so
@@ -83,31 +149,20 @@ use std::time::Duration;
 /// for the transaction's lifetime.
 pub(crate) struct TxState {
     parent: Option<Arc<TxState>>,
+    /// Lets concurrency regressions pause the actual nested transfer.
+    #[cfg(test)]
+    transfer_probe: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Serializes savepoint SQL with its registry boundary throughout the transaction tree.
+    structure: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(test)]
+    sql_probe: std::sync::Mutex<Option<Arc<SqlPause>>>,
     depth: usize,
     children: Arc<ChildFinalizers>,
     pub(crate) tx: Arc<DatabaseTransaction>,
     pub(crate) connection_name: Arc<str>,
-    /// Callbacks queued by
-    /// [`after_commit::register_callback`](super::after_commit::register_callback),
-    /// run in registration order once the physical commit succeeds.
-    ///
-    /// `std::sync::Mutex`, not `tokio::sync::Mutex`: registration is a
-    /// synchronous `Vec::push` and the drain is a single `mem::take`, so the
-    /// lock is never held across an `.await`.
-    pub(crate) after_commit: std::sync::Mutex<Vec<super::after_commit::AfterCommitCallback>>,
-    /// Compensating callbacks queued by
-    /// [`after_commit::register_rollback_callback`](super::after_commit::register_rollback_callback),
-    /// run when the transaction rolls back. The after-commit list is discarded
-    /// in that case.
-    pub(crate) on_rollback: std::sync::Mutex<Vec<super::after_commit::AfterCommitCallback>>,
-    /// Where both registries stood at each [`Transaction::savepoint`] still in
-    /// scope, innermost last.
-    ///
-    /// A savepoint rollback undoes the rows a deferred dispatch was waiting on,
-    /// so it has to undo the dispatch too - and without a recorded length there
-    /// is nothing to measure "registered above the savepoint" against. See
-    /// [`after_commit::SavepointMark`](super::after_commit::SavepointMark).
-    pub(crate) savepoints: std::sync::Mutex<Vec<super::after_commit::SavepointMark>>,
+    /// One lock prevents nested transfers from straddling savepoint bookkeeping.
+    /// Registration, marking, unwinding and draining never await under the guard.
+    pub(crate) registries: std::sync::Mutex<Registries>,
     #[cfg(feature = "filesystem")]
     publication_generations: PublicationGenerations,
     #[cfg(feature = "filesystem")]
@@ -164,6 +219,19 @@ impl Drop for PublicationGenerationEntry {
     }
 }
 
+/// Keeps a unit of deferred work indivisible at savepoint boundaries.
+#[derive(Default)]
+pub(crate) struct Registries {
+    /// Physical outcome publication must follow the same boundary as delivery.
+    pub(crate) outcome: OutcomeHooks,
+    /// Delivery waits for the physical commit.
+    pub(crate) after_commit: Vec<super::after_commit::AfterCommitCallback>,
+    /// Compensation runs when the corresponding writes are discarded.
+    pub(crate) on_rollback: Vec<super::after_commit::AfterCommitCallback>,
+    /// Marks share the lock so concurrent unwind cannot use a partial snapshot.
+    pub(crate) savepoints: Vec<super::after_commit::SavepointMark>,
+}
+
 /// Cancellation finalizer for the [`DB::transaction`] closure scope.
 ///
 /// The closure's scoped future owns every other framework transaction
@@ -217,9 +285,9 @@ struct ChildFinalizers {
     done: tokio::sync::Notify,
 }
 
-// A cancelled inner scope can still be rolling back in its owned task.
-// Keep the enclosing outcome behind that rollback instead of treating the
-// child's reference as a leaked application handle.
+// A cancelled child scope or savepoint operation still owns its connection.
+// Keep the enclosing outcome behind that task instead of treating its
+// reference as a leaked application handle.
 struct ParentCompletion(Option<Arc<ChildFinalizers>>);
 impl Drop for ParentCompletion {
     fn drop(&mut self) {
@@ -250,20 +318,15 @@ async fn finish_transaction_inner(
     state: Arc<TxState>,
     commit: bool,
 ) -> Result<(), TransactionFailure> {
-    loop {
-        let notified = state.children.done.notified();
-        if state
-            .children
-            .count
-            .load(std::sync::atomic::Ordering::Acquire)
-            == 0
-        {
-            break;
-        }
-        notified.await;
-    }
+    wait_for_children(&state).await;
+    let structure = state.structure.clone();
     let parent = state.parent.clone();
-    let (after_commit, on_rollback) = super::after_commit::drain(&state);
+    let Registries {
+        outcome,
+        after_commit,
+        on_rollback,
+        ..
+    } = super::after_commit::drain(&state);
     let tx = state.tx.clone();
     let connection_name = state.connection_name.clone();
     drop(state);
@@ -271,6 +334,9 @@ async fn finish_transaction_inner(
     let tx = match Arc::try_unwrap(tx) {
         Ok(tx) => tx,
         Err(tx) => {
+            let callbacks =
+                super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback);
+            outcome.failed(&connection_name);
             let leaked = Arc::strong_count(&tx).saturating_sub(1);
             drop(tx);
             tracing::error!(
@@ -279,9 +345,7 @@ async fn finish_transaction_inner(
                 "DB::transaction: TxHandle clones outlived the closure; transaction is in \
                  ZOMBIE STATE until all leaked handles drop and trigger rollback",
             );
-            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
-                .compensate()
-                .await;
+            callbacks.compensate().await;
             return if commit {
                 Err(FrameworkError::internal(
                     "DB::transaction: TxHandle clones outlived the closure; \
@@ -294,39 +358,48 @@ async fn finish_transaction_inner(
         }
     };
 
+    let structure_guard = structure.lock_owned().await;
     if commit {
-        if let Err(error) = tx.commit().await {
+        let committed = commit_statement(tx, parent.as_deref()).await;
+        if let Err(error) = committed {
+            drop(structure_guard);
+            let callbacks =
+                super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback);
+            outcome.failed(&connection_name);
             tracing::error!(
                 target: "suprnova::database",
                 error = %error,
                 "Transaction commit failed; deferred dispatches will be compensated",
             );
-            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
-                .compensate()
-                .await;
+            callbacks.compensate().await;
             return Err(FrameworkError::database(error.to_string()).into());
         }
         if let Some(parent) = &parent {
-            parent
-                .after_commit
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .extend(after_commit);
-            parent
-                .on_rollback
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .extend(on_rollback);
+            #[cfg(test)]
+            {
+                let probe = parent.transfer_probe.lock().unwrap().clone();
+                if let Some(probe) = probe {
+                    probe();
+                }
+            }
+            {
+                let mut registries = parent.registries.lock().unwrap_or_else(|e| e.into_inner());
+                registries.outcome.0.extend(outcome.0);
+                registries.after_commit.extend(after_commit);
+                registries.on_rollback.extend(on_rollback);
+            }
+            drop(structure_guard);
             emit_tx_event(super::events::TransactionCommitted {
                 connection_name: connection_name.to_string(),
             })
             .await;
             return Ok(());
         }
-        drop(on_rollback);
-        // Arm the committed branch before invoking any listener code. A
-        // listener panic must not discard an already-committed dispatch.
+        drop(structure_guard);
+        // Protect delivery before any hook or listener can panic.
         let callbacks = super::after_commit::GuardedCallbacks::after_commit(after_commit);
+        outcome.committed(&connection_name);
+        drop(on_rollback);
         emit_tx_event(super::events::TransactionCommitted {
             connection_name: connection_name.to_string(),
         })
@@ -338,7 +411,10 @@ async fn finish_transaction_inner(
     } else {
         let callbacks =
             super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback);
-        if let Err(error) = tx.rollback().await {
+        let rollback = tx.rollback().await;
+        drop(structure_guard);
+        outcome.failed(&connection_name);
+        if let Err(error) = rollback {
             tracing::warn!(
                 error = %error,
                 "Transaction rollback failed; the original closure error is still surfaced. \
@@ -352,6 +428,121 @@ async fn finish_transaction_inner(
         }
         callbacks.compensate().await;
         Ok(())
+    }
+}
+
+async fn wait_for_children(state: &TxState) {
+    loop {
+        let notified = state.children.done.notified();
+        if state
+            .children
+            .count
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
+            return;
+        }
+        notified.await;
+    }
+}
+
+async fn commit_statement(
+    tx: DatabaseTransaction,
+    _parent: Option<&TxState>,
+) -> Result<(), sea_orm::DbErr> {
+    let commit = tx.commit();
+    #[cfg(test)]
+    if let Some(pause) = _parent.and_then(|state| state.sql_probe.lock().unwrap().take()) {
+        use std::future::Future;
+        let mut commit = std::pin::pin!(commit);
+        let first =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(commit.as_mut().poll(cx))).await;
+        pause
+            .pending
+            .store(first.is_pending(), std::sync::atomic::Ordering::Release);
+        pause.wait().await;
+        return match first {
+            std::task::Poll::Ready(result) => result,
+            std::task::Poll::Pending => commit.await,
+        };
+    }
+    commit.await
+}
+
+// Track the task before spawning so finalization cannot drain while its SQL is in flight.
+async fn change_savepoint(
+    state: Arc<TxState>,
+    name: String,
+    rollback: bool,
+) -> Result<(), FrameworkError> {
+    tokio::runtime::Handle::try_current()
+        .map_err(|_| FrameworkError::internal("savepoint changes require an async runtime"))?;
+    let ambient = CURRENT_TX.try_with(Clone::clone).ok().flatten();
+    state
+        .children
+        .count
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    let completion = ParentCompletion(Some(state.children.clone()));
+    super::after_commit::spawn_owned(async move {
+        let _completion = completion;
+        CURRENT_TX.scope(ambient, async move {
+            let discarded = {
+                let _structure = state.structure.clone().lock_owned().await;
+                let verb = if rollback { "ROLLBACK TO SAVEPOINT" } else { "SAVEPOINT" };
+                let sql = format!("{verb} {}", quote_identifier(state.tx.get_database_backend(), &name));
+                let statement = async {
+                    state.tx.execute_unprepared(&sql).await
+                        .map_err(|error| FrameworkError::database(error.to_string()))?;
+                    #[cfg(test)]
+                    {
+                        let pause = state.sql_probe.lock().unwrap().take();
+                        if let Some(pause) = pause { pause.wait().await; }
+                    }
+                    Ok::<(), FrameworkError>(())
+                };
+                statement.await?;
+                if rollback {
+                    super::after_commit::rollback_to_savepoint(&state, &name)
+                } else {
+                    super::after_commit::mark_savepoint(&state, &name);
+                    None
+                }
+            };
+            if rollback {
+                match discarded {
+                    Some(discarded) => {
+                        let callbacks = super::after_commit::GuardedCallbacks::compensating(
+                            discarded.after_commit, discarded.on_rollback,
+                        );
+                        discarded.outcome.failed(&state.connection_name);
+                        callbacks.compensate().await;
+                    }
+                    None => tracing::warn!(
+                        target: "suprnova::database",
+                        savepoint = name,
+                        "rolled back to a savepoint this transaction never issued through Transaction::savepoint; after-commit callbacks are kept because no registry mark exists",
+                    ),
+                }
+            }
+            Ok(())
+        }).await
+    }).await.map_err(|_| FrameworkError::internal(
+        "savepoint task ended without a result; the SQL and registry outcome is unknown",
+    ))?
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct SqlPause {
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+    pending: std::sync::atomic::AtomicBool,
+}
+#[cfg(test)]
+impl SqlPause {
+    async fn wait(&self) {
+        self.entered.notify_one();
+        self.resume.notified().await;
     }
 }
 
@@ -1503,6 +1694,9 @@ impl Transaction {
     /// valid name on every backend. Names are case-insensitive. PostgreSQL also aliases names that share
     /// their first 63 ASCII bytes; SQLite and MySQL retain all 64 bytes.
     ///
+    /// SQL and the registry mark complete together in an owned task. Cancelling
+    /// the caller stops waiting; finalization still waits for that task.
+    ///
     /// Inside [`DB::transaction`] the call also marks the after-commit
     /// registry, so a later [`Self::rollback_to`] can discard the deferred
     /// dispatches this savepoint's rows were paying for. Repeating a name is
@@ -1510,17 +1704,7 @@ impl Transaction {
     /// back, which is how every backend resolves it.
     pub async fn savepoint(&self, name: &str) -> Result<(), FrameworkError> {
         let validated = canonical_savepoint_name(name, self.backend())?;
-        let sql = format!("SAVEPOINT {}", quote_identifier(self.backend(), &validated));
-        self.inner
-            .execute_unprepared(&sql)
-            .await
-            .map(|_| ())
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        // Marked only once the statement landed: a mark for a savepoint the
-        // database never established would discard callbacks whose rows are
-        // still there.
-        super::after_commit::mark_savepoint(&self.registry, &validated);
-        Ok(())
+        change_savepoint(self.registry.clone(), validated, false).await
     }
 
     /// Issue `ROLLBACK TO SAVEPOINT <name>` against the active
@@ -1530,6 +1714,9 @@ impl Transaction {
     /// The savepoint name is validated the same way as
     /// [`Self::savepoint`] before interpolation - see that method
     /// for the accepted shape.
+    ///
+    /// SQL and the registry unwind complete together in an owned task. Hooks
+    /// and compensation run after both structure and registry guards release.
     ///
     /// Inside [`DB::transaction`] this also unwinds the after-commit registry
     /// to the savepoint: a [`Job::after_commit`](crate::queue::Job::after_commit)
@@ -1555,30 +1742,7 @@ impl Transaction {
     /// goes to the cache store, and neither shipped store is database-backed.
     pub async fn rollback_to(&self, name: &str) -> Result<(), FrameworkError> {
         let validated = canonical_savepoint_name(name, self.backend())?;
-        let sql = format!(
-            "ROLLBACK TO SAVEPOINT {}",
-            quote_identifier(self.backend(), &validated)
-        );
-        self.inner
-            .execute_unprepared(&sql)
-            .await
-            .map(|_| ())
-            .map_err(|e| FrameworkError::database(e.to_string()))?;
-        // Registry after SQL, never before: a refused `ROLLBACK TO` leaves the
-        // rows in place, and callbacks discarded for it could not be recovered.
-        match super::after_commit::rollback_to_savepoint(&self.registry, &validated) {
-            Some(compensations) => {
-                super::after_commit::run_rollback(compensations).await;
-            }
-            None => tracing::warn!(
-                target: "suprnova::database",
-                savepoint = validated,
-                "rolled back to a savepoint this transaction never issued through \
-                 Transaction::savepoint; after-commit callbacks registered inside it \
-                 are kept, because there is no recorded mark to unwind to",
-            ),
-        }
-        Ok(())
+        change_savepoint(self.registry.clone(), validated, true).await
     }
 
     /// Run `callback` once this transaction commits, and never if it rolls
@@ -1646,19 +1810,19 @@ impl Transaction {
     /// happen discards them.
     pub async fn commit(self) -> Result<(), FrameworkError> {
         let conn_name = self.connection_name.to_string();
-        let (after_commit, on_rollback) = take_own_callbacks(self.registry);
+        let registry = self.registry;
+        let inner = self.inner;
         // The COMMIT and everything it releases run on a task of their own,
         // as the closure form's finalization does. A caller cancelled while
         // the COMMIT is in flight - a client disconnect, a timeout around
         // this call - cannot take the callbacks with it: the server may
         // already have committed, and the rows would then stand without the
         // jobs and callbacks that were waiting for them.
-        super::after_commit::spawn_owned(commit_owned(
-            self.inner,
-            conn_name,
-            after_commit,
-            on_rollback,
-        ))
+        super::after_commit::spawn_owned(async move {
+            wait_for_children(&registry).await;
+            let (after_commit, on_rollback) = take_own_callbacks(registry);
+            commit_owned(inner, conn_name, after_commit, on_rollback).await
+        })
         .await
         .map_err(|error| {
             FrameworkError::internal(format!(
@@ -1677,17 +1841,17 @@ impl Transaction {
     /// after a successful rollback.
     pub async fn rollback(self) -> Result<(), FrameworkError> {
         let conn_name = self.connection_name.to_string();
-        let (after_commit, on_rollback) = take_own_callbacks(self.registry);
+        let registry = self.registry;
+        let inner = self.inner;
         // Owned by its own task for the reason `commit` gives: the
         // compensations release what the transaction held, such as a deferred
         // `push_unique`'s dedupe lock, and run only once the ROLLBACK has
         // landed, whatever happens to the caller meanwhile.
-        super::after_commit::spawn_owned(rollback_owned(
-            self.inner,
-            conn_name,
-            after_commit,
-            on_rollback,
-        ))
+        super::after_commit::spawn_owned(async move {
+            wait_for_children(&registry).await;
+            let (after_commit, on_rollback) = take_own_callbacks(registry);
+            rollback_owned(inner, conn_name, after_commit, on_rollback).await
+        })
         .await
         .map_err(|error| {
             FrameworkError::internal(format!(
@@ -1779,7 +1943,10 @@ fn take_own_callbacks(
     Vec<super::after_commit::AfterCommitCallback>,
 ) {
     match Arc::try_unwrap(registry) {
-        Ok(state) => super::after_commit::drain(&state),
+        Ok(state) => {
+            let registries = super::after_commit::drain(&state);
+            (registries.after_commit, registries.on_rollback)
+        }
         Err(_shared) => (Vec::new(), Vec::new()),
     }
 }
@@ -1893,11 +2060,29 @@ impl DB {
         >,
         T: Send,
     {
-        let settled = Self::transaction_settled(isolation_level, |transaction| async move {
-            f(&transaction).await
-        })
-        .await
-        .map_err(TransactionFailure::into_error)?;
+        Self::transaction_with_outcome(isolation_level, OutcomeHooks::default(), f).await
+    }
+
+    /// Shares finalization without delaying synchronous outcome publication.
+    pub(crate) async fn transaction_with_outcome<F, T>(
+        isolation_level: Option<IsolationLevel>,
+        outcome: OutcomeHooks,
+        f: F,
+    ) -> Result<Result<(T, Option<FrameworkError>), FrameworkError>, FrameworkError>
+    where
+        F: for<'b> FnOnce(
+            &'b Transaction,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T, FrameworkError>> + Send + 'b>,
+        >,
+        T: Send,
+    {
+        let settled =
+            Self::transaction_settled(isolation_level, outcome, |transaction| async move {
+                f(&transaction).await
+            })
+            .await
+            .map_err(TransactionFailure::into_error)?;
         Ok(match settled.finalized {
             Ok(()) => settled.value.map(|value| (value, None)),
             // Only a closure that returned `Ok` commits, so `value` is `Ok`.
@@ -1967,7 +2152,8 @@ impl DB {
         Fut: std::future::Future<Output = Result<T, FrameworkError>>,
         T: Send,
     {
-        let settled = Self::transaction_settled(isolation_level, make).await?;
+        let settled =
+            Self::transaction_settled(isolation_level, OutcomeHooks::default(), make).await?;
         settled.finalized?;
         settled.value.map_err(TransactionFailure::from)
     }
@@ -2013,6 +2199,7 @@ impl DB {
     /// ran: a listener failure, no connection, or a failed `BEGIN`.
     async fn transaction_settled<G, Fut, T>(
         isolation_level: Option<IsolationLevel>,
+        outcome: OutcomeHooks,
         make: G,
     ) -> Result<Settled<T>, TransactionFailure>
     where
@@ -2020,8 +2207,13 @@ impl DB {
         Fut: std::future::Future<Output = Result<T, FrameworkError>>,
         T: Send,
     {
-        Self::notify_before_transaction()?;
         let parent = CURRENT_TX.try_with(Clone::clone).ok().flatten();
+        let connection_name = parent.as_ref().map_or_else(
+            || Arc::<str>::from(DB::default_connection()),
+            |state| state.connection_name.clone(),
+        );
+        let mut outcome = UnstartedOutcome(Some(outcome), connection_name);
+        Self::notify_before_transaction()?;
         let depth = parent.as_ref().map_or(1, |state| state.depth + 1);
         let (tx, conn_name) = if let Some(state) = &parent {
             let tx = state
@@ -2064,14 +2256,23 @@ impl DB {
                 .as_ref()
                 .map(|state| state.publication_generations.clone())
                 .unwrap_or_default(),
+            registries: std::sync::Mutex::new(Registries {
+                outcome: outcome.0.take().unwrap_or_default(),
+                ..Registries::default()
+            }),
+            #[cfg(test)]
+            transfer_probe: std::sync::Mutex::new(None),
+            structure: parent
+                .as_ref()
+                .map(|state| state.structure.clone())
+                .unwrap_or_default(),
+            #[cfg(test)]
+            sql_probe: std::sync::Mutex::new(None),
             parent,
             depth,
             children: Arc::new(ChildFinalizers::default()),
             tx: Arc::new(tx),
             connection_name: conn_name,
-            after_commit: std::sync::Mutex::new(Vec::new()),
-            on_rollback: std::sync::Mutex::new(Vec::new()),
-            savepoints: std::sync::Mutex::new(Vec::new()),
         });
         let scope_finalizer = ScopeFinalizer::armed(tx_state.clone());
         // Keep every temporary handle inside the scoped future. On abort,
@@ -2156,14 +2357,17 @@ impl DB {
             publication_scope: crate::static_publish::batch::capture(),
             #[cfg(feature = "filesystem")]
             publication_generations: PublicationGenerations::default(),
+            registries: std::sync::Mutex::new(Registries::default()),
+            #[cfg(test)]
+            transfer_probe: std::sync::Mutex::new(None),
+            structure: Arc::default(),
+            #[cfg(test)]
+            sql_probe: std::sync::Mutex::new(None),
             parent: None,
             depth: 1,
             children: Arc::new(ChildFinalizers::default()),
             tx: inner.clone(),
             connection_name: conn_name.clone(),
-            after_commit: std::sync::Mutex::new(Vec::new()),
-            on_rollback: std::sync::Mutex::new(Vec::new()),
-            savepoints: std::sync::Mutex::new(Vec::new()),
         });
         Ok(Transaction {
             inner,
@@ -2832,5 +3036,679 @@ mod tests {
                 "attempt {attempt}: observed_max {observed_max}ms is below half of ceiling {ceiling}ms - jitter window may have collapsed"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod outcome_hook_tests {
+    use super::*;
+    use crate::testing::TestDatabase;
+    use crate::{EventFacade, FrameworkError, Listener, TransactionCommitted};
+    use std::sync::Mutex;
+
+    type Trace = Arc<Mutex<Vec<&'static str>>>;
+    fn hooks(trace: &Trace) -> OutcomeHooks {
+        let committed = trace.clone();
+        let failed = trace.clone();
+        OutcomeHooks::new(
+            move || committed.lock().unwrap().push("committed"),
+            move || failed.lock().unwrap().push("failed"),
+        )
+    }
+
+    fn panicking_hooks(trace: &Trace) -> OutcomeHooks {
+        let mut outcome = OutcomeHooks::new(
+            || panic!("committed hook panic"),
+            || panic!("failed hook panic"),
+        );
+        outcome.0.extend(hooks(trace).0);
+        outcome
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn es_001_outcome_hook_panic_log_has_no_payload() {
+        const PAYLOAD: &str = "private-application-payload-marker";
+        for committed in [true, false] {
+            OutcomeHooks::new(|| panic!("{PAYLOAD}"), || panic!("{PAYLOAD}"))
+                .run(committed, "outcome-log-connection");
+        }
+        logs_assert(|lines| {
+            let records: Vec<_> = lines
+                .iter()
+                .filter(|line| line.contains("outcome hook panicked"))
+                .collect();
+            if records.len() != 2 {
+                return Err("both known outcomes must log the hook panic".to_owned());
+            }
+            if records.iter().any(|line| line.contains(PAYLOAD)) {
+                return Err("the outcome hook log exposes application data".to_owned());
+            }
+            for outcome in ["committed", "failed"] {
+                if !records.iter().any(|line| {
+                    line.contains("connection_name=\"outcome-log-connection\"")
+                        && line.contains(&format!("outcome=\"{outcome}\""))
+                }) {
+                    return Err(format!("missing connection and known {outcome} outcome"));
+                }
+            }
+            Ok(())
+        });
+    }
+
+    async fn concurrent_savepoint_transfer(rollback_during_transfer: bool) {
+        struct Release(Option<std::sync::mpsc::Sender<()>>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+        let db = TestDatabase::sqlite_memory().await.unwrap();
+        db.execute_unprepared("CREATE TABLE transfer_rows (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        let observed = trace.clone();
+        DB::transaction(move |tx| {
+            Box::pin(async move {
+                if rollback_during_transfer {
+                    tx.savepoint("boundary").await?;
+                }
+                let parent = CURRENT_TX.with(|state| state.clone().unwrap());
+                let entered = Arc::new(tokio::sync::Notify::new());
+                let probe_entered = entered.clone();
+                let (release, receiver) = std::sync::mpsc::channel();
+                let release = Release(Some(release));
+                let receiver = Mutex::new(receiver);
+                *parent.transfer_probe.lock().unwrap() = Some(Arc::new(move || {
+                    probe_entered.notify_one();
+                    receiver
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("the test releases the transfer even during unwinding");
+                }));
+                let delivery = observed.clone();
+                let compensation = observed.clone();
+                let outcome = hooks(&observed);
+                let child = super::super::after_commit::spawn_owned(CURRENT_TX.scope(
+                    Some(parent.clone()),
+                    async move {
+                        DB::transaction_with_outcome(None, outcome, move |_tx| {
+                            Box::pin(async move {
+                                DB::statement("INSERT INTO transfer_rows VALUES (1)", vec![])
+                                    .await?;
+                                DB::after_commit(move || async move {
+                                    delivery.lock().unwrap().push("delivery");
+                                    Ok(())
+                                })
+                                .await?;
+                                DB::after_rollback(move || async move {
+                                    compensation.lock().unwrap().push("compensation");
+                                    Ok(())
+                                })
+                                .await?;
+                                Ok(())
+                            })
+                        })
+                        .await
+                    },
+                ));
+                tokio::time::timeout(Duration::from_secs(5), entered.notified())
+                    .await
+                    .expect("the child reaches the transfer after releasing its SQL savepoint");
+                let marker_tx = Transaction::current().unwrap();
+                let started = Arc::new(tokio::sync::Notify::new());
+                let marker_started = started.clone();
+                let mut marker = super::super::after_commit::spawn_owned(CURRENT_TX.scope(
+                    Some(parent.clone()),
+                    async move {
+                        marker_started.notify_one();
+                        if rollback_during_transfer {
+                            marker_tx.rollback_to("boundary").await
+                        } else {
+                            marker_tx.savepoint("boundary").await
+                        }
+                    },
+                ));
+                started.notified().await;
+                // SQL must wait too, even before transfer takes the registry lock.
+                let early = tokio::time::timeout(Duration::from_millis(200), &mut marker).await;
+                let waited = early.is_err();
+                drop(release);
+                match early {
+                    Ok(result) => result.unwrap()?,
+                    Err(_) => marker.await.unwrap()?,
+                }
+                child.await.unwrap()??;
+                assert!(waited, "savepoint SQL crossed an unfinished nested release");
+                if !rollback_during_transfer {
+                    tx.rollback_to("boundary").await?;
+                }
+                drop(parent);
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        let expected = if rollback_during_transfer {
+            ["failed", "compensation"]
+        } else {
+            ["committed", "delivery"]
+        };
+        assert_eq!(*trace.lock().unwrap(), expected);
+        assert_eq!(
+            DB::scalar::<i64>("SELECT COUNT(*) FROM transfer_rows", vec![])
+                .await
+                .unwrap(),
+            i64::from(!rollback_during_transfer)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn es_001_sql_release_and_savepoint_mark_are_atomic() {
+        concurrent_savepoint_transfer(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn es_001_sql_release_and_savepoint_rollback_are_atomic() {
+        concurrent_savepoint_transfer(true).await;
+    }
+
+    struct ResumeSql(Arc<SqlPause>);
+    impl Drop for ResumeSql {
+        fn drop(&mut self) {
+            self.0.resume.notify_one();
+        }
+    }
+
+    async fn child_with_callbacks(trace: Trace) -> Result<(), FrameworkError> {
+        let delivery = trace.clone();
+        let compensation = trace.clone();
+        DB::transaction_with_outcome(None, hooks(&trace), move |_| {
+            Box::pin(async move {
+                DB::statement("INSERT INTO transfer_rows VALUES (1)", vec![]).await?;
+                DB::after_commit(move || async move {
+                    delivery.lock().unwrap().push("delivery");
+                    Ok(())
+                })
+                .await?;
+                DB::after_rollback(move || async move {
+                    // Compensation can use the enclosing transaction after both guards release.
+                    Transaction::current()
+                        .unwrap()
+                        .savepoint("compensation")
+                        .await?;
+                    compensation.lock().unwrap().push("compensation");
+                    Ok(())
+                })
+                .await?;
+                Ok(())
+            })
+        })
+        .await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_cancelled_child_sql_completion_keeps_registry_with_rows() {
+        let db = TestDatabase::sqlite_memory().await.unwrap();
+        db.execute_unprepared("CREATE TABLE transfer_rows (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        let trace: Trace = Arc::default();
+        let observed = trace.clone();
+        DB::transaction(move |tx| Box::pin(async move {
+            tx.savepoint("boundary").await?;
+            let pause = Arc::new(SqlPause::default());
+            let _resume = ResumeSql(pause.clone());
+            *tx.registry.sql_probe.lock().unwrap() = Some(pause.clone());
+            {
+                let child = child_with_callbacks(observed);
+                let mut child = std::pin::pin!(child);
+                tokio::select! {
+                    result = &mut child => panic!("child completed before the SQL pause: {result:?}"),
+                    result = tokio::time::timeout(Duration::from_secs(5), pause.entered.notified()) => result.unwrap(),
+                }
+                assert!(pause.pending.load(std::sync::atomic::Ordering::Acquire), "the real RELEASE future must have returned Pending");
+            }
+            pause.resume.notify_one();
+            tx.rollback_to("boundary").await?;
+            Ok(())
+        })).await.unwrap();
+        assert_eq!(*trace.lock().unwrap(), ["failed", "compensation"]);
+        assert_eq!(
+            DB::scalar::<i64>("SELECT COUNT(*) FROM transfer_rows", vec![])
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    async fn cancelled_named_sql(rollback: bool) {
+        let db = TestDatabase::sqlite_memory().await.unwrap();
+        db.execute_unprepared("CREATE TABLE transfer_rows (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        let trace: Trace = Arc::default();
+        let observed = trace.clone();
+        DB::transaction(move |tx| {
+            Box::pin(async move {
+                if rollback {
+                    tx.savepoint("boundary").await?;
+                    child_with_callbacks(observed.clone()).await?;
+                }
+                let pause = Arc::new(SqlPause::default());
+                let _resume = ResumeSql(pause.clone());
+                *tx.registry.sql_probe.lock().unwrap() = Some(pause.clone());
+                let result = tokio::time::timeout(Duration::from_millis(50), async {
+                    if rollback {
+                        tx.rollback_to("boundary").await
+                    } else {
+                        tx.savepoint("boundary").await
+                    }
+                })
+                .await;
+                assert!(
+                    result.is_err(),
+                    "caller drops while its SQL result is pending"
+                );
+                tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
+                    .await
+                    .unwrap();
+                pause.resume.notify_one();
+                if !rollback {
+                    child_with_callbacks(observed).await?;
+                    tx.rollback_to("boundary").await?;
+                }
+                // The enclosing finalizer also waits for the cancelled operation.
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(*trace.lock().unwrap(), ["failed", "compensation"]);
+        assert_eq!(
+            DB::scalar::<i64>("SELECT COUNT(*) FROM transfer_rows", vec![])
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_cancelled_named_savepoint_finishes_its_registry_mark() {
+        cancelled_named_sql(false).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_cancelled_named_rollback_finishes_hooks_and_compensation() {
+        cancelled_named_sql(true).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_cancelled_manual_rollback_settles_before_commit_drains() {
+        let db = TestDatabase::sqlite_memory().await.unwrap();
+        db.execute_unprepared("CREATE TABLE transfer_rows (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        let tx = DB::begin_transaction().await.unwrap();
+        tx.savepoint("boundary").await.unwrap();
+        tx.inner
+            .execute_unprepared("INSERT INTO transfer_rows VALUES (1)")
+            .await
+            .unwrap();
+        let trace: Trace = Arc::default();
+        let delivery = trace.clone();
+        tx.after_commit(move || async move {
+            delivery.lock().unwrap().push("delivery");
+            Ok(())
+        });
+        let compensation = trace.clone();
+        CURRENT_TX
+            .scope(
+                Some(tx.registry.clone()),
+                DB::after_rollback(move || async move {
+                    compensation.lock().unwrap().push("compensation");
+                    Ok(())
+                }),
+            )
+            .await
+            .unwrap();
+        let pause = Arc::new(SqlPause::default());
+        let _resume = ResumeSql(pause.clone());
+        *tx.registry.sql_probe.lock().unwrap() = Some(pause.clone());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), tx.rollback_to("boundary"))
+                .await
+                .is_err()
+        );
+        tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
+            .await
+            .unwrap();
+        pause.resume.notify_one();
+        tx.commit().await.unwrap();
+        assert_eq!(*trace.lock().unwrap(), ["compensation"]);
+        assert_eq!(
+            DB::scalar::<i64>("SELECT COUNT(*) FROM transfer_rows", vec![])
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_panicking_committed_hook_preserves_observers_and_delivery() {
+        struct Observe(Trace);
+        #[async_trait::async_trait]
+        impl Listener<TransactionCommitted> for Observe {
+            async fn handle(&self, _: &TransactionCommitted) -> Result<(), FrameworkError> {
+                self.0.lock().unwrap().push("listener");
+                Ok(())
+            }
+        }
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                EventFacade::forget::<TransactionCommitted>();
+            }
+        }
+        let db = TestDatabase::sqlite_memory().await.unwrap();
+        db.execute_unprepared("CREATE TABLE durable (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        let _cleanup = Cleanup;
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        EventFacade::listen::<TransactionCommitted, _>(Arc::new(Observe(trace.clone()))).await;
+        let delivery = trace.clone();
+        let result = DB::transaction_with_outcome(None, panicking_hooks(&trace), move |_tx| {
+            Box::pin(async move {
+                DB::statement("INSERT INTO durable VALUES (1)", vec![]).await?;
+                DB::after_commit(move || async move {
+                    delivery.lock().unwrap().push("delivery");
+                    Ok(())
+                })
+                .await?;
+                Ok(())
+            })
+        })
+        .await;
+        assert!(
+            result.is_ok(),
+            "known commit must survive a hook panic: {result:?}"
+        );
+        result.unwrap().unwrap();
+        assert_eq!(
+            *trace.lock().unwrap(),
+            ["committed", "listener", "delivery"]
+        );
+        assert_eq!(
+            DB::scalar::<i64>("SELECT COUNT(*) FROM durable", vec![])
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_panicking_failed_hook_preserves_rollback_compensation() {
+        let _db = TestDatabase::sqlite_memory().await.unwrap();
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        let compensation = trace.clone();
+        let result = DB::transaction_with_outcome(None, panicking_hooks(&trace), move |_tx| {
+            Box::pin(async move {
+                DB::after_rollback(move || async move {
+                    compensation.lock().unwrap().push("compensation");
+                    Ok(())
+                })
+                .await?;
+                Err::<(), _>(FrameworkError::internal("original rollback reason"))
+            })
+        })
+        .await;
+        let error = result
+            .expect("known rollback must survive a hook panic")
+            .unwrap_err();
+        assert!(error.to_string().contains("original rollback reason"));
+        assert_eq!(*trace.lock().unwrap(), ["failed", "compensation"]);
+    }
+
+    #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+    struct PanicHookAggregate;
+    impl crate::AggregateRoot for PanicHookAggregate {
+        const NAME: &'static str = "tests.transaction.hook-panic-aggregate";
+        fn apply(&mut self, _: &crate::Fact<'_>) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+    }
+    #[crate::domain_event(name = "tests.transaction.hook-panic", version = 1)]
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct PanicHookFact;
+
+    struct PanicHookProjector;
+    #[async_trait::async_trait]
+    impl crate::Projector for PanicHookProjector {
+        fn name(&self) -> &'static str {
+            "tests.transaction.hook-panic-projector"
+        }
+        fn handles(&self, event: &crate::StoredEvent) -> bool {
+            event.event_type == "tests.transaction.hook-panic"
+        }
+        async fn project(&self, _: &crate::StoredEvent) -> Result<(), FrameworkError> {
+            // Put the panic before the aggregate's own publication hook.
+            CURRENT_TX.with(|state| {
+                state
+                    .as_ref()
+                    .unwrap()
+                    .registries
+                    .lock()
+                    .unwrap()
+                    .outcome
+                    .0
+                    .insert(
+                        0,
+                        OutcomeHook {
+                            committed: Box::new(|| panic!("hook before aggregate publication")),
+                            failed: Box::new(|| {}),
+                        },
+                    );
+            });
+            Ok(())
+        }
+        async fn reset(&self) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+    }
+    inventory::submit! {
+        crate::ProjectorEntry { build: || Box::new(PanicHookProjector), queued: false }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_panicking_committed_hook_preserves_aggregate_publication() {
+        use sea_orm_migration::{MigrationTrait, SchemaManager};
+        let db = TestDatabase::sqlite_memory().await.unwrap();
+        crate::CreateEventSourcingTables
+            .up(&SchemaManager::new(db.conn()))
+            .await
+            .unwrap();
+        let mut aggregate =
+            crate::Aggregate::<PanicHookAggregate>::new("b154b0eb-5ac9-4a35-bbe0-9e34c9315f72")
+                .unwrap();
+        aggregate.record(PanicHookFact).await.unwrap();
+        aggregate
+            .persist()
+            .await
+            .expect("commit is known even when an earlier hook panics");
+        assert_eq!(aggregate.persisted_version(), 1);
+        assert!(aggregate.recorded().is_empty());
+        assert!(aggregate.is_settled());
+        assert_eq!(
+            crate::EventStore::events(aggregate.uuid())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_outcome_hook_precedes_listeners_and_delivery() {
+        struct Observe(Trace);
+        #[async_trait::async_trait]
+        impl Listener<TransactionCommitted> for Observe {
+            async fn handle(&self, _: &TransactionCommitted) -> Result<(), FrameworkError> {
+                self.0.lock().unwrap().push("listener");
+                Ok(())
+            }
+        }
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                EventFacade::forget::<TransactionCommitted>();
+            }
+        }
+        let _db = TestDatabase::sqlite_memory().await.unwrap();
+        let _cleanup = Cleanup;
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        EventFacade::listen::<TransactionCommitted, _>(Arc::new(Observe(trace.clone()))).await;
+        let delivery = trace.clone();
+        DB::transaction_with_outcome(None, hooks(&trace), move |_tx| {
+            Box::pin(async move {
+                DB::after_commit(move || async move {
+                    delivery.lock().unwrap().push("delivery");
+                    Ok(())
+                })
+                .await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            *trace.lock().unwrap(),
+            ["committed", "listener", "delivery"]
+        );
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_outcome_hooks_follow_the_outermost_rollback() {
+        let _db = TestDatabase::sqlite_memory().await.unwrap();
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        let inner = trace.clone();
+        let error = DB::transaction_with_outcome(None, hooks(&trace), move |_tx| {
+            Box::pin(async move {
+                DB::transaction_with_outcome(None, hooks(&inner), |_tx| Box::pin(async { Ok(()) }))
+                    .await??;
+                assert!(inner.lock().unwrap().is_empty());
+                Err::<(), _>(FrameworkError::internal("roll back parent"))
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains("roll back parent"));
+        assert_eq!(*trace.lock().unwrap(), ["failed", "failed"]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_savepoint_rollback_fails_inner_hooks_before_outer_commit() {
+        let db = TestDatabase::sqlite_memory().await.unwrap();
+        db.execute_unprepared("CREATE TABLE savepoint_writes (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        let outer: Trace = Arc::new(Mutex::new(Vec::new()));
+        let inner: Trace = Arc::new(Mutex::new(Vec::new()));
+        let inner_in_scope = inner.clone();
+        let outer_delivery = outer.clone();
+        DB::transaction_with_outcome(None, hooks(&outer), move |tx| {
+            Box::pin(async move {
+                DB::statement("INSERT INTO savepoint_writes VALUES (1)", vec![]).await?;
+                DB::after_commit(move || async move {
+                    outer_delivery.lock().unwrap().push("delivery");
+                    Ok(())
+                })
+                .await?;
+                tx.savepoint("discard_inner").await?;
+                let inner_delivery = inner_in_scope.clone();
+                let inner_compensation = inner_in_scope.clone();
+                DB::transaction_with_outcome(None, hooks(&inner_in_scope), move |_tx| {
+                    Box::pin(async move {
+                        DB::statement("INSERT INTO savepoint_writes VALUES (2)", vec![]).await?;
+                        DB::after_commit(move || async move {
+                            inner_delivery.lock().unwrap().push("delivery");
+                            Ok(())
+                        })
+                        .await?;
+                        DB::after_rollback(move || async move {
+                            inner_compensation.lock().unwrap().push("compensation");
+                            Ok(())
+                        })
+                        .await?;
+                        Ok(())
+                    })
+                })
+                .await??;
+                assert!(inner_in_scope.lock().unwrap().is_empty());
+                tx.rollback_to("discard_inner").await?;
+                assert_eq!(*inner_in_scope.lock().unwrap(), ["failed", "compensation"]);
+                // Reusing the mark must not publish the failed outcome twice.
+                tx.rollback_to("discard_inner").await?;
+                assert_eq!(*inner_in_scope.lock().unwrap(), ["failed", "compensation"]);
+                Ok(())
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(*inner.lock().unwrap(), ["failed", "compensation"]);
+        assert_eq!(*outer.lock().unwrap(), ["committed", "delivery"]);
+        assert_eq!(
+            DB::scalar::<i64>("SELECT SUM(id) FROM savepoint_writes", vec![])
+                .await
+                .unwrap(),
+            1
+        );
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_outcome_failed_hook_runs_when_commit_fails() {
+        let db = TestDatabase::sqlite_memory().await.unwrap();
+        db.execute_unprepared("PRAGMA foreign_keys = ON; CREATE TABLE parents (id INTEGER PRIMARY KEY); CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED)").await.unwrap();
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        assert!(
+            DB::transaction_with_outcome(None, hooks(&trace), |_tx| Box::pin(async {
+                DB::statement("INSERT INTO children VALUES (1, 99)", vec![]).await?;
+                Ok(())
+            }))
+            .await
+            .unwrap()
+            .is_err()
+        );
+        assert_eq!(*trace.lock().unwrap(), ["failed"]);
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_outcome_failed_hook_runs_if_begin_never_starts() {
+        let _container = crate::testing::TestContainer::fake();
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        assert!(
+            DB::transaction_with_outcome(None, hooks(&trace), |_tx| Box::pin(async { Ok(()) }))
+                .await
+                .is_err()
+        );
+        assert_eq!(*trace.lock().unwrap(), ["failed"]);
     }
 }

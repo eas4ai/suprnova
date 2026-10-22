@@ -267,26 +267,22 @@ impl LiveTopics {
         {
             return Ok(());
         }
-        if let Some((component, stream)) = topic.split_once("::") {
-            if let Ok(component) = ComponentName::parse(component) {
-                if self
-                    .state
-                    .topics
-                    .registry
-                    .topic_for_component(&component)
-                    .is_none()
-                    && let Ok(descriptor) = self.state.topics.registry.engine().resolve(&component)
-                {
-                    if descriptor
-                        .metadata()
-                        .subscriptions()
-                        .iter()
-                        .any(|s| s.stream().as_str() == stream)
-                    {
-                        return Ok(());
-                    }
-                }
-            }
+        if let Some((component, stream)) = topic.split_once("::")
+            && let Ok(component) = ComponentName::parse(component)
+            && self
+                .state
+                .topics
+                .registry
+                .topic_for_component(&component)
+                .is_none()
+            && let Ok(descriptor) = self.state.topics.registry.engine().resolve(&component)
+            && descriptor
+                .metadata()
+                .subscriptions()
+                .iter()
+                .any(|s| s.stream().as_str() == stream)
+        {
+            return Ok(());
         }
         Err(FrameworkError::internal(format!(
             "Live topic `{topic}` is not registered"
@@ -352,6 +348,7 @@ impl LiveTopics {
 
     /// Coalesces changes in an explicit request-like or job-like scope.
     /// Nested batches reuse the enclosing unit so they cannot flush it early.
+    /// Once flushing starts, its owned task keeps committed changes across caller cancellation.
     pub async fn batch<F: Future>(&self, future: F) -> Result<F::Output, FrameworkError> {
         if CHANGES.try_with(|_| ()).is_ok() {
             Ok(future.await)
@@ -375,6 +372,7 @@ impl LiveTopics {
     }
 
     /// Merges replay changes after their transactions resolve, including late manual commits.
+    /// An owned task finishes publication if the caller drops; waiting callers receive its error.
     pub async fn suppress<F, Fut>(&self, replay: F) -> Result<Fut::Output, FrameworkError>
     where
         F: FnOnce() -> Fut,
@@ -587,7 +585,7 @@ impl Drop for Registration {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
             );
-            flush_detached(batch);
+            divert_flush(batch);
         }
     }
 }
@@ -644,7 +642,17 @@ fn close(buffer: &Buffer) -> Option<ReadyBatch> {
     buffer.closed = true;
     ready(&mut buffer)
 }
-async fn flush(mut batch: Option<ReadyBatch>) -> Result<(), FrameworkError> {
+// Transfer the complete batch before the first publication can suspend.
+async fn flush(batch: Option<ReadyBatch>) -> Result<(), FrameworkError> {
+    match flush_detached(batch)? {
+        Some(task) => task.await.map_err(|_| {
+            FrameworkError::internal("Live topic flush task ended without completing publication")
+        })?,
+        None => Ok(()),
+    }
+}
+
+async fn flush_batch(mut batch: Option<ReadyBatch>) -> Result<(), FrameworkError> {
     let mut failure = None;
     while let Some(ReadyBatch {
         changes,
@@ -664,10 +672,10 @@ async fn flush(mut batch: Option<ReadyBatch>) -> Result<(), FrameworkError> {
             batch = release(&mut buffer);
         } else {
             for change in changes {
-                if let Err(error) = change.publish().await {
-                    if failure.is_none() {
-                        failure = Some(error);
-                    }
+                if let Err(error) = change.publish().await
+                    && failure.is_none()
+                {
+                    failure = Some(error);
                 }
             }
         }
@@ -677,20 +685,35 @@ async fn flush(mut batch: Option<ReadyBatch>) -> Result<(), FrameworkError> {
         None => Ok(()),
     }
 }
-fn flush_detached(batch: Option<ReadyBatch>) {
-    if batch.is_some() {
-        crate::database::after_commit::spawn_detached(async move {
-            if let Err(error) = flush(batch).await {
+fn flush_detached(
+    batch: Option<ReadyBatch>,
+) -> Result<Option<tokio::task::JoinHandle<Result<(), FrameworkError>>>, FrameworkError> {
+    let Some(batch) = batch else {
+        return Ok(None);
+    };
+    tokio::runtime::Handle::try_current()
+        .map_err(|_| FrameworkError::internal("Live topic flush requires an async runtime"))?;
+    Ok(Some(crate::database::after_commit::spawn_owned(
+        async move {
+            let result = flush_batch(Some(batch)).await;
+            if let Err(error) = &result {
                 tracing::error!(%error, "committed Live topic change could not flush");
             }
-        });
+            result
+        },
+    )))
+}
+
+fn divert_flush(batch: Option<ReadyBatch>) {
+    if let Err(error) = flush_detached(batch) {
+        tracing::error!(%error, "committed Live topic change could not start flushing");
     }
 }
 struct BufferGuard(Option<Buffer>);
 impl Drop for BufferGuard {
     fn drop(&mut self) {
         if let Some(buffer) = self.0.take() {
-            flush_detached(close(&buffer));
+            divert_flush(close(&buffer));
         }
     }
 }

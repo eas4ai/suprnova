@@ -1345,6 +1345,7 @@ where
         // CLI commands, and scheduled tasks all see registered gates - not
         // only the web server path. The inner `Once` makes this idempotent.
         crate::authorization::init_policies();
+        crate::event_sourcing::init_registry()?;
 
         // Destructure self to avoid partial move issues
         let Application {

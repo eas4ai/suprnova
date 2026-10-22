@@ -192,19 +192,20 @@ pub(crate) fn queue_on(state: &super::transaction::TxState, cb: AfterCommitCallb
 
 /// Push `cb` onto `registry` of `state`.
 fn push_to(state: &super::transaction::TxState, cb: AfterCommitCallback, registry: Registry) {
+    let mut registries = state.registries.lock().unwrap_or_else(|e| e.into_inner());
     let vec = match registry {
-        Registry::AfterCommit => &state.after_commit,
-        Registry::Rollback => &state.on_rollback,
+        Registry::AfterCommit => &mut registries.after_commit,
+        Registry::Rollback => &mut registries.on_rollback,
     };
     // Recover in place on a poisoned lock. The critical section is a single
     // `Vec::push` with no user code in it, so poisoning is unreachable in
     // practice; if it ever happened, the registry is still structurally intact
     // and dropping the callback (or running it early, inside the very
     // transaction it is meant to outlive) would both be worse than using it.
-    vec.lock().unwrap_or_else(|e| e.into_inner()).push(cb);
+    vec.push(cb);
 }
 
-/// Where both callback registries stood when a `SAVEPOINT` was issued.
+/// Where callbacks and outcome hooks stood when a `SAVEPOINT` was issued.
 ///
 /// Laravel keys the same bookkeeping by integer nesting level, because its
 /// manager owns the counter. Suprnova's caller names the point instead
@@ -222,27 +223,27 @@ pub(crate) struct SavepointMark {
     after_commit_len: usize,
     /// Length of the rollback registry at the savepoint.
     on_rollback_len: usize,
+    /// Hooks above this boundary belong to writes the savepoint can discard.
+    outcome_len: usize,
 }
 
-/// Record where both registries stand, so a later `rollback_to` on `name` can
-/// tell what was registered above this point.
+/// Records callback and hook boundaries so rollback only discards later work.
 ///
 /// Called only after the `SAVEPOINT` statement itself succeeded: a mark for a
 /// savepoint the database never established would discard callbacks the rows
 /// still back.
 pub(crate) fn mark_savepoint(state: &super::transaction::TxState, name: &str) {
-    let after_commit_len = registry_len(&state.after_commit);
-    let on_rollback_len = registry_len(&state.on_rollback);
-    let mut marks = state.savepoints.lock().unwrap_or_else(|e| e.into_inner());
-    marks.push(SavepointMark {
+    let mut registries = state.registries.lock().unwrap_or_else(|e| e.into_inner());
+    let mark = SavepointMark {
         name: name.to_owned(),
-        after_commit_len,
-        on_rollback_len,
-    });
+        after_commit_len: registries.after_commit.len(),
+        on_rollback_len: registries.on_rollback.len(),
+        outcome_len: registries.outcome.len(),
+    };
+    registries.savepoints.push(mark);
 }
 
-/// Unwind both registries to `name`'s mark and hand back the rollback callbacks
-/// that compensate for what was discarded.
+/// Unwinds to the mark and returns compensation and failed outcome hooks.
 ///
 /// Returns `None` when no mark carries `name`, which means the savepoint was
 /// established out of band (raw `SAVEPOINT` SQL rather than
@@ -257,58 +258,46 @@ pub(crate) fn mark_savepoint(state: &super::transaction::TxState, name: &str) {
 pub(crate) fn rollback_to_savepoint(
     state: &super::transaction::TxState,
     name: &str,
-) -> Option<Vec<AfterCommitCallback>> {
-    let (after_commit_len, on_rollback_len) = {
-        let mut marks = state.savepoints.lock().unwrap_or_else(|e| e.into_inner());
+) -> Option<super::transaction::Registries> {
+    let mut registries = state.registries.lock().unwrap_or_else(|e| e.into_inner());
+    let (after_commit_len, on_rollback_len, outcome_len) = {
+        let marks = &mut registries.savepoints;
         // From the top: a repeated name means the innermost savepoint shadows
         // the outer one, which is exactly how the database resolves it.
         let idx = marks.iter().rposition(|m| m.name == name)?;
-        let mark = (marks[idx].after_commit_len, marks[idx].on_rollback_len);
+        let mark = (
+            marks[idx].after_commit_len,
+            marks[idx].on_rollback_len,
+            marks[idx].outcome_len,
+        );
         marks.truncate(idx + 1);
         mark
     };
 
-    // Both guards are taken and released without an `.await` between them: the
-    // compensations run in the caller, after every lock is back.
-    {
-        let mut after_commit = state.after_commit.lock().unwrap_or_else(|e| e.into_inner());
-        // `truncate` is a no-op when the list is already shorter, which is the
-        // case for a `rollback_to` that follows another one on the same name.
-        after_commit.truncate(after_commit_len);
-    }
-    let mut on_rollback = state.on_rollback.lock().unwrap_or_else(|e| e.into_inner());
-    if on_rollback_len >= on_rollback.len() {
-        return Some(Vec::new());
-    }
-    Some(on_rollback.split_off(on_rollback_len))
+    // Move every vector before releasing the lock. Captured callback values are
+    // dropped by the guarded caller, so no application code runs under this lock.
+    let after_boundary = after_commit_len.min(registries.after_commit.len());
+    let rollback_boundary = on_rollback_len.min(registries.on_rollback.len());
+    Some(super::transaction::Registries {
+        outcome: registries.outcome.split_off(outcome_len),
+        after_commit: registries.after_commit.split_off(after_boundary),
+        on_rollback: registries.on_rollback.split_off(rollback_boundary),
+        savepoints: Vec::new(),
+    })
 }
 
-/// Current length of one registry.
+/// Takes the registries together so finalization cannot observe a partial transfer.
 ///
-/// Split out so the two reads in [`mark_savepoint`] share one poisoning policy
-/// with the rest of the module: recover in place, because the critical section
-/// holds no user code and dropping a registry would be worse than reusing it.
-fn registry_len(vec: &std::sync::Mutex<Vec<AfterCommitCallback>>) -> usize {
-    vec.lock().unwrap_or_else(|e| e.into_inner()).len()
-}
-
-/// Take both registries off `state`, leaving them empty.
-///
-/// Drained as a pair, before the physical commit or rollback, because
+/// Drained together, before the physical commit or rollback, because
 /// `TxState` holds an `Arc<DatabaseTransaction>`: `DB::transaction` has to drop
 /// its `TxState` clone before `Arc::try_unwrap` can reach the transaction to
 /// commit it. The callbacks then run after that, outside the `CURRENT_TX`
 /// scope, so a callback that dispatches its own work sees no ambient
 /// transaction and acts immediately rather than deferring into a registry
 /// nothing will drain again.
-pub(crate) fn drain(
-    state: &super::transaction::TxState,
-) -> (Vec<AfterCommitCallback>, Vec<AfterCommitCallback>) {
-    let take = |vec: &std::sync::Mutex<Vec<AfterCommitCallback>>| {
-        let mut guard = vec.lock().unwrap_or_else(|e| e.into_inner());
-        std::mem::take(&mut *guard)
-    };
-    (take(&state.after_commit), take(&state.on_rollback))
+pub(crate) fn drain(state: &super::transaction::TxState) -> super::transaction::Registries {
+    let mut registries = state.registries.lock().unwrap_or_else(|e| e.into_inner());
+    std::mem::take(&mut *registries)
 }
 
 /// Run every after-commit callback in registration order, consuming the

@@ -1738,10 +1738,13 @@ async fn pub_002_round2_5_metadata_excludes_representation_headers() {
         "max-age=31536000".into(),
     );
     p.publish(vec![rendered]).await.unwrap();
-    let writes = state.metadata_writes.lock().unwrap();
-    let (key, metadata) = writes
+    let (key, metadata) = state
+        .metadata_writes
+        .lock()
+        .unwrap()
         .iter()
         .find(|(key, _)| key.starts_with("_pub/") && key.ends_with(".html"))
+        .cloned()
         .unwrap();
     assert!(metadata.contains_key("content-security-policy"));
     assert!(metadata.contains_key("strict-transport-security"));
@@ -1752,7 +1755,7 @@ async fn pub_002_round2_5_metadata_excludes_representation_headers() {
         );
     }
     assert_eq!(
-        disk.stat(key).await.unwrap().content_type(),
+        disk.stat(&key).await.unwrap().content_type(),
         Some("text/html; charset=utf-8")
     );
 }
