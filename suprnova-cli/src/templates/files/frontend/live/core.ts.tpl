@@ -355,7 +355,9 @@ export function startInertiaLive(
     ]);
     const reloaded = new Set(
       reloadedProps.filter(
-        (prop) => Object.hasOwn(page.props, prop) && !omitted.has(prop),
+        (prop) =>
+          Object.prototype.hasOwnProperty.call(page.props, prop) &&
+          !omitted.has(prop),
       ),
     );
     for (const topic of [...renderedCursors.keys()]) {
