@@ -734,10 +734,11 @@ impl Publisher {
         let mut uploads = Vec::new();
         let mut seen = BTreeSet::new();
         for mut page in pages {
+            let mutable_graph = page.assets.keys().any(|key| !self.fingerprinted(key));
             let mut asset_paths = BTreeMap::new();
             for key in page.assets.keys() {
                 let fingerprinted = self.fingerprinted(key);
-                let target = if fingerprinted {
+                let target = if fingerprinted && !mutable_graph {
                     key.clone()
                 } else {
                     format!("_pub/{revision}/_assets/{key}")
@@ -819,7 +820,6 @@ impl Publisher {
                     source: None,
                 });
             }
-            let mutable_graph = page.assets.keys().any(|key| !self.fingerprinted(key));
             for (key, (bytes, content_type)) in page.assets {
                 safe_path(&format!("/{key}"))?;
                 if key.starts_with("_pub/") {
@@ -840,7 +840,11 @@ impl Publisher {
                     ),
                 ]);
                 let entry = ObjectEntry {
-                    path: asset_paths[&key].trim_start_matches('/').to_string(),
+                    path: if fingerprinted {
+                        key.clone()
+                    } else {
+                        asset_paths[&key].trim_start_matches('/').to_string()
+                    },
                     url: format!("/{key}"),
                     digest: digest(&bytes),
                     asset: true,
@@ -899,8 +903,17 @@ impl Publisher {
             version: revision.clone(),
             ..PublishOutcome::default()
         };
+        let previous_prefix = format!("_pub/{}/", previous.live);
         let old_object = |upload: &Upload| {
-            live.and_then(|v| v.objects.iter().find(|o| o.url == upload.entry.url))
+            live.and_then(|version| {
+                version
+                    .objects
+                    .iter()
+                    .filter(|object| {
+                        object.url == upload.entry.url && object.asset == upload.entry.asset
+                    })
+                    .max_by_key(|object| object.path.starts_with(&previous_prefix))
+            })
         };
         let unchanged = |upload: &Upload| {
             old_object(upload)
@@ -984,6 +997,16 @@ impl Publisher {
                 upload.entry.path.clone_from(&old.path);
             }
             objects.push(upload.entry.clone());
+        }
+        if omitted.iter().any(|object| !object.asset)
+            && let Some(live) = live
+        {
+            // Omitted documents still refer to their earlier revision's asset graph.
+            for old in live.objects.iter().filter(|object| object.asset) {
+                if !objects.iter().any(|object| object.path == old.path) {
+                    objects.push(old.clone());
+                }
+            }
         }
         objects.sort_by(|a, b| a.path.cmp(&b.path));
         next.live = revision.clone();

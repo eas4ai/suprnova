@@ -181,7 +181,10 @@ that revision's `_assets/` directory. Unchanged mutable dependencies are copied
 server side when storage supports copy, or uploaded again otherwise. Relative
 CSS URLs and module imports therefore resolve in the same revision. Fingerprinted
 assets retain their canonical names; a mutable graph also has revision-local
-copies of its fingerprinted dependencies for relative references.
+copies of its fingerprinted dependencies for relative references. Entrypoints
+in a mixed graph use those revision-local copies. Partial publication retains
+the earlier asset graph for omitted pages; a full replacement releases those
+references for pruning.
 
 ## CDN drivers
 

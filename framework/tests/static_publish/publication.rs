@@ -1587,3 +1587,6 @@ async fn pub_002_round2_3_mutable_dependencies_share_the_new_revision() {
 
 #[path = "fencing.rs"]
 mod fencing;
+
+#[path = "graphs.rs"]
+mod graphs;
