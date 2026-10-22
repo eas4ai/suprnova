@@ -356,25 +356,45 @@ impl StaticPublication {
                 )));
             }
         }
-        if let Some(source) = &source {
-            #[cfg(feature = "media")]
-            let mut options =
-                crate::lock::read(&self.image_options, "publication image options")?.clone();
-            #[cfg(feature = "media")]
-            {
-                options.document_path.clone_from(&page.path);
-                let prepared = super::images::prepare(&page.html, source, &options).await?;
-                page.html = prepared.html;
-                (page.html, page.json) = crate::inertia::publication::rewrite_public_image_urls(
-                    &page.html,
-                    &page.json,
-                    &prepared.replacements,
-                )?;
-                for asset in prepared.assets {
-                    page.assets
-                        .insert(asset.path, (asset.bytes, asset.content_type));
+        #[cfg(not(feature = "media"))]
+        if super::assets::tags(std::str::from_utf8(&page.html).map_err(error)?)
+            .iter()
+            .flat_map(|(_, _, tag)| &tag.attrs)
+            .flat_map(|(_, value)| super::assets::parse_srcset(value))
+            .any(|(url, _)| super::assets::raster_data_mime(&url).is_some())
+        {
+            return Err(error(format!(
+                "route {}: raster data URL requires the media feature",
+                page.path
+            )));
+        }
+        #[cfg(feature = "media")]
+        let mut options =
+            crate::lock::read(&self.image_options, "publication image options")?.clone();
+        #[cfg(feature = "media")]
+        {
+            options.document_path.clone_from(&page.path);
+            let image_source = match &source {
+                Some(source) => source.clone(),
+                None => {
+                    opendal::Operator::new(opendal::services::Memory::default()).map_err(error)?
                 }
+            };
+            let prepared = super::images::prepare(&page.html, &image_source, &options)
+                .await
+                .map_err(|failure| error(format!("route {}: {failure}", page.path)))?;
+            page.html = prepared.html;
+            (page.html, page.json) = crate::inertia::publication::rewrite_public_image_urls(
+                &page.html,
+                &page.json,
+                &prepared.replacements,
+            )?;
+            for asset in prepared.assets {
+                page.assets
+                    .insert(asset.path, (asset.bytes, asset.content_type));
             }
+        }
+        if let Some(source) = &source {
             // HTML variants replace their original references; Vite consumers retain their keys.
             let mut referenced = super::assets::referenced_assets(&page.html, &page.path)?;
             referenced.extend(vite_inventory);

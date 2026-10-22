@@ -457,6 +457,11 @@ the alpha channel. It writes `WebPLossless` lossless.
 A WebP source that you resize and do not convert is written as `WebP`.
 An opaque one is therefore written lossy.
 
+Static publication prepares relative images, absolute images on the application's
+public origin and raster data URLs. Third-party images are neither transcoded nor
+published. See [Static publication](static-publication.md#images) for preparation
+and refusal behavior.
+
 ### Lossless PNG recompression
 
 Use `recompress_png` when an image must stay PNG. It has no quality

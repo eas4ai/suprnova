@@ -158,23 +158,19 @@ pub(super) fn local_path(
     document_path: &str,
 ) -> Result<Option<String>, FrameworkError> {
     let reference = reference.trim();
-    if reference.is_empty()
-        || reference.starts_with('#')
-        || reference.starts_with("//")
-        || url::Url::parse(reference).is_ok()
-    {
+    if reference.is_empty() || reference.starts_with('#') {
         return Ok(None);
     }
-    let base = url::Url::parse(&format!(
-        "https://publication.invalid/{}",
-        document_path.trim_start_matches('/')
-    ))
-    .map_err(|error| {
-        FrameworkError::param(format!("invalid publication document path: {error}"))
+    let mut base = url::Url::parse(&crate::routing::url::app_url()).map_err(|error| {
+        FrameworkError::param(format!("invalid publication application URL: {error}"))
     })?;
+    base.set_path(&format!("/{}", document_path.trim_start_matches('/')));
     let resolved = base.join(reference).map_err(|error| {
         FrameworkError::param(format!("invalid publication asset URL: {error}"))
     })?;
+    if resolved.origin() != base.origin() {
+        return Ok(None);
+    }
     let decoded = percent_encoding::percent_decode_str(resolved.path())
         .decode_utf8()
         .map_err(|error| {
@@ -187,6 +183,25 @@ pub(super) fn local_path(
         ));
     }
     Ok((!path.is_empty()).then(|| path.to_string()))
+}
+
+// Only raster data URLs cross the image preparation boundary.
+pub(super) fn raster_data_mime(reference: &str) -> Option<&str> {
+    let (scheme, data) = reference.split_once(':')?;
+    if !scheme.eq_ignore_ascii_case("data") {
+        return None;
+    }
+    let mime = data.split([';', ',']).next()?;
+    [
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "image/bmp",
+    ]
+    .iter()
+    .any(|expected| mime.eq_ignore_ascii_case(expected))
+    .then_some(mime)
 }
 
 pub(super) fn is_raster(path: &str) -> bool {

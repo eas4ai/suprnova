@@ -2,13 +2,14 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use html5ever::tokenizer::TagKind;
 use sha2::{Digest, Sha256};
 
 use super::assets::{
-    attribute, escape, is_raster, is_vector_or_icon, local_path, parse_srcset, serialize_tag,
-    set_attribute, tags, with_descriptor,
+    attribute, escape, is_raster, is_vector_or_icon, local_path, parse_srcset, raster_data_mime,
+    serialize_tag, set_attribute, tags, with_descriptor,
 };
 use crate::error::FrameworkError;
 use crate::media::{Image, MagickCliDriver, OutputFormat, PngEffort};
@@ -116,13 +117,19 @@ impl Preparation<'_> {
         if let Some(variants) = self.variants.get(&key) {
             return Ok(variants.clone());
         }
-        let bytes = self.read(path).await?;
+        let inline = raster_data_mime(path).is_some();
+        let bytes = if inline {
+            decode_raster_data(path)?
+        } else {
+            self.read(path).await?
+        };
+        let label = if inline { "inline raster" } else { path };
         let mime = infer::get(&bytes)
             .map(|kind| kind.mime_type())
             .ok_or_else(|| {
-                FrameworkError::param(format!("publication image `{path}` has an unknown format"))
+                FrameworkError::param(format!("publication image `{label}` has an unknown format"))
             })?;
-        let original_format = fallback_format(mime, path)?;
+        let original_format = fallback_format(mime, label)?;
         let pipeline = Image::from_bytes(bytes).quality(self.options.quality);
         let original = if original_format == OutputFormat::Png && keep {
             pipeline
@@ -190,8 +197,8 @@ impl Preparation<'_> {
         {
             for icon in icons {
                 if let Some(src) = icon.get("src").and_then(serde_json::Value::as_str)
-                    && let Some(icon_path) = local_path(src, &format!("/{path}"))?
-                    && is_raster(&icon_path)
+                    && let Some(icon_path) = image_path(src, &format!("/{path}"))?
+                    && (is_raster(&icon_path) || raster_data_mime(&icon_path).is_some())
                 {
                     let variants = self.image(&icon_path, true).await?;
                     icon["src"] = variants.original.into();
@@ -223,7 +230,7 @@ impl Preparation<'_> {
         let mut all_webp = true;
         let mut all_avif = true;
         for (url, descriptor) in candidates {
-            let variants = if let Some(path) = local_path(&url, &self.options.document_path)?
+            let variants = if let Some(path) = image_path(&url, &self.options.document_path)?
                 && !is_vector_or_icon(&path)
             {
                 Some(self.image(&path, keep).await?)
@@ -265,7 +272,8 @@ impl Preparation<'_> {
 /// Prepare local document images before switching a publication live.
 ///
 /// Recognizes HTML image elements, responsive candidates, picture sources,
-/// icon links and web-manifest icons. Remote and data URLs stay unchanged.
+/// icon links and web-manifest icons. Same-origin absolute URLs and raster
+/// data URLs are prepared too. Third-party and non-raster data URLs stay unchanged.
 /// The source operator is rooted at the application's public directory.
 /// Returns errors for unreadable or malformed local images, invalid paths,
 /// quality below 85 or AVIF without the configured Magick driver.
@@ -348,14 +356,14 @@ pub async fn prepare(
                 .unwrap_or_default()
                 .to_ascii_lowercase();
             if let Some(href) = attribute(&tag, "href")
-                && let Some(path) = local_path(href, &options.document_path)?
+                && let Some(path) = image_path(href, &options.document_path)?
             {
                 let replacement = if rel.split_ascii_whitespace().any(|part| part == "manifest") {
                     Some(preparation.manifest(&path).await?)
                 } else if rel
                     .split_ascii_whitespace()
                     .any(|part| part == "icon" || part == "apple-touch-icon")
-                    && is_raster(&path)
+                    && (is_raster(&path) || raster_data_mime(&path).is_some())
                 {
                     Some(preparation.image(&path, true).await?.original)
                 } else {
@@ -365,6 +373,26 @@ pub async fn prepare(
                     set_attribute(&mut tag, "href", &replacement);
                     changed = true;
                 }
+            }
+        }
+        let fields: &[&str] = match name.as_str() {
+            "video" => &["src", "poster"],
+            "audio" | "track" | "embed" => &["src"],
+            "object" => &["data"],
+            "link" => &["href", "imagesrcset"],
+            _ => &[],
+        };
+        for field in fields {
+            if let Some(value) = attribute(&tag, field).map(str::to_string)
+                && parse_srcset(&value)
+                    .iter()
+                    .any(|(url, _)| raster_data_mime(url).is_some())
+            {
+                let (original, _, _) = preparation
+                    .candidates(&value, keep, field.ends_with("srcset"))
+                    .await?;
+                set_attribute(&mut tag, field, &original);
+                changed |= original != value;
             }
         }
         if changed {
@@ -423,6 +451,43 @@ pub async fn prepare(
         assets: preparation.objects.into_values().collect(),
         replacements: preparation.replacements,
     })
+}
+
+fn image_path(reference: &str, document: &str) -> Result<Option<String>, FrameworkError> {
+    if raster_data_mime(reference).is_some() {
+        Ok(Some(reference.to_string()))
+    } else {
+        local_path(reference, document)
+    }
+}
+
+fn decode_raster_data(reference: &str) -> Result<Bytes, FrameworkError> {
+    let limit = crate::media::config().max_alloc_bytes;
+    if reference.len() as u64 > limit.saturating_mul(3).saturating_add(256) {
+        return Err(FrameworkError::param(
+            "raster data URL exceeds IMAGE_MAX_ALLOC_BYTES",
+        ));
+    }
+    let (header, payload) = reference
+        .split_once(',')
+        .ok_or_else(|| FrameworkError::param("invalid raster data URL: missing comma"))?;
+    let payload = percent_encoding::percent_decode_str(payload).collect::<Vec<u8>>();
+    let bytes = if header
+        .split(';')
+        .any(|part| part.eq_ignore_ascii_case("base64"))
+    {
+        STANDARD
+            .decode(payload)
+            .map_err(|error| FrameworkError::param(format!("invalid raster data URL: {error}")))?
+    } else {
+        payload
+    };
+    if bytes.len() as u64 > limit {
+        return Err(FrameworkError::param(
+            "raster data URL exceeds IMAGE_MAX_ALLOC_BYTES",
+        ));
+    }
+    Ok(bytes.into())
 }
 
 fn fallback_format(mime: &str, path: &str) -> Result<OutputFormat, FrameworkError> {

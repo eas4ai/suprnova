@@ -325,7 +325,8 @@ async fn pub_007_manifest_icons_keep_png_and_relative_references_resolve() {
 #[tokio::test]
 async fn pub_007_remote_images_remain_external_and_missing_local_images_fail() {
     let source = source().await;
-    let html = b"<img src='https://example.org/photo.png'><img src='data:image/png;base64,AAAA'>";
+    let html =
+        b"<img src='https://example.org/photo.png'><img src='data:image/svg+xml,%3Csvg/%3E'>";
     let prepared = prepare(html, &source, &ImageOptions::default())
         .await
         .expect("external images");
@@ -438,4 +439,145 @@ async fn pub_007_fix_k_video_posters_and_image_preloads_are_prepared() {
                 .any(|v| v == b"private location")
         );
     }
+}
+
+#[suprnova::inertia_root(path = "static_publish/controlled-images.html")]
+struct ControlledImageDocument;
+
+#[tokio::test]
+async fn pub_007_controlled_image_urls_publish_safely_and_refusals_keep_origin() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use suprnova::static_publish::{PublishConfig, Publisher, StaticPublication};
+    use suprnova::{InertiaConfig, InertiaResponse, MiddlewareRegistry, Request, Router};
+    let _container = suprnova::testing::TestContainer::fake();
+    let mut jpeg = Image::from_bytes(png()).to_jpeg().to_bytes().await.unwrap();
+    // Big-endian TIFF: a GPS IFD pointer and its latitude reference.
+    let exif = b"Exif\0\0MM\0*\0\0\0\x08\0\x01\x88\x25\0\x04\0\0\0\x01\0\0\0\x1a\0\0\0\0\0\x01\0\x01\0\x02\0\0\0\x02N\0\0\0\0\0\0\0";
+    let mut segment = vec![0xff, 0xe1];
+    segment.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+    segment.extend_from_slice(exif);
+    jpeg.splice(2..2, segment);
+    let inline = format!("data:image/jpeg;base64,{}", STANDARD.encode(&jpeg));
+    for (image, expected) in [
+        ("http://localhost/images/photo.png".to_string(), "image/png"),
+        (inline, "image/jpeg"),
+        ("data:image/png;base64,AAAA".to_string(), "refuse"),
+        ("https://outside.example/photo.png".to_string(), "external"),
+    ] {
+        let original = image.clone();
+        let router: Router = Router::new()
+            .get("/controlled", move |request: Request| {
+                let image = image.clone();
+                async move {
+                    InertiaResponse::new("Images")
+                        .with_config(
+                            InertiaConfig::new()
+                                .development(true)
+                                .version("images-v1")
+                                .ssr_disabled()
+                                .vite_dev_server("http://localhost:5173")
+                                .root_template(suprnova::InertiaRootTemplate::of::<
+                                    ControlledImageDocument,
+                                >()),
+                        )
+                        .with_view_data("image", image.clone())
+                        .try_with("image", image)
+                        .unwrap()
+                        .resolve(&request)
+                        .await
+                        .map_err(Into::into)
+                }
+            })
+            .into();
+        let router = router
+            .public_page::<ImageProps>("/controlled", "Images")
+            .unwrap();
+        let disk = opendal::Operator::new(opendal::services::Memory::default()).unwrap();
+        let runtime = StaticPublication::install(
+            &router,
+            Publisher::from_operator(disk.clone(), "images-v1", PublishConfig::default()).unwrap(),
+        )
+        .unwrap();
+        if expected == "image/png" {
+            runtime.assets(source().await).unwrap();
+        }
+        let result = runtime.publish().await;
+        if expected == "refuse" {
+            let cause = result.unwrap_err().to_string();
+            assert!(
+                cause.contains("/controlled") && cause.contains("image"),
+                "{cause}"
+            );
+            assert!(!disk.exists("_pub/manifest.json").await.unwrap());
+            let response = suprnova::testing::TestClient::new(router, MiddlewareRegistry::new())
+                .get("/controlled")
+                .send()
+                .await;
+            response.assert_ok();
+            assert!(response.body_text().contains(&original));
+            continue;
+        }
+        result.unwrap();
+        let manifest: suprnova::static_publish::Manifest =
+            serde_json::from_slice(&disk.read("_pub/manifest.json").await.unwrap().to_bytes())
+                .unwrap();
+        let objects = &manifest.versions[&manifest.live].objects;
+        for extension in [".html", ".json"] {
+            let page = objects
+                .iter()
+                .find(|object| object.path.ends_with(extension))
+                .unwrap();
+            let content = disk.read(&page.path).await.unwrap().to_bytes();
+            let content = String::from_utf8_lossy(&content);
+            if expected == "external" {
+                assert!(content.contains(&original), "{content}");
+            } else {
+                assert!(!content.contains(&original), "{content}");
+                assert!(!content.contains("data:image/"), "{content}");
+                if extension == ".html" {
+                    assert!(content.contains("<picture>"));
+                }
+            }
+        }
+        if expected != "external" {
+            for mime in [expected, "image/webp"] {
+                let object = objects
+                    .iter()
+                    .find(|object| {
+                        object
+                            .headers
+                            .get("content-type")
+                            .is_some_and(|value| value == mime)
+                    })
+                    .expect("prepared published image");
+                let bytes = disk.read(&object.path).await.unwrap().to_bytes();
+                assert!(object.path.contains(&hex::encode(Sha256::digest(&bytes))));
+                assert!(!bytes.windows(6).any(|part| part == b"Exif\0\0"));
+                assert!(!bytes.windows(4).any(|part| part == b"EXIF"));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn pub_007_percent_encoded_inline_png_can_be_kept_and_recompressed() {
+    let source = source().await;
+    let bytes = png();
+    let data = format!(
+        "data:image/png,{}",
+        percent_encoding::percent_encode(&bytes, percent_encoding::NON_ALPHANUMERIC)
+    );
+    let html = format!("<img data-static-keep-png src='{data}'>");
+    let prepared = prepare(html.as_bytes(), &source, &ImageOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(prepared.assets.len(), 1);
+    assert!(!String::from_utf8_lossy(&prepared.html).contains("data:image/"));
+    let expected = Image::from_bytes(bytes)
+        .to_png()
+        .recompress_png(PngEffort::Maximum)
+        .to_bytes()
+        .await
+        .unwrap();
+    assert_eq!(prepared.assets[0].bytes.as_ref(), expected);
 }
