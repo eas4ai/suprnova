@@ -344,9 +344,15 @@ impl Publisher {
                 .timeout
                 .div_f64(4.0)
                 .min(Duration::from_secs(10));
-        let serial = tokio::time::timeout_at(forward, self.serial.clone().lock_owned())
-            .await
-            .map_err(|_| error("publication serialization timed out"))?;
+        let serial = match tokio::time::timeout_at(forward, self.serial.clone().lock_owned()).await
+        {
+            Ok(serial) => serial,
+            Err(_) => {
+                let result = Err(error("publication serialization timed out"));
+                self.record_result(&result, deadline).await;
+                return result;
+            }
+        };
         let acquired = tokio::time::timeout_at(
             forward,
             super::lease::StorageLease::acquire(
