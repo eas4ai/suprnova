@@ -213,6 +213,35 @@ each page shows part of the client at work:
   button, or the sign-in and register links for a guest. Every page titles
   its tab with `Head`.
 
+### Static publication
+
+All three Inertia kits install `src/lib/static/index.ts` through
+`createInertiaApp`'s `http` option. Their adapters share the same
+`src/lib/static/core.ts`. Without publication metadata the original
+Inertia XHR transport runs unchanged.
+
+A published document supplies its asset version in
+`<meta name="suprnova-static-version" content="...">` and its concrete
+public page paths in the JSON script `suprnova-static-pages`. Navigation
+between those pages reads the versioned JSON object the map names. The
+browser history keeps the page's canonical URL. A different asset version
+reloads that canonical document. A full visit to a path absent from the map
+reaches its canonical origin URL, where a marked public page can be published
+on its first visit.
+
+Partial reloads, polling, deferred props, once props, queries and mutations
+use the original route with `?__suprnova_origin=1`. Existing query values
+are kept. This URL bypasses publication, and both the request and response
+carry `Cache-Control: no-store`. Flash and validation errors are accepted
+from this private origin response; a published object containing either
+falls back to the origin.
+
+Before a mutation from a published document, the client obtains the
+same-origin `XSRF-TOKEN` cookie from a private origin request if it is
+missing. Inertia's XHR client reads the current cookie for every request
+and sends it as `X-XSRF-TOKEN`, including after a sign-in rotates it. No
+session token is embedded in a published document.
+
 ### Agents in the Inertia kits
 
 The React, Vue and Svelte kits serve [agents](agents.md) from the first

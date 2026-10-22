@@ -1215,6 +1215,30 @@ every request it dispatches, so a route outside the Inertia middleware
 answers the same way; `InertiaResponse::location_for(&req, url)` decides
 from the request you pass, for code that runs outside a dispatched request.
 
+## Published page versions and private reloads
+
+[Static Publication](static-publication.md) keeps HTML and full page JSON in
+separate keys under the asset version and publication revision. A complete
+upload switches the manifest last. Previous versions remain during the
+grace period so a client can finish loading the assets of its document.
+
+The three kits use one shared HTTP client. It reads the document's
+`suprnova-static-version` and `suprnova-static-pages` metadata and fetches
+published JSON for a navigation between public pages. The page URL stays
+the live route URL. A different response asset version produces the normal
+Inertia document reload.
+
+```typescript
+import { staticHttpClient } from '@/lib/static'
+// The kit passes this transport to createInertiaApp({ http: staticHttpClient }).
+```
+
+Partial reloads, polling, deferred props, once props and mutations use the
+live URL with `__suprnova_origin=1` and `Cache-Control: no-store`. That path
+bypasses publication and returns `private, no-store`. Flash and validation
+errors arrive from the origin. CSRF comes from `XSRF-TOKEN`, with a private
+same-origin GET to obtain it before a mutation when needed.
+
 ## Version detection
 
 Inertia versions the asset manifest so a long-lived client doesn't try

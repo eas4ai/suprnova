@@ -22,3 +22,5 @@ mod http_wire;
 mod own_process;
 #[path = "../support/own_process_async.rs"]
 mod own_process_async;
+
+mod client;
