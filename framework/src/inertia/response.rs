@@ -109,6 +109,7 @@ pub struct InertiaResponse {
     pub(super) props: IndexMap<String, Prop>,
     pub(super) cache_page: Option<Arc<super::cache::CachePage>>,
     pub(super) cache_declared: bool,
+    live_bindings: &'static [super::LiveBinding],
     flash: serde_json::Map<String, Value>,
     config: InertiaConfig,
     title: Option<String>,
@@ -387,6 +388,7 @@ impl InertiaResponse {
             props: IndexMap::new(),
             cache_page: None,
             cache_declared: false,
+            live_bindings: &[],
             flash: serde_json::Map::new(),
             // One `RwLock` read and one clone of the config per response:
             // a few short strings and paths, the version (a `String`
@@ -440,6 +442,13 @@ impl InertiaResponse {
     /// as Laravel's `ExceptionResponse` leaves them out.
     pub(crate) fn without_shared_data(mut self) -> Self {
         self.shared_data = false;
+        self
+    }
+
+    /// Carries the derive-checked topic bindings on every full and partial page response.
+    #[must_use]
+    pub fn with_live_bindings(mut self, bindings: &'static [super::LiveBinding]) -> Self {
+        self.live_bindings = bindings;
         self
     }
 
@@ -1388,6 +1397,16 @@ impl InertiaResponse {
         }
         self.prepare_component()
             .map_err(reflash_session_values_after_eager_error)?;
+        // Capture before prop reads so a write racing the render remains newer.
+        let live_page_bindings = if self.live_bindings.is_empty() {
+            None
+        } else {
+            Some(
+                crate::live::LiveTopics::resolve()?
+                    .page_bindings(self.live_bindings)
+                    .await?,
+            )
+        };
         let cache = super::cache::PageAssembly::new(
             self.cache_page.clone(),
             &self.component,
@@ -1447,6 +1466,7 @@ impl InertiaResponse {
             props,
             cache_page: _,
             cache_declared: _,
+            live_bindings: _,
             flash: response_flash,
             config,
             title,
@@ -1746,6 +1766,9 @@ impl InertiaResponse {
             },
             shared_keys,
         );
+        if let Some(bindings) = live_page_bindings {
+            page["liveBindings"] = bindings;
+        }
         // The page's server tools, a top-level field rather than a prop: the
         // client replaces it on every visit, `only` and `except` never drop
         // it, and it collides with no prop of the application (AGENT-014).
@@ -1951,6 +1974,7 @@ impl InertiaResponse {
             props,
             cache_page: _,
             cache_declared: _,
+            live_bindings: _,
             flash: response_flash,
             config,
             title: _,

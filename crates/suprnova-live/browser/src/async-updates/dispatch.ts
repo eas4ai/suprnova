@@ -11,6 +11,7 @@ export type AsyncDispatchDisposition =
   | "coalesced"
   | "dispatched"
   | "signal_updated"
+  | "topic_changed"
   | "observed"
   | "closed:server_shutdown"
   | "closed:subscription_retired"
@@ -32,6 +33,7 @@ export interface AsyncEnvelopeDispatcher {
 
 type EventPayload = Extract<AsyncPayload, { kind: "browser_event" }>;
 type PresentationSignalPayload = Extract<AsyncPayload, { kind: "presentation_signal" }>;
+type TopicChangePayload = Extract<AsyncPayload, { kind: "topic_change" }>;
 
 function exactPayload(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -100,6 +102,20 @@ export class AsyncDispatcher implements AsyncEnvelopeDispatcher {
           return unsupported();
         }
         return this.#presentationSignal(payload as unknown as PresentationSignalPayload);
+      case "topic_change":
+        if (
+          !exactPayload(payload, ["cursor", "kind", "props", "topic"]) ||
+          !Number.isSafeInteger(payload["cursor"]) ||
+          !Array.isArray(payload["props"]) ||
+          typeof payload["topic"] !== "string"
+        ) {
+          return unsupported();
+        }
+        return this.#topicChange(
+          payload as unknown as TopicChangePayload,
+          envelope.subscriptionId,
+          completion,
+        );
       case "heartbeat":
         if (!exactPayload(payload, ["kind"])) return unsupported();
         return "observed";
@@ -158,6 +174,22 @@ export class AsyncDispatcher implements AsyncEnvelopeDispatcher {
     try {
       this.#island.writePresentationSignal(signal.scope, signal.name, signal.value);
       return "signal_updated";
+    } catch {
+      return "rejected";
+    }
+  }
+
+  #topicChange(
+    change: TopicChangePayload,
+    subscriptionId: string,
+    completion?: (outcome: FreshRenderCompletion) => void,
+  ): AsyncDispatchDisposition {
+    try {
+      if (this.#island.dispatchTopicChange === undefined) {
+        return this.#refresh(subscriptionId, completion);
+      }
+      this.#island.dispatchTopicChange(change);
+      return "topic_changed";
     } catch {
       return "rejected";
     }

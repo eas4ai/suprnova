@@ -8,9 +8,8 @@
 //! - `stats`, two counts over the user's notes, is deferred: the first
 //!   response leaves it out and names it under `deferredProps`, and the
 //!   client asks for it as soon as the page shows, with the page's
-//!   `Deferred` fallback in its place until then. The page also polls it
-//!   (`usePoll` with `only: ['stats']`), and each poll runs only this
-//!   prop's queries.
+//!   `Deferred` fallback in its place until then. Topic signals reload only
+//!   `stats`. The page keeps `usePoll` when push delivery is unavailable.
 //! - `recent_notes`, the user's five newest notes, is optional: no
 //!   response carries it until the client asks for it by name, which the
 //!   page's `WhenVisible` block does once it scrolls into view.
@@ -32,6 +31,7 @@ const RECENT_NOTES: u64 = 5;
 /// sends neither with the page: `stats` arrives with the client's deferred
 /// request, and `recent_notes` when the page asks for it.
 #[derive(InertiaProps)]
+#[inertia(live(topic = "notes", only = ["stats"]))]
 pub struct DashboardProps {
     pub stats: Stats,
     pub recent_notes: Vec<NoteSummary>,
@@ -57,6 +57,7 @@ pub async fn index(req: Request) -> Response {
     let user_id = user.id;
 
     Ok(InertiaResponse::new("Dashboard")
+        .with_live_bindings(<DashboardProps as suprnova::inertia::InertiaProps>::live_bindings())
         .defer("stats", move || note_stats(user_id))
         .optional("recent_notes", move || recent_notes(user_id))
         .resolve(&req)

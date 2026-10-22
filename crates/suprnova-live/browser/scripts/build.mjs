@@ -305,6 +305,12 @@ export interface AsyncRuntimeIslandPort extends RuntimeFeatureIslandPortBase {
     capability: RegisteredBrowserEventCapability,
     event: RegisteredBrowserEventDispatch,
   ): RegisteredBrowserEventDisposition;
+  dispatchTopicChange?(change: Readonly<{
+    cursor: number;
+    kind: "topic_change";
+    props: readonly string[];
+    topic: string;
+  }>): void;
   enqueueFreshRender(
       reason: FreshRenderReason,
       completion?: FreshRenderCompletionObserver,
@@ -638,7 +644,12 @@ export default uploadsFeature;
 }
 
 declare module "@suprnova/live/async" {
-import type { JsonValue, RuntimeFeature, RuntimeFeatureRegistrationOutcome } from "@suprnova/live";
+import type {
+  FreshRenderCompletionObserver,
+  JsonValue,
+  RuntimeFeature,
+  RuntimeFeatureRegistrationOutcome,
+} from "@suprnova/live";
 export interface AsyncClock { now(): number; }
 export interface AsyncRandomness { number(): number; }
 export interface AsyncTimerPort {
@@ -759,6 +770,7 @@ export interface AsyncAuthorityPort {
     | AsyncAuthorizationResult
     | AuthorizedLogicalSubscription
     | Promise<AsyncAuthorizationResult | AuthorizedLogicalSubscription>;
+  documentInstance?(): string;
 }
 export interface DocumentTransportPort {
   subscribe(subscription: AuthorizedLogicalSubscription): DocumentMembershipOutcome | Promise<DocumentMembershipOutcome>;
@@ -812,11 +824,46 @@ export interface BrowserAsyncTransportOptions {
   readonly timers: AsyncTimerPort;
   readonly webSocket: (url: string) => { close(code?: number, reason?: string): void; send(data: string): void };
 }
+export interface TopicSubscriptionIsland {
+  readonly component: string;
+  readonly document_key: string;
+  readonly slot: string;
+}
+export interface TopicSubscriptionBinding {
+  readonly island: TopicSubscriptionIsland;
+  readonly stream: string;
+}
+export type TopicSubscriptionBindings = Readonly<Record<string, TopicSubscriptionBinding>>;
+export interface TopicChangeSignal {
+  readonly cursor: number;
+  readonly props: readonly string[];
+  readonly topic: string;
+}
+export type TopicSubscriptionState =
+  | "disconnected"
+  | "connecting"
+  | "current"
+  | "degraded"
+  | "reconnecting"
+  | "closed";
+export interface TopicSubscriptionCallbacks {
+  onPoll(topic: string, completion?: FreshRenderCompletionObserver): void;
+  onSignal(signal: TopicChangeSignal): void;
+  onState?(topic: string, state: TopicSubscriptionState): void;
+}
+export interface TopicSubscription {
+  close(): void;
+  readonly documentInstance: string;
+}
 export class BrowserAsyncTransportPorts implements AsyncTransportPorts {
   constructor(options: BrowserAsyncTransportOptions);
   eventSource(connect: DocumentTransportConnectRequest): DocumentTransportPort;
   webSocket(connect: DocumentTransportConnectRequest): DocumentTransportPort;
 }
+export function subscribeTopics(
+  bindings: TopicSubscriptionBindings,
+  callbacks: TopicSubscriptionCallbacks,
+): TopicSubscription;
 export function configureAsync(options: AsyncFeatureOptions): void;
 export function createAsyncFeature(options: AsyncFeatureOptions): RuntimeFeature;
 export const asyncFeature: RuntimeFeature;

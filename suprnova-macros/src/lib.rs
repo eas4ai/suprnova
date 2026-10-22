@@ -168,6 +168,11 @@ pub fn derive_data(input: TokenStream) -> TokenStream {
 /// `suprnova generate-types` reads them to type Inertia's `sharedPageProps`
 /// and `flashDataType` with the struct's interface.
 ///
+/// Repeatable `#[inertia(live(topic = "posts", only = ["posts", "count"]))]`
+/// declarations bind Live topics to serialized prop names. The derive rejects
+/// a name the struct does not serialize and exposes the checked table through
+/// [`suprnova::inertia::InertiaProps`](https://docs.rs/suprnova/latest/suprnova/inertia/trait.InertiaProps.html).
+///
 /// # Example
 ///
 /// ```rust,ignore

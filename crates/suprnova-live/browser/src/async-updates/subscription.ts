@@ -38,6 +38,8 @@ export interface ReplayOutcome {
 
 type ReplayDisposition = ReplayOutcome | "pending";
 
+type RefreshStartDisposition = "complete" | "dispatch_failed" | "pending" | "topic_changed";
+
 interface RefreshSegment {
   count: number;
   encodedBytes: number;
@@ -354,20 +356,9 @@ export class AsyncSubscription {
     }
   }
 
-  #applyEnvelope(envelope: ValidatedAsyncEnvelope): AsyncReceiveDisposition {
-    if (envelope.payload.kind === "refresh") {
-      this.#startRefresh({
-        count: 1,
-        encodedBytes: 0,
-        envelope,
-        first: envelope.position,
-        generation: this.#lifecycleGeneration,
-        kind: "refresh",
-        last: envelope.position,
-      });
-      return this.#activeRefresh === null && this.#continuity.state() === "degraded"
-        ? "dispatch_failed"
-        : "pending";
+  #applyEnvelope(envelope: ValidatedAsyncEnvelope, draining = false): AsyncReceiveDisposition {
+    if (envelope.payload.kind === "refresh" || envelope.payload.kind === "topic_change") {
+      return this.#applyRefreshEnvelope(envelope, draining);
     }
     const disposition = this.#dispatch.dispatch(envelope);
     if (disposition === "rejected" || typeof disposition === "object") {
@@ -390,7 +381,24 @@ export class AsyncSubscription {
     return "applied";
   }
 
-  #startRefresh(segment: RefreshSegment): void {
+  #applyRefreshEnvelope(
+    envelope: ValidatedAsyncEnvelope,
+    draining: boolean,
+  ): AsyncReceiveDisposition {
+    const outcome = this.#startRefresh({
+      count: 1,
+      encodedBytes: 0,
+      envelope,
+      first: envelope.position,
+      generation: this.#lifecycleGeneration,
+      kind: "refresh",
+      last: envelope.position,
+    });
+    if (outcome === "topic_changed" || (draining && outcome === "complete")) return "applied";
+    return outcome === "complete" ? "pending" : outcome;
+  }
+
+  #startRefresh(segment: RefreshSegment): RefreshStartDisposition {
     this.#activeRefresh = segment;
     this.#observeQueuePressure();
     const synchronousTerminal: { value: FreshRenderCompletion | null } = { value: null };
@@ -400,19 +408,27 @@ export class AsyncSubscription {
       else this.#completeRefresh(completion);
     });
     dispatching = false;
+    if (disposition === "topic_changed" && segment.envelope.payload.kind === "topic_change") {
+      this.#activeRefresh = null;
+      this.#observeQueuePressure();
+      this.#commitRange(segment);
+      return "topic_changed";
+    }
     if (disposition === "exhausted") {
       this.#activeRefresh = null;
       this.#observeQueuePressure();
       this.#failPresentation("resource_exhausted", segment.last);
-      return;
+      return "dispatch_failed";
     }
     if (disposition !== "queued" && disposition !== "coalesced") {
       this.#activeRefresh = null;
       this.#observeQueuePressure();
       this.#failPresentation("presentation_rejected", segment.last);
-      return;
+      return "dispatch_failed";
     }
     if (synchronousTerminal.value !== null) this.#completeRefresh(synchronousTerminal.value);
+    if (this.#continuity.state() === "degraded") return "dispatch_failed";
+    return this.#hasActiveRefresh() ? "pending" : "complete";
   }
 
   #enqueueWhileRefreshPending(
@@ -467,14 +483,13 @@ export class AsyncSubscription {
       this.#pendingAdmissions -= next.kind === "refresh" ? next.count : 1;
       this.#observeQueuePressure();
       if (next.kind === "refresh") {
-        this.#startRefresh(next);
-        return this.#activeRefresh === null
-          ? this.#continuity.state() === "degraded"
-            ? "dispatch_failed"
-            : "complete"
-          : "pending";
+        const outcome = this.#startRefresh(next);
+        if (outcome === "complete" || outcome === "topic_changed") continue;
+        return outcome;
       }
-      if (this.#applyEnvelope(next.envelope) !== "applied") return "dispatch_failed";
+      const outcome = this.#applyEnvelope(next.envelope, true);
+      if (outcome === "pending") return "pending";
+      if (outcome !== "applied") return "dispatch_failed";
       if (this.#continuity.state() === "degraded") {
         this.#clearPending();
         return "interrupted";
@@ -489,6 +504,10 @@ export class AsyncSubscription {
 
   #presentationSettled(): boolean {
     return this.#activeRefresh === null && this.#pending.length === 0 && !this.#replayActive;
+  }
+
+  #hasActiveRefresh(): boolean {
+    return this.#activeRefresh !== null;
   }
 
   #commitRange(segment: RefreshSegment): void {

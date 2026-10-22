@@ -172,6 +172,27 @@ test('PAR-079/080: Deferred stats and stats-only polling', async ({ page }) => {
   expect(poll.headers()['x-inertia']).toBe('true');
 });
 
+test('signal_004_committed_note_change_refreshes_dashboard_stats_before_the_poll', async ({ page }) => {
+  const initial = page.waitForResponse(response => partial('stats')(response.request()));
+  await dashboard(page);
+  await initial;
+
+  const liveReload = page.waitForRequest(partial('stats'), { timeout: 5_000 });
+  const stored = await page.request.post('/notes', {
+    headers: { 'X-XSRF-TOKEN': await csrf(page), 'X-Inertia': 'true' },
+    data: { title: 'Live signal note', body: 'Refresh the bound stats prop.' },
+    maxRedirects: 0,
+  });
+  expect([302, 303], `${kit}: live signal note: ${await stored.text()}`).toContain(stored.status());
+
+  const request = await liveReload;
+  expect(request.headers()['x-inertia-partial-component']).toBe('Dashboard');
+  expect(request.headers()['x-inertia']).toBe('true');
+  expect(request.headers()['x-socket-id']).toBeTruthy();
+  const notes = page.locator('main').getByText('Notes', { exact: true }).locator('..');
+  await expect(notes.getByText('1', { exact: true })).toBeVisible();
+});
+
 test('PAR-079/080: WhenVisible requests recent notes only after scrolling', async ({ page }) => {
   await seedNotes(page);
   const recent: Request[] = [];

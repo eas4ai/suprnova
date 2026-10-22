@@ -62,8 +62,8 @@ export interface ScopeView {
 }
 
 export interface DashboardProps {
-  stats: Stats;
-  recent_notes: Array<NoteSummary>;
+  stats?: Stats;
+  recent_notes?: Array<NoteSummary>;
 }
 
 export interface Stats {
@@ -148,6 +148,7 @@ export interface Pages {
   "Agents/Approve": ApprovalProps;
   "Agents/Claim": ClaimProps;
   "Agents/Connected": ConnectedAgentsProps;
+  "Dashboard": DashboardProps;
   "Home": HomeProps;
   "Notes/Show": NotesShowProps;
   "auth/ForgotPassword": ForgotPasswordProps;
@@ -158,17 +159,24 @@ export interface Pages {
 }
 
 export const inertiaPropCache = {
-  "Agents/Approve": { cacheable: false, public: [], perRequest: [] },
-  "Agents/Claim": { cacheable: false, public: [], perRequest: [] },
-  "Agents/Connected": { cacheable: false, public: [], perRequest: [] },
-  "Home": { cacheable: false, public: [], perRequest: [] },
-  "Notes/Show": { cacheable: false, public: [], perRequest: [] },
-  "auth/ForgotPassword": { cacheable: false, public: [], perRequest: [] },
-  "auth/Login": { cacheable: false, public: [], perRequest: [] },
-  "auth/Register": { cacheable: false, public: [], perRequest: [] },
-  "auth/ResetPassword": { cacheable: false, public: [], perRequest: [] },
-  "auth/VerifyEmail": { cacheable: false, public: [], perRequest: [] },
+  "Agents/Approve": { cacheable: false, public: [], perRequest: [], live: {} },
+  "Agents/Claim": { cacheable: false, public: [], perRequest: [], live: {} },
+  "Agents/Connected": { cacheable: false, public: [], perRequest: [], live: {} },
+  "Dashboard": { cacheable: false, public: [], perRequest: [], live: { "notes": ["stats"] } },
+  "Home": { cacheable: false, public: [], perRequest: [], live: {} },
+  "Notes/Show": { cacheable: false, public: [], perRequest: [], live: {} },
+  "auth/ForgotPassword": { cacheable: false, public: [], perRequest: [], live: {} },
+  "auth/Login": { cacheable: false, public: [], perRequest: [], live: {} },
+  "auth/Register": { cacheable: false, public: [], perRequest: [], live: {} },
+  "auth/ResetPassword": { cacheable: false, public: [], perRequest: [], live: {} },
+  "auth/VerifyEmail": { cacheable: false, public: [], perRequest: [], live: {} },
 } as const;
+
+export interface InertiaLiveBindings {
+  "Dashboard": {
+    "notes": readonly ["stats"];
+  };
+}
 
 export interface SharedProps {
   root: string;
@@ -176,6 +184,21 @@ export interface SharedProps {
 }
 
 export type Errors = Record<string, string>;
+
+export interface InertiaLiveIsland {
+  component: string;
+  slot: string;
+  document_key: string;
+}
+
+export interface LiveBinding {
+  only: string[];
+  cursor: number;
+  island: InertiaLiveIsland;
+  stream: string;
+}
+
+export type LiveBindings = Record<string, LiveBinding>;
 
 export type PageProps<C extends keyof Pages> = Pages[C] & SharedProps & { errors: Errors };
 

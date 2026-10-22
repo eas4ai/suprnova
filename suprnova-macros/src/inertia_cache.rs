@@ -12,6 +12,12 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<Option<TokenStream>> {
         .filter(|attr| attr.path().is_ident("inertia"))
     {
         attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("live") {
+                let content;
+                syn::parenthesized!(content in meta.input);
+                let _: proc_macro2::TokenStream = content.parse()?;
+                return Ok(());
+            }
             if !meta.path.is_ident("cacheable") || cacheable {
                 return Err(meta.error("expected one `#[inertia(cacheable)]`; declare public and per_request on fields"));
             }
@@ -122,7 +128,9 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<Option<TokenStream>> {
     Ok(Some(quote! {
         impl #impl_generics ::suprnova::inertia::InertiaPageProps for #name #ty_generics #where_clause {
             fn apply_props(&self, response: ::suprnova::InertiaResponse) -> ::core::result::Result<::suprnova::InertiaResponse, ::suprnova::FrameworkError> {
-                response.cacheable(self)
+                response
+                    .with_live_bindings(<Self as ::suprnova::inertia::InertiaProps>::live_bindings())
+                    .cacheable(self)
             }
         }
         impl #impl_generics ::suprnova::inertia::CacheableInertiaProps for #name #ty_generics #where_clause {

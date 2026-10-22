@@ -12,6 +12,7 @@
   import { untrack } from 'svelte'
   import Head from '../components/Head.svelte'
   import { formatDate } from '../lib/dates'
+  import { useLive } from '../lib/live/index.svelte'
   import type { DashboardProps } from '../types/inertia-props'
 
   // The public root the server shares with every page (`RootShare`): empty
@@ -34,6 +35,10 @@
   // The application layout shows this heading while the dashboard is the
   // page; a visit to another page resets it.
   setLayoutProps({ heading: 'Dashboard' })
+
+  // Live refreshes `stats` as soon as this user's notes topic changes.
+  // The poll below remains the fallback when no push transport is available.
+  useLive()
 
   // Ask the server for `stats` again every ten seconds. `only` keeps the
   // reload to that one prop, and the poll stops when the page goes away.

@@ -43,6 +43,12 @@ export type AsyncPayload =
       target: string;
     }>
   | Readonly<{ kind: "presentation_signal"; name: string; scope: string; value: JsonValue }>
+  | Readonly<{
+      cursor: number;
+      kind: "topic_change";
+      props: readonly string[];
+      topic: string;
+    }>
   | Readonly<{ kind: "heartbeat" }>
   | Readonly<{
       kind: "complete";

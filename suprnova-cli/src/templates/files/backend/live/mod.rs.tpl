@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use suprnova::live::{LiveRegistry, LiveTenantMiddleware, LiveTenantResolver, RegistryError};
+use suprnova::live::{LiveRegistry, LiveTenantMiddleware, LiveTenantResolver};
 use suprnova::rate_limit::memory::InMemoryRateLimiter;
 use suprnova::render_cache::{RenderCache, RenderCacheConfig};
 use suprnova::{
@@ -22,8 +22,8 @@ use suprnova::{
 };
 
 /// Builds the registry of every Live component in this application.
-pub fn registry() -> Result<LiveRegistry, RegistryError> {
-    let registry = LiveRegistry::builder().build();
+pub fn registry() -> Result<LiveRegistry, FrameworkError> {
+    let registry = LiveRegistry::builder().topic("notes")?.build();
     Ok(registry)
 }
 

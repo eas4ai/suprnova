@@ -161,6 +161,51 @@ pub async fn index(req: Request) -> Response {
         .await?)
 }
 ```
+
+### Live note updates
+
+The Inertia kits also keep the dashboard's `stats` current when a note is
+saved or deleted. Their Live registry declares a private application topic,
+bootstrap defines its audience and connects model hooks, and the dashboard
+props bind `stats` to it:
+
+```rust
+// src/live/mod.rs
+let registry = LiveRegistry::builder().topic("notes")?.build();
+
+// src/bootstrap.rs
+Gate::define::<String, String>("live:topic.notes", |_, _| true);
+App::singleton(registry);
+LiveTopics::resolve()?
+    .on_model::<Note>("notes", &["stats"])?;
+
+// src/controllers/dashboard.rs
+#[derive(InertiaProps)]
+#[inertia(live(topic = "notes", only = ["stats"]))]
+pub struct DashboardProps {
+    pub stats: Stats,
+    pub recent_notes: Vec<NoteSummary>,
+}
+
+InertiaResponse::new("Dashboard")
+    .with_live_bindings(<DashboardProps as suprnova::inertia::InertiaProps>::live_bindings())
+    .defer("stats", move || note_stats(user_id))
+    .optional("recent_notes", move || recent_notes(user_id));
+```
+
+Each frontend mounts its small `useLive()` adapter on `Dashboard`. A signal
+asks Inertia to reload only `stats`; the controller recalculates it over the
+signed-in user's own notes. The signal carries no note values. `usePoll`
+remains as the fallback when the browser cannot keep a push transport open.
+See [Live topic bindings](frontend-pages.md#live-topic-bindings) for the page
+contract and [Topic signals](live.md#topic-signals) for publication rules.
+
+### Why Suprnova diverges
+
+Laravel's Inertia kits do not include topic bindings. Suprnova's kits register
+the note topic and install each frontend's adapter. They keep `usePoll` so
+the dashboard updates when push delivery is unavailable.
+
 The Svelte kit's pages show Inertia 3.8's client components at work:
 
 - `layouts/AppLayout.svelte` and `layouts/GuestLayout.svelte` frame every
@@ -169,11 +214,11 @@ The Svelte kit's pages show Inertia 3.8's client components at work:
   sign-out `Link` (or sign-in and register links for a visitor), and the
   toast a handler flashes, which `components/FlashToast.svelte` reads from
   `page.flash`.
-- `Dashboard` loads the note counts with `Deferred` and polls them with
-  `usePoll`, loads the recent notes with `WhenVisible` once they scroll
-  into view, and sets the layout's heading with `setLayoutProps`. Its
-  display-name form posts JSON through `useHttp` and shows the new name
-  before the server answers.
+- `Dashboard` loads the note counts with `Deferred`, refreshes them from the
+  `notes` Live topic, and keeps `usePoll` as a fallback. It loads the recent
+  notes with `WhenVisible` once they scroll into view and sets the layout's
+  heading with `setLayoutProps`. Its display-name form posts JSON through
+  `useHttp` and shows the new name before the server answers.
 - `Notes/Index` creates a note with the `Form` component, keeps its search
   box with `useRemember`, loads more notes with `InfiniteScroll`, and opens
   a note with a prefetched, instant `Link` to `Notes/Show`.
@@ -183,9 +228,10 @@ The Svelte kit's pages show Inertia 3.8's client components at work:
 For the code, see [Page Components](frontend-pages.md).
 The React starter (`--frontend react`) runs on Inertia 3.8 through the
 `@inertiajs/vite` plugin and shows the client side of each feature on a
-page you can copy. `Dashboard` renders `stats` with `Deferred`, polls it
-with `usePoll`, loads `recent_notes` with `WhenVisible`, and changes your
-display name through `useHttp` with an optimistic update. `Notes/Index`
+page you can copy. `Dashboard` renders `stats` with `Deferred`, refreshes it
+from the `notes` Live topic with `usePoll` as a fallback, loads
+`recent_notes` with `WhenVisible`, and changes your display name through
+`useHttp` with an optimistic update. `Notes/Index`
 creates a note with `Form`, remembers its search with `useRemember`,
 scrolls your notes with `InfiniteScroll`, and opens one with an instant,
 prefetched `Link`; `Notes/Show` renders it. `Login`, `Register`,
@@ -199,8 +245,9 @@ The Vue kit (`--frontend vue`) runs on Inertia 3.8 and its Vite plugin, and
 each page shows part of the client at work:
 
 - `Dashboard.vue` loads the note counts as a deferred prop with `Deferred`,
-  polls them with `usePoll`, loads the recent notes with `WhenVisible`, and
-  saves the display name through `useHttp` with an optimistic update.
+  refreshes them from the `notes` Live topic with `usePoll` as a fallback,
+  loads the recent notes with `WhenVisible`, and saves the display name
+  through `useHttp` with an optimistic update.
 - `Notes/Index.vue` creates a note with `Form`, remembers its search with
   `useRemember`, scrolls the signed-in user's notes with `InfiniteScroll`, and
   opens a note as an instant visit from a prefetching `Link`.
@@ -817,3 +864,8 @@ The Live kit is held to `suprnova-cli/tests/kit_live.rs` and to
 which builds a fresh Live scaffold against the in-tree framework, starts it,
 and requests its pages:
 `cargo test -p suprnova-cli --test scaffold_snapshot -- --ignored live_`.
+
+## Next
+
+Define page subscriptions with [Live topic bindings](frontend-pages.md#live-topic-bindings).
+Register shared topics and model changes with [Live](live.md#topic-signals).

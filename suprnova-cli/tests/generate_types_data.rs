@@ -2036,12 +2036,66 @@ fn plain(props: PlainProps) { inertia_response!(&req, "Plain", props); }
     };
     let first = generate();
     let expected = r#"export const inertiaPropCache = {
-  "Article/Borrowed": { cacheable: true, public: ["article-id", "zTitle"], perRequest: ["viewerName"] },
-  "Article/Other": { cacheable: true, public: ["article-id", "zTitle"], perRequest: ["viewerName"] },
-  "Article/Show": { cacheable: true, public: ["article-id", "zTitle"], perRequest: ["viewerName"] },
-  "Generic/Show": { cacheable: true, public: ["title"], perRequest: ["viewer"] },
-  "Plain": { cacheable: false, public: [], perRequest: [] },
+  "Article/Borrowed": { cacheable: true, public: ["article-id", "zTitle"], perRequest: ["viewerName"], live: {} },
+  "Article/Other": { cacheable: true, public: ["article-id", "zTitle"], perRequest: ["viewerName"], live: {} },
+  "Article/Show": { cacheable: true, public: ["article-id", "zTitle"], perRequest: ["viewerName"], live: {} },
+  "Generic/Show": { cacheable: true, public: ["title"], perRequest: ["viewer"], live: {} },
+  "Plain": { cacheable: false, public: [], perRequest: [], live: {} },
 } as const;"#;
     assert!(first.contains(expected), "{first}");
     assert_eq!(first, generate());
+}
+
+#[test]
+fn signal_002_generated_types_carry_each_pages_topic_to_prop_bindings() {
+    let ts = generated(&[(
+        "controllers/dashboard.rs",
+        r#"
+use suprnova::{InertiaProps, InertiaResponse};
+
+#[derive(InertiaProps)]
+#[serde(rename_all = "camelCase")]
+#[inertia(live(topic = "posts", only = ["posts", "postCount"]))]
+#[inertia(live(topic = "counts", only = ["postCount"]))]
+struct DashboardProps {
+    posts: Vec<String>,
+    post_count: usize,
+}
+
+fn show() {
+    let _ = InertiaResponse::new("Dashboard").with_live_bindings(
+        <DashboardProps as suprnova::inertia::InertiaProps>::live_bindings(),
+    );
+}
+"#,
+    )]);
+
+    assert!(
+        ts.contains("export interface Pages {\n  \"Dashboard\": DashboardProps;\n}"),
+        "{ts}"
+    );
+    assert!(
+        ts.contains(
+            "\"Dashboard\": { cacheable: false, public: [], perRequest: [], live: { \"counts\": [\"postCount\"], \"posts\": [\"posts\", \"postCount\"] } }"
+        ),
+        "{ts}"
+    );
+    assert!(
+        ts.contains(
+            "export interface InertiaLiveBindings {\n  \"Dashboard\": {\n    \"counts\": readonly [\"postCount\"];\n    \"posts\": readonly [\"posts\", \"postCount\"];\n  };\n}\n"
+        ),
+        "{ts}"
+    );
+    assert!(
+        ts.contains(
+            "export interface InertiaLiveIsland {\n  component: string;\n  slot: string;\n  document_key: string;\n}\n\nexport interface LiveBinding {\n  only: string[];\n  cursor: number;\n  island: InertiaLiveIsland;\n  stream: string;\n}\n\nexport type LiveBindings = Record<string, LiveBinding>;\n"
+        ),
+        "{ts}"
+    );
+    assert!(
+        ts.contains(
+            "export type PageProps<C extends keyof Pages> = Pages[C] & SharedProps & { errors: Errors };\n"
+        ),
+        "{ts}"
+    );
 }

@@ -7,8 +7,8 @@ use syn::ext::IdentExt;
 use syn::punctuated::Punctuated;
 use syn::visit::Visit;
 use syn::{
-    Attribute, Expr, ExprLit, Fields, GenericArgument, ItemStruct, Lit, Meta, MetaNameValue, Pat,
-    PathArguments, Token, Type,
+    Attribute, Expr, ExprArray, ExprLit, Fields, GenericArgument, ItemStruct, Lit, LitStr, Meta,
+    MetaNameValue, Pat, PathArguments, Token, Type, meta::ParseNestedMeta,
 };
 use walkdir::WalkDir;
 
@@ -30,6 +30,8 @@ pub struct InertiaPropsStruct {
     pub components: Vec<String>,
     /// Whether the derive requires a cache boundary on every field.
     pub cacheable: bool,
+    /// Live topics mapped to their compile-time checked serialized prop names.
+    pub live_bindings: BTreeMap<String, Vec<String>>,
 }
 
 /// What a props struct types beside its own interface.
@@ -504,8 +506,8 @@ fn has_inertia_marker(attrs: &[Attribute], name: &str) -> bool {
         .iter()
         .filter(|attr| attr.path().is_ident("inertia"))
         .any(|attr| {
-            attr.parse_args_with(Punctuated::<syn::Path, Token![,]>::parse_terminated)
-                .is_ok_and(|paths| paths.iter().any(|path| path.is_ident(name)))
+            attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+                .is_ok_and(|metas| metas.iter().any(|meta| meta.path().is_ident(name)))
         })
 }
 
@@ -517,6 +519,72 @@ fn cache_boundary(attrs: &[Attribute]) -> Option<bool> {
     } else {
         None
     }
+}
+
+/// Live declarations as the derive reads them. Invalid declarations are left
+/// to the derive's compile-time diagnostics and do not enter generated types.
+fn parse_inertia_live_binding(meta: ParseNestedMeta<'_>) -> syn::Result<(String, Vec<String>)> {
+    let mut topic = None;
+    let mut only = None;
+    meta.parse_nested_meta(|entry| {
+        if entry.path.is_ident("topic") {
+            topic = Some(entry.value()?.parse::<LitStr>()?.value());
+            return Ok(());
+        }
+        if entry.path.is_ident("only") {
+            only = Some(
+                entry
+                    .value()?
+                    .parse::<ExprArray>()?
+                    .elems
+                    .into_iter()
+                    .map(|value| {
+                        string_literal(&value).ok_or_else(|| {
+                            syn::Error::new_spanned(
+                                value,
+                                "live binding prop names must be string literals",
+                            )
+                        })
+                    })
+                    .collect::<syn::Result<Vec<_>>>()?,
+            );
+            return Ok(());
+        }
+        Err(entry.error("unknown live binding argument"))
+    })?;
+    Ok((
+        topic.ok_or_else(|| meta.error("live binding is missing `topic`"))?,
+        only.ok_or_else(|| meta.error("live binding is missing `only`"))?,
+    ))
+}
+
+fn inertia_live_bindings_in_attr(attr: &Attribute) -> syn::Result<Vec<(String, Vec<String>)>> {
+    let mut bindings = Vec::new();
+    attr.parse_nested_meta(|meta| {
+        if meta.path.is_ident("live") {
+            bindings.push(parse_inertia_live_binding(meta)?);
+        }
+        Ok(())
+    })?;
+    Ok(bindings)
+}
+
+fn inertia_live_bindings(attrs: &[Attribute]) -> BTreeMap<String, Vec<String>> {
+    let mut bindings = BTreeMap::<String, Vec<String>>::new();
+    for attr in attrs.iter().filter(|attr| attr.path().is_ident("inertia")) {
+        let Ok(parsed) = inertia_live_bindings_in_attr(attr) else {
+            continue;
+        };
+        for (topic, only) in parsed {
+            let props = bindings.entry(topic).or_default();
+            let new_names: Vec<String> = only
+                .into_iter()
+                .filter(|name| !props.contains(name))
+                .collect();
+            props.extend(new_names);
+        }
+    }
+    bindings
 }
 
 impl<'ast> Visit<'ast> for InertiaPropsVisitor {
@@ -599,6 +667,11 @@ impl<'ast> Visit<'ast> for InertiaPropsVisitor {
                 components: Vec::new(),
                 cacheable: self.has_inertia_props_derive(&node.attrs)
                     && has_inertia_marker(&node.attrs, "cacheable"),
+                live_bindings: if self.has_inertia_props_derive(&node.attrs) {
+                    inertia_live_bindings(&node.attrs)
+                } else {
+                    BTreeMap::new()
+                },
             };
             if derived {
                 self.structs.push(parsed);
@@ -667,7 +740,16 @@ struct FinishedScan {
 
 /// The names the generated file declares beside the props interfaces. A
 /// project struct of one of these names would declare it twice.
-const GENERATED_DECLARATIONS: [&str; 4] = ["Pages", "SharedProps", "Errors", "PageProps"];
+const GENERATED_DECLARATIONS: [&str; 8] = [
+    "Pages",
+    "InertiaLiveBindings",
+    "InertiaLiveIsland",
+    "LiveBinding",
+    "LiveBindings",
+    "SharedProps",
+    "Errors",
+    "PageProps",
+];
 
 impl SourceScan {
     /// Collect what one parsed file, at `path`, declares and calls.
@@ -881,10 +963,11 @@ pub(crate) struct RenderSite {
 /// `InertiaResponse::new("Name")`, and by the facade's
 /// `Inertia::data("Name", dto)`, `Inertia::try_data` and
 /// `Inertia::paginate`. A method chain that starts with one of the last
-/// four pairs the component with the struct `.with_data(..)` or
-/// `.try_with_data(..)` is given anywhere in it, or `dto`; a key it defers
-/// or marks optional after that is absent from the first response. Props
-/// are a struct when the expression is a struct literal, a call through
+/// four pairs the component with the struct `.with_data(..)`,
+/// `.try_with_data(..)`, or `.with_live_bindings(..)` names anywhere in it,
+/// or `dto`; a key it defers or marks optional after that is absent from the
+/// first response. Props are a struct when the expression is a struct literal,
+/// a call through
 /// the struct's path (`Props::new(..)`), a bare path that may name a unit
 /// struct, or a local name that holds one.
 ///
@@ -940,6 +1023,30 @@ fn props_struct_name(expr: &Expr) -> Option<String> {
         Expr::Path(path) => type_segment(&path.path),
         Expr::Paren(inner) => props_struct_name(&inner.expr),
         Expr::Reference(inner) => props_struct_name(&inner.expr),
+        _ => None,
+    }
+}
+
+/// The props type named by an `InertiaProps::live_bindings()` expression.
+///
+/// The generated page templates use the fully qualified form so a response
+/// assembled field by field can still declare its complete props contract.
+fn live_bindings_props(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Call(call) if call.args.is_empty() => {
+            let Expr::Path(path) = &*call.func else {
+                return None;
+            };
+            if path.path.segments.last()?.ident != "live_bindings" {
+                return None;
+            }
+            path.qself
+                .as_ref()
+                .and_then(|qualified| declared_struct(&qualified.ty))
+                .or_else(|| type_segment(&path.path))
+        }
+        Expr::Paren(inner) => live_bindings_props(&inner.expr),
+        Expr::Reference(inner) => live_bindings_props(&inner.expr),
         _ => None,
     }
 }
@@ -1183,6 +1290,9 @@ impl InertiaCallVisitor {
                         structs.insert(name);
                         absent.clear();
                     }
+                }
+                "with_live_bindings" => {
+                    structs.extend(first.and_then(live_bindings_props));
                 }
                 "defer" | "defer_with" | "optional" => {
                     absent.extend(first.and_then(string_literal));
@@ -2192,10 +2302,12 @@ pub struct GenerateOptions {
 /// struct its components and its role before emission.
 ///
 /// After the props interfaces come the page declarations: `Pages`, mapping
-/// each component to its props interface; `SharedProps`, the framework's
-/// `root` and the shared struct's fields; `Errors` and `PageProps<C>`,
-/// which is what Inertia's `Page.props` is for that component; and the
-/// `@inertiajs/core` augmentation that types `usePage()` with no argument.
+/// each component to its props interface; `InertiaLiveBindings`, mapping
+/// components and topics to checked prop names; the runtime Live binding
+/// shape; `SharedProps`, the framework's `root` and the shared struct's
+/// fields; `Errors` and `PageProps<C>`, which is what Inertia's `Page.props`
+/// is for that component; and the `@inertiajs/core` augmentation that types
+/// `usePage()` with no argument.
 /// What `page` carries is decided by the project as a whole rather than by
 /// one struct: whether the errors are arrays, and whether the project
 /// augments `@inertiajs/core` itself, in which case the file leaves the
@@ -2242,6 +2354,7 @@ fn render_page_declarations(structs: &[InertiaPropsStruct], page: PageTypes) -> 
     out.push_str("}\n\n");
 
     out.push_str(&render_cache_declarations(&boundaries, &by_name));
+    out.push_str(&render_live_binding_declarations(&pages, &by_name));
 
     // The framework shares `root` itself and writes it after every other
     // shared prop, so a shared struct's own `root` field never arrives.
@@ -2279,6 +2392,13 @@ fn render_page_declarations(structs: &[InertiaPropsStruct], page: PageTypes) -> 
         "export type Errors = Record<string, {error_value}>;\n\n"
     ));
     out.push_str(
+        "export interface InertiaLiveIsland {\n  component: string;\n  slot: string;\n  document_key: string;\n}\n\n",
+    );
+    out.push_str(
+        "export interface LiveBinding {\n  only: string[];\n  cursor: number;\n  island: InertiaLiveIsland;\n  stream: string;\n}\n\n",
+    );
+    out.push_str("export type LiveBindings = Record<string, LiveBinding>;\n\n");
+    out.push_str(
         "export type PageProps<C extends keyof Pages> = Pages[C] & SharedProps & { errors: Errors };\n\n",
     );
 
@@ -2296,7 +2416,7 @@ fn render_page_declarations(structs: &[InertiaPropsStruct], page: PageTypes) -> 
     out
 }
 
-/// Stable cache metadata is shared by all frontend adapters.
+/// Stable cache and Live binding metadata shared by all frontend adapters.
 fn render_cache_declarations(
     pages: &BTreeMap<&str, &str>,
     structs: &[&InertiaPropsStruct],
@@ -2319,8 +2439,32 @@ fn render_cache_declarations(
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let live_entries = props
+            .live_bindings
+            .iter()
+            .map(|(topic, names)| {
+                let names = names
+                    .iter()
+                    .map(|name| ts_string_key(name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let key = ts_string_key(topic);
+                let key = if topic == "__proto__" {
+                    format!("[{key}]")
+                } else {
+                    key
+                };
+                format!("{key}: [{names}]")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let live = if live_entries.is_empty() {
+            "{}".to_owned()
+        } else {
+            format!("{{ {live_entries} }}")
+        };
         out.push_str(&format!(
-            "  {}: {{ cacheable: {}, public: [{}], perRequest: [{}] }},\n",
+            "  {}: {{ cacheable: {}, public: [{}], perRequest: [{}], live: {live} }},\n",
             ts_string_key(component),
             props.cacheable,
             names(true),
@@ -2329,6 +2473,37 @@ fn render_cache_declarations(
     }
     out.push_str("} as const;\n\n");
 
+    out
+}
+
+/// Compile-time topic-to-prop declarations for each typed page.
+fn render_live_binding_declarations(
+    pages: &BTreeMap<&str, &str>,
+    structs: &[&InertiaPropsStruct],
+) -> String {
+    let mut out = String::from("export interface InertiaLiveBindings {\n");
+    for (component, name) in pages {
+        let Some(props) = structs.iter().find(|props| props.name.as_str() == *name) else {
+            continue;
+        };
+        if props.live_bindings.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("  {}: {{\n", ts_string_key(component)));
+        for (topic, only) in &props.live_bindings {
+            let only = only
+                .iter()
+                .map(|name| ts_string_key(name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "    {}: readonly [{only}];\n",
+                ts_string_key(topic)
+            ));
+        }
+        out.push_str("  };\n");
+    }
+    out.push_str("}\n\n");
     out
 }
 

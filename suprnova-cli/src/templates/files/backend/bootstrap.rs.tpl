@@ -82,7 +82,11 @@ pub async fn register() {
     // Live components: one immutable registry shared by the server, the
     // workers, and the `suprnova live:*` commands. `suprnova live:make`
     // registers new components in `src/live/mod.rs`.
+    suprnova::Gate::define::<String, String>("live:topic.notes", |_, _| true);
     App::singleton(crate::live::registry().expect("Live component registry"));
+    suprnova::live::LiveTopics::resolve()
+        .and_then(|topics| topics.on_model::<crate::models::note::Note>("notes", &["stats"]))
+        .expect("Live note topic publication");
 
     // Example: Register a trait binding with runtime config
     // bind!(dyn Database, PostgresDB::new());
@@ -118,6 +122,12 @@ pub fn register_http_stack() {
 
 /// Keep invalid security configuration visible to callers that can return errors.
 pub fn try_register_http_stack() -> Result<(), FrameworkError> {
+    let catalog = suprnova::live::assets::live_asset_catalog()
+        .map_err(|error| FrameworkError::internal(format!("Live async assets: {error}")))?;
+    let artifact = catalog.artifact(suprnova::live::assets::ArtifactRole::AsyncEsm);
+    suprnova::View::share("live_async_url", format!("{}/{}/{}",
+        suprnova::live::assets::LIVE_ASSET_PATH_PREFIX, catalog.identity(), artifact.file()));
+    suprnova::View::share("live_async_sri", artifact.sri().to_owned());
     // Outside the error pages and RenderCache so every response is protected.
     global_middleware!(SecurityHeaders::from_env()?);
     // Global middleware (runs on every request in registration order)

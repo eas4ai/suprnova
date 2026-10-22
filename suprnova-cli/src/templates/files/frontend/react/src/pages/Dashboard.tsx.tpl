@@ -11,6 +11,7 @@ import {
   WhenVisible,
 } from '@inertiajs/react'
 import type { DashboardProps, UserInfo } from '../types/inertia-props'
+import { useLive } from '../lib/live'
 
 // The handler resolves both props apart from the page: `stats` deferred
 // (`.defer("stats", ..)`), fetched in a request of its own once the page
@@ -32,6 +33,10 @@ export default function Dashboard({ stats, recent_notes }: Partial<DashboardProp
   // The application layout shows this heading. A visit to another page
   // clears it, so a page that sets none shows none.
   setLayoutProps({ heading: 'Dashboard' })
+
+  // Live refreshes `stats` as soon as this user's notes topic changes.
+  // The poll below remains the fallback when no push transport is available.
+  useLive()
 
   // Reload `stats` every ten seconds. Each tick is a partial reload: the
   // server resolves `stats` alone and the rest of the page stays as it is.

@@ -72,6 +72,8 @@ export interface AsyncAuthorityPort {
     | AsyncAuthorizationResult
     | AuthorizedLogicalSubscription
     | Promise<AsyncAuthorizationResult | AuthorizedLogicalSubscription>;
+  /** Stable browser document identity used for sender exclusion, when available. */
+  documentInstance?(): string;
 }
 
 export interface AsyncAuthorizationResult {
@@ -554,6 +556,8 @@ function validOptions(options: AsyncFeatureOptions): boolean {
     const pollEnvironment = options.pollEnvironment ?? browserPollEnvironment;
     return (
       (streamPortsAbsent || streamPortsPresent) &&
+      (options.authority?.documentInstance === undefined ||
+        typeof options.authority.documentInstance === "function") &&
       typeof options.clock.now === "function" &&
       (options.observeFreshness === undefined || typeof options.observeFreshness === "function") &&
       (options.observeQueuePressure === undefined ||
@@ -1539,11 +1543,15 @@ export class AsyncDocumentOwner {
   readonly #options: AsyncFeatureOptions;
   readonly #pool: DocumentConnectionPool | null;
   readonly #queue: AsyncDocumentQueueBudget;
+  readonly #documentInstance: string | null;
   #state: "active" | "disposed" | "resuming" | "suspended" = "active";
 
   constructor(context: RuntimeFeatureDocumentContext, options: AsyncFeatureOptions) {
     if (!validOptions(options)) throw new Error("async_feature_configuration_invalid");
     this.#context = context;
+    const documentInstance = options.authority?.documentInstance?.();
+    this.#documentInstance =
+      typeof documentInstance === "string" && documentInstance.length > 0 ? documentInstance : null;
     const limits = context.limits ?? SERVER_DEFAULT_LIMITS;
     this.#queue = new AsyncDocumentQueueBudget(
       limits.asyncMaxQueuedEvents,
@@ -1586,6 +1594,11 @@ export class AsyncDocumentOwner {
   connectIsland(port: AsyncRuntimeIslandPort): FeatureIslandController {
     if (this.#state === "disposed") throw new Error("async_document_retired");
     return createAsyncIslandLifecycleController(this, this.#context, port);
+  }
+
+  /** Identity shared by every logical subscription in this document owner. */
+  documentInstance(): string | null {
+    return this.#documentInstance;
   }
 
   activatePoll(port: AsyncRuntimeIslandPort, policy: PollPolicy): PollingIslandController {
@@ -1693,7 +1706,49 @@ export class AsyncDocumentOwner {
   }
 }
 
-function configuredFeature(options: () => AsyncFeatureOptions | null): RuntimeFeature {
+export interface ActiveAsyncDocumentOwner {
+  readonly documentInstance: string;
+  readonly owner: AsyncDocumentOwner;
+}
+
+type ActiveAsyncDocumentOwnerObserver = (active: ActiveAsyncDocumentOwner | null) => void;
+
+let activeDefaultOwner: ActiveAsyncDocumentOwner | null = null;
+const activeDefaultOwnerObservers = new Set<ActiveAsyncDocumentOwnerObserver>();
+
+/** The document owner currently connected by the default async feature. */
+export function activeAsyncDocumentOwner(): ActiveAsyncDocumentOwner | null {
+  return activeDefaultOwner;
+}
+
+/** Observe default-owner changes so page-only subscriptions can join it later. */
+export function observeAsyncDocumentOwner(
+  observer: ActiveAsyncDocumentOwnerObserver,
+): VoidFunction {
+  activeDefaultOwnerObservers.add(observer);
+  return () => {
+    activeDefaultOwnerObservers.delete(observer);
+  };
+}
+
+function publishActiveAsyncDocumentOwner(owner: AsyncDocumentOwner | null): void {
+  const documentInstance = owner?.documentInstance() ?? null;
+  const next =
+    owner === null || documentInstance === null ? null : Object.freeze({ documentInstance, owner });
+  activeDefaultOwner = next;
+  for (const observer of [...activeDefaultOwnerObservers]) {
+    try {
+      observer(next);
+    } catch {
+      // An optional page bridge cannot interrupt the feature document lifecycle.
+    }
+  }
+}
+
+function configuredFeature(
+  options: () => AsyncFeatureOptions | null,
+  publishOwner = false,
+): RuntimeFeature {
   const sharedHandshakes = new OriginHandshakeScheduler();
   const definition: AsyncRuntimeFeatureDefinition = Object.freeze({
     connectDocument(context: RuntimeFeatureDocumentContext) {
@@ -1719,11 +1774,15 @@ function configuredFeature(options: () => AsyncFeatureOptions | null): RuntimeFe
         ...configured,
         handshakeScheduler: configured.handshakeScheduler ?? sharedHandshakes,
       });
+      if (publishOwner) publishActiveAsyncDocumentOwner(owner);
       return Object.freeze({
         connectIsland(port: AsyncRuntimeIslandPort) {
           return owner.connectIsland(port);
         },
         dispose() {
+          if (publishOwner && activeDefaultOwner?.owner === owner) {
+            publishActiveAsyncDocumentOwner(null);
+          }
           owner.dispose();
         },
         resume() {
@@ -1758,4 +1817,4 @@ export function configureAsync(options: AsyncFeatureOptions): void {
 export const asyncFeature: RuntimeFeature = configuredFeature(() => {
   defaultConfigurationLocked = true;
   return defaultConfiguration;
-});
+}, true);

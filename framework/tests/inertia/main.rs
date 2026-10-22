@@ -47,3 +47,6 @@ pub mod ssr_controls;
 pub mod ssr_gateway;
 pub mod try_serialize;
 pub mod validation_redirect;
+
+#[cfg(feature = "testing")]
+mod signals;
