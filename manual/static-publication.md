@@ -173,7 +173,8 @@ fn cloudfront(s3: S3Config) -> Result<Publisher, FrameworkError> {
 }
 ```
 
-`public-pages` is the distribution's origin ID. The driver preserves other
+`public-pages` is the distribution's origin ID. An S3 root of `pages` selects
+`/pages/_pub/<version>`; the constructor refuses ambiguous root segments. The driver preserves other
 origins and configuration fields. A failed switch or manifest write restores
 the previous origin version, including the original distribution configuration
 when the first publication fails. Rollback failures appear in the publication
@@ -181,8 +182,8 @@ error. A custom driver implements `rollback_version` to restore its initial
 configuration as well.
 
 Configure the distribution to map `/about` to `/about.html` and
-`/about/index.json` to `/about.json`. Send fingerprinted asset paths to the
-asset origin without the page version prefix. An origin-path switch changes
+`/about/index.json` to `/about.json`. Send fingerprinted asset paths and `/_pub/*` asset paths to the
+asset origin without the page version prefix, retaining the S3 root prefix. An origin-path switch changes
 the prefix; it does not create these viewer-request rewrite rules.
 
 S3 returns custom headers as `x-amz-meta-*`. Those names do not enforce CSP.

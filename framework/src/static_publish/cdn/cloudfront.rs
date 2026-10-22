@@ -28,6 +28,7 @@ const XMLNS: &str = "http://cloudfront.amazonaws.com/doc/2020-05-31/";
 /// `Deployed`; a failed update, permission refusal or deployment timeout is an error.
 pub struct CloudFrontDriver {
     response_headers_function: Option<String>,
+    root_prefix: String,
     distribution_id: String,
     origin_id: String,
     endpoint: url::Url,
@@ -91,6 +92,22 @@ impl CloudFrontDriver {
                 "origin id must be nonempty and contain no control characters",
             ));
         }
+        let root = config.root.as_deref().unwrap_or("").trim_matches('/');
+        if !root.is_empty()
+            && (root
+                .split('/')
+                .any(|part| part.is_empty() || matches!(part, "." | ".."))
+                || !root
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_/./".contains(&byte)))
+        {
+            return Err(failure("S3 root must contain unambiguous path segments"));
+        }
+        let root_prefix = if root.is_empty() {
+            String::new()
+        } else {
+            format!("/{root}")
+        };
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
@@ -116,6 +133,7 @@ impl CloudFrontDriver {
         }
         Ok(Self {
             response_headers_function: None,
+            root_prefix,
             distribution_id,
             origin_id,
             endpoint: url::Url::parse("https://cloudfront.amazonaws.com/")
@@ -311,8 +329,11 @@ impl CdnDriver for CloudFrontDriver {
             failure("configure and associate the response headers function before publication")
         })?;
         validate_header_function(&config, &self.origin_id, function)?;
-        let (updated, original_path) =
-            replace_origin_path(&config, &self.origin_id, &format!("/_pub/{version}"))?;
+        let (updated, original_path) = replace_origin_path(
+            &config,
+            &self.origin_id,
+            &format!("{}/_pub/{version}", self.root_prefix),
+        )?;
         *self.rollback_origin_path.lock().await = Some(original_path);
         self.request(http::Method::PUT, "/config", updated, Some(etag), true)
             .await?;
@@ -333,7 +354,7 @@ impl CdnDriver for CloudFrontDriver {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| failure("rollback GetDistributionConfig returned no ETag"))?;
         let target = previous
-            .map(|version| format!("/_pub/{version}"))
+            .map(|version| format!("{}/_pub/{version}", self.root_prefix))
             .unwrap_or(original_path);
         // Restore only the field this driver changed, using a fresh config and ETag.
         let (restored, _) = replace_origin_path(&current, &self.origin_id, &target)?;

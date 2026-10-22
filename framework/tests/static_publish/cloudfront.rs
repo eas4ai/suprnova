@@ -474,3 +474,51 @@ assert.equal(missing.headers['content-security-policy'].value, "default-src 'non
         String::from_utf8_lossy(&result.stderr)
     );
 }
+
+#[tokio::test]
+async fn pub_002_fix_a_cloudfront_maps_the_s3_root_and_validates_it() {
+    let mock = Mock::start(vec![
+        Reply::config(CONFIG),
+        Reply::ok(""),
+        Reply::ok("<Distribution><Status>Deployed</Status></Distribution>"),
+    ])
+    .await;
+    let driver = CloudFrontDriver::new(
+        "DISTRIBUTION1",
+        "public-pages",
+        &S3Config {
+            root: Some("pages".into()),
+            ..keys()
+        },
+    )
+    .unwrap()
+    .with_response_headers_function(FUNCTION)
+    .unwrap()
+    .with_mock_endpoint(&mock.endpoint)
+    .unwrap();
+    driver.switch_version("v2/revision").await.unwrap();
+    assert!(
+        mock.requests()[1]
+            .body
+            .contains("<OriginPath>/pages/_pub/v2/revision</OriginPath>")
+    );
+    for root in [
+        "pages/../outside",
+        "pages//nested",
+        "pages?query",
+        "pages\\nested",
+    ] {
+        assert!(
+            CloudFrontDriver::new(
+                "DISTRIBUTION1",
+                "public-pages",
+                &S3Config {
+                    root: Some(root.into()),
+                    ..keys()
+                }
+            )
+            .is_err(),
+            "invalid root {root}"
+        );
+    }
+}
