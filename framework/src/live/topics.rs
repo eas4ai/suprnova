@@ -684,8 +684,10 @@ impl LiveTopics {
     pub(crate) async fn page_bindings(
         &self,
         bindings: &[crate::inertia::LiveBinding],
+        page_component: &str,
     ) -> Result<serde_json::Value, FrameworkError> {
         let runtime = LiveRuntime::bind()?;
+        let principal = super::ports::route_principal().await;
         let mut result = serde_json::Map::new();
         for binding in bindings {
             let (component, stream) = if self
@@ -705,6 +707,33 @@ impl LiveTopics {
                 })?;
                 (component.to_owned(), stream.to_owned())
             };
+            let component_name = ComponentName::parse(&component)
+                .map_err(|_| FrameworkError::internal("invalid Live binding component"))?;
+            let stream_name = StreamName::parse(&stream)
+                .map_err(|_| FrameworkError::internal("invalid Live binding stream"))?;
+            let authority = if self
+                .state
+                .topics
+                .registry
+                .topics()
+                .contains_key(binding.topic)
+            {
+                super::ports::subscription::SubscriptionAuthority::registered(
+                    &self.state.topics.registry,
+                    &component_name,
+                    &stream_name,
+                    [binding.topic.to_owned()],
+                )
+            } else {
+                super::ports::subscription::SubscriptionAuthority::component_stream(
+                    &component_name,
+                    &stream_name,
+                )
+            };
+            if !authority.allows(principal.as_deref()).await {
+                omitted_binding(page_component, binding.topic);
+                continue;
+            }
             let cursor = self.cursor(binding.topic).await?;
             let island = runtime.subscription_mount(&component)?;
             if let Some(existing) = result.get_mut(binding.topic) {
@@ -723,5 +752,28 @@ impl LiveTopics {
             }
         }
         Ok(serde_json::Value::Object(result))
+    }
+}
+
+fn omitted_binding(page_component: &str, topic: &str) {
+    static WARNED: std::sync::OnceLock<Mutex<BTreeSet<(String, String)>>> =
+        std::sync::OnceLock::new();
+    let first = WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert((page_component.to_owned(), topic.to_owned()));
+    if first {
+        tracing::warn!(
+            page_component,
+            topic,
+            "Live page binding is not authorized; omitting it"
+        );
+    } else {
+        tracing::debug!(
+            page_component,
+            topic,
+            "Live page binding is not authorized; omitting it"
+        );
     }
 }

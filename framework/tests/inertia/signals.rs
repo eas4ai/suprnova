@@ -179,3 +179,125 @@ fn signal_fix_007_older_node_is_refused_before_the_client_suite() {
         "the unsupported runtime must not run the suite"
     );
 }
+
+#[derive(Clone)]
+struct SignalPrincipal(&'static str);
+impl suprnova::auth::Authenticatable for SignalPrincipal {
+    fn get_auth_identifier(&self) -> String {
+        self.0.to_owned()
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn into_arc_any(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn std::any::Any + Send + Sync> {
+        self
+    }
+}
+
+#[derive(InertiaProps)]
+#[inertia(live(topic = "signal.auth-private", only = ["posts"]))]
+#[inertia(live(topic = "signal.auth-public", only = ["posts"]))]
+struct AuthorizedPage {
+    posts: Vec<String>,
+}
+
+#[derive(Clone)]
+struct SignalLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for SignalLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+async fn authorized_page(principal: Option<&'static str>) -> Value {
+    suprnova::auth::request_state::request_state_scope_for_test(async {
+        if let Some(principal) = principal {
+            suprnova::Auth::set_user(std::sync::Arc::new(SignalPrincipal(principal)));
+        }
+        let request =
+            Request::for_test_with_headers("GET", "/signal-auth", [("X-Inertia", "true")]);
+        let response: Result<HttpResponse, FrameworkError> = suprnova::inertia_response!(
+            &request,
+            "__tests__/TypedProps",
+            AuthorizedPage {
+                posts: vec!["page still renders".to_owned()]
+            }
+        );
+        let response = response?;
+        assert_eq!(response.status_code(), 200);
+        Ok::<_, FrameworkError>(json(response).await)
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn signal_fix_001_private_metadata_is_omitted_and_warned_once() {
+    let _container = TestContainer::fake();
+    suprnova::Crypt::init(suprnova::EncryptionKey::generate());
+    suprnova::Gate::define::<String, String>("live:topic.signal.auth-private", |principal, _| {
+        principal == "allowed"
+    });
+    TestContainer::singleton(
+        LiveRegistry::builder()
+            .topic("signal.auth-private")
+            .unwrap()
+            .public_topic("signal.auth-public")
+            .unwrap()
+            .build(),
+    );
+    let runtime = prepare_live_router_for_test(&Router::new()).unwrap();
+    LiveTopics::from_runtime(&runtime)
+        .changed("signal.auth-private", &["posts"])
+        .await
+        .unwrap();
+    let log = SignalLog(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+    let writer = log.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    for principal in [None, Some("denied"), None] {
+        let page = authorized_page(principal).await;
+        assert!(
+            page["liveBindings"].get("signal.auth-private").is_none(),
+            "unauthorized cursor leaked: {page}"
+        );
+        assert_eq!(page["liveBindings"]["signal.auth-public"]["cursor"], 0);
+        assert_eq!(page["props"]["posts"][0], "page still renders");
+    }
+    assert_eq!(
+        authorized_page(Some("allowed")).await["liveBindings"]["signal.auth-private"]["cursor"],
+        1
+    );
+    suprnova::Gate::define::<String, String>("live:topic.signal.auth-private", |_, _| false);
+    assert!(
+        authorized_page(Some("allowed")).await["liveBindings"]
+            .get("signal.auth-private")
+            .is_none()
+    );
+    let output = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    let lines: Vec<_> = output
+        .lines()
+        .filter(|line| {
+            line.contains("signal.auth-private") && line.contains("__tests__/TypedProps")
+        })
+        .collect();
+    assert_eq!(
+        lines.iter().filter(|line| line.contains("WARN")).count(),
+        1,
+        "{output}"
+    );
+    assert!(
+        lines.iter().filter(|line| line.contains("DEBUG")).count() >= 3,
+        "{output}"
+    );
+}

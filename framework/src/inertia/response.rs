@@ -1403,7 +1403,7 @@ impl InertiaResponse {
         } else {
             Some(
                 crate::live::LiveTopics::resolve()?
-                    .page_bindings(self.live_bindings)
+                    .page_bindings(self.live_bindings, &self.component)
                     .await?,
             )
         };

@@ -741,6 +741,11 @@ Each prop keeps its own rendered cursor, so a partial response cannot consume
 a change for a prop it did not reload. Every Inertia visit carries the Live
 document identity in `X-Socket-ID` while the adapter is mounted.
 
+A private binding is included only when the current principal has its topic
+or stream ability. Otherwise the page renders without that binding or cursor
+and keeps its polling fallback. The framework logs the page component and
+topic once at warn per process, then at debug on later denied renders.
+
 ### Why Suprnova diverges
 
 Laravel has no built-in equivalent for topic-driven Inertia partial reloads.
