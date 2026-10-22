@@ -462,6 +462,22 @@ async fn pub_003_uploads_run_in_parallel_within_the_configured_bound() {
     assert_eq!(state.maximum.load(Ordering::SeqCst), 2);
 }
 
+#[derive(Debug)]
+struct FsLeaseRace {
+    snapshots: tokio::sync::Barrier,
+    closes: AtomicUsize,
+    holder_started: tokio::sync::Notify,
+}
+impl Default for FsLeaseRace {
+    fn default() -> Self {
+        Self {
+            snapshots: tokio::sync::Barrier::new(2),
+            closes: AtomicUsize::new(0),
+            holder_started: tokio::sync::Notify::new(),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct LeaseRace {
     entered: AtomicUsize,
@@ -478,6 +494,7 @@ struct Probe {
     observe_delete_manifest: Mutex<Option<Operator>>,
     deletion_manifests: Mutex<Vec<Bytes>>,
     lease_race: Mutex<Option<Arc<LeaseRace>>>,
+    fs_lease_race: Mutex<Option<Arc<FsLeaseRace>>>,
     replace_lease_on_list: Mutex<Option<Operator>>,
     refuse: Mutex<Option<String>>,
     stall: AtomicBool,
@@ -585,6 +602,7 @@ impl Service for ProbeService {
             inner: self.inner.read(ctx, path, args)?,
             state: self.state.clone(),
             tracked: path.ends_with("large.bin"),
+            expired_lease: path == lease_key(1),
         })
     }
     async fn stat(
@@ -837,6 +855,17 @@ impl oio::Write for ProbeWriter {
         self.inner.write(bytes).await
     }
     async fn close(&mut self) -> opendal::Result<Metadata> {
+        let fs_race = self.state.fs_lease_race.lock().unwrap().clone();
+        if self.path == lease_key(2)
+            && self.absent
+            && let Some(race) = fs_race
+        {
+            if race.closes.fetch_add(1, Ordering::SeqCst) == 0 {
+                tokio::time::timeout(Duration::from_secs(5), race.holder_started.notified())
+                    .await
+                    .expect("the competing Fs close must reach its holder first");
+            }
+        }
         if self.path == lease_key(2) && self.absent {
             let race = self.state.lease_race.lock().unwrap().clone();
             if let Some(race) = race {
@@ -1620,6 +1649,7 @@ struct ProbeReader {
     inner: oio::Reader,
     state: Arc<Probe>,
     tracked: bool,
+    expired_lease: bool,
 }
 impl oio::Read for ProbeReader {
     async fn open(
@@ -1637,7 +1667,16 @@ impl oio::Read for ProbeReader {
                 .maximum_asset_read
                 .fetch_max(range.size().unwrap_or(u64::MAX), Ordering::SeqCst);
         }
-        self.inner.read(range).await
+        let reply = self.inner.read(range).await?;
+        let race = self.state.fs_lease_race.lock().unwrap().clone();
+        if self.expired_lease
+            && let Some(race) = race
+        {
+            tokio::time::timeout(Duration::from_secs(5), race.snapshots.wait())
+                .await
+                .expect("both Fs takers must read the expired epoch");
+        }
+        Ok(reply)
     }
 }
 

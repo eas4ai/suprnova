@@ -79,11 +79,12 @@ async fn optional_bytes(disk: &Operator, key: &str) -> Result<Option<Bytes>, Fra
 impl StorageLease {
     pub(crate) async fn acquire(
         disk: Operator,
+        create_disk: Operator,
         timeout: Duration,
         skew: Duration,
         deadline: tokio::time::Instant,
     ) -> Result<Self, FrameworkError> {
-        let capability = disk.info().capability();
+        let capability = create_disk.info().capability();
         if !capability.write_with_if_not_exists && !capability.write_with_if_none_match {
             return Err(error(
                 "publication lease requires atomic conditional object creation",
@@ -117,7 +118,7 @@ impl StorageLease {
             ),
         };
         let path = key(epoch);
-        let write = disk.write_with(&path, serde_json::to_vec(&record).map_err(error)?);
+        let write = create_disk.write_with(&path, serde_json::to_vec(&record).map_err(error)?);
         let write = if capability.write_with_if_not_exists {
             write.if_not_exists(true)
         } else {

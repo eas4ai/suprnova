@@ -513,3 +513,100 @@ async fn pub_003_round5_epoch_exhaustion_returns_an_error_without_reusing_a_key(
     assert_eq!(highest_lease(&raw).await["epoch"], u64::MAX);
     assert_eq!(raw.list("_pub/lease/").await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn pub_003_round6_1_fs_atomic_staging_cannot_replace_an_acquired_epoch() {
+    let root = tempfile::tempdir().unwrap();
+    let staging = tempfile::tempdir().unwrap();
+    let raw = Operator::new(
+        services::Fs::default()
+            .root(root.path().to_str().unwrap())
+            .atomic_write_dir(staging.path().to_str().unwrap()),
+    )
+    .unwrap();
+    raw.write(
+        &lease_key(1),
+        br#"{"owner":"crashed","epoch":1,"expires_at_ms":0}"#.to_vec(),
+    )
+    .await
+    .unwrap();
+    let race = Arc::new(FsLeaseRace::default());
+    let probe = Arc::new(Probe::default());
+    *probe.fs_lease_race.lock().unwrap() = Some(race.clone());
+    let disk = raw.clone().layer(ProbeLayer(probe));
+    let started = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut tasks = Vec::new();
+    for _ in 0..2 {
+        let publisher = Publisher::from_operator(
+            disk.clone(),
+            "v1",
+            PublishConfig {
+                timeout: Duration::from_secs(15),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (race, started, release) = (race.clone(), started.clone(), release.clone());
+        tasks.push(tokio::spawn(async move {
+            publisher
+                .publish_with(|| async {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    race.holder_started.notify_one();
+                    tokio::time::timeout(Duration::from_millis(500), release.acquire())
+                        .await
+                        .ok();
+                    Err::<Vec<PageObject>, _>(FrameworkError::internal(
+                        "render observed acquired lease",
+                    ))
+                })
+                .await
+        }));
+    }
+    let mut failures = Vec::new();
+    for task in tasks {
+        failures.push(
+            tokio::time::timeout(Duration::from_secs(10), task)
+                .await
+                .expect("Fs contenders must finish")
+                .unwrap()
+                .unwrap_err()
+                .to_string(),
+        );
+    }
+    assert_eq!(
+        started.load(Ordering::SeqCst),
+        1,
+        "exclusive Fs create must fence the delayed rename: {failures:?}"
+    );
+    assert_eq!(
+        failures
+            .iter()
+            .filter(|failure| failure.contains("held"))
+            .count(),
+        1,
+        "{failures:?}"
+    );
+}
+
+#[tokio::test]
+async fn pub_003_round6_1_fs_with_an_unsafe_reserved_staging_entry_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let staging = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join(".suprnova-atomic"), b"occupied").unwrap();
+    let disk = Operator::new(
+        services::Fs::default()
+            .root(root.path().to_str().unwrap())
+            .atomic_write_dir(staging.path().to_str().unwrap()),
+    )
+    .unwrap();
+    let result = Publisher::from_operator(disk, "v1", PublishConfig::default());
+    let failure = result
+        .err()
+        .expect("an Fs root that cannot support exclusive publication must refuse")
+        .to_string();
+    assert!(
+        failure.contains("atomic_write_dir") && failure.contains("Storage::register_fs"),
+        "{failure}"
+    );
+}

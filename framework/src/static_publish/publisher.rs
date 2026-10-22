@@ -139,6 +139,7 @@ pub struct PublishStatus {
 #[derive(Clone)]
 pub struct Publisher {
     pub(crate) disk: opendal::Operator,
+    lease_create_disk: opendal::Operator,
     pub(crate) asset_version: String,
     pub(crate) config: PublishConfig,
     driver: Option<Arc<dyn CdnDriver>>,
@@ -198,8 +199,10 @@ impl Publisher {
                 "concurrency, timeout and revalidate must be positive",
             ));
         }
+        let lease_create_disk = crate::filesystem::exclusive_create_operator(&disk)?;
         Ok(Self {
             disk,
+            lease_create_disk,
             asset_version: asset_version.into(),
             config,
             driver: None,
@@ -336,6 +339,7 @@ impl Publisher {
             forward,
             super::lease::StorageLease::acquire(
                 self.disk.clone(),
+                self.lease_create_disk.clone(),
                 self.config.timeout,
                 self.config.clock_skew,
                 deadline,
@@ -1235,6 +1239,7 @@ impl Publisher {
             deadline,
             super::lease::StorageLease::acquire(
                 self.disk.clone(),
+                self.lease_create_disk.clone(),
                 self.config.timeout,
                 self.config.clock_skew,
                 deadline,

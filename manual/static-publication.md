@@ -147,6 +147,11 @@ creation of the next epoch. A competing creation of that same key refuses as
 held. Acquisition never deletes or replaces a record. Takeover needs only
 `write_with_if_not_exists` or `write_with_if_none_match` and works the same on
 every disk. Every publisher sharing the disk must use this epoch protocol.
+Fs lease creation uses the registered-disk confined exclusive-create primitive
+at the operator's root, including for application operators with `atomic_write_dir`.
+Application operator layers still handle publication data, lease reads and release;
+lease creation uses the confined operator directly. A root that cannot support
+this primitive refuses setup and names `Storage::register_fs` in the diagnostic.
 
 Verification lists the chain and checks the highest epoch, owner and acquired
 expiry. Release overwrites only the holder's own record with expiry zero, so
