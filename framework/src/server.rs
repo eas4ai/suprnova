@@ -453,6 +453,7 @@ impl Server {
 
         // Register all #[policy] gates collected via inventory::submit!
         crate::authorization::init_policies();
+        crate::event_sourcing::init_registry()?;
 
         // Register the MongoDB connections when `MONGODB_URI` is set or a
         // `MongoConfig` is registered. Before the cache and the queue, so

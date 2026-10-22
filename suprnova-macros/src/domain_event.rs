@@ -60,7 +60,7 @@ pub fn domain_event(args: TokenStream, input: TokenStream) -> TokenStream {
                 #upgrade
             }
             ::suprnova::inventory::submit! {
-                ::suprnova::DomainEventEntry { name: #name, decode: ::suprnova::DomainEventEntry::decode::<#ident> }
+                ::suprnova::DomainEventEntry { name: #name, rust_type: ::std::any::type_name::<#ident>, decode: ::suprnova::DomainEventEntry::decode::<#ident> }
             }
         })
     };

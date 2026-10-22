@@ -7,6 +7,8 @@ mod projections;
 mod replay;
 mod store;
 
+pub(crate) use store::init_registry;
+
 pub use aggregate::{Aggregate, AggregateEntry, AggregateRoot};
 pub use migrations::{CreateEventSourcingTables, migrations};
 pub use store::{DomainEvent, DomainEventEntry, EventStore, Fact, Snapshot, StoredEvent};

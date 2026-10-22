@@ -328,6 +328,7 @@ where
 
     if let Some((name, sub_matches)) = matches.subcommand() {
         if let Some(entry) = find(name) {
+            crate::event_sourcing::init_registry()?;
             let booted = boot.is_some();
             if let Some(boot) = boot {
                 // Boxed, as `Application::run` holds its bootstrap: awaited

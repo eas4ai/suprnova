@@ -29,6 +29,8 @@ pub trait DomainEvent: Serialize + DeserializeOwned + Send + Sync + 'static {
 pub struct DomainEventEntry {
     /// Persisted identity.
     pub name: &'static str,
+    /// Identifies both declarations when stable names collide at startup.
+    pub rust_type: fn() -> &'static str,
     /// Validates and upgrades an envelope without exposing a Rust type name.
     pub decode: fn(i32, Value) -> Result<Value, FrameworkError>,
 }
@@ -335,5 +337,66 @@ impl EventStore {
         rows(exec.query_all(exec.backend().build(&query)).await?)?
             .pop()
             .ok_or_else(|| error("inserted event not found"))
+    }
+}
+
+pub(crate) fn init_registry() -> Result<(), FrameworkError> {
+    static CHECKED: std::sync::OnceLock<Result<(), FrameworkError>> = std::sync::OnceLock::new();
+    CHECKED
+        .get_or_init(|| validate_registry_entries(inventory::iter::<DomainEventEntry>))
+        .clone()
+}
+
+fn validate_registry_entries<'a>(
+    entries: impl IntoIterator<Item = &'a DomainEventEntry>,
+) -> Result<(), FrameworkError> {
+    let mut seen = std::collections::BTreeMap::new();
+    for entry in entries {
+        let rust_type = (entry.rust_type)();
+        if let Some(previous) = seen.insert(entry.name, rust_type) {
+            let mut types = [previous, rust_type];
+            types.sort_unstable();
+            return Err(FrameworkError::internal(format!(
+                "duplicate domain event '{}' declared by '{}' and '{}'",
+                entry.name, types[0], types[1]
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+    struct First;
+    struct Second;
+    fn payload(_version: i32, value: Value) -> Result<Value, FrameworkError> {
+        Ok(value)
+    }
+    #[test]
+    fn es_002_registry_rejects_duplicate_names_before_access() {
+        let entries = [
+            DomainEventEntry {
+                name: "unique",
+                rust_type: std::any::type_name::<First>,
+                decode: payload,
+            },
+            DomainEventEntry {
+                name: "duplicate",
+                rust_type: std::any::type_name::<First>,
+                decode: payload,
+            },
+            DomainEventEntry {
+                name: "duplicate",
+                rust_type: std::any::type_name::<Second>,
+                decode: payload,
+            },
+        ];
+        let error = validate_registry_entries(&entries).unwrap_err().to_string();
+        assert!(error.contains("duplicate"), "{error}");
+        assert!(error.contains(std::any::type_name::<First>()), "{error}");
+        assert!(error.contains(std::any::type_name::<Second>()), "{error}");
+        assert!(validate_registry_entries(&entries[..2]).is_ok());
+        assert!(validate_registry_entries([]).is_ok());
     }
 }

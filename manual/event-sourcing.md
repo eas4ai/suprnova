@@ -24,6 +24,8 @@ MySQL/MariaDB use the same migration.
 
 The attribute registers a stable event name. Renaming the Rust struct preserves
 stored history. Declare a new schema version when the payload changes.
+Application and console startup validate every registered event name once. Two
+Rust types declaring one name stop startup with both type names in the error.
 
 ```rust
 use suprnova::{aggregate, domain_event, Aggregate, AggregateRoot, Fact, FrameworkError};
