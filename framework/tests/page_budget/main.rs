@@ -23,7 +23,7 @@ fn budget_001_shipped_har_reports_the_baseline() {
     let audit = PageBudget::default()
         .audit_har(include_str!("fixtures/suprnova.har.json"))
         .unwrap();
-    assert_eq!(audit.requests, 21);
+    assert_eq!(audit.requests, 11);
     for rule in [
         "total-transfer",
         "asset-size",
@@ -829,3 +829,112 @@ mod review_manifest;
 
 mod css_work;
 mod re_review;
+
+#[tokio::test]
+async fn budget_001_cross_origin_scope_agrees_in_all_modes() {
+    if std::env::var_os("BUDGET_SCOPE_CHILD").is_none() {
+        for hosts in ["fonts.example", ""] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "budget_001_cross_origin_scope_agrees_in_all_modes",
+                    "--nocapture",
+                ])
+                .env("BUDGET_SCOPE_CHILD", "1")
+                .env("PAGE_BUDGET_ALLOWED_THIRD_PARTY_HOSTS", hosts)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    }
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let html = "<link rel=preload as=font href='https://fonts.example/font-ABcd1234.woff2'><script src='/app-ABcd1234.js'></script>";
+    let router = Router::new()
+        .get("/", move |_: Request| async move {
+            Ok(HttpResponse::html(html))
+        })
+        .get("/app-ABcd1234.js", |_: Request| async {
+            Ok(HttpResponse::text("ok")
+                .header("Cache-Control", "public, max-age=31536000, immutable"))
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let count = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..count]);
+            let (body, mime) = if request.starts_with("GET / ") {
+                (html, "text/html")
+            } else {
+                ("ok", "text/javascript")
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: public, max-age=31536000, immutable\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    let url = format!("http://{address}/");
+    let mut entries = vec![
+        entry("/", 200, "text/html", html, html.len() as u64, &[]),
+        entry(
+            "/app-ABcd1234.js",
+            200,
+            "text/javascript",
+            "ok",
+            2,
+            &[("Cache-Control", "public, max-age=31536000, immutable")],
+        ),
+        entry(
+            "/font-ABcd1234.woff2",
+            403,
+            "font/woff2",
+            "",
+            2_000_000,
+            &[("Set-Cookie", "external=1")],
+        ),
+    ];
+    entries[0]["request"]["url"] = serde_json::json!(url);
+    entries[1]["request"]["url"] = serde_json::json!(format!("{url}app-ABcd1234.js"));
+    entries[2]["request"]["url"] = serde_json::json!("https://fonts.example/font-ABcd1234.woff2");
+    entries[2]["request"]["cookies"] = serde_json::json!([{"name":"external","value":"1"}]);
+    let budget = PageBudget::from_env().unwrap();
+    let helper = TestClient::new(router, MiddlewareRegistry::new())
+        .audit_page(&url, &budget)
+        .await
+        .unwrap();
+    let live = budget.audit_url(&url).await.unwrap();
+    let captured = budget.audit_har(&har(entries)).unwrap();
+    assert_eq!(helper, live);
+    assert_eq!(helper, captured);
+    assert_eq!(helper.third_party_hosts, ["fonts.example"]);
+    assert_eq!(helper.requests, 2);
+    let allowed = budget
+        .allowed_third_party_hosts
+        .as_ref()
+        .unwrap()
+        .contains("fonts.example");
+    if allowed {
+        helper.ensure_passes().unwrap();
+    } else {
+        assert_eq!(helper.findings.len(), 1);
+        assert_eq!(helper.findings[0].rule, "third-party-host");
+    }
+    let command = suprnova::console::test(["budget:audit", &url]).run().await;
+    command.assert_exit_code(if allowed { 0 } else { 1 });
+    assert!(
+        command.output().contains(&helper.to_string()),
+        "{}",
+        command.output()
+    );
+    server.abort();
+}

@@ -3,7 +3,12 @@
 A page budget checks the document and the assets it fetches. The test helper
 uses the application's in-process HTTP path. It needs no browser, port or
 network. The console command reads a HAR capture or fetches a live URL.
-Both runners use `PageBudget` and the same evaluator.
+All three modes use `PageBudget` and the same evaluator. Budgets measure the
+application's own resources: the document and same-origin assets. Third-party
+hosts are listed and governed by the configured allowed host list because the
+application controls neither their bytes nor their headers. HAR entries from
+other origins do not count toward transfer, asset, raster, font, cache or cookie
+rules.
 
 ## Test a page
 

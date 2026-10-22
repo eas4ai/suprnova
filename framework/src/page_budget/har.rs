@@ -91,6 +91,14 @@ pub(super) fn read(json: &str, budget: &PageBudget) -> Result<Capture, Framework
         if document && url.host_str() == page.host_str() {
             origin = url.clone();
         }
+        // Third-party bytes and headers are outside the application's budget.
+        // Keep their hosts under the same allow-list rule as the HTTP collectors.
+        if !same_origin(&origin, &url) && !(document && url.host_str() == page.host_str()) {
+            if let Some(host) = url.host_str() {
+                capture.hosts.insert(host.into());
+            }
+            continue;
+        }
         let mut headers: Vec<_> = entry
             .response
             .headers
