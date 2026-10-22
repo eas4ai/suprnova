@@ -79,6 +79,17 @@ struct OutcomeHook {
     failed: Box<dyn FnOnce() + Send>,
 }
 impl OutcomeHooks {
+    /// Keeps savepoint boundaries in the same unit as callback boundaries.
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Leaves earlier hooks registered when a savepoint discards later work.
+    pub(crate) fn split_off(&mut self, boundary: usize) -> Self {
+        let boundary = boundary.min(self.0.len());
+        Self(self.0.split_off(boundary))
+    }
+
     /// Keeps publication synchronous and separate from delivery callbacks.
     pub(crate) fn new(
         committed: impl FnOnce() + Send + 'static,
@@ -138,32 +149,16 @@ impl Drop for UnstartedOutcome {
 /// for the transaction's lifetime.
 pub(crate) struct TxState {
     parent: Option<Arc<TxState>>,
-    outcome: std::sync::Mutex<OutcomeHooks>,
+    /// Lets concurrency regressions pause the actual nested transfer.
+    #[cfg(test)]
+    transfer_probe: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     depth: usize,
     children: Arc<ChildFinalizers>,
     pub(crate) tx: Arc<DatabaseTransaction>,
     pub(crate) connection_name: Arc<str>,
-    /// Callbacks queued by
-    /// [`after_commit::register_callback`](super::after_commit::register_callback),
-    /// run in registration order once the physical commit succeeds.
-    ///
-    /// `std::sync::Mutex`, not `tokio::sync::Mutex`: registration is a
-    /// synchronous `Vec::push` and the drain is a single `mem::take`, so the
-    /// lock is never held across an `.await`.
-    pub(crate) after_commit: std::sync::Mutex<Vec<super::after_commit::AfterCommitCallback>>,
-    /// Compensating callbacks queued by
-    /// [`after_commit::register_rollback_callback`](super::after_commit::register_rollback_callback),
-    /// run when the transaction rolls back. The after-commit list is discarded
-    /// in that case.
-    pub(crate) on_rollback: std::sync::Mutex<Vec<super::after_commit::AfterCommitCallback>>,
-    /// Where callback registries and outcome hooks stood at each
-    /// [`Transaction::savepoint`] still in scope, innermost last.
-    ///
-    /// A savepoint rollback undoes the rows a deferred dispatch was waiting on,
-    /// so it has to undo the dispatch too - and without a recorded length there
-    /// is nothing to measure "registered above the savepoint" against. See
-    /// [`after_commit::SavepointMark`](super::after_commit::SavepointMark).
-    pub(crate) savepoints: std::sync::Mutex<Vec<super::after_commit::SavepointMark>>,
+    /// One lock prevents nested transfers from straddling savepoint bookkeeping.
+    /// Registration, marking, unwinding and draining never await under the guard.
+    pub(crate) registries: std::sync::Mutex<Registries>,
     #[cfg(feature = "filesystem")]
     publication_generations: PublicationGenerations,
     #[cfg(feature = "filesystem")]
@@ -220,22 +215,17 @@ impl Drop for PublicationGenerationEntry {
     }
 }
 
-impl TxState {
-    /// Captures the hook boundary so savepoint rollback preserves earlier work.
-    pub(crate) fn outcome_len(&self) -> usize {
-        self.outcome
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .0
-            .len()
-    }
-
-    /// Removes discarded work before the enclosing transaction can publish it.
-    pub(crate) fn take_outcomes_since(&self, boundary: usize) -> OutcomeHooks {
-        let mut outcome = self.outcome.lock().unwrap_or_else(|e| e.into_inner());
-        let boundary = boundary.min(outcome.0.len());
-        OutcomeHooks(outcome.0.split_off(boundary))
-    }
+/// Keeps a unit of deferred work indivisible at savepoint boundaries.
+#[derive(Default)]
+pub(crate) struct Registries {
+    /// Physical outcome publication must follow the same boundary as delivery.
+    pub(crate) outcome: OutcomeHooks,
+    /// Delivery waits for the physical commit.
+    pub(crate) after_commit: Vec<super::after_commit::AfterCommitCallback>,
+    /// Compensation runs when the corresponding writes are discarded.
+    pub(crate) on_rollback: Vec<super::after_commit::AfterCommitCallback>,
+    /// Marks share the lock so concurrent unwind cannot use a partial snapshot.
+    pub(crate) savepoints: Vec<super::after_commit::SavepointMark>,
 }
 
 /// Cancellation finalizer for the [`DB::transaction`] closure scope.
@@ -337,8 +327,12 @@ async fn finish_transaction_inner(
         notified.await;
     }
     let parent = state.parent.clone();
-    let outcome = std::mem::take(&mut *state.outcome.lock().unwrap_or_else(|e| e.into_inner()));
-    let (after_commit, on_rollback) = super::after_commit::drain(&state);
+    let Registries {
+        outcome,
+        after_commit,
+        on_rollback,
+        ..
+    } = super::after_commit::drain(&state);
     let tx = state.tx.clone();
     let connection_name = state.connection_name.clone();
     drop(state);
@@ -384,22 +378,19 @@ async fn finish_transaction_inner(
             return Err(FrameworkError::database(error.to_string()).into());
         }
         if let Some(parent) = &parent {
-            parent
-                .outcome
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .0
-                .extend(outcome.0);
-            parent
-                .after_commit
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .extend(after_commit);
-            parent
-                .on_rollback
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .extend(on_rollback);
+            {
+                let mut registries = parent.registries.lock().unwrap_or_else(|e| e.into_inner());
+                registries.outcome.0.extend(outcome.0);
+                #[cfg(test)]
+                {
+                    let probe = parent.transfer_probe.lock().unwrap().clone();
+                    if let Some(probe) = probe {
+                        probe();
+                    }
+                }
+                registries.after_commit.extend(after_commit);
+                registries.on_rollback.extend(on_rollback);
+            }
             emit_tx_event(super::events::TransactionCommitted {
                 connection_name: connection_name.to_string(),
             })
@@ -1652,10 +1643,12 @@ impl Transaction {
         // Registry after SQL, never before: a refused `ROLLBACK TO` leaves the
         // rows in place, and callbacks discarded for it could not be recovered.
         match super::after_commit::rollback_to_savepoint(&self.registry, &validated) {
-            Some((compensations, outcome)) => {
-                let callbacks =
-                    super::after_commit::GuardedCallbacks::compensating(Vec::new(), compensations);
-                outcome.failed(&self.connection_name);
+            Some(discarded) => {
+                let callbacks = super::after_commit::GuardedCallbacks::compensating(
+                    discarded.after_commit,
+                    discarded.on_rollback,
+                );
+                discarded.outcome.failed(&self.connection_name);
                 callbacks.compensate().await;
             }
             None => tracing::warn!(
@@ -1867,7 +1860,10 @@ fn take_own_callbacks(
     Vec<super::after_commit::AfterCommitCallback>,
 ) {
     match Arc::try_unwrap(registry) {
-        Ok(state) => super::after_commit::drain(&state),
+        Ok(state) => {
+            let registries = super::after_commit::drain(&state);
+            (registries.after_commit, registries.on_rollback)
+        }
         Err(_shared) => (Vec::new(), Vec::new()),
     }
 }
@@ -2177,15 +2173,17 @@ impl DB {
                 .as_ref()
                 .map(|state| state.publication_generations.clone())
                 .unwrap_or_default(),
-            outcome: std::sync::Mutex::new(outcome.0.take().unwrap_or_default()),
+            registries: std::sync::Mutex::new(Registries {
+                outcome: outcome.0.take().unwrap_or_default(),
+                ..Registries::default()
+            }),
+            #[cfg(test)]
+            transfer_probe: std::sync::Mutex::new(None),
             parent,
             depth,
             children: Arc::new(ChildFinalizers::default()),
             tx: Arc::new(tx),
             connection_name: conn_name,
-            after_commit: std::sync::Mutex::new(Vec::new()),
-            on_rollback: std::sync::Mutex::new(Vec::new()),
-            savepoints: std::sync::Mutex::new(Vec::new()),
         });
         let scope_finalizer = ScopeFinalizer::armed(tx_state.clone());
         // Keep every temporary handle inside the scoped future. On abort,
@@ -2270,15 +2268,14 @@ impl DB {
             publication_scope: crate::static_publish::batch::capture(),
             #[cfg(feature = "filesystem")]
             publication_generations: PublicationGenerations::default(),
-            outcome: std::sync::Mutex::new(OutcomeHooks::default()),
+            registries: std::sync::Mutex::new(Registries::default()),
+            #[cfg(test)]
+            transfer_probe: std::sync::Mutex::new(None),
             parent: None,
             depth: 1,
             children: Arc::new(ChildFinalizers::default()),
             tx: inner.clone(),
             connection_name: conn_name.clone(),
-            after_commit: std::sync::Mutex::new(Vec::new()),
-            on_rollback: std::sync::Mutex::new(Vec::new()),
-            savepoints: std::sync::Mutex::new(Vec::new()),
         });
         Ok(Transaction {
             inner,
@@ -2976,6 +2973,128 @@ mod outcome_hook_tests {
         outcome
     }
 
+    async fn concurrent_savepoint_transfer(rollback_during_transfer: bool) {
+        struct Release(Option<std::sync::mpsc::Sender<()>>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+        let db = TestDatabase::sqlite_memory().await.unwrap();
+        db.execute_unprepared("CREATE TABLE transfer_rows (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        let observed = trace.clone();
+        DB::transaction(move |tx| {
+            Box::pin(async move {
+                if rollback_during_transfer {
+                    tx.savepoint("boundary").await?;
+                }
+                let parent = CURRENT_TX.with(|state| state.clone().unwrap());
+                let entered = Arc::new(tokio::sync::Notify::new());
+                let probe_entered = entered.clone();
+                let (release, receiver) = std::sync::mpsc::channel();
+                let release = Release(Some(release));
+                let receiver = Mutex::new(receiver);
+                *parent.transfer_probe.lock().unwrap() = Some(Arc::new(move || {
+                    probe_entered.notify_one();
+                    receiver
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("the test releases the transfer even during unwinding");
+                }));
+                let delivery = observed.clone();
+                let compensation = observed.clone();
+                let outcome = hooks(&observed);
+                let child = super::super::after_commit::spawn_owned(CURRENT_TX.scope(
+                    Some(parent.clone()),
+                    async move {
+                        DB::transaction_with_outcome(None, outcome, move |_tx| {
+                            Box::pin(async move {
+                                DB::statement("INSERT INTO transfer_rows VALUES (1)", vec![])
+                                    .await?;
+                                DB::after_commit(move || async move {
+                                    delivery.lock().unwrap().push("delivery");
+                                    Ok(())
+                                })
+                                .await?;
+                                DB::after_rollback(move || async move {
+                                    compensation.lock().unwrap().push("compensation");
+                                    Ok(())
+                                })
+                                .await?;
+                                Ok(())
+                            })
+                        })
+                        .await
+                    },
+                ));
+                tokio::time::timeout(Duration::from_secs(5), entered.notified())
+                    .await
+                    .expect("the child reaches the transfer after releasing its SQL savepoint");
+                let marker_tx = Transaction::current().unwrap();
+                let started = Arc::new(tokio::sync::Notify::new());
+                let marker_started = started.clone();
+                let mut marker = super::super::after_commit::spawn_owned(CURRENT_TX.scope(
+                    Some(parent.clone()),
+                    async move {
+                        marker_started.notify_one();
+                        if rollback_during_transfer {
+                            marker_tx.rollback_to("boundary").await
+                        } else {
+                            marker_tx.savepoint("boundary").await
+                        }
+                    },
+                ));
+                started.notified().await;
+                // The old split locks let this operation finish while transfer is paused.
+                // The unified lock makes it wait for all three vectors instead.
+                let early = tokio::time::timeout(Duration::from_millis(200), &mut marker).await;
+                drop(release);
+                match early {
+                    Ok(result) => result.unwrap()?,
+                    Err(_) => marker.await.unwrap()?,
+                }
+                child.await.unwrap()??;
+                if !rollback_during_transfer {
+                    tx.rollback_to("boundary").await?;
+                }
+                drop(parent);
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        let expected = if rollback_during_transfer {
+            ["failed", "compensation"]
+        } else {
+            ["committed", "delivery"]
+        };
+        assert_eq!(*trace.lock().unwrap(), expected);
+        assert_eq!(
+            DB::scalar::<i64>("SELECT COUNT(*) FROM transfer_rows", vec![])
+                .await
+                .unwrap(),
+            i64::from(!rollback_during_transfer)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn es_001_nested_transfer_and_savepoint_mark_are_atomic() {
+        concurrent_savepoint_transfer(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn es_001_nested_transfer_and_savepoint_rollback_are_atomic() {
+        concurrent_savepoint_transfer(true).await;
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn es_001_panicking_committed_hook_preserves_observers_and_delivery() {
@@ -3078,13 +3197,21 @@ mod outcome_hook_tests {
         async fn project(&self, _: &crate::StoredEvent) -> Result<(), FrameworkError> {
             // Put the panic before the aggregate's own publication hook.
             CURRENT_TX.with(|state| {
-                state.as_ref().unwrap().outcome.lock().unwrap().0.insert(
-                    0,
-                    OutcomeHook {
-                        committed: Box::new(|| panic!("hook before aggregate publication")),
-                        failed: Box::new(|| {}),
-                    },
-                );
+                state
+                    .as_ref()
+                    .unwrap()
+                    .registries
+                    .lock()
+                    .unwrap()
+                    .outcome
+                    .0
+                    .insert(
+                        0,
+                        OutcomeHook {
+                            committed: Box::new(|| panic!("hook before aggregate publication")),
+                            failed: Box::new(|| {}),
+                        },
+                    );
             });
             Ok(())
         }
