@@ -4,7 +4,7 @@ use crate::FrameworkError;
 use html5ever::tokenizer::states::RawKind;
 use html5ever::tokenizer::{BufferQueue, StartTag, Token, TokenSink, TokenSinkResult, Tokenizer};
 use serde::Deserialize;
-use serde::de::{DeserializeSeed, Error as _, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -63,6 +63,15 @@ impl Discovery {
         }
         self.refs.work_done += 1;
         true
+    }
+    fn json_tick<E: serde::de::Error>(&mut self) -> Result<(), E> {
+        if self.tick() {
+            Ok(())
+        } else {
+            Err(E::custom(
+                self.error.as_deref().unwrap_or("discovery work limit"),
+            ))
+        }
     }
     fn reference(&mut self, base: &Url, raw: &str, manifest: bool, icon: bool) -> Option<String> {
         if !self.tick() {
@@ -525,11 +534,10 @@ fn css_function(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Default)]
 struct Icon {
     src: Option<String>,
     sizes: Option<String>,
-    #[serde(rename = "type")]
     mime: Option<String>,
 }
 struct Manifest<'a> {
@@ -573,10 +581,92 @@ impl Manifest<'_> {
         }
     }
 }
+// Typed fields and keys charge before deserialization. Ignored values use the
+// recursive visitor below so extensions cannot hide unbounded parser work.
+struct ScalarSeed<'a, T>(&'a mut Discovery, std::marker::PhantomData<T>);
+fn scalar<T>(discovery: &mut Discovery) -> ScalarSeed<'_, T> {
+    ScalarSeed(discovery, std::marker::PhantomData)
+}
+impl<'de, T: Deserialize<'de>> DeserializeSeed<'de> for ScalarSeed<'_, T> {
+    type Value = T;
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<T, D::Error> {
+        self.0.json_tick()?;
+        T::deserialize(deserializer)
+    }
+}
+struct MeteredIgnored<'a>(&'a mut Discovery);
+impl<'de> DeserializeSeed<'de> for MeteredIgnored<'_> {
+    type Value = ();
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        self.0.json_tick()?;
+        deserializer.deserialize_any(self)
+    }
+}
+impl<'de> Visitor<'de> for MeteredIgnored<'_> {
+    type Value = ();
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a bounded JSON value")
+    }
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_seq<S: SeqAccess<'de>>(self, mut seq: S) -> Result<(), S::Error> {
+        while seq.next_element_seed(MeteredIgnored(self.0))?.is_some() {}
+        Ok(())
+    }
+    fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<(), M::Error> {
+        while map.next_key_seed(MeteredIgnored(self.0))?.is_some() {
+            map.next_value_seed(MeteredIgnored(self.0))?;
+        }
+        Ok(())
+    }
+}
+struct IconFields<'a>(&'a mut Discovery);
+impl<'de> DeserializeSeed<'de> for IconFields<'_> {
+    type Value = Icon;
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Icon, D::Error> {
+        // IconSeed already charges this object as an array element.
+        deserializer.deserialize_map(self)
+    }
+}
+impl<'de> Visitor<'de> for IconFields<'_> {
+    type Value = Icon;
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a manifest icon object")
+    }
+    fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Icon, M::Error> {
+        let mut icon = Icon::default();
+        while let Some(key) = map.next_key_seed(scalar::<String>(self.0))? {
+            match key.as_str() {
+                "src" => icon.src = map.next_value_seed(scalar(self.0))?,
+                "sizes" => icon.sizes = map.next_value_seed(scalar(self.0))?,
+                "type" => icon.mime = map.next_value_seed(scalar(self.0))?,
+                _ => map.next_value_seed(MeteredIgnored(self.0))?,
+            }
+        }
+        Ok(icon)
+    }
+}
 struct RootSeed<'a, 'b>(&'a mut Manifest<'b>);
 impl<'de> DeserializeSeed<'de> for RootSeed<'_, '_> {
     type Value = ();
     fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        self.0.discovery.json_tick()?;
         deserializer.deserialize_map(self)
     }
 }
@@ -586,11 +676,11 @@ impl<'de> Visitor<'de> for RootSeed<'_, '_> {
         f.write_str("a web app manifest object")
     }
     fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<(), M::Error> {
-        while let Some(key) = map.next_key::<String>()? {
+        while let Some(key) = map.next_key_seed(scalar::<String>(self.0.discovery))? {
             if key == "icons" {
                 map.next_value_seed(IconsSeed(self.0))?;
             } else {
-                map.next_value::<IgnoredAny>()?;
+                map.next_value_seed(MeteredIgnored(self.0.discovery))?;
             }
         }
         Ok(())
@@ -600,6 +690,7 @@ struct IconsSeed<'a, 'b>(&'a mut Manifest<'b>);
 impl<'de> DeserializeSeed<'de> for IconsSeed<'_, '_> {
     type Value = ();
     fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        self.0.discovery.json_tick()?;
         deserializer.deserialize_seq(self)
     }
 }
@@ -637,7 +728,7 @@ impl<'de> DeserializeSeed<'de> for IconSeed<'_, '_> {
                 self.index
             )));
         }
-        let icon = Icon::deserialize(deserializer)?;
+        let icon = IconFields(self.manifest.discovery).deserialize(deserializer)?;
         self.manifest.icon(icon);
         if let Some(error) = &self.manifest.discovery.error {
             return Err(D::Error::custom(format!(

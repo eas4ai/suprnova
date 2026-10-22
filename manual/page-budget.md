@@ -122,8 +122,11 @@ duplicate and ignored candidates. Set `max_discovery_tokens` in Rust or
 Discovery stops HTML input on overflow, parses inline styles on their tags and
 processes complete CSS constructs from style blocks before later markup.
 Only an unfinished CSS construct is retained between character chunks; the
-response byte limit bounds its size. Manifest icons are decoded one at a time,
-and overflow refuses the remaining array before it is materialized.
+response byte limit bounds its size. Manifest keys and values consume work,
+including scalars, strings and entries inside ignored extension objects and
+arrays. The parser checks the allowance before reading each value. Icons are
+decoded one at a time. Exhaustion stops before the next value is consumed,
+without materializing the remaining array.
 Each `image-set()` is a modern-plus-fallback group, like a picture or source set.
 The pending queue is bounded too. Repeating one reference does not allocate another queue entry. Every `Cache-Control`
 header line contributes to the policy; a second `no-cache` line fails the

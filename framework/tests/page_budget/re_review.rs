@@ -180,3 +180,74 @@ async fn budget_001_style_character_chunks_preserve_quoted_urls_and_comments() {
     assert_eq!(result.requests, 3, "{result}");
     result.ensure_passes().unwrap();
 }
+
+#[test]
+fn budget_001_manifest_unknown_subtrees_obey_work_limit_before_later_fields() {
+    let extension = (0..1000).map(|_| "0").collect::<Vec<_>>().join(",");
+    for manifest in [
+        format!(r#"{{"extension":[{extension}],"icons":ICONS_MUST_NOT_BE_READ}}"#),
+        format!(
+            r#"{{"icons":[{{"extension":{{"nested":[{extension}]}},"src":SRC_MUST_NOT_BE_READ}}]}}"#
+        ),
+    ] {
+        let error = PageBudget {
+            max_discovery_tokens: 32,
+            ..PageBudget::default()
+        }
+        .audit_har(&har(vec![
+            entry(
+                "/",
+                200,
+                "text/html",
+                "<link rel=manifest href='/app.webmanifest'>",
+                100,
+                &[],
+            ),
+            entry(
+                "/app.webmanifest",
+                200,
+                "application/manifest+json",
+                &manifest,
+                100,
+                &[],
+            ),
+        ]))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("discovery work limit of 32 tokens"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("expected value"),
+            "later fields must not be read: {error}"
+        );
+    }
+}
+#[test]
+fn budget_001_manifest_meter_preserves_valid_extensions_and_icons() {
+    let manifest = r#"{"extension":{"enabled":true,"none":null,"values":[1,2.5,"label",{"a":[]}]},"icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","extension":[false,{"x":"y"}]}]}"#;
+    let result = PageBudget::default()
+        .audit_har(&har(vec![
+            entry(
+                "/",
+                200,
+                "text/html",
+                "<link rel=manifest href='/app.webmanifest'>",
+                100,
+                &[],
+            ),
+            entry(
+                "/app.webmanifest",
+                200,
+                "application/manifest+json",
+                manifest,
+                100,
+                &[],
+            ),
+            entry("/icon.svg", 200, "image/svg+xml", "<svg/>", 100, &[]),
+        ]))
+        .unwrap();
+    assert_eq!(result.requests, 3);
+    result.ensure_passes().unwrap();
+}
