@@ -716,10 +716,12 @@ topic has this shape:
 ```
 
 `only` is the partial reload list. `generation` identifies one lifetime of
-the topic's authority state. It is unique and increasing within that authority;
-clients compare generations for inequality only. `cursor` is the position
-within that generation. Both are captured before the loader runs, and `island` plus `stream` describe the authorized
-Live subscription. The generated frontend types expose the same table as
+the topic's authority state. Generations are unique and increasing within an
+authority and unique across in-process restarts; across process restarts they
+differ except with negligible probability. Clients compare generations for
+inequality only. `cursor` is the position within that generation. Both are
+captured before the loader runs, and `island` plus `stream` describe the
+authorized Live subscription. The generated frontend types expose the same table as
 `LiveBindings` and map page components through `InertiaLiveBindings`. The
 existing `inertiaPropCache` record also carries each page's topic-to-prop map
 under `live`, beside `cacheable`, `public`, and `perRequest`.

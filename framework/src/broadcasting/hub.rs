@@ -254,6 +254,15 @@ impl InMemoryBroadcastHub {
         }
     }
 
+    /// Simulates a separate process with a fixed nonce and isolated high-water mark for tests.
+    #[doc(hidden)]
+    pub fn with_live_topic_nonce_for_test(nonce: u32) -> Result<Self, FrameworkError> {
+        Ok(Self {
+            live_topics: LiveTopicRuntime::with_nonce_for_test(nonce)?,
+            ..Self::new()
+        })
+    }
+
     /// Subscribe to `channel`, evicting any zero-receiver senders we
     /// pass through on the way. The returned receiver is created **before**
     /// any map lock is released, so a concurrent eviction sweep can never

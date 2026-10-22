@@ -816,13 +816,19 @@ suprnova::App::singleton(config);
 ```
 
 Every topic instance has a generation that identifies one lifetime of its
-authority state. Generations are unique and increasing within an authority.
-Each new lifetime receives `max(now_ms, last_allocated + 1)`, so clock reuse
-or rollback cannot reuse a generation. Memory keeps the allocation counter
-under the authority's state lock. Redis keeps one counter per hub stream and
-allocates it in the same Lua script that creates the instance hash. That
-counter does not expire when an instance retires. Static topics use the same
-allocator and never retire. Clients compare generations for inequality only.
+authority state. Generations are unique and increasing within an authority
+and unique across in-process restarts; across process restarts they differ
+except with negligible probability. Memory draws one random 22-bit nonce per
+process and uses `(now_seconds << 22) | nonce` as the clock input. Each new
+lifetime receives the greater of that input and the process-wide high-water
+mark plus one. An atomic compare-and-swap advances the mark, so restarting an
+authority or moving its clock backward cannot reuse an allocation. A new
+process has a different nonce with probability `1 - 2^-22`. Redis uses
+`max(now_ms, last_allocated + 1)` with one persistent counter per hub stream,
+allocated in the same Lua script that creates the instance hash. That counter
+does not expire when an instance retires. Allocations fail if they exceed the
+browser-safe integer limit. Static topics use the same allocator and never
+retire. Clients compare generations for inequality only.
 Retirement creates a new generation at cursor 0; its next publication advances
 to 1. A signal
 from a different generation makes an open page reload all bound props even

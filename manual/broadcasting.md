@@ -799,10 +799,12 @@ Membership heartbeats keep a connected instance alive. In-memory hubs prune
 only eligible idle instances through one shared sweep per second. Static topics
 do not expire.
 A generation identifies one lifetime of a topic instance's authority state.
-Allocations are unique and increasing within the authority, including when its
-clock repeats or moves backward. Redis allocates from a persistent hub-wide
-counter in the script that creates the hash. Clients compare generations for
-inequality only. See [Topic signals](live.md#topic-signals) for configuration
+Generations are unique and increasing within an authority and unique across
+in-process restarts; across process restarts they differ except with negligible
+probability. Memory uses a process-wide high-water mark and a random process
+nonce, so clock reuse or rollback cannot repeat an in-process allocation.
+Redis allocates from a persistent hub-wide counter in the script that creates
+the hash. Clients compare generations for inequality only. See [Topic signals](live.md#topic-signals) for configuration
 and cursor resets.
 
 Topic traffic uses a reserved internal channel that ordinary `publish` calls

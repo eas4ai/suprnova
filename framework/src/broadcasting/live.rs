@@ -5,7 +5,8 @@ use crate::FrameworkError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, hash_map::Entry};
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -19,8 +20,10 @@ pub struct LiveTopicSignal {
     pub topic: String,
     /// The publication position within the retained instance lifetime. Retirement resets it to zero.
     pub cursor: u64,
-    /// Unique, increasing lifetime allocation within this authority.
-    /// Clients compare inequality so a new lifetime resets reused cursors.
+    /// Lifetime allocation, unique and increasing within its authority.
+    /// Memory preserves uniqueness across in-process restarts and uses a process
+    /// nonce to make reuse across process restarts negligibly likely.
+    /// Clients compare generations for inequality only.
     pub generation: u64,
     /// The page props to reload. An empty list requests a full reload.
     pub props: Vec<String>,
@@ -32,7 +35,9 @@ pub struct LiveTopicSignal {
 /// One authority baseline identifies both the retained state and its publication position.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LiveTopicPosition {
-    /// Unique, increasing lifetime allocation within this authority.
+    /// Lifetime allocation, unique and increasing within its authority.
+    /// Memory preserves uniqueness across in-process restarts and uses a process
+    /// nonce to make reuse across process restarts negligibly likely.
     /// Clients compare generations for inequality only.
     pub generation: u64,
     /// Accepted publications within this generation.
@@ -263,7 +268,6 @@ struct LiveTopicTable {
     topics: HashMap<String, LiveTopicEntry>,
     idle: BTreeSet<(Instant, String)>,
     last_prune: Option<Instant>,
-    last_generation: u64,
 }
 
 /// Shared cursor, expiry index and coalescing state for one authority.
@@ -272,11 +276,88 @@ pub(crate) struct LiveTopicRuntime {
     table: Arc<Mutex<LiveTopicTable>>,
     clock: Arc<TopicClock>,
     retention: LiveTopicRetention,
+    generations: Arc<TopicGenerationAllocator>,
     sweeps: Arc<std::sync::atomic::AtomicU64>,
     visits: Arc<std::sync::atomic::AtomicU64>,
 }
 
+const TOPIC_NONCE_BITS: u32 = 22;
+const TOPIC_NONCE_MASK: u32 = (1 << TOPIC_NONCE_BITS) - 1;
+static TOPIC_GENERATION_HIGH_WATER: AtomicU64 = AtomicU64::new(0);
+
+fn process_topic_nonce() -> &'static Result<u32, String> {
+    static NONCE: OnceLock<Result<u32, String>> = OnceLock::new();
+    NONCE.get_or_init(|| {
+        let mut bytes = [0; 4];
+        getrandom::fill(&mut bytes)
+            .map_err(|error| format!("Live topic process nonce: OS randomness failed: {error}"))?;
+        Ok(u32::from_le_bytes(bytes) & TOPIC_NONCE_MASK)
+    })
+}
+
+enum TopicGenerationAllocator {
+    Process(&'static Result<u32, String>),
+    SimulatedProcess { nonce: u32, high_water: AtomicU64 },
+}
+
+impl Default for TopicGenerationAllocator {
+    fn default() -> Self {
+        Self::Process(process_topic_nonce())
+    }
+}
+
+impl TopicGenerationAllocator {
+    fn allocate(&self, millis: u64) -> Result<u64, FrameworkError> {
+        let seconds = millis / 1000;
+        if seconds >= 1 << 31 {
+            return Err(FrameworkError::internal("Live topic generation exhausted"));
+        }
+        let (nonce, high_water) = match self {
+            Self::Process(nonce) => (
+                *nonce
+                    .as_ref()
+                    .map_err(|error| FrameworkError::internal(error.clone()))?,
+                &TOPIC_GENERATION_HIGH_WATER,
+            ),
+            Self::SimulatedProcess { nonce, high_water } => (*nonce, high_water),
+        };
+        let clock_input = (seconds << TOPIC_NONCE_BITS) | u64::from(nonce);
+        let mut last = high_water.load(Ordering::Relaxed);
+        loop {
+            let next = last
+                .checked_add(1)
+                .filter(|value| *value <= suprnova_live::canonical::MAX_SAFE_INTEGER)
+                .ok_or_else(|| FrameworkError::internal("Live topic generation exhausted"))?;
+            let generation = clock_input.max(next);
+            match high_water.compare_exchange_weak(
+                last,
+                generation,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(generation),
+                Err(current) => last = current,
+            }
+        }
+    }
+}
+
 impl LiveTopicRuntime {
+    pub(crate) fn with_nonce_for_test(nonce: u32) -> Result<Self, FrameworkError> {
+        if nonce > TOPIC_NONCE_MASK {
+            return Err(FrameworkError::internal(
+                "Live topic nonce must fit in 22 bits",
+            ));
+        }
+        Ok(Self {
+            generations: Arc::new(TopicGenerationAllocator::SimulatedProcess {
+                nonce,
+                high_water: AtomicU64::new(0),
+            }),
+            ..Self::default()
+        })
+    }
+
     pub(crate) fn set_clock_for_test(&self, millis: u64) -> Result<(), FrameworkError> {
         if millis == 0 || millis > suprnova_live::canonical::MAX_SAFE_INTEGER {
             return Err(FrameworkError::internal("invalid Live topic test clock"));
@@ -314,13 +395,7 @@ impl LiveTopicRuntime {
         let entry = match table.topics.entry(topic.to_owned()) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
-                let next = table
-                    .last_generation
-                    .checked_add(1)
-                    .filter(|value| *value <= suprnova_live::canonical::MAX_SAFE_INTEGER)
-                    .ok_or_else(|| FrameworkError::internal("Live topic generation exhausted"))?;
-                let generation = self.clock.now().max(next);
-                table.last_generation = generation;
+                let generation = self.generations.allocate(self.clock.now())?;
                 entry.insert(LiveTopicEntry::new(
                     self.retention.window(topic),
                     generation,
