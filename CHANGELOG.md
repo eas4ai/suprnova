@@ -28,6 +28,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   409 before any cached bytes leave. `suprnova generate-types` writes the
   declarations into `inertia-props.ts` as `inertiaPropCache`
   (`manual/render-cache.md`, `manual/frontend-typescript-types.md`).
+- **A page budget audit.** `TestClient::audit_page(url, &PageBudget)` renders a
+  page through the in-process request path, follows the assets the document
+  references (scripts, stylesheets and their imports, images and source sets,
+  fonts, icons, media, inline styles, the web app manifest) and returns every
+  failed rule with the asset, the rule, the measured value and the allowed
+  value. The rules cover total transfer, per-asset size, raster format against
+  size (WebP or AVIF with a fallback above the threshold; a PNG within a
+  margin of its oxipng fast-preset size), the one-year immutable policy on
+  fingerprinted assets, no cookie on or for a static asset, no redirect on the
+  first request, a font budget and the third-party hosts the page reaches. The
+  `budget:audit <url | file.har>` console command applies the same rules to a
+  live URL or a HAR capture. Every budget is configurable on `PageBudget` and,
+  for the command, through `PAGE_BUDGET_*` environment variables
+  (`manual/page-budget.md`). The React, Vue, Svelte and Live starter kits ship
+  `tests/page_budget.rs` over their public pages; the dogfood application runs
+  the same audit.
 
 ### Changed
 
@@ -40,6 +56,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   share hook or provider fails boot with the route name; declare the shared
   props by name instead. Middleware boxed through the public `into_boxed`
   keeps its type identity, so ordering and boot checks see it.
+- **Static files get a cache policy by file name.** `StaticFiles` serves a
+  fingerprinted file (Vite's `name-<hash>` convention; `fingerprint(pattern)`
+  changes the convention) with `public, max-age=31536000, immutable`, and every
+  other file with `public, max-age=3600` unless `cache_control(...)` sets
+  another value. Before, `cache_control` applied to every file and nothing was
+  sent when it was unset. A static file response no longer sets the session or
+  XSRF cookie when the request left the session untouched; a request that
+  changed the session (a remember-me rotation, a regeneration) still gets its
+  cookies.
 
 ### Fixed
 
