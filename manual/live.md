@@ -815,11 +815,16 @@ let config = suprnova::live::LiveConfig::builder()
 suprnova::App::singleton(config);
 ```
 
-Every instance has a generation: the creation time of its authority state in
-milliseconds. In-memory time follows the hub's monotonic clock from its start
-time. Redis assigns generations from its own clock, shared by every node.
-Static topics also carry the authority's start generation. Retirement creates
-a new generation at cursor 0; its next publication advances to 1. A signal
+Every topic instance has a generation that identifies one lifetime of its
+authority state. Generations are unique and increasing within an authority.
+Each new lifetime receives `max(now_ms, last_allocated + 1)`, so clock reuse
+or rollback cannot reuse a generation. Memory keeps the allocation counter
+under the authority's state lock. Redis keeps one counter per hub stream and
+allocates it in the same Lua script that creates the instance hash. That
+counter does not expire when an instance retires. Static topics use the same
+allocator and never retire. Clients compare generations for inequality only.
+Retirement creates a new generation at cursor 0; its next publication advances
+to 1. A signal
 from a different generation makes an open page reload all bound props even
 when its old cursor is higher. The response adopts the new generation and
 cursor. Island recovery also seeds a generation at cursor 0. Signals in the

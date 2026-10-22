@@ -798,7 +798,12 @@ data to publish a full invalidation with the current generation and cursor.
 Membership heartbeats keep a connected instance alive. In-memory hubs prune
 only eligible idle instances through one shared sweep per second. Static topics
 do not expire.
-See [Topic signals](live.md#topic-signals) for configuration and cursor resets.
+A generation identifies one lifetime of a topic instance's authority state.
+Allocations are unique and increasing within the authority, including when its
+clock repeats or moves backward. Redis allocates from a persistent hub-wide
+counter in the script that creates the hash. Clients compare generations for
+inequality only. See [Topic signals](live.md#topic-signals) for configuration
+and cursor resets.
 
 Topic traffic uses a reserved internal channel that ordinary `publish` calls
 cannot spoof. The hub envelope's `except` socket id is preserved across

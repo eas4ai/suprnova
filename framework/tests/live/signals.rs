@@ -2042,3 +2042,66 @@ async fn signal_fix3_001_island_recovery_seed_survives_retirement_at_cursor_zero
     assert_eq!(change["generation"], seed["generation"]);
     assert_eq!(change["cursor"], 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn signal_fix4_001_recreation_within_one_millisecond_gets_a_new_generation() {
+    let hub = InMemoryBroadcastHub::new();
+    hub.configure_live_topic_family("allocation", Duration::from_nanos(1))
+        .unwrap();
+    hub.set_live_topic_clock_for_test(1000).unwrap();
+    let names = ["allocation.owner".into()];
+    let first = hub.live_topic_positions(&names).await.unwrap()[0];
+    tokio::time::advance(Duration::from_nanos(1)).await;
+    let recreated = hub.live_topic_positions(&names).await.unwrap()[0];
+    assert_eq!(first.cursor, 0);
+    assert_eq!(recreated.cursor, 0);
+    assert!(
+        recreated.generation > first.generation,
+        "{first:?} -> {recreated:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn signal_fix4_001_clock_rollback_keeps_generations_increasing() {
+    let hub = InMemoryBroadcastHub::new();
+    hub.configure_live_topic_family("allocation", Duration::from_nanos(1))
+        .unwrap();
+    hub.set_live_topic_clock_for_test(10000).unwrap();
+    let names = ["allocation.owner".into()];
+    let first = hub.live_topic_positions(&names).await.unwrap()[0];
+    hub.set_live_topic_clock_for_test(10).unwrap();
+    tokio::time::advance(Duration::from_nanos(1)).await;
+    let recreated = hub.live_topic_positions(&names).await.unwrap()[0];
+    assert!(
+        recreated.generation > first.generation,
+        "{first:?} -> {recreated:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn signal_fix4_001_generation_exhaustion_fails_closed() {
+    let hub = InMemoryBroadcastHub::new();
+    hub.configure_live_topic_family("allocation", Duration::from_secs(1))
+        .unwrap();
+    hub.set_live_topic_clock_for_test(suprnova_live::canonical::MAX_SAFE_INTEGER)
+        .unwrap();
+    let first = hub
+        .live_topic_positions(&["allocation.first".into()])
+        .await
+        .unwrap()[0];
+    assert_eq!(first.generation, suprnova_live::canonical::MAX_SAFE_INTEGER);
+    let error = hub
+        .live_topic_positions(&["allocation.second".into()])
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("generation exhausted"),
+        "{error}"
+    );
+    assert_eq!(
+        hub.live_topic_positions(&["allocation.first".into()])
+            .await
+            .unwrap()[0],
+        first
+    );
+}

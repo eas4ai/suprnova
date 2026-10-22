@@ -1357,7 +1357,8 @@ impl RegisteredTopicChange {
     pub fn topic(&self) -> &str {
         &self.topic
     }
-    /// Returns the creation time of the retained topic state.
+    /// Returns a lifetime allocation, unique and increasing within its authority.
+    /// Clients compare generations for inequality only.
     pub const fn generation(&self) -> u64 {
         self.generation
     }

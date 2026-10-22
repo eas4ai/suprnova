@@ -1215,3 +1215,101 @@ async fn pending_outage(remove_pending: bool) {
         .unwrap();
     assert_eq!(pending_ttl, -2, "successful flush removes its durable work");
 }
+
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn signal_fix4_001_redis_allocates_distinct_generations_from_one_time_read() {
+    let server = crate::redis_server::PasswordRedis::start("signal-allocation-test");
+    let url = format!("redis://:signal-allocation-test@127.0.0.1:{}", server.port);
+    let stream = format!("signal-allocation-{}", uuid::Uuid::new_v4());
+    let first = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    let second = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    for hub in [&first, &second] {
+        hub.configure_live_topic_family("allocation", Duration::from_secs(60))
+            .unwrap();
+    }
+    let names = [
+        "allocation.first".into(),
+        "allocation.second".into(),
+        "static.first".into(),
+        "static.second".into(),
+    ];
+    let positions = first.live_topic_positions(&names).await.unwrap();
+    for pair in positions.windows(2) {
+        assert!(
+            pair[1].generation > pair[0].generation,
+            "one Redis TIME read must allocate unique lifetimes: {positions:?}"
+        );
+    }
+    assert_eq!(
+        second.live_topic_positions(&names).await.unwrap(),
+        positions
+    );
+    let mut connection = redis::Client::open(url)
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let key = format!("{stream}:__live:generation");
+    let last: u64 = redis::cmd("GET")
+        .arg(&key)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(last, positions[3].generation);
+    let ttl: i64 = redis::cmd("PTTL")
+        .arg(&key)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        ttl, -1,
+        "the authority allocation counter must survive instance retirement"
+    );
+    let future = suprnova_live::canonical::MAX_SAFE_INTEGER - 8;
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(future)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    let after_rollback = second
+        .live_topic_positions(&["allocation.rollback".into()])
+        .await
+        .unwrap()[0];
+    assert!(
+        after_rollback.generation > future,
+        "a clock below the persisted allocation must still advance it"
+    );
+    let mut signals = first.subscribe_live_topic("allocation.wire").unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for prop in ["immediate", "pending"] {
+        second
+            .publish_live_topic(
+                "allocation.wire",
+                &[prop.into()],
+                None,
+                Duration::from_millis(500),
+            )
+            .await
+            .unwrap();
+    }
+    let position = second
+        .live_topic_positions(&["allocation.wire".into()])
+        .await
+        .unwrap()[0];
+    assert_eq!(position.generation, future + 2);
+    for cursor in 1..=2 {
+        let signal = tokio::time::timeout(Duration::from_secs(3), signals.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(signal.data["cursor"], cursor);
+        assert_eq!(
+            signal.data["generation"].as_u64(),
+            Some(position.generation),
+            "generation must survive JSON encoding exactly: {}",
+            signal.data
+        );
+    }
+}

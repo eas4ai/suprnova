@@ -3,7 +3,7 @@
 use super::hub::BroadcastEnvelope;
 use crate::FrameworkError;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, hash_map::Entry};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -19,7 +19,8 @@ pub struct LiveTopicSignal {
     pub topic: String,
     /// The publication position within the retained instance lifetime. Retirement resets it to zero.
     pub cursor: u64,
-    /// Creation time of the topic state, so retirement remains visible at a lower cursor.
+    /// Unique, increasing lifetime allocation within this authority.
+    /// Clients compare inequality so a new lifetime resets reused cursors.
     pub generation: u64,
     /// The page props to reload. An empty list requests a full reload.
     pub props: Vec<String>,
@@ -31,7 +32,8 @@ pub struct LiveTopicSignal {
 /// One authority baseline identifies both the retained state and its publication position.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LiveTopicPosition {
-    /// Creation time of the authority state in milliseconds.
+    /// Unique, increasing lifetime allocation within this authority.
+    /// Clients compare generations for inequality only.
     pub generation: u64,
     /// Accepted publications within this generation.
     pub cursor: u64,
@@ -40,6 +42,7 @@ pub struct LiveTopicPosition {
 struct TopicClock {
     wall_millis: u64,
     start: Instant,
+    override_millis: std::sync::atomic::AtomicU64,
 }
 impl Default for TopicClock {
     fn default() -> Self {
@@ -51,11 +54,18 @@ impl Default for TopicClock {
         Self {
             wall_millis,
             start: Instant::now(),
+            override_millis: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
 impl TopicClock {
     fn now(&self) -> u64 {
+        let value = self
+            .override_millis
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if value != 0 {
+            return value;
+        }
         self.wall_millis
             .saturating_add(self.start.elapsed().as_millis().min(u64::MAX as u128) as u64)
             .min(9_007_199_254_740_991)
@@ -253,6 +263,7 @@ struct LiveTopicTable {
     topics: HashMap<String, LiveTopicEntry>,
     idle: BTreeSet<(Instant, String)>,
     last_prune: Option<Instant>,
+    last_generation: u64,
 }
 
 /// Shared cursor, expiry index and coalescing state for one authority.
@@ -266,6 +277,16 @@ pub(crate) struct LiveTopicRuntime {
 }
 
 impl LiveTopicRuntime {
+    pub(crate) fn set_clock_for_test(&self, millis: u64) -> Result<(), FrameworkError> {
+        if millis == 0 || millis > suprnova_live::canonical::MAX_SAFE_INTEGER {
+            return Err(FrameworkError::internal("invalid Live topic test clock"));
+        }
+        self.clock
+            .override_millis
+            .store(millis, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
     pub(crate) fn configure_family(
         &self,
         family: &str,
@@ -279,7 +300,7 @@ impl LiveTopicRuntime {
         table: &mut LiveTopicTable,
         topic: &str,
         update: impl FnOnce(&mut LiveTopicEntry) -> R,
-    ) -> R {
+    ) -> Result<R, FrameworkError> {
         if let Some(deadline) = table
             .topics
             .get(topic)
@@ -290,17 +311,22 @@ impl LiveTopicRuntime {
         if table.topics.get(topic).is_some_and(LiveTopicEntry::expired) {
             table.topics.remove(topic);
         }
-        let entry = table.topics.entry(topic.to_owned()).or_insert_with(|| {
-            let retention = self.retention.window(topic);
-            LiveTopicEntry::new(
-                retention,
-                if retention.is_some() {
-                    self.clock.now()
-                } else {
-                    self.clock.wall_millis
-                },
-            )
-        });
+        let entry = match table.topics.entry(topic.to_owned()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let next = table
+                    .last_generation
+                    .checked_add(1)
+                    .filter(|value| *value <= suprnova_live::canonical::MAX_SAFE_INTEGER)
+                    .ok_or_else(|| FrameworkError::internal("Live topic generation exhausted"))?;
+                let generation = self.clock.now().max(next);
+                table.last_generation = generation;
+                entry.insert(LiveTopicEntry::new(
+                    self.retention.window(topic),
+                    generation,
+                ))
+            }
+        };
         entry.last_activity = Instant::now();
         let result = update(entry);
         entry.idle_deadline = entry
@@ -310,10 +336,10 @@ impl LiveTopicRuntime {
         if let Some(deadline) = entry.idle_deadline {
             table.idle.insert((deadline, topic.to_owned()));
         }
-        result
+        Ok(result)
     }
 
-    pub(crate) fn membership(&self, topic: &str, active: bool) {
+    pub(crate) fn membership(&self, topic: &str, active: bool) -> Result<(), FrameworkError> {
         let mut table = self
             .table
             .lock()
@@ -324,7 +350,7 @@ impl LiveTopicRuntime {
             } else {
                 entry.memberships = entry.memberships.saturating_sub(1);
             }
-        });
+        })
     }
 
     pub(crate) fn sweep_stats(&self) -> (u64, u64) {
@@ -373,20 +399,24 @@ impl LiveTopicRuntime {
     }
 
     /// Reads count as activity, so a rendered instance keeps its baseline for the window.
-    pub(crate) async fn cursor(&self, topic: &str) -> u64 {
-        self.cursors(&[topic.to_owned()]).await[0]
+    pub(crate) async fn cursor(&self, topic: &str) -> Result<u64, FrameworkError> {
+        Ok(self.cursors(&[topic.to_owned()]).await?[0])
     }
 
-    pub(crate) async fn cursors(&self, names: &[String]) -> Vec<u64> {
-        self.positions(names)
-            .await
+    pub(crate) async fn cursors(&self, names: &[String]) -> Result<Vec<u64>, FrameworkError> {
+        Ok(self
+            .positions(names)
+            .await?
             .into_iter()
             .map(|position| position.cursor)
-            .collect()
+            .collect())
     }
 
     /// Generation and cursor are captured together under the same authority lock.
-    pub(crate) async fn positions(&self, names: &[String]) -> Vec<LiveTopicPosition> {
+    pub(crate) async fn positions(
+        &self,
+        names: &[String],
+    ) -> Result<Vec<LiveTopicPosition>, FrameworkError> {
         self.prune();
         let mut table = self
             .table
@@ -459,20 +489,20 @@ impl LiveTopicRuntime {
             } else {
                 Ok(AcceptedLiveTopicPublication::Coalesced)
             }
-        })
+        })?
     }
 
     /// Take the pending union and start its next rate window.
     pub(crate) async fn take_pending(
         &self,
         topic: &str,
-    ) -> Option<(LiveTopicSignal, Option<LiveTopicExclusion>)> {
+    ) -> Result<Option<(LiveTopicSignal, Option<LiveTopicExclusion>)>, FrameworkError> {
         let mut table = self
             .table
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !table.topics.contains_key(topic) {
-            return None;
+            return Ok(None);
         }
         self.with_entry(&mut table, topic, |entry| {
             let pending = entry.pending.take()?;

@@ -14,15 +14,36 @@ const LIVE_FLUSH_ERROR_BACKOFF: Duration = Duration::from_secs(1);
 /// The browser's `RegisteredTopicChange` envelope bound.
 const MAX_REGISTERED_TOPIC_CHANGE_PROPS: usize = 256;
 
+// Every state creation shares this allocation key, including recovery after retirement.
+const GENERATION_SCRIPT: &str = r#"
+local function allocate_generation(key, now)
+    local last = tonumber(redis.call('GET', key) or '0')
+    if not last or last < 0 or last % 1 ~= 0 or last >= 9007199254740991 then
+        error('Live topic generation exhausted or invalid')
+    end
+    local generation = math.max(now, last + 1)
+    if generation > 9007199254740991 then error('Live topic generation exhausted') end
+    redis.call('SET', key, string.format('%.0f', generation))
+    return generation
+end
+"#;
+
+fn topic_script(body: &str) -> Script {
+    Script::new(&format!("{GENERATION_SCRIPT}\n{body}"))
+}
+
 /// Atomically accepts a signal, advancing its cursor and either writing an
 /// immediate stream entry or merging the signal into the pending union.
 const ACCEPT_SCRIPT: &str = r#"
 local function encode_signal(envelope, empty_props)
+    -- cjson rounds large safe integers, so keep the allocation's decimal digits.
+    envelope.data.generation = string.format('%.0f', envelope.data.generation)
     local encoded = cjson.encode(envelope)
+    encoded = string.gsub(encoded, '"generation":"(%d+)"', '"generation":%1', 1)
     if empty_props then encoded = string.gsub(encoded, '"props":{}', '"props":[]', 1) end
     return encoded
 end
-for i, expected in ipairs({'hash', 'set', 'zset', 'stream', 'hash'}) do
+for i, expected in ipairs({'hash', 'set', 'zset', 'stream', 'hash', 'string'}) do
     local actual = redis.call('TYPE', KEYS[i]).ok
     if actual ~= 'none' and actual ~= expected then
         return redis.error_reply('live topic key has the wrong type')
@@ -40,7 +61,7 @@ local pending = pending_hash or previous_member ~= false
 if redis.call('HEXISTS', KEYS[1], 'generation') == 0 then
     local generation = redis.call('HGET', KEYS[5], 'generation')
     if not generation then
-        if retention > 0 then generation = now else generation = ARGV[12] end
+        generation = allocate_generation(KEYS[6], now)
     end
     redis.call('HSET', KEYS[1], 'generation', generation, 'cursor', redis.call('HGET', KEYS[5], 'cursor') or 0)
 end
@@ -120,7 +141,7 @@ local generation = redis.call('HGET', KEYS[1], 'generation') or redis.call('HGET
 local cursor = redis.call('HGET', KEYS[1], 'cursor') or redis.call('HGET', KEYS[5], 'cursor') or 0
 local retention = tonumber(ARGV[7])
 if not generation then
-    if retention > 0 then generation = now else generation = ARGV[9] end
+    generation = allocate_generation(KEYS[6], now)
 end
 redis.call('HSET', KEYS[1], 'generation', generation, 'cursor', cursor, 'retention_ms', retention)
 redis.call('PERSIST', KEYS[1])
@@ -138,7 +159,9 @@ if pending and redis.call('HGET', KEYS[5], 'except_mode') == 'some' then
     envelope.except = exclusion.socket
     envelope.data.exclusion = exclusion
 end
+envelope.data.generation = string.format('%.0f', envelope.data.generation)
 local encoded = cjson.encode(envelope)
+encoded = string.gsub(encoded, '"generation":"(%d+)"', '"generation":%1', 1)
 if #props == 0 then encoded = string.gsub(encoded, '"props":{}', '"props":[]', 1) end
 redis.call('XADD', KEYS[4], '*', ARGV[4], encoded)
 redis.call('DEL', KEYS[2], KEYS[5])
@@ -163,25 +186,19 @@ pub(super) struct RedisLiveTopics {
     stream: String,
     schedule: String,
     retention: LiveTopicRetention,
-    generation: u64,
+    generation_key: String,
 }
 
 impl RedisLiveTopics {
     /// Create publication state on an existing Redis connection manager.
-    pub(super) async fn new(
-        connection: ConnectionManager,
-        stream: &str,
-    ) -> Result<Self, FrameworkError> {
-        let generation: u64 = Script::new("local value = redis.call('GET', KEYS[1]); if not value then local t = redis.call('TIME'); value = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000); redis.call('SET', KEYS[1], value) end return tonumber(value)")
-            .key(format!("{stream}:{LIVE_KEY_SEGMENT}:generation"))
-            .invoke_async(&mut connection.clone()).await.map_err(|error| FrameworkError::internal(format!("SeaStreamerBroadcastHub: topic generation initialization failed: {error}")))?;
-        Ok(Self {
+    pub(super) fn new(connection: ConnectionManager, stream: &str) -> Self {
+        Self {
             connection,
             stream: stream.to_owned(),
             schedule: format!("{stream}:{LIVE_KEY_SEGMENT}:schedule"),
             retention: LiveTopicRetention::default(),
-            generation,
-        })
+            generation_key: format!("{stream}:{LIVE_KEY_SEGMENT}:generation"),
+        }
     }
 
     /// Accept and persist one publication atomically.
@@ -216,12 +233,13 @@ impl RedisLiveTopics {
                 ))
             })?
             .unwrap_or_default();
-        let result: (u8, u64, u64) = Script::new(ACCEPT_SCRIPT)
+        let result: (u8, u64, u64) = topic_script(ACCEPT_SCRIPT)
             .key(&meta)
             .key(prop_set)
             .key(&self.schedule)
             .key(&self.stream)
             .key(format!("{meta}:pending"))
+            .key(&self.generation_key)
             .arg(interval_ms)
             .arg(instance_id.to_string())
             .arg(live_topic_channel(topic))
@@ -233,7 +251,6 @@ impl RedisLiveTopics {
             .arg(super::sea_streamer::MESSAGE_FIELD)
             .arg(MAX_REGISTERED_TOPIC_CHANGE_PROPS)
             .arg(self.retention.window(topic).map_or(0, duration_millis))
-            .arg(self.generation)
             .invoke_async(&mut self.connection.clone())
             .await
             .map_err(|error| {
@@ -274,21 +291,22 @@ impl RedisLiveTopics {
         if topics.is_empty() {
             return Ok(Vec::new());
         }
-        let script = Script::new(
+        let script = topic_script(
             r#"
 local values = {}
 local time = redis.call('TIME')
 local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
-for i, key in ipairs(KEYS) do
-    local retention = tonumber(ARGV[i + 1])
+for i = 2, #KEYS do
+    local key = KEYS[i]
+    local retention = tonumber(ARGV[i - 1])
     if redis.call('HEXISTS', key, 'generation') == 0 then
         local generation = redis.call('HGET', key .. ':pending', 'generation')
         if not generation then
-            if retention > 0 then generation = now else generation = ARGV[1] end
+            generation = allocate_generation(KEYS[1], now)
         end
         redis.call('HSET', key, 'generation', generation, 'cursor', redis.call('HGET', key .. ':pending', 'cursor') or 0)
     end
-    values[i] = {tonumber(redis.call('HGET', key, 'generation')), tonumber(redis.call('HGET', key, 'cursor') or '0')}
+    values[i - 1] = {tonumber(redis.call('HGET', key, 'generation')), tonumber(redis.call('HGET', key, 'cursor') or '0')}
     redis.call('HSET', key, 'retention_ms', retention)
     if redis.call('HEXISTS', key, 'pending_member') == 1 or redis.call('EXISTS', key .. ':pending') == 1 then
         redis.call('PERSIST', key)
@@ -298,10 +316,10 @@ return values
 "#,
         );
         let mut invocation = script.prepare_invoke();
+        invocation.key(&self.generation_key);
         for topic in topics {
             invocation.key(self.topic_keys(topic).0);
         }
-        invocation.arg(self.generation);
         for topic in topics {
             invocation.arg(self.retention.window(topic).map_or(0, duration_millis));
         }
@@ -378,12 +396,13 @@ return values
             ))
         })?;
         let (meta, prop_set) = self.topic_keys(&schedule.topic);
-        Script::new(FLUSH_SCRIPT)
+        topic_script(FLUSH_SCRIPT)
             .key(&meta)
             .key(prop_set)
             .key(&self.schedule)
             .key(&self.stream)
             .key(format!("{meta}:pending"))
+            .key(&self.generation_key)
             .arg(instance_id.to_string())
             .arg(crate::broadcasting::live::LIVE_TOPIC_CHANNEL_PREFIX)
             .arg(LIVE_TOPIC_EVENT)
@@ -392,7 +411,6 @@ return values
             .arg(&schedule.topic)
             .arg(schedule.retention_ms)
             .arg(schedule.interval_ms)
-            .arg(self.generation)
             .invoke_async::<u8>(&mut self.connection.clone())
             .await
             .map(|_| ())

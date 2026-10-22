@@ -332,6 +332,12 @@ impl InMemoryBroadcastHub {
         self.channels.read().map(|m| m.len()).unwrap_or(0)
     }
 
+    /// Fixes the allocation clock so tests can reproduce reused milliseconds and clock rollback.
+    #[doc(hidden)]
+    pub fn set_live_topic_clock_for_test(&self, millis: u64) -> Result<(), FrameworkError> {
+        self.live_topics.set_clock_for_test(millis)
+    }
+
     /// Reports shared sweep executions and visited expiry candidates for deterministic tests.
     #[doc(hidden)]
     #[must_use]
@@ -384,8 +390,7 @@ impl BroadcastHub for InMemoryBroadcastHub {
     }
 
     fn live_topic_membership(&self, topic: &str, active: bool) -> Result<(), FrameworkError> {
-        self.live_topics.membership(topic, active);
-        Ok(())
+        self.live_topics.membership(topic, active)
     }
 
     fn prune_live_topics(&self) -> Result<usize, FrameworkError> {
@@ -401,18 +406,18 @@ impl BroadcastHub for InMemoryBroadcastHub {
     }
 
     async fn live_topic_cursor(&self, topic: &str) -> Result<u64, FrameworkError> {
-        Ok(self.live_topics.cursor(topic).await)
+        self.live_topics.cursor(topic).await
     }
 
     async fn live_topic_cursors(&self, topics: &[String]) -> Result<Vec<u64>, FrameworkError> {
-        Ok(self.live_topics.cursors(topics).await)
+        self.live_topics.cursors(topics).await
     }
 
     async fn live_topic_positions(
         &self,
         topics: &[String],
     ) -> Result<Vec<super::LiveTopicPosition>, FrameworkError> {
-        Ok(self.live_topics.positions(topics).await)
+        self.live_topics.positions(topics).await
     }
 
     async fn publish_live_topic(
@@ -436,7 +441,14 @@ impl BroadcastHub for InMemoryBroadcastHub {
                 let topic = topic.to_owned();
                 tokio::spawn(async move {
                     tokio::time::sleep_until(deadline).await;
-                    if let Some((signal, except)) = state.take_pending(&topic).await {
+                    let pending = match state.take_pending(&topic).await {
+                        Ok(pending) => pending,
+                        Err(error) => {
+                            tracing::error!(%error, topic, "Live topic delayed publication failed");
+                            return;
+                        }
+                    };
+                    if let Some((signal, except)) = pending {
                         let envelope = live_topic_envelope(signal, except);
                         if let Some(sender) = channels
                             .read()

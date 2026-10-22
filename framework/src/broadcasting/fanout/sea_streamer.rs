@@ -438,7 +438,7 @@ async fn connect_redis(
         .first()
         .map_or_else(|| "0-0".to_owned(), |entry| entry.id.clone());
     let (writer, requests) = mpsc::unbounded_channel();
-    let live_topics = RedisLiveTopics::new(write_conn.clone(), stream).await?;
+    let live_topics = RedisLiveTopics::new(write_conn.clone(), stream);
     tokio::spawn(stream_writer_task(write_conn, stream.to_owned(), requests));
     Ok((
         Producer::Redis(writer),
@@ -1300,7 +1300,7 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
 
     fn live_topic_membership(&self, topic: &str, active: bool) -> Result<(), FrameworkError> {
         if let FanoutLiveTopics::Memory(state) = &self.live_topics {
-            state.membership(topic, active);
+            state.membership(topic, active)?;
         }
         Ok(())
     }
@@ -1315,14 +1315,14 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
 
     async fn live_topic_cursor(&self, topic: &str) -> Result<u64, FrameworkError> {
         match &self.live_topics {
-            FanoutLiveTopics::Memory(live_topics) => Ok(live_topics.cursor(topic).await),
+            FanoutLiveTopics::Memory(live_topics) => live_topics.cursor(topic).await,
             FanoutLiveTopics::Redis(live_topics) => live_topics.cursor(topic).await,
         }
     }
 
     async fn live_topic_cursors(&self, topics: &[String]) -> Result<Vec<u64>, FrameworkError> {
         match &self.live_topics {
-            FanoutLiveTopics::Memory(state) => Ok(state.cursors(topics).await),
+            FanoutLiveTopics::Memory(state) => state.cursors(topics).await,
             FanoutLiveTopics::Redis(state) => state.cursors(topics).await,
         }
     }
@@ -1332,7 +1332,7 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         topics: &[String],
     ) -> Result<Vec<crate::LiveTopicPosition>, FrameworkError> {
         match &self.live_topics {
-            FanoutLiveTopics::Memory(state) => Ok(state.positions(topics).await),
+            FanoutLiveTopics::Memory(state) => state.positions(topics).await,
             FanoutLiveTopics::Redis(state) => state.positions(topics).await,
         }
     }
@@ -1369,7 +1369,14 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
                         let topic = topic.to_owned();
                         tokio::spawn(async move {
                             tokio::time::sleep_until(deadline).await;
-                            if let Some((signal, except)) = state.take_pending(&topic).await
+                            let pending = match state.take_pending(&topic).await {
+                                Ok(pending) => pending,
+                                Err(error) => {
+                                    tracing::error!(%error, topic, "SeaStreamerBroadcastHub: delayed live topic allocation failed");
+                                    return;
+                                }
+                            };
+                            if let Some((signal, except)) = pending
                                 && let Err(error) = send_live_signal_via_producer(
                                     &producer,
                                     instance_id,
