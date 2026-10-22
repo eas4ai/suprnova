@@ -22,11 +22,12 @@ pub(crate) struct StorageLease {
     owner: String,
     released: bool,
     deadline: tokio::time::Instant,
+    skew_ms: u64,
     work: Option<super::work::WorkGuard>,
 }
 
 fn now_ms() -> u64 {
-    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
+    u64::try_from(crate::clock::now().timestamp_millis()).unwrap_or(0)
 }
 
 async fn optional_bytes(disk: &Operator, key: &str) -> Result<Option<Bytes>, FrameworkError> {
@@ -41,6 +42,7 @@ impl StorageLease {
     pub(crate) async fn acquire(
         disk: Operator,
         timeout: Duration,
+        skew: Duration,
         deadline: tokio::time::Instant,
     ) -> Result<Self, FrameworkError> {
         let capability = disk.info().capability();
@@ -49,6 +51,7 @@ impl StorageLease {
                 "publication lease requires atomic conditional object creation",
             ));
         }
+        let skew_ms = u64::try_from(skew.as_millis()).unwrap_or(u64::MAX);
         let owner = uuid::Uuid::now_v7().to_string();
         let record = Record {
             owner: owner.clone(),
@@ -56,17 +59,12 @@ impl StorageLease {
                 u64::try_from(timeout.as_millis())
                     .unwrap_or(u64::MAX)
                     .saturating_mul(2)
+                    .saturating_add(skew_ms.saturating_mul(2))
                     .saturating_add(1000),
             ),
         };
         let bytes = serde_json::to_vec(&record).map_err(error)?;
-        let mut create = disk.write_with(LEASE, bytes.clone());
-        create = if capability.write_with_if_not_exists {
-            create.if_not_exists(true)
-        } else {
-            create.if_none_match("*")
-        };
-        match create.await {
+        match create(&disk, bytes.clone()).await {
             Ok(_) => {}
             Err(failure)
                 if matches!(
@@ -78,32 +76,45 @@ impl StorageLease {
                 let previous = optional_bytes(&disk, LEASE)
                     .await?
                     .ok_or_else(|| error("publication lease changed while acquiring"))?;
-                let previous: Record = serde_json::from_slice(&previous).map_err(error)?;
-                if previous.expires_at_ms > now_ms() {
+                let record: Record = serde_json::from_slice(&previous).map_err(error)?;
+                if now_ms() < record.expires_at_ms.saturating_add(skew_ms) {
                     return Err(error("publication lease is held by another publisher"));
                 }
-                if !capability.write_with_if_match {
-                    return Err(error(
-                        "expired publication lease requires operator recovery on a backend without conditional replacement",
-                    ));
+                if capability.write_with_if_match {
+                    let etag = metadata
+                        .etag()
+                        .ok_or_else(|| error("conditional lease replacement requires an ETag"))?;
+                    disk.write_with(LEASE, bytes)
+                        .if_match(etag)
+                        .await
+                        .map_err(|failure| {
+                            error(format!("publication lease changed: {failure}"))
+                        })?;
+                } else {
+                    // Recheck before the non-atomic takeover so a visible new owner wins.
+                    if optional_bytes(&disk, LEASE).await?.as_ref() != Some(&previous) {
+                        return Err(error("publication lease is held by another taker"));
+                    }
+                    disk.delete(LEASE).await.map_err(error)?;
+                    create(&disk, bytes).await.map_err(|failure| {
+                        error(format!(
+                            "publication lease is held by another taker: {failure}"
+                        ))
+                    })?;
                 }
-                let etag = metadata
-                    .etag()
-                    .ok_or_else(|| error("conditional lease replacement requires an ETag"))?;
-                disk.write_with(LEASE, bytes)
-                    .if_match(etag)
-                    .await
-                    .map_err(|failure| error(format!("publication lease changed: {failure}")))?;
             }
             Err(failure) => return Err(error(failure)),
         }
-        Ok(Self {
+        let lease = Self {
             disk,
             owner,
             released: false,
             deadline,
+            skew_ms,
             work: None,
-        })
+        };
+        lease.verify().await?;
+        Ok(lease)
     }
 
     pub(crate) fn track(&mut self, work: super::work::WorkGuard) {
@@ -115,20 +126,35 @@ impl StorageLease {
             .await?
             .ok_or_else(|| error("publication lease disappeared"))?;
         let record: Record = serde_json::from_slice(&bytes).map_err(error)?;
-        if record.owner != self.owner || record.expires_at_ms <= now_ms() {
-            return Err(error("publication lease changed or expired"));
+        if record.owner != self.owner
+            || now_ms() >= record.expires_at_ms.saturating_sub(self.skew_ms)
+        {
+            return Err(error(format!(
+                "publication lease unusable: holder {}, current owner {}, expiry {}",
+                self.owner, record.owner, record.expires_at_ms
+            )));
         }
         Ok(())
     }
 
     pub(crate) async fn release(&mut self) -> Result<(), FrameworkError> {
-        release(&self.disk, &self.owner).await?;
+        release(&self.disk, &self.owner, self.skew_ms).await?;
         self.released = true;
         Ok(())
     }
 }
 
-async fn release(disk: &Operator, owner: &str) -> Result<(), FrameworkError> {
+async fn create(disk: &Operator, bytes: Vec<u8>) -> opendal::Result<()> {
+    let write = disk.write_with(LEASE, bytes);
+    let write = if disk.info().capability().write_with_if_not_exists {
+        write.if_not_exists(true)
+    } else {
+        write.if_none_match("*")
+    };
+    write.await.map(|_| ())
+}
+
+async fn release(disk: &Operator, owner: &str, skew_ms: u64) -> Result<(), FrameworkError> {
     let metadata = match disk.stat(LEASE).await {
         Ok(metadata) => metadata,
         Err(failure) if failure.kind() == ErrorKind::NotFound => return Ok(()),
@@ -154,7 +180,10 @@ async fn release(disk: &Operator, owner: &str) -> Result<(), FrameworkError> {
             .await
             .map_err(error)?;
     } else {
-        // These backends never steal expired leases, so only this owner can remove it.
+        // An expired holder cannot delete a lease while another process takes over.
+        if now_ms() >= record.expires_at_ms.saturating_sub(skew_ms) {
+            return Ok(());
+        }
         disk.delete(LEASE).await.map_err(error)?;
     }
     Ok(())
@@ -169,10 +198,11 @@ impl Drop for StorageLease {
         let owner = self.owner.clone();
         let work = self.work.take();
         let deadline = self.deadline;
+        let skew_ms = self.skew_ms;
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 let _work = work;
-                match tokio::time::timeout_at(deadline, release(&disk, &owner)).await {
+                match tokio::time::timeout_at(deadline, release(&disk, &owner, skew_ms)).await {
                     Ok(Ok(())) => {}
                     failure => tracing::error!(
                         ?failure,

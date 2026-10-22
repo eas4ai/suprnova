@@ -144,10 +144,22 @@ When storage supports `write_with_if_match`, lease replacement and manifest
 replacement use the observed ETag. A changed manifest refuses the commit. S3
 supports these conditional writes. Without conditional replacement, the lease
 serializes cooperating publishers and a byte comparison detects earlier manifest
-changes. It cannot atomically fence a writer that ignores the lease. Filesystem
-and memory disks use this mode. An expired lease on these disks requires operator
-recovery: stop the previous owner, then delete `_pub/lease.json`. The framework
-never steals that lease. Keep the publication disk exclusive to this pipeline.
+changes. It cannot atomically fence a writer that ignores the lease.
+
+Hosts must use NTP and keep their clock difference below
+`STATIC_PUBLISH_CLOCK_SKEW` seconds, which defaults to 10; non-integer settings refuse publication setup. A holder stops using
+its lease at `expires_at - skew`; a taker waits until `expires_at + skew`.
+Rollback verifies ownership first. If ownership changes or the holder's usable
+window expires, it leaves the CDN to the new owner and records the failure.
+
+```bash
+STATIC_PUBLISH_CLOCK_SKEW=10 suprnova static:publish
+```
+
+Filesystem and memory disks take over an expired lease by deleting it, creating
+it atomically and verifying the new owner. Without conditional replacement this
+takeover is not atomic and relies on the expiry margin, so keep the publication
+disk exclusive to this pipeline.
 
 Run the same command from the server deployment or a console process:
 
@@ -156,8 +168,13 @@ suprnova static:publish
 suprnova static:status
 ```
 
-A refused lease or manifest commit appears in status. It leaves the live version
-in place. Boot continues serving the previous version.
+A refused lease appears in status. Boot continues serving. An interrupted
+manifest PUT is reconciled by reading the durable manifest: the attempted live
+version means success; the predecessor means failure and a fenced rollback.
+A failed read or a third version records `outcome: "unknown"`, `previous_version`
+and `attempted_version` in status and leaves the CDN unchanged. The next
+publication reads the manifest fresh and calls `switch_version` for its own
+version to realign the CDN, including an unchanged recovery attempt.
 
 Mutable assets in a new render inventory keep their public relative paths under
 that revision's `_assets/` directory. Unchanged mutable dependencies are copied

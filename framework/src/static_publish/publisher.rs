@@ -27,6 +27,8 @@ pub struct PublishConfig {
     pub concurrency: usize,
     /// Bounds rendering, staging, delivery and rollback so shutdown can drain owned work.
     pub timeout: Duration,
+    /// Host clocks must differ by less than this margin before lease takeover is safe.
+    pub clock_skew: Duration,
     /// Time between automatic page regenerations.
     pub revalidate: Duration,
     /// Browser lifetime, clamped to `revalidate`.
@@ -45,6 +47,12 @@ impl Default for PublishConfig {
         Self {
             concurrency: 4,
             timeout: Duration::from_secs(120),
+            clock_skew: Duration::from_secs(
+                std::env::var("STATIC_PUBLISH_CLOCK_SKEW")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(10),
+            ),
             revalidate: Duration::from_secs(60),
             browser_max_age: Duration::ZERO,
             s_maxage: Duration::from_secs(60),
@@ -116,6 +124,15 @@ pub struct PublishStatus {
     pub last_outcome: String,
     /// Work waiting or currently running.
     pub pending: usize,
+    /// Distinguishes a confirmed success or failure from an unresolved manifest PUT.
+    #[serde(default)]
+    pub outcome: String,
+    /// Identifies the predecessor when a delivery outcome needs reconciliation.
+    #[serde(default)]
+    pub previous_version: Option<String>,
+    /// Identifies the attempted revision even when its PUT reply is lost.
+    #[serde(default)]
+    pub attempted_version: Option<String>,
 }
 
 /// A disk and an optional CDN share one serialized publication pipeline.
@@ -136,6 +153,14 @@ struct Upload {
     source: Option<String>,
 }
 
+struct Delivery {
+    snapshot: super::lease::ManifestSnapshot,
+    next: Manifest,
+    uploads: Vec<Upload>,
+    outcome: PublishOutcome,
+    realign: bool,
+}
+
 impl Publisher {
     /// Uses any registered disk; no service-specific storage restriction applies.
     pub fn new(
@@ -151,6 +176,14 @@ impl Publisher {
         asset_version: &str,
         config: PublishConfig,
     ) -> Result<Self, FrameworkError> {
+        if let Some(value) = std::env::var_os("STATIC_PUBLISH_CLOCK_SKEW")
+            && value
+                .to_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_none()
+        {
+            return Err(error("STATIC_PUBLISH_CLOCK_SKEW must be integer seconds"));
+        }
         if asset_version.is_empty()
             || !asset_version
                 .bytes()
@@ -302,7 +335,12 @@ impl Publisher {
             .map_err(|_| error("publication serialization timed out"))?;
         let acquired = tokio::time::timeout_at(
             forward,
-            super::lease::StorageLease::acquire(self.disk.clone(), self.config.timeout, deadline),
+            super::lease::StorageLease::acquire(
+                self.disk.clone(),
+                self.config.timeout,
+                self.config.clock_skew,
+                deadline,
+            ),
         )
         .await
         .map_err(|_| error("publication lease acquisition timed out"))
@@ -319,6 +357,7 @@ impl Publisher {
         let staged = tokio::time::timeout_at(forward, async {
             let snapshot = super::lease::ManifestSnapshot::load(&self.disk).await?;
             let previous = &snapshot.manifest;
+            let realign = self.status().await.outcome != "success";
             self.status
                 .lock()
                 .await
@@ -327,12 +366,18 @@ impl Publisher {
             let pages = render().await?;
             let (next, uploads, outcome) = self.plan(previous, pages, retain_omitted)?;
             self.stage(previous, &uploads).await?;
-            Ok::<_, FrameworkError>((snapshot, next, uploads, outcome))
+            Ok::<_, FrameworkError>(Delivery {
+                snapshot,
+                next,
+                uploads,
+                outcome,
+                realign,
+            })
         })
         .await
         .map_err(|_| error("render or upload timed out"))
         .and_then(|result| result);
-        let (snapshot, next, uploads, outcome) = match staged {
+        let delivery = match staged {
             Ok(staged) => staged,
             Err(failure) => {
                 let result = Err(failure);
@@ -345,9 +390,7 @@ impl Publisher {
         let publisher = self.clone();
         tokio::spawn(async move {
             let _serial = serial;
-            let result = publisher
-                .deliver(snapshot, next, uploads, outcome, &lease, forward, deadline)
-                .await;
+            let result = publisher.deliver(delivery, &lease, forward, deadline).await;
             publisher.record_result(&result, deadline).await;
             publisher.release_lease(&mut lease, deadline).await;
             result
@@ -360,10 +403,23 @@ impl Publisher {
         result: &Result<PublishOutcome, FrameworkError>,
         deadline: tokio::time::Instant,
     ) {
+        let durable_live = if result.is_err() {
+            tokio::time::timeout_at(recovery_deadline(deadline), self.manifest())
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .map(|manifest| manifest.live)
+        } else {
+            None
+        };
         let mut status = self.status.lock().await;
+        if let Some(live) = durable_live {
+            status.live_version = live;
+        }
         status.pending = self.work.pending().saturating_sub(1);
         match result {
             Ok(outcome) => {
+                status.outcome = "success".into();
                 status.live_version.clone_from(&outcome.version);
                 status.last_outcome = format!(
                     "published: uploaded {}, skipped {}",
@@ -371,8 +427,11 @@ impl Publisher {
                 );
             }
             Err(failure) => {
+                if status.outcome != "unknown" {
+                    status.outcome = "failed".into();
+                }
                 status.last_outcome = failure.to_string();
-                tracing::error!(%failure,"static publication failed; previous manifest remains live");
+                tracing::error!(%failure, outcome = %status.outcome, "static publication failed");
             }
         }
         let snapshot = status.clone();
@@ -402,14 +461,18 @@ impl Publisher {
     }
     async fn deliver(
         &self,
-        snapshot: super::lease::ManifestSnapshot,
-        mut next: Manifest,
-        uploads: Vec<Upload>,
-        mut outcome: PublishOutcome,
+        delivery: Delivery,
         lease: &super::lease::StorageLease,
         forward: tokio::time::Instant,
         deadline: tokio::time::Instant,
     ) -> Result<PublishOutcome, FrameworkError> {
+        let Delivery {
+            snapshot,
+            mut next,
+            uploads,
+            mut outcome,
+            realign,
+        } = delivery;
         tokio::time::timeout_at(forward, async {
             lease.verify().await?;
             snapshot.verify(&self.disk).await
@@ -417,8 +480,14 @@ impl Publisher {
         .await
         .map_err(|_| error("delivery validation timed out"))??;
         let previous = &snapshot.manifest;
-        if next.live == previous.live {
-            outcome.prune = self.maintenance(previous, deadline).await;
+        {
+            let mut status = self.status.lock().await;
+            status.outcome = "pending".into();
+            status.previous_version = Some(previous.live.clone());
+            status.attempted_version = Some(next.live.clone());
+        }
+        if next.live == previous.live && !realign {
+            outcome.prune = self.maintenance(previous, deadline, lease).await;
             return Ok(outcome);
         }
         if let Some(driver) = &self.driver {
@@ -427,14 +496,19 @@ impl Publisher {
                 .map_err(|_| error("CDN switch timed out"))
                 .and_then(|result| result);
             if let Err(failure) = switched {
-                return Err(self.rollback_cdn(previous, failure, deadline).await);
+                return Err(self.rollback_cdn(previous, failure, lease, deadline).await);
             }
+        }
+        if next.live == previous.live {
+            outcome.prune = self.maintenance(previous, deadline, lease).await;
+            return Ok(outcome);
         }
         if tokio::time::Instant::now() >= forward {
             return Err(self
                 .rollback_cdn(
                     previous,
                     error("publication timed out before manifest commit"),
+                    lease,
                     deadline,
                 )
                 .await);
@@ -452,7 +526,8 @@ impl Publisher {
         .map_err(|_| error("manifest commit timed out"))
         .and_then(|result| result);
         if let Err(failure) = committed {
-            return Err(self.rollback_cdn(previous, failure, deadline).await);
+            self.reconcile_commit(previous, &next, failure, lease, deadline)
+                .await?;
         }
         if let Some(driver) = &self.driver {
             let capabilities = driver.capabilities();
@@ -475,22 +550,63 @@ impl Publisher {
                 None
             };
             if let Some(request) = request
-                && let Err(e) = tokio::time::timeout_at(deadline, driver.purge(request))
-                    .await
-                    .map_err(|_| error("CDN purge timed out"))
-                    .and_then(|result| result)
+                && let Err(e) = tokio::time::timeout_at(deadline, async {
+                    lease.verify().await?;
+                    driver.purge(request).await
+                })
+                .await
+                .map_err(|_| error("CDN purge timed out"))
+                .and_then(|result| result)
             {
                 tracing::error!(error = %e, "static publication switched but CDN purge failed");
             }
         }
-        outcome.prune = self.maintenance(&next, deadline).await;
+        outcome.prune = self.maintenance(&next, deadline, lease).await;
         Ok(outcome)
+    }
+    // Storage can commit a PUT before its reply arrives, so only a durable read decides rollback.
+    async fn reconcile_commit(
+        &self,
+        previous: &Manifest,
+        next: &Manifest,
+        failure: FrameworkError,
+        lease: &super::lease::StorageLease,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), FrameworkError> {
+        let observed = tokio::time::timeout_at(recovery_deadline(deadline), self.manifest()).await;
+        let reason = match observed {
+            Ok(Ok(manifest)) if manifest.live == next.live => return Ok(()),
+            Ok(Ok(manifest)) if manifest.live == previous.live => {
+                return Err(self.rollback_cdn(previous, failure, lease, deadline).await);
+            }
+            Ok(Ok(manifest)) => format!("observed third version {}", manifest.live),
+            Ok(Err(failure)) => failure.to_string(),
+            Err(_) => "manifest reconciliation timed out".to_string(),
+        };
+        self.status.lock().await.outcome = "unknown".into();
+        tracing::error!(previous = %previous.live, attempted = %next.live, %reason, "static publication outcome unknown; CDN left unchanged");
+        Err(error(format!(
+            "{failure}; outcome unknown: {reason}; previous {}, attempted {}",
+            previous.live, next.live
+        )))
     }
     async fn maintenance(
         &self,
         manifest: &Manifest,
         deadline: tokio::time::Instant,
+        lease: &super::lease::StorageLease,
     ) -> PruneOutcome {
+        if let Err(failure) = tokio::time::timeout_at(deadline, lease.verify())
+            .await
+            .map_err(|_| error("maintenance ownership check timed out"))
+            .and_then(|result| result)
+        {
+            tracing::error!(%failure, "static publication maintenance skipped");
+            return PruneOutcome {
+                error: Some(failure.to_string()),
+                ..Default::default()
+            };
+        }
         if self.driver.is_none()
             && tokio::time::timeout_at(deadline, self.mirror(manifest))
                 .await
@@ -564,11 +680,20 @@ impl Publisher {
         &self,
         previous: &Manifest,
         failure: FrameworkError,
+        lease: &super::lease::StorageLease,
         deadline: tokio::time::Instant,
     ) -> FrameworkError {
+        if let Err(ownership) = tokio::time::timeout_at(recovery_deadline(deadline), lease.verify())
+            .await
+            .map_err(|_| error("rollback ownership check timed out"))
+            .and_then(|result| result)
+        {
+            tracing::error!(%ownership, "static publication rollback skipped; current owner is authoritative");
+            return error(format!("{failure}; CDN rollback skipped: {ownership}"));
+        }
         if let Some(driver) = &self.driver {
             let rollback = tokio::time::timeout_at(
-                deadline,
+                recovery_deadline(deadline),
                 driver.rollback_version(
                     (!previous.live.is_empty()).then_some(previous.live.as_str()),
                 ),
@@ -974,7 +1099,12 @@ impl Publisher {
             .map_err(|_| error("prune serialization timed out"))?;
         let mut lease = tokio::time::timeout_at(
             deadline,
-            super::lease::StorageLease::acquire(self.disk.clone(), self.config.timeout, deadline),
+            super::lease::StorageLease::acquire(
+                self.disk.clone(),
+                self.config.timeout,
+                self.config.clock_skew,
+                deadline,
+            ),
         )
         .await
         .map_err(|_| error("prune lease timed out"))??;
@@ -1134,4 +1264,12 @@ fn policy_headers(headers: &BTreeMap<String, String>) -> BTreeMap<String, String
         })
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
+}
+
+// Reconciliation and rollback leave part of the remaining budget for durable status and lease cleanup.
+fn recovery_deadline(deadline: tokio::time::Instant) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    now.checked_add(deadline.saturating_duration_since(now).div_f64(2.0))
+        .unwrap_or(deadline)
+        .min(deadline)
 }

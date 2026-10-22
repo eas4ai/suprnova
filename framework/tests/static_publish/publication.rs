@@ -448,6 +448,12 @@ struct Probe {
     force_metadata: AtomicBool,
     metadata_writes: Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>,
     force_cas: AtomicBool,
+    cas: tokio::sync::Mutex<std::collections::BTreeMap<String, String>>,
+    cas_sequence: AtomicUsize,
+    cas_rejections: AtomicUsize,
+    inject_manifest: Mutex<Option<(Operator, Bytes)>>,
+    commit_mode: AtomicUsize,
+    fail_manifest_read: AtomicBool,
     conditional_writes: Mutex<Vec<(String, String)>>,
     gate_manifest: AtomicBool,
     manifest_entered: tokio::sync::Notify,
@@ -524,6 +530,12 @@ impl Service for ProbeService {
         path: &str,
         args: OpRead,
     ) -> opendal::Result<Self::Reader> {
+        if path == "_pub/manifest.json" && self.state.fail_manifest_read.load(Ordering::SeqCst) {
+            return Err(opendal::Error::new(
+                opendal::ErrorKind::PermissionDenied,
+                "injected reconciliation read failure",
+            ));
+        }
         Ok(ProbeReader {
             inner: self.inner.read(ctx, path, args)?,
             state: self.state.clone(),
@@ -536,13 +548,17 @@ impl Service for ProbeService {
         path: &str,
         args: OpStat,
     ) -> opendal::Result<RpStat> {
-        self.inner.stat(ctx, path, args).await.map(|reply| {
-            if self.state.force_cas.load(Ordering::SeqCst) {
-                reply.map_metadata(|metadata| metadata.with_etag("\"test-etag\"".into()))
-            } else {
-                reply
-            }
-        })
+        if self.state.force_cas.load(Ordering::SeqCst) {
+            let etags = self.state.cas.lock().await;
+            let reply = self.inner.stat(ctx, path, args).await?;
+            let etag = etags
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| "\"cas-external\"".to_string());
+            Ok(reply.map_metadata(|metadata| metadata.with_etag(etag)))
+        } else {
+            self.inner.stat(ctx, path, args).await
+        }
     }
     fn list(
         &self,
@@ -623,30 +639,29 @@ impl Service for ProbeService {
             && path != "_pub/manifest.json"
             && path != "_pub/status.json"
             && path != "_pub/lease.json";
-        let args = if self.state.force_metadata.load(Ordering::SeqCst) {
-            if let Some(metadata) = args.user_metadata() {
-                self.state.metadata_writes.lock().unwrap().push((
-                    path.to_string(),
-                    metadata
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect(),
-                ));
-            }
+        let expected = args.if_match().map(str::to_string);
+        let absent = args.if_not_exists() || args.if_none_match() == Some("*");
+        let semantic = self.state.force_cas.load(Ordering::SeqCst);
+        if let Some(metadata) = args.user_metadata()
+            && self.state.force_metadata.load(Ordering::SeqCst)
+        {
+            self.state.metadata_writes.lock().unwrap().push((
+                path.to_string(),
+                metadata
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ));
+        }
+        let args = if semantic || self.state.force_metadata.load(Ordering::SeqCst) {
             let (native, _): (OpWrite, opendal::raw::OpWriter) = opendal::options::WriteOptions {
                 content_type: args.content_type().map(str::to_string),
                 cache_control: args.cache_control().map(str::to_string),
-                if_not_exists: args.if_not_exists(),
+                if_not_exists: absent && !semantic,
                 ..Default::default()
             }
             .into();
             native
-        } else {
-            args
-        };
-        // The probe records the conditional argument; memory cannot execute it.
-        let args = if self.state.force_cas.load(Ordering::SeqCst) && args.if_match().is_some() {
-            OpWrite::default()
         } else {
             args
         };
@@ -656,6 +671,11 @@ impl Service for ProbeService {
             self.state.maximum.fetch_max(active, Ordering::SeqCst);
         }
         Ok(ProbeWriter {
+            path: path.to_string(),
+            service: self.inner.clone(),
+            ctx: ctx.clone(),
+            expected,
+            absent,
             manifest: path == "_pub/manifest.json",
             inner,
             state: self.state.clone(),
@@ -664,6 +684,11 @@ impl Service for ProbeService {
     }
 }
 struct ProbeWriter {
+    path: String,
+    service: Servicer,
+    ctx: OperationContext,
+    expected: Option<String>,
+    absent: bool,
     manifest: bool,
     inner: oio::Writer,
     state: Arc<Probe>,
@@ -691,7 +716,73 @@ impl oio::Write for ProbeWriter {
             self.state.manifest_entered.notify_one();
             self.state.manifest_release.notified().await;
         }
-        self.inner.close().await
+        let mode = if self.manifest {
+            self.state.commit_mode.swap(0, Ordering::SeqCst)
+        } else {
+            0
+        };
+        if mode == 2 {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            return Err(opendal::Error::new(
+                opendal::ErrorKind::PermissionDenied,
+                "late PUT rejection",
+            ));
+        }
+        let metadata = if self.state.force_cas.load(Ordering::SeqCst) {
+            let mut etags = self.state.cas.lock().await;
+            let injected = if self.manifest {
+                self.state.inject_manifest.lock().unwrap().take()
+            } else {
+                None
+            };
+            if let Some((disk, bytes)) = injected {
+                disk.write(&self.path, bytes).await?;
+                let sequence = self.state.cas_sequence.fetch_add(1, Ordering::SeqCst);
+                etags.insert(self.path.clone(), format!("\"cas-{sequence}\""));
+            }
+            let exists = match self
+                .service
+                .stat(&self.ctx, &self.path, OpStat::new())
+                .await
+            {
+                Ok(_) => true,
+                Err(failure) if failure.kind() == opendal::ErrorKind::NotFound => false,
+                Err(failure) => return Err(failure),
+            };
+            let current = exists.then(|| {
+                etags
+                    .get(&self.path)
+                    .map(String::as_str)
+                    .unwrap_or("\"cas-external\"")
+            });
+            if self.absent && exists
+                || self
+                    .expected
+                    .as_deref()
+                    .is_some_and(|expected| Some(expected) != current)
+            {
+                if self.manifest {
+                    self.state.cas_rejections.fetch_add(1, Ordering::SeqCst);
+                }
+                return Err(opendal::Error::new(
+                    opendal::ErrorKind::ConditionNotMatch,
+                    "semantic conditional write rejected",
+                ));
+            }
+            let metadata = self.inner.close().await?;
+            let sequence = self.state.cas_sequence.fetch_add(1, Ordering::SeqCst);
+            etags.insert(self.path.clone(), format!("\"cas-{sequence}\""));
+            metadata
+        } else {
+            self.inner.close().await?
+        };
+        if mode == 3 {
+            self.state.fail_manifest_read.store(true, Ordering::SeqCst);
+        }
+        if mode == 1 || mode == 3 {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+        Ok(metadata)
     }
     async fn abort(&mut self) -> opendal::Result<()> {
         self.inner.abort().await
@@ -1212,13 +1303,13 @@ async fn pub_003_fix_b_conditional_backends_receive_the_manifest_etag() {
             .lock()
             .unwrap()
             .iter()
-            .any(|(path, etag)| path == "_pub/manifest.json" && etag == "\"test-etag\""),
+            .any(|(path, etag)| path == "_pub/manifest.json" && etag.starts_with("\"cas-")),
         "a conditional backend must receive the original manifest ETag"
     );
 }
 
 #[tokio::test]
-async fn pub_003_fix_b_expired_lease_on_non_cas_storage_requires_recovery() {
+async fn pub_003_round2_2_memory_crashed_owner_is_recovered() {
     let (publisher, disk) = publisher("v1");
     disk.write(
         "_pub/lease.json",
@@ -1227,9 +1318,11 @@ async fn pub_003_fix_b_expired_lease_on_non_cas_storage_requires_recovery() {
     .await
     .unwrap();
     let result = publisher.publish(vec![page("ours")]).await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("expired"));
-    assert!(!disk.exists("_pub/manifest.json").await.unwrap());
+    assert!(
+        result.is_ok(),
+        "an expired crashed owner must recover without operator action: {result:?}"
+    );
+    assert!(disk.exists("_pub/manifest.json").await.unwrap());
 }
 
 fn asset_router() -> suprnova::Router {
@@ -1491,3 +1584,6 @@ async fn pub_002_round2_3_mutable_dependencies_share_the_new_revision() {
         }
     }
 }
+
+#[path = "fencing.rs"]
+mod fencing;
