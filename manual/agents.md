@@ -165,8 +165,10 @@ Names, descriptions and schemas are fixed when the application is built. An
 agent reads them as instructions, so nothing at run time can change them. The
 build fails on an invalid name, a missing or empty description, a missing
 `callers`, a `public` tool with scopes, an `input` type none of the handler's
-arguments has, or two tools with one name in a crate. Boot fails when tools in
-two crates share a name, when a tool names a scope no `tool_scopes!` declares,
+arguments has, or two tools with one name in a crate. When tools in two crates
+share a name, the build fails at link time with a duplicate-symbol error that
+names the tool. The boot check still refuses duplicate names. Boot also fails
+when a tool names a scope no `tool_scopes!` declares,
 when a path parameter of the tool's route is not a field of its input, or when
 a tool's handler serves several routes and `route` names none of them. A
 marked handler that no route serves is left out, with a warning at boot.

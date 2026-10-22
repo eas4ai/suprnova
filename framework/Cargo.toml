@@ -560,6 +560,7 @@ vector-pinecone = []
 heap-profiling = ["dep:dhat"]
 
 [dev-dependencies]
+object = { version = "0.37", default-features = false, features = ["read_core", "elf", "macho", "std"] }
 # Processor reference tensors stay compact without a native compression library.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Heap profiling for the allocation tests (MEM-001 to MEM-005).

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use suprnova::live::{LiveComponent, live};
 
 #[derive(LiveComponent)]
