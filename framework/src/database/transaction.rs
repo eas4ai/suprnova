@@ -89,24 +89,39 @@ impl OutcomeHooks {
             failed: Box::new(failed),
         }])
     }
-    fn committed(self) {
-        for hook in self.0 {
-            (hook.committed)();
-        }
+    fn committed(self, connection_name: &str) {
+        self.run(true, connection_name);
     }
-    fn failed(self) {
+    fn failed(self, connection_name: &str) {
+        self.run(false, connection_name);
+    }
+    fn run(self, committed: bool, connection_name: &str) {
         for hook in self.0 {
-            (hook.failed)();
+            let callback = if committed {
+                hook.committed
+            } else {
+                hook.failed
+            };
+            // Publication cannot change an outcome the database has established.
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
+                tracing::error!(
+                    target: "suprnova::database",
+                    connection_name,
+                    committed,
+                    panic = %crate::server::panic_payload_message(&payload),
+                    "Transaction outcome hook panicked; continuing with the known outcome",
+                );
+            }
         }
     }
 }
 
 // Cancellation before BEGIN returns cannot have committed application writes.
-struct UnstartedOutcome(Option<OutcomeHooks>);
+struct UnstartedOutcome(Option<OutcomeHooks>, Arc<str>);
 impl Drop for UnstartedOutcome {
     fn drop(&mut self) {
         if let Some(hooks) = self.0.take() {
-            hooks.failed();
+            hooks.failed(&self.1);
         }
     }
 }
@@ -313,7 +328,9 @@ async fn finish_transaction_inner(
     let tx = match Arc::try_unwrap(tx) {
         Ok(tx) => tx,
         Err(tx) => {
-            outcome.failed();
+            let callbacks =
+                super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback);
+            outcome.failed(&connection_name);
             let leaked = Arc::strong_count(&tx).saturating_sub(1);
             drop(tx);
             tracing::error!(
@@ -322,9 +339,7 @@ async fn finish_transaction_inner(
                 "DB::transaction: TxHandle clones outlived the closure; transaction is in \
                  ZOMBIE STATE until all leaked handles drop and trigger rollback",
             );
-            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
-                .compensate()
-                .await;
+            callbacks.compensate().await;
             return if commit {
                 Err(FrameworkError::internal(
                     "DB::transaction: TxHandle clones outlived the closure; \
@@ -339,15 +354,15 @@ async fn finish_transaction_inner(
 
     if commit {
         if let Err(error) = tx.commit().await {
-            outcome.failed();
+            let callbacks =
+                super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback);
+            outcome.failed(&connection_name);
             tracing::error!(
                 target: "suprnova::database",
                 error = %error,
                 "Transaction commit failed; deferred dispatches will be compensated",
             );
-            super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback)
-                .compensate()
-                .await;
+            callbacks.compensate().await;
             return Err(FrameworkError::database(error.to_string()).into());
         }
         if let Some(parent) = &parent {
@@ -373,11 +388,10 @@ async fn finish_transaction_inner(
             .await;
             return Ok(());
         }
-        outcome.committed();
-        drop(on_rollback);
-        // Arm the committed branch before invoking any listener code. A
-        // listener panic must not discard an already-committed dispatch.
+        // Protect delivery before any hook or listener can panic.
         let callbacks = super::after_commit::GuardedCallbacks::after_commit(after_commit);
+        outcome.committed(&connection_name);
+        drop(on_rollback);
         emit_tx_event(super::events::TransactionCommitted {
             connection_name: connection_name.to_string(),
         })
@@ -390,7 +404,7 @@ async fn finish_transaction_inner(
         let callbacks =
             super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback);
         let rollback = tx.rollback().await;
-        outcome.failed();
+        outcome.failed(&connection_name);
         if let Err(error) = rollback {
             tracing::warn!(
                 error = %error,
@@ -2093,9 +2107,13 @@ impl DB {
         Fut: std::future::Future<Output = Result<T, FrameworkError>>,
         T: Send,
     {
-        let mut outcome = UnstartedOutcome(Some(outcome));
-        Self::notify_before_transaction()?;
         let parent = CURRENT_TX.try_with(Clone::clone).ok().flatten();
+        let connection_name = parent.as_ref().map_or_else(
+            || Arc::<str>::from(DB::default_connection()),
+            |state| state.connection_name.clone(),
+        );
+        let mut outcome = UnstartedOutcome(Some(outcome), connection_name);
+        Self::notify_before_transaction()?;
         let depth = parent.as_ref().map_or(1, |state| state.depth + 1);
         let (tx, conn_name) = if let Some(state) = &parent {
             let tx = state
@@ -2926,6 +2944,164 @@ mod outcome_hook_tests {
             move || committed.lock().unwrap().push("committed"),
             move || failed.lock().unwrap().push("failed"),
         )
+    }
+
+    fn panicking_hooks(trace: &Trace) -> OutcomeHooks {
+        let mut outcome = OutcomeHooks::new(
+            || panic!("committed hook panic"),
+            || panic!("failed hook panic"),
+        );
+        outcome.0.extend(hooks(trace).0);
+        outcome
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_panicking_committed_hook_preserves_observers_and_delivery() {
+        struct Observe(Trace);
+        #[async_trait::async_trait]
+        impl Listener<TransactionCommitted> for Observe {
+            async fn handle(&self, _: &TransactionCommitted) -> Result<(), FrameworkError> {
+                self.0.lock().unwrap().push("listener");
+                Ok(())
+            }
+        }
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                EventFacade::forget::<TransactionCommitted>();
+            }
+        }
+        let db = TestDatabase::sqlite_memory().await.unwrap();
+        db.execute_unprepared("CREATE TABLE durable (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        let _cleanup = Cleanup;
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        EventFacade::listen::<TransactionCommitted, _>(Arc::new(Observe(trace.clone()))).await;
+        let delivery = trace.clone();
+        let result = DB::transaction_with_outcome(None, panicking_hooks(&trace), move |_tx| {
+            Box::pin(async move {
+                DB::statement("INSERT INTO durable VALUES (1)", vec![]).await?;
+                DB::after_commit(move || async move {
+                    delivery.lock().unwrap().push("delivery");
+                    Ok(())
+                })
+                .await?;
+                Ok(())
+            })
+        })
+        .await;
+        assert!(
+            result.is_ok(),
+            "known commit must survive a hook panic: {result:?}"
+        );
+        result.unwrap().unwrap();
+        assert_eq!(
+            *trace.lock().unwrap(),
+            ["committed", "listener", "delivery"]
+        );
+        assert_eq!(
+            DB::scalar::<i64>("SELECT COUNT(*) FROM durable", vec![])
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_panicking_failed_hook_preserves_rollback_compensation() {
+        let _db = TestDatabase::sqlite_memory().await.unwrap();
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        let compensation = trace.clone();
+        let result = DB::transaction_with_outcome(None, panicking_hooks(&trace), move |_tx| {
+            Box::pin(async move {
+                DB::after_rollback(move || async move {
+                    compensation.lock().unwrap().push("compensation");
+                    Ok(())
+                })
+                .await?;
+                Err::<(), _>(FrameworkError::internal("original rollback reason"))
+            })
+        })
+        .await;
+        let error = result
+            .expect("known rollback must survive a hook panic")
+            .unwrap_err();
+        assert!(error.to_string().contains("original rollback reason"));
+        assert_eq!(*trace.lock().unwrap(), ["failed", "compensation"]);
+    }
+
+    #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+    struct PanicHookAggregate;
+    impl crate::AggregateRoot for PanicHookAggregate {
+        const NAME: &'static str = "tests.transaction.hook-panic-aggregate";
+        fn apply(&mut self, _: &crate::Fact<'_>) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+    }
+    #[crate::domain_event(name = "tests.transaction.hook-panic", version = 1)]
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct PanicHookFact;
+
+    struct PanicHookProjector;
+    #[async_trait::async_trait]
+    impl crate::Projector for PanicHookProjector {
+        fn name(&self) -> &'static str {
+            "tests.transaction.hook-panic-projector"
+        }
+        fn handles(&self, event: &crate::StoredEvent) -> bool {
+            event.event_type == "tests.transaction.hook-panic"
+        }
+        async fn project(&self, _: &crate::StoredEvent) -> Result<(), FrameworkError> {
+            // Put the panic before the aggregate's own publication hook.
+            CURRENT_TX.with(|state| {
+                state.as_ref().unwrap().outcome.lock().unwrap().0.insert(
+                    0,
+                    OutcomeHook {
+                        committed: Box::new(|| panic!("hook before aggregate publication")),
+                        failed: Box::new(|| {}),
+                    },
+                );
+            });
+            Ok(())
+        }
+        async fn reset(&self) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+    }
+    inventory::submit! {
+        crate::ProjectorEntry { build: || Box::new(PanicHookProjector), queued: false }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_panicking_committed_hook_preserves_aggregate_publication() {
+        use sea_orm_migration::{MigrationTrait, SchemaManager};
+        let db = TestDatabase::sqlite_memory().await.unwrap();
+        crate::CreateEventSourcingTables
+            .up(&SchemaManager::new(db.conn()))
+            .await
+            .unwrap();
+        let mut aggregate =
+            crate::Aggregate::<PanicHookAggregate>::new("b154b0eb-5ac9-4a35-bbe0-9e34c9315f72")
+                .unwrap();
+        aggregate.record(PanicHookFact).await.unwrap();
+        aggregate
+            .persist()
+            .await
+            .expect("commit is known even when an earlier hook panics");
+        assert_eq!(aggregate.persisted_version(), 1);
+        assert!(aggregate.recorded().is_empty());
+        assert!(aggregate.is_settled());
+        assert_eq!(
+            crate::EventStore::events(aggregate.uuid())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
     #[tokio::test]
     #[serial_test::serial]
