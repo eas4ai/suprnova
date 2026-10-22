@@ -503,6 +503,9 @@ fn signal_fix_008_live_binding_public_types_are_exported_from_the_root() {
     fn bindings<P: suprnova::InertiaProps>() -> &'static [suprnova::LiveBinding] {
         P::live_bindings()
     }
+    let _: Option<suprnova::InertiaLiveResponse<Page>> = None;
+    let _: Option<suprnova::LiveTopicExclusion> = None;
+    let _: Option<suprnova::LiveTopicSender> = None;
     let _: Option<suprnova::LiveTopics> = None;
     let _: Option<suprnova::LiveTopicSignal> = None;
     assert_eq!(bindings::<Page>()[0].topic, "signal.render");
@@ -585,4 +588,114 @@ async fn signal_fix2_003_static_unknown_and_duplicate_scopes_fail_before_loading
             "{error}"
         );
     }
+}
+
+#[test]
+fn signal_fix2_005_manual_controller_imports_the_macro_it_calls() {
+    let manual = include_str!("../../../manual/frontend-pages.md");
+    let opening = manual
+        .split("```rust\n")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap();
+    compile_manual_example(opening);
+    // Application queries and models supply the context these chapter excerpts name.
+    let context = r#"
+use suprnova::*;
+use suprnova::live::{LiveRegistry, LiveTopics};
+#[derive(InertiaProps)] pub struct PostSummary { title: String }
+#[derive(InertiaProps)] pub struct NoteSummary { title: String }
+type Stats = u64;
+struct Note { user_id: i64 }
+struct Post;
+#[derive(InertiaProps)]
+#[inertia(live(topic = "notes", only = ["stats"]))]
+struct NotesDashboardProps { stats: Stats }
+async fn recent_posts() -> Result<Vec<PostSummary>, FrameworkError> { Ok(vec![]) }
+async fn count_posts() -> Result<usize, FrameworkError> { Ok(0) }
+async fn note_stats(_: i64) -> Result<Stats, FrameworkError> { Ok(0) }
+async fn recent_notes(_: i64) -> Result<Vec<NoteSummary>, FrameworkError> { Ok(vec![]) }
+async fn import_posts() -> Result<(), FrameworkError> { Ok(()) }
+async fn rebuild_post_count() -> Result<(), FrameworkError> { Ok(()) }
+async fn restore_posts_from_snapshot() -> Result<(), FrameworkError> { Ok(()) }
+"#;
+    for section in [
+        manual
+            .split("## Live topic bindings")
+            .nth(1)
+            .unwrap()
+            .split("## Shared props")
+            .next()
+            .unwrap(),
+        include_str!("../../../manual/live.md")
+            .split("## Topic signals")
+            .nth(1)
+            .unwrap()
+            .split("## Assets")
+            .next()
+            .unwrap(),
+        include_str!("../../../manual/starter-kits.md")
+            .split("### Live note updates")
+            .nth(1)
+            .unwrap()
+            .split("### Why Suprnova diverges")
+            .next()
+            .unwrap(),
+    ] {
+        for block in section.split("```rust\n").skip(1) {
+            let example = block.split("```").next().unwrap();
+            compile_manual_example(&format!(
+                "{context}\nasync fn example(req: Request, user_id: i64) -> Result<(), Box<dyn std::error::Error>> {{\n{example};\nOk(())\n}}"
+            ));
+        }
+    }
+}
+
+fn compile_manual_example(example: &str) {
+    let directory = tempfile::tempdir().unwrap();
+    let pages = directory.path().join("frontend/src/pages");
+    std::fs::create_dir_all(&pages).unwrap();
+    std::fs::write(pages.join("Home.svelte"), "<h1>Home</h1>").unwrap();
+    let source = directory.path().join("controller.rs");
+    std::fs::write(&source, example).unwrap();
+    let deps = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_owned();
+    let mut command = std::process::Command::new("rustc");
+    command
+        .args(["--edition=2024", "--crate-type=lib", "--emit=metadata"])
+        .arg(&source)
+        .arg("-o")
+        .arg(directory.path().join("controller.rmeta"))
+        .arg("-L")
+        .arg(format!("dependency={}", deps.display()))
+        .env("CARGO_MANIFEST_DIR", directory.path());
+    for name in ["suprnova"] {
+        let library = std::fs::read_dir(&deps)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(&format!("lib{name}-"))
+                    && path.extension().is_some_and(|ext| ext == "rlib")
+            })
+            .max_by_key(|path| path.metadata().unwrap().modified().unwrap())
+            .unwrap();
+        command
+            .arg("--extern")
+            .arg(format!("{name}={}", library.display()));
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "manual example does not compile: {}\n{example}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

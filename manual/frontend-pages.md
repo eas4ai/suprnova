@@ -12,7 +12,7 @@ same shape in all three.
 A controller returns an Inertia response naming a component:
 
 ```rust
-use suprnova::{InertiaProps, InertiaResponse, Request, Response};
+use suprnova::{InertiaProps, Request, Response, inertia_response};
 
 #[derive(InertiaProps)]
 pub struct HomeProps {
