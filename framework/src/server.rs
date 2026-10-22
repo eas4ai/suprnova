@@ -232,10 +232,10 @@ impl Server {
         Self::finish_boot(router, &runtime, config)
     }
 
-    /// The boot prologue both fallible constructors share: framework
-    /// services first, then the immutable Live runtime, both before any
-    /// route-construction closure runs.
+    /// Validates inventories before services and route constructors can access history.
+    /// Both fallible constructors then bind the immutable Live runtime.
     fn prepare_boot() -> Result<(ServerConfig, crate::live::LiveRuntime), crate::FrameworkError> {
+        crate::event_sourcing::init_registry()?;
         let config = Self::prepare_config()?;
         let runtime = crate::live::LiveRuntime::bind()?;
         Ok((config, runtime))
