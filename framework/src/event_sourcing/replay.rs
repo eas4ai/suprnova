@@ -88,8 +88,8 @@ impl Replay {
             }
             entries.retain(|entry| names.iter().any(|name| name == entry.projector.name()));
         }
-        let finished =
-            crate::live::topics::replay_scope(|| self.run_transaction(entries)).await??;
+        let topics = crate::LiveTopics::resolve()?;
+        let finished = topics.suppress(|| self.run_transaction(entries)).await??;
         EventFacade::dispatch(finished.clone()).await?;
         Ok(finished)
     }

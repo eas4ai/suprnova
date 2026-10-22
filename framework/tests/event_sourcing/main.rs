@@ -38,6 +38,7 @@ impl AggregateRoot for Tally {
 }
 
 async fn database() -> TestDatabase {
+    live_async_support::ensure_crypt();
     let db = TestDatabase::sqlite_memory().await.unwrap();
     suprnova::CreateEventSourcingTables
         .up(&SchemaManager::new(db.conn()))

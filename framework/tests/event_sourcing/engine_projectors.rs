@@ -118,6 +118,7 @@ async fn checkpoint(name: &str) -> i64 {
 }
 async fn engine(url: String) {
     let _container = TestContainer::fake();
+    crate::live_async_support::ensure_crypt();
     let config = DatabaseConfig::builder()
         .url(url)
         .max_connections(1)

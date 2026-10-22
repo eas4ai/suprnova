@@ -1142,5 +1142,3 @@ pub use event_sourcing::{
     ReplayFinished, ReplayStarted,
 };
 pub use suprnova_macros::{projector, reactor};
-
-pub use live::LiveTopics;

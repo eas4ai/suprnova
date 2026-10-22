@@ -77,12 +77,18 @@ async fn es_005_aggregate_projector_reactor_and_bound_live_page_reload() {
     assert!(added.status.is_redirection(), "{}", added.text());
     let signal = loop {
         let envelope = stream.next_data().await.unwrap();
-        if envelope["payload"]["kind"] != "heartbeat" {
+        if envelope["payload"]["kind"] == "topic_change"
+            && envelope["payload"]["cursor"]
+                .as_u64()
+                .is_some_and(|cursor| cursor > 0)
+        {
             break envelope;
         }
     };
     assert_eq!(signal["stream"], "changes");
-    assert_eq!(signal["payload"]["kind"], "refresh");
+    assert_eq!(signal["payload"]["kind"], "topic_change");
+    assert_eq!(signal["payload"]["topic"], domain::TALLY_TOPIC);
+    assert_eq!(signal["payload"]["props"], json!(["total"]));
     let fresh = send(
         app.addr,
         action_request(
@@ -184,6 +190,17 @@ async fn es_005_snapshot_commands_replay_and_reactor_idempotency() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn es_005_command_route_requires_authentication_and_csrf() {
     let app = setup_app(8).await;
+    let topic = domain::TALLY_TOPIC.to_owned();
+    assert!(suprnova::Gate::allows(
+        "live:topic.event-tally",
+        &"signed-in".to_owned(),
+        &topic
+    ));
+    assert!(!suprnova::Gate::allows(
+        "live:topic.event-tally",
+        &String::new(),
+        &topic
+    ));
     let anonymous = get(&app, app::live::EVENT_TALLY_PATH, None).await;
     assert!(anonymous.status.is_redirection());
     let session = seed_session(&app).await;

@@ -35,6 +35,9 @@ const UPLOAD_CONTROLS: [&str; 14] = [
 /// answers. A signed-in user may start a tally at any count; a call whose
 /// `start` the policy cannot read as a count is refused.
 pub fn authorize_live() {
+    Gate::define::<String, String>("live:topic.event-tally", |principal, _| {
+        !principal.is_empty()
+    });
     Gate::define::<ToolCaller, LiveMountRequest>("live:app.tally.mount", |caller, mount| {
         caller.is_user()
             && mount

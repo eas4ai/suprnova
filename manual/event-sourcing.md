@@ -282,6 +282,23 @@ Declare a [Live](live.md) stream on the page's component. A component named
 Its rendering hook reloads the read model after a refresh. The dogfood page at
 `/live/event-tally` shows this flow.
 
+Declare the private topic in the application registry and authorize its audience
+before resolving the publisher. A signed-in principal can observe this shared tally:
+
+```rust
+use suprnova::{FrameworkError, Gate, live::LiveRegistry};
+
+fn registry() -> Result<LiveRegistry, FrameworkError> {
+    Gate::define::<String, String>("live:topic.tally", |principal, _| {
+        !principal.is_empty()
+    });
+    Ok(LiveRegistry::builder().topic("tally")?.build())
+}
+```
+
+Include the page's component registration in the same builder. Bind the registry
+at bootstrap as described in [Live topic signals](live.md#topic-signals).
+
 Register a normal saved listener to signal a model write:
 
 ```rust
@@ -316,10 +333,25 @@ async fn clear_total() -> Result<(), FrameworkError> {
 ```
 
 `changed` waits for the owning transaction's commit and discards rolled-back
-changes. `batch(future)` coalesces an explicit unit of work. `suppress(|| future)`
-keeps one final change per topic through replay. Replay installs this buffer even
-in a worker with no HTTP runtime. It preserves ORM cache invalidation and carries
-no model values to the browser. Live streams reload their full server view.
+changes. Requests and job attempts coalesce changes per topic with the union of
+prop names. `batch(future)` coalesces another explicit unit of work.
+`suppress(|| future)` keeps one final union per touched topic through replay.
+Replay resolves the application's publisher and uses this shared suppression
+scope, including in a worker. Register its topics and abilities during bootstrap.
+It preserves ORM cache invalidation and carries no model values to the browser.
+Live streams reload their server view after a topic change.
+
+A manual transaction is not ambient state. Await identity capture when registering
+a change on its handle:
+
+```rust
+async fn signal_manual_write() -> Result<(), FrameworkError> {
+    let topics = LiveTopics::resolve()?;
+    let tx = suprnova::DB::begin_transaction().await?;
+    topics.changed_with_tx(&tx, "tally", &["total"]).await?;
+    tx.commit().await
+}
+```
 
 ## Console commands
 
@@ -352,8 +384,9 @@ Its aggregate is `app::event_sourcing::TallyState`, and its stable fact is
 Sign in and open `/live/event-tally` in two windows. **Add one** sends a protected
 POST to `/live/event-tally/add`. The aggregate records a fact. The projector saves
 the new total and calls `LiveTopics::changed("event-tally", &["total"])`. The
-reactor records activity once per stored event. Both pages subscribe to the Live
-stream, and a refresh runs the component's rendering hook to read the new total.
+reactor records activity once per stored event. The private `event-tally` topic
+requires a signed-in principal. Both pages subscribe to the Live stream, and a
+topic change runs the component's rendering hook to read the new total.
 The form uses an ordinary POST because aggregate persistence owns its transaction.
 
 The example uses a Live page. It needs no Inertia live binding. Rebuild its read
@@ -365,8 +398,8 @@ cargo run --bin console -- event-sourcing:events a9c9bce3-8b35-4530-b215-14cbb0d
 cargo run --bin console -- event-sourcing:snapshot a9c9bce3-8b35-4530-b215-14cbb0d46f01
 ```
 
-Replay rebuilds the total and sends one final refresh. It leaves reactor activity
-in place and never records that activity again.
+Replay rebuilds the total and sends one final topic change. It leaves reactor
+activity in place and never records that activity again.
 
 ### Why Suprnova diverges
 

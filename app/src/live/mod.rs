@@ -16,7 +16,7 @@ pub mod search_notes;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use suprnova::live::{LiveMount, LiveRegistry, LiveTenantMiddleware, RegistryError};
+use suprnova::live::{LiveMount, LiveRegistry, LiveTenantMiddleware};
 use suprnova::rate_limit::memory::InMemoryRateLimiter;
 use suprnova::render_cache::{
     FreshnessPolicy, RenderCache, RenderCacheConfig, RenderCachePolicy, RepresentationClass,
@@ -75,8 +75,9 @@ pub const ME_PATH: &str = "/live/me";
 pub const REACQUIRE_PATH: &str = "/account/uploads/{handle}/reacquire";
 
 /// Builds the registry of every Live component in this application.
-pub fn registry() -> Result<LiveRegistry, RegistryError> {
+pub fn registry() -> Result<LiveRegistry, FrameworkError> {
     let registry = LiveRegistry::builder()
+        .topic(crate::event_sourcing::TALLY_TOPIC)?
         .register::<SearchBox>()?
         .register::<Counter>()?
         .register::<EventTally>()?

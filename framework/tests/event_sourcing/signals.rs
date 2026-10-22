@@ -1,12 +1,15 @@
 use super::*;
-use crate::live_async_support::{self as transport, Identity, Issued, TestServer};
+use crate::live_async_support::{self as transport, Identity, TestServer};
 use std::sync::Arc;
+use std::time::Duration;
+use suprnova::broadcasting::{BroadcastHub, InMemoryBroadcastHub};
 use suprnova::live::{LiveComponent, LiveMount, LiveRegistry, LiveTopics, live};
 use suprnova::{
     Aggregate, App, DB, EventFacade, EventReplay, Gate, Listener, Model, Projector, Router, attrs,
 };
 
 const TOPIC: &str = "es-watch";
+const OTHER_TOPIC: &str = "es-watch-summary";
 #[derive(LiveComponent)]
 #[live(
     name = "tests.es-watch",
@@ -78,8 +81,24 @@ impl Projector for Signals {
 struct Changed(LiveTopics);
 #[suprnova::async_trait]
 impl Listener<signal_row::events::Saved> for Changed {
-    async fn handle(&self, _: &signal_row::events::Saved) -> Result<(), FrameworkError> {
-        self.0.changed(TOPIC, &["total"]).await
+    async fn handle(&self, event: &signal_row::events::Saved) -> Result<(), FrameworkError> {
+        let prop = if event.model.total % 2 == 0 {
+            "even"
+        } else {
+            "odd"
+        };
+        self.0.changed(TOPIC, &["total", prop]).await?;
+        self.0.changed(OTHER_TOPIC, &[prop]).await?;
+        if EventReplay::is_running() {
+            for topic in [TOPIC, OTHER_TOPIC] {
+                if self.0.cursor(topic).await? != 0 {
+                    return Err(FrameworkError::internal(
+                        "replay published an intermediate signal",
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 #[suprnova::async_trait]
@@ -91,7 +110,9 @@ impl Listener<plain::events::Saved> for Changed {
 
 struct Fixture {
     server: TestServer,
-    issued: Issued,
+    hub: Arc<InMemoryBroadcastHub>,
+    signals: tokio::sync::Mutex<tokio::sync::broadcast::Receiver<suprnova::BroadcastEnvelope>>,
+    summaries: tokio::sync::Mutex<tokio::sync::broadcast::Receiver<suprnova::BroadcastEnvelope>>,
     topics: LiveTopics,
 }
 impl Drop for Fixture {
@@ -103,67 +124,83 @@ impl Drop for Fixture {
 async fn fixture() -> Fixture {
     App::init();
     transport::ensure_crypt();
+    let hub = Arc::new(InMemoryBroadcastHub::new());
+    App::bind::<dyn BroadcastHub>(hub.clone());
+    App::singleton(
+        suprnova::live::LiveConfig::builder()
+            .topic_signal_interval_ms(1)
+            .build()
+            .unwrap(),
+    );
+    let signals = hub.subscribe_live_topic(TOPIC).unwrap();
+    let summaries = hub.subscribe_live_topic(OTHER_TOPIC).unwrap();
     Gate::define::<String, String>("live:tests.es-watch.stream.changes", |_, _| true);
-    App::singleton(LiveRegistry::builder().register::<Watch>().unwrap().build());
+    for topic in [TOPIC, OTHER_TOPIC] {
+        Gate::define::<String, String>(&format!("live:topic.{topic}"), |principal, _| {
+            !principal.is_empty()
+        });
+    }
+    App::singleton(
+        LiveRegistry::builder()
+            .register::<Watch>()
+            .unwrap()
+            .topic(TOPIC)
+            .unwrap()
+            .topic(OTHER_TOPIC)
+            .unwrap()
+            .build(),
+    );
     let mount = LiveMount::<Watch>::identity_bound("/es-watch", "es-slot", "es-document").unwrap();
-    let router = Router::new()
-        .try_live()
-        .unwrap()
-        .try_live_mount(&mount)
-        .unwrap();
+    let router: Router = Router::new().post("/es-write", request_write).into();
+    let router: Router = router.post("/es-rollback", request_rollback).into();
+    let router = router.try_live().unwrap().try_live_mount(&mount).unwrap();
     let runtime = suprnova::live::testing::prepare_live_router_for_test(&router).unwrap();
     App::singleton(runtime.clone());
     let topics = LiveTopics::from_runtime(&runtime);
     EventFacade::listen::<signal_row::events::Saved, _>(Arc::new(Changed(topics.clone()))).await;
     EventFacade::listen::<plain::events::Saved, _>(Arc::new(Changed(topics.clone()))).await;
     let server = transport::spawn_server(Arc::new(router)).await;
-    let issued = transport::issue(
-        server.port,
-        &Identity::alice(),
-        transport::issue_body(
-            "sse",
-            "tests.es-watch",
-            "es-slot",
-            "es-document",
-            "changes",
-            "es-document-0001",
-        ),
-    )
-    .await;
     Fixture {
         server,
-        issued,
         topics,
+        hub,
+        signals: tokio::sync::Mutex::new(signals),
+        summaries: tokio::sync::Mutex::new(summaries),
     }
 }
 async fn tail(fixture: &Fixture) -> Vec<serde_json::Value> {
-    let prior = &fixture.issued;
-    let body = serde_json::json!({
-        "protocol_version": 1, "operation": "renew", "transport": "sse", "stream": "changes",
-        "island": { "component": "tests.es-watch", "slot": "es-slot", "document_key": "es-document" },
-        "document_instance": "es-document-0001",
-        "prior": { "subscription_id": prior.subscription_id, "descriptor_binding": prior.descriptor_binding },
-        "position": { "epoch": prior.baseline.0, "sequence": "0" }
-    });
-    let reply = transport::post_control(
-        fixture.server.port,
-        &Identity::alice(),
-        transport::SUBSCRIPTION_PATH,
-        None,
-        body,
-    )
-    .await;
-    assert!(
-        reply.status.is_success(),
-        "{}",
-        String::from_utf8_lossy(&reply.body)
-    );
-    reply.json()["replay"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|value| serde_json::from_str(value.as_str().unwrap()).unwrap())
-        .collect()
+    let mut receiver = fixture.signals.lock().await;
+    let mut signals = Vec::new();
+    while let Ok(signal) = receiver.try_recv() {
+        signals.push(signal.data);
+    }
+    signals
+}
+async fn request_write(_: suprnova::Request) -> suprnova::Response {
+    let mut root = Aggregate::<Tally>::new(&uuid())?;
+    for _ in 0..4 {
+        root.record(SignalAdded { amount: 1 }).await?;
+    }
+    root.persist().await?;
+    LiveTopics::resolve()?.changed(TOPIC, &["request"]).await?;
+    Ok(suprnova::HttpResponse::json(
+        serde_json::json!({"saved": true}),
+    ))
+}
+async fn request_rollback(_: suprnova::Request) -> suprnova::Response {
+    DB::transaction(|_| {
+        Box::pin(async {
+            Plain::create(attrs! { total: 9i64 }).await?;
+            LiveTopics::resolve()?
+                .changed(TOPIC, &["rolled_back"])
+                .await?;
+            Err::<(), _>(FrameworkError::bad_request("rollback signal writes"))
+        })
+    })
+    .await?;
+    Ok(suprnova::HttpResponse::json(
+        serde_json::json!({"saved": true}),
+    ))
 }
 async fn setup() -> TestDatabase {
     let db = database().await;
@@ -193,7 +230,14 @@ async fn es_003_replay_signals_once_after_all_projector_writes() {
         1,
         "ten writes produce one committed signal: {log:?}"
     );
-    assert!(log[0]["payload"].get("total").is_none());
+    assert_eq!(log[0]["props"], serde_json::json!(["even", "odd", "total"]));
+    assert!(log[0].get("total").is_none());
+    assert_eq!(fixture.topics.cursor(TOPIC).await.unwrap(), 1);
+    let summary = fixture.summaries.lock().await.try_recv().unwrap().data;
+    assert_eq!(summary["topic"], OTHER_TOPIC);
+    assert_eq!(summary["props"], serde_json::json!(["even", "odd"]));
+    assert_eq!(fixture.topics.cursor(OTHER_TOPIC).await.unwrap(), 1);
+    assert!(fixture.summaries.lock().await.try_recv().is_err());
 }
 
 #[tokio::test]
@@ -205,7 +249,8 @@ async fn es_004_projector_committed_model_write_signals_a_topic() {
     root.record(SignalAdded { amount: 4 }).await.unwrap();
     root.persist().await.unwrap();
     assert_eq!(SignalRow::find(1i64).await.unwrap().unwrap().total, 4);
-    assert_eq!(tail(&fixture).await.len(), 1);
+    let log = tail(&fixture).await;
+    assert_eq!(log.len(), 1);
 }
 
 #[tokio::test]
@@ -216,6 +261,7 @@ async fn es_004_plain_model_event_and_explicit_change_need_no_aggregate() {
     Plain::create(attrs! { total: 7i64 }).await.unwrap();
     fixture.topics.changed(TOPIC, &["total"]).await.unwrap();
     assert_eq!(suprnova::EventStore::last_position().await.unwrap(), 0);
+    tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(tail(&fixture).await.len(), 2);
 }
 
@@ -259,5 +305,88 @@ async fn es_003_public_suppression_merges_into_an_outer_batch() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(tail(&fixture).await.len(), 1);
+    let log = tail(&fixture).await;
+    assert_eq!(log.len(), 1);
+    assert_eq!(
+        log[0]["props"],
+        serde_json::json!(["first", "last", "total"])
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn es_003_request_coalesces_projector_and_explicit_changes() {
+    let _db = setup().await;
+    let fixture = fixture().await;
+    let response = transport::send(
+        fixture.server.port,
+        &Identity::alice(),
+        hyper::Method::POST,
+        "/es-write",
+        &[],
+        bytes::Bytes::new(),
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        hyper::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let log = tail(&fixture).await;
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(
+        log[0]["props"],
+        serde_json::json!(["even", "odd", "request", "total"])
+    );
+    assert_eq!(fixture.hub.live_topic_cursor(TOPIC).await.unwrap(), 1);
+    assert_eq!(SignalRow::find(1i64).await.unwrap().unwrap().total, 4);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn es_003_request_rollback_discards_every_prop_and_signal() {
+    let _db = setup().await;
+    let fixture = fixture().await;
+    let response = transport::send(
+        fixture.server.port,
+        &Identity::alice(),
+        hyper::Method::POST,
+        "/es-rollback",
+        &[],
+        bytes::Bytes::new(),
+    )
+    .await;
+    assert_eq!(response.status, hyper::StatusCode::BAD_REQUEST);
+    assert_eq!(Plain::query().count().await.unwrap(), 0);
+    assert!(tail(&fixture).await.is_empty());
+    assert_eq!(fixture.topics.cursor(TOPIC).await.unwrap(), 0);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn es_003_manual_change_waits_for_commit_and_discards_rollback() {
+    let _db = setup().await;
+    let fixture = fixture().await;
+    let tx = DB::begin_transaction().await.unwrap();
+    fixture
+        .topics
+        .changed_with_tx(&tx, TOPIC, &["discarded"])
+        .await
+        .unwrap();
+    assert!(tail(&fixture).await.is_empty());
+    tx.rollback().await.unwrap();
+    assert_eq!(fixture.topics.cursor(TOPIC).await.unwrap(), 0);
+    let tx = DB::begin_transaction().await.unwrap();
+    fixture
+        .topics
+        .changed_with_tx(&tx, TOPIC, &["committed"])
+        .await
+        .unwrap();
+    assert!(tail(&fixture).await.is_empty());
+    tx.commit().await.unwrap();
+    let log = tail(&fixture).await;
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0]["props"], serde_json::json!(["committed"]));
+    assert_eq!(fixture.topics.cursor(TOPIC).await.unwrap(), 1);
 }
