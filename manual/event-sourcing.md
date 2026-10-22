@@ -341,6 +341,11 @@ scope, including in a worker. Register its topics and abilities during bootstrap
 It preserves ORM cache invalidation and carries no model values to the browser.
 Live streams reload their server view after a topic change.
 
+Once replay commits, an owned task keeps its final topic unions in publication
+order. Cancelling the caller stops waiting and does not discard those changes.
+A caller that waits receives the first publication error after every remaining
+topic is attempted.
+
 A manual transaction is not ambient state. Await identity capture when registering
 a change on its handle:
 
