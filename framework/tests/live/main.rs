@@ -49,3 +49,4 @@ pub mod upload_security;
 pub mod view_contract;
 
 pub mod signal_fanout;
+pub mod signals;

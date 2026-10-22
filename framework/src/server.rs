@@ -1206,7 +1206,7 @@ async fn route_request(
     let inner = Box::pin(crate::static_publish::batch::with_batch(inner));
     let socket_scoped = Box::pin(crate::broadcasting::request_socket::scope(
         request_socket_id,
-        crate::auth::request_state::scope(inner),
+        crate::live::topics::scope_request(crate::auth::request_state::scope(inner)),
     ));
     let ssr_scoped = Box::pin(crate::inertia::ssr::DISABLE_SSR.scope(ssr_disabled, socket_scoped));
     let response = crate::inertia::flash::FLASH_BAG
@@ -1266,7 +1266,7 @@ where
     });
     let socket_scoped = Box::pin(crate::broadcasting::request_socket::scope(
         None,
-        crate::auth::request_state::scope(inner),
+        crate::live::topics::scope_request(crate::auth::request_state::scope(inner)),
     ));
     let ssr_scoped = Box::pin(
         crate::inertia::ssr::DISABLE_SSR

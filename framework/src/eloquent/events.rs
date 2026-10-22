@@ -323,6 +323,16 @@ pub trait ModelEventHooks: Sized {
     async fn __dispatch_created(model: &Self) -> Result<(), FrameworkError>;
     /// Non-cancellable: fires after any successful save (insert or update).
     async fn __dispatch_saved(model: &Self) -> Result<(), FrameworkError>;
+    /// Keeps a generated saved signal attached to its explicit write transaction.
+    async fn __dispatch_saved_with_tx(
+        model: &Self,
+        _transaction: &crate::Transaction,
+    ) -> Result<(), FrameworkError>
+    where
+        Self: Sync,
+    {
+        Self::__dispatch_saved(model).await
+    }
     /// Cancellable: fires before an existing row is updated; `previous` is the pre-mutation snapshot.
     async fn __dispatch_updating(
         previous: &Self,
@@ -334,6 +344,17 @@ pub trait ModelEventHooks: Sized {
     async fn __dispatch_deleting(model: &Self, is_force: bool) -> Result<(), FrameworkError>;
     /// Non-cancellable: fires after a row was successfully deleted.
     async fn __dispatch_deleted(model: &Self, is_force: bool) -> Result<(), FrameworkError>;
+    /// Keeps a generated deleted signal attached to its explicit write transaction.
+    async fn __dispatch_deleted_with_tx(
+        model: &Self,
+        is_force: bool,
+        _transaction: &crate::Transaction,
+    ) -> Result<(), FrameworkError>
+    where
+        Self: Sync,
+    {
+        Self::__dispatch_deleted(model, is_force).await
+    }
     /// Non-cancellable: fires when a soft-delete moves a row into the trashed state.
     async fn __dispatch_trashed(model: &Self) -> Result<(), FrameworkError>;
     /// Cancellable: fires before a soft-deleted row is restored.

@@ -2058,7 +2058,7 @@ where
 
         Self::__dispatch_saving(shared.clone(), false).await?;
         if !save_is_dirty(self, &*shared.lock().await)? {
-            Self::__dispatch_saved(self).await?;
+            Self::__dispatch_saved_with_tx(self, tx).await?;
             return Ok(());
         }
         Self::__dispatch_updating(self, shared.clone()).await?;
@@ -2108,7 +2108,7 @@ where
             crate::auth::epoch::observe_user_write(written, &written_columns, Some(tx)).await;
         }
         Self::__dispatch_updated(self, &current).await?;
-        Self::__dispatch_saved(&current).await?;
+        Self::__dispatch_saved_with_tx(&current, tx).await?;
         current.__touch_planned_with_tx(tx, &touch_plan).await?;
         if let Some(state) = row_state(self.__eager_cache()) {
             state.sync_original(original);
@@ -2169,7 +2169,7 @@ where
             crate::auth::epoch::observe_user_write(written, &written_columns, Some(tx)).await;
         }
         Self::__dispatch_updated(&previous, &current).await?;
-        Self::__dispatch_saved(&current).await?;
+        Self::__dispatch_saved_with_tx(&current, tx).await?;
         current.__touch_planned_with_tx(tx, &touch_plan).await?;
         crate::eloquent::changes::finish_save(row_state(current.__eager_cache()));
         Ok(current)
@@ -2203,7 +2203,7 @@ where
         )
         .await?;
 
-        Self::__dispatch_deleted(&snapshot, false).await?;
+        Self::__dispatch_deleted_with_tx(&snapshot, false, tx).await?;
         snapshot.__touch_planned_with_tx(tx, &touch_plan).await?;
         Ok(())
     }
@@ -2246,7 +2246,7 @@ where
         // Nothing was loaded before the insert: no original until it returns.
         crate::eloquent::changes::begin_insert(row_state(row.__eager_cache()));
         Self::__dispatch_created(&row).await?;
-        Self::__dispatch_saved(&row).await?;
+        Self::__dispatch_saved_with_tx(&row, tx).await?;
         row.__touch_planned_with_tx(tx, &touch_plan).await?;
         crate::eloquent::changes::finish_save(row_state(row.__eager_cache()));
         Ok(row)
@@ -2282,7 +2282,7 @@ where
         .await?;
 
         Self::__dispatch_force_deleted(&snapshot).await?;
-        Self::__dispatch_deleted(&snapshot, true).await?;
+        Self::__dispatch_deleted_with_tx(&snapshot, true, tx).await?;
         snapshot.__touch_planned_with_tx(tx, &touch_plan).await?;
         Ok(())
     }
