@@ -125,3 +125,8 @@ fn cache_012_shared_props_accept_an_explicit_public_declaration() {
             .is_ok()
     );
 }
+
+#[test]
+fn cache_013_unknown_field_and_non_props_fail_to_build() {
+    trybuild::TestCases::new().compile_fail("tests/inertia/compile_fail/cache/cache_013_*.rs");
+}

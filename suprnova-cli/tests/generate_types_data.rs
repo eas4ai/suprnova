@@ -1978,3 +1978,70 @@ pub async fn edit(req: Request) -> Response {
         "a page built from two structs has no one interface to name:\n{ts}"
     );
 }
+
+#[test]
+fn cache_013_fixture_project_emits_deterministic_wire_name_boundaries() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"cache_fixture\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("src/main.rs"),
+        r#"
+#[derive(InertiaProps)]
+#[inertia(cacheable)]
+#[serde(rename_all = "camelCase")]
+struct ArticleProps {
+    #[inertia(per_request)]
+    viewer_name: String,
+    #[inertia(public)]
+    z_title: String,
+    #[inertia(public)]
+    #[serde(rename = "article-id")]
+    article_id: u32,
+}
+#[derive(InertiaProps)]
+#[inertia(cacheable)]
+struct GenericProps<T: serde::Serialize> {
+    #[inertia(public)] title: T,
+    #[inertia(per_request)] viewer: String,
+}
+#[derive(InertiaProps)]
+struct PlainProps { title: String }
+fn boot() {
+    Inertia::cache_page::<ArticleProps>("/article", "Article/Show", &[], &["errors", "flash"]);
+    Inertia::cache_page::<&(ArticleProps)>("/borrowed", "Article/Borrowed", &[], &["errors", "flash"]);
+    Inertia::cache_page::<GenericProps<String>>("/generic", "Generic/Show", &[], &["errors", "flash"]);
+}
+fn page(props: ArticleProps) { InertiaResponse::new("Article/Other").cacheable(props); }
+fn plain(props: PlainProps) { inertia_response!(&req, "Plain", props); }
+"#,
+    )
+    .unwrap();
+    let generate = || {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_suprnova"))
+            .arg("generate-types")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::read_to_string(dir.path().join("frontend/src/types/inertia-props.ts")).unwrap()
+    };
+    let first = generate();
+    let expected = r#"export const inertiaPropCache = {
+  "Article/Borrowed": { cacheable: true, public: ["article-id", "zTitle"], perRequest: ["viewerName"] },
+  "Article/Other": { cacheable: true, public: ["article-id", "zTitle"], perRequest: ["viewerName"] },
+  "Article/Show": { cacheable: true, public: ["article-id", "zTitle"], perRequest: ["viewerName"] },
+  "Generic/Show": { cacheable: true, public: ["title"], perRequest: ["viewer"] },
+  "Plain": { cacheable: false, public: [], perRequest: [] },
+} as const;"#;
+    assert!(first.contains(expected), "{first}");
+    assert_eq!(first, generate());
+}

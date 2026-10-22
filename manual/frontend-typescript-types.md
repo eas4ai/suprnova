@@ -290,7 +290,7 @@ export interface SharedProps {
 }
 ```
 
-The marker only tells the generator which struct it is; sharing the values
+The shared marker tells the generator which struct it is; sharing the values
 at run time stays your bootstrap's job. A lazy field of a shared `Data`
 object is left out, as `Inertia::share_data` leaves it out. Per-key shares
 (`Inertia::share("appName", "Suprnova")`) and shared-data providers such
@@ -819,6 +819,64 @@ has a hand-written block keeps it, and the generator steps aside: it
 writes no augmentation of its own, since the two would merge and a key
 both set to different types is a type error (see [Upgrading a project with
 its own augmentation](#upgrading-a-project-with-its-own-augmentation)).
+
+## Cache declarations
+
+`#[inertia(cacheable)]` adds runtime cache meaning to an `InertiaProps`
+struct. Every field must carry `#[inertia(public)]` or
+`#[inertia(per_request)]`. A missing marker fails the build and names the
+field. These markers belong on fields. They accept no list of field names.
+An ordinary props struct keeps its existing serialization behavior.
+
+```rust
+use suprnova::InertiaProps;
+
+#[derive(InertiaProps)]
+#[inertia(cacheable)]
+pub struct ArticleProps {
+    #[inertia(public)]
+    pub title: String,
+    #[inertia(per_request)]
+    pub viewer_name: String,
+}
+```
+
+Register the page and its shared props at boot as shown in
+[Inertia responses](frontend-inertia-responses.md). Then run:
+
+```bash
+suprnova generate-types
+```
+
+For a page named `Articles/Show`, `inertia-props.ts` includes:
+
+```typescript
+export const inertiaPropCache = {
+  "Articles/Show": { cacheable: true, public: ["title"], perRequest: ["viewer_name"] },
+} as const;
+```
+
+The record uses component names and serialized field names, including serde
+renames. Components and field lists sort by name. Every typed page has a
+record. An ordinary page has `cacheable: false` and two empty lists. Those
+empty lists make no claim about its prop privacy. The record describes page
+fields. Shared-prop declarations stay in the server's route registration.
+React, Vue and Svelte receive the same record. Generic cacheable structs
+also have a boundary record. Their field names do not depend on type
+arguments; the existing generic limitation of `Pages` still applies.
+
+```typescript
+import { inertiaPropCache } from './types/inertia-props';
+
+console.log(inertiaPropCache["Articles/Show"].perRequest);
+```
+
+### Why Suprnova diverges
+
+Laravel has no shared page cache with checked request slots. Suprnova emits
+these declarations so frontend tools can read the same field boundary that
+the Rust derive checks. The generated record does not authorize caching.
+[RenderCache](render-cache.md) still checks the route and its observations.
 
 ## Next
 

@@ -25,8 +25,11 @@ pub struct InertiaPropsStruct {
     /// the flash data.
     pub role: Option<PropsRole>,
     /// The page components the sources render with this struct as their
-    /// props, sorted. Each becomes an entry of the generated `Pages`.
+    /// props, sorted. Nongeneric components become entries of `Pages`;
+    /// cacheable generic components retain their field boundary record.
     pub components: Vec<String>,
+    /// Whether the derive requires a cache boundary on every field.
+    pub cacheable: bool,
 }
 
 /// What a props struct types beside its own interface.
@@ -73,6 +76,8 @@ pub struct StructField {
     /// `#[serde(skip_serializing_if = "...")]`: serde may leave the key out,
     /// so the output interface declares it optional.
     pub may_be_absent: bool,
+    /// True for public fields, false for request fields, absent without a declaration.
+    pub cache_public: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -493,6 +498,27 @@ pub(crate) fn serde_input_key(struct_attrs: &[Attribute], field: &syn::Field) ->
     })
 }
 
+/// Cache markers use the same field wire names as the generated interfaces.
+fn has_inertia_marker(attrs: &[Attribute], name: &str) -> bool {
+    attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("inertia"))
+        .any(|attr| {
+            attr.parse_args_with(Punctuated::<syn::Path, Token![,]>::parse_terminated)
+                .is_ok_and(|paths| paths.iter().any(|path| path.is_ident(name)))
+        })
+}
+
+fn cache_boundary(attrs: &[Attribute]) -> Option<bool> {
+    if has_inertia_marker(attrs, "public") {
+        Some(true)
+    } else if has_inertia_marker(attrs, "per_request") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 impl<'ast> Visit<'ast> for InertiaPropsVisitor {
     fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
         let data = self.has_data_derive(&node.attrs);
@@ -542,6 +568,7 @@ impl<'ast> Visit<'ast> for InertiaPropsVisitor {
                             in_input,
                             ty: Self::parse_type(&f.ty),
                             data_flags: parse_data_flags(&f.attrs),
+                            cache_public: cache_boundary(&f.attrs),
                             // The derives refuse `skip_serializing_if`.
                             may_be_absent: !derived && serde.may_be_absent,
                         })
@@ -570,6 +597,8 @@ impl<'ast> Visit<'ast> for InertiaPropsVisitor {
                     None
                 },
                 components: Vec::new(),
+                cacheable: self.has_inertia_props_derive(&node.attrs)
+                    && has_inertia_marker(&node.attrs, "cacheable"),
             };
             if derived {
                 self.structs.push(parsed);
@@ -734,9 +763,10 @@ impl SourceScan {
     fn assign_components(&self, structs: &mut [InertiaPropsStruct], conflicts: &mut Vec<String>) {
         // A generic struct has no single interface to name: `Pages` would
         // need its type arguments, which the call site does not spell out.
+        // Cache field names still have one boundary, independent of those arguments.
         let pairable: HashSet<String> = structs
             .iter()
-            .filter(|s| s.type_params.is_empty())
+            .filter(|s| s.type_params.is_empty() || s.cacheable)
             .map(|s| s.name.clone())
             .collect();
         let mut by_component: BTreeMap<&str, BTreeMap<&str, BTreeSet<String>>> = BTreeMap::new();
@@ -973,6 +1003,19 @@ fn pattern_names(pat: &Pat, names: &mut Vec<String>) {
     }
 }
 
+/// A registration names its props in the type argument, rather than a value.
+fn cache_registration_props(func: &Expr) -> Option<String> {
+    let Expr::Path(path) = func else { return None };
+    let segment = path.path.segments.last()?;
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    arguments.args.iter().find_map(|argument| match argument {
+        GenericArgument::Type(ty) => declared_struct(ty),
+        _ => None,
+    })
+}
+
 /// The last segment of `path` written like a type: in PascalCase, so not a
 /// module or function (`snake_case`) and not a constant (`SCREAMING_CASE`).
 /// `Self` names no struct the scan can see.
@@ -1135,7 +1178,7 @@ impl InertiaCallVisitor {
             let method = call.method.to_string();
             let first = call.args.first();
             match method.as_str() {
-                "with_data" | "try_with_data" => {
+                "with_data" | "try_with_data" | "cacheable" => {
                     if let Some(name) = first.and_then(|arg| self.props_struct(arg)) {
                         structs.insert(name);
                         absent.clear();
@@ -1196,6 +1239,14 @@ impl<'ast> Visit<'ast> for InertiaCallVisitor {
                         .and_then(|arg| self.props_struct(arg)),
                     absent: BTreeSet::new(),
                 }),
+                ("Inertia", "cache_page") => {
+                    let props = cache_registration_props(&node.func);
+                    self.renders.push(RenderSite {
+                        component: component_literal(node.args.iter().nth(1)),
+                        props,
+                        absent: BTreeSet::new(),
+                    });
+                }
                 ("Inertia", "share_data") => {
                     if let Some(name) = node.args.first().and_then(|arg| self.props_struct(arg)) {
                         self.shared_data.push(name);
@@ -2173,18 +2224,24 @@ fn render_page_declarations(structs: &[InertiaPropsStruct], page: PageTypes) -> 
     // that sorts first keeps the component, so the output stays a function
     // of the input.
     let mut pages: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut boundaries: BTreeMap<&str, &str> = BTreeMap::new();
     let mut by_name: Vec<&InertiaPropsStruct> = structs.iter().collect();
     by_name.sort_by(|a, b| a.name.cmp(&b.name));
     for s in &by_name {
         for component in &s.components {
-            pages.entry(component).or_insert(&s.name);
+            boundaries.entry(component).or_insert(&s.name);
+            if s.type_params.is_empty() {
+                pages.entry(component).or_insert(&s.name);
+            }
         }
     }
     let mut out = String::from("export interface Pages {\n");
-    for (component, props) in pages {
+    for (component, props) in &pages {
         out.push_str(&format!("  {}: {props};\n", ts_string_key(component)));
     }
     out.push_str("}\n\n");
+
+    out.push_str(&render_cache_declarations(&boundaries, &by_name));
 
     // The framework shares `root` itself and writes it after every other
     // shared prop, so a shared struct's own `root` field never arrives.
@@ -2236,6 +2293,42 @@ fn render_page_declarations(structs: &[InertiaPropsStruct], page: PageTypes) -> 
         out.push_str(&format!("    flashDataType: {};\n", flash.name));
     }
     out.push_str("  }\n}\n");
+    out
+}
+
+/// Stable cache metadata is shared by all frontend adapters.
+fn render_cache_declarations(
+    pages: &BTreeMap<&str, &str>,
+    structs: &[&InertiaPropsStruct],
+) -> String {
+    let mut out = String::from("export const inertiaPropCache = {\n");
+    for (component, name) in pages {
+        let Some(props) = structs.iter().find(|props| props.name.as_str() == *name) else {
+            continue;
+        };
+        let names = |public| {
+            let names: BTreeSet<&str> = props
+                .fields
+                .iter()
+                .filter(|field| field.in_output && field.cache_public == Some(public))
+                .map(|field| field.name.as_str())
+                .collect();
+            names
+                .into_iter()
+                .map(ts_string_key)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        out.push_str(&format!(
+            "  {}: {{ cacheable: {}, public: [{}], perRequest: [{}] }},\n",
+            ts_string_key(component),
+            props.cacheable,
+            names(true),
+            names(false)
+        ));
+    }
+    out.push_str("} as const;\n\n");
+
     out
 }
 
