@@ -78,14 +78,15 @@ responses skip session persistence and cookie issuance only when the handler
 changes no session state, issues no CSRF token and queues no security work.
 Automatic flash aging still marks the request copy dirty for CSRF and other
 readers. It does not advance the separate framework mutation marker used by
-the asset gate. Aging alone does not force asset persistence. Stored flash survives
-the asset request for the following page. Token issuance finalizes normally
-and sends the response as `private, no-store`. Remember credential rotation,
+the asset gate. Aging alone does not force asset persistence. When the gate
+skips finalization, stored flash survives for the following page. Token issuance
+finalizes normally. A shared-cacheable response that exposes the token becomes
+`private, no-store`. Remember credential rotation,
 regeneration, identity changes and queued sign-in rebinds also finalize normally
 and deliver any required cookies. Responses carrying those cookies become private.
-On an ordinary shared-cacheable page with loaded flash, CSRF sees the dirty
-session and issues its XSRF cookie. The cookie makes the response private with
-`Cache-Control: private, no-store`.
+On an ordinary shared-cacheable page, automatic aging keeps loaded flash dirty.
+CSRF's usual XSRF-cookie rules see that dirty state. If CSRF attaches the cookie,
+session finalization sends `Cache-Control: private, no-store`.
 
 Select another naming convention on both the audit and the static handler.
 The expression matches the filename without its extension. An invalid handler
@@ -116,8 +117,11 @@ timeout, a limit of 256 resources and a 16 MiB response limit.
 `budget:audit` reads these collection limits through `PageBudget::from_env()`.
 The resource limit counts normalized HTTP and HTTPS URLs after deduplication.
 Data URLs and fragment-only references count zero. A separate limit of 65,536
-parser tokens and raw reference candidates bounds collection work, including
-duplicate and ignored candidates. Set `max_discovery_tokens` in Rust or
+work units meters HTML and CSS tokens, JSON keys and values, and raw reference
+candidates. Duplicate and ignored candidates also consume work. CSS whitespace,
+comments and complete function argument lists consume tokens. A token can span
+many bytes, so the response byte limit separately bounds its lexical size.
+Set `max_discovery_tokens` in Rust or
 `PAGE_BUDGET_MAX_DISCOVERY_TOKENS` for the command.
 Discovery stops HTML input on overflow, parses inline styles on their tags and
 processes complete CSS constructs from style blocks before later markup.
@@ -128,8 +132,8 @@ arrays. The parser checks the allowance before reading each value. Icons are
 decoded one at a time. Exhaustion stops before the next value is consumed,
 without materializing the remaining array.
 Each `image-set()` is a modern-plus-fallback group, like a picture or source set.
-The pending queue is bounded too. Repeating one reference does not allocate another queue entry. Every `Cache-Control`
-header line contributes to the policy; a second `no-cache` line fails the
+The pending queue is bounded too. Repeating one reference does not allocate
+another queue entry. Every `Cache-Control` header line contributes to the policy; a second `no-cache` line fails the
 immutable rule. Redirects are recorded before following same-origin
 locations. The initial HTTP-to-HTTPS upgrade may be followed on the same host;
 it still fails the first-redirect rule. Other external redirects are listed.

@@ -273,7 +273,7 @@ impl Document {
                 &mut cssparser::Parser::new(attr("style")),
                 &self.base,
                 &mut self.discovery,
-                false,
+                CssContext::Rules,
                 None,
             );
         }
@@ -411,7 +411,7 @@ impl StyleStream {
                 &mut cssparser::Parser::new(&self.pending),
                 base,
                 discovery,
-                false,
+                CssContext::Rules,
                 None,
             );
         }
@@ -429,7 +429,7 @@ pub(super) fn css(
         &mut cssparser::Parser::new(text),
         base,
         &mut discovery,
-        false,
+        CssContext::Rules,
         None,
     );
     discovery.finish("stylesheet")
@@ -446,25 +446,50 @@ fn css_reference(
         group.insert(url);
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CssContext {
+    Rules,
+    ImageSet,
+    UrlArguments,
+}
+impl CssContext {
+    fn function(name: &str) -> Self {
+        if name.eq_ignore_ascii_case("url") {
+            Self::UrlArguments
+        } else if name.eq_ignore_ascii_case("image-set")
+            || name.eq_ignore_ascii_case("-webkit-image-set")
+        {
+            Self::ImageSet
+        } else {
+            Self::Rules
+        }
+    }
+}
 fn css_urls(
     parser: &mut cssparser::Parser<'_>,
     base: &Url,
     discovery: &mut Discovery,
-    image_set: bool,
+    context: CssContext,
     mut group: Option<&mut BTreeSet<String>>,
 ) {
     use cssparser::Token;
     let mut import = false;
+    let mut first = true;
     while discovery.error.is_none() {
-        let Ok(token) = parser.next().cloned() else {
+        let Ok(token) = parser.next_including_whitespace_and_comments().cloned() else {
             break;
         };
         if !discovery.tick() {
             break;
         }
         match token {
+            Token::WhiteSpace(_) | Token::Comment(_) => continue,
             Token::AtKeyword(name) => import = name.eq_ignore_ascii_case("import"),
-            Token::QuotedString(value) if import || image_set => {
+            Token::QuotedString(value)
+                if import
+                    || context == CssContext::ImageSet
+                    || (context == CssContext::UrlArguments && first) =>
+            {
                 css_reference(base, &value, discovery, &mut group);
                 import = false;
             }
@@ -474,17 +499,20 @@ fn css_urls(
             }
             Token::Function(name) => {
                 import = false;
-                css_function(parser, &name, base, discovery, &mut group);
+                css_nested(
+                    parser,
+                    base,
+                    discovery,
+                    CssContext::function(&name),
+                    &mut group,
+                );
             }
             Token::CurlyBracketBlock | Token::ParenthesisBlock | Token::SquareBracketBlock => {
-                let _: Result<(), cssparser::ParseError<()>> =
-                    parser.parse_nested_block(|nested| {
-                        css_urls(nested, base, discovery, false, None);
-                        Ok(())
-                    });
+                css_nested(parser, base, discovery, CssContext::Rules, &mut None);
             }
             _ => {}
         }
+        first = false;
     }
     // cssparser otherwise scans to the end of every enclosing block after
     // the callback returns. An empty parser stops that scan on collection failure.
@@ -493,43 +521,31 @@ fn css_urls(
     }
 }
 
-fn css_function(
+fn css_nested(
     parser: &mut cssparser::Parser<'_>,
-    name: &str,
     base: &Url,
     discovery: &mut Discovery,
+    context: CssContext,
     group: &mut Option<&mut BTreeSet<String>>,
 ) {
-    if name.eq_ignore_ascii_case("url") {
-        let _: Result<(), cssparser::ParseError<()>> = parser.parse_nested_block(|nested| {
-            if let Ok(cssparser::Token::QuotedString(value)) = nested.next() {
-                css_reference(base, value, discovery, group);
-            }
-            if discovery.error.is_some() {
-                *nested = cssparser::Parser::new("");
-            }
-            Ok(())
-        });
-        return;
-    }
-    let image_set =
-        name.eq_ignore_ascii_case("image-set") || name.eq_ignore_ascii_case("-webkit-image-set");
     let mut candidates = BTreeSet::new();
-    let _: Result<(), cssparser::ParseError<()>> = parser.parse_nested_block(|nested| {
-        css_urls(
-            nested,
-            base,
-            discovery,
-            image_set,
-            if image_set {
-                Some(&mut candidates)
-            } else {
-                None
-            },
-        );
+    let result: Result<(), cssparser::ParseError<()>> = parser.parse_nested_block(|nested| {
+        let nested_group = match context {
+            CssContext::UrlArguments => group.as_deref_mut(),
+            CssContext::ImageSet => Some(&mut candidates),
+            CssContext::Rules => None,
+        };
+        // Exhaust the block through the metered walk, including invalid tails.
+        // Returning after the URL's first string leaves unmetered cleanup work.
+        css_urls(nested, base, discovery, context, nested_group);
         Ok(())
     });
-    if image_set {
+    if result.is_err() && discovery.error.is_none() {
+        // A parser nesting refusal must stop collection instead of leaving its
+        // remaining input for cssparser's automatic block skipping.
+        discovery.error = Some("page budget CSS nested block could not be fully parsed".into());
+    }
+    if context == CssContext::ImageSet {
         discovery.group(candidates);
     }
 }
