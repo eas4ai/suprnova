@@ -1,0 +1,808 @@
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use opendal::raw::{
+    Layer, OpCopier, OpCopy, OpList, OpRead, OpStat, OpWrite, RpStat, Service, ServiceInfo,
+    Servicer, oio,
+};
+use opendal::{Buffer, Capability, Metadata, OperationContext, Operator, services};
+use suprnova::{
+    FrameworkError,
+    static_publish::{
+        PageObject, PublishConfig, Publisher,
+        cdn::{CdnCapabilities, CdnDriver, MemoryCdnDriver, Purge},
+    },
+};
+
+fn memory() -> Operator {
+    Operator::new(services::Memory::default()).unwrap()
+}
+fn publisher(version: &str) -> (Publisher, Operator) {
+    let disk = memory();
+    (
+        Publisher::from_operator(disk.clone(), version, PublishConfig::default()).unwrap(),
+        disk,
+    )
+}
+fn page_at(path: &str, text: &str) -> PageObject {
+    PageObject::new(path, Bytes::from(format!("<html>{text}</html>")),
+        Bytes::from(serde_json::json!({"component":"About","props":{"text":text},"url":path,"version":"v1"}).to_string())).unwrap()
+}
+fn page(text: &str) -> PageObject {
+    page_at("/about", text)
+}
+async fn manifest_bytes(disk: &Operator) -> Bytes {
+    disk.read("_pub/manifest.json").await.unwrap().to_bytes()
+}
+
+#[tokio::test]
+async fn pub_002_html_json_and_atomic_manifest_on_any_disk() {
+    let (p, disk) = publisher("v1");
+    let outcome = p.publish(vec![page("one")]).await.unwrap();
+    let manifest = p.manifest().await.unwrap();
+    assert_eq!(manifest.live, outcome.version);
+    let live = &manifest.versions[&manifest.live];
+    assert_eq!(live.objects.len(), 2);
+    for object in &live.objects {
+        assert!(object.path.starts_with("_pub/v1/"));
+        assert!(disk.exists(&object.path).await.unwrap());
+        assert!(!object.headers["cache-control"].contains("immutable"));
+        assert!(object.headers["cache-control"].contains("stale-while-revalidate="));
+        assert!(object.headers["cache-control"].contains("stale-if-error="));
+        assert!(!object.headers.contains_key("set-cookie"));
+        assert_eq!(object.headers["etag"], format!("\"{}\"", object.digest));
+    }
+    assert_ne!(live.objects[0].path, live.objects[1].path);
+    assert!(disk.exists("about/index.html").await.unwrap());
+    assert!(disk.exists("about/index.json").await.unwrap());
+}
+
+#[tokio::test]
+async fn pub_003_unchanged_targeted_pages_do_not_upload_or_switch() {
+    let disk = memory();
+    let state = Arc::new(Probe::default());
+    let driver = Arc::new(MemoryCdnDriver::default());
+    let p = Publisher::from_operator(
+        disk.layer(ProbeLayer(state.clone())),
+        "v1",
+        PublishConfig::default(),
+    )
+    .unwrap()
+    .with_cdn(driver.clone());
+    let first = p
+        .publish(vec![page("one"), page_at("/other", "two")])
+        .await
+        .unwrap();
+    let writes = state
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|key| key.as_str() != "_pub/status.json")
+        .count();
+    let events = driver.events().unwrap().len();
+    let next = p.publish_partial(vec![page("one")]).await.unwrap();
+    assert_eq!(next.uploaded, 0);
+    assert_eq!(next.skipped, 2);
+    assert_eq!(next.version, first.version);
+    assert_eq!(
+        state
+            .writes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|key| key.as_str() != "_pub/status.json")
+            .count(),
+        writes
+    );
+    assert_eq!(driver.events().unwrap().len(), events);
+}
+
+#[tokio::test]
+async fn pub_003_failed_render_keeps_manifest_and_status_names_failure() {
+    let (p, disk) = publisher("v1");
+    p.publish(vec![page("one")]).await.unwrap();
+    let before = manifest_bytes(&disk).await;
+    let result = p
+        .publish_with(|| async {
+            Err::<Vec<PageObject>, _>(FrameworkError::internal("broken render"))
+        })
+        .await;
+    assert!(result.is_err());
+    assert_eq!(manifest_bytes(&disk).await, before);
+    let status = p.status().await;
+    assert!(status.last_outcome.contains("broken render"));
+    assert!(!status.live_version.is_empty());
+    assert_eq!(status.pending, 0);
+}
+
+#[tokio::test]
+async fn pub_002_cdn_targeted_regeneration_copies_omitted_pages_into_new_prefix() {
+    let (p, disk) = publisher("v1");
+    let p = p.with_cdn(Arc::new(MemoryCdnDriver::default()));
+    p.publish(vec![page("one"), page_at("/other", "keep")])
+        .await
+        .unwrap();
+    let next = p.publish_partial(vec![page("changed")]).await.unwrap();
+    assert_eq!(next.uploaded, 2);
+    let manifest = p.manifest().await.unwrap();
+    let live = &manifest.versions[&manifest.live];
+    assert_eq!(live.objects.len(), 4);
+    for object in &live.objects {
+        assert!(object.path.starts_with(&format!("_pub/{}/", next.version)));
+        assert!(disk.exists(&object.path).await.unwrap());
+        if object.url == "/other" {
+            assert_eq!(
+                disk.read(&object.path).await.unwrap().to_bytes(),
+                Bytes::from_static(b"<html>keep</html>")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn pub_002_shared_assets_are_deduplicated_and_conflicts_refused() {
+    let (p, disk) = publisher("v1");
+    let asset = (
+        Bytes::from_static(b"shared script"),
+        "application/javascript".into(),
+    );
+    let mut first = page("one");
+    first
+        .assets
+        .insert("build/app-abcd1234.js".into(), asset.clone());
+    let mut second = page_at("/other", "two");
+    second.assets.insert("build/app-abcd1234.js".into(), asset);
+    let outcome = p
+        .publish(vec![first.clone(), second.clone()])
+        .await
+        .unwrap();
+    assert_eq!(outcome.uploaded, 5);
+    let manifest = p.manifest().await.unwrap();
+    let assets: Vec<_> = manifest.versions[&manifest.live]
+        .objects
+        .iter()
+        .filter(|object| !object.path.starts_with("_pub/"))
+        .collect();
+    assert_eq!(assets.len(), 1);
+    assert_eq!(
+        assets[0].headers["cache-control"],
+        "public, max-age=31536000, immutable"
+    );
+    let before = manifest_bytes(&disk).await;
+    second.assets.insert(
+        "build/app-abcd1234.js".into(),
+        (
+            Bytes::from_static(b"different"),
+            "application/javascript".into(),
+        ),
+    );
+    assert!(
+        p.publish(vec![first, second.clone()])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("conflicting objects")
+    );
+    assert_eq!(manifest_bytes(&disk).await, before);
+    assert!(
+        p.publish(vec![second])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("changed its content")
+    );
+}
+
+#[tokio::test]
+async fn pub_002_page_headers_clamp_browser_lifetime_and_forbid_credentials_and_nonces() {
+    let disk = memory();
+    let config = PublishConfig {
+        browser_max_age: Duration::from_secs(900),
+        revalidate: Duration::from_secs(10),
+        ..Default::default()
+    };
+    let p = Publisher::from_operator(disk, "v1", config).unwrap();
+    p.publish(vec![page("one")]).await.unwrap();
+    let manifest = p.manifest().await.unwrap();
+    assert!(
+        manifest.versions[&manifest.live]
+            .objects
+            .iter()
+            .all(|object| object.headers["cache-control"].contains("max-age=10,"))
+    );
+    for (header, value) in [
+        ("Set-Cookie", "token=private"),
+        ("Content-Security-Policy", "script-src 'nonce-secret'"),
+    ] {
+        let mut page = page("private");
+        page.headers.insert(header.into(), value.into());
+        assert!(p.publish(vec![page]).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn pub_003_dependency_changes_update_manifest_without_reuploading_content() {
+    let (p, _) = publisher("v1");
+    let first = p.publish(vec![page("one")]).await.unwrap();
+    let mut changed = page("one");
+    changed.dependency_tags.push("new-dependency".into());
+    let next = p.publish(vec![changed]).await.unwrap();
+    assert_eq!(next.uploaded, 0);
+    assert_eq!(next.skipped, 2);
+    assert_ne!(next.version, first.version);
+    let manifest = p.manifest().await.unwrap();
+    assert!(
+        manifest.versions[&manifest.live]
+            .objects
+            .iter()
+            .all(|object| object.dependency_tags == ["new-dependency"])
+    );
+}
+
+#[derive(Default)]
+struct FailingCdn {
+    events: Mutex<Vec<String>>,
+    fail_switch: AtomicBool,
+    stall_switch: AtomicBool,
+}
+#[async_trait]
+impl CdnDriver for FailingCdn {
+    fn capabilities(&self) -> CdnCapabilities {
+        CdnCapabilities {
+            urls: true,
+            ..Default::default()
+        }
+    }
+    async fn switch_version(&self, version: &str) -> Result<(), FrameworkError> {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("switch:{version}"));
+        if self.stall_switch.swap(false, Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        if self.fail_switch.swap(false, Ordering::SeqCst) {
+            Err(FrameworkError::internal(
+                "switch failed after provider accepted it",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+    async fn rollback_version(&self, previous: Option<&str>) -> Result<(), FrameworkError> {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("rollback:{}", previous.unwrap_or("initial")));
+        Ok(())
+    }
+    async fn purge(&self, _: Purge) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn pub_003_switch_failure_restores_previous_cdn_revision_and_keeps_manifest() {
+    let (p, disk) = publisher("v1");
+    let driver = Arc::new(FailingCdn::default());
+    let p = p.with_cdn(driver.clone());
+    let first = p.publish(vec![page("one")]).await.unwrap();
+    let before = manifest_bytes(&disk).await;
+    driver.fail_switch.store(true, Ordering::SeqCst);
+    assert!(p.publish(vec![page("two")]).await.is_err());
+    assert_eq!(manifest_bytes(&disk).await, before);
+    assert_eq!(
+        driver.events.lock().unwrap().last().unwrap(),
+        &format!("rollback:{}", first.version)
+    );
+}
+
+#[tokio::test]
+async fn pub_003_manifest_or_alias_failure_restores_both_previous_representations() {
+    for refusal in ["_pub/manifest.json", "about/index.json"] {
+        let disk = memory();
+        let state = Arc::new(Probe::default());
+        let p = Publisher::from_operator(
+            disk.clone().layer(ProbeLayer(state.clone())),
+            "v1",
+            PublishConfig::default(),
+        )
+        .unwrap();
+        p.publish(vec![page("one")]).await.unwrap();
+        let before = manifest_bytes(&disk).await;
+        let html = disk.read("about/index.html").await.unwrap().to_bytes();
+        let json = disk.read("about/index.json").await.unwrap().to_bytes();
+        *state.refuse.lock().unwrap() = Some(refusal.into());
+        assert!(p.publish(vec![page("two")]).await.is_err());
+        assert_eq!(manifest_bytes(&disk).await, before);
+        assert_eq!(
+            disk.read("about/index.html").await.unwrap().to_bytes(),
+            html
+        );
+        assert_eq!(
+            disk.read("about/index.json").await.unwrap().to_bytes(),
+            json
+        );
+    }
+}
+
+#[tokio::test]
+async fn pub_003_manifest_failure_rolls_back_cdn_including_initial_configuration() {
+    for initial in [false, true] {
+        let disk = memory();
+        let state = Arc::new(Probe::default());
+        let driver = Arc::new(FailingCdn::default());
+        let p = Publisher::from_operator(
+            disk.clone().layer(ProbeLayer(state.clone())),
+            "v1",
+            PublishConfig::default(),
+        )
+        .unwrap()
+        .with_cdn(driver.clone());
+        let before = if initial {
+            None
+        } else {
+            p.publish(vec![page("one")]).await.unwrap();
+            Some(manifest_bytes(&disk).await)
+        };
+        *state.refuse.lock().unwrap() = Some("_pub/manifest.json".into());
+        assert!(p.publish(vec![page("two")]).await.is_err());
+        assert!(
+            driver
+                .events
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .starts_with("rollback:")
+        );
+        if let Some(before) = before {
+            assert_eq!(manifest_bytes(&disk).await, before);
+        } else {
+            assert!(!disk.exists("_pub/manifest.json").await.unwrap());
+            assert_eq!(
+                driver.events.lock().unwrap().last().unwrap(),
+                "rollback:initial"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn pub_003_upload_failure_and_timeout_never_change_the_live_manifest() {
+    let disk = memory();
+    let state = Arc::new(Probe::default());
+    let config = PublishConfig {
+        timeout: Duration::from_millis(30),
+        ..Default::default()
+    };
+    let p = Publisher::from_operator(disk.clone().layer(ProbeLayer(state.clone())), "v1", config)
+        .unwrap();
+    p.publish(vec![page("one")]).await.unwrap();
+    let before = manifest_bytes(&disk).await;
+    *state.refuse.lock().unwrap() = Some(".json".into());
+    assert!(p.publish(vec![page("two")]).await.is_err());
+    assert_eq!(manifest_bytes(&disk).await, before);
+    state.stall.store(true, Ordering::SeqCst);
+    assert!(
+        p.publish(vec![page("three")])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("timed out")
+    );
+    assert_eq!(manifest_bytes(&disk).await, before);
+    assert_eq!(state.active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn pub_003_uploads_run_in_parallel_within_the_configured_bound() {
+    let disk = memory();
+    let state = Arc::new(Probe::default());
+    state.delay.store(true, Ordering::SeqCst);
+    let config = PublishConfig {
+        concurrency: 2,
+        ..Default::default()
+    };
+    let p = Publisher::from_operator(disk.layer(ProbeLayer(state.clone())), "v1", config).unwrap();
+    let pages = (0..4)
+        .map(|index| page_at(&format!("/page-{index}"), "one"))
+        .collect();
+    p.publish(pages).await.unwrap();
+    assert_eq!(state.maximum.load(Ordering::SeqCst), 2);
+}
+
+#[derive(Debug, Default)]
+struct Probe {
+    writes: Mutex<Vec<String>>,
+    refuse: Mutex<Option<String>>,
+    stall: AtomicBool,
+    delay: AtomicBool,
+    active: AtomicUsize,
+    maximum: AtomicUsize,
+}
+#[derive(Clone, Debug)]
+struct ProbeLayer(Arc<Probe>);
+impl Layer for ProbeLayer {
+    fn apply_service(&self, inner: Servicer) -> Servicer {
+        Arc::new(ProbeService {
+            inner,
+            state: self.0.clone(),
+        })
+    }
+}
+#[derive(Debug)]
+struct ProbeService {
+    inner: Servicer,
+    state: Arc<Probe>,
+}
+impl Service for ProbeService {
+    type Reader = oio::Reader;
+    type Writer = ProbeWriter;
+    type Lister = oio::Lister;
+    type Deleter = oio::Deleter;
+    type Copier = oio::Copier;
+    fn info(&self) -> ServiceInfo {
+        self.inner.info()
+    }
+    fn capability(&self) -> Capability {
+        self.inner.capability()
+    }
+    async fn create_dir(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: opendal::raw::OpCreateDir,
+    ) -> opendal::Result<opendal::raw::RpCreateDir> {
+        self.inner.create_dir(ctx, path, args).await
+    }
+    async fn rename(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: opendal::raw::OpRename,
+    ) -> opendal::Result<opendal::raw::RpRename> {
+        self.inner.rename(ctx, from, to, args).await
+    }
+    async fn presign(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: opendal::raw::OpPresign,
+    ) -> opendal::Result<opendal::raw::RpPresign> {
+        self.inner.presign(ctx, path, args).await
+    }
+    fn read(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpRead,
+    ) -> opendal::Result<Self::Reader> {
+        self.inner.read(ctx, path, args)
+    }
+    async fn stat(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpStat,
+    ) -> opendal::Result<RpStat> {
+        self.inner.stat(ctx, path, args).await
+    }
+    fn list(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpList,
+    ) -> opendal::Result<Self::Lister> {
+        self.inner.list(ctx, path, args)
+    }
+    fn delete(&self, ctx: &OperationContext) -> opendal::Result<Self::Deleter> {
+        self.inner.delete(ctx)
+    }
+    fn copy(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpCopy,
+        opts: OpCopier,
+    ) -> opendal::Result<Self::Copier> {
+        self.inner.copy(ctx, from, to, args, opts)
+    }
+    fn write(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpWrite,
+    ) -> opendal::Result<Self::Writer> {
+        self.state.writes.lock().unwrap().push(path.to_owned());
+        let mut refuse = self.state.refuse.lock().unwrap();
+        if refuse.as_ref().is_some_and(|suffix| path.ends_with(suffix)) {
+            refuse.take();
+            return Err(opendal::Error::new(
+                opendal::ErrorKind::PermissionDenied,
+                "injected storage refusal",
+            ));
+        }
+        drop(refuse);
+        let counted =
+            path.starts_with("_pub/") && path != "_pub/manifest.json" && path != "_pub/status.json";
+        let inner = self.inner.write(ctx, path, args)?;
+        if counted {
+            let active = self.state.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.state.maximum.fetch_max(active, Ordering::SeqCst);
+        }
+        Ok(ProbeWriter {
+            inner,
+            state: self.state.clone(),
+            counted,
+        })
+    }
+}
+struct ProbeWriter {
+    inner: oio::Writer,
+    state: Arc<Probe>,
+    counted: bool,
+}
+impl Drop for ProbeWriter {
+    fn drop(&mut self) {
+        if self.counted {
+            self.state.active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+impl oio::Write for ProbeWriter {
+    async fn write(&mut self, bytes: Buffer) -> opendal::Result<()> {
+        if self.counted && self.state.stall.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        if self.counted && self.state.delay.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        self.inner.write(bytes).await
+    }
+    async fn close(&mut self) -> opendal::Result<Metadata> {
+        self.inner.close().await
+    }
+    async fn abort(&mut self) -> opendal::Result<()> {
+        self.inner.abort().await
+    }
+}
+
+#[tokio::test]
+async fn pub_003_status_survives_a_new_console_process_after_failed_publication() {
+    let (p, disk) = publisher("v1");
+    p.publish(vec![page("one")]).await.unwrap();
+    let live = p.manifest().await.unwrap().live;
+    assert!(
+        p.publish_with(|| async {
+            Err::<Vec<PageObject>, _>(FrameworkError::internal("render refused"))
+        })
+        .await
+        .is_err()
+    );
+    let next_process = Publisher::from_operator(disk, "v1", PublishConfig::default()).unwrap();
+    let status = next_process.status().await;
+    assert!(status.last_outcome.contains("render refused"));
+    assert_eq!(status.live_version, live);
+    assert_eq!(status.pending, 0);
+}
+
+#[tokio::test]
+async fn pub_002_explicit_no_store_page_is_never_published() {
+    let (p, disk) = publisher("v1");
+    let mut page = page("private");
+    page.headers
+        .insert("CACHE-CONTROL".into(), "private, no-store".into());
+    assert!(
+        p.publish(vec![page])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("no-store")
+    );
+    assert!(!disk.exists("_pub/manifest.json").await.unwrap());
+}
+
+#[tokio::test]
+async fn pub_002_full_inventory_drops_obsolete_pages_and_assets_after_grace() {
+    let disk = memory();
+    let p = Publisher::from_operator(disk.clone(), "v1", PublishConfig::default()).unwrap();
+    let mut obsolete = page_at("/obsolete", "old");
+    obsolete.assets.insert(
+        "build/obsolete-abcd1234.js".into(),
+        (
+            Bytes::from_static(b"old script"),
+            "application/javascript".into(),
+        ),
+    );
+    p.publish(vec![page("keep"), obsolete]).await.unwrap();
+    let initial = p.manifest().await.unwrap();
+    let old_page = initial.versions[&initial.live]
+        .objects
+        .iter()
+        .find(|object| object.url == "/obsolete")
+        .unwrap()
+        .path
+        .clone();
+    p.publish_partial(vec![page("keep")]).await.unwrap();
+    assert_eq!(p.manifest().await.unwrap().live, initial.live);
+    p.publish(vec![page("keep")]).await.unwrap();
+    let mut manifest = p.manifest().await.unwrap();
+    assert_eq!(manifest.versions[&manifest.live].objects.len(), 2);
+    assert!(disk.exists(&old_page).await.unwrap());
+    assert!(disk.exists("build/obsolete-abcd1234.js").await.unwrap());
+    for (id, version) in &mut manifest.versions {
+        if id != &manifest.live {
+            version.retired_at_ms = Some(0);
+        }
+    }
+    disk.write("_pub/manifest.json", serde_json::to_vec(&manifest).unwrap())
+        .await
+        .unwrap();
+    let report = p.prune().await.unwrap();
+    assert!(report.removed.contains(&old_page));
+    assert!(
+        report
+            .removed
+            .contains(&"build/obsolete-abcd1234.js".into())
+    );
+    assert!(!disk.exists(&old_page).await.unwrap());
+    assert!(!disk.exists("build/obsolete-abcd1234.js").await.unwrap());
+}
+
+#[tokio::test]
+async fn pub_003_cdn_switch_timeout_rolls_back_without_changing_manifest() {
+    let disk = memory();
+    let config = PublishConfig {
+        timeout: Duration::from_millis(30),
+        ..Default::default()
+    };
+    let driver = Arc::new(FailingCdn::default());
+    let p = Publisher::from_operator(disk.clone(), "v1", config)
+        .unwrap()
+        .with_cdn(driver.clone());
+    let first = p.publish(vec![page("one")]).await.unwrap();
+    let before = manifest_bytes(&disk).await;
+    driver.stall_switch.store(true, Ordering::SeqCst);
+    assert!(
+        p.publish(vec![page("two")])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("switch timed out")
+    );
+    assert_eq!(manifest_bytes(&disk).await, before);
+    assert_eq!(
+        driver.events.lock().unwrap().last().unwrap(),
+        &format!("rollback:{}", first.version)
+    );
+}
+
+#[tokio::test]
+async fn pub_002_representation_headers_match_final_bytes() {
+    let (p, _) = publisher("v1");
+    let mut rendered = page("one");
+    rendered
+        .headers
+        .insert("ETag".into(), "stale-render-etag".into());
+    rendered.headers.insert("Content-Length".into(), "1".into());
+    p.publish(vec![rendered]).await.unwrap();
+    let manifest = p.manifest().await.unwrap();
+    for object in &manifest.versions[&manifest.live].objects {
+        assert_eq!(object.headers["etag"], format!("\"{}\"", object.digest));
+        assert!(!object.headers.contains_key("content-length"));
+    }
+}
+
+#[tokio::test]
+async fn pub_002_only_fingerprinted_assets_are_immutable() {
+    let (p, _) = publisher("v1");
+    let mut rendered = page("one");
+    for name in [
+        "favicon.svg",
+        "manifest.webmanifest",
+        "ordinaryfilename.js",
+        "app-ABC12345.js",
+        "app.ABC12345.js",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.webp",
+    ] {
+        rendered.assets.insert(
+            name.into(),
+            (
+                Bytes::from_static(b"asset"),
+                "application/octet-stream".into(),
+            ),
+        );
+    }
+    p.publish(vec![rendered]).await.unwrap();
+    let manifest = p.manifest().await.unwrap();
+    for object in &manifest.versions[&manifest.live].objects {
+        let immutable = object.headers["cache-control"].contains("immutable");
+        if object.url.contains("ABC12345") || object.url.ends_with(".webp") {
+            assert!(immutable);
+        } else {
+            assert!(!immutable, "{}", object.url);
+        }
+    }
+}
+
+fn with_icon(text: &str) -> PageObject {
+    let mut rendered = page("page");
+    rendered.assets.insert(
+        "favicon.svg".into(),
+        (Bytes::from(text.to_owned()), "image/svg+xml".into()),
+    );
+    rendered
+}
+
+#[tokio::test]
+async fn pub_003_mutable_assets_stage_privately_and_restore_their_alias_on_failure() {
+    for cdn in [false, true] {
+        let disk = memory();
+        let state = Arc::new(Probe::default());
+        let mut p = Publisher::from_operator(
+            disk.clone().layer(ProbeLayer(state.clone())),
+            "v1",
+            PublishConfig::default(),
+        )
+        .unwrap();
+        if cdn {
+            p = p.with_cdn(Arc::new(MemoryCdnDriver::default()));
+        }
+        p.publish(vec![with_icon("old icon")]).await.unwrap();
+        assert_eq!(
+            disk.read("favicon.svg").await.unwrap().to_bytes(),
+            Bytes::from_static(b"old icon")
+        );
+        let before = manifest_bytes(&disk).await;
+        for refusal in [".json", "_pub/manifest.json"] {
+            *state.refuse.lock().unwrap() = Some(refusal.into());
+            let mut changed = with_icon("new icon");
+            changed.html = Bytes::from_static(b"changed page");
+            changed.json = Bytes::from_static(b"changed JSON");
+            assert!(p.publish(vec![changed]).await.is_err());
+            assert_eq!(manifest_bytes(&disk).await, before);
+            assert_eq!(
+                disk.read("favicon.svg").await.unwrap().to_bytes(),
+                Bytes::from_static(b"old icon")
+            );
+        }
+        p.publish(vec![with_icon("new icon")]).await.unwrap();
+        assert_eq!(
+            disk.read("favicon.svg").await.unwrap().to_bytes(),
+            Bytes::from_static(b"new icon")
+        );
+        let manifest = p.manifest().await.unwrap();
+        let asset = manifest.versions[&manifest.live]
+            .objects
+            .iter()
+            .find(|object| object.asset)
+            .unwrap();
+        assert!(asset.path.contains("/_assets/favicon.svg"));
+        assert!(!asset.headers["cache-control"].contains("immutable"));
+        p.publish(vec![page("page")]).await.unwrap();
+        assert!(disk.exists("favicon.svg").await.unwrap());
+        let mut manifest = p.manifest().await.unwrap();
+        for (id, version) in &mut manifest.versions {
+            if id != &manifest.live {
+                version.retired_at_ms = Some(0);
+            }
+        }
+        disk.write("_pub/manifest.json", serde_json::to_vec(&manifest).unwrap())
+            .await
+            .unwrap();
+        let report = p.prune().await.unwrap();
+        assert!(report.removed.contains(&"favicon.svg".into()));
+        assert!(!disk.exists("favicon.svg").await.unwrap());
+    }
+}
