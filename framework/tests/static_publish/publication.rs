@@ -758,7 +758,7 @@ async fn pub_002_only_fingerprinted_assets_are_immutable() {
     let manifest = p.manifest().await.unwrap();
     for object in &manifest.versions[&manifest.live].objects {
         let immutable = object.headers["cache-control"].contains("immutable");
-        if object.url.contains("ABC12345") || object.url.ends_with(".webp") {
+        if object.url.contains("-ABC12345") {
             assert!(immutable);
         } else {
             assert!(!immutable, "{}", object.url);
@@ -973,4 +973,67 @@ async fn pub_002_fix_h_refuses_vary_dimensions_missing_from_the_key() {
         assert!(result.is_err(), "unsupported Vary {vary} must refuse");
         assert!(result.unwrap_err().to_string().contains("Vary"));
     }
+}
+
+#[tokio::test]
+async fn pub_002_fix_l_fingerprints_follow_the_shared_vite_pattern() {
+    let (publisher, _) = publisher("v1");
+    let mut page = page("public");
+    for name in [
+        "brand-background.svg",
+        "site-manifest.json",
+        "app-settings.js",
+        "main-AbC123_x.js",
+        "main-lowercas.js",
+        "main.ABC12345.js",
+    ] {
+        page.assets.insert(
+            name.into(),
+            (
+                Bytes::from_static(b"asset"),
+                "application/octet-stream".into(),
+            ),
+        );
+    }
+    publisher.publish(vec![page]).await.unwrap();
+    let manifest = publisher.manifest().await.unwrap();
+    for object in manifest.versions[&manifest.live]
+        .objects
+        .iter()
+        .filter(|o| o.asset)
+    {
+        assert_eq!(
+            object.headers["cache-control"].contains("immutable"),
+            object.url.ends_with("main-AbC123_x.js"),
+            "{}",
+            object.url
+        );
+    }
+}
+
+#[tokio::test]
+async fn pub_002_fix_l_fingerprint_override_matches_static_files() {
+    let (invalid, _) = publisher("v1");
+    assert!(invalid.fingerprint("[").is_err());
+    let (publisher, _) = publisher("v1");
+    let publisher = publisher.fingerprint(r"\.release$").unwrap();
+    let mut page = page("public");
+    page.assets.insert(
+        "main.release.js".into(),
+        (
+            Bytes::from_static(b"asset"),
+            "application/javascript".into(),
+        ),
+    );
+    publisher.publish(vec![page]).await.unwrap();
+    let manifest = publisher.manifest().await.unwrap();
+    assert!(
+        manifest.versions[&manifest.live]
+            .objects
+            .iter()
+            .find(|o| o.asset)
+            .unwrap()
+            .headers["cache-control"]
+            .contains("immutable")
+    );
 }

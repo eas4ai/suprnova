@@ -338,6 +338,15 @@ impl StaticPublication {
     }
     async fn prepare(&self, page: &mut PageObject) -> Result<(), FrameworkError> {
         let source = crate::lock::read(&self.source, "publication asset source")?.clone();
+        #[cfg(not(feature = "media"))]
+        for path in super::assets::referenced_assets(&page.html, &page.path)? {
+            if super::assets::is_raster(&path) {
+                return Err(error(format!(
+                    "route {}: raster {path} requires the media feature",
+                    page.path
+                )));
+            }
+        }
         if let Some(source) = &source {
             #[cfg(feature = "media")]
             {
@@ -364,6 +373,16 @@ impl StaticPublication {
             for path in referenced {
                 if !page.assets.contains_key(&path) {
                     let bytes = source.read(&path).await.map_err(error)?.to_bytes();
+                    #[cfg(not(feature = "media"))]
+                    if !super::assets::is_vector_or_icon(&path)
+                        && infer::get(&bytes)
+                            .is_some_and(|kind| kind.mime_type().starts_with("image/"))
+                    {
+                        return Err(error(format!(
+                            "route {}: raster {path} requires the media feature",
+                            page.path
+                        )));
+                    }
                     let mime = crate::http::file_response::content_type_from_extension(
                         std::path::Path::new(&path),
                     );

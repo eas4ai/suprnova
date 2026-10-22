@@ -406,3 +406,28 @@ async fn pub_007_avif_magick_publishes_enabled_alternative_and_strips_metadata()
             .any(|part| part == b"private location")
     );
 }
+
+#[tokio::test]
+async fn pub_007_fix_k_video_posters_and_image_preloads_are_prepared() {
+    let source = source().await;
+    let prepared=prepare(br#"<video poster="/images/photo.png"></video><link rel="preload" as="image" href="/images/photo.png">"#,&source,&ImageOptions::default()).await.unwrap();
+    let html = String::from_utf8(prepared.html.to_vec()).unwrap();
+    assert!(
+        !html.contains("/images/photo.png"),
+        "every raster reference is rewritten: {html}"
+    );
+    assert!(html.contains(".webp"));
+    assert_eq!(
+        prepared.assets.len(),
+        2,
+        "WebP and stripped fallback are both retained"
+    );
+    for asset in &prepared.assets {
+        assert!(
+            !asset
+                .bytes
+                .windows(b"private location".len())
+                .any(|v| v == b"private location")
+        );
+    }
+}

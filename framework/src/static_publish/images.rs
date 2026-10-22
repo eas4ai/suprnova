@@ -78,7 +78,10 @@ struct Preparation<'a> {
 impl Preparation<'_> {
     fn object(&mut self, bytes: Vec<u8>, extension: &str, content_type: &str) -> String {
         let digest = hex::encode(Sha256::digest(&bytes));
-        let path = format!("static/images/{digest}.{extension}");
+        let path = format!(
+            "static/images/{digest}-{}.{extension}",
+            digest[..8].to_ascii_uppercase()
+        );
         self.objects.entry(path.clone()).or_insert(ImageObject {
             path: path.clone(),
             bytes: bytes.into(),
@@ -390,8 +393,44 @@ pub async fn prepare(
         }
     }
     output.push_str(&html[cursor..]);
+    // Every collector reference is checked, including posters, preloads and object data.
+    let mut remaining = BTreeMap::new();
+    for path in super::assets::referenced_assets(output.as_bytes(), &options.document_path)? {
+        if preparation.objects.contains_key(&path) || is_vector_or_icon(&path) {
+            continue;
+        }
+        let raster = if is_raster(&path) {
+            true
+        } else {
+            let bytes = preparation.read(&path).await?;
+            infer::get(&bytes).is_some_and(|kind| {
+                kind.mime_type().starts_with("image/")
+                    && kind.mime_type() != "image/svg+xml"
+                    && kind.mime_type() != "image/x-icon"
+            })
+        };
+        if raster {
+            let keep =
+                options.keep_png.contains(&path) || options.keep_png.contains(&format!("/{path}"));
+            let variants = preparation.image(&path, keep).await?;
+            remaining.insert(
+                path,
+                if keep {
+                    variants.original
+                } else {
+                    variants.webp.unwrap_or(variants.original)
+                },
+            );
+        }
+    }
+    let (html, _) = super::assets::version_assets(
+        &bytes::Bytes::from(output),
+        &bytes::Bytes::from_static(b"{}"),
+        &options.document_path,
+        &remaining,
+    )?;
     Ok(PreparedImages {
-        html: output.into(),
+        html,
         assets: preparation.objects.into_values().collect(),
         replacements: preparation.replacements,
     })

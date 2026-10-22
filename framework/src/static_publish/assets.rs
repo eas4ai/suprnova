@@ -131,13 +131,13 @@ pub(crate) fn referenced_assets(
         let fields: &[&str] = match tag.name.as_str() {
             "img" | "source" => &["src", "srcset"],
             "script" | "video" | "audio" | "track" | "embed" => &["src", "poster"],
-            "link" => &["href"],
+            "link" => &["href", "imagesrcset"],
             "object" => &["data"],
             _ => &[],
         };
         for field in fields {
             if let Some(value) = attribute(&tag, field) {
-                let urls = if *field == "srcset" {
+                let urls = if field.ends_with("srcset") {
                     parse_srcset(value)
                 } else {
                     vec![(value.into(), String::new())]
@@ -189,7 +189,6 @@ pub(super) fn local_path(
     Ok((!path.is_empty()).then(|| path.to_string()))
 }
 
-#[cfg(feature = "media")]
 pub(super) fn is_raster(path: &str) -> bool {
     path.rsplit('.').next().is_some_and(|extension| {
         matches!(
@@ -209,7 +208,6 @@ pub(super) fn is_raster(path: &str) -> bool {
     })
 }
 
-#[cfg(feature = "media")]
 pub(super) fn is_vector_or_icon(path: &str) -> bool {
     path.rsplit('.')
         .next()
@@ -521,14 +519,14 @@ pub(crate) fn version_assets(
         let fields: &[&str] = match tag.name.as_str() {
             "img" | "source" => &["src", "srcset"],
             "script" | "video" | "audio" | "track" | "embed" => &["src", "poster"],
-            "link" => &["href"],
+            "link" => &["href", "imagesrcset"],
             "object" => &["data"],
             _ => &[],
         };
         let mut changed = false;
         for field in fields {
             if let Some(value) = attribute(&tag, field) {
-                let target = if *field == "srcset" {
+                let target = if field.ends_with("srcset") {
                     let mut candidates = Vec::new();
                     for (url, descriptor) in parse_srcset(value) {
                         candidates.push(

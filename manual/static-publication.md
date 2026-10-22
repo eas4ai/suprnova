@@ -226,6 +226,17 @@ metadata; place a header bridge in front of it before serving public documents.
 The Suprnova origin fallback already serves the headers directly. Header restrictions
 follow the [AWS edge function contract](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/edge-function-restrictions-all.html).
 
+Fingerprint classification uses the same default file-stem pattern as StaticFiles:
+a hyphen followed by eight base64url characters with a digit, uppercase letter,
+underscore or hyphen. Names such as `brand-background.svg` remain mutable.
+Select another build convention explicitly:
+
+```rust
+use suprnova::static_publish::{Publisher, PublishConfig};
+let publisher = Publisher::new("pages", "build-42", PublishConfig::default())?
+    .fingerprint(r"\.release$")?;
+```
+
 ## CSP and private requests
 
 Nonce documents cannot be published. Select the public hash mode described in
@@ -294,7 +305,10 @@ failure. Only dependency digests travel through the hub, never rendered props.
 
 ## Prepare images
 
-Publication resolves local image URLs against the document path. It emits
+Publication resolves local image URLs against the document path. Posters, image
+preloads and other collected raster references use the same preparation path.
+Without the media feature, raster references refuse publication with a route
+diagnostic. It emits
 fingerprinted WebP objects at quality 85 and keeps a metadata-stripped original
 fallback. Picture sources preserve responsive descriptors, media and sizes.
 Quality must stay between 85 and 100. AVIF requires explicit enablement and

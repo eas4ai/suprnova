@@ -28,3 +28,6 @@ mod own_process;
 mod own_process_async;
 
 mod client;
+
+#[cfg(not(feature = "media"))]
+mod raster_guard;

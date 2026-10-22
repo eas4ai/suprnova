@@ -124,6 +124,7 @@ pub struct Publisher {
     pub(crate) asset_version: String,
     pub(crate) config: PublishConfig,
     driver: Option<Arc<dyn CdnDriver>>,
+    fingerprint: regex::Regex,
     serial: Mutex<()>,
     status: Mutex<PublishStatus>,
 }
@@ -168,6 +169,9 @@ impl Publisher {
             asset_version: asset_version.into(),
             config,
             driver: None,
+            fingerprint: crate::page_budget::fingerprint_regex(
+                crate::page_budget::DEFAULT_FINGERPRINT_PATTERN,
+            )?,
             serial: Mutex::new(()),
             status: Mutex::new(PublishStatus::default()),
         })
@@ -176,6 +180,17 @@ impl Publisher {
     pub fn with_cdn(mut self, driver: Arc<dyn CdnDriver>) -> Self {
         self.driver = Some(driver);
         self
+    }
+    /// Uses the same file-stem convention as StaticFiles while validating overrides before publication.
+    pub fn fingerprint(mut self, pattern: impl AsRef<str>) -> Result<Self, FrameworkError> {
+        self.fingerprint = crate::page_budget::fingerprint_regex(pattern.as_ref())?;
+        Ok(self)
+    }
+    fn fingerprinted(&self, path: &str) -> bool {
+        std::path::Path::new(path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| self.fingerprint.is_match(stem))
     }
     /// Reads the durable truth rather than a process-local manifest copy.
     pub async fn manifest(&self) -> Result<Manifest, FrameworkError> {
@@ -460,7 +475,7 @@ impl Publisher {
         for mut page in pages {
             let mut asset_paths = BTreeMap::new();
             for (key, (bytes, content_type)) in &page.assets {
-                let fingerprinted = fingerprinted_asset(key);
+                let fingerprinted = self.fingerprinted(key);
                 let old = previous.versions.get(&previous.live).and_then(|version| {
                     version.objects.iter().find(|entry| {
                         entry.asset
@@ -559,7 +574,7 @@ impl Publisher {
                 if key.starts_with("_pub/") {
                     return Err(error("asset uses reserved _pub prefix"));
                 }
-                let fingerprinted = fingerprinted_asset(&key);
+                let fingerprinted = self.fingerprinted(&key);
                 let headers = BTreeMap::from([
                     ("content-type".into(), content_type),
                     (
@@ -932,14 +947,4 @@ fn digest(bytes: &[u8]) -> String {
 }
 fn now_ms() -> u64 {
     u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
-}
-
-fn fingerprinted_asset(path: &str) -> bool {
-    let filename = path.rsplit('/').next().unwrap_or("");
-    let stem = filename.rsplit_once('.').map_or(filename, |(stem, _)| stem);
-    (stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        || stem
-            .split(['-', '.'])
-            .skip(1)
-            .any(|part| part.len() >= 8 && part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
 }
