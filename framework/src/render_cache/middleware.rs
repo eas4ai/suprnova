@@ -1236,7 +1236,7 @@ fn variance_depends_on_ambient_context(policy: &RenderCachePolicy) -> bool {
 
 /// A purpose-separated digest of a registered route pattern. See
 /// [`ROUTE_IDENTITY_DOMAIN`].
-fn route_identity(pattern: &str) -> RouteIdentity {
+pub(super) fn route_identity(pattern: &str) -> RouteIdentity {
     let mut hasher = Sha256::new();
     hasher.update(ROUTE_IDENTITY_DOMAIN);
     hasher.update(pattern.as_bytes());
@@ -2881,8 +2881,17 @@ async fn lead_render(
     // class, and a stitched route whose render mounted no Live document at
     // all and so recorded nothing to check - publishes the response's own
     // bytes as a Complete representation, exactly as before.
-    let published = match (is_stitched(policy), report.live_document.as_ref()) {
-        (true, Some(facts)) => {
+    let published = match (
+        is_stitched(policy),
+        report.live_document.as_ref(),
+        report.inertia_document.as_ref(),
+    ) {
+        (true, Some(_), Some(_)) => Err(stitch::CompositeBuildError::CaptureInvalid),
+        (true, None, Some(facts)) => {
+            super::inertia_page::build_entry(runtime, header, response.body(), facts)
+                .map_err(|_| stitch::CompositeBuildError::CaptureInvalid)
+        }
+        (true, Some(facts), _) => {
             stitch::build_composite_entry(runtime, header, response.body(), facts).await
         }
         // CACHE-004: a Complete entry replays its stored CSP and body to
@@ -2959,7 +2968,11 @@ async fn lead_render(
     // request that produced it. See fix round 2, item 2.
     finish_fresh_render(
         response,
-        if_none_match.as_deref(),
+        if report.inertia_document.is_some() {
+            None
+        } else {
+            if_none_match.as_deref()
+        },
         policy,
         entry.header(),
         &validator,

@@ -56,6 +56,7 @@ struct Known {
     /// route named it.
     alias: Option<String>,
     security_headers: Option<crate::SecurityHeaders>,
+    inertia_hooks: bool,
     /// The tools a `with_tools` layer offers, which the router checks at
     /// boot (AGENT-014).
     #[cfg(feature = "agents")]
@@ -92,6 +93,12 @@ pub(crate) fn boxed_as<M: Middleware + 'static>(middleware: M) -> BoxedMiddlewar
     let page_tools = (&middleware as &dyn std::any::Any)
         .downcast_ref::<crate::agents::page_tools::PageToolsLayer>()
         .map(crate::agents::page_tools::PageToolsLayer::names);
+    let inertia_hooks = (&middleware as &dyn std::any::Any)
+        .downcast_ref::<crate::InertiaMiddleware>()
+        .is_some_and(crate::InertiaMiddleware::has_hooks)
+        || (&middleware as &dyn std::any::Any)
+            .downcast_ref::<crate::InertiaHeadersMiddleware>()
+            .is_some_and(crate::InertiaHeadersMiddleware::has_hooks);
     let boxed = into_boxed(middleware);
     // A poisoned table is recovered, as the registries beside it are: a
     // panic elsewhere must not stop middleware from being registered.
@@ -104,6 +111,7 @@ pub(crate) fn boxed_as<M: Middleware + 'static>(middleware: M) -> BoxedMiddlewar
             type_id: Some(TypeId::of::<M>()),
             alias: None,
             security_headers,
+            inertia_hooks,
             #[cfg(feature = "agents")]
             page_tools,
         },
@@ -131,6 +139,7 @@ pub(crate) fn name_as(boxed: &BoxedMiddleware, identity: String) {
                     type_id: None,
                     alias: Some(identity),
                     security_headers: None,
+                    inertia_hooks: false,
                     #[cfg(feature = "agents")]
                     page_tools: None,
                 },
@@ -152,6 +161,7 @@ pub(crate) fn inherit_identity(source: &BoxedMiddleware, wrapper: &BoxedMiddlewa
             type_id: known.type_id,
             alias: known.alias.clone(),
             security_headers: known.security_headers.clone(),
+            inertia_hooks: known.inertia_hooks,
             #[cfg(feature = "agents")]
             page_tools: known.page_tools.clone(),
         })
@@ -179,6 +189,15 @@ pub(crate) fn security_headers_of(boxed: &BoxedMiddleware) -> Option<crate::Secu
     is_entry_of(known, boxed)
         .then(|| known.security_headers.clone())
         .flatten()
+}
+
+/// Boot validation checks the configuration held by a route's own middleware.
+pub(crate) fn inertia_hooks_of(boxed: &BoxedMiddleware) -> bool {
+    let table = table().read().unwrap_or_else(|p| p.into_inner());
+    table
+        .known
+        .get(&key(boxed))
+        .is_some_and(|known| is_entry_of(known, boxed) && known.inertia_hooks)
 }
 
 /// The tools `boxed` offers, when it is a `with_tools` layer.

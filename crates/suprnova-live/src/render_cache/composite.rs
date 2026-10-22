@@ -666,11 +666,51 @@ impl CheckedIsland {
     }
 }
 
+/// Structured JSON serialized by the engine for one authorized request slot.
+///
+/// JSON never enters the HTML trust contract. Its serializer owns escaping,
+/// and the assembler checks its slot identity and size like an island's.
+pub struct CheckedJson {
+    bytes: Bytes,
+    slot: IslandSlot,
+    document_key: DocumentMountKey,
+}
+
+impl fmt::Debug for CheckedJson {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CheckedJson")
+            .field("bytes", &self.bytes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CheckedJson {
+    /// Serializes a value and binds it to the slot the host authorized.
+    pub fn new(
+        value: &serde_json::Value,
+        slot: IslandSlot,
+        document_key: DocumentMountKey,
+    ) -> Result<Self, RenderCacheError> {
+        let json = serde_json::to_string(value).map_err(|_| invalid())?;
+        let json = json
+            .replace('&', "\\u0026")
+            .replace('<', "\\u003c")
+            .replace('>', "\\u003e");
+        Ok(Self {
+            bytes: Bytes::from(json),
+            slot,
+            document_key,
+        })
+    }
+}
+
 /// The outcome of one slot for one request.
 #[derive(Debug)]
 pub enum SlotOutcome {
     /// The island rendered under current authority.
     Rendered(CheckedIsland),
+    /// A structured Inertia request payload rendered under current authority.
+    Json(CheckedJson),
     /// The slot's declared fallback fragment is used.
     Fallback,
     /// The slot's declared omit behavior is used.
@@ -719,8 +759,8 @@ fn assembly_failed() -> RenderCacheError {
 }
 
 /// Why the assembler refused one [`Segment::Nested`] segment, distinct from
-/// the generic [`RenderCacheErrorKind::AssemblyFailed`] every other
-/// request-time rejection carries. Fetch failure and reauthorization are
+/// the generic [`RenderCacheErrorKind::AssemblyFailed`] for invalid inputs.
+/// Fetch failure and reauthorization are
 /// framework concerns with no engine-typed cause; this covers only what the
 /// engine determines from typed facts, for the framework's own telemetry
 /// mapping (`suprnova.render_cache.stitch.nested`'s `cause` attribute).
@@ -829,6 +869,7 @@ fn assembled_len(
     for (slot, outcome) in graph.slots.iter().zip(outcomes) {
         let piece_len = match outcome {
             SlotOutcome::Rendered(island) => island.html.as_str().len(),
+            SlotOutcome::Json(json) => json.bytes.len(),
             SlotOutcome::Fallback => match &slot.on_failure {
                 SlotFailurePolicy::Fallback { html } => html.len(),
                 SlotFailurePolicy::FailDocument | SlotFailurePolicy::Omit => {
@@ -879,8 +920,9 @@ fn assembled_len(
 }
 
 /// Turns one graph plus current-request outcomes into final bytes and
-/// headers. Pure and deterministic; every rejection is
-/// [`RenderCacheErrorKind::AssemblyFailed`]. Delegates to the same assembler
+/// headers. Pure and deterministic. Invalid inputs return
+/// [`RenderCacheErrorKind::AssemblyFailed`]; validated inputs above the body
+/// bound return [`RenderCacheErrorKind::AssemblyTooLarge`]. Uses the same assembler
 /// [`assemble_nested`] uses, with no nested outcomes and no ancestors, so a
 /// graph that declares any [`Segment::Nested`] segment always fails here:
 /// use [`assemble_nested`] for one that does.
@@ -907,10 +949,11 @@ pub fn assemble(
 /// own `ancestors` extended with nothing further -- the chain this function
 /// builds from `ancestors` plus `entry`'s own key is already the exact chain
 /// the deeper entry sits above, so it is also the deeper call's `ancestors`
-/// unchanged. Every failure, including a cycle or a depth, version, or
-/// length mismatch this function re-detects as defense in depth, is
-/// [`RenderCacheErrorKind::AssemblyFailed`]; a caller that needs the precise
-/// cause for its own policy decision and telemetry gets it from
+/// unchanged. Invalid inputs, including a cycle or a depth, version, or
+/// length mismatch this function re-detects as defense in depth, return
+/// [`RenderCacheErrorKind::AssemblyFailed`]. Validated inputs above the body
+/// bound return [`RenderCacheErrorKind::AssemblyTooLarge`]. A caller that needs
+/// the precise cause for its own policy decision and telemetry gets it from
 /// [`descend_nested`] and [`verify_nested`] directly, before calling here.
 pub fn assemble_nested(
     entry: &CompositeEntry,
@@ -975,6 +1018,15 @@ fn assemble_impl(
                 // invariant were somehow violated.
                 if !slots_seen.insert(island.slot.as_str())
                     || !keys_seen.insert(island.document_key.as_str())
+                {
+                    return Err(assembly_failed());
+                }
+            }
+            SlotOutcome::Json(json) => {
+                if json.slot.as_str() != slot.slot
+                    || json.document_key.as_str() != slot.document_key
+                    || !slots_seen.insert(json.slot.as_str())
+                    || !keys_seen.insert(json.document_key.as_str())
                 {
                     return Err(assembly_failed());
                 }
@@ -1047,7 +1099,9 @@ fn assemble_impl(
     let shell = entry.shell();
     let total_len = assembled_len(graph, &input.outcomes, nested, shell.len(), nonce)?;
     if total_len > max_body_bytes {
-        return Err(assembly_failed());
+        return Err(RenderCacheError::new(
+            RenderCacheErrorKind::AssemblyTooLarge,
+        ));
     }
     let mut body: Vec<u8> = Vec::with_capacity(total_len);
     let mut cursor = 0usize;
@@ -1072,6 +1126,7 @@ fn assemble_impl(
             }
             Segment::Slot { index } => match &input.outcomes[usize::from(*index)] {
                 SlotOutcome::Rendered(island) => push(&mut body, island.html.as_str().as_bytes())?,
+                SlotOutcome::Json(json) => push(&mut body, &json.bytes)?,
                 SlotOutcome::Fallback => match &graph.slots[usize::from(*index)].on_failure {
                     SlotFailurePolicy::Fallback { html } => push(&mut body, html.as_bytes())?,
                     SlotFailurePolicy::FailDocument | SlotFailurePolicy::Omit => {
@@ -1649,6 +1704,38 @@ mod tests {
     }
 
     #[test]
+    fn composite_json_slot_is_escaped_bound_and_size_checked() {
+        let entry = entry();
+        let input = |name: &str| AssemblyInput {
+            outcomes: vec![
+                SlotOutcome::Json(
+                    CheckedJson::new(
+                        &serde_json::json!({"private": "</script><script>secret&"}),
+                        IslandSlot::parse(name).expect("slot"),
+                        DocumentMountKey::parse("doc-a").expect("key"),
+                    )
+                    .expect("JSON"),
+                ),
+                SlotOutcome::Omitted,
+            ],
+            nonce: Some("abcDEF123-_".to_owned()),
+        };
+        let document = assemble(&entry, input("a"), 1 << 20).expect("assemble JSON");
+        let body = std::str::from_utf8(document.body()).expect("UTF-8");
+        assert!(body.contains(r"\u003c/script\u003e"));
+        assert!(!body.contains("</script><script>secret"));
+        assert_eq!(
+            assemble(&entry, input("wrong"), 1).unwrap_err().kind(),
+            RenderCacheErrorKind::AssemblyFailed
+        );
+        assert_eq!(
+            assemble(&entry, input("a"), 1).unwrap_err().kind(),
+            RenderCacheErrorKind::AssemblyTooLarge
+        );
+        assert!(!format!("{:?}", input("a")).contains("secret"));
+    }
+
+    #[test]
     fn assembly_is_deterministic_and_fills_every_hole() {
         let entry = entry();
         let input = || AssemblyInput {
@@ -1857,7 +1944,7 @@ mod tests {
             assemble(&entry, input, 128)
                 .map(|_| ())
                 .map_err(|e| e.kind()),
-            Err(RenderCacheErrorKind::AssemblyFailed)
+            Err(RenderCacheErrorKind::AssemblyTooLarge)
         );
     }
 
@@ -1881,7 +1968,7 @@ mod tests {
             assemble(&entry, input(), exact_len - 1)
                 .map(|_| ())
                 .map_err(|e| e.kind()),
-            Err(RenderCacheErrorKind::AssemblyFailed),
+            Err(RenderCacheErrorKind::AssemblyTooLarge),
             "one byte over the bound must be rejected"
         );
     }
@@ -2239,7 +2326,7 @@ mod tests {
             )
             .map(|_| ())
             .map_err(|e| e.kind()),
-            Err(RenderCacheErrorKind::AssemblyFailed),
+            Err(RenderCacheErrorKind::AssemblyTooLarge),
             "one byte under the named and actual length must be rejected"
         );
         assert!(

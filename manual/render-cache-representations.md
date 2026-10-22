@@ -29,7 +29,7 @@ A stored entry is one of two kinds.
 - **`Composite`** is a shared **shell** with typed holes cut in it, plus a
   segment graph saying what goes back into each hole. Only
   `RepresentationClass::PublicShellStitched` stores this form, and only a
-  Live document produces one.
+  Live document or a registered cacheable Inertia page produces one.
 
 The class you declare in the policy decides which form is even reachable.
 `/live/public` and `/live/todos` both declare `PublicShared`;
@@ -285,8 +285,8 @@ classification list in [RenderCache](render-cache.md).
 
 ## A shell with holes in it
 
-`RepresentationClass::PublicShellStitched` is for a Live document whose
-frame is the same for everybody and whose islands are not. The stored entry
+`RepresentationClass::PublicShellStitched` supports Live documents and typed
+Inertia pages. The public frame is shared and request slots are not. The stored entry
 holds the shell alone. No identity-bound island's markup and no signed
 snapshot is ever inside the stored bytes; every hit re-mounts every island
 for whoever is asking, under authority derived for that request.
@@ -325,12 +325,45 @@ sent `private, no-cache` like any other private representation;
 refuses `SharedCachePolicy::SMaxAge` at policy build time, so no shared
 proxy is ever offered the bytes.
 
-Two limits to know: the class is meaningful only on a route whose chain ends
-in the Live completion middleware, so use it with `LiveDocument::render` and
-nothing else, and a stitched entry is never served by the stale-on-error
-fallback and never triggers a background rebuild. The
+Live routes complete assembly in the Live completion middleware. Registered
+cacheable Inertia routes complete at the handler boundary, after the route's
+guards. Inertia stores public page JSON with one structured request slot;
+the composite engine checks its identity, surrounding bytes, and body bound.
+It then writes page JSON or renders the root document. SSR runs against the
+assembled props on every HTML visit when enabled. Inertia assemblies stay
+`private, no-store`, including the response that first publishes the shell.
+If current request props exceed the assembly bound, the response uses those
+current values without repeating the handler or its resolvers. Invalid slot
+identities still fail closed. A nonce CSP declines Inertia shell publication.
+A stitched entry is never
+served by the stale-on-error fallback and never triggers a background rebuild. The
 [Generations](render-cache-generations.md) chapter says what that second one
 means in practice.
+
+A typed declaration makes the same boundary explicit for Inertia:
+
+```rust,no_run
+use suprnova::{Inertia, InertiaProps, Prop, FrameworkError};
+
+#[derive(InertiaProps)]
+#[inertia(cacheable)]
+struct PageProps {
+    #[inertia(public)]
+    title: String,
+    #[inertia(per_request)]
+    viewer: Prop,
+}
+
+fn register_page() -> Result<(), FrameworkError> {
+    Inertia::cache_page::<PageProps>("/page", "Page", &[], &["errors", "flash"])
+}
+```
+
+Register named shared props first, then attach a `PublicShellStitched`
+policy and install RenderCache. The handler uses
+`InertiaResponse::new("Page").cacheable(PageProps { ... })?`.
+The [Inertia response chapter](frontend-inertia-responses.md#cacheable-pages)
+contains the complete handler and boot example.
 
 ### Why Suprnova diverges
 

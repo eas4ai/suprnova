@@ -280,13 +280,20 @@ impl Middleware for VersionChangeHook {
 #[derive(Clone)]
 pub struct InertiaMiddleware {
     stack: Arc<[BoxedMiddleware]>,
+    has_hooks: bool,
 }
 
 impl InertiaMiddleware {
+    /// Cache boot checks must see hooks held by route-local configurations.
+    pub(crate) fn has_hooks(&self) -> bool {
+        self.has_hooks
+    }
+
     /// Build the stack for `config`.
     pub fn new(config: &InertiaConfig) -> Self {
         Self {
             stack: stack(config).into(),
+            has_hooks: config.hooks.is_some(),
         }
     }
 }

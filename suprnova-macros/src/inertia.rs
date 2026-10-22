@@ -157,6 +157,11 @@ pub fn derive_inertia_props_impl(input: TokenStream) -> TokenStream {
     if let Err(error) = props_marker(&input) {
         return error.to_compile_error().into();
     }
+    match crate::inertia_cache::expand(&input) {
+        Ok(Some(expanded)) => return expanded.into(),
+        Ok(None) => {}
+        Err(error) => return error.to_compile_error().into(),
+    }
     let name = &input.ident;
     let generics = &input.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -292,30 +297,22 @@ fn render_inertia_response_expansion(input: &InertiaResponseInput) -> proc_macro
     let component_lit = &input.component;
     let request_expr = &input.request;
 
-    // Materialize props as a `serde_json::Value`, then unfold into individual
-    // eager props on the `InertiaResponse` builder. Unfolding (one prop per
-    // top-level key) is what makes partial-reload filtering work - the
-    // framework needs to know each prop's name to honor X-Inertia-Partial-Data.
-    //
-    // Domain 5 audit M-D5-2: previously the typed-props branch panicked via
-    // `.expect(...)` on a `Serialize` failure, and the non-object branch
-    // panicked when the props expression resolved to a non-object Value.
-    // Both now propagate `FrameworkError::internal` through the macro's
-    // already-Result-returning expansion. The macro MUST be invoked in a
-    // function whose return type accepts `FrameworkError` via `From`
-    // (typically `Result<InertiaResponse, FrameworkError>` or the
-    // framework's blanket `Result<_, E>` where `FrameworkError: Into<E>`);
-    // this matches the existing contract on the `resolve(...).await`
-    // call's `.map_err(Into::into)`.
+    // Each JSON key becomes one eager prop so partial filtering sees its name.
+    // Typed conversion preserves cacheable resolvers and propagates serialization errors.
     let value_expr = match &input.props {
-        PropsKind::Typed(expr) => quote! {
-            ::suprnova::serde_json::to_value(&#expr)
-                .map_err(|__se| ::suprnova::FrameworkError::internal(::std::format!(
-                    "inertia_response!({}): typed props failed to serialize: {}",
-                    #component_name,
-                    __se,
-                )))?
-        },
+        PropsKind::Typed(props) => {
+            let configure = match &input.config {
+                Some(config) => quote! { __response = __response.with_config(#config); },
+                None => quote! {},
+            };
+            return quote! {{
+                let mut __response = ::suprnova::InertiaResponse::new(#component_lit);
+                #configure
+                use ::suprnova::inertia::InertiaPageProps as _;
+                (#props).apply_props(__response)?
+                    .resolve(#request_expr).await.map_err(::core::convert::Into::into)
+            }};
+        }
         PropsKind::Json(tokens) => match json_object_tokens(tokens, &component_name) {
             Ok(object) => object,
             Err(error) => return error.to_compile_error(),
@@ -541,12 +538,12 @@ mod tests {
             "typed-props branch must not panic via .expect; got: {rendered}"
         );
         assert!(
-            rendered.contains("FrameworkError :: internal"),
-            "typed-props branch must wrap Serialize errors in FrameworkError; got: {rendered}"
+            rendered.contains("InertiaPageProps as _") && rendered.contains("apply_props"),
+            "typed-props branch must preserve checked cache declarations; got: {rendered}"
         );
         assert!(
-            rendered.contains("typed props failed to serialize"),
-            "typed-props branch must carry diagnostic; got: {rendered}"
+            rendered.contains("apply_props") && rendered.contains('?'),
+            "typed-props conversion must propagate its diagnostic; got: {rendered}"
         );
     }
 
@@ -563,30 +560,21 @@ mod tests {
             !rendered.contains("panic !"),
             "non-Object branch must not panic; got: {rendered}"
         );
-        // The Err arm carries the FrameworkError::internal carrying
-        // the component name for debuggability. The source-level
-        // line continuation in the macro's format string preserves
-        // the backslash when round-tripped through `quote!.to_string()`,
-        // so the assertion checks just the leading portion.
+        // The conversion owns object validation so cacheable props can preserve resolvers.
         assert!(
-            rendered.contains("page props must serialize to a"),
-            "Err arm must carry diagnostic; got: {rendered}"
+            rendered.contains("InertiaPageProps as _") && rendered.contains("apply_props"),
+            "the checked conversion must validate the object shape; got: {rendered}"
         );
         assert!(
-            rendered.contains("JSON object"),
-            "Err arm message must mention JSON object requirement; got: {rendered}"
-        );
-        assert!(
-            rendered.contains("Result :: Err"),
-            "non-object branch must return Result::Err; got: {rendered}"
+            rendered.contains('?'),
+            "conversion errors must propagate; got: {rendered}"
         );
     }
 
     /// JSON-syntax props go through `serde_json::json!` which is
     /// infallible - the typed-only error wrapper must NOT appear in
-    /// the JSON branch's `value_expr`. (Both branches share the
-    /// non-Object Err arm; this assertion targets just the value
-    /// production phase.)
+    /// the JSON branch's `value_expr`. Typed conversion owns its object
+    /// validation; this assertion targets JSON value production.
     #[test]
     fn json_props_branch_does_not_wrap_in_framework_error() {
         let parsed: InertiaResponseInput = parse_quote! {

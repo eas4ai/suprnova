@@ -145,7 +145,7 @@ impl MiddlewareChain {
     }
 }
 
-fn dispatch(request: Request, handler: &BoxedHandler) -> MiddlewareFuture {
+fn dispatch(request: Request, handler: &Arc<BoxedHandler>) -> MiddlewareFuture {
     // Closures and plain functions have only a Request argument. Typed
     // handlers stop after extraction in the handler macro instead.
     if request.is_precognitive()
@@ -155,7 +155,11 @@ fn dispatch(request: Request, handler: &BoxedHandler) -> MiddlewareFuture {
     {
         Box::pin(async { Err(crate::FrameworkError::PrecognitionSuccess.into()) })
     } else {
-        handler(request)
+        let handler = handler.clone();
+        Box::pin(crate::render_cache::inertia_page::serve_prepared(
+            request,
+            Arc::new(move |request| handler(request)),
+        ))
     }
 }
 

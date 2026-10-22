@@ -3435,22 +3435,30 @@ pub async fn dispatch_head(harness: &Harness, path: &str) -> TestResponse {
 
 /// Installs protocol middleware after the cache to exercise enforced ordering.
 pub async fn boot_with_inertia_routes(router: Router) -> Arc<Harness> {
+    boot_with_inertia_routes_setup(router, || {
+        suprnova::Inertia::install(
+            &suprnova::InertiaConfig::new()
+                .development(true)
+                .version("cache-v1"),
+        )
+        .expect("Inertia install");
+    })
+    .await
+}
+
+/// Runs cache declarations while the harness container and database are installed.
+pub async fn boot_with_inertia_routes_setup(router: Router, setup: impl FnOnce()) -> Arc<Harness> {
     let harness = boot_with_render_cache().await;
     let mut harness = Arc::try_unwrap(harness).ok().expect("sole harness owner");
     let mut config = RenderCacheConfig::from_env().expect("cache config");
     config.enabled = true;
     config.l1 = suprnova::render_cache::L1Config::Disabled;
+    setup();
     harness.router = Arc::new(
         RenderCache::install(router, config)
             .await
             .expect("cache install"),
     );
-    suprnova::Inertia::install(
-        &suprnova::InertiaConfig::new()
-            .development(true)
-            .version("cache-v1"),
-    )
-    .expect("Inertia install");
     harness.middleware = Arc::new(MiddlewareRegistry::from_global());
     Arc::new(harness)
 }

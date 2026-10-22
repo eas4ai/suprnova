@@ -105,8 +105,9 @@ pub trait IntoInertiaData {
 /// [`InertiaConfig`]. Then call [`resolve`](Self::resolve) with the current
 /// request to produce an [`HttpResponse`].
 pub struct InertiaResponse {
-    component: String,
-    props: IndexMap<String, Prop>,
+    pub(super) component: String,
+    pub(super) props: IndexMap<String, Prop>,
+    pub(super) cache_page: Option<Arc<super::cache::CachePage>>,
     flash: serde_json::Map<String, Value>,
     config: InertiaConfig,
     title: Option<String>,
@@ -383,6 +384,7 @@ impl InertiaResponse {
         Self {
             component: component.into(),
             props: IndexMap::new(),
+            cache_page: None,
             flash: serde_json::Map::new(),
             // One `RwLock` read and one clone of the config per response:
             // a few short strings and paths, the version (a `String`
@@ -1381,7 +1383,14 @@ impl InertiaResponse {
     ) -> Result<HttpResponse, FrameworkError> {
         self.prepare_component()
             .map_err(reflash_session_values_after_eager_error)?;
-        let staged_session = StagedInertiaSessionValues::stage();
+        let cache = super::cache::PageAssembly::new(self.cache_page.clone(), &self.component);
+        let cacheable = cache.enabled();
+        if cache.observes_public_session() && crate::session::middleware::session_scope_installed()
+        {
+            let _ = crate::session::session();
+        }
+        let staged_session =
+            super::cache::in_slot(cacheable, async { StagedInertiaSessionValues::stage() }).await;
         let is_inertia_request = req.is_inertia();
         let filter = PartialFilter::build(req, &self.component);
         // Laravel gates the whole once-skip on `isInertia && !isPartial`
@@ -1427,6 +1436,7 @@ impl InertiaResponse {
         let Self {
             component,
             props,
+            cache_page: _,
             flash: response_flash,
             config,
             title,
@@ -1648,6 +1658,7 @@ impl InertiaResponse {
             Vec::new()
         };
 
+        cache.validate(&merged, !providers.is_empty())?;
         let (mut materialized, metadata) = resolve_props(
             merged,
             &filter,
@@ -1659,7 +1670,10 @@ impl InertiaResponse {
             config.max_concurrent_resolvers,
             config.with_all_errors,
             staged_session.error_bags(),
-            req,
+            super::cache::ResolveContext {
+                request: req,
+                cache: Some(&cache),
+            },
         )
         .await?;
         if let Some(collector) = collector.as_mut() {
@@ -1686,7 +1700,8 @@ impl InertiaResponse {
         //      `SessionMiddleware`.
         //   2. Task-local flash bag - same-request `App::flash`.
         //   3. Builder flash - same-request `InertiaResponse::flash`.
-        let mut flash = staged_session.page_flash();
+        let mut flash =
+            super::cache::in_slot(cacheable, async { staged_session.page_flash() }).await;
         for (k, v) in flash::drain() {
             flash.insert(k, v);
         }
@@ -1730,42 +1745,48 @@ impl InertiaResponse {
         {
             page.insert("agentTools".to_owned(), tools);
         }
-        let response = if is_inertia_request {
-            build_json_response(&page)?
-        } else {
-            // SSR runs only for HTML (non-XHR) visits. XHR is a JSON
-            // page-object response and never needs prerender.
-            // The `root_view` middleware hook chooses the configuration the
-            // document is written with.
-            let config = match visit.as_ref().and_then(|visit| visit.hooks()) {
-                Some(hooks) => hooks.root_view(req, config),
-                None => config,
+        page = cache.assemble(page)?;
+        let response = super::cache::in_slot(cacheable, async {
+            let response = if is_inertia_request {
+                build_json_response(&page)?
+            } else {
+                // SSR runs only for HTML (non-XHR) visits. XHR is a JSON
+                // page-object response and never needs prerender.
+                // The `root_view` middleware hook chooses the configuration the
+                // document is written with.
+                let config = match visit.as_ref().and_then(|visit| visit.hooks()) {
+                    Some(hooks) => hooks.root_view(req, config),
+                    None => config,
+                };
+                // In development the dispatch goes hot (PAR-058): the
+                // configuration supplies the Vite dev server as the hot URL.
+                let ssr = config.ssr_for_dispatch();
+                let ssr_result = super::ssr_gateway::gateway()
+                    .dispatch(&ssr, req, &page)
+                    .await?;
+                match config.root_template_for(req).application() {
+                    Some(template) => build_template_response(
+                        template,
+                        &page,
+                        &config,
+                        title.as_deref(),
+                        ssr_result.as_ref(),
+                        &view_data,
+                        head.as_ref(),
+                    )?,
+                    None => build_html_response(
+                        &page,
+                        &config,
+                        title.as_deref(),
+                        ssr_result.as_ref(),
+                        head.as_ref(),
+                    )?,
+                }
             };
-            // In development the dispatch goes hot (PAR-058): the
-            // configuration supplies the Vite dev server as the hot URL.
-            let ssr = config.ssr_for_dispatch();
-            let ssr_result = super::ssr_gateway::gateway()
-                .dispatch(&ssr, req, &page)
-                .await?;
-            match config.root_template_for(req).application() {
-                Some(template) => build_template_response(
-                    template,
-                    &page,
-                    &config,
-                    title.as_deref(),
-                    ssr_result.as_ref(),
-                    &view_data,
-                    head.as_ref(),
-                )?,
-                None => build_html_response(
-                    &page,
-                    &config,
-                    title.as_deref(),
-                    ssr_result.as_ref(),
-                    head.as_ref(),
-                )?,
-            }
-        };
+            Ok::<_, FrameworkError>(response)
+        })
+        .await?;
+        cache.capture(&page, &response)?;
         // Inertia DevTools records the page only once the response that
         // carries it was built: a JSON encoding, SSR dispatch or root
         // template that fails returned above, and the entry then records
@@ -1774,8 +1795,8 @@ impl InertiaResponse {
         if let (Some(recorder), Some(collector)) = (recorder.as_ref(), collector.take()) {
             recorder.page_rendered(collector.build(page));
         }
-        staged_session.commit();
-        Ok(response)
+        super::cache::in_slot(cacheable, async { staged_session.commit() }).await;
+        Ok(cache.finish(response))
     }
 
     /// The steps of Laravel's `ResponseFactory::render` that settle the
@@ -1818,6 +1839,7 @@ impl InertiaResponse {
         let Self {
             component,
             props,
+            cache_page: _,
             flash: response_flash,
             config,
             title: _,
@@ -1845,7 +1867,10 @@ impl InertiaResponse {
             usize::MAX,
             config.with_all_errors,
             staged_session.error_bags(),
-            &TestRequest,
+            super::cache::ResolveContext {
+                request: &TestRequest,
+                cache: None,
+            },
         )
         .await
         .expect("test resolver should not fail");
@@ -2169,7 +2194,7 @@ async fn resolve_props(
     max_concurrency: usize,
     with_all_errors: bool,
     session_errors: serde_json::Map<String, Value>,
-    request: &dyn InertiaRequestExt,
+    context: super::cache::ResolveContext<'_>,
 ) -> Result<(serde_json::Map<String, Value>, PageMetadata), FrameworkError> {
     let mut materialized = serde_json::Map::new();
     let mut metadata = PageMetadata::default();
@@ -2214,6 +2239,7 @@ async fn resolve_props(
     let mut registered: Vec<String> = Vec::new();
 
     for (key, prop) in props {
+        let request_slot = context.cache.is_some_and(|cache| cache.request_slot(&key));
         // The absent sentinel (`when_loaded!` on an unloaded relation)
         // carries neither a value nor metadata. Checked first so flags
         // set on it cannot leak into the page object.
@@ -2461,6 +2487,12 @@ async fn resolve_props(
         // narrowed either.
         let narrow_value = !is_errors_bag && narrows_as_literal(&key, &prop);
         registered.push(key.clone());
+        if !request_slot
+            && let Some(value) = context.cache.and_then(|cache| cache.cached_value(&key))
+        {
+            materialized.insert(key, value);
+            continue;
+        }
         match prop.into_source() {
             // Unreachable: handled at the top of the loop. Listed so the
             // match stays exhaustive without a panic.
@@ -2476,8 +2508,12 @@ async fn resolve_props(
             // A property converts now, with its context, and ships whole,
             // as Laravel ships an object's conversion.
             PropSource::Property(value) => {
-                let context = PropertyContext::new(&key, &siblings, request);
-                match value.to_inertia_property(&context) {
+                let context = PropertyContext::new(&key, &siblings, context.request);
+                match super::cache::in_slot(request_slot, async {
+                    value.to_inertia_property(&context)
+                })
+                .await
+                {
                     Ok(v) => {
                         materialized.insert(key, v);
                     }
@@ -2491,7 +2527,7 @@ async fn resolve_props(
             // closure's result, and brings the facts its loader read.
             PropSource::ScrollResolver(loader) => {
                 tasks.push(Box::pin(async move {
-                    match loader().await {
+                    match super::cache::in_slot(request_slot, async { loader().await }).await {
                         Ok((value, facts)) => Ok(TaskOutcome::InsertScroll {
                             scroll: scroll_entry.map(|reset| {
                                 Box::new(ScrollMetadataEntry {
@@ -2510,7 +2546,7 @@ async fn resolve_props(
             PropSource::Resolver(resolver) if rescue => {
                 let filter = filter.clone();
                 tasks.push(Box::pin(async move {
-                    match resolver().await {
+                    match super::cache::in_slot(request_slot, async { resolver().await }).await {
                         Ok(v) => {
                             let v = if narrow_value {
                                 filter.narrow(&key, v)
@@ -2526,7 +2562,7 @@ async fn resolve_props(
             PropSource::Resolver(resolver) => {
                 let filter = filter.clone();
                 tasks.push(Box::pin(async move {
-                    let v = resolver().await?;
+                    let v = super::cache::in_slot(request_slot, async { resolver().await }).await?;
                     let v = if narrow_value {
                         filter.narrow(&key, v)
                     } else {

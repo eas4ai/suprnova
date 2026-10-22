@@ -113,6 +113,8 @@ pub enum RenderCacheErrorKind {
     LeaseFenced,
     /// A request-time assembly input was not acceptable for this graph.
     AssemblyFailed,
+    /// Validated request-time values exceeded the assembled body bound.
+    AssemblyTooLarge,
 }
 
 /// A RenderCache contract violation.
@@ -147,6 +149,7 @@ impl std::fmt::Display for RenderCacheError {
             RenderCacheErrorKind::PublicationFenced => "render_cache_publication_fenced",
             RenderCacheErrorKind::LeaseFenced => "render_cache_lease_fenced",
             RenderCacheErrorKind::AssemblyFailed => "render_cache_assembly_failed",
+            RenderCacheErrorKind::AssemblyTooLarge => "render_cache_assembly_too_large",
         })
     }
 }

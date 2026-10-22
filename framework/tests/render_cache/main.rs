@@ -38,6 +38,7 @@ pub mod file_store;
 pub mod hardening;
 pub mod hints;
 mod inertia;
+mod inertia_props;
 pub mod ledger;
 pub mod live;
 pub mod middleware;

@@ -367,12 +367,17 @@ impl HttpResponse {
         }
     }
 
-    /// Access the static body bytes. Returns `None` for streaming responses.
+    /// Access the static body bytes. Returns an empty slice for streaming responses.
     /// Use this in tests and JSON:API serialization where a buffered body is expected.
     pub fn body(&self) -> &[u8] {
+        self.buffered_bytes().map_or(&[], Bytes::as_ref)
+    }
+
+    /// Cache response formation can borrow the buffer without copying a document.
+    pub(crate) fn buffered_bytes(&self) -> Option<&Bytes> {
         match &self.body {
-            Body::Static(b) => b,
-            Body::Stream(_) => &[],
+            Body::Static(bytes) => Some(bytes),
+            Body::Stream(_) => None,
         }
     }
 

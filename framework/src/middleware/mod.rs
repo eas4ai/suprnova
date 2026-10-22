@@ -26,6 +26,7 @@
 mod aliases;
 mod chain;
 mod identity;
+pub(crate) use identity::inertia_hooks_of;
 mod pipeline;
 mod registry;
 mod terminable;
