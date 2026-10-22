@@ -382,6 +382,10 @@ provide that behavior. Suprnova uses its typed props declarations, transactional
 dependency collector and named disk drivers. Separate HTML and JSON keys avoid
 depending on an object store varying responses on `X-Inertia`.
 
+The origin trusts a forwarded HTTPS scheme only from the proxies named in
+`APP_TRUSTED_PROXIES`; `APP_TRUSTED_PROXIES` is empty by default, so a deployment
+behind a TLS-terminating proxy must list it or HSTS is never sent.
+
 ## Next
 
 - [RenderCache](render-cache.md)

@@ -18,8 +18,30 @@ struct Scripts {
     hashes: BTreeSet<String>,
     template_depth: usize,
     nonce: bool,
-    foreign: Vec<String>,
+    elements: Vec<Element>,
     foreign_script: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Namespace {
+    Html,
+    Svg,
+    Math,
+}
+struct Element {
+    name: String,
+    namespace: Namespace,
+}
+impl Element {
+    fn children_namespace(&self) -> Namespace {
+        match (self.namespace, self.name.as_str()) {
+            (Namespace::Svg, "foreignobject" | "desc" | "title")
+            | (Namespace::Math, "mi" | "mo" | "mn" | "ms" | "mtext" | "annotation-xml") => {
+                Namespace::Html
+            }
+            _ => self.namespace,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -35,14 +57,50 @@ impl TokenSink for ScriptSink {
                 let name: &str = tag.name.as_ref();
                 if tag.kind == TagKind::StartTag {
                     state.nonce |= tag.attrs.iter().any(|attr| &*attr.name.local == "nonce");
-                    if matches!(name, "svg" | "math") && !tag.self_closing {
-                        state.foreign.push(name.to_string());
+                    let inherited = state
+                        .elements
+                        .last()
+                        .map(Element::children_namespace)
+                        .unwrap_or(Namespace::Html);
+                    let namespace = match (inherited, name) {
+                        (Namespace::Html, "svg") => Namespace::Svg,
+                        (Namespace::Html, "math") => Namespace::Math,
+                        _ => inherited,
+                    };
+                    let foreign = namespace != Namespace::Html
+                        || state
+                            .elements
+                            .iter()
+                            .any(|element| element.namespace != Namespace::Html);
+                    if !tag.self_closing
+                        && !matches!(
+                            name,
+                            "area"
+                                | "base"
+                                | "br"
+                                | "col"
+                                | "embed"
+                                | "hr"
+                                | "img"
+                                | "input"
+                                | "link"
+                                | "meta"
+                                | "param"
+                                | "source"
+                                | "track"
+                                | "wbr"
+                        )
+                    {
+                        state.elements.push(Element {
+                            name: name.to_string(),
+                            namespace,
+                        });
                     }
                     if name == "template" {
                         state.template_depth += 1;
                     }
                     if name == "script" {
-                        state.foreign_script |= !state.foreign.is_empty();
+                        state.foreign_script |= foreign;
                         let attr = |name: &str| {
                             tag.attrs
                                 .iter()
@@ -77,31 +135,38 @@ impl TokenSink for ScriptSink {
                         state.script = Some((enabled, String::new()));
                         return TokenSinkResult::RawData(RawKind::ScriptData);
                     }
-                    if matches!(
-                        name,
-                        "style" | "xmp" | "iframe" | "noembed" | "noframes" | "noscript"
-                    ) {
+                    if namespace == Namespace::Html
+                        && matches!(
+                            name,
+                            "style" | "xmp" | "iframe" | "noembed" | "noframes" | "noscript"
+                        )
+                    {
                         return TokenSinkResult::RawData(RawKind::Rawtext);
                     }
-                    if matches!(name, "textarea" | "title") {
+                    if namespace == Namespace::Html && matches!(name, "textarea" | "title") {
                         return TokenSinkResult::RawData(RawKind::Rcdata);
                     }
-                    if name == "plaintext" {
+                    if namespace == Namespace::Html && name == "plaintext" {
                         return TokenSinkResult::Plaintext;
                     }
-                } else if matches!(name, "svg" | "math") {
-                    if state.foreign.last().is_some_and(|open| open == name) {
-                        state.foreign.pop();
+                } else {
+                    if let Some(position) = state
+                        .elements
+                        .iter()
+                        .rposition(|element| element.name == name)
+                    {
+                        state.elements.truncate(position);
                     }
-                } else if name == "script" {
-                    if let Some((true, script)) = state.script.take() {
-                        state.hashes.insert(format!(
-                            "'sha256-{}'",
-                            STANDARD.encode(Sha256::digest(script.as_bytes()))
-                        ));
+                    if name == "script" {
+                        if let Some((true, script)) = state.script.take() {
+                            state.hashes.insert(format!(
+                                "'sha256-{}'",
+                                STANDARD.encode(Sha256::digest(script.as_bytes()))
+                            ));
+                        }
+                    } else if name == "template" {
+                        state.template_depth = state.template_depth.saturating_sub(1);
                     }
-                } else if name == "template" {
-                    state.template_depth = state.template_depth.saturating_sub(1);
                 }
             }
             Token::CharacterTokens(text) => {

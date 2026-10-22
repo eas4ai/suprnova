@@ -567,3 +567,67 @@ async fn pub_001_fix_f_hsts_is_recorded_and_applied_at_secure_delivery()
     );
     Ok(())
 }
+
+#[suprnova::inertia_root(path = "static_publish/foreign-style.html")]
+struct ForeignStyleRoot;
+#[suprnova::inertia_root(path = "static_publish/foreign-title.html")]
+struct ForeignTitleRoot;
+#[suprnova::inertia_root(path = "static_publish/foreign-integration.html")]
+struct ForeignIntegrationRoot;
+async fn foreign_transition_page(req: Request) -> Response {
+    let template = match req.path() {
+        "/foreign-style" => suprnova::InertiaRootTemplate::of::<ForeignStyleRoot>(),
+        "/foreign-title" => suprnova::InertiaRootTemplate::of::<ForeignTitleRoot>(),
+        _ => suprnova::InertiaRootTemplate::of::<ForeignIntegrationRoot>(),
+    };
+    InertiaResponse::new("Public")
+        .with_config(
+            suprnova::InertiaConfig::new()
+                .version("pub-test-v1")
+                .ssr_disabled()
+                .root_template(template),
+        )
+        .cacheable(PublicProps {
+            title: "Public".into(),
+        })
+        .map_err(HttpResponse::from)?
+        .resolve(&req)
+        .await
+        .map_err(HttpResponse::from)
+}
+#[tokio::test]
+#[serial_test::serial]
+async fn pub_001_round2_8_foreign_transitions_expose_nested_scripts() -> Result<(), FrameworkError>
+{
+    let _container = suprnova::testing::TestContainer::fake();
+    suprnova::global_middleware!(SecurityHeaders::balanced().hash_public_pages());
+    let router: Router = Router::new()
+        .get("/foreign-style", foreign_transition_page)
+        .get("/foreign-title", foreign_transition_page)
+        .get("/foreign-integration", foreign_transition_page)
+        .into();
+    let router = router
+        .public_page::<PublicProps>("/foreign-style", "Public")?
+        .public_page::<PublicProps>("/foreign-title", "Public")?
+        .public_page::<PublicProps>("/foreign-integration", "Public")?;
+    let runtime = runtime(&router)?;
+    let cause = message(runtime.render("/foreign-style").await)?;
+    assert!(
+        cause.contains("/foreign-style") && cause.contains("foreign"),
+        "{cause}"
+    );
+    for path in ["/foreign-title", "/foreign-integration"] {
+        runtime.render(path).await?;
+    }
+    Ok(())
+}
+#[test]
+fn pub_001_round2_9_manual_explains_empty_proxy_default() {
+    for manual in [
+        include_str!("../../../manual/static-publication.md"),
+        include_str!("../../../manual/security-headers.md"),
+    ] {
+        assert!(manual.contains("`APP_TRUSTED_PROXIES` is empty by default"));
+        assert!(manual.contains("TLS-terminating"));
+    }
+}

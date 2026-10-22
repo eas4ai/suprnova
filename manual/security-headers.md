@@ -484,6 +484,10 @@ tags, but no CSP, HSTS or policy middleware. Applications use packages such as
 Live and RenderCache writers share one per-request nonce and its scaffolds
 start with a browser policy.
 
+The origin trusts a forwarded HTTPS scheme only from the proxies named in
+`APP_TRUSTED_PROXIES`; `APP_TRUSTED_PROXIES` is empty by default, so a deployment
+behind a TLS-terminating proxy must list it or HSTS is never sent.
+
 ## Next
 
 - [Middleware](middleware.md) covers global order and route middleware.
