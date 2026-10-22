@@ -15,7 +15,7 @@ async fn audit(args: Vec<String>) -> Result<(), FrameworkError> {
             "usage: budget:audit <url | path.har>",
         ));
     };
-    let budget = PageBudget::default();
+    let budget = PageBudget::from_env()?;
     let audit = if target.starts_with("http://") || target.starts_with("https://") {
         budget.audit_url(target).await?
     } else {

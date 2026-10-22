@@ -237,6 +237,80 @@ pub(crate) fn fingerprinted(url: &Url, pattern: &Regex) -> bool {
 }
 
 impl PageBudget {
+    /// Read PAGE_BUDGET_ overrides so console audits use the deployment's policy.
+    ///
+    /// Unset variables keep shipped defaults. Invalid numbers, flags, host lists
+    /// and regular expressions return an error naming the variable.
+    pub fn from_env() -> Result<Self, FrameworkError> {
+        fn env_value<T: std::str::FromStr>(name: &str) -> Result<Option<T>, FrameworkError> {
+            match std::env::var(name) {
+                Ok(value) => value.parse().map(Some).map_err(|_| {
+                    FrameworkError::bad_request(format!(
+                        "page budget environment variable {name} could not be parsed"
+                    ))
+                }),
+                Err(std::env::VarError::NotPresent) => Ok(None),
+                Err(std::env::VarError::NotUnicode(_)) => Err(FrameworkError::bad_request(
+                    format!("page budget environment variable {name} is not Unicode"),
+                )),
+            }
+        }
+        let mut budget = Self::default();
+        macro_rules! field {
+            ($name:literal, $field:ident) => {
+                if let Some(value) = env_value($name)? {
+                    budget.$field = value;
+                }
+            };
+        }
+        field!("PAGE_BUDGET_TOTAL_BYTES", total_transfer_bytes);
+        field!("PAGE_BUDGET_ASSET_BYTES", asset_bytes);
+        field!("PAGE_BUDGET_RASTER_THRESHOLD_BYTES", raster_threshold_bytes);
+        field!("PAGE_BUDGET_PNG_MARGIN_PERCENT", png_margin_percent);
+        field!("PAGE_BUDGET_FONT_BYTES", font_bytes);
+        field!("PAGE_BUDGET_REQUIRE_IMMUTABLE", require_immutable);
+        field!(
+            "PAGE_BUDGET_FORBID_ASSET_SET_COOKIE",
+            forbid_asset_set_cookie
+        );
+        field!(
+            "PAGE_BUDGET_FORBID_ASSET_REQUEST_COOKIE",
+            forbid_asset_request_cookie
+        );
+        field!(
+            "PAGE_BUDGET_REQUIRE_COOKIE_INDEPENDENT",
+            require_cookie_independent
+        );
+        field!("PAGE_BUDGET_FORBID_FIRST_REDIRECT", forbid_first_redirect);
+        field!("PAGE_BUDGET_FINGERPRINT_PATTERN", fingerprint_pattern);
+        field!("PAGE_BUDGET_MAX_RESOURCES", max_resources);
+        field!("PAGE_BUDGET_MAX_RESPONSE_BYTES", max_response_bytes);
+        if let Some(seconds) = env_value("PAGE_BUDGET_REQUEST_TIMEOUT_SECS")? {
+            budget.request_timeout = Duration::from_secs(seconds);
+        }
+        if let Some(seconds) = env_value("PAGE_BUDGET_COLLECTION_TIMEOUT_SECS")? {
+            budget.collection_timeout = Duration::from_secs(seconds);
+        }
+        fingerprint_regex(&budget.fingerprint_pattern).map_err(|error| {
+            FrameworkError::bad_request(format!("PAGE_BUDGET_FINGERPRINT_PATTERN: {error}"))
+        })?;
+        if let Some(hosts) = env_value::<String>("PAGE_BUDGET_ALLOWED_THIRD_PARTY_HOSTS")? {
+            let mut allowed = BTreeSet::new();
+            if !hosts.trim().is_empty() {
+                for host in hosts.split(',') {
+                    let host = url::Host::parse(host.trim()).map_err(|error| {
+                        FrameworkError::bad_request(format!(
+                            "PAGE_BUDGET_ALLOWED_THIRD_PARTY_HOSTS: {error}"
+                        ))
+                    })?;
+                    allowed.insert(host.to_string());
+                }
+            }
+            budget.allowed_third_party_hosts = Some(allowed);
+        }
+        Ok(budget)
+    }
+
     /// Apply the shared evaluator to a HAR export without any network requests.
     pub fn audit_har(&self, json: &str) -> Result<PageAudit, FrameworkError> {
         let capture = har::read(json, self)?;

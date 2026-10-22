@@ -105,14 +105,45 @@ cargo run --bin console -- budget:audit https://example.com/
 ```
 
 HTTP requests have a ten-second timeout. The whole collection has a thirty-second
-timeout, a limit of 256 resources and a 16 MiB response limit. These collection
-limits are configurable. Discovery deduplicates and caps references as it
+timeout, a limit of 256 resources and a 16 MiB response limit.
+`budget:audit` reads these collection limits through `PageBudget::from_env()`.
+Discovery deduplicates and caps references as it
 parses HTML, CSS and manifests. The pending queue is bounded too. Repeating
 one reference does not allocate another queue entry. Every `Cache-Control`
 header line contributes to the policy; a second `no-cache` line fails the
 immutable rule. Redirects are recorded before following same-origin
 locations. The initial HTTP-to-HTTPS upgrade may be followed on the same host;
 it still fails the first-redirect rule. Other external redirects are listed.
+
+`PageBudget::default()` keeps the shipped values. `PageBudget::from_env()`
+reads one variable per field and rejects invalid values with the variable's
+name. Boolean values use literal `true` or `false`. Host lists use commas;
+spaces around each host are ignored. Unset lists only report hosts. An empty
+list rejects every external host. An invalid fingerprint expression fails
+before collection.
+
+```bash
+PAGE_BUDGET_TOTAL_BYTES=800000 PAGE_BUDGET_FONT_BYTES=80000 cargo run --bin console -- budget:audit capture.har
+```
+
+| Variable | Default | Type | Purpose |
+|---|---|---|---|
+| `PAGE_BUDGET_TOTAL_BYTES` | `1000000` | u64 | Total transferred response bytes. |
+| `PAGE_BUDGET_ASSET_BYTES` | `250000` | u64 | Transferred bytes per asset. |
+| `PAGE_BUDGET_RASTER_THRESHOLD_BYTES` | `100000` | u64 | Decoded bytes above which a raster needs a modern format and fallback. |
+| `PAGE_BUDGET_PNG_MARGIN_PERCENT` | `10` | u32 | Margin above the fast PNG recompression size. |
+| `PAGE_BUDGET_FONT_BYTES` | `100000` | u64 | Combined transferred font bytes. |
+| `PAGE_BUDGET_REQUIRE_IMMUTABLE` | `true` | bool | Check fingerprinted cache policy. |
+| `PAGE_BUDGET_FORBID_ASSET_SET_COOKIE` | `true` | bool | Reject asset response cookies. |
+| `PAGE_BUDGET_FORBID_ASSET_REQUEST_COOKIE` | `true` | bool | Reject captured asset request cookies. |
+| `PAGE_BUDGET_REQUIRE_COOKIE_INDEPENDENT` | `true` | bool | Require successful anonymous asset access. |
+| `PAGE_BUDGET_FORBID_FIRST_REDIRECT` | `true` | bool | Reject an initial document redirect. |
+| `PAGE_BUDGET_FINGERPRINT_PATTERN` | Strict Vite hash expression | regex | Match the filename stem. |
+| `PAGE_BUDGET_ALLOWED_THIRD_PARTY_HOSTS` | unset | comma-separated hosts | Restrict external hosts when set. Empty forbids all external hosts. |
+| `PAGE_BUDGET_MAX_RESOURCES` | `256` | usize | Bound discovery and queued resources. |
+| `PAGE_BUDGET_MAX_RESPONSE_BYTES` | `16777216` | usize | Bound one response body. |
+| `PAGE_BUDGET_REQUEST_TIMEOUT_SECS` | `10` | u64 | Bound one HTTP request in seconds. |
+| `PAGE_BUDGET_COLLECTION_TIMEOUT_SECS` | `30` | u64 | Bound the complete collection in seconds. |
 
 HAR response `bodySize` measures transferred bytes; `content.size` measures
 decoded bytes. When `bodySize` is unknown, the audit uses `content.size`.

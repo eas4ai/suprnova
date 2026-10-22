@@ -823,5 +823,6 @@ fn budget_001_initial_https_upgrade_does_not_list_the_page_host_as_third_party()
 }
 
 mod review_discovery;
+mod review_env;
 mod review_limits;
 mod review_manifest;
