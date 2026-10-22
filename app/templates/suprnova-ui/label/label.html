@@ -1,0 +1,8 @@
+{#
+  suprnova.label - a programmatic label for one control (FORM-002).
+  for_id names the control; required marks the visual asterisk only, the
+  control itself carries the required attribute.
+#}
+{% macro label(for_id, text, required=false) %}
+<label class="sn-label" for="{{ for_id }}">{{ text }}{% if required %} <span class="sn-label-mark" aria-hidden="true">*</span>{% endif %}</label>
+{% endmacro %}

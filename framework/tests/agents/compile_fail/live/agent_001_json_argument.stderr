@@ -1,0 +1,5 @@
+error: the argument `change` of a tool action has no JSON Schema an agent can read: take String, bool, i64, u64, f64, Date, OffsetDateTime or Uuid, or an Option, Vec or BTreeMap of them
+  --> tests/agents/compile_fail/live/agent_001_json_argument.rs:13:37
+   |
+13 |     pub fn apply(&mut self, change: serde_json::Value) {
+   |                                     ^^^^^^^^^^

@@ -1,0 +1,205 @@
+//! `Persistable` trait - the seam between a factory-produced model and
+//! whatever storage it lives in.
+//!
+//! The trait surface is intentionally minimal - `async fn persist(self)
+//! -> Result<Self, FrameworkError>` - so a custom backend (Redis,
+//! Surreal, blob-only, whatever) can opt in with one impl.
+//!
+//! ## SeaORM blanket impl
+//!
+//! Every SeaORM `Model` that can `IntoActiveModel<ActiveModel>` already
+//! gets `Persistable` via the blanket impl below. `persist(self)`
+//! converts to an `ActiveModel` and `.insert(...)`s it on the ambient
+//! `DB::transaction` when one is open, and on the framework's bound
+//! `DB::connection()` otherwise. The returned `Self` is what
+//! SeaORM hands back from the insert - with the auto-incremented id,
+//! default-filled columns, etc. resolved.
+//!
+//! No per-model boilerplate. `User::factory().count(50).create_many()`
+//! works as soon as `User` is a SeaORM entity.
+//!
+//! ## Sharp edge - orphan rules
+//!
+//! Because the blanket targets every `ModelTrait` type, a downstream
+//! crate cannot write its own `impl Persistable for MyOrm::Model`
+//! without `MyOrm::Model: ModelTrait` (which would conflict). For
+//! non-SeaORM custom-persist scenarios, wrap the model in a newtype
+//! and impl `Persistable` on the wrapper. This is a deliberate
+//! trade-off - SeaORM is the first-class ORM and the ergonomic win on
+//! the dogfood path is worth the orphan constraint.
+//!
+//! ## Helper for explicit-connection sites
+//!
+//! [`persist_via_seaorm`] takes the connection as an argument for the
+//! rare case where a caller wants to drive persistence against a
+//! connection that ISN'T the framework's bound `DB::connection()` -
+//! integration tests that want to verify against a specific
+//! `sqlite::memory:` handle, for instance.
+
+use crate::eloquent::Attrs;
+use crate::error::FrameworkError;
+use async_trait::async_trait;
+use sea_orm::{
+    ActiveModelTrait, ConnectionTrait, EntityTrait, IntoActiveModel, Iterable, ModelTrait,
+    PrimaryKeyToColumn,
+};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::{Map, Value};
+
+/// A model that can persist itself. The async method consumes `self`
+/// and returns the canonicalized post-insert version (assigned id,
+/// defaulted columns resolved, etc.).
+#[async_trait]
+pub trait Persistable: Sized + Send {
+    /// Insert `self` - on the ambient `DB::transaction` when one is open,
+    /// otherwise on the default database connection - and return the
+    /// canonicalized post-insert version with assigned id, default
+    /// columns resolved, and timestamps populated.
+    async fn persist(self) -> Result<Self, FrameworkError>;
+
+    /// Every field of this model, keyed by its serialized name, so a
+    /// factory's per-record attribute sets merge over the whole
+    /// definition and the merged map can be deserialized back into the
+    /// model.
+    ///
+    /// A field hidden from the model's array and JSON output is still a
+    /// column the insert writes, so this map must not apply the hidden or
+    /// visible lists. The default serializes the model, which is the
+    /// whole row for a plain SeaORM model. The `#[suprnova::model]` macro
+    /// overrides it with the unfiltered attributes, because that model's
+    /// `Serialize` honours its hidden and visible lists.
+    ///
+    /// The default [`Persistable::with_definition_attributes`] merges over
+    /// this map. A `#[suprnova::model]` overrides that method and assigns
+    /// fields directly, because a field it skips on output is missing
+    /// from this map too.
+    ///
+    /// The `Self: Serialize` bound sits on the method, not the trait, so
+    /// a custom `Persistable` that is not serializable still compiles; it
+    /// only cannot take attribute sets in `create_many`.
+    fn definition_fields(&self) -> Result<Map<String, Value>, FrameworkError>
+    where
+        Self: Serialize,
+    {
+        let value = serde_json::to_value(self).map_err(|error| {
+            FrameworkError::internal(format!("factory definition serialization: {error}"))
+        })?;
+        match value {
+            Value::Object(fields) => Ok(fields),
+            _ => Err(FrameworkError::bad_request(
+                "factory attributes require an object model",
+            )),
+        }
+    }
+
+    /// Applies one of `create_many`'s per-record attribute sets to a model
+    /// the factory definition and its `with` overrides built. Each name is
+    /// a serialized field name. A field the set does not name keeps its
+    /// built value. A name that matches no field, or a value that does not
+    /// fit its field, is an error, so `create_many` inserts no row.
+    ///
+    /// The default serializes the model through
+    /// [`Persistable::definition_fields`], merges the set over that map and
+    /// deserializes the result, which round-trips every column of a plain
+    /// SeaORM model. That round trip drops a field the model skips on
+    /// output, so the `#[suprnova::model]` macro overrides this method: it
+    /// deserializes each value into its own field and assigns it, and
+    /// leaves every other field untouched. A custom `Persistable` with the
+    /// same kind of field should override it the same way.
+    ///
+    /// The `Self: Serialize + DeserializeOwned` bound sits on the method for
+    /// the same reason as on [`Persistable::definition_fields`].
+    fn with_definition_attributes(self, attributes: Attrs) -> Result<Self, FrameworkError>
+    where
+        Self: Serialize + DeserializeOwned,
+    {
+        let mut fields = self.definition_fields()?;
+        for (name, value) in attributes.0 {
+            if !fields.contains_key(&name) {
+                return Err(FrameworkError::bad_request(format!(
+                    "factory attribute `{name}` is not a serialized model field"
+                )));
+            }
+            fields.insert(name, value);
+        }
+        serde_json::from_value(Value::Object(fields))
+            .map_err(|error| FrameworkError::bad_request(format!("factory attributes: {error}")))
+    }
+}
+
+/// SeaORM-backed persist against a specific connection. Useful when a
+/// caller wants to drive persistence against a connection that isn't
+/// the framework's bound `DB::connection()` - most often an
+/// `sqlite::memory:` handle in an integration test.
+///
+/// `M` is the SeaORM Model; `E` is its Entity. The trait bounds thread
+/// through SeaORM's type system to require:
+///   - `M: ModelTrait<Entity = E>` - M IS the canonical model of E
+///   - `M: IntoActiveModel<E::ActiveModel>` - M can become an active model
+///   - `E::ActiveModel: ActiveModelTrait<Entity = E>` - round-trip closes
+///
+/// # Primary-key handling
+///
+/// `IntoActiveModel`'s derive sets EVERY field - including the primary
+/// key - to `Set(value)`. For factory-produced models the PK is
+/// typically a placeholder (`0` for an auto-increment `i32`), so a
+/// straight insert collides on the second call (UNIQUE constraint
+/// failure). This helper flips every primary-key column to
+/// `NotSet` BEFORE inserting, which lets the database assign its own
+/// id - the exact semantic factories need.
+///
+/// Consumers who DO want to assign a specific id can ignore this
+/// helper and call `model.into_active_model().insert(db)` directly;
+/// the seam is there for the auto-increment dogfood path.
+pub async fn persist_via_seaorm<M, E, C>(model: M, db: &C) -> Result<M, FrameworkError>
+where
+    M: ModelTrait<Entity = E> + IntoActiveModel<<E as EntityTrait>::ActiveModel> + Send,
+    E: EntityTrait<Model = M>,
+    <E as EntityTrait>::ActiveModel: ActiveModelTrait<Entity = E> + Send,
+    <E as EntityTrait>::PrimaryKey:
+        PrimaryKeyToColumn<Column = <E as EntityTrait>::Column> + Iterable,
+    C: ConnectionTrait,
+{
+    let mut active = model.into_active_model();
+    // Flip every primary-key column to NotSet so the DB assigns it.
+    // Composite PKs walk every column in the iter.
+    for pk in <<E as EntityTrait>::PrimaryKey as Iterable>::iter() {
+        active.not_set(pk.into_column());
+    }
+    active
+        .insert(db)
+        .await
+        .map_err(|e| FrameworkError::internal(format!("factory persist: {e}")))
+}
+
+/// Blanket impl: any SeaORM `Model` is `Persistable`. Consumers don't
+/// write per-model `impl Persistable for User` - the trait is already
+/// there.
+///
+/// The insert runs where every framework write runs: on the ambient
+/// `DB::transaction` when one is open, and on the default pool
+/// otherwise. `create_many` documents wrapping it in a transaction for
+/// atomicity, so an insert sent to the pool instead escaped the
+/// rollback - and on a one-connection pool it waited for the connection
+/// the transaction held.
+#[async_trait]
+impl<M, E> Persistable for M
+where
+    M: ModelTrait<Entity = E> + IntoActiveModel<<E as EntityTrait>::ActiveModel> + Send + 'static,
+    E: EntityTrait<Model = M>,
+    <E as EntityTrait>::ActiveModel: ActiveModelTrait<Entity = E> + Send,
+    <E as EntityTrait>::PrimaryKey:
+        PrimaryKeyToColumn<Column = <E as EntityTrait>::Column> + Iterable,
+{
+    async fn persist(self) -> Result<Self, FrameworkError> {
+        use crate::database::transaction::ExecutorChoice;
+        let result = match ExecutorChoice::resolve_write(None, None, None).await? {
+            ExecutorChoice::Tx(tx, _) => persist_via_seaorm(self, tx.as_ref()).await?,
+            ExecutorChoice::Pool(db, _) => persist_via_seaorm(self, db.inner()).await?,
+        };
+        let table = crate::database::model::entity_table_name::<E>();
+        crate::render_cache::orm::after_table_write(table).await?;
+        Ok(result)
+    }
+}

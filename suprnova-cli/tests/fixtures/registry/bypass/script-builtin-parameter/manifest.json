@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-builtin-parameter",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
