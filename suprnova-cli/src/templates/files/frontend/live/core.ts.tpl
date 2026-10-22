@@ -337,7 +337,7 @@ export function startInertiaLive(
       if (
         position !== null &&
         baseline?.generation === position.generation &&
-        position.cursor < -1
+        position.cursor <= baseline.cursor
       )
         continue;
       const queued = entry.props.get(prop);
