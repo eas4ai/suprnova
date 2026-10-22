@@ -195,6 +195,12 @@ queue a separate job when delivery needs durable retries.
 
 ## Queued projectors
 
+Queued projectors must not read synchronous projectors' read models. Build each
+projection from its own state and stored facts. Live persistence completes
+synchronous writes before queue delivery. Replay follows that order within each
+page: synchronous handlers receive every fact first, then queued handlers receive
+every fact. Replay pages need not match the original persistence batches.
+
 Replace `#[suprnova::projector]` on `Totals` with
 `#[suprnova::projector(queued)]`. Run a [queue worker](queues.md). Each persistence
 queues a `QueuedProjector` wake-up after commit. The worker type is registered by

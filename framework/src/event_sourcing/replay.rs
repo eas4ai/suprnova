@@ -129,13 +129,18 @@ impl Replay {
                         if page.is_empty() {
                             break;
                         }
-                        for event in page {
-                            for entry in &entries {
-                                projections::apply(entry.projector.as_ref(), &event).await?;
+                        // A live batch completes synchronous writes before queued delivery.
+                        for queued in [false, true] {
+                            for event in &page {
+                                for entry in entries.iter().filter(|entry| entry.queued == queued) {
+                                    projections::apply(entry.projector.as_ref(), event).await?;
+                                }
                             }
-                            after = event.id;
-                            count += 1;
                         }
+                        if let Some(last) = page.last() {
+                            after = last.id;
+                        }
+                        count += page.len() as u64;
                     }
                     for entry in &entries {
                         entry.projector.replay_finished().await?;

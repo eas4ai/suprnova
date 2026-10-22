@@ -72,8 +72,22 @@ impl Projector for Deferred {
     }
     async fn project(&self, event: &StoredEvent) -> Result<(), FrameworkError> {
         if let Some(fact) = event.decode::<Projected>()? {
+            // This observation fixture checks scheduling, not a supported projection dependency.
+            let observed = if event
+                .metadata
+                .get("observe_s")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                ReadModel::find(1i64)
+                    .await?
+                    .ok_or_else(|| FrameworkError::internal("read model missing"))?
+                    .total
+            } else {
+                0
+            };
             DB::table("es_order")
-                .insert(attrs! { event_id: event.id, amount: fact.amount })
+                .insert(attrs! { event_id: event.id, amount: fact.amount, observed: observed })
                 .await?;
         }
         Ok(())
@@ -109,7 +123,7 @@ impl Reactor for Notify {
 
 pub(super) async fn setup() -> TestDatabase {
     let db = database().await;
-    db.execute_unprepared("CREATE TABLE es_projection (id INTEGER PRIMARY KEY, total BIGINT NOT NULL); INSERT INTO es_projection VALUES (1, 0); CREATE TABLE es_order (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id BIGINT NOT NULL, amount BIGINT NOT NULL); CREATE TABLE es_reactions (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id BIGINT NOT NULL); CREATE TABLE es_lifecycle (id INTEGER PRIMARY KEY AUTOINCREMENT, stage TEXT NOT NULL)").await.unwrap();
+    db.execute_unprepared("CREATE TABLE es_projection (id INTEGER PRIMARY KEY, total BIGINT NOT NULL); INSERT INTO es_projection VALUES (1, 0); CREATE TABLE es_order (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id BIGINT NOT NULL, amount BIGINT NOT NULL, observed BIGINT NOT NULL); CREATE TABLE es_reactions (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id BIGINT NOT NULL); CREATE TABLE es_lifecycle (id INTEGER PRIMARY KEY AUTOINCREMENT, stage TEXT NOT NULL)").await.unwrap();
     db
 }
 async fn append(amounts: &[i64]) -> Vec<StoredEvent> {
@@ -354,4 +368,40 @@ async fn es_003_live_and_replay_keep_the_same_projector_event_order() {
         .await
         .unwrap();
     assert_eq!(*trace.lock().unwrap(), live);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn es_003_mixed_replay_matches_live_batch_observations() {
+    let _queue = Queue::fake();
+    let _db = setup().await;
+    let mut root = Aggregate::<Tally>::new(&uuid()).unwrap();
+    for amount in [2, 3] {
+        root.record_with_metadata(Projected { amount }, serde_json::json!({"observe_s":true}))
+            .unwrap();
+    }
+    let events = root.persist().await.unwrap();
+    QueuedProjector::new("es.queued", events.last().unwrap().id)
+        .unwrap()
+        .handle()
+        .await
+        .unwrap();
+    async fn observations() -> Vec<i64> {
+        DB::table("es_order")
+            .order_by_asc("id")
+            .get()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get_int("observed").unwrap())
+            .collect()
+    }
+    let live = observations().await;
+    assert_eq!(live, [5, 5]);
+    EventReplay::projectors(["es.inline", "es.queued"])
+        .page_size(2)
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(observations().await, live);
 }
