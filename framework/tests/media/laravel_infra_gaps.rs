@@ -41,7 +41,7 @@ fn flat_png(width: u32, height: u32) -> Vec<u8> {
 
 /// Whether the host's ImageMagick binary runs. The ImageMagick cases
 /// return early without it, and say so.
-fn magick_runs(test: &str) -> bool {
+pub(crate) fn magick_runs(test: &str) -> bool {
     let runs = std::process::Command::new(MagickCliDriver::from_env().binary())
         .arg("-version")
         .output()

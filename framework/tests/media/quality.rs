@@ -63,10 +63,14 @@ async fn img_009_oxideav_defaults_to_85_and_clamps_quality() {
 }
 
 // The driver's policy check is cached per process. A real binary needs its
-// own process so a stand-in in another test cannot supply that check.
+// own process so a stand-in in another test cannot supply that check. The
+// case returns early, and says so, on a host without ImageMagick.
 #[cfg(unix)]
 #[test]
 fn img_009_magick_defaults_to_85_and_clamps_quality() {
+    if !crate::laravel_infra_gaps::magick_runs("img_009_magick_defaults_to_85_and_clamps_quality") {
+        return;
+    }
     crate::own_process::run_alone(
         "quality::img_009_magick_defaults_to_85_and_clamps_quality_child",
     );
