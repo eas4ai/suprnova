@@ -1838,6 +1838,15 @@ mod maintenance;
 
 #[tokio::test]
 async fn pub_002_manifest_output_files_are_immutable() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "pub_002_manifest_output_files_are_immutable",
+    )
+    .await
+    {
+        return;
+    }
+
     let _container = suprnova::testing::TestContainer::fake();
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("custom-manifest.json");

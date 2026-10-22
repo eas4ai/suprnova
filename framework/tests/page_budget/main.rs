@@ -941,6 +941,24 @@ async fn budget_001_cross_origin_scope_agrees_in_all_modes() {
 
 #[tokio::test]
 async fn budget_001_manifest_output_files_require_immutable_in_all_modes() {
+    if std::env::var_os("BUDGET_MANIFEST_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "budget_001_manifest_output_files_require_immutable_in_all_modes",
+                "--nocapture",
+            ])
+            .env("BUDGET_MANIFEST_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     use suprnova::http_client::{FakeResponse, Http};
     let _container = suprnova::testing::TestContainer::fake();
     let dir = tempfile::tempdir().unwrap();
@@ -1048,6 +1066,24 @@ async fn budget_001_manifest_output_files_require_immutable_in_all_modes() {
 
 #[tokio::test]
 async fn budget_001_cross_origin_redirect_port_keeps_the_same_scope() {
+    if std::env::var_os("BUDGET_PORT_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "budget_001_cross_origin_redirect_port_keeps_the_same_scope",
+                "--nocapture",
+            ])
+            .env("BUDGET_PORT_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     use suprnova::http_client::{FakeResponse, Http};
     let client = TestClient::new(
         Router::new().get("/", |_: Request| async {

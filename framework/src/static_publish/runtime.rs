@@ -357,12 +357,7 @@ impl StaticPublication {
             }
         }
         #[cfg(not(feature = "media"))]
-        if super::assets::tags(std::str::from_utf8(&page.html).map_err(error)?)
-            .iter()
-            .flat_map(|(_, _, tag)| &tag.attrs)
-            .flat_map(|(_, value)| super::assets::parse_srcset(value))
-            .any(|(url, _)| super::assets::raster_data_mime(&url).is_some())
-        {
+        if super::assets::has_raster_data(&page.html)? {
             return Err(error(format!(
                 "route {}: raster data URL requires the media feature",
                 page.path
@@ -372,7 +367,7 @@ impl StaticPublication {
         let mut options =
             crate::lock::read(&self.image_options, "publication image options")?.clone();
         #[cfg(feature = "media")]
-        {
+        if source.is_some() || super::assets::has_raster_data(&page.html)? {
             options.document_path.clone_from(&page.path);
             let image_source = match &source {
                 Some(source) => source.clone(),

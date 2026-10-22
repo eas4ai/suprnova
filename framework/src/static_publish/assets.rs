@@ -128,17 +128,7 @@ pub(crate) fn referenced_assets(
         if tag.kind != TagKind::StartTag {
             continue;
         }
-        let fields: &[&str] = match tag.name.as_str() {
-            "img" | "source" => &["src", "srcset"],
-            "script" | "video" | "audio" | "track" | "embed" => &["src", "poster"],
-            "link"
-                if crate::page_budget::asset_link(attribute(&tag, "rel").unwrap_or_default()) =>
-            {
-                &["href", "imagesrcset"]
-            }
-            "object" => &["data"],
-            _ => &[],
-        };
+        let fields = reference_fields(&tag);
         for field in fields {
             if let Some(value) = attribute(&tag, field) {
                 let urls = if field.ends_with("srcset") {
@@ -155,6 +145,38 @@ pub(crate) fn referenced_assets(
         }
     }
     Ok(paths)
+}
+
+pub(super) fn has_raster_data(html: &[u8]) -> Result<bool, FrameworkError> {
+    let html = std::str::from_utf8(html).map_err(|error| {
+        FrameworkError::param(format!("publication HTML is not UTF-8: {error}"))
+    })?;
+    Ok(tags(html).iter().any(|(_, _, tag)| {
+        tag.kind == TagKind::StartTag
+            && reference_fields(tag).iter().any(|field| {
+                attribute(tag, field).is_some_and(|value| {
+                    if field.ends_with("srcset") {
+                        parse_srcset(value)
+                            .iter()
+                            .any(|(url, _)| raster_data_mime(url).is_some())
+                    } else {
+                        raster_data_mime(value).is_some()
+                    }
+                })
+            })
+    }))
+}
+
+fn reference_fields(tag: &HtmlTag) -> &'static [&'static str] {
+    match tag.name.as_str() {
+        "img" | "source" => &["src", "srcset"],
+        "script" | "video" | "audio" | "track" | "embed" => &["src", "poster"],
+        "link" if crate::page_budget::asset_link(attribute(tag, "rel").unwrap_or_default()) => {
+            &["href", "imagesrcset"]
+        }
+        "object" => &["data"],
+        _ => &[],
+    }
 }
 
 pub(super) fn local_path(
@@ -191,7 +213,7 @@ pub(super) fn local_path(
 
 // Only raster data URLs cross the image preparation boundary.
 pub(super) fn raster_data_mime(reference: &str) -> Option<&str> {
-    let (scheme, data) = reference.split_once(':')?;
+    let (scheme, data) = reference.trim().split_once(':')?;
     if !scheme.eq_ignore_ascii_case("data") {
         return None;
     }
@@ -437,17 +459,7 @@ pub(crate) fn version_assets(
         if tag.kind != TagKind::StartTag {
             continue;
         }
-        let fields: &[&str] = match tag.name.as_str() {
-            "img" | "source" => &["src", "srcset"],
-            "script" | "video" | "audio" | "track" | "embed" => &["src", "poster"],
-            "link"
-                if crate::page_budget::asset_link(attribute(&tag, "rel").unwrap_or_default()) =>
-            {
-                &["href", "imagesrcset"]
-            }
-            "object" => &["data"],
-            _ => &[],
-        };
+        let fields = reference_fields(&tag);
         let mut changed = false;
         for field in fields {
             if let Some(value) = attribute(&tag, field) {
