@@ -98,3 +98,58 @@ async fn pub_006_origin_keeps_rendering_without_publication() {
         .assert_ok()
         .assert_see("origin works");
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn pub_006_fix_i_request_directives_are_case_insensitive() {
+    let _container = TestContainer::fake();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let router: Router = Router::new()
+        .get("/public", move |request: Request| {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                InertiaResponse::new("Public")
+                    .with_config(
+                        InertiaConfig::new()
+                            .version("v1")
+                            .development(true)
+                            .ssr_disabled(),
+                    )
+                    .cacheable(PublicProps {
+                        title: "Public".into(),
+                    })
+                    .unwrap()
+                    .resolve(&request)
+                    .await
+                    .map_err(Into::into)
+            }
+        })
+        .into();
+    let router = router
+        .public_page::<PublicProps>("/public", "Public")
+        .unwrap();
+    Storage::register_memory("request-directives");
+    let runtime = StaticPublication::install(
+        &router,
+        Publisher::new("request-directives", "v1", PublishConfig::default()).unwrap(),
+    )
+    .unwrap();
+    runtime.publish().await.unwrap();
+    let client = TestClient::new(router, MiddlewareRegistry::new());
+    for directive in ["No-Store", "PUBLIC, NO-CACHE", "max-age=0, nO-sToRe"] {
+        let before = calls.load(Ordering::SeqCst);
+        client
+            .get("/public")
+            .header("Cache-Control", directive)
+            .send()
+            .await
+            .assert_ok();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            before + 1,
+            "{directive} bypasses storage"
+        );
+    }
+}

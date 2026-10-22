@@ -957,3 +957,20 @@ async fn pub_003_fix_1_manifest_is_the_only_origin_switch_and_assets_exist() {
         assert_eq!(delivered.body_text(), "new");
     }
 }
+
+#[tokio::test]
+async fn pub_002_fix_h_refuses_vary_dimensions_missing_from_the_key() {
+    for vary in [
+        "*",
+        "Accept-Language",
+        "X-Inertia, Cookie",
+        "X-Inertia-Partial-Data",
+    ] {
+        let (publisher, _) = publisher("v1");
+        let mut page = page("public");
+        page.headers.insert("Vary".into(), vary.into());
+        let result = publisher.publish(vec![page]).await;
+        assert!(result.is_err(), "unsupported Vary {vary} must refuse");
+        assert!(result.unwrap_err().to_string().contains("Vary"));
+    }
+}

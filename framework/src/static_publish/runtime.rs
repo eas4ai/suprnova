@@ -248,10 +248,21 @@ impl StaticPublication {
             )));
         }
         let mut page = PageObject::new(&path, capture.html, capture.json)?;
-        page.headers = response
-            .headers()
-            .map(|(k, v)| (k.to_ascii_lowercase(), v.to_owned()))
-            .collect();
+        page.headers = response.headers().fold(
+            BTreeMap::<String, String>::new(),
+            |mut headers, (name, value)| {
+                let name = name.to_ascii_lowercase();
+                if name == "vary"
+                    && let Some(previous) = headers.get_mut(&name)
+                {
+                    previous.push_str(", ");
+                    previous.push_str(value);
+                } else {
+                    headers.insert(name, value.to_string());
+                }
+                headers
+            },
+        );
         page.headers.remove("content-length");
         page.dependency_tags = report
             .observed
@@ -415,10 +426,15 @@ impl StaticPublication {
         query: Option<&str>,
     ) -> Result<Option<HttpResponse>, FrameworkError> {
         if query.is_some_and(|query| !query.is_empty())
-            || headers
-                .get("cache-control")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v.contains("no-store") || v.contains("no-cache"))
+            || {
+                let directives = crate::render_cache::middleware::header_cache_directives(
+                    headers
+                        .get_all("cache-control")
+                        .iter()
+                        .filter_map(|value| value.to_str().ok()),
+                );
+                directives.no_store || directives.no_cache
+            }
             || headers.keys().any(|name| {
                 matches!(
                     name.as_str(),

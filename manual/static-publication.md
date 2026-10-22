@@ -100,7 +100,9 @@ receive bounded cache directives. Pages reference their versioned keys, so every
 Page objects never receive `immutable`. Their `Cache-Control` contains
 `s-maxage`, `stale-while-revalidate` and `stale-if-error`. Browser `max-age`
 is clamped to `revalidate`. Object entries retain content type and hash CSP.
-Cookies are excluded.
+Cookies are excluded. `Vary` may name only `X-Inertia` and `X-Inertia-Version`;
+other fields and `*` refuse publication. Request cache directives compare
+case-insensitively before storage lookup.
 
 ```rust
 use std::time::Duration;

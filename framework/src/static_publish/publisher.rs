@@ -482,6 +482,26 @@ impl Publisher {
             (page.html, page.json) =
                 super::assets::version_assets(&page.html, &page.json, &page.path, &asset_paths)?;
             let path = safe_path(&page.path)?;
+            for (_, value) in page
+                .headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("vary"))
+            {
+                if let Some(field) = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|field| !field.is_empty())
+                    .find(|field| {
+                        !["x-inertia", "x-inertia-version"]
+                            .iter()
+                            .any(|allowed| allowed.eq_ignore_ascii_case(field))
+                    })
+                {
+                    return Err(error(format!(
+                        "route {path}: Vary {field} has no publication key dimension"
+                    )));
+                }
+            }
             if !seen.insert(path.clone()) {
                 return Err(error(format!("duplicate page {path}")));
             }
