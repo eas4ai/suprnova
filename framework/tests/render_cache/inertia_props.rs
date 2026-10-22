@@ -90,6 +90,16 @@ async fn page(request: Request) -> Response {
     }));
     let large = request.header("x-test-large-viewer") == Some("yes");
     let builder = InertiaResponse::new("Cache/Stitched");
+    let builder = if request.header("x-test-route-config") == Some("yes") {
+        builder.with_config(
+            InertiaConfig::new()
+                .development(true)
+                .version("cache-v1")
+                .ssr_disabled(),
+        )
+    } else {
+        builder
+    };
     let response = if request.header("x-test-eager-viewer") == Some("yes") {
         builder.cacheable(EagerPageProps {
             article,
@@ -563,4 +573,119 @@ async fn cache_review_1_unregistered_alias_never_stores_request_props() {
             .count(),
         2
     );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn cache_review_3_preboxed_stack_publishes_and_rejects_stale_versions_before_lookup() {
+    PUBLIC_RUNS.store(0, Ordering::SeqCst);
+    PRIVATE_RUNS.store(0, Ordering::SeqCst);
+    let config = InertiaConfig::new()
+        .development(true)
+        .version("cache-v1")
+        .ssr_disabled();
+    let router: Router = Router::new()
+        .get("/boxed", page)
+        .middleware(SessionAndGuard)
+        .middleware_boxed(suprnova::middleware::into_boxed(Inertia::middleware(
+            &config,
+        )))
+        .into();
+    let policy = RenderCachePolicy::builder(RepresentationClass::PublicShellStitched)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).unwrap())
+        .vary(VarianceDimension::Locale)
+        .build()
+        .unwrap();
+    let router = router.try_render_cache("/boxed", policy).unwrap();
+    let harness = support::boot_with_inertia_routes_setup(router, || {
+        Inertia::cache_page::<PageProps>("/boxed", "Cache/Stitched", &[], &["errors", "flash"])
+            .unwrap();
+    })
+    .await;
+    Post::create(attrs! { title: "shared article" })
+        .await
+        .unwrap();
+    User::create(attrs! { name: "Alice" }).await.unwrap();
+    User::create(attrs! { name: "Bob" }).await.unwrap();
+    for (user, name) in [("1", "Alice"), ("2", "Bob")] {
+        let mut headers = headers(user, user);
+        headers.push(("x-test-route-config", "yes"));
+        let response = dispatch_get(&harness, "/boxed", &headers).await;
+        assert_eq!(response.status.as_u16(), 200);
+        assert_eq!(response.header("cache-control"), Some("private, no-store"));
+        let page: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(page["props"]["viewer"]["name"], name);
+        assert_eq!(page["version"], "cache-v1");
+    }
+    assert_eq!(
+        PUBLIC_RUNS.load(Ordering::SeqCst),
+        1,
+        "no-store runs after publication"
+    );
+    assert_eq!(PRIVATE_RUNS.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        suprnova::render_cache::RenderCache::store_inspection()
+            .await
+            .unwrap()
+            .entries,
+        1
+    );
+    suprnova::render_cache::telemetry::reset_recorded_lookups_for_test();
+    let response = dispatch_get(
+        &harness,
+        "/boxed",
+        &[
+            ("X-Inertia", "true"),
+            ("X-Inertia-Version", "stale"),
+            ("x-test-route-config", "yes"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status.as_u16(), 409);
+    assert_eq!(response.header("x-inertia-version"), Some("cache-v1"));
+    assert!(response.header("age").is_none());
+    assert!(suprnova::render_cache::telemetry::recorded_lookups_for_test().is_empty());
+    assert_eq!(PRIVATE_RUNS.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn cache_review_3_preboxed_hook_is_refused_at_boot_with_its_route() {
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    struct EagerShares;
+    impl suprnova::InertiaMiddlewareHooks for EagerShares {
+        fn share(&self, _: &dyn InertiaRequestExt) -> suprnova::indexmap::IndexMap<String, Prop> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            [("viewer".to_owned(), Prop::eager("private".into()))].into()
+        }
+    }
+    let _harness = support::boot_with_render_cache().await;
+    Inertia::cache_page::<PageProps>(
+        "/boxed-hook",
+        "Cache/Stitched",
+        &[],
+        &["errors", "flash", "viewer"],
+    )
+    .unwrap();
+    let config = InertiaConfig::new().development(true).hooks(EagerShares);
+    let router: Router = Router::new()
+        .get("/boxed-hook", page)
+        .middleware_boxed(suprnova::middleware::into_boxed(Inertia::middleware(
+            &config,
+        )))
+        .into();
+    let policy = RenderCachePolicy::builder(RepresentationClass::PublicShellStitched)
+        .freshness(FreshnessPolicy::new(60_000, 0, 0).unwrap())
+        .build()
+        .unwrap();
+    let router = router.try_render_cache("/boxed-hook", policy).unwrap();
+    let mut config = suprnova::render_cache::config::RenderCacheConfig::from_env().unwrap();
+    config.enabled = true;
+    let error = match suprnova::render_cache::RenderCache::install(router, config).await {
+        Err(error) => error,
+        Ok(_) => panic!("a preboxed hook must fail boot"),
+    };
+    assert!(error.to_string().contains("/boxed-hook"));
+    assert!(error.to_string().contains("middleware hook"));
+    assert_eq!(CALLS.load(Ordering::SeqCst), 0);
 }

@@ -709,8 +709,15 @@ register by type:
 - `global_middleware!(M)` and `register_global_middleware(M)`;
 - an alias, through `.middleware_named(...)` or a group.
 
-A middleware you box by hand and add with `.middleware_boxed(...)` has no
-type the list could name, and it keeps its place.
+`into_boxed(M)` retains the type and framework metadata. Adding that box
+with `.middleware_boxed(...)` follows the same priority order and boot
+checks as `.middleware(M)`. A raw closure built by hand still has no known
+type and keeps its place.
+
+RenderCache keeps security headers and Inertia protocol middleware outside
+its publication boundary, including when the priority list is empty. The
+asset-version check runs before cache lookup. Cacheable page transport
+headers run after publication and keep the assembled response private.
 
 `middleware_priority()` returns a snapshot of the current `Vec<TypeId>`
 for diagnostics.

@@ -225,13 +225,12 @@ async fn prepending_to_the_list_outranks_what_the_list_held() {
 
 #[tokio::test]
 #[serial]
-async fn a_middleware_boxed_by_hand_has_no_type_and_keeps_its_place() {
+async fn cache_review_3_public_box_keeps_its_type_for_priority() {
     let _list = PriorityList::empty();
     append_middleware_priority::<SessionMiddleware>();
     append_middleware_priority::<AuthMiddleware>();
 
-    // `into_boxed` does not register the type. The list cannot name what
-    // it cannot see, so the box stays where it was put.
+    // Public boxing must preserve the type that the priority list names.
     let router = Router::new()
         .get("/account", |_req: Request| async { text("ok") })
         .middleware_boxed(into_boxed(AuthMiddleware))
@@ -239,6 +238,36 @@ async fn a_middleware_boxed_by_hand_has_no_type_and_keeps_its_place() {
 
     assert_eq!(
         run(router, MiddlewareRegistry::new(), "/account").await,
-        ["auth", "session"]
+        ["session", "auth"]
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn cache_review_3_preboxed_inertia_keeps_its_type_for_priority() {
+    struct Shares;
+    impl suprnova::InertiaMiddlewareHooks for Shares {
+        fn share(
+            &self,
+            _: &dyn suprnova::InertiaRequestExt,
+        ) -> suprnova::indexmap::IndexMap<String, suprnova::Prop> {
+            RAN.lock().unwrap().push("inertia");
+            Default::default()
+        }
+    }
+    let _guard = suprnova::testing::TestContainer::fake();
+    let _list = PriorityList::empty();
+    append_middleware_priority::<suprnova::InertiaMiddleware>();
+    append_middleware_priority::<AuthMiddleware>();
+    let config = suprnova::InertiaConfig::new()
+        .development(true)
+        .hooks(Shares);
+    let router = Router::new()
+        .get("/boxed", |_request: Request| async { text("ok") })
+        .middleware(AuthMiddleware)
+        .middleware_boxed(into_boxed(suprnova::Inertia::middleware(&config)));
+    assert_eq!(
+        run(router, MiddlewareRegistry::new(), "/boxed").await,
+        ["inertia", "auth"]
     );
 }

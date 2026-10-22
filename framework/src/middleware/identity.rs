@@ -17,10 +17,9 @@
 //!
 //! Registrations and request-boundary wrappers of known middleware write
 //! the table. Dropped wrappers are swept with the other weak entries.
-//! [`into_boxed`] itself writes nothing, because ordinary request wrappers
-//! have no registration metadata to retain. A middleware boxed
-//! by hand or by `into_boxed` has no known type, and the priority list
-//! leaves it where it is.
+//! Public [`super::into_boxed`] uses the same registration path, so its type,
+//! security policy, Inertia hooks and page tools remain visible. Only a raw
+//! closure built by hand has no known type and keeps its place.
 //!
 //! An entry holds a `Weak`, never the middleware. The address of a dropped
 //! box can be given to a new one, and the `Weak` is how a lookup tells that
@@ -39,7 +38,7 @@
 //! from the table: [`MiddlewareExclusion::matches`] compares the type
 //! [`boxed_as`] remembered or the alias [`name_as`] remembered.
 
-use super::{BoxedMiddleware, Middleware, MiddlewareFuture, Next, into_boxed};
+use super::{BoxedMiddleware, Middleware, MiddlewareFuture, Next};
 use crate::FrameworkError;
 use crate::http::Request;
 use std::any::TypeId;
@@ -99,7 +98,11 @@ pub(crate) fn boxed_as<M: Middleware + 'static>(middleware: M) -> BoxedMiddlewar
         || (&middleware as &dyn std::any::Any)
             .downcast_ref::<crate::InertiaHeadersMiddleware>()
             .is_some_and(crate::InertiaHeadersMiddleware::has_hooks);
-    let boxed = into_boxed(middleware);
+    let middleware = Arc::new(middleware);
+    let boxed: BoxedMiddleware = Arc::new(move |request, next| {
+        let middleware = Arc::clone(&middleware);
+        Box::pin(async move { middleware.handle(request, next).await })
+    });
     // A poisoned table is recovered, as the registries beside it are: a
     // panic elsewhere must not stop middleware from being registered.
     let mut table = table().write().unwrap_or_else(|p| p.into_inner());
@@ -459,19 +462,15 @@ mod tests {
     }
 
     #[test]
-    fn a_registered_box_knows_its_type_and_a_plain_box_does_not() {
+    fn registered_and_public_boxes_keep_their_type() {
         let first = boxed_as(First);
         let second = boxed_as(Second);
-        let plain = into_boxed(First);
+        let public = super::super::into_boxed(First);
 
         assert_eq!(type_of(&first), Some(TypeId::of::<First>()));
         assert_eq!(type_of(&second), Some(TypeId::of::<Second>()));
         assert_eq!(type_of(&first.clone()), Some(TypeId::of::<First>()));
-        assert_eq!(
-            type_of(&plain),
-            None,
-            "into_boxed writes nothing: the request path calls it for every request"
-        );
+        assert_eq!(type_of(&public), Some(TypeId::of::<First>()));
     }
 
     #[test]
