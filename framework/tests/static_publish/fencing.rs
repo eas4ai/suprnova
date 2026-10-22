@@ -65,7 +65,7 @@ async fn pub_003_round2_1_rejected_put_with_late_reply_rolls_back() {
     );
 }
 #[tokio::test]
-async fn pub_003_round2_1_unreadable_commit_is_unknown_then_realigns() {
+async fn pub_003_round2_1_unreadable_commit_is_unknown_then_checks_selection() {
     let (publisher, disk, state, driver, previous, result) = delayed(3).await;
     assert!(result.is_err());
     assert!(
@@ -94,8 +94,8 @@ async fn pub_003_round2_1_unreadable_commit_is_unknown_then_realigns() {
             .into_iter()
             .filter(|event| event.starts_with("switch:"))
             .count(),
-        switches + 1,
-        "an unchanged recovery attempt must realign the driver"
+        switches,
+        "a known selection already matching the durable manifest needs no switch"
     );
 }
 #[tokio::test]
@@ -207,6 +207,9 @@ struct TakeoverDriver {
 impl CdnDriver for TakeoverDriver {
     fn capabilities(&self) -> CdnCapabilities {
         Default::default()
+    }
+    async fn selected_version(&self) -> Result<Option<String>, FrameworkError> {
+        self.ledger.selected_version().await
     }
     async fn switch_version(&self, version: &str) -> Result<(), FrameworkError> {
         self.ledger.switch_version(version).await?;
@@ -322,5 +325,81 @@ async fn pub_003_round2_2_clock_skew_setting_is_loaded() {
     assert!(
         Publisher::from_operator(memory(), "v1", PublishConfig::default()).is_err(),
         "invalid skew must be diagnosed"
+    );
+}
+
+#[tokio::test]
+async fn pub_003_round4_1_cached_success_cannot_skip_another_publishers_unknown_switch() {
+    let raw = memory();
+    let probe = Arc::new(Probe::default());
+    let driver = Arc::new(MemoryCdnDriver::default());
+    let a = Publisher::from_operator(raw.clone(), "v1", PublishConfig::default())
+        .unwrap()
+        .with_cdn(driver.clone());
+    let old = a.publish(vec![page("old")]).await.unwrap().version;
+    assert_eq!(a.status().await.outcome, "success");
+    let b = Publisher::from_operator(
+        raw.clone().layer(ProbeLayer(probe.clone())),
+        "v1",
+        PublishConfig::default(),
+    )
+    .unwrap()
+    .with_cdn(driver.clone());
+    probe.commit_mode.store(4, Ordering::SeqCst);
+    assert!(b.publish(vec![page("uncommitted")]).await.is_err());
+    assert_eq!(b.status().await.outcome, "unknown");
+    assert!(!raw.exists("_pub/lease.json").await.unwrap());
+    assert_ne!(
+        driver.events().unwrap().last().unwrap(),
+        &format!("switch:{old}")
+    );
+    let events = driver.events().unwrap().len();
+    a.publish_with(|| async {
+        assert_eq!(
+            driver.selected_version().await.unwrap().as_deref(),
+            Some(old.as_str())
+        );
+        assert_eq!(
+            a.status().await.outcome,
+            "pending",
+            "success cannot precede reconciliation"
+        );
+        Ok(vec![page("old")])
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        driver.events().unwrap()[events..],
+        [format!("switch:{old}")],
+        "unchanged A must repair the actual CDN selection despite its cached success"
+    );
+    assert_eq!(a.status().await.outcome, "success");
+    assert_eq!(a.manifest().await.unwrap().live, old);
+}
+
+#[tokio::test]
+async fn pub_003_round4_1_unknown_driver_selection_always_realigns() {
+    struct Unknown(Arc<MemoryCdnDriver>);
+    #[async_trait]
+    impl CdnDriver for Unknown {
+        fn capabilities(&self) -> CdnCapabilities {
+            Default::default()
+        }
+        async fn switch_version(&self, version: &str) -> Result<(), FrameworkError> {
+            self.0.switch_version(version).await
+        }
+        async fn purge(&self, _: Purge) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+    }
+    let ledger = Arc::new(MemoryCdnDriver::default());
+    let (p, _) = publisher("v1");
+    let p = p.with_cdn(Arc::new(Unknown(ledger.clone())));
+    let first = p.publish(vec![page("one")]).await.unwrap();
+    let events = ledger.events().unwrap().len();
+    p.publish(vec![page("one")]).await.unwrap();
+    assert_eq!(
+        ledger.events().unwrap()[events..],
+        [format!("switch:{}", first.version)]
     );
 }

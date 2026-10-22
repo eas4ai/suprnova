@@ -158,7 +158,6 @@ struct Delivery {
     next: Manifest,
     uploads: Vec<Upload>,
     outcome: PublishOutcome,
-    realign: bool,
 }
 
 impl Publisher {
@@ -354,15 +353,39 @@ impl Publisher {
             }
         };
         lease.track(work);
+        // Recovery can mutate the CDN, so this owned task drains before releasing its lease.
+        let publisher = self.clone();
+        let (mut lease, serial, prepared) = tokio::spawn(async move {
+            let prepared = tokio::time::timeout_at(forward, async {
+                let snapshot = super::lease::ManifestSnapshot::load(&publisher.disk).await?;
+                {
+                    let mut status = publisher.status.lock().await;
+                    status.live_version.clone_from(&snapshot.manifest.live);
+                    status.outcome = "pending".into();
+                }
+                if !snapshot.manifest.live.is_empty()
+                    && let Some(driver) = &publisher.driver
+                {
+                    lease.verify().await?;
+                    if driver.selected_version().await?.as_deref()
+                        != Some(snapshot.manifest.live.as_str())
+                    {
+                        lease.verify().await?;
+                        driver.switch_version(&snapshot.manifest.live).await?;
+                    }
+                }
+                Ok::<_, FrameworkError>(snapshot)
+            })
+            .await
+            .map_err(|_| error("publication CDN reconciliation timed out"))
+            .and_then(|result| result);
+            (lease, serial, prepared)
+        })
+        .await
+        .map_err(|failure| error(format!("publication reconciliation task failed: {failure}")))?;
         let staged = tokio::time::timeout_at(forward, async {
-            let snapshot = super::lease::ManifestSnapshot::load(&self.disk).await?;
+            let snapshot = prepared?;
             let previous = &snapshot.manifest;
-            let realign = self.status().await.outcome != "success";
-            self.status
-                .lock()
-                .await
-                .live_version
-                .clone_from(&previous.live);
             let pages = render().await?;
             let (next, uploads, outcome) = self.plan(previous, pages, retain_omitted)?;
             self.stage(previous, &uploads).await?;
@@ -371,7 +394,6 @@ impl Publisher {
                 next,
                 uploads,
                 outcome,
-                realign,
             })
         })
         .await
@@ -471,7 +493,6 @@ impl Publisher {
             mut next,
             uploads,
             mut outcome,
-            realign,
         } = delivery;
         tokio::time::timeout_at(forward, async {
             lease.verify().await?;
@@ -486,7 +507,7 @@ impl Publisher {
             status.previous_version = Some(previous.live.clone());
             status.attempted_version = Some(next.live.clone());
         }
-        if next.live == previous.live && !realign {
+        if next.live == previous.live {
             outcome.prune = self.maintenance(previous, deadline, lease).await;
             return Ok(outcome);
         }
@@ -498,10 +519,6 @@ impl Publisher {
             if let Err(failure) = switched {
                 return Err(self.rollback_cdn(previous, failure, lease, deadline).await);
             }
-        }
-        if next.live == previous.live {
-            outcome.prune = self.maintenance(previous, deadline, lease).await;
-            return Ok(outcome);
         }
         if tokio::time::Instant::now() >= forward {
             return Err(self

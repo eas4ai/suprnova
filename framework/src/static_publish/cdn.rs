@@ -43,6 +43,11 @@ pub trait CdnDriver: Send + Sync + 'static {
     ) -> Result<(), FrameworkError> {
         Ok(())
     }
+    /// Reads provider selection so recovery does not trust another process's cached status.
+    /// Unknown selection requires realignment with the durable manifest before rendering.
+    async fn selected_version(&self) -> Result<Option<String>, FrameworkError> {
+        Ok(None)
+    }
     /// Points the page origin at `_pub/<version>/` after uploads finish.
     async fn switch_version(&self, version: &str) -> Result<(), FrameworkError>;
     /// Restores the previous live revision after a failed switch or manifest write.
@@ -63,6 +68,7 @@ pub trait CdnDriver: Send + Sync + 'static {
 #[derive(Default)]
 pub struct MemoryCdnDriver {
     events: Mutex<Vec<String>>,
+    selected: Mutex<Option<String>>,
 }
 
 impl MemoryCdnDriver {
@@ -84,7 +90,17 @@ impl CdnDriver for MemoryCdnDriver {
             prefix: true,
         }
     }
+    async fn selected_version(&self) -> Result<Option<String>, FrameworkError> {
+        self.selected
+            .lock()
+            .map(|selected| selected.clone())
+            .map_err(|_| super::error("CDN selection lock poisoned"))
+    }
     async fn switch_version(&self, version: &str) -> Result<(), FrameworkError> {
+        *self
+            .selected
+            .lock()
+            .map_err(|_| super::error("CDN selection lock poisoned"))? = Some(version.to_string());
         self.events
             .lock()
             .map_err(|_| super::error("CDN event lock poisoned"))?
@@ -92,6 +108,11 @@ impl CdnDriver for MemoryCdnDriver {
         Ok(())
     }
     async fn rollback_version(&self, previous: Option<&str>) -> Result<(), FrameworkError> {
+        *self
+            .selected
+            .lock()
+            .map_err(|_| super::error("CDN selection lock poisoned"))? =
+            previous.map(str::to_string);
         self.events
             .lock()
             .map_err(|_| super::error("CDN event lock poisoned"))?

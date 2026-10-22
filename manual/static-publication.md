@@ -173,8 +173,11 @@ manifest PUT is reconciled by reading the durable manifest: the attempted live
 version means success; the predecessor means failure and a fenced rollback.
 A failed read or a third version records `outcome: "unknown"`, `previous_version`
 and `attempted_version` in status and leaves the CDN unchanged. The next
-publication reads the manifest fresh and calls `switch_version` for its own
-version to realign the CDN, including an unchanged recovery attempt.
+publication reads the manifest fresh and checks `CdnDriver::selected_version`
+before rendering. A different or unknown selection calls `switch_version` for
+the manifest's live version, independently of cached status. CloudFront reads
+its configured origin path; custom drivers may return unknown. The first
+publication has no live version to restore.
 
 Mutable assets and the fingerprinted dependencies in their relative asset graph
 form one set at `_pub/<asset-version>/_assets/<set-digest>/<public path>`.

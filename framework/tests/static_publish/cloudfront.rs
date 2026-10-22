@@ -603,3 +603,37 @@ assert.equal(Object.keys(response.headers).some(key=>key.startsWith('x-amz-meta-
         String::from_utf8_lossy(&result.stderr)
     );
 }
+
+#[tokio::test]
+async fn pub_003_round4_1_cloudfront_reads_selection_relative_to_the_s3_root() {
+    for (path, expected) in [
+        ("/pages/_pub/v1/revision", Some("v1/revision")),
+        ("/_pub/v1/revision", None),
+        ("/pages/_pub/../outside", None),
+        ("/pages", None),
+    ] {
+        let config = CONFIG.replacen(
+            "<OriginPath></OriginPath>",
+            &format!("<OriginPath>{path}</OriginPath>"),
+            1,
+        );
+        let mock = Mock::start(vec![Reply::config(config)]).await;
+        let driver = CloudFrontDriver::new(
+            "DISTRIBUTION1",
+            "public-pages",
+            &S3Config {
+                root: Some("pages".into()),
+                ..keys()
+            },
+        )
+        .unwrap()
+        .with_mock_endpoint(&mock.endpoint)
+        .unwrap();
+        assert_eq!(
+            driver.selected_version().await.unwrap().as_deref(),
+            expected
+        );
+        assert_eq!(mock.requests().len(), 1);
+        assert_eq!(mock.requests()[0].method, "GET");
+    }
+}

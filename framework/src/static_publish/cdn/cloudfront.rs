@@ -347,6 +347,26 @@ impl CdnDriver for CloudFrontDriver {
         }
         Ok(())
     }
+    async fn selected_version(&self) -> Result<Option<String>, FrameworkError> {
+        let (_, config) = self
+            .request(http::Method::GET, "/config", String::new(), None, false)
+            .await?;
+        let (_, path) = replace_origin_path(&config, &self.origin_id, "")?;
+        let prefix = format!("{}/_pub/", self.root_prefix);
+        Ok(path
+            .strip_prefix(&prefix)
+            .filter(|version| {
+                !version.is_empty()
+                    && version.split('/').all(|part| {
+                        !part.is_empty()
+                            && !matches!(part, "." | "..")
+                            && part.bytes().all(|c| {
+                                c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.')
+                            })
+                    })
+            })
+            .map(str::to_string))
+    }
     async fn switch_version(&self, version: &str) -> Result<(), FrameworkError> {
         if version.is_empty()
             || version.split('/').any(|part| {

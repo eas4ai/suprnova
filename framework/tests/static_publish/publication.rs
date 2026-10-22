@@ -250,6 +250,7 @@ async fn pub_003_dependency_changes_update_manifest_without_reuploading_content(
 #[derive(Default)]
 struct FailingCdn {
     events: Mutex<Vec<String>>,
+    selected: Mutex<Option<String>>,
     fail_switch: AtomicBool,
     stall_switch: AtomicBool,
 }
@@ -261,7 +262,11 @@ impl CdnDriver for FailingCdn {
             ..Default::default()
         }
     }
+    async fn selected_version(&self) -> Result<Option<String>, FrameworkError> {
+        Ok(self.selected.lock().unwrap().clone())
+    }
     async fn switch_version(&self, version: &str) -> Result<(), FrameworkError> {
+        *self.selected.lock().unwrap() = Some(version.to_string());
         self.events
             .lock()
             .unwrap()
@@ -278,6 +283,7 @@ impl CdnDriver for FailingCdn {
         }
     }
     async fn rollback_version(&self, previous: Option<&str>) -> Result<(), FrameworkError> {
+        *self.selected.lock().unwrap() = previous.map(str::to_string);
         self.events
             .lock()
             .unwrap()
@@ -721,6 +727,13 @@ impl oio::Write for ProbeWriter {
         } else {
             0
         };
+        if mode == 4 {
+            self.state.fail_manifest_read.store(true, Ordering::SeqCst);
+            return Err(opendal::Error::new(
+                opendal::ErrorKind::PermissionDenied,
+                "rejected PUT with unreadable outcome",
+            ));
+        }
         if mode == 2 {
             tokio::time::sleep(Duration::from_secs(5)).await;
             return Err(opendal::Error::new(
