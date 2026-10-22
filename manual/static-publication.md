@@ -71,6 +71,9 @@ fn publish(router: &Router) -> Result<(), FrameworkError> {
 Register the source disk `public-assets` against the application's public
 directory before this function. It supplies built assets and source images.
 Use the same Inertia asset version for the page config and the publisher.
+Asset versions reserve `lease`, `manifest.json`, `lease.json`, every name that
+begins with `_` and every name that contains `/`. Both publisher constructors
+refuse these names because they overlap the publication control namespace.
 Concrete parameterized paths can be listed with `add_path`. A missing public
 path is also rendered and published when its first origin request arrives.
 

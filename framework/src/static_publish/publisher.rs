@@ -20,6 +20,29 @@ use tokio::sync::Mutex;
 const MANIFEST: &str = "_pub/manifest.json";
 const STATUS: &str = "_pub/status.json";
 
+// Control objects and hidden namespaces must remain disjoint from asset versions.
+fn validate_asset_version(version: &str) -> Result<(), FrameworkError> {
+    if matches!(version, "lease" | "manifest.json" | "lease.json")
+        || version.starts_with('_')
+        || version.contains('/')
+    {
+        return Err(error(
+            "reserved asset version: lease, manifest.json, lease.json, names beginning with _ and names containing / are reserved",
+        ));
+    }
+    if version.is_empty()
+        || !version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        || matches!(version, "." | "..")
+    {
+        return Err(error(
+            "asset version must be a nonempty path-safe identifier",
+        ));
+    }
+    Ok(())
+}
+
 /// Lifetimes and resource bounds applied to every publication path.
 #[derive(Clone, Debug)]
 pub struct PublishConfig {
@@ -168,6 +191,7 @@ impl Publisher {
         asset_version: &str,
         config: PublishConfig,
     ) -> Result<Self, FrameworkError> {
+        validate_asset_version(asset_version)?;
         Self::from_operator(Storage::disk(disk)?, asset_version, config)
     }
     /// Accepts an application-owned OpenDAL operator.
@@ -184,16 +208,7 @@ impl Publisher {
         {
             return Err(error("STATIC_PUBLISH_CLOCK_SKEW must be integer seconds"));
         }
-        if asset_version.is_empty()
-            || !asset_version
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-            || matches!(asset_version, "." | "..")
-        {
-            return Err(error(
-                "asset version must be a nonempty path-safe identifier",
-            ));
-        }
+        validate_asset_version(asset_version)?;
         if config.concurrency == 0 || config.timeout.is_zero() || config.revalidate.is_zero() {
             return Err(error(
                 "concurrency, timeout and revalidate must be positive",

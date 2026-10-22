@@ -610,3 +610,81 @@ async fn pub_003_round6_1_fs_with_an_unsafe_reserved_staging_entry_is_refused() 
         "{failure}"
     );
 }
+
+#[test]
+fn pub_002_round6_2_reserved_asset_versions_refuse_both_configuration_paths() {
+    for version in [
+        "lease",
+        "manifest.json",
+        "lease.json",
+        "_private",
+        "_",
+        "build/nested",
+    ] {
+        let direct = Publisher::from_operator(memory(), version, PublishConfig::default());
+        let configured = Publisher::new("round6-not-registered", version, PublishConfig::default());
+        for result in [direct, configured] {
+            let failure = result
+                .err()
+                .unwrap_or_else(|| panic!("reserved version {version} must refuse"))
+                .to_string();
+            for expected in ["reserved", "lease", "manifest.json", "lease.json", "_", "/"] {
+                assert!(failure.contains(expected), "{version}: {failure}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn pub_008_round6_2_normal_asset_version_still_publishes_serves_and_prunes() {
+    let _container = suprnova::testing::TestContainer::fake();
+    suprnova::Storage::register_memory("round6-normal-pages");
+    let raw = suprnova::Storage::disk("round6-normal-pages").unwrap();
+    let p = Publisher::new(
+        "round6-normal-pages",
+        "build-20261022",
+        PublishConfig::default(),
+    )
+    .unwrap();
+    let old = p.publish(vec![asset_page("old")]).await.unwrap().version;
+    p.publish(vec![asset_page("live")]).await.unwrap();
+    let mut manifest = p.manifest().await.unwrap();
+    let live = manifest.live.clone();
+    let asset = manifest.versions[&live]
+        .objects
+        .iter()
+        .find(|entry| entry.asset && entry.path.ends_with("bg.png"))
+        .unwrap()
+        .clone();
+    let router = suprnova::Router::new();
+    suprnova::static_publish::StaticPublication::install(&router, p.clone()).unwrap();
+    let client = suprnova::testing::TestClient::new(router, suprnova::MiddlewareRegistry::new());
+    client
+        .get(format!("/{}", asset.path))
+        .send()
+        .await
+        .assert_ok()
+        .assert_see("pixels");
+    manifest.versions.get_mut(&old).unwrap().retired_at_ms = Some(0);
+    raw.write("_pub/manifest.json", serde_json::to_vec(&manifest).unwrap())
+        .await
+        .unwrap();
+    let removed = p.prune().await.unwrap();
+    assert!(
+        removed
+            .removed
+            .iter()
+            .any(|path| path.starts_with(&format!("_pub/{old}/")))
+    );
+    assert!(!removed.removed.contains(&asset.path));
+    assert!(raw.exists(&asset.path).await.unwrap());
+    client
+        .get(format!("/{}", asset.path))
+        .send()
+        .await
+        .assert_ok()
+        .assert_see("pixels");
+    let retained = p.manifest().await.unwrap();
+    assert_eq!(retained.live, live);
+    assert_eq!(retained.versions.len(), 1);
+}
