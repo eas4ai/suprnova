@@ -1,0 +1,5 @@
+error: duplicate registered Live action name
+  --> tests/ui/live/fail/duplicate_action_name.rs:14:5
+   |
+14 |     #[action(name = "save")]
+   |     ^

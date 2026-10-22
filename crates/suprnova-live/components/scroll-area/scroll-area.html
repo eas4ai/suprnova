@@ -1,0 +1,8 @@
+{#
+  suprnova.scroll-area - a labeled region that scrolls natively (DATA-001).
+  The region is focusable so the keyboard can scroll it, shows a visible
+  focus ring, and never traps focus. Content keeps its document order.
+#}
+{% macro scroll_area(id, label, axis="block") %}
+<div class="sn-scroll-area" id="{{ id }}" role="region" aria-label="{{ label }}" tabindex="0" data-sn-axis="{{ axis }}">{{ caller() }}</div>
+{% endmacro %}

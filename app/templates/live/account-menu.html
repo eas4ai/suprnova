@@ -1,0 +1,6 @@
+{% import "suprnova-ui/account-menu/account-menu.html" as menu %}
+{% call menu::account_menu("account", name, initials) %}
+{% call menu::account_link("/live/me", "Profile") %}{% endcall %}
+{% call menu::account_link("/live/forms", "Settings") %}{% endcall %}
+{% call menu::account_sign_out("/live/sign-out", csrf) %}{% endcall %}
+{% endcall %}

@@ -1,0 +1,149 @@
+{
+  "schema_version": 3,
+  "engine_version": "0.1.0",
+  "runtime_contract_version": 1,
+  "protocol_versions": [
+    1,
+    2
+  ],
+  "snapshot_versions": [
+    1
+  ],
+  "built_at": "1970-01-01T00:00:00.000Z",
+  "assets": [
+    {
+      "file": "suprnova-live.classic.js",
+      "role": "core-classic",
+      "bytes": 248634,
+      "sha256": "0d262564422dc7306fbcaadeb88f6713a4601eb0ce12532737bcc085df615b69",
+      "sri": "sha256-DSYlZEItxzBvvKreuI9nE6RgHrDOElMnN7zAhd9hW2k=",
+      "capability": "core@1",
+      "capability_version": 1,
+      "compatible_core": ">=0.1.0 <0.2.0",
+      "content_type": "text/javascript; charset=utf-8",
+      "script_kind": "classic",
+      "preload_rel": "preload",
+      "cache_control": "public, max-age=31536000, immutable"
+    },
+    {
+      "file": "suprnova-live.esm.js",
+      "role": "core-esm",
+      "bytes": 248438,
+      "sha256": "6424ad297efb0835c085ec32a1cc3ef13cf3f2de2b73f73559ce08eb12ae381b",
+      "sri": "sha256-ZCStKX77CDXAhewyocw+8Tzz8t4rc/c1Wc4I6xKuOBs=",
+      "capability": "core@1",
+      "capability_version": 1,
+      "compatible_core": ">=0.1.0 <0.2.0",
+      "content_type": "text/javascript; charset=utf-8",
+      "script_kind": "module",
+      "preload_rel": "modulepreload",
+      "cache_control": "public, max-age=31536000, immutable"
+    },
+    {
+      "file": "suprnova-live.stimulus.classic.js",
+      "role": "stimulus-classic",
+      "bytes": 10637,
+      "sha256": "2ecbe5d5ca72d2809128e2353c0467d47e80bda04055cfa53397231d348a0e54",
+      "sri": "sha256-Lsvl1cpy0oCRKOI1PARn1H6AvaBAVc+lM5cjHTSKDlQ=",
+      "capability": "stimulus@1",
+      "capability_version": 1,
+      "compatible_core": ">=0.1.0 <0.2.0",
+      "content_type": "text/javascript; charset=utf-8",
+      "script_kind": "classic",
+      "preload_rel": "preload",
+      "cache_control": "public, max-age=31536000, immutable"
+    },
+    {
+      "file": "suprnova-live.stimulus.esm.js",
+      "role": "stimulus-esm",
+      "bytes": 10767,
+      "sha256": "66eb02804783ec1a453aa4016c5fd44506ecb8744a19323ebe4579dce517bbfd",
+      "sri": "sha256-ZusCgEeD7BpFOqQBbF/URQbsuHRKGTI+vkV53OUXu/0=",
+      "capability": "stimulus@1",
+      "capability_version": 1,
+      "compatible_core": ">=0.1.0 <0.2.0",
+      "content_type": "text/javascript; charset=utf-8",
+      "script_kind": "module",
+      "preload_rel": "modulepreload",
+      "cache_control": "public, max-age=31536000, immutable"
+    },
+    {
+      "file": "suprnova-live.uploads.classic.js",
+      "role": "uploads-classic",
+      "bytes": 60854,
+      "sha256": "86c01c2420dd9deb3f84a57bcc24e97ce5df06bb7db36da55a2059da4eb10e2a",
+      "sri": "sha256-hsAcJCDdnes/hKV7zCTpfOXfBrt9s22lWiBZ2k6xDio=",
+      "capability": "uploads@1",
+      "capability_version": 1,
+      "compatible_core": ">=0.1.0 <0.2.0",
+      "content_type": "text/javascript; charset=utf-8",
+      "script_kind": "classic",
+      "preload_rel": "preload",
+      "cache_control": "public, max-age=31536000, immutable"
+    },
+    {
+      "file": "suprnova-live.uploads.esm.js",
+      "role": "uploads-esm",
+      "bytes": 61859,
+      "sha256": "77e8735e4002e41f51a699105bf8a5a685a8c7f44ceaef911a8223b59d8aa45c",
+      "sri": "sha256-d+hzXkAC5B9RppkQW/ilpoWox/RM6u+RGoIjtZ2KpFw=",
+      "capability": "uploads@1",
+      "capability_version": 1,
+      "compatible_core": ">=0.1.0 <0.2.0",
+      "content_type": "text/javascript; charset=utf-8",
+      "script_kind": "module",
+      "preload_rel": "modulepreload",
+      "cache_control": "public, max-age=31536000, immutable"
+    },
+    {
+      "file": "suprnova-live.async.classic.js",
+      "role": "async-classic",
+      "bytes": 104351,
+      "sha256": "6fe3e35c47c842c598fb49c47b452c0da8435693ee2d1da9391cd0f5b8b106d4",
+      "sri": "sha256-b+PjXEfIQsWY+0nEe0UsDahDVpPuLR2pORzQ9bixBtQ=",
+      "capability": "async@1",
+      "capability_version": 1,
+      "compatible_core": ">=0.1.0 <0.2.0",
+      "content_type": "text/javascript; charset=utf-8",
+      "script_kind": "classic",
+      "preload_rel": "preload",
+      "cache_control": "public, max-age=31536000, immutable"
+    },
+    {
+      "file": "suprnova-live.async.esm.js",
+      "role": "async-esm",
+      "bytes": 104647,
+      "sha256": "92f79e5e103e1d21dcfd96d14289ce612f59fe5a0315346e2ad1a3f24cd58625",
+      "sri": "sha256-kveeXhA+HSHc/ZbRQonOYS9Z/loDFTRuKtGj8kzVhiU=",
+      "capability": "async@1",
+      "capability_version": 1,
+      "compatible_core": ">=0.1.0 <0.2.0",
+      "content_type": "text/javascript; charset=utf-8",
+      "script_kind": "module",
+      "preload_rel": "modulepreload",
+      "cache_control": "public, max-age=31536000, immutable"
+    },
+    {
+      "file": "suprnova-ui.css",
+      "role": "ui-styles",
+      "bytes": 18046,
+      "sha256": "cf012b1991d77d94ddcc7adc891eba47dc74c65a0abfd6961c6381c20773285c",
+      "sri": "sha256-zwErGZHXfZTdzHrciR66R9x0xloKv9aWHGOBwgdzKFw=",
+      "capability": "ui@1",
+      "capability_version": 1,
+      "compatible_core": ">=0.1.0 <0.2.0",
+      "content_type": "text/css; charset=utf-8",
+      "script_kind": "stylesheet",
+      "preload_rel": "preload",
+      "cache_control": "public, max-age=31536000, immutable"
+    }
+  ],
+  "provenance": {
+    "idiomorph": {
+      "name": "idiomorph",
+      "version": "0.7.4",
+      "license": "0BSD",
+      "bundled": true
+    }
+  }
+}
