@@ -1045,3 +1045,53 @@ async fn budget_001_manifest_output_files_require_immutable_in_all_modes() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn budget_001_cross_origin_redirect_port_keeps_the_same_scope() {
+    use suprnova::http_client::{FakeResponse, Http};
+    let client = TestClient::new(
+        Router::new().get("/", |_: Request| async {
+            Ok(HttpResponse::text("")
+                .status(302)
+                .header("Location", "http://audit.test:8080/"))
+        }),
+        MiddlewareRegistry::new(),
+    );
+    let helper = client
+        .audit_page("http://audit.test/", &PageBudget::default())
+        .await
+        .unwrap();
+    let mut first = entry(
+        "/",
+        302,
+        "text/html",
+        "",
+        0,
+        &[("Location", "http://audit.test:8080/")],
+    );
+    first["request"]["url"] = serde_json::json!("http://audit.test/");
+    let mut external = entry("/", 200, "text/html", "", 2_000_000, &[]);
+    external["request"]["url"] = serde_json::json!("http://audit.test:8080/");
+    let captured = PageBudget::default()
+        .audit_har(&har(vec![first, external]))
+        .unwrap();
+    assert_eq!(helper, captured);
+    assert_eq!(helper.third_party_hosts, ["audit.test"]);
+    assert_eq!(helper.findings.len(), 1);
+    assert_eq!(helper.findings[0].rule, "first-redirect");
+    Http::fake(|| async {
+        Http::prevent_stray_requests(true);
+        Http::fake_url(
+            "http://audit.test/",
+            FakeResponse::new(302).header("Location", "http://audit.test:8080/"),
+        );
+        assert_eq!(
+            helper,
+            PageBudget::default()
+                .audit_url("http://audit.test/")
+                .await
+                .unwrap()
+        );
+    })
+    .await;
+}

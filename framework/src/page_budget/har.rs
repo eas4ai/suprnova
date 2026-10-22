@@ -88,12 +88,20 @@ pub(super) fn read(json: &str, budget: &PageBudget) -> Result<Capture, Framework
                 }
             }
         }
-        if document && url.host_str() == page.host_str() {
+        // Match the HTTP collector's initial upgrade exception exactly.
+        // A different port or an unrelated origin remains third-party.
+        if document
+            && origin.scheme() == "http"
+            && url.scheme() == "https"
+            && origin.host_str() == url.host_str()
+            && origin.port().is_none()
+            && url.port().is_none()
+        {
             origin = url.clone();
         }
         // Third-party bytes and headers are outside the application's budget.
         // Keep their hosts under the same allow-list rule as the HTTP collectors.
-        if !same_origin(&origin, &url) && !(document && url.host_str() == page.host_str()) {
+        if !same_origin(&origin, &url) {
             if let Some(host) = url.host_str() {
                 capture.hosts.insert(host.into());
             }
