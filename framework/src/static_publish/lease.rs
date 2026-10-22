@@ -64,6 +64,7 @@ impl StorageLease {
             ),
         };
         let bytes = serde_json::to_vec(&record).map_err(error)?;
+        let mut settle = false;
         match create(&disk, bytes.clone()).await {
             Ok(_) => {}
             Err(failure)
@@ -101,6 +102,7 @@ impl StorageLease {
                             "publication lease is held by another taker: {failure}"
                         ))
                     })?;
+                    settle = true;
                 }
             }
             Err(failure) => return Err(error(failure)),
@@ -113,7 +115,20 @@ impl StorageLease {
             skew_ms,
             work: None,
         };
-        lease.verify().await?;
+        lease.verify().await.map_err(|failure| {
+            error(format!(
+                "publication lease is held or changed while acquiring: {failure}"
+            ))
+        })?;
+        if settle {
+            // Other non-CAS takers must become visible before this holder starts side effects.
+            tokio::time::sleep(skew).await;
+            lease.verify().await.map_err(|failure| {
+                error(format!(
+                    "publication lease is held by another taker after settling: {failure}"
+                ))
+            })?;
+        }
         Ok(lease)
     }
 

@@ -440,8 +440,19 @@ async fn pub_003_uploads_run_in_parallel_within_the_configured_bound() {
 }
 
 #[derive(Debug, Default)]
+struct LeaseRace {
+    entered: AtomicUsize,
+    entered_event: tokio::sync::Notify,
+    gates: [tokio::sync::Notify; 2],
+    created: AtomicUsize,
+    created_event: tokio::sync::Notify,
+}
+#[derive(Debug, Default)]
 struct Probe {
     writes: Mutex<Vec<String>>,
+    deleted: Mutex<Vec<String>>,
+    lease_race: Mutex<Option<Arc<LeaseRace>>>,
+    replace_lease_on_list: Mutex<Option<Operator>>,
     refuse: Mutex<Option<String>>,
     stall: AtomicBool,
     delay: AtomicBool,
@@ -483,8 +494,8 @@ struct ProbeService {
 impl Service for ProbeService {
     type Reader = ProbeReader;
     type Writer = ProbeWriter;
-    type Lister = oio::Lister;
-    type Deleter = oio::Deleter;
+    type Lister = ProbeLister;
+    type Deleter = oio::OneShotDeleter<ProbeDelete>;
     type Copier = oio::Copier;
     fn info(&self) -> ServiceInfo {
         self.inner.info()
@@ -572,10 +583,17 @@ impl Service for ProbeService {
         path: &str,
         args: OpList,
     ) -> opendal::Result<Self::Lister> {
-        self.inner.list(ctx, path, args)
+        Ok(ProbeLister {
+            inner: self.inner.list(ctx, path, args)?,
+            state: self.state.clone(),
+        })
     }
     fn delete(&self, ctx: &OperationContext) -> opendal::Result<Self::Deleter> {
-        self.inner.delete(ctx)
+        Ok(oio::OneShotDeleter::new(ProbeDelete {
+            inner: self.inner.clone(),
+            ctx: ctx.clone(),
+            state: self.state.clone(),
+        }))
     }
     fn copy(
         &self,
@@ -689,6 +707,48 @@ impl Service for ProbeService {
         })
     }
 }
+struct ProbeLister {
+    inner: oio::Lister,
+    state: Arc<Probe>,
+}
+impl oio::List for ProbeLister {
+    async fn next(&mut self) -> opendal::Result<Option<oio::Entry>> {
+        let disk = self.state.replace_lease_on_list.lock().unwrap().take();
+        if let Some(disk) = disk {
+            disk.write(
+                "_pub/lease.json",
+                serde_json::json!({"owner":"replacement", "expires_at_ms":u64::MAX}).to_string(),
+            )
+            .await?;
+        }
+        self.inner.next().await
+    }
+}
+struct ProbeDelete {
+    inner: Servicer,
+    ctx: OperationContext,
+    state: Arc<Probe>,
+}
+impl oio::OneShotDelete for ProbeDelete {
+    async fn delete_once(&self, path: String, args: opendal::raw::OpDelete) -> opendal::Result<()> {
+        use oio::Delete as _;
+        let race = self.state.lease_race.lock().unwrap().clone();
+        if path == "_pub/lease.json"
+            && let Some(race) = race
+        {
+            let index = race.entered.fetch_add(1, Ordering::SeqCst);
+            if index < 2 {
+                race.entered_event.notify_one();
+                race.gates[index].notified().await;
+            }
+        }
+        let mut deleter = self.inner.delete(&self.ctx)?;
+        deleter.delete(&path, args).await?;
+        deleter.close().await?;
+        self.state.deleted.lock().unwrap().push(path);
+        Ok(())
+    }
+}
 struct ProbeWriter {
     path: String,
     service: Servicer,
@@ -789,6 +849,13 @@ impl oio::Write for ProbeWriter {
         } else {
             self.inner.close().await?
         };
+        if self.path == "_pub/lease.json" {
+            let race = self.state.lease_race.lock().unwrap().clone();
+            if let Some(race) = race {
+                race.created.fetch_add(1, Ordering::SeqCst);
+                race.created_event.notify_one();
+            }
+        }
         if mode == 3 {
             self.state.fail_manifest_read.store(true, Ordering::SeqCst);
         }
@@ -1607,3 +1674,6 @@ mod graphs;
 
 #[path = "sets.rs"]
 mod sets;
+
+#[path = "maintenance.rs"]
+mod maintenance;

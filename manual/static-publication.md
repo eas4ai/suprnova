@@ -157,9 +157,11 @@ STATIC_PUBLISH_CLOCK_SKEW=10 suprnova static:publish
 ```
 
 Filesystem and memory disks take over an expired lease by deleting it, creating
-it atomically and verifying the new owner. Without conditional replacement this
-takeover is not atomic and relies on the expiry margin, so keep the publication
-disk exclusive to this pipeline.
+it atomically, waiting the configured skew interval and verifying ownership
+again. Takeover without conditional replacement is best-effort and relies on
+the settle period and on the exclusive publication disk. Mirror writes, prune
+deletions and prune manifest commits verify ownership before each operation;
+a lost lease stops maintenance and reports the current owner.
 
 Run the same command from the server deployment or a console process:
 

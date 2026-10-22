@@ -625,13 +625,20 @@ impl Publisher {
             };
         }
         if self.driver.is_none()
-            && tokio::time::timeout_at(deadline, self.mirror(manifest))
+            && let Err(failure) = tokio::time::timeout_at(deadline, self.mirror(manifest, lease))
                 .await
-                .is_err()
+                .map_err(|_| {
+                    error("static publication mirror deadline exceeded; manifest remains live")
+                })
+                .and_then(|result| result)
         {
-            tracing::error!("static publication mirror deadline exceeded; manifest remains live");
+            tracing::error!(%failure, "static publication maintenance stopped");
+            return PruneOutcome {
+                error: Some(failure.to_string()),
+                ..Default::default()
+            };
         }
-        match tokio::time::timeout_at(deadline, self.retention()).await {
+        match tokio::time::timeout_at(deadline, self.retention(lease)).await {
             Ok(outcome) => outcome,
             Err(_) => PruneOutcome {
                 error: Some("retention deadline exceeded; live objects retained".into()),
@@ -640,7 +647,11 @@ impl Publisher {
         }
     }
     // Bucket mirrors are maintained only after the durable manifest selects complete objects.
-    async fn mirror(&self, manifest: &Manifest) {
+    async fn mirror(
+        &self,
+        manifest: &Manifest,
+        lease: &super::lease::StorageLease,
+    ) -> Result<(), FrameworkError> {
         if let Some(version) = manifest.versions.get(&manifest.live) {
             for object in version.objects.iter().filter(|object| !object.asset) {
                 let key = if object.url.ends_with("/index.json") {
@@ -671,6 +682,7 @@ impl Publisher {
                 {
                     continue;
                 }
+                lease.verify().await?;
                 let mirrored = match source {
                     Ok(bytes) => self.write(&key, &bytes, &object.headers).await,
                     Err(failure) => Err(error(failure)),
@@ -680,9 +692,10 @@ impl Publisher {
                 }
             }
         }
+        Ok(())
     }
-    async fn retention(&self) -> PruneOutcome {
-        match self.prune_locked().await {
+    async fn retention(&self, lease: &super::lease::StorageLease) -> PruneOutcome {
+        match self.prune_locked(lease).await {
             Ok(prune) => prune,
             Err(e) => {
                 tracing::error!(error=%e,"static publication prune failed; live objects retained");
@@ -1233,7 +1246,7 @@ impl Publisher {
         let publisher = self.clone();
         tokio::spawn(async move {
             let _serial = serial;
-            let result = tokio::time::timeout_at(deadline, publisher.prune_locked())
+            let result = tokio::time::timeout_at(deadline, publisher.prune_locked(&lease))
                 .await
                 .map_err(|_| error("prune timed out; live references retained"))
                 .and_then(|result| result);
@@ -1243,7 +1256,11 @@ impl Publisher {
         .await
         .map_err(|failure| error(format!("prune task failed: {failure}")))?
     }
-    async fn prune_locked(&self) -> Result<PruneOutcome, FrameworkError> {
+    async fn prune_locked(
+        &self,
+        lease: &super::lease::StorageLease,
+    ) -> Result<PruneOutcome, FrameworkError> {
+        lease.verify().await?;
         let snapshot = super::lease::ManifestSnapshot::load(&self.disk).await?;
         let mut manifest = snapshot.manifest.clone();
         let now = now_ms();
@@ -1376,6 +1393,7 @@ impl Publisher {
                 })
             };
             if old {
+                lease.verify().await?;
                 self.disk.delete(&key).await.map_err(error)?;
                 report.removed.push(key);
             } else {
@@ -1385,6 +1403,7 @@ impl Publisher {
         let before = manifest.versions.len();
         manifest.versions.retain(|id, _| retained.contains(id));
         if before != manifest.versions.len() {
+            lease.verify().await?;
             snapshot.commit(&self.disk, &manifest).await?;
         }
         Ok(report)
