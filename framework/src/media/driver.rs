@@ -17,7 +17,8 @@ use crate::error::FrameworkError;
 use super::color::Color;
 use super::custom::{CustomTransformation, TransformationSettings};
 
-/// Default lossy encode quality. The developer chose 85 because lower quality blurs images.
+/// Default lossy encode quality: 85, not Laravel's 70, because lower quality
+/// blurs images.
 ///
 /// Only the lossy encoders read it. See [`ImagePipeline::quality`] for which
 /// formats honour the knob and which ignore it.

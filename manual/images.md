@@ -97,8 +97,8 @@ filled memory.
 | `optimize(format, q)` | `to_format(format).quality(q)` in one call |
 | `using(driver)` | Process this image with the `oxideav` or `magick` driver (see [Backends](#backends)) |
 
-The default departs from Laravel's 70 on the developer's ruling that quality
-below 85 blurs images.
+The default departs from Laravel's 70 because quality below 85 blurs
+images.
 
 Values that would be nonsense are clamped rather than rejected:
 `blur(500)` records `100`, `quality(0)` records `1`, and a side of `0`
