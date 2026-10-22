@@ -335,14 +335,25 @@ impl PageBudget {
             if self.forbid_asset_request_cookie && resource.request_cookie {
                 audit.fail(url, "asset-request-cookie", "Cookie present", "no Cookie");
             }
+            let cache_control = resource
+                .headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("cache-control"))
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
             if self.require_immutable
                 && fingerprinted(&resource.url, &pattern)
-                && !immutable(resource.header("cache-control").unwrap_or(""))
+                && !immutable(&cache_control)
             {
                 audit.fail(
                     url,
                     "fingerprint-cache",
-                    resource.header("cache-control").unwrap_or("missing"),
+                    if cache_control.is_empty() {
+                        "missing"
+                    } else {
+                        &cache_control
+                    },
                     "public, max-age=31536000, immutable",
                 );
             }

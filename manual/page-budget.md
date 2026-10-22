@@ -106,7 +106,11 @@ cargo run --bin console -- budget:audit https://example.com/
 
 HTTP requests have a ten-second timeout. The whole collection has a thirty-second
 timeout, a limit of 256 resources and a 16 MiB response limit. These collection
-limits are configurable. Redirects are recorded before following same-origin
+limits are configurable. Discovery deduplicates and caps references as it
+parses HTML, CSS and manifests. The pending queue is bounded too. Repeating
+one reference does not allocate another queue entry. Every `Cache-Control`
+header line contributes to the policy; a second `no-cache` line fails the
+immutable rule. Redirects are recorded before following same-origin
 locations. The initial HTTP-to-HTTPS upgrade may be followed on the same host;
 it still fails the first-redirect rule. Other external redirects are listed.
 

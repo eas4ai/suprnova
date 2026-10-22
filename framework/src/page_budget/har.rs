@@ -181,7 +181,7 @@ pub(super) fn read(json: &str, budget: &PageBudget) -> Result<Capture, Framework
         {
             capture.hosts.insert(host.into());
         }
-        for link in capture.references(resource)?.links {
+        for link in capture.references(resource, budget.max_resources)?.links {
             if !same_origin(&origin, &link.url)
                 && let Some(host) = link.url.host_str()
             {
@@ -196,7 +196,7 @@ pub(super) fn read(json: &str, budget: &PageBudget) -> Result<Capture, Framework
         if manifest_urls.contains(resource.url.as_str()) {
             resource.manifest = true;
             if resource.body.is_some() {
-                for link in capture.references(resource)?.links {
+                for link in capture.references(resource, budget.max_resources)?.links {
                     if !same_origin(&origin, &link.url)
                         && let Some(host) = link.url.host_str()
                     {

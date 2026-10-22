@@ -12,11 +12,13 @@ pub(super) struct Capture {
     pub hosts: BTreeSet<String>,
     pub alternatives: BTreeSet<String>,
     pub image_groups: Vec<Vec<String>>,
+    reference_urls: BTreeSet<String>,
 }
 
 impl Capture {
     pub(super) fn new(page: Url) -> Self {
         Self {
+            reference_urls: BTreeSet::from([page.to_string()]),
             page,
             resources: Vec::new(),
             hosts: BTreeSet::new(),
@@ -28,24 +30,55 @@ impl Capture {
     pub(super) fn references(
         &mut self,
         resource: &Resource,
+        maximum: usize,
     ) -> Result<discover::References, FrameworkError> {
         let Some(bytes) = &resource.body else {
             return Ok(discover::References::default());
         };
         let mut refs = if resource.document && resource.mime().eq_ignore_ascii_case("text/html") {
-            discover::html(&resource.url, &String::from_utf8_lossy(bytes))
+            discover::html(&resource.url, &String::from_utf8_lossy(bytes), maximum)?
         } else if resource.mime().eq_ignore_ascii_case("text/css")
             || resource.url.path().ends_with(".css")
         {
-            discover::css(&resource.url, &String::from_utf8_lossy(bytes))
+            discover::css(&resource.url, &String::from_utf8_lossy(bytes), maximum)?
         } else if resource.manifest {
-            discover::manifest(&resource.url, bytes)?
+            discover::manifest(&resource.url, bytes, maximum)?
         } else {
             discover::References::default()
         };
-        self.alternatives.append(&mut refs.alternatives);
-        self.image_groups.append(&mut refs.image_groups);
+        self.register_references(&mut refs, maximum)?;
         Ok(refs)
+    }
+
+    // Track the complete graph before any of its references enter the queue.
+    fn register_references(
+        &mut self,
+        refs: &mut discover::References,
+        maximum: usize,
+    ) -> Result<(), FrameworkError> {
+        for link in &refs.links {
+            if !self.reference_urls.contains(link.url.as_str()) {
+                if self.reference_urls.len() >= maximum {
+                    return Err(FrameworkError::bad_request(format!(
+                        "page budget discovery exceeds {maximum} resources at {}",
+                        link.url
+                    )));
+                }
+                self.reference_urls.insert(link.url.to_string());
+            }
+        }
+        self.alternatives.append(&mut refs.alternatives);
+        for group in refs.image_groups.drain(..) {
+            if !self.image_groups.contains(&group) {
+                if self.image_groups.len() >= maximum {
+                    return Err(FrameworkError::bad_request(
+                        "page budget exceeds resource groups",
+                    ));
+                }
+                self.image_groups.push(group);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -72,7 +105,12 @@ pub(super) async fn audit_http(
                 "Content-Length",
             ]
             .into_iter()
-            .filter_map(|name| response.header(name).map(|value| (name.into(), value)))
+            .flat_map(|name| {
+                response
+                    .header_values(name)
+                    .into_iter()
+                    .map(move |value| (name.into(), value))
+            })
             .collect();
             let body = response.bytes().await?.to_vec();
             Ok(Resource {
@@ -113,6 +151,12 @@ where
     let collect = async {
         let mut capture = Capture::new(page.clone());
         let mut origin = page.clone();
+        if budget.max_resources == 0 {
+            return Err(FrameworkError::bad_request(
+                "page budget resource limit is zero",
+            ));
+        }
+        let mut scheduled = BTreeSet::from([page.to_string()]);
         let mut queue = VecDeque::from([(page, true, false, false)]);
         let mut seen = BTreeSet::new();
         while let Some((mut url, document, manifest_icon, manifest)) = queue.pop_front() {
@@ -173,11 +217,23 @@ where
                         "page budget redirect cycle at {next}"
                     )));
                 }
-                queue.push_back((next, document, manifest_icon, manifest));
+                enqueue(
+                    &mut queue,
+                    &mut scheduled,
+                    &mut capture,
+                    (next, document, manifest_icon, manifest),
+                    budget.max_resources,
+                )?;
             } else if (200..300).contains(&resource.status) {
-                let refs = capture.references(&resource)?;
+                let refs = capture.references(&resource, budget.max_resources)?;
                 for link in refs.links {
-                    queue.push_back((link.url, false, link.manifest_icon, link.manifest));
+                    enqueue(
+                        &mut queue,
+                        &mut scheduled,
+                        &mut capture,
+                        (link.url, false, link.manifest_icon, link.manifest),
+                        budget.max_resources,
+                    )?;
                 }
             }
             capture.resources.push(resource);
@@ -196,4 +252,39 @@ where
     tokio::task::spawn_blocking(move || budget.evaluate(capture))
         .await
         .map_err(|e| FrameworkError::internal(format!("page budget evaluator failed: {e}")))?
+}
+
+// Deduplicate before queueing, including off-origin references, to bound pending work.
+fn enqueue(
+    queue: &mut VecDeque<(Url, bool, bool, bool)>,
+    scheduled: &mut BTreeSet<String>,
+    capture: &mut Capture,
+    entry: (Url, bool, bool, bool),
+    maximum: usize,
+) -> Result<(), FrameworkError> {
+    if scheduled.contains(entry.0.as_str()) {
+        if let Some(pending) = queue.iter_mut().find(|item| item.0 == entry.0) {
+            pending.1 |= entry.1;
+            pending.2 |= entry.2;
+            pending.3 |= entry.3;
+        }
+        if let Some(resource) = capture
+            .resources
+            .iter_mut()
+            .find(|resource| resource.url == entry.0)
+        {
+            resource.manifest_icon |= entry.2;
+            resource.manifest |= entry.3;
+        }
+        return Ok(());
+    }
+    if scheduled.len() >= maximum {
+        return Err(FrameworkError::bad_request(format!(
+            "page budget exceeds {maximum} resources at {}",
+            entry.0
+        )));
+    }
+    scheduled.insert(entry.0.to_string());
+    queue.push_back(entry);
+    Ok(())
 }

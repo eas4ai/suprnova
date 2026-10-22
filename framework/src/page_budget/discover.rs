@@ -2,8 +2,9 @@
 
 use html5ever::tokenizer::states::RawKind;
 use html5ever::tokenizer::{BufferQueue, StartTag, Token, TokenSink, TokenSinkResult, Tokenizer};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 use url::Url;
 
 #[derive(Default)]
@@ -13,15 +14,51 @@ pub(super) struct References {
     pub image_groups: Vec<Vec<String>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct Link {
     pub url: Url,
     pub manifest_icon: bool,
     pub manifest: bool,
 }
 
+// Each parser shares an overflow flag so it stops retaining references at the limit.
+#[derive(Clone, Default)]
+struct Limit {
+    maximum: usize,
+    exceeded: Rc<Cell<bool>>,
+}
+impl Limit {
+    fn new(maximum: usize) -> Self {
+        Self {
+            maximum,
+            exceeded: Rc::default(),
+        }
+    }
+    fn push<T: PartialEq>(&self, values: &mut Vec<T>, value: T) {
+        if self.exceeded.get() || values.contains(&value) {
+            return;
+        }
+        if values.len() >= self.maximum {
+            self.exceeded.set(true);
+        } else {
+            values.push(value);
+        }
+    }
+    fn check(&self) -> Result<(), crate::FrameworkError> {
+        if self.exceeded.get() {
+            Err(crate::FrameworkError::bad_request(format!(
+                "page budget discovery exceeds {} resources",
+                self.maximum
+            )))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 #[derive(Default)]
 struct Document {
+    limit: Limit,
     links: Vec<String>,
     base: Option<String>,
     manifests: BTreeSet<String>,
@@ -31,25 +68,72 @@ struct Document {
     css: String,
 }
 
+impl Document {
+    fn close_tag(&mut self, name: &str) {
+        if name == "picture"
+            && let Some(group) = self.picture.take()
+        {
+            self.limit.push(&mut self.groups, group);
+        }
+        if name == "style" {
+            self.style = false;
+        }
+    }
+}
+
+fn tag_urls(name: &str, attrs: &BTreeMap<String, String>, limit: &Limit) -> Vec<String> {
+    let attr = |key: &str| attrs.get(key).map(String::as_str).unwrap_or("");
+    let fields: &[&str] = match name {
+        "video" => &["src", "poster"],
+        "audio" | "script" | "img" | "source" => &["src"],
+        "link"
+            if attr("rel").split_ascii_whitespace().any(|rel| {
+                [
+                    "stylesheet",
+                    "icon",
+                    "apple-touch-icon",
+                    "manifest",
+                    "preload",
+                    "modulepreload",
+                ]
+                .iter()
+                .any(|candidate| rel.eq_ignore_ascii_case(candidate))
+            }) =>
+        {
+            &["href"]
+        }
+        _ => &[],
+    };
+    let mut urls = Vec::new();
+    for field in fields {
+        if !attr(field).is_empty() {
+            limit.push(&mut urls, attr(field).to_owned());
+        }
+    }
+    match name {
+        "img" | "source" => srcset(attr("srcset"), &mut urls, limit),
+        "link" if !fields.is_empty() => srcset(attr("imagesrcset"), &mut urls, limit),
+        _ => {}
+    }
+    urls
+}
+
 struct Sink(RefCell<Document>);
 
 impl TokenSink for Sink {
     type Handle = ();
     fn process_token(&self, token: Token, _: u64) -> TokenSinkResult<()> {
         let mut doc = self.0.borrow_mut();
+        let limit = doc.limit.clone();
+        if limit.exceeded.get() {
+            return TokenSinkResult::Continue;
+        }
         match token {
             Token::CharacterTokens(text) if doc.style => doc.css.push_str(&text),
             Token::TagToken(tag) => {
                 let name = tag.name.as_ref();
                 if tag.kind != StartTag {
-                    if name == "picture"
-                        && let Some(group) = doc.picture.take()
-                    {
-                        doc.groups.push(group);
-                    }
-                    if name == "style" {
-                        doc.style = false;
-                    }
+                    doc.close_tag(name);
                     return TokenSinkResult::Continue;
                 }
                 let attrs: BTreeMap<_, _> = tag
@@ -64,53 +148,27 @@ impl TokenSink for Sink {
                 if name == "picture" {
                     doc.picture = Some(Vec::new());
                 }
-                let mut urls = Vec::new();
-                match name {
-                    "video" => {
-                        urls.push(attr("src").to_owned());
-                        urls.push(attr("poster").to_owned());
-                    }
-                    "audio" | "script" => {
-                        urls.push(attr("src").to_owned());
-                    }
-                    "img" | "source" => {
-                        urls.push(attr("src").to_owned());
-                        urls.extend(srcset(attr("srcset")));
-                    }
-                    "link"
-                        if attr("rel").split_ascii_whitespace().any(|r| {
-                            [
-                                "stylesheet",
-                                "icon",
-                                "apple-touch-icon",
-                                "manifest",
-                                "preload",
-                                "modulepreload",
-                            ]
-                            .iter()
-                            .any(|s| r.eq_ignore_ascii_case(s))
-                        }) =>
-                    {
-                        if attr("rel")
-                            .split_ascii_whitespace()
-                            .any(|r| r.eq_ignore_ascii_case("manifest"))
-                        {
-                            doc.manifests.insert(attr("href").to_owned());
-                        }
-                        urls.push(attr("href").to_owned());
-                        urls.extend(srcset(attr("imagesrcset")));
-                    }
-                    _ => {}
+                let mut urls = tag_urls(name, &attrs, &limit);
+                if name == "link"
+                    && attr("rel")
+                        .split_ascii_whitespace()
+                        .any(|rel| rel.eq_ignore_ascii_case("manifest"))
+                {
+                    doc.manifests.insert(attr("href").to_owned());
                 }
                 urls.retain(|s| !s.is_empty());
                 if matches!(name, "img" | "source") {
                     if let Some(group) = &mut doc.picture {
-                        group.extend(urls.clone());
+                        for url in &urls {
+                            limit.push(group, url.clone());
+                        }
                     } else {
-                        doc.groups.push(urls.clone());
+                        limit.push(&mut doc.groups, urls.clone());
                     }
                 }
-                doc.links.extend(urls);
+                for url in urls {
+                    limit.push(&mut doc.links, url);
+                }
                 doc.css.push_str(attr("style"));
                 doc.css.push(';');
                 if name == "style" {
@@ -131,9 +189,8 @@ impl TokenSink for Sink {
 }
 
 // HTML URL tokens may contain commas. Only trailing URL commas end a candidate.
-fn srcset(value: &str) -> Vec<String> {
+fn srcset(value: &str, urls: &mut Vec<String>, limit: &Limit) {
     let mut rest = value;
-    let mut urls = Vec::new();
     loop {
         rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == ',');
         if rest.is_empty() {
@@ -144,7 +201,10 @@ fn srcset(value: &str) -> Vec<String> {
             .unwrap_or(rest.len());
         let token = &rest[..end];
         rest = &rest[end..];
-        urls.push(token.trim_end_matches(',').to_owned());
+        limit.push(urls, token.trim_end_matches(',').to_owned());
+        if limit.exceeded.get() {
+            break;
+        }
         if token.ends_with(',') {
             continue;
         }
@@ -164,7 +224,6 @@ fn srcset(value: &str) -> Vec<String> {
         }
         rest = &rest[consumed..];
     }
-    urls
 }
 
 fn resolve(base: &Url, value: &str) -> Option<Url> {
@@ -182,12 +241,22 @@ fn resolve(base: &Url, value: &str) -> Option<Url> {
     Some(url)
 }
 
-pub(super) fn html(base: &Url, text: &str) -> References {
-    let tokenizer = Tokenizer::new(Sink(RefCell::new(Document::default())), Default::default());
+pub(super) fn html(
+    base: &Url,
+    text: &str,
+    maximum: usize,
+) -> Result<References, crate::FrameworkError> {
+    let limit = Limit::new(maximum);
+    let document = Document {
+        limit: limit.clone(),
+        ..Document::default()
+    };
+    let tokenizer = Tokenizer::new(Sink(RefCell::new(document)), Default::default());
     let buffer = BufferQueue::default();
     buffer.push_back(text.into());
     let _ = tokenizer.feed(&buffer);
     tokenizer.end();
+    limit.check()?;
     let doc = tokenizer.sink.0.into_inner();
     let base = doc
         .base
@@ -215,8 +284,11 @@ pub(super) fn html(base: &Url, text: &str) -> References {
                 .extend(urls.into_iter().map(|u| u.to_string()));
         }
     }
-    result.links.extend(css(&base, &doc.css).links);
-    result
+    for link in css(&base, &doc.css, maximum)?.links {
+        limit.push(&mut result.links, link);
+    }
+    limit.check()?;
+    Ok(result)
 }
 
 fn modern(path: &str) -> bool {
@@ -229,11 +301,17 @@ fn legacy(path: &str) -> bool {
     )
 }
 
-pub(super) fn css(base: &Url, text: &str) -> References {
+pub(super) fn css(
+    base: &Url,
+    text: &str,
+    maximum: usize,
+) -> Result<References, crate::FrameworkError> {
+    let limit = Limit::new(maximum);
     let mut parser = cssparser::Parser::new(text);
     let mut urls = Vec::new();
-    css_urls(&mut parser, &mut urls, false);
-    References {
+    css_urls(&mut parser, &mut urls, false, &limit);
+    limit.check()?;
+    Ok(References {
         links: urls
             .iter()
             .filter_map(|s| resolve(base, s))
@@ -245,21 +323,29 @@ pub(super) fn css(base: &Url, text: &str) -> References {
             .collect(),
         alternatives: BTreeSet::new(),
         image_groups: Vec::new(),
-    }
+    })
 }
 
-fn css_urls<'i>(parser: &mut cssparser::Parser<'i>, urls: &mut Vec<String>, image_set: bool) {
+fn css_urls<'i>(
+    parser: &mut cssparser::Parser<'i>,
+    urls: &mut Vec<String>,
+    image_set: bool,
+    limit: &Limit,
+) {
     use cssparser::Token;
     let mut import = false;
-    while let Ok(token) = parser.next().cloned() {
+    while !limit.exceeded.get() {
+        let Ok(token) = parser.next().cloned() else {
+            break;
+        };
         match token {
             Token::AtKeyword(name) => import = name.eq_ignore_ascii_case("import"),
             Token::QuotedString(value) if import || image_set => {
-                urls.push(value.to_string());
+                limit.push(urls, value.to_string());
                 import = false;
             }
             Token::UnquotedUrl(value) => {
-                urls.push(value.to_string());
+                limit.push(urls, value.to_string());
                 import = false;
             }
             Token::Function(name) if name.eq_ignore_ascii_case("url") => {
@@ -267,7 +353,7 @@ fn css_urls<'i>(parser: &mut cssparser::Parser<'i>, urls: &mut Vec<String>, imag
                 let _: Result<(), cssparser::ParseError<()>> =
                     parser.parse_nested_block(|nested| {
                         if let Ok(Token::QuotedString(value)) = nested.next() {
-                            urls.push(value.to_string());
+                            limit.push(urls, value.to_string());
                         }
                         Ok(())
                     });
@@ -277,14 +363,14 @@ fn css_urls<'i>(parser: &mut cssparser::Parser<'i>, urls: &mut Vec<String>, imag
                     || name.eq_ignore_ascii_case("-webkit-image-set");
                 let _: Result<(), cssparser::ParseError<()>> =
                     parser.parse_nested_block(|nested| {
-                        css_urls(nested, urls, image_set);
+                        css_urls(nested, urls, image_set, limit);
                         Ok(())
                     });
             }
             Token::CurlyBracketBlock | Token::ParenthesisBlock | Token::SquareBracketBlock => {
                 let _: Result<(), cssparser::ParseError<()>> =
                     parser.parse_nested_block(|nested| {
-                        css_urls(nested, urls, false);
+                        css_urls(nested, urls, false, limit);
                         Ok(())
                     });
             }
@@ -293,10 +379,15 @@ fn css_urls<'i>(parser: &mut cssparser::Parser<'i>, urls: &mut Vec<String>, imag
     }
 }
 
-pub(super) fn manifest(base: &Url, bytes: &[u8]) -> Result<References, crate::FrameworkError> {
+pub(super) fn manifest(
+    base: &Url,
+    bytes: &[u8],
+    maximum: usize,
+) -> Result<References, crate::FrameworkError> {
     let json: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| {
         crate::FrameworkError::bad_request(format!("page budget manifest {base}: {e}"))
     })?;
+    let limit = Limit::new(maximum);
     let mut result = References::default();
     let mut groups: BTreeMap<BTreeSet<String>, (bool, bool, Vec<String>)> = BTreeMap::new();
     for icon in json
@@ -321,18 +412,27 @@ pub(super) fn manifest(base: &Url, bytes: &[u8]) -> Result<References, crate::Fr
             .collect::<BTreeSet<_>>();
         let mime = icon.get("type").and_then(|v| v.as_str()).unwrap_or("");
         if !sizes.is_empty() {
+            if groups.len() >= maximum && !groups.contains_key(&sizes) {
+                return Err(crate::FrameworkError::bad_request(
+                    "page budget manifest exceeds resource groups",
+                ));
+            }
             let group = groups.entry(sizes).or_default();
             group.0 |= matches!(mime, "image/webp" | "image/avif");
             group.1 |= !matches!(mime, "image/webp" | "image/avif")
                 && (matches!(mime, "image/png" | "image/jpeg" | "image/gif" | "image/bmp")
                     || legacy(url.path()));
-            group.2.push(url.to_string());
+            limit.push(&mut group.2, url.to_string());
         }
-        result.links.push(Link {
-            url,
-            manifest_icon: true,
-            manifest: false,
-        });
+        limit.push(
+            &mut result.links,
+            Link {
+                url,
+                manifest_icon: true,
+                manifest: false,
+            },
+        );
+        limit.check()?;
     }
     // Manifest alternatives describe the same icon size and declare a modern type.
     for (_, (modern, fallback, urls)) in groups {
