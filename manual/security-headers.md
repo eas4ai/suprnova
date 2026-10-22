@@ -514,3 +514,9 @@ refuse publication without being evaluated. An unlisted named share, a session r
 nonce policy refuses that route with its path and cause. The listener keeps
 serving even when a route refuses publication. The HTML and page JSON come from
 the same resolved page, so publishing both does not run a lazy resolver twice.
+
+Public hash mode removes nonces and `unsafe-inline` from `script-src`,
+`script-src-elem` and `script-src-attr`. An empty attribute policy becomes
+`script-src-attr 'none'`. Inline event handlers do not gain permission from the
+hashes of inline script elements. A script inside SVG or MathML refuses
+publication because foreign-content executable text follows different rules.

@@ -435,3 +435,82 @@ fn pub_005_fix_p_manual_calls_the_transport_factory() {
             .contains("http: staticHttpClient()")
     );
 }
+
+#[suprnova::inertia_root(path = "static_publish/foreign-svg.html")]
+struct SvgRoot;
+#[suprnova::inertia_root(path = "static_publish/foreign-math.html")]
+struct MathRoot;
+
+async fn foreign_script_page(req: Request) -> Response {
+    let template = if req.path() == "/svg" {
+        suprnova::InertiaRootTemplate::of::<SvgRoot>()
+    } else {
+        suprnova::InertiaRootTemplate::of::<MathRoot>()
+    };
+    InertiaResponse::new("Public")
+        .with_config(
+            suprnova::InertiaConfig::new()
+                .version("pub-test-v1")
+                .development(false)
+                .ssr_disabled()
+                .root_template(template),
+        )
+        .cacheable(PublicProps {
+            title: "Public".into(),
+        })
+        .map_err(HttpResponse::from)?
+        .resolve(&req)
+        .await
+        .map_err(HttpResponse::from)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn pub_001_fix_n_foreign_content_scripts_refuse_with_route() -> Result<(), FrameworkError> {
+    let _container = suprnova::testing::TestContainer::fake();
+    suprnova::global_middleware!(SecurityHeaders::balanced().hash_public_pages());
+    let router: Router = Router::new()
+        .get("/svg", foreign_script_page)
+        .get("/math", foreign_script_page)
+        .into();
+    let router = router
+        .public_page::<PublicProps>("/svg", "Public")?
+        .public_page::<PublicProps>("/math", "Public")?;
+    let runtime = runtime(&router)?;
+    for path in ["/svg", "/math"] {
+        let cause = message(runtime.render(path).await)?;
+        assert!(cause.contains(path) && cause.contains("foreign"), "{cause}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn pub_001_fix_o_all_script_directives_remove_broad_inline_sources()
+-> Result<(), FrameworkError> {
+    let _container = suprnova::testing::TestContainer::fake();
+    let policy = suprnova::ContentSecurityPolicy::new(
+        "default-src 'self'; script-src 'unsafe-inline' 'nonce-{nonce}'; script-src-elem 'self' 'unsafe-inline'; script-src-attr 'unsafe-inline' 'nonce-{nonce}'",
+    )?;
+    suprnova::global_middleware!(
+        SecurityHeaders::balanced()
+            .content_security_policy(Some(policy))
+            .hash_public_pages()
+    );
+    let router: Router = Router::new().get("/hashed", hash_page).into();
+    let router = router.public_page::<PublicProps>("/hashed", "Public")?;
+    let page = runtime(&router)?.render("/hashed").await?;
+    let csp = &page.headers["content-security-policy"];
+    for directive in csp
+        .split(';')
+        .map(str::trim)
+        .filter(|d| d.starts_with("script-src"))
+    {
+        assert!(
+            !directive.contains("unsafe-inline") && !directive.contains("nonce-"),
+            "{directive}"
+        );
+    }
+    assert!(csp.contains("sha256-"));
+    Ok(())
+}

@@ -18,6 +18,8 @@ struct Scripts {
     hashes: BTreeSet<String>,
     template_depth: usize,
     nonce: bool,
+    foreign: Vec<String>,
+    foreign_script: bool,
 }
 
 #[derive(Default)]
@@ -33,10 +35,14 @@ impl TokenSink for ScriptSink {
                 let name: &str = tag.name.as_ref();
                 if tag.kind == TagKind::StartTag {
                     state.nonce |= tag.attrs.iter().any(|attr| &*attr.name.local == "nonce");
+                    if matches!(name, "svg" | "math") && !tag.self_closing {
+                        state.foreign.push(name.to_string());
+                    }
                     if name == "template" {
                         state.template_depth += 1;
                     }
                     if name == "script" {
+                        state.foreign_script |= !state.foreign.is_empty();
                         let attr = |name: &str| {
                             tag.attrs
                                 .iter()
@@ -83,6 +89,10 @@ impl TokenSink for ScriptSink {
                     if name == "plaintext" {
                         return TokenSinkResult::Plaintext;
                     }
+                } else if matches!(name, "svg" | "math") {
+                    if state.foreign.last().is_some_and(|open| open == name) {
+                        state.foreign.pop();
+                    }
                 } else if name == "script" {
                     if let Some((true, script)) = state.script.take() {
                         state.hashes.insert(format!(
@@ -120,6 +130,11 @@ pub(crate) fn trusted_script_hashes(document: &[u8]) -> Result<Vec<String>, Fram
     let _ = tokenizer.feed(&input);
     tokenizer.end();
     let state = tokenizer.sink.0.into_inner();
+    if state.foreign_script {
+        return Err(FrameworkError::internal(
+            "Public Inertia document contains a script in foreign content",
+        ));
+    }
     if state.nonce {
         return Err(FrameworkError::internal(
             "Public Inertia document contains a nonce attribute",

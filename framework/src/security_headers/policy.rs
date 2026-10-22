@@ -150,12 +150,23 @@ impl ContentSecurityPolicy {
                         let name = words.next().unwrap_or_default();
                         let mut sources: Vec<&str> = words
                             .filter(|source| {
-                                !source.starts_with("'nonce-") && *source != "'strict-dynamic'"
+                                !source.starts_with("'nonce-")
+                                    && *source != "'strict-dynamic'"
+                                    && !(matches!(
+                                        name.to_ascii_lowercase().as_str(),
+                                        "script-src" | "script-src-elem" | "script-src-attr"
+                                    ) && *source == "'unsafe-inline'")
                             })
                             .collect();
-                        if name.eq_ignore_ascii_case("script-src") && !sources.contains(&"'self'") {
+                        if (name.eq_ignore_ascii_case("script-src")
+                            || name.eq_ignore_ascii_case("script-src-elem"))
+                            && !sources.contains(&"'self'")
+                        {
                             sources.retain(|source| *source != "'none'");
                             sources.push("'self'");
+                        }
+                        if name.eq_ignore_ascii_case("script-src-attr") && sources.is_empty() {
+                            sources.push("'none'");
                         }
                         std::iter::once(name)
                             .chain(sources)
