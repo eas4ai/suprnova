@@ -427,3 +427,11 @@ async fn pub_003_fix_d_refused_inventory_retains_live_and_records_route()
     assert!(String::from_utf8_lossy(&durable).contains("/public"));
     Ok(())
 }
+
+#[test]
+fn pub_005_fix_p_manual_calls_the_transport_factory() {
+    assert!(
+        include_str!("../../../manual/frontend-inertia-responses.md")
+            .contains("http: staticHttpClient()")
+    );
+}

@@ -1230,7 +1230,7 @@ Inertia document reload.
 
 ```typescript
 import { staticHttpClient } from '@/lib/static'
-// The kit passes this transport to createInertiaApp({ http: staticHttpClient }).
+// The kit passes this transport to createInertiaApp({ http: staticHttpClient() }).
 ```
 
 Partial reloads, polling, deferred props, once props and mutations use the
