@@ -30,6 +30,7 @@ pub struct DbConnection {
     ///
     /// [`TestDatabase::refresh`]: crate::database::testing::TestDatabase::refresh
     in_test_transaction: bool,
+    transaction_timeout: Duration,
 }
 
 impl DbConnection {
@@ -187,6 +188,7 @@ impl DbConnection {
         let result = Self {
             inner: Arc::new(conn),
             in_test_transaction: false,
+            transaction_timeout: Duration::from_secs(config.transaction_timeout),
         };
         // Fire ConnectionEstablished. The default pool reaches this
         // path with __primary__ semantics; named pools flow through
@@ -219,7 +221,13 @@ impl DbConnection {
         Self {
             inner: Arc::new(conn),
             in_test_transaction: false,
+            transaction_timeout: Duration::from_secs(30),
         }
+    }
+
+    /// Bounds reconciliation while an owned finalizer continues independently.
+    pub(crate) fn transaction_timeout(&self) -> Duration {
+        self.transaction_timeout
     }
 
     /// Get a reference to the underlying SeaORM connection

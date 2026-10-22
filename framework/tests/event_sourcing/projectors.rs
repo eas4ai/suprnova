@@ -129,7 +129,7 @@ pub(super) async fn setup() -> TestDatabase {
 async fn append(amounts: &[i64]) -> Vec<StoredEvent> {
     let mut root = Aggregate::<Tally>::new(&uuid()).unwrap();
     for amount in amounts {
-        root.record(Projected { amount: *amount }).unwrap();
+        root.record(Projected { amount: *amount }).await.unwrap();
     }
     root.persist().await.unwrap()
 }
@@ -178,8 +178,8 @@ async fn es_003_projector_failure_rolls_back_facts_and_read_models() {
     let db = setup().await;
     db.execute_unprepared("CREATE TRIGGER fail_projection BEFORE UPDATE ON es_projection WHEN NEW.total > 3 BEGIN SELECT RAISE(ABORT, 'projection refused'); END").await.unwrap();
     let mut root = Aggregate::<Tally>::new(&uuid()).unwrap();
-    root.record(Projected { amount: 2 }).unwrap();
-    root.record(Projected { amount: 3 }).unwrap();
+    root.record(Projected { amount: 2 }).await.unwrap();
+    root.record(Projected { amount: 3 }).await.unwrap();
     assert!(root.persist().await.is_err());
     assert!(EventStore::events(root.uuid()).await.unwrap().is_empty());
     assert_eq!(ReadModel::find(1i64).await.unwrap().unwrap().total, 0);
@@ -285,7 +285,7 @@ async fn es_003_reactor_failure_preserves_the_committed_version_without_recordin
     let db = setup().await;
     db.execute_unprepared("CREATE TRIGGER fail_reactor BEFORE INSERT ON es_reactions BEGIN SELECT RAISE(ABORT, 'reactor failed'); END").await.unwrap();
     let mut root = Aggregate::<Tally>::new(&uuid()).unwrap();
-    root.record(Projected { amount: 2 }).unwrap();
+    root.record(Projected { amount: 2 }).await.unwrap();
     let error = root.persist().await.unwrap_err().to_string();
     assert!(error.contains("reactor failed"), "{error}");
     assert_eq!(root.persisted_version(), 1);
@@ -351,13 +351,14 @@ async fn es_003_live_and_replay_keep_the_same_projector_event_order() {
     EventFacade::listen::<read_model::events::Saved, _>(Arc::new(Trace(trace.clone()))).await;
     EventFacade::listen::<post::events::Saved, _>(Arc::new(Trace(trace.clone()))).await;
     let mut root = Aggregate::<Tally>::new(&uuid()).unwrap();
-    root.record(Projected { amount: 2 }).unwrap();
+    root.record(Projected { amount: 2 }).await.unwrap();
     root.record(super::cache::Title {
         id: post.id,
         title: "middle".into(),
     })
+    .await
     .unwrap();
-    root.record(Projected { amount: 3 }).unwrap();
+    root.record(Projected { amount: 3 }).await.unwrap();
     root.persist().await.unwrap();
     let live = trace.lock().unwrap().clone();
     assert_eq!(live, ["total:2", "title:middle", "total:5"]);
@@ -378,6 +379,7 @@ async fn es_003_mixed_replay_matches_live_batch_observations() {
     let mut root = Aggregate::<Tally>::new(&uuid()).unwrap();
     for amount in [2, 3] {
         root.record_with_metadata(Projected { amount }, serde_json::json!({"observe_s":true}))
+            .await
             .unwrap();
     }
     let events = root.persist().await.unwrap();

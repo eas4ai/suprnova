@@ -56,7 +56,7 @@ impl AggregateRoot for Tally {
 async fn add() -> Result<(), FrameworkError> {
     let uuid = "7d200fce-d107-4a12-8b9b-7e642209aa01";
     let mut tally = Aggregate::<Tally>::retrieve(uuid).await?;
-    tally.record(Added { amount: 1 })?;
+    tally.record(Added { amount: 1 }).await?;
     tally.persist().await?;
     let rebuilt = Aggregate::<Tally>::retrieve(uuid).await?;
     assert_eq!(rebuilt.state().total, tally.state().total);
@@ -80,9 +80,18 @@ returns an internal error naming the aggregate. Storage failures remain database
 errors. This prevents an outer rollback from leaving the in-memory
 version ahead of durable history. An after-commit error can occur after the write
 succeeds. The instance then records the committed version and clears its pending
-facts, so retrying the instance cannot duplicate them. This bookkeeping update
-runs before delivery callbacks and survives caller cancellation after commit.
-Cancellation before commit retains pending facts and the prior durable version.
+facts, so retrying the instance cannot duplicate them. The instance reflects the
+committed outcome as soon as COMMIT returns, before transaction listeners or
+delivery callbacks. A cancelled persist settles on the next `record` or `persist`
+call. These calls are async because they first await the owned transaction's
+outcome. `is_settled()` remains false until that reconciliation completes.
+Rollback retains pending facts and the prior durable version.
+
+The wait uses the connection's `DatabaseConfig::transaction_timeout` in seconds,
+set with `.transaction_timeout(seconds)` or `DB_TRANSACTION_TIMEOUT` (default 30).
+A timeout returns an internal error naming the aggregate and stating that the
+outcome is unknown. It prevents reuse and does not cancel COMMIT. Retry settlement
+after the owned finalizer completes. Snapshots require a settled instance.
 `recorded()` returns a copy of the pending facts at the time of the call.
 
 ## Snapshots

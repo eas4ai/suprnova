@@ -126,7 +126,7 @@ impl Reactor for TallyReactor {
 /// Executes a domain command. The aggregate owns the persistence transaction.
 pub async fn add(amount: i64) -> Result<i64, FrameworkError> {
     let mut tally = Aggregate::<TallyState>::retrieve(TALLY_UUID).await?;
-    tally.record(TallyAdded { amount })?;
+    tally.record(TallyAdded { amount }).await?;
     tally.persist().await?;
     Ok(tally.state().total)
 }

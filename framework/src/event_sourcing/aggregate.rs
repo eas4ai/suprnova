@@ -1,10 +1,13 @@
 //! Shared bookkeeping follows the durable outcome when callback delivery is cancelled.
 use super::{DomainEvent, EventStore, Fact, Snapshot, StoredEvent, error, store::executor};
+use crate::database::transaction::OutcomeHooks;
 use crate::{DB, FrameworkError};
 use sea_orm::sea_query::{Alias, OnConflict, Query};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+use tokio::sync::watch;
 
 /// Application state rebuilt by applying declared facts in version order.
 pub trait AggregateRoot:
@@ -40,6 +43,19 @@ pub struct Aggregate<A: AggregateRoot> {
     uuid: String,
     state: A,
     bookkeeping: Arc<Mutex<Bookkeeping>>,
+    unsettled: Option<PendingPersistence>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PersistenceResult {
+    Pending,
+    Committed,
+    Failed,
+}
+#[derive(Debug)]
+struct PendingPersistence {
+    receiver: watch::Receiver<PersistenceResult>,
+    timeout: Duration,
 }
 
 #[derive(Debug, Default)]
@@ -54,12 +70,41 @@ impl<A: AggregateRoot> Aggregate<A> {
             uuid: EventStore::uuid(uuid)?,
             state: A::default(),
             bookkeeping: Arc::new(Mutex::new(Bookkeeping::default())),
+            unsettled: None,
         })
     }
     fn bookkeeping(&self) -> MutexGuard<'_, Bookkeeping> {
         self.bookkeeping
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+    /// Reports whether a cancelled persistence has been reconciled by this instance.
+    pub fn is_settled(&self) -> bool {
+        self.unsettled.is_none()
+    }
+    async fn settle(&mut self) -> Result<(), FrameworkError> {
+        let Some(pending) = self.unsettled.as_mut() else {
+            return Ok(());
+        };
+        let result = tokio::time::timeout(pending.timeout, async {
+            loop {
+                if *pending.receiver.borrow_and_update() != PersistenceResult::Pending {
+                    return Ok::<(), ()>(());
+                }
+                pending.receiver.changed().await.map_err(|_| ())?;
+            }
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {
+                self.unsettled = None;
+                Ok(())
+            }
+            _ => Err(FrameworkError::internal(format!(
+                "aggregate '{}' transaction outcome is unknown; refusing reuse",
+                self.uuid
+            ))),
+        }
     }
     /// Returns the current state, including recorded facts.
     pub fn state(&self) -> &A {
@@ -77,16 +122,18 @@ impl<A: AggregateRoot> Aggregate<A> {
     pub fn recorded(&self) -> Vec<StoredEvent> {
         self.bookkeeping().pending.clone()
     }
-    /// Applies a fact before recording it. Failure leaves state unchanged.
-    pub fn record<E: DomainEvent>(&mut self, event: E) -> Result<&mut Self, FrameworkError> {
+    /// Reconciles cancelled persistence before applying a new fact to a copy.
+    pub async fn record<E: DomainEvent>(&mut self, event: E) -> Result<&mut Self, FrameworkError> {
         self.record_with_metadata(event, serde_json::json!({}))
+            .await
     }
-    /// Adds application context while preserving the aggregate identity.
-    pub fn record_with_metadata<E: DomainEvent>(
+    /// Reconciles the prior outcome before recording application context.
+    pub async fn record_with_metadata<E: DomainEvent>(
         &mut self,
         event: E,
         mut metadata: Value,
     ) -> Result<&mut Self, FrameworkError> {
+        self.settle().await?;
         let object = metadata
             .as_object_mut()
             .ok_or_else(|| error("event metadata must be an object"))?;
@@ -173,6 +220,7 @@ impl<A: AggregateRoot> Aggregate<A> {
     }
     /// Commits all recorded facts atomically. This operation owns its transaction.
     pub async fn persist(&mut self) -> Result<Vec<StoredEvent>, FrameworkError> {
+        self.settle().await?;
         if DB::transaction_level() > 0 {
             return Err(FrameworkError::internal(format!(
                 "aggregate '{}' persist must own its transaction",
@@ -191,15 +239,27 @@ impl<A: AggregateRoot> Aggregate<A> {
             .first()
             .map_or(committed, |event| event.aggregate_version);
         let bookkeeping = Arc::clone(&self.bookkeeping);
-        let uuid = self.uuid.clone();
-        let result = DB::transaction_with_isolation(None, move |_tx| Box::pin(async move {
-            // Register before writes can schedule projection delivery or cache callbacks.
-            DB::after_commit(move || async move {
-                let mut bookkeeping = bookkeeping.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let timeout = DB::connection()?.transaction_timeout();
+        let (status, receiver) = watch::channel(PersistenceResult::Pending);
+        self.unsettled = Some(PendingPersistence { receiver, timeout });
+        let failed = status.clone();
+        let hooks = OutcomeHooks::new(
+            move || {
+                let mut bookkeeping = bookkeeping
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 bookkeeping.expected = committed;
-                bookkeeping.pending.retain(|event| event.aggregate_version > committed);
-                Ok(())
-            }).await?;
+                bookkeeping
+                    .pending
+                    .retain(|event| event.aggregate_version > committed);
+                status.send_replace(PersistenceResult::Committed);
+            },
+            move || {
+                failed.send_replace(PersistenceResult::Failed);
+            },
+        );
+        let uuid = self.uuid.clone();
+        let result = DB::transaction_with_outcome(None, hooks, move |_tx| Box::pin(async move {
             EventStore::lock().await.map_err(|cause| storage(&uuid, attempted, cause))?;
             let actual = EventStore::version(&uuid).await.map_err(|cause| storage(&uuid, attempted, cause))?;
             if actual != expected { return Err(conflict(&uuid, expected, actual)); }
@@ -212,8 +272,9 @@ impl<A: AggregateRoot> Aggregate<A> {
             }
             super::projections::persisted(&stored).await?;
             Ok(stored)
-        })).await??;
-        let (events, callback_error) = result;
+        })).await;
+        self.settle().await?;
+        let (events, callback_error) = result??;
         if let Some(cause) = callback_error {
             return Err(error(format!(
                 "aggregate '{}' committed through version {}; after-commit delivery failed: {cause}",
@@ -225,6 +286,12 @@ impl<A: AggregateRoot> Aggregate<A> {
     }
     /// Captures only persisted state. Repeating a capture at one version is safe.
     pub async fn snapshot(&self) -> Result<Snapshot, FrameworkError> {
+        if !self.is_settled() {
+            return Err(FrameworkError::internal(format!(
+                "aggregate '{}' must settle before taking a snapshot",
+                self.uuid
+            )));
+        }
         let (expected, pending_empty) = {
             let bookkeeping = self.bookkeeping();
             (bookkeeping.expected, bookkeeping.pending.is_empty())
@@ -278,4 +345,58 @@ fn storage(uuid: &str, attempted: i64, cause: FrameworkError) -> FrameworkError 
     FrameworkError::database(format!(
         "aggregate '{uuid}' attempted version {attempted}: {cause}"
     ))
+}
+
+#[cfg(test)]
+mod settlement_tests {
+    use super::*;
+    #[derive(Clone, Default, Serialize, serde::Deserialize, Debug)]
+    struct State;
+    impl AggregateRoot for State {
+        const NAME: &'static str = "tests.settlement";
+        fn apply(&mut self, _fact: &Fact<'_>) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+    }
+    #[derive(Serialize, serde::Deserialize)]
+    struct Added;
+    impl DomainEvent for Added {
+        const NAME: &'static str = "tests.settlement.added";
+        const VERSION: i32 = 1;
+    }
+    #[tokio::test]
+    async fn es_001_unresolved_outcome_is_bounded_by_the_connection_timeout() {
+        let config = crate::DatabaseConfig::builder()
+            .url("sqlite::memory:")
+            .transaction_timeout(1)
+            .build();
+        let connection = crate::DbConnection::connect(&config).await.unwrap();
+        assert_eq!(connection.transaction_timeout(), Duration::from_secs(1));
+        let mut root = Aggregate::<State>::new("30436483-b26b-4d9e-8cd2-46177926f838").unwrap();
+        let (status, receiver) = watch::channel(PersistenceResult::Pending);
+        root.unsettled = Some(PendingPersistence {
+            receiver,
+            timeout: connection.transaction_timeout(),
+        });
+        let started = std::time::Instant::now();
+        let error = root.record(Added).await.unwrap_err();
+        assert!(matches!(error, FrameworkError::Internal { .. }));
+        assert!(error.to_string().contains(root.uuid()));
+        assert!(error.to_string().contains("outcome is unknown"));
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!root.is_settled());
+        assert!(root.recorded().is_empty());
+        status.send_replace(PersistenceResult::Failed);
+        root.settle().await.unwrap();
+        assert!(root.is_settled());
+        assert_eq!(root.persisted_version(), 0);
+        assert!(
+            crate::DatabaseConfig::builder()
+                .transaction_timeout(0)
+                .build()
+                .validate_pool()
+                .is_err()
+        );
+    }
 }

@@ -177,7 +177,7 @@ async fn es_003_replay_signals_once_after_all_projector_writes() {
     let _db = setup().await;
     let mut root = Aggregate::<Tally>::new(&uuid()).unwrap();
     for _ in 0..10 {
-        root.record(SignalAdded { amount: 1 }).unwrap();
+        root.record(SignalAdded { amount: 1 }).await.unwrap();
     }
     root.persist().await.unwrap();
     let fixture = fixture().await;
@@ -202,7 +202,7 @@ async fn es_004_projector_committed_model_write_signals_a_topic() {
     let _db = setup().await;
     let fixture = fixture().await;
     let mut root = Aggregate::<Tally>::new(&uuid()).unwrap();
-    root.record(SignalAdded { amount: 4 }).unwrap();
+    root.record(SignalAdded { amount: 4 }).await.unwrap();
     root.persist().await.unwrap();
     assert_eq!(SignalRow::find(1i64).await.unwrap().unwrap().total, 4);
     assert_eq!(tail(&fixture).await.len(), 1);

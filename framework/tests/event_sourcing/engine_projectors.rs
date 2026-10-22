@@ -136,7 +136,7 @@ async fn engine(url: String) {
 async fn lifecycle() {
     let id = uuid();
     let mut aggregate = Aggregate::<Tally>::new(&id).unwrap();
-    aggregate.record(Added { amount: 2 }).unwrap();
+    aggregate.record(Added { amount: 2 }).await.unwrap();
     let first = aggregate.persist().await.unwrap()[0].id;
     assert_eq!(InlineRow::find(id.clone()).await.unwrap().unwrap().total, 2);
     assert_eq!(checkpoint("es.engine.inline").await, first);
@@ -146,7 +146,7 @@ async fn lifecycle() {
         .await
         .unwrap();
     assert_eq!(checkpoint("es.engine.queued").await, first);
-    aggregate.record(Added { amount: 3 }).unwrap();
+    aggregate.record(Added { amount: 3 }).await.unwrap();
     let last = aggregate.persist().await.unwrap()[0].id;
     QueuedProjector::new("es.engine.queued", last)
         .unwrap()

@@ -8,8 +8,8 @@ async fn es_005_commands_list_events_make_snapshots_and_select_replays() {
     let db = super::projectors::setup().await;
     db.execute_unprepared("CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, views BIGINT NOT NULL DEFAULT 0); CREATE TABLE es_signals (id INTEGER PRIMARY KEY, total BIGINT NOT NULL)").await.unwrap();
     let mut root = Aggregate::<Tally>::new(&uuid()).unwrap();
-    root.record(RenamedAddition { amount: 2 }).unwrap();
-    root.record(RenamedAddition { amount: 5 }).unwrap();
+    root.record(RenamedAddition { amount: 2 }).await.unwrap();
+    root.record(RenamedAddition { amount: 5 }).await.unwrap();
     root.persist().await.unwrap();
     let listed = console::test(["event-sourcing:events", root.uuid()])
         .run()

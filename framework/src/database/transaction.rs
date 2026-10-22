@@ -71,6 +71,46 @@ use sea_orm::{ConnectionTrait, DatabaseTransaction, IsolationLevel, TransactionT
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Publishes the physical outcome before async observers can delay it.
+#[derive(Default)]
+pub(crate) struct OutcomeHooks(Vec<OutcomeHook>);
+struct OutcomeHook {
+    committed: Box<dyn FnOnce() + Send>,
+    failed: Box<dyn FnOnce() + Send>,
+}
+impl OutcomeHooks {
+    /// Keeps publication synchronous and separate from delivery callbacks.
+    pub(crate) fn new(
+        committed: impl FnOnce() + Send + 'static,
+        failed: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        Self(vec![OutcomeHook {
+            committed: Box::new(committed),
+            failed: Box::new(failed),
+        }])
+    }
+    fn committed(self) {
+        for hook in self.0 {
+            (hook.committed)();
+        }
+    }
+    fn failed(self) {
+        for hook in self.0 {
+            (hook.failed)();
+        }
+    }
+}
+
+// Cancellation before BEGIN returns cannot have committed application writes.
+struct UnstartedOutcome(Option<OutcomeHooks>);
+impl Drop for UnstartedOutcome {
+    fn drop(&mut self) {
+        if let Some(hooks) = self.0.take() {
+            hooks.failed();
+        }
+    }
+}
+
 /// Internal state shared by [`Transaction`], [`TxHandle`], and the
 /// task-local [`CURRENT_TX`]. Pairs the SeaORM transaction handle with
 /// the logical connection name the transaction was opened against, so
@@ -83,6 +123,7 @@ use std::time::Duration;
 /// for the transaction's lifetime.
 pub(crate) struct TxState {
     parent: Option<Arc<TxState>>,
+    outcome: std::sync::Mutex<OutcomeHooks>,
     depth: usize,
     children: Arc<ChildFinalizers>,
     pub(crate) tx: Arc<DatabaseTransaction>,
@@ -263,6 +304,7 @@ async fn finish_transaction_inner(
         notified.await;
     }
     let parent = state.parent.clone();
+    let outcome = std::mem::take(&mut *state.outcome.lock().unwrap_or_else(|e| e.into_inner()));
     let (after_commit, on_rollback) = super::after_commit::drain(&state);
     let tx = state.tx.clone();
     let connection_name = state.connection_name.clone();
@@ -271,6 +313,7 @@ async fn finish_transaction_inner(
     let tx = match Arc::try_unwrap(tx) {
         Ok(tx) => tx,
         Err(tx) => {
+            outcome.failed();
             let leaked = Arc::strong_count(&tx).saturating_sub(1);
             drop(tx);
             tracing::error!(
@@ -296,6 +339,7 @@ async fn finish_transaction_inner(
 
     if commit {
         if let Err(error) = tx.commit().await {
+            outcome.failed();
             tracing::error!(
                 target: "suprnova::database",
                 error = %error,
@@ -307,6 +351,12 @@ async fn finish_transaction_inner(
             return Err(FrameworkError::database(error.to_string()).into());
         }
         if let Some(parent) = &parent {
+            parent
+                .outcome
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .0
+                .extend(outcome.0);
             parent
                 .after_commit
                 .lock()
@@ -323,6 +373,7 @@ async fn finish_transaction_inner(
             .await;
             return Ok(());
         }
+        outcome.committed();
         drop(on_rollback);
         // Arm the committed branch before invoking any listener code. A
         // listener panic must not discard an already-committed dispatch.
@@ -338,7 +389,9 @@ async fn finish_transaction_inner(
     } else {
         let callbacks =
             super::after_commit::GuardedCallbacks::compensating(after_commit, on_rollback);
-        if let Err(error) = tx.rollback().await {
+        let rollback = tx.rollback().await;
+        outcome.failed();
+        if let Err(error) = rollback {
             tracing::warn!(
                 error = %error,
                 "Transaction rollback failed; the original closure error is still surfaced. \
@@ -1893,11 +1946,29 @@ impl DB {
         >,
         T: Send,
     {
-        let settled = Self::transaction_settled(isolation_level, |transaction| async move {
-            f(&transaction).await
-        })
-        .await
-        .map_err(TransactionFailure::into_error)?;
+        Self::transaction_with_outcome(isolation_level, OutcomeHooks::default(), f).await
+    }
+
+    /// Shares finalization without delaying synchronous outcome publication.
+    pub(crate) async fn transaction_with_outcome<F, T>(
+        isolation_level: Option<IsolationLevel>,
+        outcome: OutcomeHooks,
+        f: F,
+    ) -> Result<Result<(T, Option<FrameworkError>), FrameworkError>, FrameworkError>
+    where
+        F: for<'b> FnOnce(
+            &'b Transaction,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T, FrameworkError>> + Send + 'b>,
+        >,
+        T: Send,
+    {
+        let settled =
+            Self::transaction_settled(isolation_level, outcome, |transaction| async move {
+                f(&transaction).await
+            })
+            .await
+            .map_err(TransactionFailure::into_error)?;
         Ok(match settled.finalized {
             Ok(()) => settled.value.map(|value| (value, None)),
             // Only a closure that returned `Ok` commits, so `value` is `Ok`.
@@ -1967,7 +2038,8 @@ impl DB {
         Fut: std::future::Future<Output = Result<T, FrameworkError>>,
         T: Send,
     {
-        let settled = Self::transaction_settled(isolation_level, make).await?;
+        let settled =
+            Self::transaction_settled(isolation_level, OutcomeHooks::default(), make).await?;
         settled.finalized?;
         settled.value.map_err(TransactionFailure::from)
     }
@@ -2013,6 +2085,7 @@ impl DB {
     /// ran: a listener failure, no connection, or a failed `BEGIN`.
     async fn transaction_settled<G, Fut, T>(
         isolation_level: Option<IsolationLevel>,
+        outcome: OutcomeHooks,
         make: G,
     ) -> Result<Settled<T>, TransactionFailure>
     where
@@ -2020,6 +2093,7 @@ impl DB {
         Fut: std::future::Future<Output = Result<T, FrameworkError>>,
         T: Send,
     {
+        let mut outcome = UnstartedOutcome(Some(outcome));
         Self::notify_before_transaction()?;
         let parent = CURRENT_TX.try_with(Clone::clone).ok().flatten();
         let depth = parent.as_ref().map_or(1, |state| state.depth + 1);
@@ -2064,6 +2138,7 @@ impl DB {
                 .as_ref()
                 .map(|state| state.publication_generations.clone())
                 .unwrap_or_default(),
+            outcome: std::sync::Mutex::new(outcome.0.take().unwrap_or_default()),
             parent,
             depth,
             children: Arc::new(ChildFinalizers::default()),
@@ -2156,6 +2231,7 @@ impl DB {
             publication_scope: crate::static_publish::batch::capture(),
             #[cfg(feature = "filesystem")]
             publication_generations: PublicationGenerations::default(),
+            outcome: std::sync::Mutex::new(OutcomeHooks::default()),
             parent: None,
             depth: 1,
             children: Arc::new(ChildFinalizers::default()),
@@ -2832,5 +2908,112 @@ mod tests {
                 "attempt {attempt}: observed_max {observed_max}ms is below half of ceiling {ceiling}ms - jitter window may have collapsed"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod outcome_hook_tests {
+    use super::*;
+    use crate::testing::TestDatabase;
+    use crate::{EventFacade, FrameworkError, Listener, TransactionCommitted};
+    use std::sync::Mutex;
+
+    type Trace = Arc<Mutex<Vec<&'static str>>>;
+    fn hooks(trace: &Trace) -> OutcomeHooks {
+        let committed = trace.clone();
+        let failed = trace.clone();
+        OutcomeHooks::new(
+            move || committed.lock().unwrap().push("committed"),
+            move || failed.lock().unwrap().push("failed"),
+        )
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_outcome_hook_precedes_listeners_and_delivery() {
+        struct Observe(Trace);
+        #[async_trait::async_trait]
+        impl Listener<TransactionCommitted> for Observe {
+            async fn handle(&self, _: &TransactionCommitted) -> Result<(), FrameworkError> {
+                self.0.lock().unwrap().push("listener");
+                Ok(())
+            }
+        }
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                EventFacade::forget::<TransactionCommitted>();
+            }
+        }
+        let _db = TestDatabase::sqlite_memory().await.unwrap();
+        let _cleanup = Cleanup;
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        EventFacade::listen::<TransactionCommitted, _>(Arc::new(Observe(trace.clone()))).await;
+        let delivery = trace.clone();
+        DB::transaction_with_outcome(None, hooks(&trace), move |_tx| {
+            Box::pin(async move {
+                DB::after_commit(move || async move {
+                    delivery.lock().unwrap().push("delivery");
+                    Ok(())
+                })
+                .await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            *trace.lock().unwrap(),
+            ["committed", "listener", "delivery"]
+        );
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_outcome_hooks_follow_the_outermost_rollback() {
+        let _db = TestDatabase::sqlite_memory().await.unwrap();
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        let inner = trace.clone();
+        let error = DB::transaction_with_outcome(None, hooks(&trace), move |_tx| {
+            Box::pin(async move {
+                DB::transaction_with_outcome(None, hooks(&inner), |_tx| Box::pin(async { Ok(()) }))
+                    .await??;
+                assert!(inner.lock().unwrap().is_empty());
+                Err::<(), _>(FrameworkError::internal("roll back parent"))
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains("roll back parent"));
+        assert_eq!(*trace.lock().unwrap(), ["failed", "failed"]);
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_outcome_failed_hook_runs_when_commit_fails() {
+        let db = TestDatabase::sqlite_memory().await.unwrap();
+        db.execute_unprepared("PRAGMA foreign_keys = ON; CREATE TABLE parents (id INTEGER PRIMARY KEY); CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED)").await.unwrap();
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        assert!(
+            DB::transaction_with_outcome(None, hooks(&trace), |_tx| Box::pin(async {
+                DB::statement("INSERT INTO children VALUES (1, 99)", vec![]).await?;
+                Ok(())
+            }))
+            .await
+            .unwrap()
+            .is_err()
+        );
+        assert_eq!(*trace.lock().unwrap(), ["failed"]);
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn es_001_outcome_failed_hook_runs_if_begin_never_starts() {
+        let _container = crate::testing::TestContainer::fake();
+        let trace: Trace = Arc::new(Mutex::new(Vec::new()));
+        assert!(
+            DB::transaction_with_outcome(None, hooks(&trace), |_tx| Box::pin(async { Ok(()) }))
+                .await
+                .is_err()
+        );
+        assert_eq!(*trace.lock().unwrap(), ["failed"]);
     }
 }

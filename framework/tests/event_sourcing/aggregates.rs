@@ -6,8 +6,8 @@ use suprnova::{Aggregate, DB, EventStore};
 async fn es_001_recording_rebuilds_exact_state() {
     let _db = database().await;
     let mut tally = Aggregate::<Tally>::new(&uuid()).unwrap();
-    tally.record(RenamedAddition { amount: 3 }).unwrap();
-    tally.record(RenamedAddition { amount: 7 }).unwrap();
+    tally.record(RenamedAddition { amount: 3 }).await.unwrap();
+    tally.record(RenamedAddition { amount: 7 }).await.unwrap();
     assert_eq!(tally.state().total, 10);
     tally.persist().await.unwrap();
     let rebuilt = Aggregate::<Tally>::retrieve(tally.uuid()).await.unwrap();
@@ -20,11 +20,11 @@ async fn es_001_recording_rebuilds_exact_state() {
 async fn es_001_snapshot_plus_tail_equals_full_rebuild() {
     let _db = database().await;
     let mut tally = Aggregate::<Tally>::new(&uuid()).unwrap();
-    tally.record(RenamedAddition { amount: 4 }).unwrap();
+    tally.record(RenamedAddition { amount: 4 }).await.unwrap();
     tally.persist().await.unwrap();
     tally.snapshot().await.unwrap();
     tally.snapshot().await.unwrap();
-    tally.record(RenamedAddition { amount: 9 }).unwrap();
+    tally.record(RenamedAddition { amount: 9 }).await.unwrap();
     assert!(tally.snapshot().await.is_err());
     tally.persist().await.unwrap();
     let snap = Aggregate::<Tally>::retrieve(tally.uuid()).await.unwrap();
@@ -52,8 +52,8 @@ async fn es_001_concurrent_persists_have_one_winner() {
         let id = uuid();
         let mut left = Aggregate::<Tally>::retrieve(&id).await.unwrap();
         let mut right = Aggregate::<Tally>::retrieve(&id).await.unwrap();
-        left.record(RenamedAddition { amount: 1 }).unwrap();
-        right.record(RenamedAddition { amount: 2 }).unwrap();
+        left.record(RenamedAddition { amount: 1 }).await.unwrap();
+        right.record(RenamedAddition { amount: 2 }).await.unwrap();
         let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
         let other = barrier.clone();
         let left = TestContainer::spawn(async move {
@@ -106,7 +106,7 @@ async fn es_002_stable_name_reads_renamed_type_and_upgrades_old_payload() {
 async fn es_002_unknown_type_fails_by_name() {
     let _db = database().await;
     let mut tally = Aggregate::<Tally>::new(&uuid()).unwrap();
-    tally.record(RenamedAddition { amount: 1 }).unwrap();
+    tally.record(RenamedAddition { amount: 1 }).await.unwrap();
     tally.persist().await.unwrap();
     DB::statement(
         "UPDATE stored_events SET event_type = 'unknown.fact'",
@@ -126,8 +126,8 @@ async fn es_002_unknown_type_fails_by_name() {
 async fn es_001_failed_batch_rolls_back_and_keeps_recorded_facts() {
     let db = database().await;
     let mut tally = Aggregate::<Tally>::new(&uuid()).unwrap();
-    tally.record(RenamedAddition { amount: 1 }).unwrap();
-    tally.record(RenamedAddition { amount: 2 }).unwrap();
+    tally.record(RenamedAddition { amount: 1 }).await.unwrap();
+    tally.record(RenamedAddition { amount: 2 }).await.unwrap();
     db.execute_unprepared("CREATE TRIGGER reject_second BEFORE INSERT ON stored_events WHEN NEW.aggregate_version = 2 BEGIN SELECT RAISE(ABORT, 'second fact refused'); END").await.unwrap();
     assert!(tally.persist().await.is_err());
     assert_eq!(tally.recorded().len(), 2);
@@ -152,7 +152,7 @@ async fn es_001_failed_batch_rolls_back_and_keeps_recorded_facts() {
 async fn es_002_future_payload_version_fails_by_name() {
     let _db = database().await;
     let mut tally = Aggregate::<Tally>::new(&uuid()).unwrap();
-    tally.record(RenamedAddition { amount: 1 }).unwrap();
+    tally.record(RenamedAddition { amount: 1 }).await.unwrap();
     tally.persist().await.unwrap();
     DB::statement("UPDATE stored_events SET event_version = 3", vec![])
         .await
@@ -192,6 +192,7 @@ async fn es_001_fact_view_matches_recording_snapshot_and_full_rebuild() {
             RenamedAddition { amount },
             serde_json::json!({"source":amount}),
         )
+        .await
         .unwrap();
     }
     let recorded = root.state().clone();

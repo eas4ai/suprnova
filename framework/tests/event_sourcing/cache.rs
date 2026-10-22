@@ -50,6 +50,7 @@ async fn es_003_replay_orm_writes_advance_generations_and_replace_a_cached_page(
         id: post.id,
         title: "from history".into(),
     })
+    .await
     .unwrap();
     root.persist().await.unwrap();
     let mut corrupt = Post::find(post.id).await.unwrap().unwrap();
