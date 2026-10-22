@@ -667,6 +667,32 @@ Resolve the publisher after binding the registry and its gates. Resolution
 assembles and binds the Live runtime when needed. Then report changes from
 handlers, services, or jobs:
 
+Private data uses an owner-scoped family instead of one global topic. The
+family authorizer receives the full instance name as its resource:
+
+```rust
+use suprnova::{Gate, live::{LiveRegistry, LiveTopics}};
+
+Gate::define::<String, String>("live:topic.notes", |principal, instance| {
+    instance == &format!("notes.{principal}")
+});
+let registry = LiveRegistry::builder().topic_family("notes")?.build();
+suprnova::App::singleton(registry);
+LiveTopics::resolve()?.on_model_scoped::<Note>(
+    "notes", |note| note.user_id.to_string(), &["stats"],
+)?;
+```
+
+The instances `notes.42` and `notes.73` have separate memberships, cursors,
+rate windows, and fanout. `public_topic_family("announcements")?` explicitly
+permits anonymous instances. A Live island can declare a stream topic such as
+`notes.:principal`; the existing trusted topic parameter resolver supplies the
+key. A page supplies the key with the
+[Live response loader](frontend-pages.md#live-topic-bindings).
+`changed("notes.42", &["stats"]).await?` and
+`changed_with_tx(&tx, "notes.42", &["stats"])?` publish to the same instance.
+Family names cannot overlap another family or one of its static instances.
+
 ```rust
 use suprnova::live::LiveTopics;
 

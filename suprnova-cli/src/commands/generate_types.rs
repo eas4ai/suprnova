@@ -964,7 +964,7 @@ pub(crate) struct RenderSite {
 /// `Inertia::data("Name", dto)`, `Inertia::try_data` and
 /// `Inertia::paginate`. A method chain that starts with one of the last
 /// four pairs the component with the struct `.with_data(..)`,
-/// `.try_with_data(..)`, or `.with_live_bindings(..)` names anywhere in it,
+/// `.try_with_data(..)`, or the typed `InertiaResponse::live::<P>` loader,
 /// or `dto`; a key it defers or marks optional after that is absent from the
 /// first response. Props are a struct when the expression is a struct literal,
 /// a call through
@@ -1031,24 +1031,54 @@ fn props_struct_name(expr: &Expr) -> Option<String> {
 ///
 /// The generated page templates use the fully qualified form so a response
 /// assembled field by field can still declare its complete props contract.
-fn live_bindings_props(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Call(call) if call.args.is_empty() => {
-            let Expr::Path(path) = &*call.func else {
-                return None;
-            };
-            if path.path.segments.last()?.ident != "live_bindings" {
-                return None;
-            }
-            path.qself
-                .as_ref()
-                .and_then(|qualified| declared_struct(&qualified.ty))
-                .or_else(|| type_segment(&path.path))
-        }
-        Expr::Paren(inner) => live_bindings_props(&inner.expr),
-        Expr::Reference(inner) => live_bindings_props(&inner.expr),
+fn live_props_type(expr: &Expr) -> Option<String> {
+    let Expr::Path(path) = expr else {
+        return None;
+    };
+    let syn::PathArguments::AngleBracketed(arguments) = &path.path.segments.last()?.arguments
+    else {
+        return None;
+    };
+    arguments.args.iter().find_map(|argument| match argument {
+        syn::GenericArgument::Type(ty) => declared_struct(ty),
         _ => None,
+    })
+}
+
+fn loader_absent_props(expr: &Expr) -> BTreeSet<String> {
+    let Expr::Closure(closure) = expr else {
+        return BTreeSet::new();
+    };
+    let Some(Pat::Ident(parameter)) = closure.inputs.first() else {
+        return BTreeSet::new();
+    };
+    struct Absent {
+        parameter: String,
+        keys: BTreeSet<String>,
     }
+    impl<'ast> Visit<'ast> for Absent {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if matches!(
+                call.method.to_string().as_str(),
+                "defer" | "defer_with" | "optional"
+            ) {
+                let mut root = &*call.receiver;
+                while let Expr::MethodCall(parent) = root {
+                    root = &parent.receiver;
+                }
+                if matches!(root, Expr::Path(path) if path.path.is_ident(&self.parameter)) {
+                    self.keys.extend(call.args.first().and_then(string_literal));
+                }
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut visitor = Absent {
+        parameter: parameter.ident.to_string(),
+        keys: BTreeSet::new(),
+    };
+    visitor.visit_expr(&closure.body);
+    visitor.keys
 }
 
 /// The name `path` reads when it is a lone local name: one segment, not
@@ -1267,6 +1297,9 @@ impl InertiaCallVisitor {
         let mut structs: BTreeSet<String> = BTreeSet::new();
         match (owner.as_str(), function.as_str()) {
             ("InertiaResponse", "new") | ("Inertia", "paginate") => {}
+            ("InertiaResponse", "live") => {
+                structs.extend(live_props_type(&root.func));
+            }
             ("Inertia", "data" | "try_data") => {
                 structs.extend(
                     root.args
@@ -1291,8 +1324,10 @@ impl InertiaCallVisitor {
                         absent.clear();
                     }
                 }
-                "with_live_bindings" => {
-                    structs.extend(first.and_then(live_bindings_props));
+                "load_with" => {
+                    if let Some(loader) = first {
+                        absent.extend(loader_absent_props(loader));
+                    }
                 }
                 "defer" | "defer_with" | "optional" => {
                     absent.extend(first.and_then(string_literal));
@@ -1340,6 +1375,11 @@ impl<'ast> Visit<'ast> for InertiaCallVisitor {
                         absent: BTreeSet::new(),
                     });
                 }
+                ("InertiaResponse", "live") => self.renders.push(RenderSite {
+                    component: component_literal(node.args.first()),
+                    props: live_props_type(&node.func),
+                    absent: BTreeSet::new(),
+                }),
                 ("Inertia", "data" | "try_data") => self.renders.push(RenderSite {
                     component: component_literal(node.args.first()),
                     props: node

@@ -82,10 +82,10 @@ pub async fn register() {
     // Live components: one immutable registry shared by the server, the
     // workers, and the `suprnova live:*` commands. `suprnova live:make`
     // registers new components in `src/live/mod.rs`.
-    suprnova::Gate::define::<String, String>("live:topic.notes", |_, _| true);
+    suprnova::Gate::define::<String, String>("live:topic.notes", |principal, instance| instance == &format!("notes.{principal}"));
     App::singleton(crate::live::registry().expect("Live component registry"));
     suprnova::live::LiveTopics::resolve()
-        .and_then(|topics| topics.on_model::<crate::models::note::Note>("notes", &["stats"]))
+        .and_then(|topics| topics.on_model_scoped::<crate::models::note::Note>("notes", |note| note.user_id.to_string(), &["stats"]))
         .expect("Live note topic publication");
 
     // Example: Register a trait binding with runtime config

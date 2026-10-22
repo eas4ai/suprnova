@@ -1,6 +1,6 @@
 //! Topic invalidations share Live authority and carry no model values.
 
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::sync::{Arc, Mutex, Weak};
@@ -26,12 +26,20 @@ pub(crate) fn topic_component(topic: &str) -> String {
     )
 }
 
-pub(crate) fn topic_descriptor(topic: &str) -> Result<ComponentDescriptor, FrameworkError> {
+pub(crate) fn topic_descriptor(
+    topic: &str,
+    family: bool,
+) -> Result<ComponentDescriptor, FrameworkError> {
     let invalid = || FrameworkError::internal(format!("invalid Live topic `{topic}`"));
     let name = topic_component(topic);
+    let pattern = if family {
+        format!("{topic}.:topic_key")
+    } else {
+        topic.to_owned()
+    };
     let subscription = SubscriptionMetadata::new(
         StreamName::parse("changes").map_err(|_| invalid())?,
-        BoundedTopics::new(vec![TopicName::parse(topic).map_err(|_| invalid())?])
+        BoundedTopics::new(vec![TopicName::parse(&pattern).map_err(|_| invalid())?])
             .map_err(|_| invalid())?,
         BoundedEventNames::refresh_only(),
         SubscriptionModes::new(vec![
@@ -58,12 +66,15 @@ pub(crate) fn topic_descriptor(topic: &str) -> Result<ComponentDescriptor, Frame
     Ok(ComponentDescriptor::new(metadata))
 }
 
+type ModelBinding =
+    Arc<dyn Fn(&dyn Any) -> Result<(String, Vec<String>), FrameworkError> + Send + Sync>;
+
 pub(crate) struct TopicState {
     pub(crate) registry: LiveRegistry,
     pub(crate) hub: Arc<dyn BroadcastHub>,
     interval: Duration,
     listeners: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
-    models: Mutex<HashMap<TypeId, Vec<(String, Vec<String>)>>>,
+    models: Mutex<HashMap<TypeId, Vec<ModelBinding>>>,
 }
 
 impl TopicState {
@@ -199,7 +210,13 @@ impl LiveTopics {
 
     fn check_topic(&self, topic: &str) -> Result<(), FrameworkError> {
         TopicName::parse(topic).map_err(|_| FrameworkError::internal("invalid Live topic"))?;
-        if self.state.topics.registry.topics().contains_key(topic) {
+        if self
+            .state
+            .topics
+            .registry
+            .application_topic(topic)
+            .is_some()
+        {
             return Ok(());
         }
         if let Some((component, stream)) = topic.split_once("::") {
@@ -329,20 +346,59 @@ impl LiveTopics {
             .models
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        models.entry(TypeId::of::<M>()).or_default().push((
-            topic.to_owned(),
+        let topic = topic.to_owned();
+        let props: Vec<String> = props.iter().map(|p| (*p).to_owned()).collect();
+        models
+            .entry(TypeId::of::<M>())
+            .or_default()
+            .push(Arc::new(move |_| Ok((topic.clone(), props.clone()))));
+        Ok(())
+    }
+
+    /// Derives the private instance from the saved or deleted model, without sending its values.
+    pub fn on_model_scoped<M: 'static>(
+        &self,
+        family: &str,
+        key: impl Fn(&M) -> String + Send + Sync + 'static,
+        props: &[&str],
+    ) -> Result<(), FrameworkError> {
+        let registry = self.state.topics.registry.clone();
+        let sample = registry.family_instance(family, "0")?;
+        suprnova_live::async_updates::RegisteredTopicChange::new(
+            sample,
+            1,
             props.iter().map(|p| (*p).to_owned()).collect(),
-        ));
+        )
+        .map_err(|_| FrameworkError::internal("invalid Live model topic prop names"))?;
+        let family = family.to_owned();
+        let props: Vec<String> = props.iter().map(|p| (*p).to_owned()).collect();
+        self.state
+            .topics
+            .models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(TypeId::of::<M>())
+            .or_default()
+            .push(Arc::new(move |model| {
+                let model = model
+                    .downcast_ref::<M>()
+                    .ok_or_else(|| FrameworkError::internal("Live scoped model type mismatch"))?;
+                Ok((
+                    registry.family_instance(&family, &key(model))?,
+                    props.clone(),
+                ))
+            }));
         Ok(())
     }
 
     /// Called by generated saved and deleted hooks after the write succeeds.
     #[doc(hidden)]
-    pub async fn __model_changed<M: 'static>() -> Result<(), FrameworkError> {
+    pub async fn __model_changed<M: 'static>(model: &M) -> Result<(), FrameworkError> {
         let Some((publisher, bindings)) = Self::model_bindings::<M>() else {
             return Ok(());
         };
-        for (topic, props) in bindings {
+        for binding in bindings {
+            let (topic, props) = binding(model)?;
             publisher
                 .changed(
                     &topic,
@@ -356,12 +412,14 @@ impl LiveTopics {
     /// Called by generated hooks when a model write names a transaction handle.
     #[doc(hidden)]
     pub fn __model_changed_with_tx<M: 'static>(
+        model: &M,
         transaction: &crate::Transaction,
     ) -> Result<(), FrameworkError> {
         let Some((publisher, bindings)) = Self::model_bindings::<M>() else {
             return Ok(());
         };
-        for (topic, props) in bindings {
+        for binding in bindings {
+            let (topic, props) = binding(model)?;
             publisher.changed_with_tx(
                 transaction,
                 &topic,
@@ -371,7 +429,7 @@ impl LiveTopics {
         Ok(())
     }
 
-    fn model_bindings<M: 'static>() -> Option<(Self, Vec<(String, Vec<String>)>)> {
+    fn model_bindings<M: 'static>() -> Option<(Self, Vec<ModelBinding>)> {
         if crate::seed::events_muted() {
             return None;
         }
@@ -685,44 +743,59 @@ impl LiveTopics {
         &self,
         bindings: &[crate::inertia::LiveBinding],
         page_component: &str,
+        scopes: &BTreeMap<String, String>,
     ) -> Result<serde_json::Value, FrameworkError> {
         let runtime = LiveRuntime::bind()?;
+        let registry = &self.state.topics.registry;
         let principal = super::ports::route_principal().await;
-        let mut result = serde_json::Map::new();
+        let mut selected: BTreeMap<String, (Vec<String>, String, String, Option<String>)> =
+            BTreeMap::new();
         for binding in bindings {
-            let (component, stream) = if self
-                .state
-                .topics
-                .registry
-                .topics()
-                .contains_key(binding.topic)
-            {
-                (topic_component(binding.topic), "changes".to_owned())
-            } else {
-                let (component, stream) = binding.topic.split_once("::").ok_or_else(|| {
+            let (topic, component, stream, key) = if registry.is_family(binding.topic) {
+                let key = scopes.get(binding.topic).ok_or_else(|| {
                     FrameworkError::internal(format!(
-                        "Live binding topic `{}` is not registered",
+                        "Live page `{page_component}` is missing scope for family `{}`",
                         binding.topic
                     ))
                 })?;
-                (component.to_owned(), stream.to_owned())
+                (
+                    registry.family_instance(binding.topic, key)?,
+                    topic_component(binding.topic),
+                    "changes".to_owned(),
+                    Some(key.clone()),
+                )
+            } else if registry.topics().contains_key(binding.topic) {
+                (
+                    binding.topic.to_owned(),
+                    topic_component(binding.topic),
+                    "changes".to_owned(),
+                    None,
+                )
+            } else {
+                let (component, stream) = binding.topic.split_once("::").ok_or_else(|| {
+                    FrameworkError::internal(format!(
+                        "Live page `{page_component}` binds unregistered topic `{}`",
+                        binding.topic
+                    ))
+                })?;
+                (
+                    binding.topic.to_owned(),
+                    component.to_owned(),
+                    stream.to_owned(),
+                    None,
+                )
             };
+            self.check_topic(&topic)?;
             let component_name = ComponentName::parse(&component)
                 .map_err(|_| FrameworkError::internal("invalid Live binding component"))?;
             let stream_name = StreamName::parse(&stream)
                 .map_err(|_| FrameworkError::internal("invalid Live binding stream"))?;
-            let authority = if self
-                .state
-                .topics
-                .registry
-                .topics()
-                .contains_key(binding.topic)
-            {
+            let authority = if registry.application_topic(&topic).is_some() {
                 super::ports::subscription::SubscriptionAuthority::registered(
-                    &self.state.topics.registry,
+                    registry,
                     &component_name,
                     &stream_name,
-                    [binding.topic.to_owned()],
+                    [topic.clone()],
                 )
             } else {
                 super::ports::subscription::SubscriptionAuthority::component_stream(
@@ -731,25 +804,32 @@ impl LiveTopics {
                 )
             };
             if !authority.allows(principal.as_deref()).await {
-                omitted_binding(page_component, binding.topic);
+                omitted_binding(page_component, &topic);
                 continue;
             }
-            let cursor = self.cursor(binding.topic).await?;
-            let island = runtime.subscription_mount(&component)?;
-            if let Some(existing) = result.get_mut(binding.topic) {
-                let existing: &mut serde_json::Value = existing;
-                let only = existing["only"]
-                    .as_array_mut()
-                    .ok_or_else(|| FrameworkError::internal("invalid Live binding table"))?;
-                for name in binding.only {
-                    let value = serde_json::Value::String((*name).to_owned());
-                    if !only.contains(&value) {
-                        only.push(value);
-                    }
+            let entry = selected
+                .entry(topic)
+                .or_insert_with(|| (Vec::new(), component, stream, key));
+            for prop in binding.only {
+                if !entry.0.iter().any(|name| name == prop) {
+                    entry.0.push((*prop).to_owned());
                 }
-            } else {
-                result.insert(binding.topic.to_owned(), serde_json::json!({"only": binding.only, "cursor": cursor, "island": island, "stream": stream}));
             }
+        }
+        if selected.is_empty() {
+            return Ok(serde_json::json!({}));
+        }
+        let names: Vec<_> = selected.keys().cloned().collect();
+        let cursors = self.state.topics.hub.live_topic_cursors(&names).await?;
+        if cursors.len() != names.len() {
+            return Err(FrameworkError::internal(
+                "Live topic baseline has an invalid cursor count",
+            ));
+        }
+        let mut result = serde_json::Map::new();
+        for ((topic, (only, component, stream, key)), cursor) in selected.into_iter().zip(cursors) {
+            let island = runtime.subscription_mount(&component, key.as_deref())?;
+            result.insert(topic, serde_json::json!({"only": only, "cursor": cursor, "island": island, "stream": stream}));
         }
         Ok(serde_json::Value::Object(result))
     }

@@ -828,7 +828,8 @@ impl AsyncState {
         let component_topic = format!("{}::{}", component.as_str(), stream.as_str());
         for topic in &topics {
             // Parameterized legacy topics use direct refresh publication, not hub signals.
-            if topic == &component_topic || self.topics.registry.topics().contains_key(topic) {
+            if topic == &component_topic || self.topics.registry.application_topic(topic).is_some()
+            {
                 self.topics
                     .listen(self, topic)
                     .map_err(|_| AsyncErrorKind::Unavailable)?;
@@ -1029,7 +1030,8 @@ impl AsyncState {
                         .topics
                         .iter()
                         .filter(|topic| {
-                            *topic == &alias || self.topics.registry.topics().contains_key(*topic)
+                            *topic == &alias
+                                || self.topics.registry.application_topic(topic).is_some()
                         })
                         .cloned()
                         .collect::<Vec<_>>()

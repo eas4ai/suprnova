@@ -141,6 +141,11 @@ pub trait BroadcastHub: Send + Sync + 'static {
         Err(live_topics_unsupported())
     }
 
+    /// Reads one consistent baseline for all bindings before an Inertia loader starts.
+    async fn live_topic_cursors(&self, _topics: &[String]) -> Result<Vec<u64>, FrameworkError> {
+        Err(live_topics_unsupported())
+    }
+
     /// Publish a data-free Inertia Live topic signal.
     ///
     /// Calls inside `interval` are coalesced into one signal containing the
@@ -335,6 +340,10 @@ impl BroadcastHub for InMemoryBroadcastHub {
 
     async fn live_topic_cursor(&self, topic: &str) -> Result<u64, FrameworkError> {
         Ok(self.live_topics.cursor(topic).await)
+    }
+
+    async fn live_topic_cursors(&self, topics: &[String]) -> Result<Vec<u64>, FrameworkError> {
+        Ok(self.live_topics.cursors(topics).await)
     }
 
     async fn publish_live_topic(

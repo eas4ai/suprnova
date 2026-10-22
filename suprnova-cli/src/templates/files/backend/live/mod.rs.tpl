@@ -23,7 +23,7 @@ use suprnova::{
 
 /// Builds the registry of every Live component in this application.
 pub fn registry() -> Result<LiveRegistry, FrameworkError> {
-    let registry = LiveRegistry::builder().topic("notes")?.build();
+    let registry = LiveRegistry::builder().topic_family("notes")?.build();
     Ok(registry)
 }
 

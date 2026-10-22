@@ -1108,13 +1108,21 @@ fn resolve_topics(
                 if index != 0 {
                     resolved.push('/');
                 }
-                if let Some(parameter) = segment.strip_prefix(':') {
+                let parameter = segment
+                    .strip_prefix(':')
+                    .map(|parameter| ("", parameter))
+                    .or_else(|| segment.rsplit_once(".:"));
+                if let Some((prefix, parameter)) = parameter {
                     if parameter.is_empty()
                         || !valid_topic_parameter(parameter, MAX_TOPIC_PARAMETER_NAME_BYTES)
                     {
                         return Err(SubscriptionError::new(
                             SubscriptionErrorKind::UnregisteredSubscription,
                         ));
+                    }
+                    if !prefix.is_empty() {
+                        resolved.push_str(prefix);
+                        resolved.push('.');
                     }
                     resolved.push_str(parameters.get(parameter).ok_or_else(|| {
                         SubscriptionError::new(SubscriptionErrorKind::UnregisteredSubscription)

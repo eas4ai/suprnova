@@ -112,10 +112,10 @@ impl SubscriptionAuthority {
         let mut application_topic = false;
         let mut component_topic = false;
         for topic in topics {
-            if let Some(public) = registry.topics().get(&topic) {
+            if let Some((name, public)) = registry.application_topic(&topic) {
                 application_topic = true;
                 if !public {
-                    abilities.push((format!("live:topic.{topic}"), topic));
+                    abilities.push((format!("live:topic.{name}"), topic));
                 }
             } else {
                 component_topic = true;

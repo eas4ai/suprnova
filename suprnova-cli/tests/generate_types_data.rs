@@ -2063,9 +2063,7 @@ struct DashboardProps {
 }
 
 fn show() {
-    let _ = InertiaResponse::new("Dashboard").with_live_bindings(
-        <DashboardProps as suprnova::inertia::InertiaProps>::live_bindings(),
-    );
+    let _ = InertiaResponse::live::<DashboardProps>("Dashboard");
 }
 "#,
     )]);

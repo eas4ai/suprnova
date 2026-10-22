@@ -139,6 +139,15 @@ impl LiveTopicRuntime {
             .map_or(0, |entry| entry.cursor)
     }
 
+    /// Captures all requested baselines under the same authority lock before a loader runs.
+    pub(crate) async fn cursors(&self, names: &[String]) -> Vec<u64> {
+        let topics = self.topics.lock().await;
+        names
+            .iter()
+            .map(|name| topics.get(name).map_or(0, |entry| entry.cursor))
+            .collect()
+    }
+
     /// Accept a publication and decide whether it publishes or coalesces.
     pub(crate) async fn accept(
         &self,

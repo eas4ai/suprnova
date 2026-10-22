@@ -237,6 +237,28 @@ impl RedisLiveTopics {
             })
     }
 
+    /// A single Redis command captures all requested family and static baselines.
+    pub(super) async fn cursors(&self, topics: &[String]) -> Result<Vec<u64>, FrameworkError> {
+        if topics.is_empty() {
+            return Ok(Vec::new());
+        }
+        let script = Script::new(
+            "local values = {} for i, key in ipairs(KEYS) do values[i] = tonumber(redis.call('HGET', key, 'cursor') or '0') end return values",
+        );
+        let mut invocation = script.prepare_invoke();
+        for topic in topics {
+            invocation.key(self.topic_keys(topic).0);
+        }
+        invocation
+            .invoke_async(&mut self.connection.clone())
+            .await
+            .map_err(|error| {
+                FrameworkError::internal(format!(
+                    "SeaStreamerBroadcastHub: live topic baseline read failed: {error}"
+                ))
+            })
+    }
+
     /// Start a worker that atomically flushes pending unions into the stream.
     pub(super) fn spawn_flush_worker(&self, instance_id: Uuid) -> JoinHandle<()> {
         let backend = self.clone();

@@ -1283,6 +1283,13 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         }
     }
 
+    async fn live_topic_cursors(&self, topics: &[String]) -> Result<Vec<u64>, FrameworkError> {
+        match &self.live_topics {
+            FanoutLiveTopics::Memory(state) => Ok(state.cursors(topics).await),
+            FanoutLiveTopics::Redis(state) => state.cursors(topics).await,
+        }
+    }
+
     async fn publish_live_topic(
         &self,
         topic: &str,

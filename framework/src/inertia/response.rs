@@ -109,7 +109,7 @@ pub struct InertiaResponse {
     pub(super) props: IndexMap<String, Prop>,
     pub(super) cache_page: Option<Arc<super::cache::CachePage>>,
     pub(super) cache_declared: bool,
-    live_bindings: &'static [super::LiveBinding],
+    live_page_bindings: Option<Value>,
     flash: serde_json::Map<String, Value>,
     config: InertiaConfig,
     title: Option<String>,
@@ -165,6 +165,75 @@ pub struct InertiaResponse {
     /// its route names (AGENT-014).
     #[cfg(feature = "agents")]
     agent_tools: Vec<&'static str>,
+}
+
+/// Loads bound page data only after one authorized cursor snapshot is captured.
+pub struct InertiaLiveResponse<P> {
+    response: InertiaResponse,
+    scopes: Vec<(String, String)>,
+    props: std::marker::PhantomData<fn() -> P>,
+}
+
+impl<P: super::InertiaProps> InertiaLiveResponse<P> {
+    /// Resolves a family binding to its instance before the loader can query data.
+    pub fn scope(mut self, family: impl Into<String>, key: impl ToString) -> Self {
+        self.scopes.push((family.into(), key.to_string()));
+        self
+    }
+
+    async fn baseline(&self) -> Result<Value, FrameworkError> {
+        let mut scopes = std::collections::BTreeMap::new();
+        for (family, key) in &self.scopes {
+            if !P::live_bindings()
+                .iter()
+                .any(|binding| binding.topic == family)
+                || scopes.insert(family.clone(), key.clone()).is_some()
+            {
+                return Err(FrameworkError::internal(format!(
+                    "Live page `{}` has an unbound or duplicate family scope `{family}`",
+                    self.response.component
+                )));
+            }
+        }
+        if P::live_bindings().is_empty() {
+            return Ok(serde_json::json!({}));
+        }
+        crate::live::LiveTopics::resolve()?
+            .page_bindings(P::live_bindings(), &self.response.component, &scopes)
+            .await
+    }
+
+    /// Loads typed eager props after their baseline, preserving checked cache prop conversion.
+    pub async fn load<F, Fut>(self, loader: F) -> Result<InertiaResponse, FrameworkError>
+    where
+        P: super::InertiaPageProps,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<P, FrameworkError>>,
+    {
+        let baseline = self.baseline().await?;
+        let props = loader().await?;
+        let mut response = props.apply_props(self.response)?;
+        response.live_page_bindings = Some(baseline);
+        Ok(response)
+    }
+
+    /// Keeps deferred and optional resolvers inside the same pre-load cursor boundary.
+    pub async fn load_with<F, Fut>(self, loader: F) -> Result<InertiaResponse, FrameworkError>
+    where
+        F: FnOnce(InertiaResponse) -> Fut,
+        Fut: std::future::Future<Output = Result<InertiaResponse, FrameworkError>>,
+    {
+        let baseline = self.baseline().await?;
+        let component = self.response.component.clone();
+        let mut response = loader(self.response).await?;
+        if response.component != component {
+            return Err(FrameworkError::internal(
+                "a Live loader cannot change its page component",
+            ));
+        }
+        response.live_page_bindings = Some(baseline);
+        Ok(response)
+    }
 }
 
 /// Request-scoped snapshot of session values that an Inertia response delivers once.
@@ -388,7 +457,7 @@ impl InertiaResponse {
             props: IndexMap::new(),
             cache_page: None,
             cache_declared: false,
-            live_bindings: &[],
+            live_page_bindings: None,
             flash: serde_json::Map::new(),
             // One `RwLock` read and one clone of the config per response:
             // a few short strings and paths, the version (a `String`
@@ -445,11 +514,13 @@ impl InertiaResponse {
         self
     }
 
-    /// Carries the derive-checked topic bindings on every full and partial page response.
-    #[must_use]
-    pub fn with_live_bindings(mut self, bindings: &'static [super::LiveBinding]) -> Self {
-        self.live_bindings = bindings;
-        self
+    /// Captures authorized topic baselines before any bound page data is loaded.
+    pub fn live<P: super::InertiaProps>(component: impl Into<String>) -> InertiaLiveResponse<P> {
+        InertiaLiveResponse {
+            response: Self::new(component),
+            scopes: Vec::new(),
+            props: std::marker::PhantomData,
+        }
     }
 
     /// Override the default [`InertiaConfig`] for this response.
@@ -1397,16 +1468,7 @@ impl InertiaResponse {
         }
         self.prepare_component()
             .map_err(reflash_session_values_after_eager_error)?;
-        // Capture before prop reads so a write racing the render remains newer.
-        let live_page_bindings = if self.live_bindings.is_empty() {
-            None
-        } else {
-            Some(
-                crate::live::LiveTopics::resolve()?
-                    .page_bindings(self.live_bindings, &self.component)
-                    .await?,
-            )
-        };
+        let live_page_bindings = self.live_page_bindings.take();
         let cache = super::cache::PageAssembly::new(
             self.cache_page.clone(),
             &self.component,
@@ -1466,7 +1528,7 @@ impl InertiaResponse {
             props,
             cache_page: _,
             cache_declared: _,
-            live_bindings: _,
+            live_page_bindings: _,
             flash: response_flash,
             config,
             title,
@@ -1974,7 +2036,7 @@ impl InertiaResponse {
             props,
             cache_page: _,
             cache_declared: _,
-            live_bindings: _,
+            live_page_bindings: _,
             flash: response_flash,
             config,
             title: _,

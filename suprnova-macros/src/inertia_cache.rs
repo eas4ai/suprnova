@@ -128,9 +128,7 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<Option<TokenStream>> {
     Ok(Some(quote! {
         impl #impl_generics ::suprnova::inertia::InertiaPageProps for #name #ty_generics #where_clause {
             fn apply_props(&self, response: ::suprnova::InertiaResponse) -> ::core::result::Result<::suprnova::InertiaResponse, ::suprnova::FrameworkError> {
-                response
-                    .with_live_bindings(<Self as ::suprnova::inertia::InertiaProps>::live_bindings())
-                    .cacheable(self)
+                response.cacheable(self)
             }
         }
         impl #impl_generics ::suprnova::inertia::CacheableInertiaProps for #name #ty_generics #where_clause {

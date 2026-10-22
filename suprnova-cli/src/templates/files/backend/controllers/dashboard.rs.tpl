@@ -56,10 +56,14 @@ pub async fn index(req: Request) -> Response {
     // response is resolved, so each takes the id rather than the request.
     let user_id = user.id;
 
-    Ok(InertiaResponse::new("Dashboard")
-        .with_live_bindings(<DashboardProps as suprnova::inertia::InertiaProps>::live_bindings())
-        .defer("stats", move || note_stats(user_id))
-        .optional("recent_notes", move || recent_notes(user_id))
+    Ok(InertiaResponse::live::<DashboardProps>("Dashboard")
+        .scope("notes", user_id)
+        .load_with(move |response| async move {
+            Ok(response
+                .defer("stats", move || note_stats(user_id))
+                .optional("recent_notes", move || recent_notes(user_id)))
+        })
+        .await?
         .resolve(&req)
         .await?)
 }

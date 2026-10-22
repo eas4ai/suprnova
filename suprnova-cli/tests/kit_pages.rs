@@ -322,6 +322,25 @@ fn both_offer_more_before_cap_and_stop_at_exhaustion() {
                     "svelte live adapter must use a .svelte.ts module"
                 );
             }
+            let backend = app.read("src/controllers/dashboard.rs");
+            for present in [
+                "InertiaResponse::live::<DashboardProps>",
+                ".scope(\"notes\", user_id)",
+                ".load_with(",
+            ] {
+                assert!(
+                    backend.contains(present),
+                    "{} dashboard lacks {present}",
+                    app.kit
+                );
+            }
+            let bootstrap = app.read("src/bootstrap.rs");
+            assert!(bootstrap.contains("on_model_scoped::<crate::models::note::Note>"));
+            assert!(bootstrap.contains("instance == &format!(\"notes.{principal}\")"));
+            assert!(
+                app.read("src/live/mod.rs")
+                    .contains(".topic_family(\"notes\")?")
+            );
             let dashboard = match app.kit {
                 "react" => app.read("frontend/src/pages/Dashboard.tsx"),
                 "svelte" => app.read("frontend/src/pages/Dashboard.svelte"),

@@ -200,6 +200,49 @@ describe("Inertia live client core", () => {
     connection = null;
   });
 
+  it(
+    "accepts the committed signal newer than the actual Rust loader page",
+    { skip: !process.env.SIGNAL_LIVE_BASELINE_PAGE },
+    async () => {
+      const { startInertiaLive } = await loadCore();
+      const app = fixture();
+      const page = JSON.parse(
+        await readFile(process.env.SIGNAL_LIVE_BASELINE_PAGE!, "utf8"),
+      );
+      assert.equal(page.liveBindings["signal.render"].cursor, 0);
+      assert.deepEqual(page.props.posts, ["old query value"]);
+      app.setPage(page);
+      connection = startInertiaLive({
+        clearTimer: app.clearTimer,
+        setTimer: app.setTimer,
+        router: app.router,
+        transport: app.transport,
+        getPage: () => app.page,
+      });
+      app.handlers.onSignal({
+        topic: "signal.render",
+        cursor: 1,
+        props: ["posts"],
+      });
+      app.runNextTimer();
+      assert.deepEqual(app.reloads[0]?.only, ["posts"]);
+      app.reloads[0]?.onSuccess?.({
+        ...page,
+        liveBindings: {
+          "signal.render": { ...page.liveBindings["signal.render"], cursor: 1 },
+        },
+        props: { posts: ["committed new value"] },
+      });
+      app.reloads[0]?.onFinish?.();
+      app.handlers.onSignal({
+        topic: "signal.render",
+        cursor: 1,
+        props: ["posts"],
+      });
+      assert.equal(app.timerCount, 0);
+    },
+  );
+
   it("subscribes topic names that match Object prototype properties", async () => {
     const { startInertiaLive } = await loadCore();
     const app = fixture();

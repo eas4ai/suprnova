@@ -1,6 +1,5 @@
 use http_body_util::BodyExt;
 use serde_json::Value;
-use suprnova::inertia::InertiaProps as BindingMetadata;
 use suprnova::live::testing::prepare_live_router_for_test;
 use suprnova::live::{LiveRegistry, LiveTopics};
 use suprnova::testing::TestContainer;
@@ -15,11 +14,16 @@ struct Page {
 }
 
 async fn response(request: &Request) -> Result<HttpResponse, FrameworkError> {
-    let props = Page {
-        posts: vec!["visible".to_owned()],
-        count: 1,
-    };
-    suprnova::inertia_response!(request, "__tests__/TypedProps", props)
+    InertiaResponse::live::<Page>("__tests__/TypedProps")
+        .load(|| async {
+            Ok(Page {
+                posts: vec!["visible".to_owned()],
+                count: 1,
+            })
+        })
+        .await?
+        .resolve(request)
+        .await
 }
 async fn json(response: HttpResponse) -> Value {
     serde_json::from_slice(
@@ -87,15 +91,18 @@ async fn signal_002_render_baseline_precedes_prop_reads_that_race_a_write() {
     let topics = LiveTopics::from_runtime(&runtime);
     let change = topics.clone();
     let request = Request::for_test_with_headers("GET", "/signal", [("X-Inertia", "true")]);
-    let page = InertiaResponse::new("__tests__/TypedProps")
-        .with_live_bindings(Page::live_bindings())
-        .lazy("posts", move || {
-            let change = change.clone();
-            async move {
-                change.changed("signal.render", &["posts"]).await.unwrap();
-                Ok::<_, FrameworkError>(vec!["value"])
-            }
+    let page = InertiaResponse::live::<Page>("__tests__/TypedProps")
+        .load_with(move |response| async move {
+            Ok(response.lazy("posts", move || {
+                let change = change.clone();
+                async move {
+                    change.changed("signal.render", &["posts"]).await.unwrap();
+                    Ok::<_, FrameworkError>(vec!["value"])
+                }
+            }))
         })
+        .await
+        .unwrap()
         .resolve(&request)
         .await
         .unwrap();
@@ -135,11 +142,22 @@ fn signal_004_shared_client_drops_stale_cursors_and_coalesces_bounded_reloads() 
     );
     let suite = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../suprnova-cli/tests/frontend-live-core.test.ts");
+    let directory = tempfile::tempdir().expect("client page fixture directory");
+    let fixture = directory.path().join("baseline-page.json");
+    let page = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("loader fixture runtime")
+        .block_on(loader_race_page());
+    std::fs::write(&fixture, serde_json::to_vec(&page).expect("page JSON"))
+        .expect("write actual baseline page");
     let output = std::process::Command::new("node")
         .arg("--test")
         .arg(suite)
+        .env("SIGNAL_LIVE_BASELINE_PAGE", fixture)
         .output()
         .expect("Node 24.22.1 or later runs the kit client regression suite");
+    print!("{}", String::from_utf8_lossy(&output.stdout));
     assert!(
         output.status.success(),
         "{}{}",
@@ -220,13 +238,15 @@ async fn authorized_page(principal: Option<&'static str>) -> Value {
         }
         let request =
             Request::for_test_with_headers("GET", "/signal-auth", [("X-Inertia", "true")]);
-        let response: Result<HttpResponse, FrameworkError> = suprnova::inertia_response!(
-            &request,
-            "__tests__/TypedProps",
-            AuthorizedPage {
-                posts: vec!["page still renders".to_owned()]
-            }
-        );
+        let response = InertiaResponse::live::<AuthorizedPage>("__tests__/TypedProps")
+            .load(|| async {
+                Ok(AuthorizedPage {
+                    posts: vec!["page still renders".to_owned()],
+                })
+            })
+            .await?
+            .resolve(&request)
+            .await;
         let response = response?;
         assert_eq!(response.status_code(), 200);
         Ok::<_, FrameworkError>(json(response).await)
@@ -299,5 +319,205 @@ async fn signal_fix_001_private_metadata_is_omitted_and_warned_once() {
     assert!(
         lines.iter().filter(|line| line.contains("DEBUG")).count() >= 3,
         "{output}"
+    );
+}
+
+async fn loader_race_page() -> Value {
+    let _guard = TestContainer::fake();
+    suprnova::Crypt::init(suprnova::EncryptionKey::generate());
+    let db = suprnova::testing::TestDatabase::sqlite_memory()
+        .await
+        .unwrap();
+    db.execute_unprepared("CREATE TABLE signal_baseline_posts (title TEXT NOT NULL)")
+        .await
+        .unwrap();
+    db.execute_unprepared("INSERT INTO signal_baseline_posts (title) VALUES ('old query value')")
+        .await
+        .unwrap();
+    let hub = std::sync::Arc::new(BaselineHub::default());
+    suprnova::App::bind::<dyn suprnova::broadcasting::BroadcastHub>(hub.clone());
+    TestContainer::singleton(
+        LiveRegistry::builder()
+            .public_topic("signal.render")
+            .unwrap()
+            .build(),
+    );
+    let runtime = prepare_live_router_for_test(&Router::new()).unwrap();
+    let topics = LiveTopics::from_runtime(&runtime);
+    let request = Request::for_test_with_headers("GET", "/signal", [("X-Inertia", "true")]);
+    let response = InertiaResponse::live::<Page>("__tests__/TypedProps")
+        .load(|| async {
+            let row = db
+                .fetch_one("SELECT title FROM signal_baseline_posts", vec![])
+                .await?;
+            let title = row.try_get::<String>("", "title")?;
+            let change = topics.clone();
+            suprnova::DB::transaction(move |_| {
+                Box::pin(async move {
+                    suprnova::DB::statement(
+                        "UPDATE signal_baseline_posts SET title = 'committed new value'",
+                        vec![],
+                    )
+                    .await?;
+                    change.changed("signal.render", &["posts"]).await?;
+                    Ok::<(), FrameworkError>(())
+                })
+            })
+            .await?;
+            Ok(Page {
+                posts: vec![title],
+                count: 0,
+            })
+        })
+        .await
+        .unwrap()
+        .resolve(&request)
+        .await
+        .unwrap();
+    let page = json(response).await;
+    assert_eq!(page["props"]["posts"][0], "old query value");
+    assert_eq!(page["liveBindings"]["signal.render"]["cursor"], 0);
+    assert_eq!(topics.cursor("signal.render").await.unwrap(), 1);
+    assert_eq!(hub.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    page
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn signal_fix_004_a_write_after_an_eager_query_keeps_the_old_baseline() {
+    loader_race_page().await;
+}
+
+#[derive(Default)]
+struct BaselineHub {
+    inner: suprnova::broadcasting::InMemoryBroadcastHub,
+    reads: std::sync::atomic::AtomicUsize,
+}
+#[suprnova::async_trait]
+impl suprnova::broadcasting::BroadcastHub for BaselineHub {
+    fn subscribe(
+        &self,
+        channel: &str,
+    ) -> tokio::sync::broadcast::Receiver<suprnova::broadcasting::BroadcastEnvelope> {
+        self.inner.subscribe(channel)
+    }
+    async fn publish(
+        &self,
+        envelope: suprnova::broadcasting::BroadcastEnvelope,
+    ) -> Result<(), FrameworkError> {
+        self.inner.publish(envelope).await
+    }
+    fn subscribe_live_topic(
+        &self,
+        topic: &str,
+    ) -> Result<
+        tokio::sync::broadcast::Receiver<suprnova::broadcasting::BroadcastEnvelope>,
+        FrameworkError,
+    > {
+        self.inner.subscribe_live_topic(topic)
+    }
+    async fn live_topic_cursor(&self, topic: &str) -> Result<u64, FrameworkError> {
+        self.inner.live_topic_cursor(topic).await
+    }
+    async fn live_topic_cursors(&self, topics: &[String]) -> Result<Vec<u64>, FrameworkError> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.live_topic_cursors(topics).await
+    }
+    async fn publish_live_topic(
+        &self,
+        topic: &str,
+        props: &[String],
+        except: Option<String>,
+        interval: std::time::Duration,
+    ) -> Result<(), FrameworkError> {
+        self.inner
+            .publish_live_topic(topic, props, except, interval)
+            .await
+    }
+}
+
+#[derive(InertiaProps)]
+#[inertia(live(topic = "signal.scoped", only = ["posts"]))]
+#[inertia(live(topic = "signal.public-scoped", only = ["posts"]))]
+struct ScopedPage {
+    posts: Vec<String>,
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn signal_fix_004_family_scope_is_required_and_authorized_before_the_loader() {
+    let _guard = TestContainer::fake();
+    suprnova::Crypt::init(suprnova::EncryptionKey::generate());
+    suprnova::Gate::define::<String, String>("live:topic.signal.scoped", |principal, instance| {
+        instance == &format!("signal.scoped.{principal}")
+    });
+    TestContainer::singleton(
+        LiveRegistry::builder()
+            .topic_family("signal.scoped")
+            .unwrap()
+            .public_topic_family("signal.public-scoped")
+            .unwrap()
+            .build(),
+    );
+    prepare_live_router_for_test(&Router::new()).unwrap();
+    let result = InertiaResponse::live::<ScopedPage>("__tests__/TypedProps")
+        .load(|| async { panic!("missing scope must fail before loading") })
+        .await;
+    let error = result.err().unwrap().to_string();
+    assert!(
+        error.contains("__tests__/TypedProps") && error.contains("signal.scoped"),
+        "{error}"
+    );
+    for principal in [None, Some("other"), Some("owner")] {
+        suprnova::auth::request_state::request_state_scope_for_test(async {
+            if let Some(principal) = principal {
+                suprnova::Auth::set_user(std::sync::Arc::new(SignalPrincipal(principal)));
+            }
+            let request = Request::for_test_with_headers("GET", "/scope", [("X-Inertia", "true")]);
+            let response = InertiaResponse::live::<ScopedPage>("__tests__/TypedProps")
+                .scope("signal.scoped", "owner")
+                .scope("signal.public-scoped", "guest")
+                .load(|| async { Ok(ScopedPage { posts: vec![] }) })
+                .await
+                .unwrap()
+                .resolve(&request)
+                .await
+                .unwrap();
+            let page = json(response).await;
+            assert_eq!(
+                page["liveBindings"].get("signal.scoped.owner").is_some(),
+                principal == Some("owner")
+            );
+            assert_eq!(
+                page["liveBindings"]["signal.public-scoped.guest"]["cursor"],
+                0
+            );
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn signal_fix_004_prebuilt_bound_props_require_a_loader() {
+    async fn prebuilt(request: &Request) -> Result<HttpResponse, FrameworkError> {
+        suprnova::inertia_response!(
+            request,
+            "__tests__/TypedProps",
+            Page {
+                posts: vec![],
+                count: 0
+            }
+        )
+    }
+    let _container = TestContainer::fake();
+    let request = Request::for_test_with_headers("GET", "/signal", [("X-Inertia", "true")]);
+    assert!(
+        prebuilt(&request)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("loader")
     );
 }

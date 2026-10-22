@@ -12,7 +12,7 @@ same shape in all three.
 A controller returns an Inertia response naming a component:
 
 ```rust
-use suprnova::{InertiaProps, Request, Response, inertia_response};
+use suprnova::{InertiaProps, InertiaResponse, Request, Response};
 
 #[derive(InertiaProps)]
 pub struct HomeProps {
@@ -634,7 +634,7 @@ A typed page can subscribe its props to a Live application topic. Add a
 repeatable `#[inertia(live(...))]` declaration to its `InertiaProps` type:
 
 ```rust
-use suprnova::{InertiaProps, Request, Response, inertia_response};
+use suprnova::{InertiaProps, InertiaResponse, Request, Response};
 
 #[derive(InertiaProps)]
 #[serde(rename_all = "camelCase")]
@@ -645,10 +645,16 @@ pub struct DashboardProps {
 }
 
 pub async fn dashboard(req: Request) -> Response {
-    inertia_response!(&req, "Dashboard", DashboardProps {
-        posts: recent_posts().await?,
-        post_count: count_posts().await?,
-    })
+    Ok(InertiaResponse::live::<DashboardProps>("Dashboard")
+        .load(|| async {
+            Ok(DashboardProps {
+                posts: recent_posts().await?,
+                post_count: count_posts().await?,
+            })
+        })
+        .await?
+        .resolve(&req)
+        .await?)
 }
 ```
 
@@ -656,6 +662,36 @@ The topic must be declared in the [Live registry](live.md#topic-signals).
 `only` contains serialized prop names, after a `serde` rename such as
 `post_count` to `postCount`. The derive rejects an unknown name or a duplicate
 name at compile time. Repeat the attribute to bind another topic.
+
+Use `InertiaResponse::live::<P>` and a loader for every bound page. The
+framework reads the authorized bindings' cursors in one hub read before it
+calls the loader. This includes eager queries inside the loader. A write
+committed after the query remains newer than the rendered cursor. Prebuilt
+bound props are rejected by `inertia_response!` instead of acquiring a newer
+cursor after their data was read.
+
+A family binding uses the family name in the attribute and supplies its key
+before loading. The runtime metadata contains the resolved instance name:
+
+```rust
+InertiaResponse::live::<NotesDashboardProps>("Dashboard")
+    .scope("notes", user_id)
+    .load_with(move |response| async move {
+        Ok(response
+            .defer("stats", move || note_stats(user_id))
+            .optional("recent_notes", move || recent_notes(user_id)))
+    })
+    .await?
+    .resolve(&req)
+    .await?
+```
+
+`load` returns typed `P` props. `load_with` receives the response builder so
+existing deferred and optional resolvers keep their filtering rules. Both use
+the same pre-loader cursor boundary. A missing family scope fails with an
+internal error naming the component and family. A family key is one trusted
+Live mount parameter, at most 128 unreserved ASCII bytes. The full instance
+still follows the topic-name bound.
 
 The response carries the checked metadata in the reserved top-level page field
 `liveBindings`, outside `props`. Partial reload filtering never drops it. Each
@@ -679,7 +715,7 @@ topic has this shape:
 ```
 
 `only` is the partial reload list, `cursor` is the topic position captured
-before the props are read, and `island` plus `stream` describe the authorized
+before the loader runs, and `island` plus `stream` describe the authorized
 Live subscription. The generated frontend types expose the same table as
 `LiveBindings` and map page components through `InertiaLiveBindings`. The
 existing `inertiaPropCache` record also carries each page's topic-to-prop map

@@ -165,19 +165,19 @@ pub async fn index(req: Request) -> Response {
 ### Live note updates
 
 The Inertia kits also keep the dashboard's `stats` current when a note is
-saved or deleted. Their Live registry declares a private application topic,
+saved or deleted. Their Live registry declares a private topic family,
 bootstrap defines its audience and connects model hooks, and the dashboard
 props bind `stats` to it:
 
 ```rust
 // src/live/mod.rs
-let registry = LiveRegistry::builder().topic("notes")?.build();
+let registry = LiveRegistry::builder().topic_family("notes")?.build();
 
 // src/bootstrap.rs
-Gate::define::<String, String>("live:topic.notes", |_, _| true);
+Gate::define::<String, String>("live:topic.notes", |principal, instance| instance == &format!("notes.{principal}"));
 App::singleton(registry);
 LiveTopics::resolve()?
-    .on_model::<Note>("notes", &["stats"])?;
+    .on_model_scoped::<Note>("notes", |note| note.user_id.to_string(), &["stats"])?;
 
 // src/controllers/dashboard.rs
 #[derive(InertiaProps)]
@@ -187,15 +187,22 @@ pub struct DashboardProps {
     pub recent_notes: Vec<NoteSummary>,
 }
 
-InertiaResponse::new("Dashboard")
-    .with_live_bindings(<DashboardProps as suprnova::inertia::InertiaProps>::live_bindings())
-    .defer("stats", move || note_stats(user_id))
-    .optional("recent_notes", move || recent_notes(user_id));
+InertiaResponse::live::<DashboardProps>("Dashboard")
+    .scope("notes", user_id)
+    .load_with(move |response| async move {
+        Ok(response
+            .defer("stats", move || note_stats(user_id))
+            .optional("recent_notes", move || recent_notes(user_id)))
+    })
+    .await?
+    .resolve(&req)
+    .await?;
 ```
 
 Each frontend mounts its small `useLive()` adapter on `Dashboard`. A signal
 asks Inertia to reload only `stats`; the controller recalculates it over the
-signed-in user's own notes. The signal carries no note values. `usePoll`
+signed-in user's own notes. Only the owner receives the instance signal or its cursor. The signal carries
+no note values. The baseline is captured before the loader runs. `usePoll`
 remains as the fallback when the browser cannot keep a push transport open.
 See [Live topic bindings](frontend-pages.md#live-topic-bindings) for the page
 contract and [Topic signals](live.md#topic-signals) for publication rules.

@@ -65,7 +65,9 @@ pub use prop::{MergePaths, OnceUntil};
 pub use providers::{
     PropertyContext, ProvidesInertiaProperties, ProvidesInertiaProperty, RenderContext,
 };
-pub use response::{InertiaLocation, InertiaResponse, IntoInertiaData, PropEntry};
+pub use response::{
+    InertiaLiveResponse, InertiaLocation, InertiaResponse, IntoInertiaData, PropEntry,
+};
 pub(crate) use response::{SlashEscaping, contains_title_element, escape_html_attr};
 pub use root_share::RootShare;
 pub use root_template::{

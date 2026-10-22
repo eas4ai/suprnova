@@ -98,13 +98,17 @@ struct SignalPage {
 }
 
 async fn page_handler(request: Request) -> Response {
-    suprnova::inertia_response!(
-        &request,
-        "__tests__/TypedProps",
-        SignalPage {
-            posts: vec![],
-            count: 0
-        }
+    Ok(
+        suprnova::InertiaResponse::live::<SignalPage>("__tests__/TypedProps")
+            .load(|| async {
+                Ok(SignalPage {
+                    posts: vec![],
+                    count: 0,
+                })
+            })
+            .await?
+            .resolve(&request)
+            .await?,
     )
 }
 async fn write_handler(_request: Request) -> Response {
@@ -1445,4 +1449,115 @@ async fn signal_003_model_hooks_follow_an_explicit_write_transaction() {
     assert_eq!(topics.cursor("signal.model-tx").await.unwrap(), 1);
     tx.rollback().await.unwrap();
     assert_eq!(topics.cursor("signal.model-tx").await.unwrap(), 1);
+}
+
+#[suprnova::model(table = "signal_owned_posts", fillable = ["title", "user_id"])]
+pub struct SignalOwnedPost {
+    pub id: i64,
+    pub title: String,
+    pub user_id: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(suprnova::InertiaProps)]
+#[inertia(live(topic = "signal.owned", only = ["posts"]))]
+struct OwnedPage {
+    posts: Vec<String>,
+}
+
+async fn owned_page_handler(request: Request) -> Response {
+    let owner = suprnova::Auth::id().ok_or(FrameworkError::Unauthorized)?;
+    Ok(
+        suprnova::InertiaResponse::live::<OwnedPage>("__tests__/TypedProps")
+            .scope("signal.owned", owner)
+            .load(|| async { Ok(OwnedPage { posts: vec![] }) })
+            .await?
+            .resolve(&request)
+            .await?,
+    )
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn signal_fix_002_two_users_receive_only_their_own_model_changes_over_sse() {
+    use suprnova::Model;
+    let _guard = TestContainer::fake();
+    App::init();
+    ensure_crypt();
+    let db = suprnova::testing::TestDatabase::sqlite_memory()
+        .await
+        .unwrap();
+    db.execute_unprepared("CREATE TABLE signal_owned_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, user_id TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)").await.unwrap();
+    Gate::define::<String, String>("live:topic.signal.owned", |principal, instance| {
+        instance == &format!("signal.owned.{principal}")
+    });
+    App::singleton(
+        LiveRegistry::builder()
+            .topic_family("signal.owned")
+            .unwrap()
+            .build(),
+    );
+    let router: Router = Router::new()
+        .get("/signal/owned", owned_page_handler)
+        .into();
+    let router = router.try_live().unwrap();
+    let runtime = prepare_live_router_for_test(&router).unwrap();
+    App::singleton(runtime.clone());
+    let topics = LiveTopics::from_runtime(&runtime);
+    topics
+        .on_model_scoped::<SignalOwnedPost>("signal.owned", |post| post.user_id.clone(), &["posts"])
+        .unwrap();
+    let server = spawn_server(Arc::new(router)).await;
+    let alice = Identity::alice();
+    let bob = Identity::alice()
+        .with_principal("bob")
+        .with_session("bob-owned-session");
+    let mut bindings = Vec::new();
+    for identity in [&alice, &bob] {
+        let reply = send(
+            server.port,
+            identity,
+            Method::GET,
+            "/signal/owned",
+            &[("x-inertia", "true")],
+            Bytes::new(),
+        )
+        .await;
+        assert_eq!(
+            reply.status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
+        );
+        let page = reply.json();
+        let (topic, binding) = page["liveBindings"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .next()
+            .unwrap();
+        bindings.push((topic.clone(), binding.clone()));
+    }
+    let a = issue_page(&server, &bindings[0].1, "owned-alice-document-0001", &alice).await;
+    let b = issue_page(&server, &bindings[1].1, "owned-bob-document-0001", &bob).await;
+    let mut a_stream = open_membership(&server, &alice, &a, "owned-alice-nonce").await;
+    let mut b_stream = open_membership(&server, &bob, &b, "owned-bob-nonce").await;
+    let post =
+        SignalOwnedPost::create(suprnova::attrs! { title: "private alice note", user_id: "alice" })
+            .await
+            .unwrap();
+    assert_eq!(next_signal(&mut a_stream).await["topic"], bindings[0].0);
+    assert_no_signal(&mut b_stream).await;
+    assert_eq!(topics.cursor(&bindings[1].0).await.unwrap(), 0);
+    post.delete().await.unwrap();
+    next_signal(&mut a_stream).await;
+    assert_no_signal(&mut b_stream).await;
+    let _ = SignalOwnedPost::create(suprnova::attrs! { title: "private bob note", user_id: "bob" })
+        .await
+        .unwrap();
+    assert_eq!(next_signal(&mut b_stream).await["topic"], bindings[1].0);
+    assert_no_signal(&mut a_stream).await;
+    assert_eq!(topics.cursor(&bindings[0].0).await.unwrap(), 2);
+    assert_eq!(topics.cursor(&bindings[1].0).await.unwrap(), 1);
 }

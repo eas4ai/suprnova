@@ -450,9 +450,11 @@ fn live_binding_probe(props: &Expr) -> proc_macro2::TokenStream {
         let __props_value = #props;
         let __props = __props_value.__suprnova_inertia_props_borrow();
         let __live_props = __SuprnovaLiveProps(__props);
-        __response = __response.with_live_bindings(
-            (&__live_props).__suprnova_live_bindings()
-        );
+        if !(&__live_props).__suprnova_live_bindings().is_empty() {
+            ::core::result::Result::<(), ::suprnova::FrameworkError>::Err(
+                ::suprnova::FrameworkError::internal("Live-bound props require InertiaResponse::live with a loader")
+            )?;
+        }
     }
 }
 
