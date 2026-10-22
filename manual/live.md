@@ -633,8 +633,8 @@ regardless, so a policy change ends delivery immediately on every node.
 
 ## Topic signals
 
-A topic signal says that named data changed. It carries the topic, a monotonic
-cursor, and the prop names that should be refreshed. It never carries a model
+A topic signal says that named data changed. It carries the topic, its state
+generation, a cursor within that generation, and the prop names that should be refreshed. It never carries a model
 or its values. Live components can subscribe to the same topic, and an Inertia
 page can turn the signal into a partial reload as described in [Live topic
 bindings](frontend-pages.md#live-topic-bindings).
@@ -685,9 +685,8 @@ LiveTopics::resolve()?.on_model_scoped::<Note>(
 
 The instances `notes.42` and `notes.73` have separate memberships, cursors,
 rate windows, and fanout. `public_topic_family("announcements")?` explicitly
-permits anonymous instances. A Live island can declare a stream topic such as
-`notes.:principal`; the existing trusted topic parameter resolver supplies the
-key. A page supplies the key with the
+permits anonymous instances. A Live island can subscribe to an instance name such as `notes.42`, using
+the same family ability check. A page supplies the key with the
 [Live response loader](frontend-pages.md#live-topic-bindings).
 `changed("notes.42", &["stats"]).await?` and
 `changed_with_tx(&tx, "notes.42", &["stats"]).await?` publish to the same instance.
@@ -783,8 +782,8 @@ let topics = LiveTopics::resolve()?;
 topics.on_model::<Post>("posts", &["posts", "post_count"])?;
 ```
 
-The cursor belongs to the topic, not to a subscriber. A binding records its
-current value before its page loader runs, so reconnect can distinguish a current
+The generation and cursor belong to the topic, not to a subscriber. A
+binding records both before its page loader runs, so reconnect can distinguish a current
 subscription from one that needs a reload. With a cross-process hub, every
 replica observes the same cursor. Without a configured hub, Live binds its
 in-memory fallback and signals reach only this process. See [Inertia Live topic
@@ -801,8 +800,10 @@ last membership expires and is pruned, its listener and receiver are released.
 Idle instances expire after `LIVE_TOPIC_INSTANCE_RETENTION_SECS=86400` seconds.
 Zero is rejected. A publication, baseline read or membership renews activity.
 In-memory pruning retains active memberships and pending rate-limited signals;
-Redis renews the instance hash TTL on publication, baseline reads and membership
-heartbeats. Pending signals survive until their permitted publication. Static
+Redis renews the idle cursor/rate hash TTL on publication, baseline reads and
+membership heartbeats. Pending work has no TTL and pins that hash until a
+successful flush. The flush restores its idle TTL. Its prop set and schedule
+survive a worker outage. A missing pending hash produces a full invalidation. Static
 topics never expire. All callers share one sweep per second. The ordered idle
 index excludes active memberships, pending work and static topics, so a sweep
 visits only instances whose idle deadline has passed. Configure the same retention window on every replica:
@@ -814,10 +815,16 @@ let config = suprnova::live::LiveConfig::builder()
 suprnova::App::singleton(config);
 ```
 
-A retired instance has baseline cursor 0. Its next publication advances to 1.
-This matches a volatile process restart. A recovery reload installs the lower
-baseline before the client accepts the reused instance's signals. Keep polling
-as the fallback while a disconnected page recovers its baseline.
+Every instance has a generation: the creation time of its authority state in
+milliseconds. In-memory time follows the hub's monotonic clock from its start
+time. Redis assigns generations from its own clock, shared by every node.
+Static topics also carry the authority's start generation. Retirement creates
+a new generation at cursor 0; its next publication advances to 1. A signal
+from a different generation makes an open page reload all bound props even
+when its old cursor is higher. The response adopts the new generation and
+cursor. Island recovery also seeds a generation at cursor 0. Signals in the
+same generation at or below the rendered cursor are discarded. Polling remains
+the fallback while push delivery is unavailable.
 
 A binding may also name an existing component stream as
 `component::stream`. Such a binding uses the component ability

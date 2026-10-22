@@ -664,7 +664,7 @@ The topic must be declared in the [Live registry](live.md#topic-signals).
 name at compile time. Repeat the attribute to bind another topic.
 
 Use `InertiaResponse::live::<P>` and a loader for every bound page. The
-framework reads the authorized bindings' cursors in one hub read before it
+framework reads the authorized bindings' generations and cursors in one hub read before it
 calls the loader. This includes eager queries inside the loader. A write
 committed after the query remains newer than the rendered cursor. Prebuilt
 bound props are rejected by `inertia_response!` instead of acquiring a newer
@@ -703,6 +703,7 @@ topic has this shape:
     "posts": {
       "only": ["posts", "postCount"],
       "cursor": 42,
+      "generation": 1792688181000,
       "island": {
         "component": "suprnova.topic.a44f1b975171163546d46ba5ca80652f85fcad7f665cf55d00a202ff9d0f7dbe",
         "slot": "topic",
@@ -714,8 +715,9 @@ topic has this shape:
 }
 ```
 
-`only` is the partial reload list, `cursor` is the topic position captured
-before the loader runs, and `island` plus `stream` describe the authorized
+`only` is the partial reload list. `generation` is the topic state creation
+time in milliseconds; `cursor` is its position within that generation. Both
+are captured before the loader runs, and `island` plus `stream` describe the authorized
 Live subscription. The generated frontend types expose the same table as
 `LiveBindings` and map page components through `InertiaLiveBindings`. The
 existing `inertiaPropCache` record also carries each page's topic-to-prop map
@@ -723,7 +725,7 @@ under `live`, beside `cacheable`, `public`, and `perRequest`.
 
 When a `topic_change` arrives, the adapter reloads the named props through the
 ordinary Inertia partial reload path. An empty signal prop list reloads all
-props in the binding. The signal carries only `topic`, `cursor`, and `props`,
+props in the binding. The signal carries only `topic`, `generation`, `cursor`, and `props`,
 so page data still comes from the controller under its normal authorization.
 
 A topic may instead be a component-stream alias such as
@@ -773,7 +775,8 @@ Only props present in the response advance their rendered cursors. A rescued
 or omitted deferred prop keeps its invalidation. Failed or canceled reloads
 retry after 1, 2, 4, 8, and 16 seconds, then every 30 seconds. A successful
 reload resets this backoff. The page keeps its polling fallback during retries.
-Each prop keeps its own rendered cursor, so a partial response cannot consume
+A changed generation reloads every prop bound to that topic regardless of
+its old cursor. Each prop keeps its own rendered generation and cursor, so a partial response cannot consume
 a change for a prop it did not reload. Every Inertia visit carries the Live
 document identity in `X-Socket-ID` while the adapter is mounted.
 

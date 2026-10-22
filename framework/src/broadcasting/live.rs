@@ -19,11 +19,47 @@ pub struct LiveTopicSignal {
     pub topic: String,
     /// The publication position within the retained instance lifetime. Retirement resets it to zero.
     pub cursor: u64,
+    /// Creation time of the topic state, so retirement remains visible at a lower cursor.
+    pub generation: u64,
     /// The page props to reload. An empty list requests a full reload.
     pub props: Vec<String>,
     /// Internal hub routing metadata, removed before delivery to a browser.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusion: Option<LiveTopicExclusion>,
+}
+
+/// One authority baseline identifies both the retained state and its publication position.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LiveTopicPosition {
+    /// Creation time of the authority state in milliseconds.
+    pub generation: u64,
+    /// Accepted publications within this generation.
+    pub cursor: u64,
+}
+
+struct TopicClock {
+    wall_millis: u64,
+    start: Instant,
+}
+impl Default for TopicClock {
+    fn default() -> Self {
+        let wall_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .clamp(1, 9_007_199_254_740_991) as u64;
+        Self {
+            wall_millis,
+            start: Instant::now(),
+        }
+    }
+}
+impl TopicClock {
+    fn now(&self) -> u64 {
+        self.wall_millis
+            .saturating_add(self.start.elapsed().as_millis().min(u64::MAX as u128) as u64)
+            .min(9_007_199_254_740_991)
+    }
 }
 
 /// Sender identity used only to route an internal hub exclusion.
@@ -66,6 +102,7 @@ pub(crate) fn live_topic_envelope(
     let mut data = serde_json::json!({
         "topic": signal.topic,
         "cursor": signal.cursor,
+        "generation": signal.generation,
         "props": signal.props,
     });
     if let Some(exclusion) = &except {
@@ -98,18 +135,20 @@ struct LiveTopicEntry {
     retention: Option<Duration>,
     memberships: usize,
     cursor: u64,
+    generation: u64,
     next_publication: Option<Instant>,
     pending: Option<PendingLiveTopicSignal>,
 }
 
 impl LiveTopicEntry {
-    fn new(retention: Option<Duration>) -> Self {
+    fn new(retention: Option<Duration>, generation: u64) -> Self {
         Self {
             last_activity: Instant::now(),
             idle_deadline: None,
             retention,
             memberships: 0,
             cursor: 0,
+            generation,
             next_publication: None,
             pending: None,
         }
@@ -220,6 +259,7 @@ struct LiveTopicTable {
 #[derive(Clone, Default)]
 pub(crate) struct LiveTopicRuntime {
     table: Arc<Mutex<LiveTopicTable>>,
+    clock: Arc<TopicClock>,
     retention: LiveTopicRetention,
     sweeps: Arc<std::sync::atomic::AtomicU64>,
     visits: Arc<std::sync::atomic::AtomicU64>,
@@ -250,10 +290,17 @@ impl LiveTopicRuntime {
         if table.topics.get(topic).is_some_and(LiveTopicEntry::expired) {
             table.topics.remove(topic);
         }
-        let entry = table
-            .topics
-            .entry(topic.to_owned())
-            .or_insert_with(|| LiveTopicEntry::new(self.retention.window(topic)));
+        let entry = table.topics.entry(topic.to_owned()).or_insert_with(|| {
+            let retention = self.retention.window(topic);
+            LiveTopicEntry::new(
+                retention,
+                if retention.is_some() {
+                    self.clock.now()
+                } else {
+                    self.clock.wall_millis
+                },
+            )
+        });
         entry.last_activity = Instant::now();
         let result = update(entry);
         entry.idle_deadline = entry
@@ -330,8 +377,16 @@ impl LiveTopicRuntime {
         self.cursors(&[topic.to_owned()]).await[0]
     }
 
-    /// Captures all requested baselines under one authority lock before a loader runs.
     pub(crate) async fn cursors(&self, names: &[String]) -> Vec<u64> {
+        self.positions(names)
+            .await
+            .into_iter()
+            .map(|position| position.cursor)
+            .collect()
+    }
+
+    /// Generation and cursor are captured together under the same authority lock.
+    pub(crate) async fn positions(&self, names: &[String]) -> Vec<LiveTopicPosition> {
         self.prune();
         let mut table = self
             .table
@@ -339,7 +394,12 @@ impl LiveTopicRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         names
             .iter()
-            .map(|name| self.with_entry(&mut table, name, |entry| entry.cursor))
+            .map(|name| {
+                self.with_entry(&mut table, name, |entry| LiveTopicPosition {
+                    cursor: entry.cursor,
+                    generation: entry.generation,
+                })
+            })
             .collect()
     }
 
@@ -375,6 +435,7 @@ impl LiveTopicRuntime {
                     signal: LiveTopicSignal {
                         topic: topic.to_owned(),
                         cursor: entry.cursor,
+                        generation: entry.generation,
                         exclusion: None,
                         props: normalized_props(props)
                             .map(|props| props.into_iter().collect())
@@ -422,6 +483,7 @@ impl LiveTopicRuntime {
                 LiveTopicSignal {
                     topic: topic.to_owned(),
                     cursor: entry.cursor,
+                    generation: entry.generation,
                     exclusion: None,
                     props,
                 },

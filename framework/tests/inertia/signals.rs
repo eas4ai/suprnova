@@ -408,6 +408,13 @@ impl suprnova::broadcasting::BroadcastHub for BaselineHub {
         self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.live_topic_cursors(topics).await
     }
+    async fn live_topic_positions(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<suprnova::LiveTopicPosition>, FrameworkError> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.live_topic_positions(topics).await
+    }
     async fn publish_live_topic(
         &self,
         topic: &str,
@@ -515,6 +522,7 @@ fn signal_fix_008_live_binding_public_types_are_exported_from_the_root() {
     let _: Option<suprnova::InertiaLiveResponse<Page>> = None;
     let _: Option<suprnova::LiveTopicExclusion> = None;
     let _: Option<suprnova::LiveTopicSender> = None;
+    let _: Option<suprnova::LiveTopicPosition> = None;
     let _: Option<suprnova::LiveTopics> = None;
     let _: Option<suprnova::LiveTopicSignal> = None;
     assert_eq!(bindings::<Page>()[0].topic, "signal.render");
@@ -771,6 +779,14 @@ async fn retired_instance_fixture() -> Value {
     assert_eq!(hub.prune_live_topics().unwrap(), 1);
     let reset = page().await;
     assert_eq!(reset["liveBindings"]["notes.42"]["cursor"], 0);
+    assert!(
+        reset["liveBindings"]["notes.42"]["generation"]
+            .as_u64()
+            .unwrap()
+            > old["liveBindings"]["notes.42"]["generation"]
+                .as_u64()
+                .unwrap()
+    );
     let mut receiver = hub.subscribe_live_topic("notes.42").unwrap();
     LiveTopics::from_runtime(&runtime)
         .changed("notes.42", &["stats"])
@@ -778,11 +794,22 @@ async fn retired_instance_fixture() -> Value {
         .unwrap();
     let signal = receiver.recv().await.unwrap().data;
     assert_eq!(signal["cursor"], 1);
-    serde_json::json!({ "oldPage": old, "resetPage": reset, "signal": signal })
+    assert_eq!(
+        signal["generation"],
+        reset["liveBindings"]["notes.42"]["generation"]
+    );
+    let current = page().await;
+    serde_json::json!({ "oldPage": old, "resetPage": reset, "currentPage": current, "signal": signal })
 }
 
 #[tokio::test(start_paused = true)]
 #[serial_test::serial]
 async fn signal_fix2_001_retired_family_renders_zero_before_its_first_new_signal() {
+    retired_instance_fixture().await;
+}
+
+#[tokio::test(start_paused = true)]
+#[serial_test::serial]
+async fn signal_fix3_001_retirement_changes_the_rendered_generation_and_signal() {
     retired_instance_fixture().await;
 }

@@ -36,6 +36,7 @@ export type TopicSubscriptionBindings = Readonly<Record<string, TopicSubscriptio
 
 export interface TopicChangeSignal {
   readonly cursor: number;
+  readonly generation: number;
   readonly props: readonly string[];
   readonly topic: string;
 }
@@ -126,7 +127,12 @@ function topicPort(
     dispatchTopicChange(change: Extract<AsyncPayload, { kind: "topic_change" }>) {
       if (change.topic !== topic) throw new Error("topic_subscription_mismatch");
       callbacks.onSignal(
-        Object.freeze({ cursor: change.cursor, props: change.props, topic: change.topic }),
+        Object.freeze({
+          cursor: change.cursor,
+          generation: change.generation,
+          props: change.props,
+          topic: change.topic,
+        }),
       );
     },
     element: Object.freeze({}) as Element,

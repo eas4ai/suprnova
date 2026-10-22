@@ -749,8 +749,9 @@ topic operations in addition to application event fanout:
 
 - `subscribe_live_topic(topic)` opens the typed signal feed.
 - `live_topic_cursor(topic)` reads the current monotonic position.
-- `live_topic_cursors(topics)` reads one baseline for every binding before
-  the page loader runs.
+- `live_topic_positions(topics)` reads generations and cursors together for
+  every binding before the page loader runs. The cursor-only helpers remain
+  available for callers that do not render a baseline.
 - `publish_live_topic(topic, props, except, interval)` advances that position
   and publishes the change.
 
@@ -763,6 +764,7 @@ receives a data-free Live payload:
   "kind": "topic_change",
   "topic": "posts",
   "cursor": 42,
+  "generation": 1792688181000,
   "props": ["posts", "post_count"]
 }
 ```
@@ -788,9 +790,14 @@ silently acting as a process-local hub.
 
 Family instances use the configured `LIVE_TOPIC_INSTANCE_RETENTION_SECS`
 window, which defaults to 86400 seconds. Redis expires idle instance hashes;
-its cursor and rate schedule metadata share that TTL. Publications and baseline
-reads renew it. Membership heartbeats keep a connected instance alive. In-memory
-hubs prune idle instances without memberships. Static topics do not expire.
+its idle cursor/rate metadata uses that TTL. Publications and baseline reads
+renew it. Pending work, its prop set and its schedule have no TTL. A pending
+signal pins the authority hash until XADD succeeds; flush then restores the
+idle TTL. If the pending hash is missing, the schedule retains enough routing
+data to publish a full invalidation with the current generation and cursor.
+Membership heartbeats keep a connected instance alive. In-memory hubs prune
+only eligible idle instances through one shared sweep per second. Static topics
+do not expire.
 See [Topic signals](live.md#topic-signals) for configuration and cursor resets.
 
 Topic traffic uses a reserved internal channel that ordinary `publish` calls
@@ -1242,7 +1249,7 @@ the event itself - see [Events](events.md#testing---eventfacadefake).
 | `suprnova::broadcasting::InMemoryBroadcastHub` | Default in-process hub. No external dependencies. Ordinary publish rejects reserved framework channels. |
 | `suprnova::broadcasting::RecordingBroadcastHub` | Test double. Records every publish; still delivers to live subscribers. |
 | `suprnova::broadcasting::BroadcastEnvelope` | One published event: `channel`, `event`, `data`, `except`. `new(ch, ev, data)` builder; `.with_except(socket_id)` for per-dispatch exclusion. |
-| `suprnova::broadcasting::LiveTopicSignal` | Data-free topic change: `topic`, monotonic `cursor`, and the prop names to refresh. |
+| `suprnova::broadcasting::LiveTopicSignal` | Data-free topic change: `topic`, `generation`, its `cursor`, and the prop names to refresh. |
 | `suprnova::broadcasting::ClientFrame` / `ServerFrame` | The JSON-envelope wire types. `ServerFrame::Lagged { channel, skipped }` surfaces per-channel ring-buffer overflows. |
 | `suprnova::broadcasting::BroadcastingWsHandler` | The framework's reusable `WebSocketHandler`. Constructor: `BroadcastingWsHandler::new(hub, registry)`. Pass to `ws!()`. |
 | `suprnova::PusherBroadcastHub` | Pusher-protocol hub. `new(config, registry)`; `auth()` returns the `PusherAuth` to bind; `client()` returns its `PusherClient`. Also delivers to in-process subscribers. |

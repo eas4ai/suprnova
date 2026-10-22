@@ -2086,7 +2086,7 @@ fn show() {
     );
     assert!(
         ts.contains(
-            "export interface InertiaLiveIsland {\n  component: string;\n  slot: string;\n  document_key: string;\n}\n\nexport interface LiveBinding {\n  only: string[];\n  cursor: number;\n  island: InertiaLiveIsland;\n  stream: string;\n}\n\nexport type LiveBindings = Record<string, LiveBinding>;\n"
+            "export interface InertiaLiveIsland {\n  component: string;\n  slot: string;\n  document_key: string;\n}\n\nexport interface LiveBinding {\n  only: string[];\n  cursor: number;\n  generation: number;\n  island: InertiaLiveIsland;\n  stream: string;\n}\n\nexport type LiveBindings = Record<string, LiveBinding>;\n"
         ),
         "{ts}"
     );

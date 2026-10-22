@@ -83,6 +83,7 @@ describe("browser async envelope boundary", () => {
     expect(
       decodeAsyncEnvelope(
         encoded({
+          generation: 1,
           cursor: 42,
           kind: "topic_change",
           props: ["stats", "recent_notes"],
@@ -91,6 +92,7 @@ describe("browser async envelope boundary", () => {
         membership(),
       ).payload,
     ).toEqual({
+      generation: 1,
       cursor: 42,
       kind: "topic_change",
       props: ["stats", "recent_notes"],
@@ -98,16 +100,41 @@ describe("browser async envelope boundary", () => {
     });
     expect(
       decodeAsyncEnvelope(
-        encoded({ cursor: 43, kind: "topic_change", props: [], topic: "notes/user-42" }),
+        encoded({
+          generation: 1,
+          cursor: 43,
+          kind: "topic_change",
+          props: [],
+          topic: "notes/user-42",
+        }),
         membership(),
       ).payload,
-    ).toEqual({ cursor: 43, kind: "topic_change", props: [], topic: "notes/user-42" });
+    ).toEqual({
+      generation: 1,
+      cursor: 43,
+      kind: "topic_change",
+      props: [],
+      topic: "notes/user-42",
+    });
 
     for (const payload of [
-      { cursor: 42, data: { notes: 3 }, kind: "topic_change", props: ["stats"], topic: "notes" },
-      { cursor: -1, kind: "topic_change", props: ["stats"], topic: "notes" },
-      { cursor: 42, kind: "topic_change", props: ["stats", 3], topic: "notes" },
-      { cursor: 42, kind: "topic_change", props: ["stats", "stats"], topic: "notes" },
+      {
+        generation: 1,
+        cursor: 42,
+        data: { notes: 3 },
+        kind: "topic_change",
+        props: ["stats"],
+        topic: "notes",
+      },
+      { generation: 1, cursor: -1, kind: "topic_change", props: ["stats"], topic: "notes" },
+      { generation: 1, cursor: 42, kind: "topic_change", props: ["stats", 3], topic: "notes" },
+      {
+        generation: 1,
+        cursor: 42,
+        kind: "topic_change",
+        props: ["stats", "stats"],
+        topic: "notes",
+      },
     ]) {
       expect(() =>
         decodeAsyncEnvelope(encoded(payload as JsonValue as never), membership()),

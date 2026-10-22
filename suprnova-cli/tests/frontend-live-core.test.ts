@@ -51,6 +51,7 @@ function fixture() {
     onSignal: (signal: {
       topic: string;
       cursor: number;
+      generation: number;
       props: string[];
     }) => void;
     onState: (topic: string, state: string) => void;
@@ -66,6 +67,7 @@ function fixture() {
   let page = {
     liveBindings: {
       notes: {
+        generation: 1,
         cursor: 10,
         island: {
           component: "kit.note-stats",
@@ -76,6 +78,7 @@ function fixture() {
         stream: "changes",
       },
       profile: {
+        generation: 1,
         cursor: 3,
         island: {
           component: "kit.profile",
@@ -200,8 +203,86 @@ describe("Inertia live client core", () => {
     connection = null;
   });
 
+  it.each([200, 50])(
+    "reloads all bound props when generation %i has a lower cursor",
+    async (generation) => {
+      const { startInertiaLive } = await loadCore();
+      const app = fixture();
+      Object.assign(app.page.liveBindings.notes, { generation: 100 });
+      connection = startInertiaLive({
+        clearTimer: app.clearTimer,
+        getPage: () => app.page,
+        router: app.router,
+        setTimer: app.setTimer,
+        transport: app.transport,
+      });
+      app.handlers.onSignal({
+        topic: "notes",
+        generation: 100,
+        cursor: 9,
+        props: ["stats"],
+      });
+      expect(app.timerCount).toBe(0);
+      app.handlers.onSignal({
+        topic: "notes",
+        generation,
+        cursor: 1,
+        props: ["stats"],
+      });
+      expect(app.timerCount).toBe(1);
+      app.runNextTimer();
+      expect(app.reloads[0]?.only).toEqual(["recent_notes", "stats"]);
+      Object.assign(app.page.liveBindings.notes, { generation, cursor: 1 });
+      app.reloads[0]?.onSuccess?.(app.page);
+      app.reloads[0]?.onFinish?.();
+      expect(app.timerCount).toBe(0);
+      app.handlers.onSignal({
+        topic: "notes",
+        generation,
+        cursor: 0,
+        props: [],
+      });
+      expect(app.timerCount).toBe(0);
+    },
+  );
+
+  it("keeps a generation reset that arrives during an older reload", async () => {
+    const { startInertiaLive } = await loadCore();
+    const app = fixture();
+    app.page.liveBindings.notes.generation = 100;
+    connection = startInertiaLive({
+      clearTimer: app.clearTimer,
+      getPage: () => app.page,
+      router: app.router,
+      setTimer: app.setTimer,
+      transport: app.transport,
+    });
+    app.handlers.onSignal({
+      topic: "notes",
+      generation: 100,
+      cursor: 11,
+      props: ["stats"],
+    });
+    app.runNextTimer();
+    app.handlers.onSignal({
+      topic: "notes",
+      generation: 50,
+      cursor: 1,
+      props: ["stats"],
+    });
+    app.page.liveBindings.notes.cursor = 11;
+    app.reloads[0]?.onSuccess?.(app.page);
+    app.reloads[0]?.onFinish?.();
+    expect(app.runNextTimer()).toBe(25);
+    expect(app.reloads[1]?.only).toEqual(["recent_notes", "stats"]);
+    Object.assign(app.page.liveBindings.notes, { generation: 50, cursor: 1 });
+    app.reloads[1]?.onSuccess?.(app.page);
+    app.reloads[1]?.onFinish?.();
+    expect(app.timerCount).toBe(0);
+  });
+
   it.skipIf(!Bun.env.SIGNAL_LIVE_RETIRED_PAGE)(
-    "accepts a reused family signal after the actual retired Rust baseline resets the old page",
+    "reloads a stale Rust page directly from a recreated generation signal",
     async () => {
       const { startInertiaLive } = await loadCore();
       const app = fixture();
@@ -215,14 +296,14 @@ describe("Inertia live client core", () => {
         transport: app.transport,
       });
       expect(app.page.liveBindings["notes.42"].cursor).toBe(10);
-      const visit = app.beginVisit();
-      app.setPage(retired.resetPage);
-      app.renderVisit("success", visit);
-      app.finishVisit(visit);
-      expect(app.page.liveBindings["notes.42"].cursor).toBe(0);
       app.handlers.onSignal(retired.signal);
       expect(app.runNextTimer()).toBe(25);
-      expect(app.reloads[0]?.only).toEqual(["stats"]);
+      expect(app.reloads[0]?.only).toEqual(["recent_notes", "stats"]);
+      app.reloads[0]?.onSuccess?.(retired.currentPage);
+      app.reloads[0]?.onFinish?.();
+      expect(app.timerCount).toBe(0);
+      app.handlers.onSignal({ ...retired.signal, cursor: 0 });
+      expect(app.timerCount).toBe(0);
     },
   );
 
@@ -243,6 +324,7 @@ describe("Inertia live client core", () => {
         getPage: () => app.page,
       });
       app.handlers.onSignal({
+        generation: page.liveBindings["signal.render"].generation,
         topic: "signal.render",
         cursor: 1,
         props: ["posts"],
@@ -258,6 +340,7 @@ describe("Inertia live client core", () => {
       });
       app.reloads[0]?.onFinish?.();
       app.handlers.onSignal({
+        generation: page.liveBindings["signal.render"].generation,
         topic: "signal.render",
         cursor: 1,
         props: ["posts"],
@@ -283,7 +366,12 @@ describe("Inertia live client core", () => {
       transport: app.transport,
     });
     expect(Object.hasOwn(app.subscribedBindings, "__proto__")).toBe(true);
-    app.handlers.onSignal({ topic: "__proto__", cursor: 11, props: ["stats"] });
+    app.handlers.onSignal({
+      generation: 1,
+      topic: "__proto__",
+      cursor: 11,
+      props: ["stats"],
+    });
     expect(app.timerCount).toBe(1);
     app.runNextTimer();
     expect(app.reloads[0]?.only).toEqual(["stats"]);
@@ -307,7 +395,12 @@ describe("Inertia live client core", () => {
       transport: app.transport,
     });
     expect(Object.keys(app.subscribedBindings).length).toBe(33);
-    app.handlers.onSignal({ topic: "topic-32", cursor: 11, props: ["stats"] });
+    app.handlers.onSignal({
+      generation: 1,
+      topic: "topic-32",
+      cursor: 11,
+      props: ["stats"],
+    });
     app.runNextTimer();
     expect(app.reloads[0]?.only).toEqual(["stats"]);
   });
@@ -324,7 +417,12 @@ describe("Inertia live client core", () => {
       setTimer: app.setTimer,
       transport: app.transport,
     });
-    app.handlers.onSignal({ topic: "notes", cursor: 11, props: [] });
+    app.handlers.onSignal({
+      generation: 1,
+      topic: "notes",
+      cursor: 11,
+      props: [],
+    });
     app.runNextTimer();
     expect(app.reloads[0]?.only).toEqual([...only].sort());
   });
@@ -339,20 +437,32 @@ describe("Inertia live client core", () => {
       setTimer: app.setTimer,
       transport: app.transport,
     });
-    app.handlers.onSignal({ topic: "notes", cursor: 11, props: ["stats"] });
+    app.handlers.onSignal({
+      generation: 1,
+      topic: "notes",
+      cursor: 11,
+      props: ["stats"],
+    });
     app.runNextTimer();
     app.page.liveBindings.notes.cursor = 0;
+    app.page.liveBindings.notes.generation = 2;
     app.reloads[0]?.onSuccess?.(app.page);
     app.reloads[0]?.onFinish?.();
     expect(app.timerCount).toBe(0);
 
     app.handlers.onSignal({
+      generation: 2,
       topic: "notes",
       cursor: 1,
       props: ["recent_notes"],
     });
     expect(app.timerCount).toBe(1);
-    app.handlers.onSignal({ topic: "notes", cursor: 1, props: ["stats"] });
+    app.handlers.onSignal({
+      generation: 2,
+      topic: "notes",
+      cursor: 1,
+      props: ["stats"],
+    });
     expect(app.timerCount).toBe(1);
     app.runNextTimer();
     expect(app.reloads[1]?.only).toEqual(["recent_notes", "stats"]);
@@ -375,12 +485,28 @@ describe("Inertia live client core", () => {
       transport: app.transport,
     });
 
-    app.handlers.onSignal({ topic: "notes", cursor: 10, props: ["stats"] });
+    app.handlers.onSignal({
+      generation: 1,
+      topic: "notes",
+      cursor: 10,
+      props: ["stats"],
+    });
     expect(app.timerCount).toBe(0);
 
-    app.handlers.onSignal({ topic: "notes", cursor: 11, props: [] });
-    app.handlers.onSignal({ topic: "profile", cursor: 4, props: ["auth"] });
     app.handlers.onSignal({
+      generation: 1,
+      topic: "notes",
+      cursor: 11,
+      props: [],
+    });
+    app.handlers.onSignal({
+      generation: 1,
+      topic: "profile",
+      cursor: 4,
+      props: ["auth"],
+    });
+    app.handlers.onSignal({
+      generation: 1,
       topic: "notes",
       cursor: 12,
       props: ["stats", "not_bound"],
@@ -410,9 +536,15 @@ describe("Inertia live client core", () => {
       transport: app.transport,
     });
 
-    app.handlers.onSignal({ topic: "notes", cursor: 11, props: ["stats"] });
+    app.handlers.onSignal({
+      generation: 1,
+      topic: "notes",
+      cursor: 11,
+      props: ["stats"],
+    });
     app.runNextTimer();
     app.handlers.onSignal({
+      generation: 1,
       topic: "notes",
       cursor: 12,
       props: ["recent_notes"],
@@ -431,11 +563,17 @@ describe("Inertia live client core", () => {
     app.reloads[0]?.onFinish?.();
     expect(app.timerCount).toBe(1);
     app.handlers.onSignal({
+      generation: 1,
       topic: "notes",
       cursor: 12,
       props: ["recent_notes"],
     });
-    app.handlers.onSignal({ topic: "notes", cursor: 12, props: ["stats"] });
+    app.handlers.onSignal({
+      generation: 1,
+      topic: "notes",
+      cursor: 12,
+      props: ["stats"],
+    });
     expect(app.timerCount).toBe(1);
     app.runNextTimer();
     expect(app.reloads[1]?.only).toEqual(["recent_notes"]);
@@ -448,13 +586,44 @@ describe("Inertia live client core", () => {
       props: { recent_notes: [] },
     });
     app.reloads[1]?.onFinish?.();
-    app.handlers.onSignal({ topic: "notes", cursor: 12, props: ["stats"] });
     app.handlers.onSignal({
+      generation: 1,
+      topic: "notes",
+      cursor: 12,
+      props: ["stats"],
+    });
+    app.handlers.onSignal({
+      generation: 1,
       topic: "notes",
       cursor: 12,
       props: ["recent_notes"],
     });
     expect(app.timerCount).toBe(0);
+  });
+
+  it("keeps unrendered props stale when a partial visit adopts a new generation", async () => {
+    const { startInertiaLive } = await loadCore();
+    const app = fixture();
+    connection = startInertiaLive({
+      clearTimer: app.clearTimer,
+      getPage: () => app.page,
+      router: app.router,
+      setTimer: app.setTimer,
+      transport: app.transport,
+    });
+    const visit = app.beginVisit({ only: ["stats"] });
+    Object.assign(app.page.liveBindings.notes, { generation: 2, cursor: 0 });
+    app.renderVisit("success", visit);
+    app.finishVisit(visit);
+    app.handlers.onSignal({
+      generation: 2,
+      topic: "notes",
+      cursor: 1,
+      props: ["stats"],
+    });
+    expect(app.timerCount).toBe(1);
+    app.runNextTimer();
+    expect(app.reloads[0]?.only).toEqual(["recent_notes", "stats"]);
   });
 
   it("reconciles an external partial reload per rendered prop", async () => {
@@ -474,6 +643,7 @@ describe("Inertia live client core", () => {
     app.finishVisit(poll);
 
     app.handlers.onSignal({
+      generation: 1,
       topic: "notes",
       cursor: 15,
       props: ["stats", "recent_notes"],
@@ -499,7 +669,12 @@ describe("Inertia live client core", () => {
     app.renderVisit("error", poll);
     app.finishVisit(poll);
 
-    app.handlers.onSignal({ topic: "notes", cursor: 15, props: ["stats"] });
+    app.handlers.onSignal({
+      generation: 1,
+      topic: "notes",
+      cursor: 15,
+      props: ["stats"],
+    });
     expect(app.timerCount).toBe(0);
   });
 
@@ -518,7 +693,12 @@ describe("Inertia live client core", () => {
     app.page.liveBindings.notes.cursor = 20;
     app.finishVisit(canceled);
 
-    app.handlers.onSignal({ topic: "notes", cursor: 15, props: ["stats"] });
+    app.handlers.onSignal({
+      generation: 1,
+      topic: "notes",
+      cursor: 15,
+      props: ["stats"],
+    });
     expect(app.timerCount).toBe(1);
     app.runNextTimer();
     expect(app.reloads[0]?.only).toEqual(["stats"]);
@@ -535,6 +715,7 @@ describe("Inertia live client core", () => {
       getPage: () => app.page,
     });
     app.handlers.onSignal({
+      generation: 1,
       topic: "notes",
       cursor: 11,
       props: ["stats", "recent_notes"],
@@ -549,7 +730,12 @@ describe("Inertia live client core", () => {
       rescuedProps: ["recent_notes"],
     });
     app.reloads[0]?.onFinish?.();
-    app.handlers.onSignal({ topic: "notes", cursor: 11, props: ["stats"] });
+    app.handlers.onSignal({
+      generation: 1,
+      topic: "notes",
+      cursor: 11,
+      props: ["stats"],
+    });
     expect(app.timerCount).toBe(1);
     app.runNextTimer();
     expect(app.reloads[1]?.only).toEqual(["recent_notes"]);
@@ -562,6 +748,7 @@ describe("Inertia live client core", () => {
     });
     app.reloads[1]?.onFinish?.();
     app.handlers.onSignal({
+      generation: 1,
       topic: "notes",
       cursor: 11,
       props: ["stats", "recent_notes"],
@@ -592,6 +779,7 @@ describe("Inertia live client core", () => {
     app.renderVisit("success", visit);
     app.finishVisit(visit);
     app.handlers.onSignal({
+      generation: 1,
       topic: "notes",
       cursor: 15,
       props: ["stats", "recent_notes"],
@@ -612,7 +800,12 @@ describe("Inertia live client core", () => {
         transport: app.transport,
         getPage: () => app.page,
       });
-      app.handlers.onSignal({ topic: "notes", cursor: 11, props: ["stats"] });
+      app.handlers.onSignal({
+        generation: 1,
+        topic: "notes",
+        cursor: 11,
+        props: ["stats"],
+      });
       expect(app.runNextTimer()).toBe(25);
       app.reloads[0]?.onFinish?.();
       expect(app.timerCount).toBe(1);
@@ -627,7 +820,12 @@ describe("Inertia live client core", () => {
       });
       app.reloads[1]?.onFinish?.();
       expect(app.timerCount).toBe(0);
-      app.handlers.onSignal({ topic: "notes", cursor: 11, props: ["stats"] });
+      app.handlers.onSignal({
+        generation: 1,
+        topic: "notes",
+        cursor: 11,
+        props: ["stats"],
+      });
       expect(app.timerCount).toBe(0);
     });
   }
@@ -642,9 +840,15 @@ describe("Inertia live client core", () => {
       transport: app.transport,
       getPage: () => app.page,
     });
-    app.handlers.onSignal({ topic: "notes", cursor: 11, props: ["stats"] });
+    app.handlers.onSignal({
+      generation: 1,
+      topic: "notes",
+      cursor: 11,
+      props: ["stats"],
+    });
     app.runNextTimer();
     app.handlers.onSignal({
+      generation: 1,
       topic: "notes",
       cursor: 12,
       props: ["recent_notes"],
@@ -665,7 +869,12 @@ describe("Inertia live client core", () => {
     });
     app.reloads[7]?.onFinish?.();
     expect(app.timerCount).toBe(0);
-    app.handlers.onSignal({ topic: "notes", cursor: 13, props: ["stats"] });
+    app.handlers.onSignal({
+      generation: 1,
+      topic: "notes",
+      cursor: 13,
+      props: ["stats"],
+    });
     expect(app.runNextTimer()).toBe(25);
     app.reloads[8]?.onFinish?.();
     expect(app.runNextTimer()).toBe(1_000);
@@ -729,7 +938,12 @@ describe("Inertia live client core", () => {
       "pending:canceled",
     ]);
     expect(app.visit().headers).toEqual({ Existing: "kept" });
-    app.handlers.onSignal({ topic: "notes", cursor: 20, props: ["stats"] });
+    app.handlers.onSignal({
+      generation: 1,
+      topic: "notes",
+      cursor: 20,
+      props: ["stats"],
+    });
     expect(app.timerCount).toBe(0);
   });
 });

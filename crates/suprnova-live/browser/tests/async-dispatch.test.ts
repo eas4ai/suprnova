@@ -157,6 +157,49 @@ function resolver(
 }
 
 describe("closed asynchronous presentation dispatcher", () => {
+  it("recovers an island on a generation change even at cursor zero", () => {
+    const { calls, port } = fakePort();
+    delete port.dispatchTopicChange;
+    const dispatcher = new AsyncDispatcher(port, fakeCapability);
+    const change = (generation: number, cursor: number) =>
+      envelope({ generation, cursor, kind: "topic_change", props: [], topic: "posts" });
+    expect(dispatcher.dispatch(change(100, 10))).toBe("queued");
+    expect(dispatcher.dispatch(change(100, 9))).toBe("topic_changed");
+    expect(calls.refresh).toHaveBeenCalledTimes(1);
+    expect(dispatcher.dispatch(change(200, 0))).toBe("queued");
+    expect(calls.refresh).toHaveBeenCalledTimes(2);
+    expect(dispatcher.dispatch(change(200, 1))).toBe("queued");
+    expect(calls.refresh).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["failed", "canceled", "retired"] as const)(
+    "does not consume an island generation reset after a %s render",
+    (outcome) => {
+      const completions: FreshRenderCompletionObserver[] = [];
+      const { calls, port } = fakePort({
+        enqueueFreshRender: (_reason, observer) => {
+          if (observer !== undefined) completions.push(observer);
+          return "queued";
+        },
+      });
+      delete port.dispatchTopicChange;
+      const dispatcher = new AsyncDispatcher(port, fakeCapability);
+      const change = envelope({
+        generation: 200,
+        cursor: 1,
+        kind: "topic_change",
+        props: [],
+        topic: "posts",
+      });
+      expect(dispatcher.dispatch(change)).toBe("queued");
+      completions[0]?.(outcome);
+      expect(dispatcher.dispatch(change)).toBe("queued");
+      expect(calls.topicChange).not.toHaveBeenCalled();
+      completions[1]?.("succeeded");
+      expect(dispatcher.dispatch(change)).toBe("topic_changed");
+    },
+  );
+
   it("delivers a topic change only through the data-free topic port", () => {
     const { calls, port } = fakePort();
     const dispatcher = new AsyncDispatcher(port, fakeCapability);
@@ -164,6 +207,7 @@ describe("closed asynchronous presentation dispatcher", () => {
     expect(
       dispatcher.dispatch(
         envelope({
+          generation: 1,
           cursor: 42,
           kind: "topic_change",
           props: ["stats"],
@@ -172,6 +216,7 @@ describe("closed asynchronous presentation dispatcher", () => {
       ),
     ).toBe("topic_changed");
     expect(calls.topicChange).toHaveBeenCalledWith({
+      generation: 1,
       cursor: 42,
       kind: "topic_change",
       props: ["stats"],
@@ -199,12 +244,7 @@ describe("closed asynchronous presentation dispatcher", () => {
 
     expect(
       dispatcher.dispatch(
-        envelope({
-          cursor: 42,
-          kind: "topic_change",
-          props: [],
-          topic: "posts",
-        }),
+        envelope({ generation: 1, cursor: 42, kind: "topic_change", props: [], topic: "posts" }),
         completion,
       ),
     ).toBe("queued");
@@ -232,7 +272,13 @@ describe("closed asynchronous presentation dispatcher", () => {
 
     expect(
       pageSubscription.receive(
-        encoded({ cursor: 42, kind: "topic_change", props: ["stats"], topic: "posts" }),
+        encoded({
+          generation: 1,
+          cursor: 42,
+          kind: "topic_change",
+          props: ["stats"],
+          topic: "posts",
+        }),
       ),
     ).toBe("applied");
     expect(pageSubscription.position()).toEqual({ epoch: 4n, sequence: 41n });
@@ -255,7 +301,7 @@ describe("closed asynchronous presentation dispatcher", () => {
 
     expect(
       islandSubscription.receive(
-        encoded({ cursor: 42, kind: "topic_change", props: [], topic: "posts" }),
+        encoded({ generation: 1, cursor: 42, kind: "topic_change", props: [], topic: "posts" }),
       ),
     ).toBe("pending");
     expect(islandSubscription.position()).toEqual({ epoch: 4n, sequence: 40n });

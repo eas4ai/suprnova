@@ -167,6 +167,14 @@ pub trait BroadcastHub: Send + Sync + 'static {
         Err(live_topics_unsupported())
     }
 
+    /// Captures generations and cursors in one read before a page loader queries data.
+    async fn live_topic_positions(
+        &self,
+        _topics: &[String],
+    ) -> Result<Vec<super::LiveTopicPosition>, FrameworkError> {
+        Err(live_topics_unsupported())
+    }
+
     /// Publish a data-free Inertia Live topic signal.
     ///
     /// Calls inside `interval` are coalesced into one signal containing the
@@ -398,6 +406,13 @@ impl BroadcastHub for InMemoryBroadcastHub {
 
     async fn live_topic_cursors(&self, topics: &[String]) -> Result<Vec<u64>, FrameworkError> {
         Ok(self.live_topics.cursors(topics).await)
+    }
+
+    async fn live_topic_positions(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<super::LiveTopicPosition>, FrameworkError> {
+        Ok(self.live_topics.positions(topics).await)
     }
 
     async fn publish_live_topic(

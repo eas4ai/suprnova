@@ -275,7 +275,9 @@ fn both_offer_more_before_cap_and_stop_at_exhaustion() {
             );
             for present in [
                 "const value = page.liveBindings",
-                "cursor <= (rendered?.get(prop) ?? -1)",
+                "baseline?.generation === position.generation",
+                "position.cursor <= baseline.cursor",
+                "position.generation !== binding.generation",
                 "[...entry.props.keys()]",
                 "options.router.on(\"before\"",
                 "router.reload({",

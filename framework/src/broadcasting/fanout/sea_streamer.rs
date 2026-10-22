@@ -438,7 +438,7 @@ async fn connect_redis(
         .first()
         .map_or_else(|| "0-0".to_owned(), |entry| entry.id.clone());
     let (writer, requests) = mpsc::unbounded_channel();
-    let live_topics = RedisLiveTopics::new(write_conn.clone(), stream);
+    let live_topics = RedisLiveTopics::new(write_conn.clone(), stream).await?;
     tokio::spawn(stream_writer_task(write_conn, stream.to_owned(), requests));
     Ok((
         Producer::Redis(writer),
@@ -580,6 +580,17 @@ impl Drop for SeaStreamerBroadcastHub {
 }
 
 impl SeaStreamerBroadcastHub {
+    /// Stops only the Redis flush worker so tests can prove durable recovery after an outage.
+    #[doc(hidden)]
+    pub fn pause_live_topic_flush_for_test(&self) -> Result<(), FrameworkError> {
+        let task = self
+            ._live_flush_task
+            .as_ref()
+            .ok_or_else(|| FrameworkError::internal("Redis Live flush worker is not configured"))?;
+        task.abort();
+        Ok(())
+    }
+
     /// Connect to the stream `stream_key` at `streamer_uri`.
     ///
     /// `streamer_uri` - `redis://` or `rediss://` (with the URL's
@@ -1313,6 +1324,16 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         match &self.live_topics {
             FanoutLiveTopics::Memory(state) => Ok(state.cursors(topics).await),
             FanoutLiveTopics::Redis(state) => state.cursors(topics).await,
+        }
+    }
+
+    async fn live_topic_positions(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<crate::LiveTopicPosition>, FrameworkError> {
+        match &self.live_topics {
+            FanoutLiveTopics::Memory(state) => Ok(state.positions(topics).await),
+            FanoutLiveTopics::Redis(state) => state.positions(topics).await,
         }
     }
 

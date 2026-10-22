@@ -8,6 +8,7 @@ export type InertiaLiveIsland = {
 /** One topic binding rendered with an Inertia page. */
 export type InertiaLiveBinding = {
   cursor: number;
+  generation: number;
   island: InertiaLiveIsland;
   only: string[];
   stream: string;
@@ -17,6 +18,7 @@ export type InertiaLiveBindings = Record<string, InertiaLiveBinding>;
 
 export type InertiaLiveSignal = {
   cursor: number;
+  generation: number;
   props: readonly string[];
   topic: string;
 };
@@ -115,9 +117,22 @@ export type InertiaLiveConnection = {
   close: () => void;
 };
 
+type TopicPosition = { generation: number; cursor: number };
+
+function covers(
+  rendered: TopicPosition | undefined,
+  change: TopicPosition,
+): boolean {
+  return (
+    rendered !== undefined &&
+    rendered.generation === change.generation &&
+    rendered.cursor >= change.cursor
+  );
+}
+
 type PendingTopic = {
   completions: Set<InertiaLivePollCompletion>;
-  props: Map<string, number | null>;
+  props: Map<string, TopicPosition | null>;
 };
 
 type VisitSelection = Pick<InertiaLiveVisit, "except" | "only" | "reset">;
@@ -141,6 +156,8 @@ function validBinding(value: unknown): value is InertiaLiveBinding {
   const binding = value as Partial<InertiaLiveBinding>;
   const island = binding.island;
   return (
+    Number.isSafeInteger(binding.generation) &&
+    (binding.generation ?? 0) > 0 &&
     Number.isSafeInteger(binding.cursor) &&
     (binding.cursor ?? -1) >= 0 &&
     Array.isArray(binding.only) &&
@@ -255,10 +272,15 @@ export function startInertiaLive(
   const delay = coalesceWindow(options.coalesceMilliseconds);
   let bindings = pageBindings(options.getPage());
   let bindingShape = transportShape(bindings);
-  const renderedCursors = new Map<string, Map<string, number>>(
+  const renderedPositions = new Map<string, Map<string, TopicPosition>>(
     Object.entries(bindings).map(([topic, binding]) => [
       topic,
-      new Map(binding.only.map((prop) => [prop, binding.cursor])),
+      new Map(
+        binding.only.map((prop) => [
+          prop,
+          { generation: binding.generation, cursor: binding.cursor },
+        ]),
+      ),
     ]),
   );
   let closed = false;
@@ -274,33 +296,60 @@ export function startInertiaLive(
   const queue = (
     topic: string,
     props: readonly string[],
-    cursor: number | null,
+    position: TopicPosition | null,
     completion?: InertiaLivePollCompletion,
   ) => {
     if (closed) return;
     const binding = bindings[topic];
     if (binding === undefined) return;
-    if (cursor !== null && !Number.isSafeInteger(cursor)) return;
+    if (
+      position !== null &&
+      (!Number.isSafeInteger(position.cursor) ||
+        position.cursor < 0 ||
+        !Number.isSafeInteger(position.generation) ||
+        position.generation < 1)
+    )
+      return;
+    const rendered = renderedPositions.get(topic);
+    const reset =
+      position !== null &&
+      (position.generation !== binding.generation ||
+        binding.only.some((prop) => {
+          const baseline = rendered?.get(prop);
+          return (
+            baseline === undefined ||
+            baseline.generation !== position.generation ||
+            baseline.cursor < 0
+          );
+        }));
     const allowed = new Set(binding.only);
     const selected =
-      props.length === 0
+      props.length === 0 || reset
         ? binding.only
         : props.filter((prop) => allowed.has(prop));
     if (selected.length === 0) return;
     const entry = pending.get(topic) ?? {
       completions: new Set<InertiaLivePollCompletion>(),
-      props: new Map<string, number | null>(),
+      props: new Map<string, TopicPosition | null>(),
     };
-    const rendered = renderedCursors.get(topic);
     for (const prop of selected) {
-      if (cursor !== null && cursor <= (rendered?.get(prop) ?? -1)) continue;
+      const baseline = rendered?.get(prop);
+      if (
+        position !== null &&
+        baseline?.generation === position.generation &&
+        position.cursor <= baseline.cursor
+      )
+        continue;
       const queued = entry.props.get(prop);
       if (
         !entry.props.has(prop) ||
-        (cursor !== null &&
-          (queued === null || queued === undefined || cursor > queued))
+        (position !== null &&
+          (queued === null ||
+            queued === undefined ||
+            queued.generation !== position.generation ||
+            position.cursor > queued.cursor))
       ) {
-        entry.props.set(prop, cursor);
+        entry.props.set(prop, position);
       }
     }
     if (entry.props.size === 0) return;
@@ -324,7 +373,10 @@ export function startInertiaLive(
       ) {
         return;
       }
-      queue(signal.topic, signal.props, signal.cursor);
+      queue(signal.topic, signal.props, {
+        generation: signal.generation,
+        cursor: signal.cursor,
+      });
     },
     onState(topic, state) {
       options.onState?.(topic, state);
@@ -360,27 +412,32 @@ export function startInertiaLive(
           !omitted.has(prop),
       ),
     );
-    for (const topic of [...renderedCursors.keys()]) {
-      if (bindings[topic] === undefined) renderedCursors.delete(topic);
+    for (const topic of [...renderedPositions.keys()]) {
+      if (bindings[topic] === undefined) renderedPositions.delete(topic);
     }
     for (const [topic, binding] of Object.entries(bindings)) {
-      const rendered = renderedCursors.get(topic) ?? new Map<string, number>();
+      const rendered =
+        renderedPositions.get(topic) ?? new Map<string, TopicPosition>();
       const bound = new Set(binding.only);
       for (const prop of [...rendered.keys()]) {
         if (!bound.has(prop)) rendered.delete(prop);
       }
       for (const prop of binding.only) {
         if (reloaded.has(prop)) {
-          rendered.set(prop, binding.cursor);
+          rendered.set(prop, {
+            generation: binding.generation,
+            cursor: binding.cursor,
+          });
         } else if (
           !rendered.has(prop) ||
-          (rendered.get(prop) ?? -1) > binding.cursor
+          rendered.get(prop)?.generation !== binding.generation ||
+          (rendered.get(prop)?.cursor ?? -1) > binding.cursor
         ) {
           // A lower authority baseline makes unreloaded prop cursors incomparable.
-          rendered.set(prop, -1);
+          rendered.set(prop, { generation: binding.generation, cursor: -1 });
         }
       }
-      renderedCursors.set(topic, rendered);
+      renderedPositions.set(topic, rendered);
     }
     for (const [topic, entry] of pending) {
       const binding = bindings[topic];
@@ -390,12 +447,12 @@ export function startInertiaLive(
         continue;
       }
       const bound = new Set(binding.only);
-      const rendered = renderedCursors.get(topic);
-      for (const [prop, cursor] of entry.props) {
+      const rendered = renderedPositions.get(topic);
+      for (const [prop, position] of entry.props) {
         if (
           !bound.has(prop) ||
           (reloaded.has(prop) &&
-            (cursor === null || cursor <= (rendered?.get(prop) ?? -1)))
+            (position === null || covers(rendered?.get(prop), position)))
         ) {
           entry.props.delete(prop);
         }
@@ -440,9 +497,16 @@ export function startInertiaLive(
     const restoreBatch = (rendered = new Set<string>()) => {
       let restored = false;
       for (const [topic, entry] of batch) {
-        for (const [prop, cursor] of entry.props) {
-          if (rendered.has(prop)) continue;
-          queue(topic, [prop], cursor);
+        for (const [prop, position] of entry.props) {
+          if (
+            rendered.has(prop) &&
+            (position === null ||
+              renderedPositions.get(topic)?.get(prop)?.generation !==
+                position.generation ||
+              covers(renderedPositions.get(topic)?.get(prop), position))
+          )
+            continue;
+          queue(topic, [prop], position);
           restored ||= pending.get(topic)?.props.has(prop) ?? false;
         }
       }

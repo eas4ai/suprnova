@@ -226,8 +226,15 @@ async fn next_signal(stream: &mut SseClient) -> Value {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let value = stream.next_data().await.expect("stream remains open");
-            if value["payload"]["kind"] == "topic_change" {
-                return value["payload"].clone();
+            if value["payload"]["kind"] == "topic_change" && value["payload"]["cursor"] != 0 {
+                let mut payload = value["payload"].clone();
+                assert!(
+                    payload["generation"]
+                        .as_u64()
+                        .is_some_and(|generation| generation > 0)
+                );
+                payload.as_object_mut().unwrap().remove("generation");
+                return payload;
             }
         }
     })
@@ -238,6 +245,9 @@ async fn next_signal(stream: &mut SseClient) -> Value {
 async fn assert_no_signal(stream: &mut SseClient) {
     let _ = tokio::time::timeout(Duration::from_millis(250), async {
         while let Some(value) = stream.next_data().await {
+            if value["payload"]["cursor"] == 0 {
+                continue;
+            }
             assert_ne!(
                 value["payload"]["kind"], "topic_change",
                 "unexpected signal: {value}"
@@ -289,8 +299,15 @@ async fn next_socket_signal(socket: &mut WsStream) -> Value {
         loop {
             let text = ws_next_text(socket).await.expect("socket remains open");
             let value: Value = serde_json::from_str(&text).unwrap();
-            if value["payload"]["kind"] == "topic_change" {
-                return value["payload"].clone();
+            if value["payload"]["kind"] == "topic_change" && value["payload"]["cursor"] != 0 {
+                let mut payload = value["payload"].clone();
+                assert!(
+                    payload["generation"]
+                        .as_u64()
+                        .is_some_and(|generation| generation > 0)
+                );
+                payload.as_object_mut().unwrap().remove("generation");
+                return payload;
             }
         }
     })
@@ -360,7 +377,7 @@ async fn signal_003_ten_request_writes_signal_once_with_prop_union_and_no_model_
         .unwrap();
     assert_eq!(
         signal.data,
-        json!({"topic":"signal.posts", "cursor":1, "props":["count", "posts"]})
+        json!({"topic":"signal.posts", "generation": hub.live_topic_positions(&["signal.posts".into()]).await.unwrap()[0].generation, "cursor":1, "props":["count", "posts"]})
     );
     tokio::time::sleep(Duration::from_millis(120)).await;
     assert!(signals.try_recv().is_err());
@@ -1172,10 +1189,19 @@ async fn signal_002_component_page_binding_does_not_receive_model_event_data() {
         )
         .await
         .unwrap();
-    let event = tokio::time::timeout(Duration::from_secs(2), island_stream.next_data())
-        .await
-        .unwrap()
-        .unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = island_stream.next_data().await.unwrap();
+            if event["payload"]["kind"] == "browser_event" {
+                break event;
+            }
+            assert_eq!(event["payload"]["kind"], "topic_change");
+            assert_eq!(event["payload"]["cursor"], 0);
+            assert!(event["payload"]["generation"].as_u64().unwrap() > 0);
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(event["payload"]["payload"]["title"], "private model field");
     let _ = tokio::time::timeout(Duration::from_millis(250), async {
         while let Some(event) = page_stream.next_data().await {
@@ -1205,14 +1231,20 @@ async fn signal_005_stream_refresh_uses_cursor_and_rate_for_both_topic_forms() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(first.data, json!({"topic":topic, "cursor":1, "props":[]}));
+        assert_eq!(
+            first.data,
+            json!({"topic":topic, "generation": hub.live_topic_positions(&[topic.into()]).await.unwrap()[0].generation, "cursor":1, "props":[]})
+        );
         assert!(receiver.try_recv().is_err());
         let last = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
             .await
             .unwrap()
             .unwrap();
         assert!(start.elapsed() >= Duration::from_millis(90));
-        assert_eq!(last.data, json!({"topic":topic, "cursor":20, "props":[]}));
+        assert_eq!(
+            last.data,
+            json!({"topic":topic, "generation": first.data["generation"], "cursor":20, "props":[]})
+        );
         assert!(receiver.try_recv().is_err());
     }
 }
@@ -1266,7 +1298,7 @@ async fn signal_003_stream_refresh_obeys_rollback_and_the_outer_scope() {
         .unwrap();
     assert_eq!(
         signal.data,
-        json!({"topic":"signal.stream-tx", "cursor":1, "props":[]})
+        json!({"topic":"signal.stream-tx", "generation": hub.live_topic_positions(&["signal.stream-tx".into()]).await.unwrap()[0].generation, "cursor":1, "props":[]})
     );
 }
 
@@ -1888,4 +1920,125 @@ async fn signal_fix3_003_sweep_is_shared_throttled_and_visits_only_idle_candidat
         assert_eq!(hub.prune_live_topics().unwrap(), 0);
     }
     assert_eq!(hub.live_topic_sweep_stats_for_test(), after);
+}
+
+#[derive(LiveComponent)]
+#[live(
+    name = "tests.family-recovery",
+    view = "live/tests/signal-island.html",
+    minimum_protocol_version = 2,
+    streams(stream(
+        name = "changes",
+        topics("recovery.alice"),
+        events(SignalEvent),
+        targets("self"),
+        fanout = 4
+    ))
+)]
+pub struct FamilyRecoveryIsland {
+    #[model]
+    count: u64,
+}
+#[live]
+impl FamilyRecoveryIsland {
+    #[mount]
+    pub fn mount() -> Self {
+        Self { count: 0 }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn signal_fix3_001_island_recovery_seed_survives_retirement_at_cursor_zero() {
+    let _guard = TestContainer::fake();
+    ensure_crypt();
+    let hub = Arc::new(InMemoryBroadcastHub::new());
+    App::bind::<dyn BroadcastHub>(hub.clone());
+    App::singleton(
+        suprnova::live::LiveConfig::builder()
+            .topic_instance_retention_secs(1)
+            .build()
+            .unwrap(),
+    );
+    App::singleton(
+        LiveRegistry::builder()
+            .register::<FamilyRecoveryIsland>()
+            .unwrap()
+            .public_topic_family("recovery")
+            .unwrap()
+            .build(),
+    );
+    Gate::define::<String, String>("live:tests.family-recovery.stream.changes", |_, _| true);
+    let mount = LiveMount::<FamilyRecoveryIsland>::identity_bound(
+        "/recovery",
+        "recovery-slot",
+        "recovery-document",
+    )
+    .unwrap();
+    let router = Router::new()
+        .try_live()
+        .unwrap()
+        .try_live_mount(&mount)
+        .unwrap();
+    let runtime = prepare_live_router_for_test(&router).unwrap();
+    App::singleton(runtime.clone());
+    for _ in 0..10 {
+        hub.publish_live_topic("recovery.alice", &[], None, Duration::from_millis(1))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let old = hub
+        .live_topic_positions(&["recovery.alice".into()])
+        .await
+        .unwrap()[0];
+    assert_eq!(old.cursor, 10);
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(hub.prune_live_topics().unwrap(), 1);
+    let server = spawn_server(Arc::new(router)).await;
+    let alice = Identity::alice();
+    let issued = issue(
+        server.port,
+        &alice,
+        issue_body(
+            "sse",
+            "tests.family-recovery",
+            "recovery-slot",
+            "recovery-document",
+            "changes",
+            "retired-island-0001",
+        ),
+    )
+    .await;
+    let mut stream = open_membership(&server, &alice, &issued, "nonce-retired-island").await;
+    let seed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let frame = stream.next_data().await.unwrap();
+            if frame["payload"]["topic"] == "recovery.alice" {
+                break frame["payload"].clone();
+            }
+        }
+    })
+    .await
+    .expect("zero-cursor authority must still seed island recovery");
+    assert_eq!(seed["kind"], "topic_change");
+    assert_eq!(seed["cursor"], 0);
+    assert_eq!(seed["props"], json!([]));
+    assert!(seed["generation"].as_u64().unwrap() > old.generation);
+    LiveTopics::from_runtime(&runtime)
+        .changed("recovery.alice", &["stats"])
+        .await
+        .unwrap();
+    let change = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let frame = stream.next_data().await.unwrap();
+            if frame["payload"]["topic"] == "recovery.alice" {
+                break frame["payload"].clone();
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(change["generation"], seed["generation"]);
+    assert_eq!(change["cursor"], 1);
 }

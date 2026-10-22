@@ -157,12 +157,14 @@ describe("Inertia topic subscriptions", () => {
       slot: "stats",
     });
     app.port.dispatchTopicChange?.({
+      generation: 1,
       cursor: 12,
       kind: "topic_change",
       props: ["stats"],
       topic: "notes",
     });
     expect(app.onSignal).toHaveBeenCalledWith({
+      generation: 1,
       cursor: 12,
       props: ["stats"],
       topic: "notes",
@@ -183,6 +185,7 @@ describe("Inertia topic subscriptions", () => {
 
     expect(() =>
       app.port.dispatchTopicChange?.({
+        generation: 1,
         cursor: 12,
         kind: "topic_change",
         props: ["stats"],

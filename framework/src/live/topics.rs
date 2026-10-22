@@ -320,6 +320,7 @@ impl LiveTopics {
         suprnova_live::async_updates::RegisteredTopicChange::new(
             topic.to_owned(),
             1,
+            1,
             props.iter().map(|p| (*p).to_owned()).collect(),
         )
         .map_err(|_| FrameworkError::internal("invalid Live topic prop names"))?;
@@ -399,6 +400,7 @@ impl LiveTopics {
         suprnova_live::async_updates::RegisteredTopicChange::new(
             topic.to_owned(),
             1,
+            1,
             props.iter().map(|prop| (*prop).to_owned()).collect(),
         )
         .map_err(|_| FrameworkError::internal("invalid Live model topic prop names"))?;
@@ -428,6 +430,7 @@ impl LiveTopics {
         let sample = registry.family_instance(family, "0")?;
         suprnova_live::async_updates::RegisteredTopicChange::new(
             sample,
+            1,
             1,
             props.iter().map(|p| (*p).to_owned()).collect(),
         )
@@ -887,16 +890,17 @@ impl LiveTopics {
             return Ok(serde_json::json!({}));
         }
         let names: Vec<_> = selected.keys().cloned().collect();
-        let cursors = self.state.topics.hub.live_topic_cursors(&names).await?;
+        let cursors = self.state.topics.hub.live_topic_positions(&names).await?;
         if cursors.len() != names.len() {
             return Err(FrameworkError::internal(
                 "Live topic baseline has an invalid cursor count",
             ));
         }
         let mut result = serde_json::Map::new();
-        for ((topic, (only, component, stream, key)), cursor) in selected.into_iter().zip(cursors) {
+        for ((topic, (only, component, stream, key)), position) in selected.into_iter().zip(cursors)
+        {
             let island = runtime.subscription_mount(&component, key.as_deref())?;
-            result.insert(topic, serde_json::json!({"only": only, "cursor": cursor, "island": island, "stream": stream}));
+            result.insert(topic, serde_json::json!({"only": only, "cursor": position.cursor, "generation": position.generation, "island": island, "stream": stream}));
         }
         Ok(serde_json::Value::Object(result))
     }

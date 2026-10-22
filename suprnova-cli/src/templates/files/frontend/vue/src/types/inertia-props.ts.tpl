@@ -194,6 +194,7 @@ export interface InertiaLiveIsland {
 export interface LiveBinding {
   only: string[];
   cursor: number;
+  generation: number;
   island: InertiaLiveIsland;
   stream: string;
 }

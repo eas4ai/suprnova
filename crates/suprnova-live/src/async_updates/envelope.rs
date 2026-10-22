@@ -1318,6 +1318,7 @@ impl RegisteredPresentationSignal {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegisteredTopicChange {
     topic: String,
+    generation: u64,
     cursor: u64,
     props: Vec<String>,
 }
@@ -1326,12 +1327,14 @@ impl RegisteredTopicChange {
     /// Rejects unbounded names and cursors that browsers cannot compare exactly.
     pub fn new(
         topic: String,
+        generation: u64,
         cursor: u64,
         mut props: Vec<String>,
     ) -> Result<Self, AsyncEnvelopeError> {
         crate::async_updates::TopicName::parse(&topic)
             .map_err(|_| AsyncEnvelopeError::new(AsyncEnvelopeErrorKind::InvalidPayload))?;
-        if cursor == 0
+        if generation == 0
+            || generation > MAX_SAFE_INTEGER
             || cursor > MAX_SAFE_INTEGER
             || props.len() > 256
             || props.iter().any(|name| name.is_empty() || name.len() > 256)
@@ -1344,6 +1347,7 @@ impl RegisteredTopicChange {
         props.dedup();
         Ok(Self {
             topic,
+            generation,
             cursor,
             props,
         })
@@ -1353,7 +1357,11 @@ impl RegisteredTopicChange {
     pub fn topic(&self) -> &str {
         &self.topic
     }
-    /// Returns the topic authority's monotonic cursor.
+    /// Returns the creation time of the retained topic state.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+    /// Returns the topic authority's cursor within its generation.
     pub const fn cursor(&self) -> u64 {
         self.cursor
     }
@@ -1833,10 +1841,22 @@ fn parse_payload(
         "topic_change" => {
             require_exact_keys(
                 &fields,
-                &["kind", "topic", "cursor", "props"],
+                &["kind", "topic", "generation", "cursor", "props"],
                 AsyncEnvelopeErrorKind::InvalidPayload,
             )?;
             let topic = string(take(&mut fields, "topic")?)?;
+            let CanonicalValue::Number(generation) = take(&mut fields, "generation")? else {
+                return Err(AsyncEnvelopeError::new(
+                    AsyncEnvelopeErrorKind::InvalidPayload,
+                ));
+            };
+            let generation = generation.get();
+            if generation.fract() != 0.0 || generation < 1.0 || generation > MAX_SAFE_INTEGER as f64
+            {
+                return Err(AsyncEnvelopeError::new(
+                    AsyncEnvelopeErrorKind::InvalidPayload,
+                ));
+            }
             let cursor_value = take(&mut fields, "cursor")?;
             let CanonicalValue::Number(number) = cursor_value else {
                 return Err(AsyncEnvelopeError::new(
@@ -1844,7 +1864,7 @@ fn parse_payload(
                 ));
             };
             let cursor = number.get();
-            if cursor.fract() != 0.0 || cursor < 1.0 || cursor > MAX_SAFE_INTEGER as f64 {
+            if cursor.fract() != 0.0 || cursor < 0.0 || cursor > MAX_SAFE_INTEGER as f64 {
                 return Err(AsyncEnvelopeError::new(
                     AsyncEnvelopeErrorKind::InvalidPayload,
                 ));
@@ -1858,7 +1878,8 @@ fn parse_payload(
                 .into_iter()
                 .map(string)
                 .collect::<Result<Vec<_>, _>>()?;
-            RegisteredTopicChange::new(topic, cursor as u64, props).map(AsyncPayload::TopicChange)
+            RegisteredTopicChange::new(topic, generation as u64, cursor as u64, props)
+                .map(AsyncPayload::TopicChange)
         }
         "browser_event" => parse_browser_event(fields, context).map(AsyncPayload::BrowserEvent),
         "presentation_signal" => {
@@ -2157,6 +2178,10 @@ fn payload_value(payload: &AsyncPayload) -> Result<CanonicalValue, AsyncEnvelope
         AsyncPayload::TopicChange(signal) => object_value([
             ("kind", CanonicalValue::String("topic_change".to_owned())),
             ("topic", CanonicalValue::String(signal.topic.clone())),
+            (
+                "generation",
+                CanonicalValue::number(signal.generation as f64).map_err(map_canonical)?,
+            ),
             (
                 "cursor",
                 CanonicalValue::number(signal.cursor as f64).map_err(map_canonical)?,

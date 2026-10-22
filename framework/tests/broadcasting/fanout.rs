@@ -656,6 +656,7 @@ async fn signal_005_redis_live_topics_share_cursor_and_coalescing() {
         envelope.data,
         json!({
             "topic": "dashboard",
+            "generation": hub_b.live_topic_positions(&["dashboard".into()]).await.unwrap()[0].generation,
             "cursor": 3,
             "props": ["activity", "stats"]
         })
@@ -676,7 +677,7 @@ async fn signal_005_redis_live_topics_share_cursor_and_coalescing() {
         .expect("empty immediate signal channel remains open");
     assert_eq!(
         envelope.data,
-        json!({"topic": "empty.immediate", "cursor": 1, "props": []})
+        json!({"topic": "empty.immediate", "generation": hub_b.live_topic_positions(&["empty.immediate".into()]).await.unwrap()[0].generation, "cursor": 1, "props": []})
     );
 
     let mut coalesced_empty = hub_b
@@ -715,7 +716,7 @@ async fn signal_005_redis_live_topics_share_cursor_and_coalescing() {
         .expect("empty coalesced signal channel remains open");
     assert_eq!(
         envelope.data,
-        json!({"topic": "empty.coalesced", "cursor": 3, "props": []})
+        json!({"topic": "empty.coalesced", "generation": hub_b.live_topic_positions(&["empty.coalesced".into()]).await.unwrap()[0].generation, "cursor": 3, "props": []})
     );
 
     let mut overflow = hub_b
@@ -751,7 +752,7 @@ async fn signal_005_redis_live_topics_share_cursor_and_coalescing() {
         .expect("bounded coalesced signal channel remains open");
     assert_eq!(
         envelope.data,
-        json!({"topic": "props.overflow", "cursor": 3, "props": []})
+        json!({"topic": "props.overflow", "generation": hub_b.live_topic_positions(&["props.overflow".into()]).await.unwrap()[0].generation, "cursor": 3, "props": []})
     );
 }
 
@@ -976,6 +977,11 @@ async fn owned_signal_fanout(first: &SeaStreamerBroadcastHub, second: &SeaStream
         let signal: LiveTopicSignal = serde_json::from_value(envelope.data).unwrap();
         assert_eq!(signal.exclusion, Some(owner));
         assert_eq!(signal.cursor, cursor);
+        let names = ["owned.42".into()];
+        let first_position = first.live_topic_positions(&names).await.unwrap()[0];
+        let second_position = second.live_topic_positions(&names).await.unwrap()[0];
+        assert_eq!(first_position, second_position);
+        assert_eq!(signal.generation, first_position.generation);
         assert_eq!(
             second
                 .live_topic_cursors(&["owned.42".into(), "owned.99".into()])
@@ -1005,7 +1011,11 @@ async fn signal_fix2_001_redis_instance_ttl_is_refreshed_and_static_topics_do_no
         format!("{stream}\0notes.42").as_bytes(),
     );
     let meta = format!("{stream}:__live:topic:{identity}");
-    assert_eq!(hub.live_topic_cursor("notes.42").await.unwrap(), 0);
+    let original_position = hub
+        .live_topic_positions(&["notes.42".into()])
+        .await
+        .unwrap()[0];
+    assert_eq!(original_position.cursor, 0);
     let initial: i64 = redis::cmd("PTTL")
         .arg(&meta)
         .query_async(&mut connection)
@@ -1066,7 +1076,12 @@ async fn signal_fix2_001_redis_instance_ttl_is_refreshed_and_static_topics_do_no
         .await
         .unwrap();
     assert!(!exists, "Redis did not retire the instance hash");
-    assert_eq!(hub.live_topic_cursor("notes.42").await.unwrap(), 0);
+    let recreated = hub
+        .live_topic_positions(&["notes.42".into()])
+        .await
+        .unwrap()[0];
+    assert_eq!(recreated.cursor, 0);
+    assert!(recreated.generation > original_position.generation);
     hub.publish_live_topic(
         "notes.42",
         &["stats".into()],
@@ -1076,4 +1091,127 @@ async fn signal_fix2_001_redis_instance_ttl_is_refreshed_and_static_topics_do_no
     .await
     .unwrap();
     assert_eq!(hub.live_topic_cursor("notes.42").await.unwrap(), 1);
+}
+
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn signal_fix3_002_pending_work_survives_a_worker_outage_past_retention() {
+    pending_outage(false).await;
+}
+
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn signal_fix3_002_missing_pending_hash_recovers_with_a_full_invalidation() {
+    pending_outage(true).await;
+}
+
+async fn pending_outage(remove_pending: bool) {
+    let server = crate::redis_server::PasswordRedis::start("signal-pending-test");
+    let url = format!("redis://:signal-pending-test@127.0.0.1:{}", server.port);
+    let stream = format!("signal-pending-{}", uuid::Uuid::new_v4());
+    let first = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    first
+        .configure_live_topic_family("notes", Duration::from_millis(200))
+        .unwrap();
+    first.pause_live_topic_flush_for_test().unwrap();
+    let mut receiver = first.subscribe_live_topic("notes.42").unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    first
+        .publish_live_topic(
+            "notes.42",
+            &["first".into()],
+            None,
+            Duration::from_millis(500),
+        )
+        .await
+        .unwrap();
+    first
+        .publish_live_topic(
+            "notes.42",
+            &["pending".into()],
+            None,
+            Duration::from_millis(500),
+        )
+        .await
+        .unwrap();
+    let mut connection = redis::Client::open(url.clone())
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let identity = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("{stream}\0notes.42").as_bytes(),
+    );
+    let meta = format!("{stream}:__live:topic:{identity}");
+    for key in [
+        &meta,
+        &format!("{meta}:pending"),
+        &format!("{meta}:props"),
+        &format!("{stream}:__live:schedule"),
+    ] {
+        let ttl: i64 = redis::cmd("PTTL")
+            .arg(key)
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(ttl, -1, "pending activity must not expire: {key}");
+    }
+    if remove_pending {
+        let _: i64 = redis::cmd("PERSIST")
+            .arg(&meta)
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+        let _: i64 = redis::cmd("PERSIST")
+            .arg(format!("{meta}:props"))
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+        let _: i64 = redis::cmd("DEL")
+            .arg(format!("{meta}:pending"))
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let _returning_worker = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    let signal = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let envelope = receiver.recv().await.unwrap();
+            if envelope.data["cursor"] == 2 {
+                break envelope.data;
+            }
+        }
+    })
+    .await
+    .expect("accepted pending signal vanished while workers were absent");
+    assert_eq!(
+        signal["props"],
+        if remove_pending {
+            json!([])
+        } else {
+            json!(["pending"])
+        }
+    );
+    assert!(
+        signal["generation"]
+            .as_u64()
+            .is_some_and(|generation| generation > 0)
+    );
+    let idle_ttl: i64 = redis::cmd("PTTL")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        (0..=200).contains(&idle_ttl),
+        "flush must restore idle expiry: {idle_ttl}"
+    );
+    let pending_ttl: i64 = redis::cmd("PTTL")
+        .arg(format!("{meta}:pending"))
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(pending_ttl, -2, "successful flush removes its durable work");
 }

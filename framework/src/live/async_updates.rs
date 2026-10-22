@@ -1046,16 +1046,27 @@ impl AsyncState {
                 .unwrap_or_default()
         };
         for topic in seed_topics {
+            // Unbound legacy aliases keep their existing initial stream contract.
+            let seed_zero = self.topics.registry.application_topic(&topic).is_some()
+                || self
+                    .tables()
+                    .issued
+                    .get(id)
+                    .is_some_and(|record| record.topic_binding);
             let cursor = self
                 .topics
                 .hub
-                .live_topic_cursor(&topic)
+                .live_topic_positions(&[topic.clone()])
                 .await
                 .map_err(|_| AsyncErrorKind::Unavailable)?;
-            if cursor > 0 {
+            if let Some(position) = cursor
+                .first()
+                .filter(|position| position.cursor > 0 || seed_zero)
+            {
                 let signal = crate::broadcasting::LiveTopicSignal {
                     topic: topic.clone(),
-                    cursor,
+                    cursor: position.cursor,
+                    generation: position.generation,
                     props: Vec::new(),
                     exclusion: None,
                 };
@@ -1896,6 +1907,7 @@ impl AsyncState {
                 StreamPayloadSpec::TopicChange { signal, .. } => {
                     let change = suprnova_live::async_updates::RegisteredTopicChange::new(
                         signal.topic.clone(),
+                        signal.generation,
                         signal.cursor,
                         signal.props.clone(),
                     )

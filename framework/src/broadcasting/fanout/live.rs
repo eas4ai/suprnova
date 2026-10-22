@@ -19,54 +19,43 @@ const MAX_REGISTERED_TOPIC_CHANGE_PROPS: usize = 256;
 const ACCEPT_SCRIPT: &str = r#"
 local function encode_signal(envelope, empty_props)
     local encoded = cjson.encode(envelope)
-    if empty_props then
-        encoded = string.gsub(encoded, '"props":{}', '"props":[]', 1)
-    end
+    if empty_props then encoded = string.gsub(encoded, '"props":{}', '"props":[]', 1) end
     return encoded
 end
-
-local meta_type = redis.call('TYPE', KEYS[1]).ok
-local props_type = redis.call('TYPE', KEYS[2]).ok
-local schedule_type = redis.call('TYPE', KEYS[3]).ok
-local stream_type = redis.call('TYPE', KEYS[4]).ok
-if meta_type ~= 'none' and meta_type ~= 'hash' then
-    return redis.error_reply('live topic metadata key has the wrong type')
-end
-if props_type ~= 'none' and props_type ~= 'set' then
-    return redis.error_reply('live topic props key has the wrong type')
-end
-if schedule_type ~= 'none' and schedule_type ~= 'zset' then
-    return redis.error_reply('live topic schedule key has the wrong type')
-end
-if stream_type ~= 'none' and stream_type ~= 'stream' then
-    return redis.error_reply('broadcast stream key has the wrong type')
-end
-
-local time = redis.call('TIME')
-local now = (tonumber(time[1]) * 1000) + math.floor(tonumber(time[2]) / 1000)
-local cursor = redis.call('HINCRBY', KEYS[1], 'cursor', 1)
-local previous_next_at = redis.call('HGET', KEYS[1], 'next_at')
-local next_at = tonumber(previous_next_at or '0')
-local pending = redis.call('HGET', KEYS[1], 'pending') == '1'
-local interval = tonumber(ARGV[1])
-local props = cjson.decode(ARGV[8])
-local max_props = tonumber(ARGV[10])
-local retention = tonumber(ARGV[11])
-local function retain_instance(deadline)
-    if retention > 0 then
-        redis.call('HSET', KEYS[1], 'retention_ms', retention)
-        local ttl = retention + math.max(0, deadline - now)
-        redis.call('PEXPIRE', KEYS[1], ttl)
-        redis.call('PEXPIRE', KEYS[2], ttl)
+for i, expected in ipairs({'hash', 'set', 'zset', 'stream', 'hash'}) do
+    local actual = redis.call('TYPE', KEYS[i]).ok
+    if actual ~= 'none' and actual ~= expected then
+        return redis.error_reply('live topic key has the wrong type')
     end
 end
-
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+local interval = tonumber(ARGV[1])
+local retention = tonumber(ARGV[11])
+local props = cjson.decode(ARGV[8])
+local max_props = tonumber(ARGV[10])
+local previous_member = redis.call('HGET', KEYS[1], 'pending_member')
+local pending_hash = redis.call('EXISTS', KEYS[5]) == 1
+local pending = pending_hash or previous_member ~= false
+if redis.call('HEXISTS', KEYS[1], 'generation') == 0 then
+    local generation = redis.call('HGET', KEYS[5], 'generation')
+    if not generation then
+        if retention > 0 then generation = now else generation = ARGV[12] end
+    end
+    redis.call('HSET', KEYS[1], 'generation', generation, 'cursor', redis.call('HGET', KEYS[5], 'cursor') or 0)
+end
+local generation = tonumber(redis.call('HGET', KEYS[1], 'generation'))
+local cursor = redis.call('HINCRBY', KEYS[1], 'cursor', 1)
+local previous_next_at = redis.call('HGET', KEYS[1], 'next_at')
+local next_at = tonumber(previous_next_at or redis.call('HGET', KEYS[5], 'next_at') or '0')
+local function idle()
+    if retention > 0 then redis.call('PEXPIRE', KEYS[1], retention) end
+end
+redis.call('HSET', KEYS[1], 'retention_ms', retention)
 if not pending and now >= next_at then
     local envelope = {
-        instance_id = ARGV[2],
-        channel = ARGV[3],
-        event = ARGV[4],
-        data = { topic = ARGV[5], cursor = cursor, props = props }
+        instance_id = ARGV[2], channel = ARGV[3], event = ARGV[4],
+        data = { topic = ARGV[5], generation = generation, cursor = cursor, props = props }
     }
     if ARGV[6] == '1' then
         local exclusion = cjson.decode(ARGV[7])
@@ -77,101 +66,95 @@ if not pending and now >= next_at then
     local written = redis.pcall('XADD', KEYS[4], '*', ARGV[9], encode_signal(envelope, #props == 0))
     if type(written) == 'table' and written.err then
         redis.call('HINCRBY', KEYS[1], 'cursor', -1)
-        if previous_next_at then
-            redis.call('HSET', KEYS[1], 'next_at', previous_next_at)
-        else
-            redis.call('HDEL', KEYS[1], 'next_at')
-        end
+        if previous_next_at then redis.call('HSET', KEYS[1], 'next_at', previous_next_at)
+        else redis.call('HDEL', KEYS[1], 'next_at') end
+        idle()
         return redis.error_reply(written.err)
     end
-    retain_instance(now)
+    idle()
     return {0, cursor, 0}
 end
-
 local first = not pending
-redis.call('HSET', KEYS[1], 'pending', 1, 'topic', ARGV[5], 'interval', interval)
-if #props == 0 then
-    redis.call('HSET', KEYS[1], 'pending_all', 1)
+if next_at == 0 then next_at = now + interval end
+redis.call('HSET', KEYS[5], 'generation', generation, 'cursor', cursor, 'next_at', next_at)
+if (pending and not pending_hash) or #props == 0 then
+    redis.call('HSET', KEYS[5], 'pending_all', 1)
     redis.call('DEL', KEYS[2])
-elseif redis.call('HGET', KEYS[1], 'pending_all') ~= '1' then
-    for _, prop in ipairs(props) do
-        redis.call('SADD', KEYS[2], prop)
-    end
+elseif redis.call('HGET', KEYS[5], 'pending_all') ~= '1' then
+    for _, prop in ipairs(props) do redis.call('SADD', KEYS[2], prop) end
     if redis.call('SCARD', KEYS[2]) > max_props then
-        redis.call('HSET', KEYS[1], 'pending_all', 1)
+        redis.call('HSET', KEYS[5], 'pending_all', 1)
         redis.call('DEL', KEYS[2])
     end
 end
-
 local incoming_mode = 'none'
 if ARGV[6] == '1' then incoming_mode = 'some' end
 if first then
-    redis.call('HSET', KEYS[1], 'except_mode', incoming_mode, 'except_value', ARGV[7])
+    redis.call('HSET', KEYS[5], 'except_mode', incoming_mode, 'except_value', ARGV[7])
 else
-    local mode = redis.call('HGET', KEYS[1], 'except_mode') or 'mixed'
-    local value = redis.call('HGET', KEYS[1], 'except_value') or ''
+    local mode = redis.call('HGET', KEYS[5], 'except_mode') or 'mixed'
+    local value = redis.call('HGET', KEYS[5], 'except_value') or ''
     if mode ~= incoming_mode or (mode == 'some' and value ~= ARGV[7]) then
-        redis.call('HSET', KEYS[1], 'except_mode', 'mixed', 'except_value', '')
+        redis.call('HSET', KEYS[5], 'except_mode', 'mixed', 'except_value', '')
     end
 end
-
-if next_at == 0 then next_at = now + interval end
-redis.call('ZADD', KEYS[3], next_at, KEYS[1])
-retain_instance(next_at)
+local member = cjson.encode({topic = ARGV[5], interval_ms = interval, retention_ms = retention})
+if previous_member and previous_member ~= member then redis.call('ZREM', KEYS[3], previous_member) end
+redis.call('ZADD', KEYS[3], next_at, member)
+redis.call('HSET', KEYS[1], 'pending_member', member)
+redis.call('PERSIST', KEYS[1])
+redis.call('PERSIST', KEYS[2])
+redis.call('PERSIST', KEYS[5])
 return {1, cursor, next_at}
 "#;
 
-/// Atomically turns a due pending union into one Redis stream entry.
+/// Pending work is removed only after XADD succeeds. The schedule retains routing
+/// metadata so a missing pending hash still produces a full recovery signal.
 const FLUSH_SCRIPT: &str = r#"
-local function encode_signal(envelope, empty_props)
-    local encoded = cjson.encode(envelope)
-    if empty_props then
-        encoded = string.gsub(encoded, '"props":{}', '"props":[]', 1)
-    end
-    return encoded
-end
-
 local time = redis.call('TIME')
-local now = (tonumber(time[1]) * 1000) + math.floor(tonumber(time[2]) / 1000)
-local next_at = tonumber(redis.call('HGET', KEYS[1], 'next_at') or '0')
-if redis.call('HGET', KEYS[1], 'pending') ~= '1' or next_at > now then
-    if redis.call('HGET', KEYS[1], 'pending') ~= '1' then
-        redis.call('ZREM', KEYS[3], KEYS[1])
-    end
-    return 0
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+local due = redis.call('ZSCORE', KEYS[3], ARGV[5])
+if not due or tonumber(due) > now then return 0 end
+local pending = redis.call('EXISTS', KEYS[5]) == 1
+local generation = redis.call('HGET', KEYS[1], 'generation') or redis.call('HGET', KEYS[5], 'generation')
+local cursor = redis.call('HGET', KEYS[1], 'cursor') or redis.call('HGET', KEYS[5], 'cursor') or 0
+local retention = tonumber(ARGV[7])
+if not generation then
+    if retention > 0 then generation = now else generation = ARGV[9] end
 end
-
-local topic = redis.call('HGET', KEYS[1], 'topic')
-local cursor = tonumber(redis.call('HGET', KEYS[1], 'cursor'))
-local interval = tonumber(redis.call('HGET', KEYS[1], 'interval'))
-local props
-if redis.call('HGET', KEYS[1], 'pending_all') == '1' then
-    props = cjson.decode('[]')
-else
+redis.call('HSET', KEYS[1], 'generation', generation, 'cursor', cursor, 'retention_ms', retention)
+redis.call('PERSIST', KEYS[1])
+local props = {}
+if pending and redis.call('HGET', KEYS[5], 'pending_all') ~= '1' then
     props = redis.call('SMEMBERS', KEYS[2])
     table.sort(props)
 end
 local envelope = {
-    instance_id = ARGV[1],
-    channel = ARGV[2] .. topic,
-    event = ARGV[3],
-    data = { topic = topic, cursor = cursor, props = props }
+    instance_id = ARGV[1], channel = ARGV[2] .. ARGV[6], event = ARGV[3],
+    data = { topic = ARGV[6], generation = tonumber(generation), cursor = tonumber(cursor), props = props }
 }
-if redis.call('HGET', KEYS[1], 'except_mode') == 'some' then
-    local exclusion = cjson.decode(redis.call('HGET', KEYS[1], 'except_value'))
+if pending and redis.call('HGET', KEYS[5], 'except_mode') == 'some' then
+    local exclusion = cjson.decode(redis.call('HGET', KEYS[5], 'except_value'))
     envelope.except = exclusion.socket
     envelope.data.exclusion = exclusion
 end
-
-redis.call('XADD', KEYS[4], '*', ARGV[4], encode_signal(envelope, #props == 0))
-redis.call('HDEL', KEYS[1], 'pending', 'pending_all', 'topic', 'interval', 'except_mode', 'except_value')
-redis.call('DEL', KEYS[2])
-redis.call('ZREM', KEYS[3], KEYS[1])
-redis.call('HSET', KEYS[1], 'next_at', now + interval)
-local retention = tonumber(redis.call('HGET', KEYS[1], 'retention_ms') or '0')
+local encoded = cjson.encode(envelope)
+if #props == 0 then encoded = string.gsub(encoded, '"props":{}', '"props":[]', 1) end
+redis.call('XADD', KEYS[4], '*', ARGV[4], encoded)
+redis.call('DEL', KEYS[2], KEYS[5])
+redis.call('ZREM', KEYS[3], ARGV[5])
+redis.call('HDEL', KEYS[1], 'pending_member')
+redis.call('HSET', KEYS[1], 'next_at', now + tonumber(ARGV[8]))
 if retention > 0 then redis.call('PEXPIRE', KEYS[1], retention) end
 return 1
 "#;
+
+#[derive(serde::Deserialize)]
+struct TopicSchedule {
+    topic: String,
+    interval_ms: u64,
+    retention_ms: u64,
+}
 
 /// Shared Redis publication state for one stream-backed hub.
 #[derive(Clone)]
@@ -180,17 +163,25 @@ pub(super) struct RedisLiveTopics {
     stream: String,
     schedule: String,
     retention: LiveTopicRetention,
+    generation: u64,
 }
 
 impl RedisLiveTopics {
     /// Create publication state on an existing Redis connection manager.
-    pub(super) fn new(connection: ConnectionManager, stream: &str) -> Self {
-        Self {
+    pub(super) async fn new(
+        connection: ConnectionManager,
+        stream: &str,
+    ) -> Result<Self, FrameworkError> {
+        let generation: u64 = Script::new("local value = redis.call('GET', KEYS[1]); if not value then local t = redis.call('TIME'); value = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000); redis.call('SET', KEYS[1], value) end return tonumber(value)")
+            .key(format!("{stream}:{LIVE_KEY_SEGMENT}:generation"))
+            .invoke_async(&mut connection.clone()).await.map_err(|error| FrameworkError::internal(format!("SeaStreamerBroadcastHub: topic generation initialization failed: {error}")))?;
+        Ok(Self {
             connection,
             stream: stream.to_owned(),
             schedule: format!("{stream}:{LIVE_KEY_SEGMENT}:schedule"),
             retention: LiveTopicRetention::default(),
-        }
+            generation,
+        })
     }
 
     /// Accept and persist one publication atomically.
@@ -226,10 +217,11 @@ impl RedisLiveTopics {
             })?
             .unwrap_or_default();
         let result: (u8, u64, u64) = Script::new(ACCEPT_SCRIPT)
-            .key(meta)
+            .key(&meta)
             .key(prop_set)
             .key(&self.schedule)
             .key(&self.stream)
+            .key(format!("{meta}:pending"))
             .arg(interval_ms)
             .arg(instance_id.to_string())
             .arg(live_topic_channel(topic))
@@ -241,6 +233,7 @@ impl RedisLiveTopics {
             .arg(super::sea_streamer::MESSAGE_FIELD)
             .arg(MAX_REGISTERED_TOPIC_CHANGE_PROPS)
             .arg(self.retention.window(topic).map_or(0, duration_millis))
+            .arg(self.generation)
             .invoke_async(&mut self.connection.clone())
             .await
             .map_err(|error| {
@@ -264,8 +257,20 @@ impl RedisLiveTopics {
         Ok(self.cursors(&[topic.to_owned()]).await?[0])
     }
 
-    /// A single Redis command captures all requested family and static baselines.
     pub(super) async fn cursors(&self, topics: &[String]) -> Result<Vec<u64>, FrameworkError> {
+        Ok(self
+            .positions(topics)
+            .await?
+            .into_iter()
+            .map(|position| position.cursor)
+            .collect())
+    }
+
+    /// Captures generation and cursor together, renewing idle state in one command.
+    pub(super) async fn positions(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<crate::LiveTopicPosition>, FrameworkError> {
         if topics.is_empty() {
             return Ok(Vec::new());
         }
@@ -275,18 +280,19 @@ local values = {}
 local time = redis.call('TIME')
 local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 for i, key in ipairs(KEYS) do
-    values[i] = tonumber(redis.call('HGET', key, 'cursor') or '0')
-    local retention = tonumber(ARGV[i])
-    if retention > 0 then
-        redis.call('HSETNX', key, 'cursor', 0)
-        redis.call('HSET', key, 'retention_ms', retention)
-        local next_at = tonumber(redis.call('HGET', key, 'next_at') or '0')
-        local pending = redis.call('HGET', key, 'pending') == '1'
-        local ttl = retention
-        if pending then ttl = ttl + math.max(0, next_at - now) end
-        redis.call('PEXPIRE', key, ttl)
-        redis.call('PEXPIRE', key .. ':props', ttl)
+    local retention = tonumber(ARGV[i + 1])
+    if redis.call('HEXISTS', key, 'generation') == 0 then
+        local generation = redis.call('HGET', key .. ':pending', 'generation')
+        if not generation then
+            if retention > 0 then generation = now else generation = ARGV[1] end
+        end
+        redis.call('HSET', key, 'generation', generation, 'cursor', redis.call('HGET', key .. ':pending', 'cursor') or 0)
     end
+    values[i] = {tonumber(redis.call('HGET', key, 'generation')), tonumber(redis.call('HGET', key, 'cursor') or '0')}
+    redis.call('HSET', key, 'retention_ms', retention)
+    if redis.call('HEXISTS', key, 'pending_member') == 1 or redis.call('EXISTS', key .. ':pending') == 1 then
+        redis.call('PERSIST', key)
+    elseif retention > 0 then redis.call('PEXPIRE', key, retention) end
 end
 return values
 "#,
@@ -295,17 +301,22 @@ return values
         for topic in topics {
             invocation.key(self.topic_keys(topic).0);
         }
+        invocation.arg(self.generation);
         for topic in topics {
             invocation.arg(self.retention.window(topic).map_or(0, duration_millis));
         }
-        invocation
+        let values: Vec<(u64, u64)> = invocation
             .invoke_async(&mut self.connection.clone())
             .await
             .map_err(|error| {
                 FrameworkError::internal(format!(
                     "SeaStreamerBroadcastHub: live topic baseline read failed: {error}"
                 ))
-            })
+            })?;
+        Ok(values
+            .into_iter()
+            .map(|(generation, cursor)| crate::LiveTopicPosition { generation, cursor })
+            .collect())
     }
 
     /// Start a worker that atomically flushes pending unions into the stream.
@@ -360,17 +371,28 @@ return values
         Ok(entries.into_iter().next())
     }
 
-    async fn flush(&self, meta: &str, instance_id: Uuid) -> Result<(), FrameworkError> {
-        let prop_set = format!("{meta}:props");
+    async fn flush(&self, member: &str, instance_id: Uuid) -> Result<(), FrameworkError> {
+        let schedule: TopicSchedule = serde_json::from_str(member).map_err(|error| {
+            FrameworkError::internal(format!(
+                "SeaStreamerBroadcastHub: invalid pending schedule: {error}"
+            ))
+        })?;
+        let (meta, prop_set) = self.topic_keys(&schedule.topic);
         Script::new(FLUSH_SCRIPT)
-            .key(meta)
+            .key(&meta)
             .key(prop_set)
             .key(&self.schedule)
             .key(&self.stream)
+            .key(format!("{meta}:pending"))
             .arg(instance_id.to_string())
             .arg(crate::broadcasting::live::LIVE_TOPIC_CHANNEL_PREFIX)
             .arg(LIVE_TOPIC_EVENT)
             .arg(super::sea_streamer::MESSAGE_FIELD)
+            .arg(member)
+            .arg(&schedule.topic)
+            .arg(schedule.retention_ms)
+            .arg(schedule.interval_ms)
+            .arg(self.generation)
             .invoke_async::<u8>(&mut self.connection.clone())
             .await
             .map(|_| ())

@@ -138,8 +138,10 @@ function targetValid(target: string): boolean {
 }
 
 function topicChangePayload(fields: JsonObject): Extract<AsyncPayload, { kind: "topic_change" }> {
-  exact(fields, ["cursor", "kind", "props", "topic"], "async_payload_invalid");
+  exact(fields, ["cursor", "generation", "kind", "props", "topic"], "async_payload_invalid");
   const cursor = integer(fields["cursor"], "async_payload_invalid");
+  const generation = integer(fields["generation"], "async_payload_invalid");
+  if (generation === 0) fail("async_payload_invalid");
   const topic = string(fields["topic"], "async_payload_invalid");
   const props = fields["props"];
   if (
@@ -161,6 +163,7 @@ function topicChangePayload(fields: JsonObject): Extract<AsyncPayload, { kind: "
   }
   return Object.freeze({
     cursor,
+    generation,
     kind: "topic_change",
     props: Object.freeze(names),
     topic,
