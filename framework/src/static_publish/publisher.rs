@@ -403,8 +403,8 @@ impl Publisher {
             Ok(staged) => staged,
             Err(failure) => {
                 let result = Err(failure);
-                self.record_result(&result, deadline).await;
                 self.release_lease(&mut lease, deadline).await;
+                self.record_result(&result, deadline).await;
                 return result;
             }
         };
@@ -413,8 +413,8 @@ impl Publisher {
         tokio::spawn(async move {
             let _serial = serial;
             let result = publisher.deliver(delivery, &lease, forward, deadline).await;
-            publisher.record_result(&result, deadline).await;
             publisher.release_lease(&mut lease, deadline).await;
+            publisher.record_result(&result, deadline).await;
             result
         })
         .await

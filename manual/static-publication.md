@@ -170,6 +170,9 @@ suprnova static:publish
 suprnova static:status
 ```
 
+The publisher releases its lease before bounded status persistence, so a slow
+status write cannot consume the lease release budget.
+
 A refused lease appears in status. Boot continues serving. An interrupted
 manifest PUT is reconciled by reading the durable manifest: the attempted live
 version means success; the predecessor means failure and a fenced rollback.

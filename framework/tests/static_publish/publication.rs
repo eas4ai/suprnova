@@ -458,6 +458,8 @@ struct Probe {
     replace_lease_on_list: Mutex<Option<Operator>>,
     refuse: Mutex<Option<String>>,
     stall: AtomicBool,
+    stall_status: AtomicBool,
+    delay_lease_release: AtomicBool,
     delay: AtomicBool,
     active: AtomicUsize,
     maximum: AtomicUsize,
@@ -767,6 +769,9 @@ impl oio::OneShotDelete for ProbeDelete {
                 ));
             }
         }
+        if path == "_pub/lease.json" && self.state.delay_lease_release.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         let mut deleter = self.inner.delete(&self.ctx)?;
         deleter.delete(&path, args).await?;
         deleter.close().await?;
@@ -794,6 +799,9 @@ impl Drop for ProbeWriter {
 }
 impl oio::Write for ProbeWriter {
     async fn write(&mut self, bytes: Buffer) -> opendal::Result<()> {
+        if self.path == "_pub/status.json" && self.state.stall_status.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         if self.counted && self.state.stall.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }

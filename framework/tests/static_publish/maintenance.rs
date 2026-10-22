@@ -278,3 +278,46 @@ async fn pub_008_round4_3_refused_prune_manifest_leaves_all_objects_present() {
         );
     }
 }
+
+async fn stalled_status_releases_lease(render_failure: bool) {
+    let raw = memory();
+    let probe = Arc::new(Probe::default());
+    probe.stall_status.store(true, Ordering::SeqCst);
+    probe.delay_lease_release.store(true, Ordering::SeqCst);
+    let p = Publisher::from_operator(
+        raw.clone().layer(ProbeLayer(probe)),
+        "v1",
+        PublishConfig {
+            timeout: Duration::from_millis(400),
+            clock_skew: Duration::ZERO,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let result = p
+        .publish_with(|| async {
+            if render_failure {
+                Err(FrameworkError::internal("intentional render failure"))
+            } else {
+                Ok(vec![page("success")])
+            }
+        })
+        .await;
+    assert_eq!(result.is_err(), render_failure);
+    assert!(
+        !raw.exists("_pub/lease.json").await.unwrap(),
+        "slow status persistence must not exhaust the lease release budget"
+    );
+    assert_eq!(
+        p.status().await.outcome,
+        if render_failure { "failed" } else { "success" }
+    );
+}
+#[tokio::test(start_paused = true)]
+async fn pub_003_round4_4_success_releases_lease_before_stalled_status() {
+    stalled_status_releases_lease(false).await;
+}
+#[tokio::test(start_paused = true)]
+async fn pub_003_round4_4_render_failure_releases_lease_before_stalled_status() {
+    stalled_status_releases_lease(true).await;
+}
