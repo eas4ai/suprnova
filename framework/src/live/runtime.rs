@@ -1268,7 +1268,18 @@ impl LiveRuntime {
                 Arc::clone(&self.graph.engine_registry),
                 parameters.clone(),
             )),
-            authorization: Arc::clone(&self.graph.ports.subscription_authorization),
+            authorization: if slot == "topic"
+                && document_key == "topic"
+                && self
+                    .graph
+                    .registry
+                    .topic_for_component(selector.selection.component())
+                    .is_none()
+            {
+                Arc::new(super::ports::subscription::SuprnovaSubscriptionAuthorization::for_component_stream(self.graph.registry.clone()))
+            } else {
+                Arc::clone(&self.graph.ports.subscription_authorization)
+            },
             continuity: Arc::new(FixedSubscriptionBaseline::new(baseline)),
             credentials: Arc::clone(&self.graph.ports.subscription_credentials)
                 as Arc<dyn SubscriptionCredentialPort>,
@@ -1303,6 +1314,21 @@ impl LiveRuntime {
             .resolve(component)
             .ok()
             .map(|descriptor| descriptor.metadata().clone())
+    }
+
+    pub(crate) fn topic_registry(&self) -> &LiveRegistry {
+        &self.graph.registry
+    }
+
+    pub(crate) fn subscription_mount(
+        &self,
+        component: &str,
+    ) -> Result<serde_json::Value, FrameworkError> {
+        self.finalize_mount_catalog()?;
+        let selector = self.select_mount(component, "topic", "topic")?;
+        Ok(
+            serde_json::json!({"component": selector.selection.component().as_str(), "slot": "topic", "document_key": "topic"}),
+        )
     }
 
     /// Returns the shared asynchronous-update runtime state.
@@ -1937,6 +1963,12 @@ fn assemble_runtime(
     registry: LiveRegistry,
     candidates: RuntimeProviderCandidates,
 ) -> Result<LiveRuntime, FrameworkError> {
+    registry.validate_topics()?;
+    if config.topic_signal_interval_ms() == 0 {
+        return Err(FrameworkError::internal(
+            "LIVE_TOPIC_SIGNAL_INTERVAL_MS must be positive",
+        ));
+    }
     let RuntimeProviders {
         clock,
         random,
@@ -2076,9 +2108,13 @@ fn assemble_runtime(
         Arc::clone(&clock),
         Arc::clone(&engine_registry),
         AsyncLimits::from_config(config),
+        super::topics::TopicState::new(
+            registry.clone(),
+            std::time::Duration::from_millis(config.topic_signal_interval_ms()),
+        ),
     )?;
 
-    Ok(LiveRuntime {
+    let runtime = LiveRuntime {
         graph: Arc::new(RuntimeGraph {
             config,
             registry,
@@ -2109,7 +2145,9 @@ fn assemble_runtime(
             mount_kinds: OnceLock::new(),
             stitch_registrations: OnceLock::new(),
         }),
-    })
+    };
+    super::topics::register_subscription_mounts(&runtime)?;
+    Ok(runtime)
 }
 
 /// Proves the backend the configured Live instance ledger driver needs is

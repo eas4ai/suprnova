@@ -84,8 +84,13 @@
 //! and behave as `new` and `new_with_presence_ttl`.
 
 use crate::FrameworkError;
+use crate::broadcasting::fanout::live::RedisLiveTopics;
 use crate::broadcasting::hub::{
     BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub, reject_reserved_channel,
+};
+use crate::broadcasting::live::{
+    AcceptedLiveTopicPublication, LIVE_TOPIC_CHANNEL_PREFIX, LiveTopicRuntime, LiveTopicSignal,
+    live_topic_envelope,
 };
 use async_trait::async_trait;
 use futures::FutureExt;
@@ -163,7 +168,7 @@ where
 /// The stream entry field a message's bytes travel in. sea-streamer-redis
 /// wrote the same field, so hubs of an earlier version on the same stream
 /// read and write the same entries.
-const MESSAGE_FIELD: &str = "msg";
+pub(super) const MESSAGE_FIELD: &str = "msg";
 
 /// How long one `XREAD` waits for new entries before it asks again. The
 /// read connection's response timeout leaves room above it.
@@ -320,6 +325,8 @@ struct MemoryStream {
     /// The key the stream is registered under, so it can unregister itself.
     key: String,
     readers: Mutex<Vec<mpsc::UnboundedSender<Arc<[u8]>>>>,
+    /// Cursor and coalescing state shared by every hub on this named stream.
+    live_topics: LiveTopicRuntime,
 }
 
 /// The process's memory streams by key.
@@ -344,6 +351,7 @@ impl MemoryStream {
         let stream = Arc::new(MemoryStream {
             key: key.to_owned(),
             readers: Mutex::new(Vec::new()),
+            live_topics: LiveTopicRuntime::default(),
         });
         streams.insert(key.to_owned(), Arc::downgrade(&stream));
         stream
@@ -385,7 +393,10 @@ impl Drop for MemoryStream {
 }
 
 /// The writer, reader and start position of a hub on a Redis stream.
-async fn connect_redis(uri: &str, stream: &str) -> Result<(Producer, Consumer), FrameworkError> {
+async fn connect_redis(
+    uri: &str,
+    stream: &str,
+) -> Result<(Producer, Consumer, RedisLiveTopics), FrameworkError> {
     // The URL is never repeated in an error: it can carry a password.
     let client = crate::redis_client::open(uri).map_err(|error| {
         FrameworkError::internal(format!(
@@ -427,6 +438,7 @@ async fn connect_redis(uri: &str, stream: &str) -> Result<(Producer, Consumer), 
         .first()
         .map_or_else(|| "0-0".to_owned(), |entry| entry.id.clone());
     let (writer, requests) = mpsc::unbounded_channel();
+    let live_topics = RedisLiveTopics::new(write_conn.clone(), stream);
     tokio::spawn(stream_writer_task(write_conn, stream.to_owned(), requests));
     Ok((
         Producer::Redis(writer),
@@ -435,6 +447,7 @@ async fn connect_redis(uri: &str, stream: &str) -> Result<(Producer, Consumer), 
             stream: stream.to_owned(),
             last_id,
         },
+        live_topics,
     ))
 }
 
@@ -516,6 +529,12 @@ fn now_ms() -> u64 {
 /// across all hub instances.
 type CrossProcessView = Arc<AsyncRwLock<HashMap<String, HashMap<(String, String), MemberRecord>>>>;
 
+/// The signal authority paired with the configured stream backend.
+enum FanoutLiveTopics {
+    Memory(LiveTopicRuntime),
+    Redis(RedisLiveTopics),
+}
+
 // ── SeaStreamerBroadcastHub ───────────────────────────────────────────────────
 
 /// BroadcastHub implementation that fans out both locally and across
@@ -538,12 +557,15 @@ pub struct SeaStreamerBroadcastHub {
     /// Snapshot of locally-tracked members for the heartbeat task. Updated
     /// by `track_member` / `untrack_member`.
     local_members: Arc<AsyncRwLock<HashMap<(String, String), Value>>>,
+    live_topics: FanoutLiveTopics,
     /// Background task driving the consumer/presence pump.
     _consumer_task: JoinHandle<()>,
     /// Periodic heartbeat re-publisher.
     _heartbeat_task: JoinHandle<()>,
     /// Periodic stale-entry pruner.
     _prune_task: JoinHandle<()>,
+    /// Redis worker that drains due coalesced topic publications.
+    _live_flush_task: Option<JoinHandle<()>>,
 }
 
 impl Drop for SeaStreamerBroadcastHub {
@@ -551,6 +573,9 @@ impl Drop for SeaStreamerBroadcastHub {
         self._consumer_task.abort();
         self._heartbeat_task.abort();
         self._prune_task.abort();
+        if let Some(task) = &self._live_flush_task {
+            task.abort();
+        }
     }
 }
 
@@ -638,12 +663,21 @@ impl SeaStreamerBroadcastHub {
         let scheme = streamer_uri
             .split_once("://")
             .map_or("", |(scheme, _)| scheme);
-        let (producer, consumer) = match scheme {
-            "redis" | "rediss" => connect_redis(streamer_uri, stream_key).await?,
+        let (producer, consumer, live_topics) = match scheme {
+            "redis" | "rediss" => {
+                let (producer, consumer, live_topics) =
+                    connect_redis(streamer_uri, stream_key).await?;
+                (producer, consumer, FanoutLiveTopics::Redis(live_topics))
+            }
             "memory" | "stdio" => {
                 let stream = MemoryStream::named(stream_key);
                 let feed = stream.subscribe();
-                (Producer::Memory(stream), Consumer::Memory(feed))
+                let live_topics = stream.live_topics.clone();
+                (
+                    Producer::Memory(stream),
+                    Consumer::Memory(feed),
+                    FanoutLiveTopics::Memory(live_topics),
+                )
             }
             // Only the scheme is repeated: the rest of a URL can carry a
             // password.
@@ -668,6 +702,12 @@ impl SeaStreamerBroadcastHub {
         let prune_interval = (presence_ttl / 2).max(MIN_INTERVAL);
 
         let instance_id = Uuid::new_v4();
+        let live_flush_task = match &live_topics {
+            FanoutLiveTopics::Redis(live_topics) => {
+                Some(live_topics.spawn_flush_worker(instance_id))
+            }
+            FanoutLiveTopics::Memory(_) => None,
+        };
         let local = Arc::new(InMemoryBroadcastHub::new());
         let cross_process_view: CrossProcessView = Arc::new(AsyncRwLock::new(HashMap::new()));
         let local_members: Arc<AsyncRwLock<HashMap<(String, String), Value>>> =
@@ -711,9 +751,11 @@ impl SeaStreamerBroadcastHub {
             instance_id,
             cross_process_view,
             local_members,
+            live_topics,
             _consumer_task: consumer_task,
             _heartbeat_task: heartbeat_task,
             _prune_task: prune_task,
+            _live_flush_task: live_flush_task,
         })
     }
 
@@ -788,6 +830,30 @@ impl SeaStreamerBroadcastHub {
         })?;
         await_send_receipt(receipt, "presence update").await
     }
+}
+
+/// Write one framework-owned topic signal through the configured stream.
+async fn send_live_signal_via_producer(
+    producer: &Producer,
+    instance_id: Uuid,
+    signal: LiveTopicSignal,
+    except: Option<String>,
+) -> Result<(), FrameworkError> {
+    let tagged = TaggedEnvelope {
+        instance_id,
+        envelope: live_topic_envelope(signal, except),
+    };
+    let bytes = serde_json::to_vec(&tagged).map_err(|error| {
+        FrameworkError::internal(format!(
+            "SeaStreamerBroadcastHub: failed to serialize live topic envelope: {error}"
+        ))
+    })?;
+    let receipt = producer.send(bytes).map_err(|error| {
+        FrameworkError::internal(format!(
+            "SeaStreamerBroadcastHub: live topic producer send error: {error}"
+        ))
+    })?;
+    await_send_receipt(receipt, "live topic publish").await
 }
 
 // ── background tasks ──────────────────────────────────────────────────────────
@@ -914,6 +980,17 @@ async fn route_message(
                     );
                 }
             }
+        }
+        Ok(tagged)
+            if tagged
+                .envelope
+                .channel
+                .starts_with(LIVE_TOPIC_CHANNEL_PREFIX) =>
+        {
+            // Live signals use their shared stream as the single delivery
+            // path, including on the publishing hub. This keeps a Redis
+            // script's atomic XADD authoritative for local and remote pages.
+            local.publish_framework(tagged.envelope);
         }
         Ok(tagged) if tagged.instance_id == own_id => {
             // Our own app-data message read back - skip to avoid double
@@ -1192,6 +1269,76 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         await_send_receipt(receipt, "broadcast publish").await
     }
 
+    fn subscribe_live_topic(
+        &self,
+        topic: &str,
+    ) -> Result<tokio::sync::broadcast::Receiver<BroadcastEnvelope>, FrameworkError> {
+        self.local.subscribe_live_topic(topic)
+    }
+
+    async fn live_topic_cursor(&self, topic: &str) -> Result<u64, FrameworkError> {
+        match &self.live_topics {
+            FanoutLiveTopics::Memory(live_topics) => Ok(live_topics.cursor(topic).await),
+            FanoutLiveTopics::Redis(live_topics) => live_topics.cursor(topic).await,
+        }
+    }
+
+    async fn publish_live_topic(
+        &self,
+        topic: &str,
+        props: &[String],
+        except: Option<String>,
+        interval: Duration,
+    ) -> Result<(), FrameworkError> {
+        match &self.live_topics {
+            FanoutLiveTopics::Redis(live_topics) => {
+                live_topics
+                    .publish(self.instance_id, topic, props, except, interval)
+                    .await?;
+                Ok(())
+            }
+            FanoutLiveTopics::Memory(live_topics) => {
+                match live_topics.accept(topic, props, except, interval).await? {
+                    AcceptedLiveTopicPublication::Immediate { signal, except } => {
+                        send_live_signal_via_producer(
+                            &self.producer,
+                            self.instance_id,
+                            signal,
+                            except,
+                        )
+                        .await?;
+                    }
+                    AcceptedLiveTopicPublication::Pending { deadline } => {
+                        let state = live_topics.clone();
+                        let producer = self.producer.clone();
+                        let instance_id = self.instance_id;
+                        let topic = topic.to_owned();
+                        tokio::spawn(async move {
+                            tokio::time::sleep_until(deadline).await;
+                            if let Some((signal, except)) = state.take_pending(&topic).await
+                                && let Err(error) = send_live_signal_via_producer(
+                                    &producer,
+                                    instance_id,
+                                    signal,
+                                    except,
+                                )
+                                .await
+                            {
+                                tracing::error!(
+                                    error = %error,
+                                    topic,
+                                    "SeaStreamerBroadcastHub: delayed live topic publish failed"
+                                );
+                            }
+                        });
+                    }
+                    AcceptedLiveTopicPublication::Coalesced => {}
+                }
+                Ok(())
+            }
+        }
+    }
+
     fn subscriber_count(&self, channel: &str) -> usize {
         self.local.subscriber_count(channel)
     }
@@ -1283,6 +1430,89 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn signal_005_memory_fanout_shares_cursor_across_hubs() {
+        let hub_a = SeaStreamerBroadcastHub::new("memory://", "signal-005-shared-cursor")
+            .await
+            .expect("hub a connects");
+        let hub_b = SeaStreamerBroadcastHub::new("memory://", "signal-005-shared-cursor")
+            .await
+            .expect("hub b connects");
+        let mut receiver = hub_b
+            .subscribe_live_topic("orders")
+            .expect("fanout hub supports live topics");
+
+        hub_a
+            .publish_live_topic(
+                "orders",
+                &["summary".to_owned()],
+                None,
+                Duration::from_millis(100),
+            )
+            .await
+            .expect("signal publishes");
+
+        let envelope = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("remote hub receives signal")
+            .expect("signal channel remains open");
+        assert_eq!(envelope.data["cursor"], 1);
+        assert_eq!(hub_a.live_topic_cursor("orders").await.unwrap(), 1);
+        assert_eq!(hub_b.live_topic_cursor("orders").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn signal_005_memory_fanout_coalesces_across_publishers() {
+        let hub_a = SeaStreamerBroadcastHub::new("memory://", "signal-005-shared-rate")
+            .await
+            .expect("hub a connects");
+        let hub_b = SeaStreamerBroadcastHub::new("memory://", "signal-005-shared-rate")
+            .await
+            .expect("hub b connects");
+        let mut receiver = hub_b.subscribe_live_topic("dashboard").unwrap();
+        let interval = Duration::from_millis(80);
+
+        hub_a
+            .publish_live_topic("dashboard", &["seed".to_owned()], None, interval)
+            .await
+            .unwrap();
+        receiver.recv().await.unwrap();
+        hub_a
+            .publish_live_topic(
+                "dashboard",
+                &["stats".to_owned()],
+                Some("socket-a".to_owned()),
+                interval,
+            )
+            .await
+            .unwrap();
+        hub_b
+            .publish_live_topic(
+                "dashboard",
+                &["activity".to_owned()],
+                Some("socket-b".to_owned()),
+                interval,
+            )
+            .await
+            .unwrap();
+
+        let envelope = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("pending union flushes")
+            .expect("signal channel remains open");
+        assert_eq!(envelope.except, None);
+        assert_eq!(
+            envelope.data,
+            serde_json::json!({
+                "topic": "dashboard",
+                "cursor": 3,
+                "props": ["activity", "stats"]
+            })
+        );
+        assert_eq!(hub_a.live_topic_cursor("dashboard").await.unwrap(), 3);
+        assert_eq!(hub_b.live_topic_cursor("dashboard").await.unwrap(), 3);
+    }
 
     /// Sol review: the in-process stream behind `memory://` is freed once the
     /// last hub on it drops. The registry held every stream it ever created

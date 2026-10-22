@@ -596,6 +596,159 @@ async fn redis_backend_cross_hub_fanout() {
     assert_eq!(envelope.data["from"], "hub_a");
 }
 
+#[tokio::test]
+#[ignore = "requires REDIS_BROADCAST_URL pointing at a running Redis"]
+async fn signal_005_redis_live_topics_share_cursor_and_coalescing() {
+    let url = match std::env::var("REDIS_BROADCAST_URL") {
+        Ok(url) if !url.is_empty() => url,
+        _ => return,
+    };
+    let stream_key = format!("suprnova-test-live-{}", uuid::Uuid::new_v4());
+    let hub_a = SeaStreamerBroadcastHub::new(&url, &stream_key)
+        .await
+        .expect("hub a Redis connect");
+    let hub_b = SeaStreamerBroadcastHub::new(&url, &stream_key)
+        .await
+        .expect("hub b Redis connect");
+    let mut receiver = hub_b
+        .subscribe_live_topic("dashboard")
+        .expect("Redis fanout hub supports live topics");
+    let interval = Duration::from_millis(120);
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    hub_a
+        .publish_live_topic("dashboard", &["seed".to_owned()], None, interval)
+        .await
+        .expect("first signal publishes atomically");
+    receiver.recv().await.expect("first signal arrives");
+
+    hub_a
+        .publish_live_topic(
+            "dashboard",
+            &["stats".to_owned()],
+            Some("socket-a".to_owned()),
+            interval,
+        )
+        .await
+        .expect("first pending signal is accepted");
+    hub_b
+        .publish_live_topic(
+            "dashboard",
+            &["activity".to_owned()],
+            Some("socket-b".to_owned()),
+            interval,
+        )
+        .await
+        .expect("second pending signal is accepted");
+
+    let envelope = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+        .await
+        .expect("coalesced Redis signal arrives")
+        .expect("signal channel remains open");
+    assert_eq!(envelope.except, None);
+    assert_eq!(
+        envelope.data,
+        json!({
+            "topic": "dashboard",
+            "cursor": 3,
+            "props": ["activity", "stats"]
+        })
+    );
+    assert_eq!(hub_a.live_topic_cursor("dashboard").await.unwrap(), 3);
+    assert_eq!(hub_b.live_topic_cursor("dashboard").await.unwrap(), 3);
+
+    let mut immediate_empty = hub_b
+        .subscribe_live_topic("empty.immediate")
+        .expect("Redis fanout hub supports an empty immediate signal");
+    hub_a
+        .publish_live_topic("empty.immediate", &[], None, interval)
+        .await
+        .expect("empty immediate signal is accepted");
+    let envelope = tokio::time::timeout(Duration::from_secs(5), immediate_empty.recv())
+        .await
+        .expect("empty immediate Redis signal arrives")
+        .expect("empty immediate signal channel remains open");
+    assert_eq!(
+        envelope.data,
+        json!({"topic": "empty.immediate", "cursor": 1, "props": []})
+    );
+
+    let mut coalesced_empty = hub_b
+        .subscribe_live_topic("empty.coalesced")
+        .expect("Redis fanout hub supports an empty coalesced signal");
+    let bounded_interval = Duration::from_millis(500);
+    hub_a
+        .publish_live_topic(
+            "empty.coalesced",
+            &["seed".to_owned()],
+            None,
+            bounded_interval,
+        )
+        .await
+        .expect("coalesced-empty seed is accepted");
+    hub_a
+        .publish_live_topic(
+            "empty.coalesced",
+            &["stats".to_owned()],
+            None,
+            bounded_interval,
+        )
+        .await
+        .expect("named pending signal is accepted");
+    hub_a
+        .publish_live_topic("empty.coalesced", &[], None, bounded_interval)
+        .await
+        .expect("empty pending signal is accepted");
+    coalesced_empty
+        .recv()
+        .await
+        .expect("coalesced-empty seed arrives");
+    let envelope = tokio::time::timeout(Duration::from_secs(5), coalesced_empty.recv())
+        .await
+        .expect("empty coalesced Redis signal arrives")
+        .expect("empty coalesced signal channel remains open");
+    assert_eq!(
+        envelope.data,
+        json!({"topic": "empty.coalesced", "cursor": 3, "props": []})
+    );
+
+    let mut overflow = hub_b
+        .subscribe_live_topic("props.overflow")
+        .expect("Redis fanout hub supports bounded prop coalescing");
+    hub_a
+        .publish_live_topic(
+            "props.overflow",
+            &["seed".to_owned()],
+            None,
+            bounded_interval,
+        )
+        .await
+        .expect("overflow seed is accepted");
+    let first_props = (0..200)
+        .map(|index| format!("prop_{index:03}"))
+        .collect::<Vec<_>>();
+    let second_props = (200..300)
+        .map(|index| format!("prop_{index:03}"))
+        .collect::<Vec<_>>();
+    hub_a
+        .publish_live_topic("props.overflow", &first_props, None, bounded_interval)
+        .await
+        .expect("first bounded pending signal is accepted");
+    hub_a
+        .publish_live_topic("props.overflow", &second_props, None, bounded_interval)
+        .await
+        .expect("pending union beyond the bound is accepted as a full reload");
+    overflow.recv().await.expect("overflow seed arrives");
+    let envelope = tokio::time::timeout(Duration::from_secs(5), overflow.recv())
+        .await
+        .expect("bounded coalesced Redis signal arrives")
+        .expect("bounded coalesced signal channel remains open");
+    assert_eq!(
+        envelope.data,
+        json!({"topic": "props.overflow", "cursor": 3, "props": []})
+    );
+}
+
 /// Redis command failures are reported by the send receipt, after
 /// `SeaProducer::send` has accepted the message. Publishing must wait for
 /// that receipt instead of returning success for a failed `XADD`.

@@ -74,21 +74,114 @@ pub(crate) fn stream_ability(
     )
 }
 
-pub(crate) struct SuprnovaSubscriptionAuthorization;
+#[derive(Clone)]
+pub(crate) struct SubscriptionAuthority {
+    abilities: Vec<(String, String)>,
+}
+impl SubscriptionAuthority {
+    /// Keeps issuance checks and adds the stream ability for alias delivery.
+    pub(crate) fn for_topic(
+        &self,
+        component: &suprnova_live::identity::ComponentName,
+        stream: &suprnova_live::async_updates::StreamName,
+        topic: Option<&str>,
+    ) -> Self {
+        let mut authority = self.clone();
+        let ability = stream_ability(component, stream);
+        if topic == Some(ability.1.as_str()) && !authority.abilities.contains(&ability) {
+            authority.abilities.push(ability);
+        }
+        authority
+    }
+
+    pub(crate) fn component_stream(
+        component: &suprnova_live::identity::ComponentName,
+        stream: &suprnova_live::async_updates::StreamName,
+    ) -> Self {
+        Self {
+            abilities: vec![stream_ability(component, stream)],
+        }
+    }
+    pub(crate) fn registered(
+        registry: &super::super::LiveRegistry,
+        component: &suprnova_live::identity::ComponentName,
+        stream: &suprnova_live::async_updates::StreamName,
+        topics: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let mut abilities = Vec::new();
+        let mut application_topic = false;
+        let mut component_topic = false;
+        for topic in topics {
+            if let Some(public) = registry.topics().get(&topic) {
+                application_topic = true;
+                if !public {
+                    abilities.push((format!("live:topic.{topic}"), topic));
+                }
+            } else {
+                component_topic = true;
+            }
+        }
+        if !application_topic || component_topic {
+            abilities.push(stream_ability(component, stream));
+        }
+        Self { abilities }
+    }
+    pub(crate) async fn allows(&self, principal: Option<&str>) -> bool {
+        for (ability, resource) in &self.abilities {
+            let Some(principal) = principal else {
+                return false;
+            };
+            if !crate::authorization::Gate::allows_async(ability, &principal.to_owned(), resource)
+                .await
+            {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+pub(crate) struct SuprnovaSubscriptionAuthorization {
+    registry: super::super::LiveRegistry,
+    component_stream: bool,
+}
+impl SuprnovaSubscriptionAuthorization {
+    pub(crate) fn new(registry: super::super::LiveRegistry) -> Self {
+        Self {
+            registry,
+            component_stream: false,
+        }
+    }
+    pub(crate) fn for_component_stream(registry: super::super::LiveRegistry) -> Self {
+        Self {
+            registry,
+            component_stream: true,
+        }
+    }
+}
 
 impl SubscriptionAuthorizationPort for SuprnovaSubscriptionAuthorization {
     fn authorize<'a>(
         &'a self,
         request: SubscriptionAuthorizationRequest<'a>,
     ) -> SubscriptionFuture<'a, Result<SubscriptionAuthorizationDecision, SubscriptionError>> {
-        let (ability, resource) = stream_ability(request.component(), request.stream());
+        let authority = if self.component_stream {
+            SubscriptionAuthority::component_stream(request.component(), request.stream())
+        } else {
+            SubscriptionAuthority::registered(
+                &self.registry,
+                request.component(),
+                request.stream(),
+                request
+                    .topics()
+                    .as_slice()
+                    .iter()
+                    .map(|topic| topic.as_str().to_owned()),
+            )
+        };
         Box::pin(async move {
-            let Some(principal) = super::route_principal().await else {
-                return Ok(SubscriptionAuthorizationDecision::Deny);
-            };
-            let allowed =
-                crate::authorization::Gate::allows_async(&ability, &principal, &resource).await;
-            Ok(if allowed {
+            let principal = super::route_principal().await;
+            Ok(if authority.allows(principal.as_deref()).await {
                 SubscriptionAuthorizationDecision::Allow
             } else {
                 SubscriptionAuthorizationDecision::Deny

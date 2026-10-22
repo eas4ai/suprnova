@@ -57,9 +57,9 @@ pub use manifest::{ManifestEntry, ResolvedAssets, ViteManifest};
 pub(crate) use pages::ensure_page_exists;
 pub(crate) use prop::header_is_truthy;
 pub use prop::{
-    DeferOptions, InertiaRequestExt, MatchOnFields, MergeMode, MergeStrategy, OnceOptions,
-    PartialFilter, Prop, PropFuture, PropResolver, ProvidesScrollMetadata, ScrollMetadata,
-    Visibility,
+    DeferOptions, InertiaProps, InertiaRequestExt, LiveBinding, MatchOnFields, MergeMode,
+    MergeStrategy, OnceOptions, PartialFilter, Prop, PropFuture, PropResolver,
+    ProvidesScrollMetadata, ScrollMetadata, Visibility,
 };
 pub use prop::{MergePaths, OnceUntil};
 pub use providers::{

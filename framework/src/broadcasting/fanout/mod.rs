@@ -26,5 +26,6 @@
 //! # }
 //! ```
 
+mod live;
 mod sea_streamer;
 pub use sea_streamer::SeaStreamerBroadcastHub;

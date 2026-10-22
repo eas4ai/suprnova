@@ -175,15 +175,61 @@ async fn control(request: Request, route: ControlRoute) -> Result<HttpResponse, 
     }
     // The route's principal: the user of the guard the route's
     // `AuthMiddleware` checked, never another guard's user.
-    let Some(principal) = super::ports::route_principal().await else {
-        return Err(AsyncErrorKind::AuthorizationDenied.into());
-    };
+    let principal = super::ports::route_principal().await.unwrap_or_default();
+    if principal.is_empty() && matches!(route, ControlRoute::Subscriptions) {
+        let control = serde_json::from_slice::<SubscriptionControl>(body)
+            .map_err(|_| AsyncErrorKind::AuthorizationDenied)?;
+        if !anonymous_subscription(&runtime, &control).await {
+            return Err(AsyncErrorKind::AuthorizationDenied.into());
+        }
+    }
     Ok(match route {
         ControlRoute::Subscriptions => {
             subscription_control(&runtime, &state, &request, body, principal).await?
         }
         ControlRoute::Memberships => membership_control(&state, &request, body).await?,
     })
+}
+
+async fn anonymous_subscription(runtime: &LiveRuntime, control: &SubscriptionControl) -> bool {
+    use super::ports::subscription::SubscriptionAuthority;
+    let Ok(component) = suprnova_live::identity::ComponentName::parse(&control.island.component)
+    else {
+        return false;
+    };
+    let Ok(stream) = StreamName::parse(&control.stream) else {
+        return false;
+    };
+    let registry = runtime.topic_registry();
+    let Ok(descriptor) = registry.engine().resolve(&component) else {
+        return false;
+    };
+    let Some(subscription) = descriptor
+        .metadata()
+        .subscriptions()
+        .iter()
+        .find(|subscription| subscription.stream() == &stream)
+    else {
+        return false;
+    };
+    let authority = if control.island.slot == "topic"
+        && control.island.document_key == "topic"
+        && registry.topic_for_component(&component).is_none()
+    {
+        SubscriptionAuthority::component_stream(&component, &stream)
+    } else {
+        SubscriptionAuthority::registered(
+            registry,
+            &component,
+            &stream,
+            subscription
+                .topics()
+                .as_slice()
+                .iter()
+                .map(|topic| topic.as_str().to_owned()),
+        )
+    };
+    authority.allows(None).await
 }
 
 async fn subscription_control(
@@ -279,6 +325,11 @@ async fn membership_control(
 ) -> Result<HttpResponse, AsyncErrorKind> {
     let control: MembershipControl =
         serde_json::from_slice(body).map_err(|_| AsyncErrorKind::ProtocolInvalid)?;
+    if super::ports::route_principal().await.is_none()
+        && !state.anonymous_membership(&control.subscription_id)
+    {
+        return Err(AsyncErrorKind::AuthorizationDenied);
+    }
     if control.protocol_version != 1 {
         return Err(AsyncErrorKind::ProtocolInvalid);
     }
@@ -336,11 +387,11 @@ async fn events_inner(request: Request) -> Result<HttpResponse, AsyncRefusal> {
         .filter(|generation| browser_safe_generation(*generation))
         .ok_or(AsyncErrorKind::GenerationInvalid)?;
     let (_, state) = bind_state()?;
-    if super::ports::route_principal().await.is_none() {
-        return Err(AsyncErrorKind::AuthorityInvalid.into());
-    }
     let facts = request_scope_facts(&request, state.now()?)?;
     let key = state.transport_for_credential(&credential, &facts)?;
+    if super::ports::route_principal().await.is_none() && !state.anonymous_transport(&key) {
+        return Err(AsyncErrorKind::AuthorityInvalid.into());
+    }
     let mut receiver = state.open_sse_reader(&key, generation)?;
     let stream = futures::stream::poll_fn(move |context| {
         receiver
@@ -447,13 +498,13 @@ async fn socket_text(
     };
     match codec.decode_membership_request(frame()) {
         Ok(membership) => {
-            if !authenticated {
+            let subscription = membership.subscription().to_base64url();
+            if !authenticated && !state.anonymous_membership(&subscription) {
                 return Err("membership_authority_invalid");
             }
             state
                 .admit_socket_control(key, membership.transport_generation())
                 .map_err(AsyncErrorKind::socket_reason)?;
-            let subscription = membership.subscription().to_base64url();
             let acknowledgment = state
                 .add_membership(key, &subscription, None, Some(membership))
                 .await
@@ -471,7 +522,7 @@ async fn socket_text(
         }
         Err(_) => match codec.decode_control(frame()) {
             Ok(WebSocketControlRecord::Unsubscribe(subscription)) => {
-                if !authenticated {
+                if !authenticated && !state.anonymous_membership(&subscription.to_base64url()) {
                     return Err("membership_authority_invalid");
                 }
                 state

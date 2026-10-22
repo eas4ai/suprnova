@@ -424,6 +424,13 @@ hub.publish(
 ).await?;
 ```
 
+`LiveTopics::changed` captures the same `X-Socket-ID` before registering its
+after-commit callback. The id stays attached when publication is deferred until
+the request ends or a transaction commits. Rollback discards the change.
+Queue job attempts start without an inherited socket id and publish to every
+authorized transport. See [Topic signals](live.md#topic-signals) for the
+transaction and model registration examples.
+
 ### Dispatch ordering with sibling listeners
 
 `EventFacade::dispatch` is **fail-fast**: if a hub publish returns
@@ -729,6 +736,58 @@ cross-process view so the read path is unified.
 Writes go through one writer task per hub, in the order they were
 made, and each `publish` waits up to 5 s for its write to land. A write
 whose caller stopped waiting is dropped instead of being written late.
+
+### Inertia Live topic signals
+
+[Live topic signals](live.md#topic-signals) use the same hub so an island and
+an Inertia page see one ordered change stream. `BroadcastHub` exposes three
+topic operations in addition to application event fanout:
+
+- `subscribe_live_topic(topic)` opens the typed signal feed.
+- `live_topic_cursor(topic)` reads the current monotonic position.
+- `publish_live_topic(topic, props, except, interval)` advances that position
+  and publishes the change.
+
+The browser receives a data-free Live payload:
+
+```json
+{
+  "kind": "topic_change",
+  "topic": "posts",
+  "cursor": 42,
+  "props": ["posts", "post_count"]
+}
+```
+
+There is no serialized model in the message. The receiver reloads the named
+props from its ordinary authorized controller or fresh-renders its island.
+An empty `props` array requests a full refresh for that binding.
+
+The hub keeps the cursor and minimum spacing global for each topic. The
+default `LIVE_TOPIC_SIGNAL_INTERVAL_MS=100` permits at most 10 signals per
+second for one topic across the hub, not 10 from each publisher. Changes that
+arrive inside the interval are held and their prop names are unioned; an empty
+list dominates the union. Configure the same value in code with
+`LiveConfig::builder().topic_signal_interval_ms(100)`.
+
+`SeaStreamerBroadcastHub` stores the cursor and pending coalesced change in
+Redis, so replicas share the ordering and rate bound. Its `memory://` backend
+shares them between hubs with the same stream key inside one process for
+tests. If the application binds no hub, Live uses `InMemoryBroadcastHub` and
+topic signals reach this process only. A custom hub that keeps the trait's
+default topic methods reports that topic fanout is unsupported instead of
+silently acting as a process-local hub.
+
+Topic traffic uses a reserved internal channel that ordinary `publish` calls
+cannot spoof. The hub envelope's `except` socket id is preserved across
+fanout. A write made by an Inertia visit can therefore skip the transport that
+initiated it while other tabs and replicas receive the signal.
+
+### Why Suprnova diverges
+
+Laravel broadcasting does not own an Inertia invalidation cursor. Suprnova
+stores that cursor beside the hub's topic publications so replicas agree on
+the position and the rate bound. The signal still contains no model data.
 
 ### Cross-process presence
 
@@ -1164,10 +1223,11 @@ the event itself - see [Events](events.md#testing---eventfacadefake).
 | `suprnova::broadcasting::PresenceChannel` | `async fn member_info(req, params) -> Result<Value, FrameworkError>`. Requires `Channel::presence_info` override. |
 | `suprnova::broadcasting::ChannelRegistry` | Holds every registered channel. Bound as `Arc<ChannelRegistry>` in the container; resolved by `BroadcastingWsHandler`. |
 | `suprnova::broadcasting::Broadcastable` | Trait on `Event + Serialize`. Required: `broadcast_on()`. Optional: `broadcast_event_name`, `broadcast_with`, `broadcast_when`, `broadcast_to_others`. |
-| `suprnova::broadcasting::BroadcastHub` | Hub trait. `subscribe`, `publish`, `subscriber_count`, presence track/untrack/list. |
-| `suprnova::broadcasting::InMemoryBroadcastHub` | Default in-process hub. No external dependencies. Publish returns `Ok` unconditionally. |
+| `suprnova::broadcasting::BroadcastHub` | Hub trait. `subscribe`, `publish`, `subscriber_count`, presence track/untrack/list, and Live topic subscribe/cursor/publish. |
+| `suprnova::broadcasting::InMemoryBroadcastHub` | Default in-process hub. No external dependencies. Ordinary publish rejects reserved framework channels. |
 | `suprnova::broadcasting::RecordingBroadcastHub` | Test double. Records every publish; still delivers to live subscribers. |
 | `suprnova::broadcasting::BroadcastEnvelope` | One published event: `channel`, `event`, `data`, `except`. `new(ch, ev, data)` builder; `.with_except(socket_id)` for per-dispatch exclusion. |
+| `suprnova::broadcasting::LiveTopicSignal` | Data-free topic change: `topic`, monotonic `cursor`, and the prop names to refresh. |
 | `suprnova::broadcasting::ClientFrame` / `ServerFrame` | The JSON-envelope wire types. `ServerFrame::Lagged { channel, skipped }` surfaces per-channel ring-buffer overflows. |
 | `suprnova::broadcasting::BroadcastingWsHandler` | The framework's reusable `WebSocketHandler`. Constructor: `BroadcastingWsHandler::new(hub, registry)`. Pass to `ws!()`. |
 | `suprnova::PusherBroadcastHub` | Pusher-protocol hub. `new(config, registry)`; `auth()` returns the `PusherAuth` to bind; `client()` returns its `PusherClient`. Also delivers to in-process subscribers. |

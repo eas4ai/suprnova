@@ -204,6 +204,12 @@ impl BoundedTopics {
 pub struct BoundedEventNames(Vec<BrowserOperationName>);
 
 impl BoundedEventNames {
+    /// Creates the event-free contract of a topic that carries invalidations only.
+    #[must_use]
+    pub const fn refresh_only() -> Self {
+        Self(Vec::new())
+    }
+
     /// Sorts and validates a nonempty bounded event-name declaration.
     pub fn new(mut events: Vec<BrowserOperationName>) -> Result<Self, MetadataError> {
         if events.is_empty() {

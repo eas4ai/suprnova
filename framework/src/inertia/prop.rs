@@ -3,6 +3,33 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+/// One compile-time checked mapping from a Live topic to Inertia prop names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LiveBinding {
+    /// The Live topic whose refresh signal reloads the props.
+    pub topic: &'static str,
+    /// Serialized prop names reloaded when the topic signals a change.
+    pub only: &'static [&'static str],
+}
+
+/// Static metadata emitted by `#[derive(InertiaProps)]`.
+///
+/// Implementations generated from `#[inertia(live(...))]` return their
+/// checked topic-to-prop table. A hand-written implementation has no live
+/// bindings unless it overrides [`live_bindings`](Self::live_bindings).
+pub trait InertiaProps {
+    /// Returns the Live topics and serialized props declared by this type.
+    fn live_bindings() -> &'static [LiveBinding] {
+        &[]
+    }
+}
+
+impl<T: InertiaProps + ?Sized> InertiaProps for &T {
+    fn live_bindings() -> &'static [LiveBinding] {
+        T::live_bindings()
+    }
+}
+
 use crate::error::FrameworkError;
 
 /// Minimal request abstraction used by [`crate::inertia::InertiaResponse::resolve`]

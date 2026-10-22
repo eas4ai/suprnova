@@ -130,6 +130,7 @@ pub struct LiveConfig {
     max_request_items: usize,
     max_response_items: usize,
     max_context_lifetime_ms: u64,
+    topic_signal_interval_ms: u64,
     request_timeout_ms: u32,
     max_queued_per_island: u8,
     max_parallel_per_island: u8,
@@ -873,6 +874,7 @@ impl LiveConfig {
             max_request_items: DEFAULT_ITEMS,
             max_response_items: DEFAULT_ITEMS,
             max_context_lifetime_ms: DEFAULT_CONTEXT_LIFETIME_MS,
+            topic_signal_interval_ms: 100,
             request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             max_queued_per_island: DEFAULT_QUEUED_PER_ISLAND,
             max_parallel_per_island: DEFAULT_PARALLEL_PER_ISLAND,
@@ -1047,6 +1049,12 @@ impl LiveConfig {
         self.async_max_queued_events
     }
 
+    /// Minimum time between topic publications; defaults to 100 milliseconds.
+    #[must_use]
+    pub const fn topic_signal_interval_ms(self) -> u64 {
+        self.topic_signal_interval_ms
+    }
+
     /// Events one reconnect replay may carry (`LIVE_ASYNC_MAX_REPLAY_EVENTS`).
     /// A replay is queued whole, so it fits inside the queued-event limit.
     #[must_use]
@@ -1156,6 +1164,7 @@ pub struct LiveConfigBuilder {
     max_request_items: usize,
     max_response_items: usize,
     max_context_lifetime_ms: u64,
+    topic_signal_interval_ms: u64,
     request_timeout_ms: u32,
     max_queued_per_island: u8,
     max_parallel_per_island: u8,
@@ -1199,6 +1208,7 @@ impl LiveConfigBuilder {
             max_request_items: DEFAULT_ITEMS,
             max_response_items: DEFAULT_ITEMS,
             max_context_lifetime_ms: DEFAULT_CONTEXT_LIFETIME_MS,
+            topic_signal_interval_ms: 100,
             request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             max_queued_per_island: DEFAULT_QUEUED_PER_ISLAND,
             max_parallel_per_island: DEFAULT_PARALLEL_PER_ISLAND,
@@ -1265,6 +1275,14 @@ impl LiveConfigBuilder {
         let narrow32 = |value: u64| u32::try_from(value).unwrap_or(u32::MAX);
         let narrow8 = |value: u64| u8::try_from(value).unwrap_or(u8::MAX);
         let mut builder = Self::new();
+        if let Some(value) = number("LIVE_TOPIC_SIGNAL_INTERVAL_MS")? {
+            if value == 0 {
+                return Err(FrameworkError::internal(
+                    "LIVE_TOPIC_SIGNAL_INTERVAL_MS must be positive",
+                ));
+            }
+            builder.topic_signal_interval_ms = value;
+        }
         if let Some(value) = number("LIVE_MAX_REQUEST_BYTES")? {
             builder.max_request_bytes = bytes(value);
         }
@@ -1640,6 +1658,13 @@ impl LiveConfigBuilder {
         self
     }
 
+    /// Sets the minimum publication spacing for each topic in milliseconds.
+    #[must_use]
+    pub const fn topic_signal_interval_ms(mut self, interval: u64) -> Self {
+        self.topic_signal_interval_ms = interval;
+        self
+    }
+
     /// Validates every limit and creates the immutable configuration.
     ///
     /// # Errors
@@ -1648,6 +1673,12 @@ impl LiveConfigBuilder {
     /// its rule.
     pub fn build(self) -> Result<LiveConfig, LiveConfigError> {
         use LiveConfigErrorKind as Kind;
+        check(
+            self.topic_signal_interval_ms > 0,
+            Kind::InvalidAsyncLimits,
+            "LIVE_TOPIC_SIGNAL_INTERVAL_MS",
+            "must be positive milliseconds",
+        )?;
         let request = self.max_request_bytes;
         check(
             (1..=HARD_MAX_CONTROL_BYTES).contains(&request),
@@ -1817,6 +1848,7 @@ impl LiveConfigBuilder {
             max_request_items: self.max_request_items,
             max_response_items: self.max_response_items,
             max_context_lifetime_ms: self.max_context_lifetime_ms,
+            topic_signal_interval_ms: self.topic_signal_interval_ms,
             request_timeout_ms: self.request_timeout_ms,
             max_queued_per_island: self.max_queued_per_island,
             max_parallel_per_island: self.max_parallel_per_island,

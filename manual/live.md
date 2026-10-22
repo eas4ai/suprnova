@@ -631,6 +631,154 @@ against the session store at most once per ten seconds, so events stop within
 that interval. The stream's gate is asked again before every delivery
 regardless, so a policy change ends delivery immediately on every node.
 
+## Topic signals
+
+A topic signal says that named data changed. It carries the topic, a monotonic
+cursor, and the prop names that should be refreshed. It never carries a model
+or its values. Live components can subscribe to the same topic, and an Inertia
+page can turn the signal into a partial reload as described in [Live topic
+bindings](frontend-pages.md#live-topic-bindings).
+
+Declare application topics beside components in the immutable registry. A
+private topic requires a signed-in principal and an ability named
+`live:topic.<topic>`. A public topic explicitly permits anonymous subscribers:
+
+```rust
+use suprnova::live::LiveRegistry;
+use suprnova::{FrameworkError, Gate};
+
+pub fn registry() -> Result<LiveRegistry, FrameworkError> {
+    Gate::define::<String, String>("live:topic.posts", |principal, _topic| {
+        !principal.is_empty()
+    });
+
+    Ok(LiveRegistry::builder()
+        .topic("posts")?
+        .public_topic("announcements")?
+        .build())
+}
+```
+
+The second `String` passed to the gate is the registered topic name. Make the
+ability express the audience for that topic; the signal contains no record
+with which to make a row-level decision.
+
+Resolve the publisher after binding the registry and its gates. Resolution
+assembles and binds the Live runtime when needed. Then report changes from
+handlers, services, or jobs:
+
+```rust
+use suprnova::live::LiveTopics;
+
+let topics = LiveTopics::resolve()?;
+topics.changed("posts", &["posts", "post_count"]).await?;
+let cursor = topics.cursor("posts").await?;
+```
+
+`changed` automatically registers its publish with `DB::after_commit`. Inside
+an ambient database transaction it sends only after the outer commit, and a
+rollback sends nothing. A committed change flushes when its request or job
+ends. Outside both scopes it publishes immediately. Every queue job attempt
+has a fresh coalescing scope. Repeated changes to one topic become one signal
+whose prop list is the union. Use `batch` for another explicit unit of work:
+
+```rust
+let topics = LiveTopics::resolve()?;
+topics
+    .batch(async {
+        import_posts().await?;
+        topics.changed("posts", &["posts"]).await?;
+        rebuild_post_count().await?;
+        topics.changed("posts", &["post_count"]).await
+    })
+    .await??;
+```
+
+A manual transaction handle is not ambient state. Name it when the change
+belongs to its commit. Rollback and savepoint rollback discard this callback:
+
+```rust
+let topics = LiveTopics::resolve()?;
+let tx = suprnova::DB::begin_transaction().await?;
+topics.changed_with_tx(&tx, "posts", &["posts"])?;
+tx.commit().await?;
+```
+
+An empty prop list means reload every prop bound to the topic. It dominates
+named props when changes merge. A union beyond 256 names also requests all
+bound props, so the bounded transport never discards that invalidation.
+`suppress` is for a replay or bulk operation
+whose intermediate states must stay quiet. Changes inside its closure are
+merged, then one final signal per touched topic is released:
+
+```rust
+let topics = LiveTopics::resolve()?;
+topics
+    .suppress(|| async {
+        restore_posts_from_snapshot().await?;
+        topics.changed("posts", &[]).await
+    })
+    .await??;
+```
+
+If a manual transaction commits after the closure returns, its callbacks keep
+the replay group open. The group releases after those transactions commit or
+roll back. Committed changes still join the enclosing request or job group;
+rolled-back prop names never enter its union.
+
+An explicit `batch` inside a request, job or another batch reuses that outer
+group. It does not publish before the enclosing unit finishes.
+
+`LiveStreams::refresh` uses this same deferred signal path for
+registered application topics and component-stream aliases. It invalidates all
+props bound to the topic and advances the same hub cursor. Its publications
+share the configured rate bound:
+
+```rust
+let streams = suprnova::live::LiveStreams::resolve()?;
+streams.refresh("posts").await?;
+```
+
+For a manual transaction, use
+`LiveTopics::changed_with_tx(&tx, "posts", &[])?` to name the commit.
+
+A component-stream page binding receives changes for its bound stream alias.
+It does not inherit the island's other named topics or typed browser events.
+Both page and island delivery of the alias re-check the stream's own ability.
+The `topic` slot and `topic` document-key pair identify the framework's
+subscription-only mount. Use another identity pair for a rendered island.
+
+For model-wide invalidation, register the model once during bootstrap after
+binding the registry. Generated model hooks call it after every successful
+save and delete; the ordinary after-commit rule still applies:
+
+```rust
+let topics = LiveTopics::resolve()?;
+topics.on_model::<Post>("posts", &["posts", "post_count"])?;
+```
+
+The cursor belongs to the topic, not to a subscriber. A binding records its
+current value when the page renders, so reconnect can distinguish a current
+subscription from one that needs a reload. With a cross-process hub, every
+replica observes the same cursor. Without a configured hub, Live binds its
+in-memory fallback and signals reach only this process. See [Inertia Live topic
+signals](broadcasting.md#inertia-live-topic-signals) for multi-replica fanout.
+In-process counters and memberships end with the process. A recovery reload
+takes the new rendered baseline from the page object; the polling fallback
+keeps the page current while push reconnects. Redis-backed cursor state lives
+in the configured hub instead of an individual process.
+
+A binding may also name an existing component stream as
+`component::stream`. Such a binding uses the component ability
+`live:<component>.stream.<stream>`. A subscription by application topic name
+uses `live:topic.<topic>`, for a page or an island.
+
+### Why Suprnova diverges
+
+Laravel has no built-in Inertia topic binding. The `inertia-live` package
+adds that behavior separately. Suprnova uses Live's existing memberships and
+authorization so islands and Inertia pages share one delivery contract.
+
 ## Assets and no-build use
 
 The framework serves the exact reviewed runtime artifacts at
@@ -678,6 +826,7 @@ use suprnova::App;
 use suprnova::live::LiveConfig;
 
 let config = LiveConfig::builder()
+    .topic_signal_interval_ms(100)
     .max_html_bytes(64 * 1024 * 1024)
     .max_response_bytes(64 * 1024 * 1024)
     .max_request_bytes(64 * 1024 * 1024)
@@ -689,6 +838,7 @@ App::singleton(config);
 
 | Key | Default | Bounds |
 |---|---|---|
+| `LIVE_TOPIC_SIGNAL_INTERVAL_MS` | 100 ms | Hub-global minimum spacing between signals for one topic, at most 10 per second by default |
 | `LIVE_MAX_REQUEST_BYTES` | 16 MiB | One request body, the snapshot included |
 | `LIVE_MAX_RESPONSE_BYTES` | 16 MiB | One response body |
 | `LIVE_MAX_HTML_BYTES` | 16 MiB | One island render's HTML |
@@ -1241,3 +1391,8 @@ RenderCache's job; see [RenderCache](render-cache.md).
 | `suprnova live:check` | Verify every recorded third-party component offline, then prove every registered view with the integrated checker |
 | `suprnova live:inspect` | Report safe runtime, registry, provider, and artifact state |
 | `suprnova live:assets --out <dir>` | Publish the reviewed runtime artifacts atomically |
+
+## Next
+
+Bind page props to the same topics with [Live topic bindings](frontend-pages.md#live-topic-bindings).
+Configure cross-process delivery with [Broadcasting](broadcasting.md#inertia-live-topic-signals).

@@ -13,12 +13,17 @@
 //! to the live working set without a background task.
 
 use crate::FrameworkError;
+use crate::broadcasting::live::{
+    AcceptedLiveTopicPublication, LiveTopicRuntime, LiveTopicSignal, live_topic_channel,
+    live_topic_envelope,
+};
 use crate::lock;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tokio::sync::RwLock as AsyncRwLock;
 use tokio::sync::broadcast;
 
@@ -119,6 +124,37 @@ pub trait BroadcastHub: Send + Sync + 'static {
     /// happens, runs before the error is returned and is unaffected.
     async fn publish(&self, envelope: BroadcastEnvelope) -> Result<(), FrameworkError>;
 
+    /// Subscribe to the reserved signal channel for an Inertia Live topic.
+    ///
+    /// Custom hubs must implement this with the same authority as
+    /// [`Self::publish_live_topic`]. The default returns an explicit error so
+    /// a configured hub cannot silently degrade to process-local delivery.
+    fn subscribe_live_topic(
+        &self,
+        _topic: &str,
+    ) -> Result<broadcast::Receiver<BroadcastEnvelope>, FrameworkError> {
+        Err(live_topics_unsupported())
+    }
+
+    /// Read the last publication cursor accepted for an Inertia Live topic.
+    async fn live_topic_cursor(&self, _topic: &str) -> Result<u64, FrameworkError> {
+        Err(live_topics_unsupported())
+    }
+
+    /// Publish a data-free Inertia Live topic signal.
+    ///
+    /// Calls inside `interval` are coalesced into one signal containing the
+    /// union of their props. Every accepted call still advances the cursor.
+    async fn publish_live_topic(
+        &self,
+        _topic: &str,
+        _props: &[String],
+        _except: Option<String>,
+        _interval: Duration,
+    ) -> Result<(), FrameworkError> {
+        Err(live_topics_unsupported())
+    }
+
     /// Subscriber count for a channel. `0` if no one is subscribed
     /// or the channel hasn't been created yet.
     fn subscriber_count(&self, _channel: &str) -> usize {
@@ -162,11 +198,16 @@ pub trait BroadcastHub: Send + Sync + 'static {
     }
 }
 
+fn live_topics_unsupported() -> FrameworkError {
+    FrameworkError::internal("configured BroadcastHub does not support Inertia Live topic signals")
+}
+
 /// In-process broadcast hub. Default for single-process apps.
 pub struct InMemoryBroadcastHub {
     channels: Arc<RwLock<HashMap<String, broadcast::Sender<BroadcastEnvelope>>>>,
     /// Per-channel presence members: channel → (member_id → info).
     members: Arc<AsyncRwLock<HashMap<String, HashMap<String, Value>>>>,
+    live_topics: LiveTopicRuntime,
 }
 
 impl InMemoryBroadcastHub {
@@ -175,6 +216,7 @@ impl InMemoryBroadcastHub {
         Self {
             channels: Arc::new(RwLock::new(HashMap::new())),
             members: Arc::new(AsyncRwLock::new(HashMap::new())),
+            live_topics: LiveTopicRuntime::default(),
         }
     }
 
@@ -225,6 +267,14 @@ impl InMemoryBroadcastHub {
         self.channels.read().ok()?.get(channel).cloned()
     }
 
+    /// Publish framework-owned traffic after its caller has selected a
+    /// reserved channel through a typed API.
+    pub(crate) fn publish_framework(&self, envelope: BroadcastEnvelope) {
+        if let Some(sender) = self.sender_for_publish(&envelope.channel) {
+            let _ = sender.send(envelope);
+        }
+    }
+
     /// Evict zero-receiver senders. Called under the write lock so the
     /// observation is consistent with subscribe (no receiver can appear
     /// between `receiver_count() == 0` and the removal). The channel
@@ -270,13 +320,58 @@ impl BroadcastHub for InMemoryBroadcastHub {
 
     async fn publish(&self, envelope: BroadcastEnvelope) -> Result<(), FrameworkError> {
         reject_reserved_channel(&envelope.channel)?;
-        if let Some(sender) = self.sender_for_publish(&envelope.channel) {
-            // send() Errs only when there are no subscribers; that's
-            // not an error from the publisher's perspective.
-            let _ = sender.send(envelope);
-        }
+        self.publish_framework(envelope);
         // No-subscriber publishes are normal: in-process delivery has
         // nowhere to go and that isn't a failure.
+        Ok(())
+    }
+
+    fn subscribe_live_topic(
+        &self,
+        topic: &str,
+    ) -> Result<broadcast::Receiver<BroadcastEnvelope>, FrameworkError> {
+        Ok(self.subscribe_for(&live_topic_channel(topic)))
+    }
+
+    async fn live_topic_cursor(&self, topic: &str) -> Result<u64, FrameworkError> {
+        Ok(self.live_topics.cursor(topic).await)
+    }
+
+    async fn publish_live_topic(
+        &self,
+        topic: &str,
+        props: &[String],
+        except: Option<String>,
+        interval: Duration,
+    ) -> Result<(), FrameworkError> {
+        match self
+            .live_topics
+            .accept(topic, props, except, interval)
+            .await?
+        {
+            AcceptedLiveTopicPublication::Immediate { signal, except } => {
+                self.publish_live_signal(signal, except);
+            }
+            AcceptedLiveTopicPublication::Pending { deadline } => {
+                let state = self.live_topics.clone();
+                let channels = Arc::clone(&self.channels);
+                let topic = topic.to_owned();
+                tokio::spawn(async move {
+                    tokio::time::sleep_until(deadline).await;
+                    if let Some((signal, except)) = state.take_pending(&topic).await {
+                        let envelope = live_topic_envelope(signal, except);
+                        if let Some(sender) = channels
+                            .read()
+                            .ok()
+                            .and_then(|map| map.get(&envelope.channel).cloned())
+                        {
+                            let _ = sender.send(envelope);
+                        }
+                    }
+                });
+            }
+            AcceptedLiveTopicPublication::Coalesced => {}
+        }
         Ok(())
     }
 
@@ -322,6 +417,12 @@ impl BroadcastHub for InMemoryBroadcastHub {
         map.get(channel)
             .map(|ch| ch.values().cloned().collect())
             .unwrap_or_default()
+    }
+}
+
+impl InMemoryBroadcastHub {
+    fn publish_live_signal(&self, signal: LiveTopicSignal, except: Option<String>) {
+        self.publish_framework(live_topic_envelope(signal, except));
     }
 }
 
@@ -484,5 +585,128 @@ mod tests {
         let got = race.await.unwrap();
         assert_eq!(got.event, "Ping");
         drop(live);
+    }
+
+    #[tokio::test]
+    async fn signal_005_in_memory_cursor_and_payload_are_data_free() {
+        let hub = InMemoryBroadcastHub::new();
+        let mut receiver = hub
+            .subscribe_live_topic("orders.42")
+            .expect("in-memory hub supports live topics");
+
+        hub.publish_live_topic(
+            "orders.42",
+            &["summary".to_owned(), "summary".to_owned()],
+            Some("socket-a".to_owned()),
+            Duration::from_millis(100),
+        )
+        .await
+        .expect("first signal publishes");
+
+        let envelope = receiver.recv().await.expect("subscriber receives signal");
+        assert_eq!(envelope.channel, "__live.topic.orders.42");
+        assert_eq!(envelope.event, "inertia.live");
+        assert_eq!(envelope.except.as_deref(), Some("socket-a"));
+        assert_eq!(
+            envelope.data,
+            json!({"topic": "orders.42", "cursor": 1, "props": ["summary"]})
+        );
+        assert_eq!(hub.live_topic_cursor("orders.42").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn signal_005_in_memory_coalesces_props_and_mixed_exclusions() {
+        let hub = InMemoryBroadcastHub::new();
+        let mut receiver = hub
+            .subscribe_live_topic("dashboard")
+            .expect("in-memory hub supports live topics");
+        let interval = Duration::from_millis(80);
+
+        hub.publish_live_topic("dashboard", &["seed".to_owned()], None, interval)
+            .await
+            .unwrap();
+        receiver.recv().await.unwrap();
+
+        hub.publish_live_topic(
+            "dashboard",
+            &["stats".to_owned()],
+            Some("socket-a".to_owned()),
+            interval,
+        )
+        .await
+        .unwrap();
+        hub.publish_live_topic(
+            "dashboard",
+            &["activity".to_owned(), "stats".to_owned()],
+            Some("socket-b".to_owned()),
+            interval,
+        )
+        .await
+        .unwrap();
+
+        let envelope = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("coalesced signal is flushed")
+            .expect("signal channel remains open");
+        assert_eq!(envelope.except, None);
+        assert_eq!(
+            envelope.data,
+            json!({
+                "topic": "dashboard",
+                "cursor": 3,
+                "props": ["activity", "stats"]
+            })
+        );
+        assert_eq!(hub.live_topic_cursor("dashboard").await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn signal_005_empty_props_dominate_a_coalesced_union() {
+        let hub = InMemoryBroadcastHub::new();
+        let mut receiver = hub.subscribe_live_topic("dashboard").unwrap();
+        let interval = Duration::from_millis(80);
+
+        hub.publish_live_topic("dashboard", &["seed".to_owned()], None, interval)
+            .await
+            .unwrap();
+        receiver.recv().await.unwrap();
+        hub.publish_live_topic("dashboard", &["stats".to_owned()], None, interval)
+            .await
+            .unwrap();
+        hub.publish_live_topic("dashboard", &[], None, interval)
+            .await
+            .unwrap();
+
+        let envelope = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(envelope.data["props"], json!([]));
+        assert_eq!(envelope.data["cursor"], 3);
+    }
+
+    struct Signal005UnsupportedHub;
+
+    #[async_trait]
+    impl BroadcastHub for Signal005UnsupportedHub {
+        fn subscribe(&self, _channel: &str) -> broadcast::Receiver<BroadcastEnvelope> {
+            broadcast::channel(1).1
+        }
+
+        async fn publish(&self, _envelope: BroadcastEnvelope) -> Result<(), FrameworkError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn signal_005_custom_hubs_fail_explicitly_until_supported() {
+        let hub = Signal005UnsupportedHub;
+        assert!(hub.subscribe_live_topic("orders").is_err());
+        assert!(hub.live_topic_cursor("orders").await.is_err());
+        assert!(
+            hub.publish_live_topic("orders", &[], None, Duration::from_millis(100))
+                .await
+                .is_err()
+        );
     }
 }

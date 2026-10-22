@@ -282,7 +282,7 @@ fn install(mut router: Router, guard: &LiveRouteGuard) -> Result<Router, Framewo
             router.register_live_route_metadata(
                 method,
                 path,
-                LiveRouteMetadata::new(LiveOperation::SseControl, strict_action_policy()),
+                LiveRouteMetadata::new(LiveOperation::SseControl, topic_transport_policy()),
             )?;
         }
     }
@@ -298,7 +298,7 @@ fn install(mut router: Router, guard: &LiveRouteGuard) -> Result<Router, Framewo
     router.register_live_route_metadata(
         Method::GET,
         LIVE_ASYNC_SOCKET_PATH,
-        LiveRouteMetadata::new(LiveOperation::WebSocketHandshake, strict_action_policy()),
+        LiveRouteMetadata::new(LiveOperation::WebSocketHandshake, topic_transport_policy()),
     )?;
     router = router
         .try_methods(
@@ -328,5 +328,14 @@ pub(crate) const fn strict_action_policy() -> LiveRouteSecurityPolicy {
         direct_peer: false,
         upstream_rate_limit: false,
         no_additional_middleware: false,
+    }
+}
+
+fn topic_transport_policy() -> LiveRouteSecurityPolicy {
+    LiveRouteSecurityPolicy {
+        anonymous_principal: true,
+        stateless_session: true,
+        tenantless: true,
+        ..strict_action_policy()
     }
 }

@@ -13,6 +13,7 @@ mod broadcastable;
 mod channel;
 mod handler;
 mod hub;
+mod live;
 mod protocol;
 mod pusher;
 pub(crate) mod request_socket;
@@ -28,6 +29,7 @@ pub use channel::{
 };
 pub use handler::{BroadcastingWsHandler, DEFAULT_MAX_SUBSCRIPTIONS_PER_CONNECTION};
 pub use hub::{BroadcastEnvelope, BroadcastHub, InMemoryBroadcastHub};
+pub use live::LiveTopicSignal;
 pub use protocol::{ClientFrame, ServerFrame};
 pub use pusher::{
     PusherAuth, PusherBroadcastHub, PusherClient, PusherConfig, PusherScheme, pusher_channel_auth,
