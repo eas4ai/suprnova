@@ -66,7 +66,11 @@ impl TokenSink for Sink {
                 }
                 let mut urls = Vec::new();
                 match name {
-                    "script" => {
+                    "video" => {
+                        urls.push(attr("src").to_owned());
+                        urls.push(attr("poster").to_owned());
+                    }
+                    "audio" | "script" => {
                         urls.push(attr("src").to_owned());
                     }
                     "img" | "source" => {
@@ -107,6 +111,8 @@ impl TokenSink for Sink {
                     }
                 }
                 doc.links.extend(urls);
+                doc.css.push_str(attr("style"));
+                doc.css.push(';');
                 if name == "style" {
                     doc.style = true;
                     return TokenSinkResult::RawData(RawKind::Rawtext);
@@ -124,28 +130,39 @@ impl TokenSink for Sink {
     }
 }
 
-// Data URLs can contain commas. Consume their URL before splitting descriptors.
+// HTML URL tokens may contain commas. Only trailing URL commas end a candidate.
 fn srcset(value: &str) -> Vec<String> {
     let mut rest = value;
     let mut urls = Vec::new();
-    while !rest.is_empty() {
+    loop {
         rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == ',');
         if rest.is_empty() {
             break;
         }
-        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let end = rest
+            .find(|c: char| c.is_ascii_whitespace())
+            .unwrap_or(rest.len());
         let token = &rest[..end];
-        if token.starts_with("data:") {
-            rest = &rest[end..];
-        } else {
-            let end = token.find(',').unwrap_or(token.len());
-            urls.push(token[..end].to_owned());
-            rest = &rest[end..];
-            if rest.starts_with(',') {
-                continue;
+        rest = &rest[end..];
+        urls.push(token.trim_end_matches(',').to_owned());
+        if token.ends_with(',') {
+            continue;
+        }
+        // Commas in descriptor parentheses do not terminate a candidate.
+        let mut parentheses = 0usize;
+        let mut consumed = rest.len();
+        for (index, character) in rest.char_indices() {
+            match character {
+                '(' => parentheses = parentheses.saturating_add(1),
+                ')' => parentheses = parentheses.saturating_sub(1),
+                ',' if parentheses == 0 => {
+                    consumed = index + 1;
+                    break;
+                }
+                _ => {}
             }
         }
-        rest = rest.split_once(',').map_or("", |(_, tail)| tail);
+        rest = &rest[consumed..];
     }
     urls
 }
@@ -215,7 +232,7 @@ fn legacy(path: &str) -> bool {
 pub(super) fn css(base: &Url, text: &str) -> References {
     let mut parser = cssparser::Parser::new(text);
     let mut urls = Vec::new();
-    css_urls(&mut parser, &mut urls);
+    css_urls(&mut parser, &mut urls, false);
     References {
         links: urls
             .iter()
@@ -231,13 +248,13 @@ pub(super) fn css(base: &Url, text: &str) -> References {
     }
 }
 
-fn css_urls<'i>(parser: &mut cssparser::Parser<'i>, urls: &mut Vec<String>) {
+fn css_urls<'i>(parser: &mut cssparser::Parser<'i>, urls: &mut Vec<String>, image_set: bool) {
     use cssparser::Token;
     let mut import = false;
     while let Ok(token) = parser.next().cloned() {
         match token {
             Token::AtKeyword(name) => import = name.eq_ignore_ascii_case("import"),
-            Token::QuotedString(value) if import => {
+            Token::QuotedString(value) if import || image_set => {
                 urls.push(value.to_string());
                 import = false;
             }
@@ -255,13 +272,19 @@ fn css_urls<'i>(parser: &mut cssparser::Parser<'i>, urls: &mut Vec<String>) {
                         Ok(())
                     });
             }
-            Token::Function(_)
-            | Token::CurlyBracketBlock
-            | Token::ParenthesisBlock
-            | Token::SquareBracketBlock => {
+            Token::Function(name) => {
+                let image_set = name.eq_ignore_ascii_case("image-set")
+                    || name.eq_ignore_ascii_case("-webkit-image-set");
                 let _: Result<(), cssparser::ParseError<()>> =
                     parser.parse_nested_block(|nested| {
-                        css_urls(nested, urls);
+                        css_urls(nested, urls, image_set);
+                        Ok(())
+                    });
+            }
+            Token::CurlyBracketBlock | Token::ParenthesisBlock | Token::SquareBracketBlock => {
+                let _: Result<(), cssparser::ParseError<()>> =
+                    parser.parse_nested_block(|nested| {
+                        css_urls(nested, urls, false);
                         Ok(())
                     });
             }

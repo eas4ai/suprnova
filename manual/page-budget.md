@@ -27,10 +27,13 @@ async fn public_page_stays_within_budget() -> Result<(), suprnova::FrameworkErro
 ```
 
 The helper fetches stylesheets, scripts, images, source sets, icons, manifests
-and preloads. It follows CSS URLs, including `@font-face` fonts and imports.
+and preloads. It follows video and audio sources, video posters and CSS URLs
+in style attributes and stylesheets, including `@font-face` fonts, imports
+and string candidates in `image-set()`.
 It fetches manifest icons only when the document references the manifest.
 It deduplicates URLs and records external hosts without requesting them.
 All `srcset` candidates count; the helper does not choose a viewport.
+Data URL commas do not hide later candidates.
 Every asset request carries no cookie. The client's login and cookie jar do
 not affect the audit. A refused or redirected asset fails the audit.
 

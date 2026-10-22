@@ -822,4 +822,5 @@ fn budget_001_initial_https_upgrade_does_not_list_the_page_host_as_third_party()
     assert_eq!(audit.findings[0].rule, "first-redirect");
 }
 
+mod review_discovery;
 mod review_manifest;
