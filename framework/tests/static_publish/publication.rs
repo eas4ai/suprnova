@@ -1016,7 +1016,8 @@ async fn pub_003_mutable_assets_use_versioned_keys_and_keep_previous_objects_on_
             disk.read(&asset.path).await.unwrap().to_bytes(),
             Bytes::from_static(b"new icon")
         );
-        assert!(asset.path.contains("/_assets/favicon.svg"));
+        assert!(asset.path.contains("/_assets/"));
+        assert!(asset.path.ends_with("/favicon.svg"));
         assert!(!asset.headers["cache-control"].contains("immutable"));
         p.publish(vec![page("page")]).await.unwrap();
         assert!(disk.exists(&old_asset).await.unwrap());
@@ -1548,16 +1549,16 @@ async fn pub_002_round2_3_mutable_dependencies_share_the_new_revision() {
         p.publish(vec![make(b"body{background:url(./bg.png)}")])
             .await
             .unwrap();
-        let second = p
-            .publish(vec![make(
-                b"body{background:url(./bg.png),url(./bg-AbC12345.png);color:red}",
-            )])
-            .await
-            .unwrap();
+        p.publish(vec![make(
+            b"body{background:url(./bg.png),url(./bg-AbC12345.png);color:red}",
+        )])
+        .await
+        .unwrap();
         let manifest = p.manifest().await.unwrap();
         let assets = &manifest.versions[&manifest.live].objects;
         let bg = assets.iter().find(|o| o.url == "/bg.png").unwrap();
-        assert_eq!(bg.path, format!("_pub/{}/_assets/bg.png", second.version));
+        let set = &manifest.versions[&manifest.live].asset_set_digest;
+        assert_eq!(bg.path, format!("_pub/v1/_assets/{set}/bg.png"));
         assert!(assets.iter().any(|o| o.path == "bg-AbC12345.png"));
         suprnova::static_publish::StaticPublication::install(
             &router,
@@ -1568,7 +1569,7 @@ async fn pub_002_round2_3_mutable_dependencies_share_the_new_revision() {
             suprnova::testing::TestClient::new(router, suprnova::MiddlewareRegistry::new());
         for (key, body) in [("bg.png", "pixels"), ("bg-AbC12345.png", "fingerprint")] {
             let response = client
-                .get(format!("/_pub/{}/_assets/{key}", second.version))
+                .get(format!("/_pub/v1/_assets/{set}/{key}"))
                 .send()
                 .await;
             response.assert_ok();
@@ -1590,3 +1591,6 @@ mod fencing;
 
 #[path = "graphs.rs"]
 mod graphs;
+
+#[path = "sets.rs"]
+mod sets;

@@ -17,6 +17,12 @@ pub struct Manifest {
 pub struct VersionEntry {
     /// The Inertia asset version, independent of the publication revision.
     pub asset_version: String,
+    /// Content identity of the mutable asset set; empty when this revision has none.
+    #[serde(default)]
+    pub asset_set_digest: String,
+    /// Page URLs retain their set roots so partial publication preserves relative dependencies.
+    #[serde(default)]
+    pub page_asset_sets: BTreeMap<String, String>,
     /// Creation time in Unix milliseconds.
     pub published_at_ms: u64,
     /// Time this revision stopped being live; grace starts here.

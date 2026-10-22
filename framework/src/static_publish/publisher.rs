@@ -731,20 +731,53 @@ impl Publisher {
         retain_omitted: bool,
     ) -> Result<(Manifest, Vec<Upload>, PublishOutcome), FrameworkError> {
         let revision = format!("{}/{}", self.asset_version, uuid::Uuid::now_v7().simple());
+        let mut inventory = BTreeMap::new();
+        let mut set_members = BTreeSet::new();
+        for page in &pages {
+            // A mixed graph keeps fingerprinted dependencies beside mutable entrypoints.
+            if page.assets.keys().any(|key| !self.fingerprinted(key)) {
+                set_members.extend(page.assets.keys().cloned());
+            }
+            for (key, value) in &page.assets {
+                safe_path(&format!("/{key}"))?;
+                if key.starts_with("_pub/") {
+                    return Err(error("asset uses reserved _pub prefix"));
+                }
+                if inventory
+                    .insert(key.clone(), value.clone())
+                    .is_some_and(|old| old != *value)
+                {
+                    return Err(error(format!("conflicting objects at {key}")));
+                }
+            }
+        }
+        // JSON frames the sorted pairs without ambiguous path or digest boundaries.
+        let pairs: Vec<_> = inventory
+            .iter()
+            .filter(|(key, _)| set_members.contains(*key))
+            .map(|(key, (bytes, _))| (key, digest(bytes)))
+            .collect();
+        let asset_set_digest = if pairs.is_empty() {
+            String::new()
+        } else {
+            digest(&serde_json::to_vec(&pairs).map_err(error)?)
+        };
+        let set_root = format!("_pub/{}/_assets/{asset_set_digest}/", self.asset_version);
+        let asset_paths: BTreeMap<_, _> = inventory
+            .keys()
+            .map(|key| {
+                let path = if set_members.contains(key) {
+                    format!("/{set_root}{key}")
+                } else {
+                    format!("/{key}")
+                };
+                (key.clone(), path)
+            })
+            .collect();
+        let mut page_asset_sets = BTreeMap::new();
         let mut uploads = Vec::new();
         let mut seen = BTreeSet::new();
         for mut page in pages {
-            let mutable_graph = page.assets.keys().any(|key| !self.fingerprinted(key));
-            let mut asset_paths = BTreeMap::new();
-            for key in page.assets.keys() {
-                let fingerprinted = self.fingerprinted(key);
-                let target = if fingerprinted && !mutable_graph {
-                    key.clone()
-                } else {
-                    format!("_pub/{revision}/_assets/{key}")
-                };
-                asset_paths.insert(key.clone(), format!("/{target}"));
-            }
             (page.html, page.json) =
                 super::assets::version_assets(&page.html, &page.json, &page.path, &asset_paths)?;
             let path = safe_path(&page.path)?;
@@ -802,14 +835,18 @@ impl Publisher {
                 } else {
                     format!("{}/", path.trim_matches('/'))
                 };
+                let url = if ext == "html" {
+                    path.clone()
+                } else {
+                    format!("/{stable_base}index.json")
+                };
+                if page.assets.keys().any(|key| set_members.contains(key)) {
+                    page_asset_sets.insert(url.clone(), set_root.clone());
+                }
                 uploads.push(Upload {
                     entry: ObjectEntry {
                         path: format!("_pub/{revision}/{base}.{ext}"),
-                        url: if ext == "html" {
-                            path.clone()
-                        } else {
-                            format!("/{stable_base}index.json")
-                        },
+                        url,
                         digest: content_digest,
                         asset: false,
                         asset_version: self.asset_version.clone(),
@@ -852,10 +889,10 @@ impl Publisher {
                     dependency_tags: Vec::new(),
                     headers,
                 };
-                if fingerprinted && mutable_graph {
-                    // Relative imports from a mutable entry resolve inside this revision too.
+                if fingerprinted && set_members.contains(&key) {
+                    // Relative imports keep the same path topology inside the shared set.
                     let mut relative = entry.clone();
-                    relative.path = format!("_pub/{revision}/_assets/{key}");
+                    relative.path = format!("{set_root}{key}");
                     relative.url = format!("/{}", relative.path);
                     let source = previous
                         .versions
@@ -898,6 +935,19 @@ impl Publisher {
             }
         }
         let mut uploads: Vec<_> = unique.into_values().collect();
+        for upload in &mut uploads {
+            // A content-addressed set keeps its original delivery metadata on reuse.
+            if upload.entry.asset
+                && upload.entry.path.starts_with(&set_root)
+                && let Some(old) = previous
+                    .versions
+                    .values()
+                    .flat_map(|version| &version.objects)
+                    .find(|old| old.path == upload.entry.path && old.digest == upload.entry.digest)
+            {
+                upload.entry.headers.clone_from(&old.headers);
+            }
+        }
         let live = previous.versions.get(&previous.live);
         let mut outcome = PublishOutcome {
             version: revision.clone(),
@@ -912,7 +962,12 @@ impl Publisher {
                     .filter(|object| {
                         object.url == upload.entry.url && object.asset == upload.entry.asset
                     })
-                    .max_by_key(|object| object.path.starts_with(&previous_prefix))
+                    .max_by_key(|object| {
+                        (
+                            object.path == upload.entry.path,
+                            object.path.starts_with(&previous_prefix),
+                        )
+                    })
             })
         };
         let unchanged = |upload: &Upload| {
@@ -966,11 +1021,16 @@ impl Publisher {
             .into_iter()
             .flat_map(|v| &v.objects)
             .filter(|old| {
-                retain_omitted && !uploads.iter().any(|upload| upload.entry.url == old.url)
+                retain_omitted
+                    && !old.asset
+                    && !uploads.iter().any(|upload| upload.entry.url == old.url)
             })
             .cloned()
             .collect();
         for old in &omitted {
+            if let Some(root) = live.and_then(|version| version.page_asset_sets.get(&old.url)) {
+                page_asset_sets.insert(old.url.clone(), root.clone());
+            }
             let mut entry = old.clone();
             if self.driver.is_some() && !entry.asset && entry.path.starts_with("_pub/") {
                 let suffix = if let Some(page) = old.url.strip_suffix("/index.json") {
@@ -998,12 +1058,16 @@ impl Publisher {
             }
             objects.push(upload.entry.clone());
         }
-        if omitted.iter().any(|object| !object.asset)
-            && let Some(live) = live
-        {
-            // Omitted documents still refer to their earlier revision's asset graph.
+        if let Some(live) = live {
+            let referenced_sets: BTreeSet<_> = page_asset_sets.values().collect();
             for old in live.objects.iter().filter(|object| object.asset) {
-                if !objects.iter().any(|object| object.path == old.path) {
+                let referenced = referenced_sets
+                    .iter()
+                    .any(|root| old.path.starts_with(root.as_str()));
+                let canonical = !omitted.is_empty() && !old.path.starts_with("_pub/");
+                if (referenced || canonical)
+                    && !objects.iter().any(|object| object.path == old.path)
+                {
                     objects.push(old.clone());
                 }
             }
@@ -1014,6 +1078,8 @@ impl Publisher {
             revision,
             VersionEntry {
                 asset_version: self.asset_version.clone(),
+                asset_set_digest,
+                page_asset_sets,
                 published_at_ms: now_ms(),
                 retired_at_ms: None,
                 objects,
@@ -1043,11 +1109,26 @@ impl Publisher {
         upload: &'a Upload,
     ) -> BoxFuture<'a, Result<(), FrameworkError>> {
         Box::pin(async move {
-            let old = previous.versions.get(&previous.live).and_then(|version| {
-                version.objects.iter().find(|old| {
-                    old.digest == upload.entry.digest
+            let existing = previous
+                .versions
+                .values()
+                .flat_map(|version| &version.objects)
+                .find(|old| {
+                    old.path == upload.entry.path
+                        && old.digest == upload.entry.digest
                         && old.headers == upload.entry.headers
-                        && old.url == upload.entry.url
+                });
+            let old = existing.or_else(|| {
+                previous.versions.get(&previous.live).and_then(|version| {
+                    version
+                        .objects
+                        .iter()
+                        .filter(|old| {
+                            old.digest == upload.entry.digest
+                                && old.headers == upload.entry.headers
+                                && (old.url == upload.entry.url || old.path == upload.entry.path)
+                        })
+                        .max_by_key(|old| old.path == upload.entry.path)
                 })
             });
             if old.is_some_and(|old| old.path == upload.entry.path) {
@@ -1161,6 +1242,29 @@ impl Publisher {
             })
             .map(|(id, _)| id.clone())
             .collect();
+        let set_roots = |version: &VersionEntry| {
+            let mut roots: BTreeSet<String> = version.page_asset_sets.values().cloned().collect();
+            if !version.asset_set_digest.is_empty() {
+                roots.insert(format!(
+                    "_pub/{}/_assets/{}/",
+                    version.asset_version, version.asset_set_digest
+                ));
+            }
+            roots
+        };
+        let protected_sets: BTreeSet<_> = manifest
+            .versions
+            .iter()
+            .filter(|(id, _)| retained.contains(*id))
+            .flat_map(|(_, version)| set_roots(version))
+            .collect();
+        let expired_sets: BTreeSet<_> = manifest
+            .versions
+            .iter()
+            .filter(|(id, _)| !retained.contains(*id))
+            .flat_map(|(_, version)| set_roots(version))
+            .filter(|root| !protected_sets.contains(root))
+            .collect();
         let mut protected: BTreeSet<_> = manifest
             .versions
             .iter()
@@ -1232,11 +1336,13 @@ impl Publisher {
         paths.extend(expired.iter().cloned());
         let mut report = PruneOutcome::default();
         for key in paths {
-            if protected.contains(&key) {
+            if protected.contains(&key) || protected_sets.iter().any(|root| key.starts_with(root)) {
                 report.kept.push(key);
                 continue;
             }
-            let old = if expired.contains(&key) {
+            let old = if expired.contains(&key)
+                || expired_sets.iter().any(|root| key.starts_with(root))
+            {
                 true
             } else {
                 let metadata = match self.disk.stat(&key).await {

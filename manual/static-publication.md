@@ -176,15 +176,19 @@ and `attempted_version` in status and leaves the CDN unchanged. The next
 publication reads the manifest fresh and calls `switch_version` for its own
 version to realign the CDN, including an unchanged recovery attempt.
 
-Mutable assets in a new render inventory keep their public relative paths under
-that revision's `_assets/` directory. Unchanged mutable dependencies are copied
-server side when storage supports copy, or uploaded again otherwise. Relative
-CSS URLs and module imports therefore resolve in the same revision. Fingerprinted
-assets retain their canonical names; a mutable graph also has revision-local
-copies of its fingerprinted dependencies for relative references. Entrypoints
-in a mixed graph use those revision-local copies. Partial publication retains
-the earlier asset graph for omitted pages; a full replacement releases those
-references for pruning.
+Mutable assets and the fingerprinted dependencies in their relative asset graph
+form one set at `_pub/<asset-version>/_assets/<set-digest>/<public path>`.
+The set digest is SHA-256 over the JSON array of sorted public path and content
+digest pairs. HTML and JSON reference set members at these paths, so relative
+CSS URLs and module imports resolve inside the set. Page-only changes reuse the
+set without uploading or copying assets. A changed set writes every member once,
+using server-side copy for unchanged members when the disk supports it, or upload
+otherwise. Fingerprinted assets also retain their canonical names.
+
+Each manifest version records `asset_set_digest` and a `page_asset_sets` map of
+page URLs to set roots. Omitted pages keep their set references in a partial
+publication. Prune removes a set directory only when no retained version
+references it; the live version and retired versions inside grace retain theirs.
 
 ## CDN drivers
 
