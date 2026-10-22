@@ -1,0 +1,14 @@
+{#
+  suprnova.footer - the contentinfo landmark with its own navigation
+  region (NAV-001). Links are anchors with real route URLs.
+#}
+{% macro footer(id, text, label="Footer") %}
+<footer class="sn-footer" id="{{ id }}">
+<nav class="sn-footer-nav" aria-label="{{ label }}">{{ caller() }}</nav>
+<p class="sn-footer-text">{{ text }}</p>
+</footer>
+{% endmacro %}
+
+{% macro footer_link(href, text) %}
+<a class="sn-footer-link" href="{{ href }}">{{ text }}</a>
+{% endmacro %}

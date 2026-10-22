@@ -1,0 +1,5 @@
+{
+  "name": "acme.counter",
+  "files": ["counter.html", "counter.rs"],
+  "register": ["counter::Counter"]
+}
