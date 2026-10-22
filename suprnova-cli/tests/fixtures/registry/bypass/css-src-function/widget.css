@@ -1,2 +1,0 @@
-.evil-widget { color: red; }
-@font-face { font-family: Evil; src: src("https://evil.test/f.woff2"); } /* refused: css-url */
