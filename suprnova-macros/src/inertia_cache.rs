@@ -12,6 +12,12 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<Option<TokenStream>> {
         .filter(|attr| attr.path().is_ident("inertia"))
     {
         attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("live") {
+                let content;
+                syn::parenthesized!(content in meta.input);
+                let _: proc_macro2::TokenStream = content.parse()?;
+                return Ok(());
+            }
             if !meta.path.is_ident("cacheable") || cacheable {
                 return Err(meta.error("expected one `#[inertia(cacheable)]`; declare public and per_request on fields"));
             }

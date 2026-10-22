@@ -74,6 +74,40 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   navigations and sends everything else to the origin
   (`manual/static-publication.md`).
 
+- **Live bindings for Inertia pages.** `#[inertia(live(topic = "notes", only =
+  ["stats"]))]` on an `InertiaProps` struct binds a Live topic to a list of its
+  props, checked at compile time against the struct and carried into the
+  generated TypeScript. A bound page renders through
+  `InertiaResponse::live::<Props>("Dashboard")`, naming each topic family
+  instance with `.scope(family, key)` and loading its data in `.load(...)`;
+  the response reads the topic cursors before the loader runs and carries them
+  under the reserved `liveBindings` page key. Topics are the Live registry's
+  own: `LiveRegistry::builder().topic(name)` and `.public_topic(name)`
+  register them, `.topic_family(name)` gives per-key instances such as
+  `notes.42` under one `live:topic.{name}` ability (`.load_with(...)` takes
+  the response builder for deferred and optional props), and every binding goes
+  through Live's subscription log, authorization and transports; a private
+  topic without an authorizer refuses to boot, and a binding the viewer may
+  not subscribe to is omitted from the page instead of leaking its cursor. A
+  change registered with `LiveTopics::changed` signals after the commit of its
+  transaction and never after a rollback, coalesced to one signal per topic
+  per request or job and excluding the sender's own page;
+  `on_model_scoped` publishes a model's saves and deletes to the instance it
+  maps to. A signal carries only the topic, its cursor and generation, and
+  the affected prop names. The configured `BroadcastHub` owns each topic's cursor and its rate
+  (`LIVE_TOPIC_SIGNAL_INTERVAL_MS`, default 100 ms); with the Redis Streams
+  hub a signal reaches pages on every node, without a hub it reaches the
+  publishing process only; an instance with no member and no activity for
+  `LIVE_TOPIC_INSTANCE_RETENTION_SECS` (default one day) retires and comes
+  back with a new generation at cursor 0, which the client treats as a reset
+  of its bound props. The React, Vue and
+  Svelte kits ship one client
+  core with an adapter each: a signal older than the render is dropped, a
+  burst reloads once with the union of its props, a failed reload retries
+  with bounded backoff, and polling stays as the fallback. The kit dashboards
+  bind `stats` to the per-user `notes` family (`manual/live.md`,
+  `manual/frontend-pages.md`).
+
 ### Changed
 
 - **The default lossy encode quality is 85, not 70.** JPEG and lossy WebP
@@ -98,6 +132,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **`cdn-cloudfront` is a default feature.** It reuses the AWS signing stack
   the S3 disk and the SQS queue driver already carry and adds `quick-xml` for
   the distribution configuration; turn it off with `default-features = false`.
+
+- **`LiveStreams::refresh` follows the shared topic rules** for cursor,
+  fanout, scope, socket exclusion and rate, and
+  `LiveStreamErrorKind::RuntimeUnavailable` also covers an unavailable
+  configured publisher.
 
 ### Fixed
 

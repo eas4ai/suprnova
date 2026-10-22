@@ -1258,17 +1258,51 @@ impl LiveRuntime {
         document_key: &str,
         baseline: StreamPosition,
     ) -> Result<(TrustedLiveRequestContext, TrustedMountParameters), AsyncErrorKind> {
+        let family = ComponentName::parse(component).ok().and_then(|name| {
+            self.graph
+                .registry
+                .family_for_component(&name)
+                .map(str::to_owned)
+        });
+        let selection_key = if let Some(family) = family.as_deref() {
+            if slot != "topic" {
+                return Err(AsyncErrorKind::MountUnknown);
+            }
+            self.graph
+                .registry
+                .family_instance(family, document_key)
+                .map_err(|_| AsyncErrorKind::ContextRejected)?;
+            "topic"
+        } else {
+            document_key
+        };
         let selector = self
-            .select_mount(component, slot, document_key)
+            .select_mount(component, slot, selection_key)
             .map_err(|_| AsyncErrorKind::MountUnknown)?;
-        let parameters = trusted_mount_parameters(request, principal, &selector)
-            .map_err(|_| AsyncErrorKind::ContextRejected)?;
+        let parameters = trusted_mount_parameters(
+            request,
+            principal,
+            &selector,
+            family.as_ref().map(|_| document_key),
+        )
+        .map_err(|_| AsyncErrorKind::ContextRejected)?;
         let subscription = SubscriptionCapabilities {
             registry: Arc::new(SuprnovaSubscriptionRegistry::new(
                 Arc::clone(&self.graph.engine_registry),
                 parameters.clone(),
             )),
-            authorization: Arc::clone(&self.graph.ports.subscription_authorization),
+            authorization: if slot == "topic"
+                && document_key == "topic"
+                && self
+                    .graph
+                    .registry
+                    .topic_for_component(selector.selection.component())
+                    .is_none()
+            {
+                Arc::new(super::ports::subscription::SuprnovaSubscriptionAuthorization::for_component_stream(self.graph.registry.clone()))
+            } else {
+                Arc::clone(&self.graph.ports.subscription_authorization)
+            },
             continuity: Arc::new(FixedSubscriptionBaseline::new(baseline)),
             credentials: Arc::clone(&self.graph.ports.subscription_credentials)
                 as Arc<dyn SubscriptionCredentialPort>,
@@ -1303,6 +1337,22 @@ impl LiveRuntime {
             .resolve(component)
             .ok()
             .map(|descriptor| descriptor.metadata().clone())
+    }
+
+    pub(crate) fn topic_registry(&self) -> &LiveRegistry {
+        &self.graph.registry
+    }
+
+    pub(crate) fn subscription_mount(
+        &self,
+        component: &str,
+        family_key: Option<&str>,
+    ) -> Result<serde_json::Value, FrameworkError> {
+        self.finalize_mount_catalog()?;
+        let selector = self.select_mount(component, "topic", "topic")?;
+        Ok(
+            serde_json::json!({"component": selector.selection.component().as_str(), "slot": "topic", "document_key": family_key.unwrap_or("topic")}),
+        )
     }
 
     /// Returns the shared asynchronous-update runtime state.
@@ -1873,6 +1923,7 @@ fn trusted_mount_parameters(
     request: &Request,
     principal: &str,
     selector: &UploadMountSelector,
+    topic_key: Option<&str>,
 ) -> Result<TrustedMountParameters, FrameworkError> {
     let mut values = vec![
         (
@@ -1888,6 +1939,9 @@ fn trusted_mount_parameters(
             selector.document_key.as_str().to_owned(),
         ),
     ];
+    if let Some(key) = topic_key {
+        values.push(("topic_key".to_owned(), key.to_owned()));
+    }
     values.push(("principal".to_owned(), principal.to_owned()));
     if let Some(tenant) = request.live_tenant() {
         values.push(("tenant".to_owned(), tenant.to_owned()));
@@ -1937,6 +1991,12 @@ fn assemble_runtime(
     registry: LiveRegistry,
     candidates: RuntimeProviderCandidates,
 ) -> Result<LiveRuntime, FrameworkError> {
+    registry.validate_topics()?;
+    if config.topic_signal_interval_ms() == 0 {
+        return Err(FrameworkError::internal(
+            "LIVE_TOPIC_SIGNAL_INTERVAL_MS must be positive",
+        ));
+    }
     let RuntimeProviders {
         clock,
         random,
@@ -2076,9 +2136,14 @@ fn assemble_runtime(
         Arc::clone(&clock),
         Arc::clone(&engine_registry),
         AsyncLimits::from_config(config),
+        super::topics::TopicState::new(
+            registry.clone(),
+            std::time::Duration::from_millis(config.topic_signal_interval_ms()),
+            std::time::Duration::from_secs(config.topic_instance_retention_secs()),
+        ),
     )?;
 
-    Ok(LiveRuntime {
+    let runtime = LiveRuntime {
         graph: Arc::new(RuntimeGraph {
             config,
             registry,
@@ -2109,7 +2174,9 @@ fn assemble_runtime(
             mount_kinds: OnceLock::new(),
             stitch_registrations: OnceLock::new(),
         }),
-    })
+    };
+    super::topics::register_subscription_mounts(&runtime)?;
+    Ok(runtime)
 }
 
 /// Proves the backend the configured Live instance ledger driver needs is

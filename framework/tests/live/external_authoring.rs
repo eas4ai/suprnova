@@ -81,6 +81,10 @@ fn external_view_authoring_is_downstream_only_and_fail_closed() {
         ("trusted-html-bypass", "TrustedHtml"),
         ("invalid-view-attribute", "path"),
         ("windows-path-traversal", "view path"),
+        (
+            "simulated-topic-authority",
+            "with_live_topic_nonce_for_test",
+        ),
     ] {
         let output = cargo_check(&format!("--bin={bin}"), target.path());
         assert!(!output.status.success(), "{bin} unexpectedly compiled");

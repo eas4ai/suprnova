@@ -6,7 +6,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../canonical.js";
-import { JSON_DEPTH_CEILING } from "../limits.js";
+import { JSON_DEPTH_CEILING, utf8Length } from "../limits.js";
 import { isSignalName } from "../signals/name.js";
 import type {
   AsyncPayload,
@@ -22,6 +22,9 @@ const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 const OPERATION_NAME = /^[a-z][a-z0-9._-]{0,63}$/u;
 const SIGNAL_SCOPE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SUBSCRIPTION_ID = /^[A-Za-z0-9_-]{16,128}$/u;
+const TOPIC_NAME = /^[A-Za-z0-9._:/-]{1,256}$/u;
+const MAX_TOPIC_PROPS = 256;
+const MAX_PROP_NAME_BYTES = 256;
 // The server encodes every envelope under its own configured payload limit
 // (`LIVE_ASYNC_MAX_PAYLOAD_BYTES`) before it is queued, so the browser bounds
 // only the recursive walk's depth, at the ceiling no server configuration can
@@ -134,6 +137,39 @@ function targetValid(target: string): boolean {
   );
 }
 
+function topicChangePayload(fields: JsonObject): Extract<AsyncPayload, { kind: "topic_change" }> {
+  exact(fields, ["cursor", "generation", "kind", "props", "topic"], "async_payload_invalid");
+  const cursor = integer(fields["cursor"], "async_payload_invalid");
+  const generation = integer(fields["generation"], "async_payload_invalid");
+  if (generation === 0) fail("async_payload_invalid");
+  const topic = string(fields["topic"], "async_payload_invalid");
+  const props = fields["props"];
+  if (
+    !TOPIC_NAME.test(topic) ||
+    topic
+      .split("/")
+      .some((segment) => segment.length === 0 || segment === "." || segment === "..") ||
+    !Array.isArray(props) ||
+    props.length > MAX_TOPIC_PROPS
+  ) {
+    fail("async_payload_invalid");
+  }
+  const names = (props as JsonValue[]).map((prop) => string(prop, "async_payload_invalid"));
+  if (
+    names.some((name) => name.length === 0 || utf8Length(name) > MAX_PROP_NAME_BYTES) ||
+    new Set(names).size !== names.length
+  ) {
+    fail("async_payload_invalid");
+  }
+  return Object.freeze({
+    cursor,
+    generation,
+    kind: "topic_change",
+    props: Object.freeze(names),
+    topic,
+  });
+}
+
 function payload(value: JsonValue, membership: AuthorizedLogicalSubscription): AsyncPayload {
   const fields = record(value, "async_payload_invalid");
   const kind = string(fields["kind"], "async_payload_invalid");
@@ -198,6 +234,8 @@ function payload(value: JsonValue, membership: AuthorizedLogicalSubscription): A
         value: freezeJson(signalValue),
       });
     }
+    case "topic_change":
+      return topicChangePayload(fields);
     case "heartbeat":
       exact(fields, ["kind"], "async_payload_invalid");
       return Object.freeze({ kind: "heartbeat" });

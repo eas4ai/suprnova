@@ -339,6 +339,14 @@ pub use ::opendal;
 // code resolves against the version Suprnova links rather than whatever
 // the app happens to have in its own Cargo.toml.
 pub use ::tokio;
+/// Ownership metadata prevents forged socket headers from excluding another sender.
+pub use broadcasting::LiveTopicExclusion;
+/// Keeps generation and cursor together when an authority baseline is read.
+pub use broadcasting::LiveTopicPosition;
+/// Identifies the session or principal that owns a signal exclusion.
+pub use broadcasting::LiveTopicSender;
+/// Topic invalidations that keep model data in the page controller.
+pub use broadcasting::LiveTopicSignal;
 pub use broadcasting::{
     BroadcastEnvelope, BroadcastHub, BroadcastListener, Broadcastable, BroadcastingWsHandler,
     ChannelVisibility, InMemoryBroadcastHub, PusherAuth, PusherBroadcastHub, PusherClient,
@@ -347,6 +355,14 @@ pub use broadcasting::{
 pub use bus::testing::{dispatched, dispatched_after_response, dispatched_sync};
 pub use bus::{AfterResponseIo, after_response_connection};
 pub use bus::{Bus, Dispatched};
+/// Captures live cursors before a typed page loader queries its props.
+pub use inertia::InertiaLiveResponse;
+/// Metadata emitted by the InertiaProps derive for checked page bindings.
+pub use inertia::InertiaProps;
+/// Derive-checked topic declarations for a page's live props.
+pub use inertia::LiveBinding;
+/// Shared topic publication for Live islands and Inertia pages.
+pub use live::LiveTopics;
 // The concurrency facade. Its `Task` and `TaskResult` stay at
 // `suprnova::concurrency::{Task, TaskResult}`: the crate root's `Task` and
 // `TaskResult` are the scheduler's.

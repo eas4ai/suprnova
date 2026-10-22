@@ -910,6 +910,12 @@ pub fn stream_core() -> &'static str {
     include_str!("files/frontend/stream/core.ts.tpl")
 }
 
+/// `src/lib/live/core.ts`, shared by every Inertia kit: cursor checks,
+/// bounded signal coalescing, partial reloads and Live transport cleanup.
+pub fn live_core() -> &'static str {
+    include_str!("files/frontend/live/core.ts.tpl")
+}
+
 /// `src/lib/agents/core.ts`, the same in every Inertia kit: WebMCP
 /// registration, server tool calls and the form tool engine the kit's
 /// `src/lib/agents/index.ts` hooks build on (AGENT-014, AGENT-015).
@@ -984,6 +990,10 @@ pub mod react {
     /// `useEventStream` and `useJsonEventStream` over [`super::stream_core`].
     pub fn stream_hooks() -> &'static str {
         include_str!("files/frontend/react/src/lib/stream/index.ts.tpl")
+    }
+    /// `src/lib/live/index.ts`: the React lifecycle adapter over [`super::live_core`].
+    pub fn live_hooks() -> &'static str {
+        include_str!("files/frontend/react/src/lib/live/index.ts.tpl")
     }
     /// `src/lib/agents/index.ts`: `usePageTool` and `useFormTool` over
     /// [`super::agents_core`], and `installPageTools`.
@@ -1064,6 +1074,10 @@ pub mod svelte {
     /// [`super::stream_core`].
     pub fn stream_hooks() -> &'static str {
         include_str!("files/frontend/svelte/src/lib/stream/index.ts.tpl")
+    }
+    /// `src/lib/live/index.svelte.ts`: the Svelte rune adapter over [`super::live_core`].
+    pub fn live_hooks() -> &'static str {
+        include_str!("files/frontend/svelte/src/lib/live/index.svelte.ts.tpl")
     }
     /// `src/lib/agents/index.ts`: `usePageTool` and `useFormTool` over
     /// [`super::agents_core`], and `installPageTools`.
@@ -1275,6 +1289,10 @@ pub mod vue {
     pub fn stream_hooks() -> &'static str {
         include_str!("files/frontend/vue/src/lib/stream/index.ts.tpl")
     }
+    /// `src/lib/live/index.ts`: the Vue lifecycle adapter over [`super::live_core`].
+    pub fn live_hooks() -> &'static str {
+        include_str!("files/frontend/vue/src/lib/live/index.ts.tpl")
+    }
     /// `src/lib/agents/index.ts`: `usePageTool` and `useFormTool` over
     /// [`super::agents_core`], and `installPageTools`.
     pub fn agent_hooks() -> &'static str {
@@ -1443,6 +1461,27 @@ pub fn scaffold_frontend(
     for (path, content) in [
         (stream.join("core.ts"), stream_core()),
         (stream.join("index.ts"), stream_hooks),
+    ] {
+        fs::write(&path, content)
+            .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    }
+
+    // Inertia live bindings: one shared cursor/coalescing engine and the
+    // chosen framework's mount and unmount adapter.
+    let live = lib.join("live");
+    fs::create_dir_all(&live).map_err(|e| format!("Failed to create {}: {}", live.display(), e))?;
+    let live_hooks = match kit {
+        InertiaKit::React => react::live_hooks(),
+        InertiaKit::Svelte => svelte::live_hooks(),
+        InertiaKit::Vue => vue::live_hooks(),
+    };
+    let live_hooks_path = match kit {
+        InertiaKit::Svelte => live.join("index.svelte.ts"),
+        InertiaKit::React | InertiaKit::Vue => live.join("index.ts"),
+    };
+    for (path, content) in [
+        (live.join("core.ts"), live_core()),
+        (live_hooks_path, live_hooks),
     ] {
         fs::write(&path, content)
             .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;

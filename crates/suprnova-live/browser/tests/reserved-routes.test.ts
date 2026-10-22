@@ -22,12 +22,21 @@ import { FetchUploadTransport } from "../src/uploads/feature.js";
 const PREFIXED_CONFIG = JSON.stringify({ endpoint: "/billing/__live/action" });
 
 /** The two members of `Document` the route reader uses. */
-function page(configText: string | null, baseURI = "https://app.test/billing/catalog") {
+function page(
+  configText: string | null,
+  root: string | null = null,
+  baseURI = "https://app.test/billing/catalog",
+) {
   return {
     baseURI,
     getElementById(id: string) {
       return id === "suprnova-live-config" && configText !== null
         ? { textContent: configText }
+        : null;
+    },
+    querySelector(selector: string) {
+      return selector === 'meta[name="suprnova-live-root"]' && root !== null
+        ? { content: root }
         : null;
     },
   } as unknown as Document;
@@ -101,6 +110,49 @@ describe("PFX-006 reserved Live routes follow the configured endpoint", () => {
       "/__live/upload",
     );
     expect(reservedRoutePath("upload")).toBe("/__live/upload");
+  });
+
+  it("PFX-006 uses the standalone page's explicit public root", () => {
+    expect(reservedRoutePath("upload", page(null, "/billing"))).toBe("/billing/__live/upload");
+    expect(reservedRoutePath("async/subscriptions", page(null, "/billing"))).toBe(
+      "/billing/__live/async/subscriptions",
+    );
+    expect(reservedRoutePath("upload", page("not json", "/billing"))).toBe(
+      "/billing/__live/upload",
+    );
+  });
+
+  it("PFX-006 prefers a valid Live endpoint over the standalone page root", () => {
+    expect(reservedRoutePath("upload", page(PREFIXED_CONFIG, "/other"))).toBe(
+      "/billing/__live/upload",
+    );
+  });
+
+  it.each([
+    ["", "/__live/upload"],
+    ["/", "/__live/upload"],
+    ["/billing/v2", "/billing/v2/__live/upload"],
+    ["/A-z_~.9", "/A-z_~.9/__live/upload"],
+  ])("PFX-006 accepts the explicit public root %j", (root, expected) => {
+    expect(reservedRoutePath("upload", page(null, root))).toBe(expected);
+  });
+
+  it.each([
+    "billing",
+    "/billing/",
+    "/a//b",
+    "/a/./b",
+    "/a/../b",
+    "/%2e%2e",
+    "/café",
+    "/a b",
+    "//evil.test",
+    "https://evil.test/billing",
+    "/billing?mode=x",
+    "/billing#fragment",
+    "/a\\b",
+  ])("PFX-006 rejects the malformed explicit public root %j", (root) => {
+    expect(reservedRoutePath("upload", page(null, root))).toBe("/__live/upload");
   });
 
   it("PFX-006 sends uploads to the upload endpoint under the root", async () => {

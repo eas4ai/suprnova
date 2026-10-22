@@ -2403,3 +2403,18 @@ impl<'result> ActionAssertion<'result> {
         );
     }
 }
+
+/// Counts the finite declaration keys retained for denied bindings on one page.
+#[doc(hidden)]
+#[must_use]
+pub fn live_binding_warning_entries(page_component: &str) -> usize {
+    super::topics::warning_entries(page_component)
+}
+
+/// Runs the ordinary expiry pass and reports the remaining topic listener tasks.
+#[doc(hidden)]
+#[must_use]
+pub fn prune_live_topic_listeners_for_test(runtime: &LiveRuntime) -> usize {
+    runtime.async_state().prune_topics();
+    runtime.async_state().topics.listener_count()
+}

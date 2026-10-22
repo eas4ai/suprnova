@@ -79,6 +79,69 @@ describe("browser async envelope boundary", () => {
     });
   });
 
+  it("decodes a data-free topic change with an exact bounded shape", () => {
+    expect(
+      decodeAsyncEnvelope(
+        encoded({
+          generation: 1,
+          cursor: 42,
+          kind: "topic_change",
+          props: ["stats", "recent_notes"],
+          topic: "notes/user-42",
+        }),
+        membership(),
+      ).payload,
+    ).toEqual({
+      generation: 1,
+      cursor: 42,
+      kind: "topic_change",
+      props: ["stats", "recent_notes"],
+      topic: "notes/user-42",
+    });
+    expect(
+      decodeAsyncEnvelope(
+        encoded({
+          generation: 1,
+          cursor: 43,
+          kind: "topic_change",
+          props: [],
+          topic: "notes/user-42",
+        }),
+        membership(),
+      ).payload,
+    ).toEqual({
+      generation: 1,
+      cursor: 43,
+      kind: "topic_change",
+      props: [],
+      topic: "notes/user-42",
+    });
+
+    for (const payload of [
+      {
+        generation: 1,
+        cursor: 42,
+        data: { notes: 3 },
+        kind: "topic_change",
+        props: ["stats"],
+        topic: "notes",
+      },
+      { generation: 1, cursor: -1, kind: "topic_change", props: ["stats"], topic: "notes" },
+      { generation: 1, cursor: 42, kind: "topic_change", props: ["stats", 3], topic: "notes" },
+      {
+        generation: 1,
+        cursor: 42,
+        kind: "topic_change",
+        props: ["stats", "stats"],
+        topic: "notes",
+      },
+    ]) {
+      expect(() =>
+        decodeAsyncEnvelope(encoded(payload as JsonValue as never), membership()),
+      ).toThrow("async_payload_invalid");
+    }
+  });
+
   it("rejects noncanonical, extra-key, cross-membership, and unsupported payload input", () => {
     const valid = JSON.parse(encoded({ kind: "heartbeat" })) as Record<string, unknown>;
     expect(() => decodeAsyncEnvelope(JSON.stringify(valid, null, 2), membership())).toThrow(

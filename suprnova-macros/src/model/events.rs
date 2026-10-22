@@ -263,7 +263,18 @@ pub fn emit_event_dispatch_impl(struct_ident: &Ident) -> TokenStream {
             ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
                 ::suprnova::eloquent::events::dispatch_after_with(
                     || #module_name::events::Saved { model: ::core::clone::Clone::clone(model) },
-                ).await
+                ).await?;
+                ::suprnova::live::LiveTopics::__model_changed::<Self>(model).await
+            }
+
+            async fn __dispatch_saved_with_tx(
+                model: &Self,
+                transaction: &::suprnova::Transaction,
+            ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
+                ::suprnova::eloquent::events::dispatch_after_with(
+                    || #module_name::events::Saved { model: ::core::clone::Clone::clone(model) },
+                ).await?;
+                ::suprnova::live::LiveTopics::__model_changed_with_tx::<Self>(model, transaction).await
             }
 
             async fn __dispatch_updating(
@@ -311,7 +322,22 @@ pub fn emit_event_dispatch_impl(struct_ident: &Ident) -> TokenStream {
                         model: ::core::clone::Clone::clone(model),
                         is_force,
                     },
-                ).await
+                ).await?;
+                ::suprnova::live::LiveTopics::__model_changed::<Self>(model).await
+            }
+
+            async fn __dispatch_deleted_with_tx(
+                model: &Self,
+                is_force: bool,
+                transaction: &::suprnova::Transaction,
+            ) -> ::core::result::Result<(), ::suprnova::FrameworkError> {
+                ::suprnova::eloquent::events::dispatch_after_with(
+                    || #module_name::events::Deleted {
+                        model: ::core::clone::Clone::clone(model),
+                        is_force,
+                    },
+                ).await?;
+                ::suprnova::live::LiveTopics::__model_changed_with_tx::<Self>(model, transaction).await
             }
 
             async fn __dispatch_trashed(

@@ -12,6 +12,7 @@ import {
   WhenVisible,
 } from '@inertiajs/vue3'
 import type { DashboardProps, UserInfo } from '../types/inertia-props'
+import { useLive } from '../lib/live'
 
 // The public root the server shares with every page (`RootShare`): empty
 // at the host root, `/billing` behind a proxy that serves the app there.
@@ -35,6 +36,10 @@ defineProps<Partial<DashboardProps>>()
 // The application layout shows this as the page's heading. The next visit
 // to a page that sets no heading clears it.
 setLayoutProps({ heading: 'Dashboard' })
+
+// Live refreshes `stats` as soon as this user's notes topic changes.
+// The poll below remains the fallback when no push transport is available.
+useLive()
 
 // Reload `stats` alone every ten seconds while this page is open; the poll
 // stops when the page unmounts.

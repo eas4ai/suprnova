@@ -77,3 +77,44 @@ async fn subscriber_count_returns_zero_for_unknown_channel() {
     let hub = InMemoryBroadcastHub::new();
     assert_eq!(hub.subscriber_count("nobody.here"), 0);
 }
+
+#[tokio::test]
+async fn signal_fix_003_hub_preserves_sender_and_clears_mixed_owners() {
+    use std::time::Duration;
+    use suprnova::broadcasting::{LiveTopicExclusion, LiveTopicSender, LiveTopicSignal};
+    let hub = InMemoryBroadcastHub::new();
+    let mut receiver = hub.subscribe_live_topic("owned").unwrap();
+    let interval = Duration::from_millis(30);
+    let owner = LiveTopicExclusion {
+        socket: "shared-document".into(),
+        sender: LiveTopicSender::Session("session-a".into()),
+    };
+    hub.publish_live_topic("owned", &["stats".into()], Some(owner.clone()), interval)
+        .await
+        .unwrap();
+    let envelope = receiver.recv().await.unwrap();
+    let signal: LiveTopicSignal = serde_json::from_value(envelope.data).unwrap();
+    assert_eq!(signal.exclusion, Some(owner.clone()));
+    hub.publish_live_topic("owned", &["stats".into()], Some(owner), interval)
+        .await
+        .unwrap();
+    hub.publish_live_topic(
+        "owned",
+        &["count".into()],
+        Some(LiveTopicExclusion {
+            socket: "shared-document".into(),
+            sender: LiveTopicSender::Session("session-b".into()),
+        }),
+        interval,
+    )
+    .await
+    .unwrap();
+    let envelope = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(envelope.except.is_none());
+    let signal: LiveTopicSignal = serde_json::from_value(envelope.data).unwrap();
+    assert!(signal.exclusion.is_none());
+    assert_eq!(signal.props, ["count", "stats"]);
+}

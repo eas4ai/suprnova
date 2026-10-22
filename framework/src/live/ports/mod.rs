@@ -158,7 +158,9 @@ impl HostPorts {
                 config.max_redirect_bytes(),
             )),
             uploads,
-            subscription_authorization: Arc::new(subscription::SuprnovaSubscriptionAuthorization),
+            subscription_authorization: Arc::new(
+                subscription::SuprnovaSubscriptionAuthorization::new(registry.clone()),
+            ),
             subscription_credentials: Arc::new(
                 subscription::SuprnovaSubscriptionCredentials::default(),
             ),

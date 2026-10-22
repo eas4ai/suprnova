@@ -9,7 +9,9 @@ import type {
   AuthorizedLogicalSubscription,
 } from "../src/async-updates/types.js";
 import type {
+  FreshRenderCompletionObserver,
   FreshRenderDisposition,
+  FreshRenderReason,
   RegisteredBrowserEventCapability,
   AsyncRuntimeIslandPort,
 } from "../src/features/contract.js";
@@ -112,10 +114,12 @@ function fakePort(overrides: Partial<AsyncRuntimeIslandPort> = {}) {
     refresh: vi.fn(() => "queued" as const),
     signal: vi.fn((_scope: string, _name: string, value: JsonValue) => value),
     stateWrite: vi.fn(),
+    topicChange: vi.fn(),
   };
   const port: AsyncRuntimeIslandPort = {
     consumeRegisteredEventCapability: () => fakeCapability(),
     dispatchRegisteredEvent: calls.event,
+    dispatchTopicChange: calls.topicChange,
     element,
     enqueueFreshRender: calls.refresh,
     identity: Object.freeze({
@@ -153,6 +157,179 @@ function resolver(
 }
 
 describe("closed asynchronous presentation dispatcher", () => {
+  it("recovers an island on a generation change even at cursor zero", () => {
+    const { calls, port } = fakePort();
+    delete port.dispatchTopicChange;
+    const dispatcher = new AsyncDispatcher(port, fakeCapability);
+    const change = (generation: number, cursor: number) =>
+      envelope({ generation, cursor, kind: "topic_change", props: [], topic: "posts" });
+    expect(dispatcher.dispatch(change(100, 10))).toBe("queued");
+    expect(dispatcher.dispatch(change(100, 9))).toBe("topic_changed");
+    expect(calls.refresh).toHaveBeenCalledTimes(1);
+    expect(dispatcher.dispatch(change(200, 0))).toBe("queued");
+    expect(calls.refresh).toHaveBeenCalledTimes(2);
+    expect(dispatcher.dispatch(change(200, 1))).toBe("queued");
+    expect(calls.refresh).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["failed", "canceled", "retired"] as const)(
+    "does not consume an island generation reset after a %s render",
+    (outcome) => {
+      const completions: FreshRenderCompletionObserver[] = [];
+      const { calls, port } = fakePort({
+        enqueueFreshRender: (_reason, observer) => {
+          if (observer !== undefined) completions.push(observer);
+          return "queued";
+        },
+      });
+      delete port.dispatchTopicChange;
+      const dispatcher = new AsyncDispatcher(port, fakeCapability);
+      const change = envelope({
+        generation: 200,
+        cursor: 1,
+        kind: "topic_change",
+        props: [],
+        topic: "posts",
+      });
+      expect(dispatcher.dispatch(change)).toBe("queued");
+      completions[0]?.(outcome);
+      expect(dispatcher.dispatch(change)).toBe("queued");
+      expect(calls.topicChange).not.toHaveBeenCalled();
+      completions[1]?.("succeeded");
+      expect(dispatcher.dispatch(change)).toBe("topic_changed");
+    },
+  );
+
+  it("forwards a lower full recovery after a higher partial page signal", () => {
+    const { calls, port } = fakePort();
+    const dispatcher = new AsyncDispatcher(port, fakeCapability);
+    const partial = {
+      generation: 1,
+      cursor: 11,
+      kind: "topic_change",
+      props: ["stats"],
+      topic: "posts",
+    };
+    const recovery = { ...partial, cursor: 10, props: [] };
+    expect(dispatcher.dispatch(envelope(partial))).toBe("topic_changed");
+    expect(dispatcher.dispatch(envelope(recovery))).toBe("topic_changed");
+    expect(calls.topicChange).toHaveBeenNthCalledWith(1, partial);
+    expect(calls.topicChange).toHaveBeenNthCalledWith(2, recovery);
+    expect(calls.refresh).not.toHaveBeenCalled();
+  });
+
+  it("delivers a topic change only through the data-free topic port", () => {
+    const { calls, port } = fakePort();
+    const dispatcher = new AsyncDispatcher(port, fakeCapability);
+
+    expect(
+      dispatcher.dispatch(
+        envelope({
+          generation: 1,
+          cursor: 42,
+          kind: "topic_change",
+          props: ["stats"],
+          topic: "notes/user-42",
+        }),
+      ),
+    ).toBe("topic_changed");
+    expect(calls.topicChange).toHaveBeenCalledWith({
+      generation: 1,
+      cursor: 42,
+      kind: "topic_change",
+      props: ["stats"],
+      topic: "notes/user-42",
+    });
+    expect(calls.refresh).not.toHaveBeenCalled();
+    expect(calls.event).not.toHaveBeenCalled();
+    expect(calls.signal).not.toHaveBeenCalled();
+  });
+
+  it("fresh-renders a normal island for a topic change with refresh completion semantics", () => {
+    const completions: ((result: "succeeded" | "failed" | "canceled" | "retired") => void)[] = [];
+    const refresh = vi.fn(
+      (_reason: FreshRenderReason, observer?: FreshRenderCompletionObserver) => {
+        if (observer !== undefined) completions.push(observer);
+        return "queued" as const;
+      },
+    );
+    const { calls, port } = fakePort({
+      enqueueFreshRender: refresh,
+    });
+    delete port.dispatchTopicChange;
+    const completion = vi.fn();
+    const dispatcher = new AsyncDispatcher(port, fakeCapability);
+
+    expect(
+      dispatcher.dispatch(
+        envelope({ generation: 1, cursor: 42, kind: "topic_change", props: [], topic: "posts" }),
+        completion,
+      ),
+    ).toBe("queued");
+    expect(calls.topicChange).not.toHaveBeenCalled();
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(
+      "stream",
+      expect.any(Function),
+      SUBSCRIPTION_ID,
+    );
+    expect(completions).toHaveLength(1);
+    expect(completion).not.toHaveBeenCalled();
+
+    completions[0]?.("succeeded");
+    completions[0]?.("failed");
+    expect(completion).toHaveBeenCalledExactlyOnceWith("succeeded");
+  });
+
+  it("commits page topic callbacks immediately but waits for a normal island render", () => {
+    const page = fakePort();
+    const pageSubscription = new AsyncSubscription(
+      authorization(),
+      new AsyncDispatcher(page.port, fakeCapability),
+      { now: () => 1_000 },
+    );
+
+    expect(
+      pageSubscription.receive(
+        encoded({
+          generation: 1,
+          cursor: 42,
+          kind: "topic_change",
+          props: ["stats"],
+          topic: "posts",
+        }),
+      ),
+    ).toBe("applied");
+    expect(pageSubscription.position()).toEqual({ epoch: 4n, sequence: 41n });
+    expect(page.calls.topicChange).toHaveBeenCalledOnce();
+    expect(page.calls.refresh).not.toHaveBeenCalled();
+
+    const completions: ((result: "succeeded" | "failed" | "canceled" | "retired") => void)[] = [];
+    const island = fakePort({
+      enqueueFreshRender: (_reason, observer) => {
+        if (observer !== undefined) completions.push(observer);
+        return "queued";
+      },
+    });
+    delete island.port.dispatchTopicChange;
+    const islandSubscription = new AsyncSubscription(
+      authorization(),
+      new AsyncDispatcher(island.port, fakeCapability),
+      { now: () => 1_000 },
+    );
+
+    expect(
+      islandSubscription.receive(
+        encoded({ generation: 1, cursor: 42, kind: "topic_change", props: [], topic: "posts" }),
+      ),
+    ).toBe("pending");
+    expect(islandSubscription.position()).toEqual({ epoch: 4n, sequence: 40n });
+    expect(completions).toHaveLength(1);
+
+    completions[0]?.("succeeded");
+    expect(islandSubscription.position()).toEqual({ epoch: 4n, sequence: 41n });
+    expect(islandSubscription.state()).toBe("current");
+  });
+
   it("rejects every authority-writing payload without actions, morphs, or commits", () => {
     const { calls, port } = fakePort();
     const dispatcher = new AsyncDispatcher(port, fakeCapability);

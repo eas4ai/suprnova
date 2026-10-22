@@ -1,6 +1,7 @@
 import { registerClassicAsyncFeature } from "./features/producer.js";
 import { asyncFeature, configureAsync } from "./async-updates/feature.js";
 import { browserAsyncOptions } from "./async-updates/browser-host.js";
+import { subscribeTopics } from "./async-updates/topics.js";
 
 registerClassicAsyncFeature(globalThis, asyncFeature, configureAsync);
 
@@ -10,5 +11,5 @@ registerClassicAsyncFeature(globalThis, asyncFeature, configureAsync);
 Reflect.set(
   globalThis,
   "SuprnovaLiveAsync",
-  Object.freeze({ browserOptions: browserAsyncOptions }),
+  Object.freeze({ browserOptions: browserAsyncOptions, subscribeTopics }),
 );

@@ -63,6 +63,8 @@ pub struct LiveRegistry {
 struct LiveRegistryGraph {
     engine: suprnova_live::registry::ComponentRegistry,
     validation: BTreeMap<ComponentName, Arc<dyn ValidationPort>>,
+    topics: BTreeMap<String, bool>,
+    families: BTreeMap<String, bool>,
 }
 
 impl LiveRegistry {
@@ -89,6 +91,90 @@ impl LiveRegistry {
         self.inner.engine.names().cloned().collect()
     }
 
+    pub(crate) fn topics(&self) -> &BTreeMap<String, bool> {
+        &self.inner.topics
+    }
+
+    pub(crate) fn topic_for_component(&self, component: &ComponentName) -> Option<(&str, bool)> {
+        self.inner
+            .topics
+            .iter()
+            .chain(self.inner.families.iter())
+            .find_map(|(topic, public)| {
+                (super::topics::topic_component(topic) == component.as_str())
+                    .then_some((topic.as_str(), *public))
+            })
+    }
+
+    pub(crate) fn family_for_component(&self, component: &ComponentName) -> Option<&str> {
+        self.inner
+            .families
+            .keys()
+            .find(|name| super::topics::topic_component(name) == component.as_str())
+            .map(String::as_str)
+    }
+
+    pub(crate) fn application_topic(&self, topic: &str) -> Option<(&str, bool)> {
+        if let Some((name, public)) = self.inner.topics.get_key_value(topic) {
+            return Some((name.as_str(), *public));
+        }
+        self.inner.families.iter().find_map(|(family, public)| {
+            let key = topic.strip_prefix(family)?.strip_prefix('.')?;
+            self.family_instance(family, key)
+                .ok()
+                .map(|_| (family.as_str(), *public))
+        })
+    }
+
+    pub(crate) fn families(&self) -> impl Iterator<Item = &str> {
+        self.inner.families.keys().map(String::as_str)
+    }
+
+    pub(crate) fn is_family(&self, name: &str) -> bool {
+        self.inner.families.contains_key(name)
+    }
+
+    pub(crate) fn family_instance(
+        &self,
+        family: &str,
+        key: &str,
+    ) -> Result<String, crate::FrameworkError> {
+        if !self.is_family(family) {
+            return Err(crate::FrameworkError::internal(format!(
+                "Live topic family `{family}` is not registered"
+            )));
+        }
+        suprnova_live::async_updates::TrustedMountParameters::new(vec![(
+            "topic_key".to_owned(),
+            key.to_owned(),
+        )])
+        .map_err(|_| {
+            crate::FrameworkError::internal(format!(
+                "invalid instance key for Live topic family `{family}`"
+            ))
+        })?;
+        let instance = format!("{family}.{key}");
+        suprnova_live::async_updates::TopicName::parse(&instance).map_err(|_| {
+            crate::FrameworkError::internal(format!(
+                "invalid instance of Live topic family `{family}`"
+            ))
+        })?;
+        Ok(instance)
+    }
+
+    pub(crate) fn validate_topics(&self) -> Result<(), crate::FrameworkError> {
+        for (name, public) in self.inner.topics.iter().chain(self.inner.families.iter()) {
+            if !public
+                && !crate::authorization::Gate::has::<String, String>(&format!("live:topic.{name}"))
+            {
+                return Err(crate::FrameworkError::internal(format!(
+                    "private Live topic `{name}` has no authorizer for `live:topic.{name}`"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn engine(&self) -> &suprnova_live::registry::ComponentRegistry {
         &self.inner.engine
     }
@@ -102,6 +188,8 @@ impl LiveRegistry {
             inner: Arc::new(LiveRegistryGraph {
                 engine: inner,
                 validation: BTreeMap::new(),
+                topics: BTreeMap::new(),
+                families: BTreeMap::new(),
             }),
         }
     }
@@ -120,6 +208,8 @@ impl fmt::Debug for LiveRegistry {
 pub struct LiveRegistryBuilder {
     inner: suprnova_live::registry::ComponentRegistryBuilder,
     validation: BTreeMap<ComponentName, Arc<dyn ValidationPort>>,
+    topics: BTreeMap<String, bool>,
+    families: BTreeMap<String, bool>,
 }
 
 impl LiveRegistryBuilder {
@@ -129,7 +219,74 @@ impl LiveRegistryBuilder {
         Self {
             inner: suprnova_live::registry::ComponentRegistryBuilder::new(),
             validation: BTreeMap::new(),
+            topics: BTreeMap::new(),
+            families: BTreeMap::new(),
         }
+    }
+
+    /// Registers a private application topic in the same registry as island streams.
+    pub fn topic(self, name: &str) -> Result<Self, crate::FrameworkError> {
+        self.register_topic(name, false, false)
+    }
+
+    /// Registers a topic that explicitly permits anonymous subscriptions.
+    pub fn public_topic(self, name: &str) -> Result<Self, crate::FrameworkError> {
+        self.register_topic(name, true, false)
+    }
+
+    /// Keeps each private family instance on its own authorized topic and cursor.
+    pub fn topic_family(self, name: &str) -> Result<Self, crate::FrameworkError> {
+        self.register_topic(name, false, true)
+    }
+
+    /// Allows anonymous subscriptions only when the family is explicitly public.
+    pub fn public_topic_family(self, name: &str) -> Result<Self, crate::FrameworkError> {
+        self.register_topic(name, true, true)
+    }
+
+    fn register_topic(
+        mut self,
+        name: &str,
+        public: bool,
+        family: bool,
+    ) -> Result<Self, crate::FrameworkError> {
+        suprnova_live::async_updates::TopicName::parse(name)
+            .map_err(|_| crate::FrameworkError::internal("invalid Live application topic name"))?;
+        if name.contains("::")
+            || self.topics.contains_key(name)
+            || self.families.contains_key(name)
+            || self
+                .families
+                .keys()
+                .any(|parent| name.starts_with(&format!("{parent}.")))
+            || (family
+                && self
+                    .topics
+                    .keys()
+                    .chain(self.families.keys())
+                    .any(|child| child.starts_with(&format!("{name}."))))
+        {
+            return Err(crate::FrameworkError::internal(format!(
+                "duplicate or reserved Live topic `{name}`"
+            )));
+        }
+        if family {
+            suprnova_live::async_updates::TopicName::parse(&format!("{name}.0")).map_err(|_| {
+                crate::FrameworkError::internal(
+                    "Live topic family name leaves no room for an instance",
+                )
+            })?;
+        }
+        let descriptor = super::topics::topic_descriptor(name, family)?;
+        self.inner = self.inner.register(descriptor).map_err(|_| {
+            crate::FrameworkError::internal(format!("cannot register Live topic `{name}`"))
+        })?;
+        if family {
+            self.families.insert(name.to_owned(), public);
+        } else {
+            self.topics.insert(name.to_owned(), public);
+        }
+        Ok(self)
     }
 
     /// Registers one macro-produced component contract.
@@ -211,6 +368,8 @@ impl LiveRegistryBuilder {
             inner: Arc::new(LiveRegistryGraph {
                 engine: self.inner.build(),
                 validation: self.validation,
+                topics: self.topics,
+                families: self.families,
             }),
         }
     }
@@ -296,3 +455,9 @@ impl fmt::Debug for RegistryError {
 }
 
 impl Error for RegistryError {}
+
+impl From<RegistryError> for crate::FrameworkError {
+    fn from(error: RegistryError) -> Self {
+        Self::internal(format!("Live registration failed: {error}"))
+    }
+}

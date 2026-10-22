@@ -433,7 +433,7 @@ pub struct BoundedEventContracts(Vec<SubscriptionEventContract>);
 impl BoundedEventContracts {
     /// Sorts and validates the bounded full contract set.
     pub fn new(mut events: Vec<SubscriptionEventContract>) -> Result<Self, SubscriptionError> {
-        if events.is_empty() || events.len() > MAX_SUBSCRIPTION_EVENTS {
+        if events.len() > MAX_SUBSCRIPTION_EVENTS {
             return Err(SubscriptionError::new(
                 SubscriptionErrorKind::InvalidDescriptor,
             ));

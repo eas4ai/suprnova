@@ -286,6 +286,11 @@ export class BrowserAsyncAuthority implements AsyncAuthorityPort {
     this.#documentInstance = documentInstance();
   }
 
+  /** Stable socket identity carried by every subscription this authority issues. */
+  documentInstance(): string {
+    return this.#documentInstance;
+  }
+
   async authorize(request: AsyncAuthorizationRequest): Promise<AsyncAuthorizationResult> {
     const prior = request.prior;
     const body: Record<string, unknown> = {

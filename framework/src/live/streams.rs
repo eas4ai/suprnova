@@ -29,7 +29,7 @@ pub enum LiveEventTarget {
 /// Closed reasons a publication was not accepted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LiveStreamErrorKind {
-    /// No Live runtime is bound in this process.
+    /// The Live runtime or its configured topic publisher is unavailable.
     RuntimeUnavailable,
     /// The topic is not a valid stream topic.
     InvalidTopic,
@@ -67,7 +67,7 @@ impl fmt::Display for LiveStreamError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
             LiveStreamErrorKind::RuntimeUnavailable => {
-                formatter.write_str("Live runtime is not bound")
+                formatter.write_str("Live runtime is unavailable")
             }
             LiveStreamErrorKind::InvalidTopic => formatter.write_str("invalid Live stream topic"),
             LiveStreamErrorKind::InvalidPayload => match self.limit {
@@ -106,7 +106,14 @@ impl LiveStreams {
     }
 
     /// Tells every subscriber of `topic` to refresh from the server.
+    /// Page-bindable topics share deferred publication, cursor, fanout and rate handling.
     pub async fn refresh(&self, topic: &str) -> Result<(), LiveStreamError> {
+        if let Some(result) = super::LiveTopics::refresh_shared(&self.state, topic).await {
+            return result.map_err(|error| {
+                tracing::error!(%error, topic, "shared Live topic refresh failed");
+                LiveStreamError::new(LiveStreamErrorKind::RuntimeUnavailable)
+            });
+        }
         self.state
             .publish(topic, &StreamPayloadSpec::Refresh)
             .await

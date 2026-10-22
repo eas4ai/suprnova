@@ -2,7 +2,156 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
 use std::path::{Path, PathBuf};
-use syn::{DeriveInput, Expr, LitStr, Token, parse::Parse, parse::ParseStream, parse_macro_input};
+use syn::{
+    DeriveInput, Expr, ExprArray, ExprLit, Lit, LitStr, Token, meta::ParseNestedMeta, parse::Parse,
+    parse::ParseStream, parse_macro_input,
+};
+
+const LIVE_BINDING_SYNTAX: &str =
+    "expected `#[inertia(live(topic = \"topic\", only = [\"prop\", ...]))]`";
+
+/// One parsed `#[inertia(live(...))]` declaration.
+struct LiveBindingSpec {
+    topic: LitStr,
+    only: Vec<LitStr>,
+}
+
+fn live_prop_name(value: Expr) -> syn::Result<LitStr> {
+    match value {
+        Expr::Lit(ExprLit {
+            lit: Lit::Str(name),
+            ..
+        }) => Ok(name),
+        other => Err(syn::Error::new_spanned(
+            other,
+            "live binding prop names must be string literals",
+        )),
+    }
+}
+
+fn live_only(entry: ParseNestedMeta<'_>) -> syn::Result<Vec<LitStr>> {
+    let names: Vec<LitStr> = entry
+        .value()?
+        .parse::<ExprArray>()?
+        .elems
+        .into_iter()
+        .map(live_prop_name)
+        .collect::<syn::Result<_>>()?;
+    let mut found = std::collections::BTreeSet::new();
+    for name in &names {
+        if !found.insert(name.value()) {
+            return Err(syn::Error::new_spanned(
+                name,
+                format!("live binding lists prop `{}` more than once", name.value()),
+            ));
+        }
+    }
+    Ok(names)
+}
+
+fn parse_live_binding(meta: ParseNestedMeta<'_>) -> syn::Result<LiveBindingSpec> {
+    let mut topic = None;
+    let mut only = None;
+    meta.parse_nested_meta(|entry| {
+        if entry.path.is_ident("topic") {
+            if topic.is_some() {
+                return Err(entry.error("a live binding has one `topic`"));
+            }
+            topic = Some(entry.value()?.parse::<LitStr>()?);
+            return Ok(());
+        }
+        if entry.path.is_ident("only") {
+            if only.is_some() {
+                return Err(entry.error("a live binding has one `only` list"));
+            }
+            only = Some(live_only(entry)?);
+            return Ok(());
+        }
+        Err(entry.error(LIVE_BINDING_SYNTAX))
+    })?;
+    Ok(LiveBindingSpec {
+        topic: topic.ok_or_else(|| meta.error(LIVE_BINDING_SYNTAX))?,
+        only: only.ok_or_else(|| meta.error(LIVE_BINDING_SYNTAX))?,
+    })
+}
+
+fn validate_live_binding(
+    binding: &LiveBindingSpec,
+    serialized_fields: &[String],
+) -> syn::Result<()> {
+    let Some(name) = binding
+        .only
+        .iter()
+        .find(|name| !serialized_fields.iter().any(|field| field == &name.value()))
+    else {
+        return Ok(());
+    };
+    let mut expected_fields = serialized_fields.to_vec();
+    expected_fields.sort();
+    Err(syn::Error::new_spanned(
+        name,
+        format!(
+            "live binding topic `{}` names unknown prop `{}`; expected one of {}",
+            binding.topic.value(),
+            name.value(),
+            expected_fields
+                .iter()
+                .map(|field| format!("`{field}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    ))
+}
+
+/// Read repeatable live bindings and check every name against serialized props.
+fn live_bindings(
+    input: &DeriveInput,
+    serialized_fields: &[String],
+) -> syn::Result<Vec<LiveBindingSpec>> {
+    let mut bindings = Vec::new();
+    for attr in input
+        .attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("inertia"))
+    {
+        attr.parse_nested_meta(|meta| {
+            if !meta.path.is_ident("live") {
+                return Ok(());
+            }
+            let binding = parse_live_binding(meta)?;
+            validate_live_binding(&binding, serialized_fields)?;
+            bindings.push(binding);
+            Ok(())
+        })?;
+    }
+    Ok(bindings)
+}
+
+/// Emit the framework metadata implementation for a props type.
+fn live_bindings_impl(
+    input: &DeriveInput,
+    bindings: &[LiveBindingSpec],
+) -> proc_macro2::TokenStream {
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    let entries = bindings.iter().map(|binding| {
+        let topic = &binding.topic;
+        let only = &binding.only;
+        quote! {
+            ::suprnova::inertia::LiveBinding {
+                topic: #topic,
+                only: &[#(#only),*],
+            }
+        }
+    });
+    quote! {
+        impl #impl_generics ::suprnova::inertia::InertiaProps for #name #ty_generics #where_clause {
+            fn live_bindings() -> &'static [::suprnova::inertia::LiveBinding] {
+                &[#(#entries),*]
+            }
+        }
+    }
+}
 
 /// Props can be either a typed struct expression or JSON-like syntax.
 pub enum PropsKind {
@@ -157,11 +306,10 @@ pub fn derive_inertia_props_impl(input: TokenStream) -> TokenStream {
     if let Err(error) = props_marker(&input) {
         return error.to_compile_error().into();
     }
-    match crate::inertia_cache::expand(&input) {
-        Ok(Some(expanded)) => return expanded.into(),
-        Ok(None) => {}
+    let cache_expansion = match crate::inertia_cache::expand(&input) {
+        Ok(expanded) => expanded,
         Err(error) => return error.to_compile_error().into(),
-    }
+    };
     let name = &input.ident;
     let generics = &input.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -217,6 +365,19 @@ pub fn derive_inertia_props_impl(input: TokenStream) -> TokenStream {
         field_name_strings.push(names.serialize);
     }
     let field_count = field_names.len();
+    let live_bindings = match live_bindings(&input, &field_name_strings) {
+        Ok(bindings) => bindings,
+        Err(error) => return error.to_compile_error().into(),
+    };
+    let live_bindings_impl = live_bindings_impl(&input, &live_bindings);
+
+    if let Some(expanded) = cache_expansion {
+        return quote! {
+            #expanded
+            #live_bindings_impl
+        }
+        .into();
+    }
 
     let expanded = quote! {
         impl #impl_generics ::suprnova::serde::Serialize for #name #ty_generics #where_clause {
@@ -232,6 +393,7 @@ pub fn derive_inertia_props_impl(input: TokenStream) -> TokenStream {
                 state.end()
             }
         }
+        #live_bindings_impl
     };
 
     expanded.into()
@@ -258,6 +420,42 @@ fn inertia_response_inner(input: InertiaResponseInput) -> proc_macro2::TokenStre
     };
 
     track_inputs(render_inertia_response_expansion(&input), &tracked)
+}
+
+/// Probe live metadata without requiring every typed props value to derive
+/// `InertiaProps`. Method resolution takes the borrowed implementation when
+/// it exists and the copyable wrapper fallback for ordinary serializable values.
+fn live_binding_probe(props: &Expr) -> proc_macro2::TokenStream {
+    quote! {
+        struct __SuprnovaLiveProps<'a, T: ?Sized>(&'a T);
+        impl<'a, T: ?Sized> ::core::marker::Copy for __SuprnovaLiveProps<'a, T> {}
+        impl<'a, T: ?Sized> ::core::clone::Clone for __SuprnovaLiveProps<'a, T> {
+            fn clone(&self) -> Self { *self }
+        }
+        trait __SuprnovaLiveBindings {
+            fn __suprnova_live_bindings(self) -> &'static [::suprnova::inertia::LiveBinding];
+        }
+        impl<'a, T: ?Sized> __SuprnovaLiveBindings for __SuprnovaLiveProps<'a, T> {
+            fn __suprnova_live_bindings(self) -> &'static [::suprnova::inertia::LiveBinding] {
+                &[]
+            }
+        }
+        impl<'a, T: ::suprnova::inertia::InertiaProps + ?Sized> __SuprnovaLiveBindings
+            for &__SuprnovaLiveProps<'a, T>
+        {
+            fn __suprnova_live_bindings(self) -> &'static [::suprnova::inertia::LiveBinding] {
+                T::live_bindings()
+            }
+        }
+        let __props_value = #props;
+        let __props = __props_value.__suprnova_inertia_props_borrow();
+        let __live_props = __SuprnovaLiveProps(__props);
+        if !(&__live_props).__suprnova_live_bindings().is_empty() {
+            ::core::result::Result::<(), ::suprnova::FrameworkError>::Err(
+                ::suprnova::FrameworkError::internal("Live-bound props require InertiaResponse::live with a loader")
+            )?;
+        }
+    }
 }
 
 /// Prefix the expansion with one `include_bytes!` per file the check read.
@@ -287,6 +485,33 @@ fn track_inputs(
     }}
 }
 
+/// Render the typed-props branch, including its optional Live metadata.
+fn render_typed_inertia_response(
+    input: &InertiaResponseInput,
+    props: &Expr,
+) -> proc_macro2::TokenStream {
+    let component = &input.component;
+    let request = &input.request;
+    let configure = match &input.config {
+        Some(config) => quote! { __response = __response.with_config(#config); },
+        None => quote! {},
+    };
+    let live_binding_probe = live_binding_probe(props);
+    quote! {{
+        let mut __response = ::suprnova::InertiaResponse::new(#component);
+        #configure
+        // Borrow through wrappers before the qualified conversion. A user's
+        // inherent apply_props must not take part in method lookup.
+        trait __SuprnovaInertiaPropsBorrow {
+            fn __suprnova_inertia_props_borrow(&self) -> &Self { self }
+        }
+        impl<T: ::suprnova::inertia::InertiaPageProps + ?Sized> __SuprnovaInertiaPropsBorrow for T {}
+        #live_binding_probe
+        ::suprnova::inertia::InertiaPageProps::apply_props(__props, __response)?
+            .resolve(#request).await.map_err(::core::convert::Into::into)
+    }}
+}
+
 /// Render the macro expansion proper - the value-expr, the match
 /// over the Object branch, and the trailing `resolve(...).await`.
 /// Split out of `inertia_response_inner` so unit tests can target
@@ -300,26 +525,7 @@ fn render_inertia_response_expansion(input: &InertiaResponseInput) -> proc_macro
     // Each JSON key becomes one eager prop so partial filtering sees its name.
     // Typed conversion preserves cacheable resolvers and propagates serialization errors.
     let value_expr = match &input.props {
-        PropsKind::Typed(props) => {
-            let configure = match &input.config {
-                Some(config) => quote! { __response = __response.with_config(#config); },
-                None => quote! {},
-            };
-            return quote! {{
-                let mut __response = ::suprnova::InertiaResponse::new(#component_lit);
-                #configure
-                // Borrow through wrappers before the qualified conversion. A user's
-                // inherent apply_props must not take part in method lookup.
-                trait __SuprnovaInertiaPropsBorrow {
-                    fn __suprnova_inertia_props_borrow(&self) -> &Self { self }
-                }
-                impl<T: ::suprnova::inertia::InertiaPageProps + ?Sized> __SuprnovaInertiaPropsBorrow for T {}
-                ::suprnova::inertia::InertiaPageProps::apply_props(
-                    (#props).__suprnova_inertia_props_borrow(), __response
-                )?
-                    .resolve(#request_expr).await.map_err(::core::convert::Into::into)
-            }};
-        }
+        PropsKind::Typed(props) => return render_typed_inertia_response(input, props),
         PropsKind::Json(tokens) => match json_object_tokens(tokens, &component_name) {
             Ok(object) => object,
             Err(error) => return error.to_compile_error(),

@@ -47,3 +47,6 @@ pub mod upload_providers;
 pub mod upload_routes;
 pub mod upload_security;
 pub mod view_contract;
+
+pub mod signal_fanout;
+pub mod signals;

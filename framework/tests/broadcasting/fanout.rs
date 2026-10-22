@@ -596,6 +596,166 @@ async fn redis_backend_cross_hub_fanout() {
     assert_eq!(envelope.data["from"], "hub_a");
 }
 
+#[tokio::test]
+#[ignore = "requires REDIS_BROADCAST_URL pointing at a running Redis"]
+async fn signal_005_redis_live_topics_share_cursor_and_coalescing() {
+    let url = match std::env::var("REDIS_BROADCAST_URL") {
+        Ok(url) if !url.is_empty() => url,
+        _ => return,
+    };
+    let stream_key = format!("suprnova-test-live-{}", uuid::Uuid::new_v4());
+    let hub_a = SeaStreamerBroadcastHub::new(&url, &stream_key)
+        .await
+        .expect("hub a Redis connect");
+    let hub_b = SeaStreamerBroadcastHub::new(&url, &stream_key)
+        .await
+        .expect("hub b Redis connect");
+    let mut receiver = hub_b
+        .subscribe_live_topic("dashboard")
+        .expect("Redis fanout hub supports live topics");
+    let interval = Duration::from_millis(120);
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    hub_a
+        .publish_live_topic("dashboard", &["seed".to_owned()], None, interval)
+        .await
+        .expect("first signal publishes atomically");
+    receiver.recv().await.expect("first signal arrives");
+
+    hub_a
+        .publish_live_topic(
+            "dashboard",
+            &["stats".to_owned()],
+            Some(suprnova::broadcasting::LiveTopicExclusion {
+                socket: "socket-a".to_owned(),
+                sender: suprnova::broadcasting::LiveTopicSender::Principal("alice".to_owned()),
+            }),
+            interval,
+        )
+        .await
+        .expect("first pending signal is accepted");
+    hub_b
+        .publish_live_topic(
+            "dashboard",
+            &["activity".to_owned()],
+            Some(suprnova::broadcasting::LiveTopicExclusion {
+                socket: "socket-b".to_owned(),
+                sender: suprnova::broadcasting::LiveTopicSender::Principal("alice".to_owned()),
+            }),
+            interval,
+        )
+        .await
+        .expect("second pending signal is accepted");
+
+    let envelope = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+        .await
+        .expect("coalesced Redis signal arrives")
+        .expect("signal channel remains open");
+    assert_eq!(envelope.except, None);
+    assert_eq!(
+        envelope.data,
+        json!({
+            "topic": "dashboard",
+            "generation": hub_b.live_topic_positions(&["dashboard".into()]).await.unwrap()[0].generation,
+            "cursor": 3,
+            "props": ["activity", "stats"]
+        })
+    );
+    assert_eq!(hub_a.live_topic_cursor("dashboard").await.unwrap(), 3);
+    assert_eq!(hub_b.live_topic_cursor("dashboard").await.unwrap(), 3);
+
+    let mut immediate_empty = hub_b
+        .subscribe_live_topic("empty.immediate")
+        .expect("Redis fanout hub supports an empty immediate signal");
+    hub_a
+        .publish_live_topic("empty.immediate", &[], None, interval)
+        .await
+        .expect("empty immediate signal is accepted");
+    let envelope = tokio::time::timeout(Duration::from_secs(5), immediate_empty.recv())
+        .await
+        .expect("empty immediate Redis signal arrives")
+        .expect("empty immediate signal channel remains open");
+    assert_eq!(
+        envelope.data,
+        json!({"topic": "empty.immediate", "generation": hub_b.live_topic_positions(&["empty.immediate".into()]).await.unwrap()[0].generation, "cursor": 1, "props": []})
+    );
+
+    let mut coalesced_empty = hub_b
+        .subscribe_live_topic("empty.coalesced")
+        .expect("Redis fanout hub supports an empty coalesced signal");
+    let bounded_interval = Duration::from_millis(500);
+    hub_a
+        .publish_live_topic(
+            "empty.coalesced",
+            &["seed".to_owned()],
+            None,
+            bounded_interval,
+        )
+        .await
+        .expect("coalesced-empty seed is accepted");
+    hub_a
+        .publish_live_topic(
+            "empty.coalesced",
+            &["stats".to_owned()],
+            None,
+            bounded_interval,
+        )
+        .await
+        .expect("named pending signal is accepted");
+    hub_a
+        .publish_live_topic("empty.coalesced", &[], None, bounded_interval)
+        .await
+        .expect("empty pending signal is accepted");
+    coalesced_empty
+        .recv()
+        .await
+        .expect("coalesced-empty seed arrives");
+    let envelope = tokio::time::timeout(Duration::from_secs(5), coalesced_empty.recv())
+        .await
+        .expect("empty coalesced Redis signal arrives")
+        .expect("empty coalesced signal channel remains open");
+    assert_eq!(
+        envelope.data,
+        json!({"topic": "empty.coalesced", "generation": hub_b.live_topic_positions(&["empty.coalesced".into()]).await.unwrap()[0].generation, "cursor": 3, "props": []})
+    );
+
+    let mut overflow = hub_b
+        .subscribe_live_topic("props.overflow")
+        .expect("Redis fanout hub supports bounded prop coalescing");
+    hub_a
+        .publish_live_topic(
+            "props.overflow",
+            &["seed".to_owned()],
+            None,
+            bounded_interval,
+        )
+        .await
+        .expect("overflow seed is accepted");
+    let first_props = (0..200)
+        .map(|index| format!("prop_{index:03}"))
+        .collect::<Vec<_>>();
+    let second_props = (200..300)
+        .map(|index| format!("prop_{index:03}"))
+        .collect::<Vec<_>>();
+    hub_a
+        .publish_live_topic("props.overflow", &first_props, None, bounded_interval)
+        .await
+        .expect("first bounded pending signal is accepted");
+    hub_a
+        .publish_live_topic("props.overflow", &second_props, None, bounded_interval)
+        .await
+        .expect("pending union beyond the bound is accepted as a full reload");
+    overflow.recv().await.expect("overflow seed arrives");
+    let envelope = tokio::time::timeout(Duration::from_secs(5), overflow.recv())
+        .await
+        .expect("bounded coalesced Redis signal arrives")
+        .expect("bounded coalesced signal channel remains open");
+    assert_eq!(
+        envelope.data,
+        json!({"topic": "props.overflow", "generation": hub_b.live_topic_positions(&["props.overflow".into()]).await.unwrap()[0].generation, "cursor": 3, "props": []})
+    );
+}
+
 /// Redis command failures are reported by the send receipt, after
 /// `SeaProducer::send` has accepted the message. Publishing must wait for
 /// that receipt instead of returning success for a failed `XADD`.
@@ -771,4 +931,385 @@ async fn redis_backend_reaches_a_tls_server_child() {
     let server = crate::redis_server::TlsRedis::start();
     crate::env_snapshot::set_env("SSL_CERT_FILE", Some(&server.ca.display().to_string()));
     cross_hub_round_trip(&format!("rediss://127.0.0.1:{}/0", server.port)).await;
+}
+
+#[tokio::test]
+async fn signal_fix_003_memory_fanout_preserves_owned_exclusions() {
+    let first = SeaStreamerBroadcastHub::new("memory://", "signal-owned-fanout")
+        .await
+        .unwrap();
+    let second = SeaStreamerBroadcastHub::new("memory://", "signal-owned-fanout")
+        .await
+        .unwrap();
+    owned_signal_fanout(&first, &second).await;
+}
+
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn signal_fix_003_redis_fanout_preserves_owned_exclusions() {
+    let server = crate::redis_server::PasswordRedis::start("signal-owned-test");
+    let url = format!("redis://:signal-owned-test@127.0.0.1:{}", server.port);
+    let stream = format!("signal-owned-{}", uuid::Uuid::new_v4());
+    let first = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    let second = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    owned_signal_fanout(&first, &second).await;
+}
+
+async fn owned_signal_fanout(first: &SeaStreamerBroadcastHub, second: &SeaStreamerBroadcastHub) {
+    use suprnova::broadcasting::{LiveTopicExclusion, LiveTopicSender, LiveTopicSignal};
+    let mut receiver = second.subscribe_live_topic("owned.42").unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let interval = Duration::from_millis(100);
+    for cursor in 1..=2 {
+        let owner = LiveTopicExclusion {
+            socket: "owned-document".into(),
+            sender: LiveTopicSender::Session("owned-session".into()),
+        };
+        first
+            .publish_live_topic("owned.42", &["stats".into()], Some(owner.clone()), interval)
+            .await
+            .unwrap();
+        let envelope = tokio::time::timeout(Duration::from_secs(3), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(envelope.except.as_deref(), Some("owned-document"));
+        let signal: LiveTopicSignal = serde_json::from_value(envelope.data).unwrap();
+        assert_eq!(signal.exclusion, Some(owner));
+        assert_eq!(signal.cursor, cursor);
+        let names = ["owned.42".into()];
+        let first_position = first.live_topic_positions(&names).await.unwrap()[0];
+        let second_position = second.live_topic_positions(&names).await.unwrap()[0];
+        assert_eq!(first_position, second_position);
+        assert_eq!(signal.generation, first_position.generation);
+        assert_eq!(
+            second
+                .live_topic_cursors(&["owned.42".into(), "owned.99".into()])
+                .await
+                .unwrap(),
+            [cursor, 0]
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn signal_fix2_001_redis_instance_ttl_is_refreshed_and_static_topics_do_not_expire() {
+    let server = crate::redis_server::PasswordRedis::start("signal-retention-test");
+    let url = format!("redis://:signal-retention-test@127.0.0.1:{}", server.port);
+    let stream = format!("signal-retention-{}", uuid::Uuid::new_v4());
+    let hub = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    hub.configure_live_topic_family("notes", Duration::from_secs(2))
+        .unwrap();
+    let mut connection = redis::Client::open(url)
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let identity = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("{stream}\0notes.42").as_bytes(),
+    );
+    let meta = format!("{stream}:__live:topic:{identity}");
+    let original_position = hub
+        .live_topic_positions(&["notes.42".into()])
+        .await
+        .unwrap()[0];
+    assert_eq!(original_position.cursor, 0);
+    let initial: i64 = redis::cmd("PTTL")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!((1500..=2000).contains(&initial), "baseline TTL: {initial}");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let older: i64 = redis::cmd("PTTL")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    hub.publish_live_topic(
+        "notes.42",
+        &["stats".into()],
+        None,
+        Duration::from_millis(10),
+    )
+    .await
+    .unwrap();
+    let published: i64 = redis::cmd("PTTL")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        published > older + 300 && published <= 2000,
+        "publication TTL: {older} -> {published}"
+    );
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        hub.live_topic_cursors(&["notes.42".into()]).await.unwrap(),
+        [1]
+    );
+    let baseline: i64 = redis::cmd("PTTL")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!(baseline > 1700, "bulk baseline TTL: {baseline}");
+    hub.publish_live_topic("static", &[], None, Duration::from_millis(1))
+        .await
+        .unwrap();
+    let static_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("{stream}\0static").as_bytes(),
+    );
+    let ttl: i64 = redis::cmd("PTTL")
+        .arg(format!("{stream}:__live:topic:{static_id}"))
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(ttl, -1);
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    let exists: bool = redis::cmd("EXISTS")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!(!exists, "Redis did not retire the instance hash");
+    let recreated = hub
+        .live_topic_positions(&["notes.42".into()])
+        .await
+        .unwrap()[0];
+    assert_eq!(recreated.cursor, 0);
+    assert!(recreated.generation > original_position.generation);
+    hub.publish_live_topic(
+        "notes.42",
+        &["stats".into()],
+        None,
+        Duration::from_millis(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(hub.live_topic_cursor("notes.42").await.unwrap(), 1);
+}
+
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn signal_fix3_002_pending_work_survives_a_worker_outage_past_retention() {
+    pending_outage(false).await;
+}
+
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn signal_fix3_002_missing_pending_hash_recovers_with_a_full_invalidation() {
+    pending_outage(true).await;
+}
+
+async fn pending_outage(remove_pending: bool) {
+    let server = crate::redis_server::PasswordRedis::start("signal-pending-test");
+    let url = format!("redis://:signal-pending-test@127.0.0.1:{}", server.port);
+    let stream = format!("signal-pending-{}", uuid::Uuid::new_v4());
+    let first = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    first
+        .configure_live_topic_family("notes", Duration::from_millis(200))
+        .unwrap();
+    first.pause_live_topic_flush_for_test().unwrap();
+    let mut receiver = first.subscribe_live_topic("notes.42").unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    first
+        .publish_live_topic(
+            "notes.42",
+            &["first".into()],
+            None,
+            Duration::from_millis(500),
+        )
+        .await
+        .unwrap();
+    first
+        .publish_live_topic(
+            "notes.42",
+            &["pending".into()],
+            None,
+            Duration::from_millis(500),
+        )
+        .await
+        .unwrap();
+    let mut connection = redis::Client::open(url.clone())
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let identity = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("{stream}\0notes.42").as_bytes(),
+    );
+    let meta = format!("{stream}:__live:topic:{identity}");
+    for key in [
+        &meta,
+        &format!("{meta}:pending"),
+        &format!("{meta}:props"),
+        &format!("{stream}:__live:schedule"),
+    ] {
+        let ttl: i64 = redis::cmd("PTTL")
+            .arg(key)
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(ttl, -1, "pending activity must not expire: {key}");
+    }
+    if remove_pending {
+        let _: i64 = redis::cmd("PERSIST")
+            .arg(&meta)
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+        let _: i64 = redis::cmd("PERSIST")
+            .arg(format!("{meta}:props"))
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+        let _: i64 = redis::cmd("DEL")
+            .arg(format!("{meta}:pending"))
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let _returning_worker = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    let signal = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let envelope = receiver.recv().await.unwrap();
+            if envelope.data["cursor"] == 2 {
+                break envelope.data;
+            }
+        }
+    })
+    .await
+    .expect("accepted pending signal vanished while workers were absent");
+    assert_eq!(
+        signal["props"],
+        if remove_pending {
+            json!([])
+        } else {
+            json!(["pending"])
+        }
+    );
+    assert!(
+        signal["generation"]
+            .as_u64()
+            .is_some_and(|generation| generation > 0)
+    );
+    let idle_ttl: i64 = redis::cmd("PTTL")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        (0..=200).contains(&idle_ttl),
+        "flush must restore idle expiry: {idle_ttl}"
+    );
+    let pending_ttl: i64 = redis::cmd("PTTL")
+        .arg(format!("{meta}:pending"))
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(pending_ttl, -2, "successful flush removes its durable work");
+}
+
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn signal_fix4_001_redis_allocates_distinct_generations_from_one_time_read() {
+    let server = crate::redis_server::PasswordRedis::start("signal-allocation-test");
+    let url = format!("redis://:signal-allocation-test@127.0.0.1:{}", server.port);
+    let stream = format!("signal-allocation-{}", uuid::Uuid::new_v4());
+    let first = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    let second = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    for hub in [&first, &second] {
+        hub.configure_live_topic_family("allocation", Duration::from_secs(60))
+            .unwrap();
+    }
+    let names = [
+        "allocation.first".into(),
+        "allocation.second".into(),
+        "static.first".into(),
+        "static.second".into(),
+    ];
+    let positions = first.live_topic_positions(&names).await.unwrap();
+    for pair in positions.windows(2) {
+        assert!(
+            pair[1].generation > pair[0].generation,
+            "one Redis TIME read must allocate unique lifetimes: {positions:?}"
+        );
+    }
+    assert_eq!(
+        second.live_topic_positions(&names).await.unwrap(),
+        positions
+    );
+    let mut connection = redis::Client::open(url)
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let key = format!("{stream}:__live:generation");
+    let last: u64 = redis::cmd("GET")
+        .arg(&key)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(last, positions[3].generation);
+    let ttl: i64 = redis::cmd("PTTL")
+        .arg(&key)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        ttl, -1,
+        "the authority allocation counter must survive instance retirement"
+    );
+    let future = suprnova_live::canonical::MAX_SAFE_INTEGER - 8;
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(future)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    let after_rollback = second
+        .live_topic_positions(&["allocation.rollback".into()])
+        .await
+        .unwrap()[0];
+    assert!(
+        after_rollback.generation > future,
+        "a clock below the persisted allocation must still advance it"
+    );
+    let mut signals = first.subscribe_live_topic("allocation.wire").unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for prop in ["immediate", "pending"] {
+        second
+            .publish_live_topic(
+                "allocation.wire",
+                &[prop.into()],
+                None,
+                Duration::from_millis(500),
+            )
+            .await
+            .unwrap();
+    }
+    let position = second
+        .live_topic_positions(&["allocation.wire".into()])
+        .await
+        .unwrap()[0];
+    assert_eq!(position.generation, future + 2);
+    for cursor in 1..=2 {
+        let signal = tokio::time::timeout(Duration::from_secs(3), signals.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(signal.data["cursor"], cursor);
+        assert_eq!(
+            signal.data["generation"].as_u64(),
+            Some(position.generation),
+            "generation must survive JSON encoding exactly: {}",
+            signal.data
+        );
+    }
 }

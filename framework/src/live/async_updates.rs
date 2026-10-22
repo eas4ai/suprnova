@@ -210,6 +210,10 @@ impl AsyncErrorKind {
 #[derive(Clone, Debug)]
 pub(crate) enum StreamPayloadSpec {
     Refresh,
+    TopicChange {
+        signal: crate::broadcasting::LiveTopicSignal,
+        except: Option<String>,
+    },
     BrowserEvent {
         name: String,
         version: u16,
@@ -301,6 +305,10 @@ impl super::replay::RetainedBytes for AsyncEnvelope {
                 .len()
                 .saturating_add(signal.scope().as_str().len())
                 .saturating_add(super::replay::canonical_heap_bytes(signal.value())),
+            AsyncPayload::TopicChange(signal) => signal
+                .topic()
+                .len()
+                .saturating_add(signal.props().iter().map(String::len).sum::<usize>()),
             AsyncPayload::Refresh(_)
             | AsyncPayload::Heartbeat(_)
             | AsyncPayload::Complete(_)
@@ -433,8 +441,7 @@ fn release_reservation(tables: &mut AsyncTables, scope: &str) {
 struct DeliveryCandidate {
     id: String,
     principal: Option<String>,
-    ability: String,
-    resource: String,
+    authority: super::ports::subscription::SubscriptionAuthority,
     transport: TransportKey,
     socket: bool,
     member: bool,
@@ -444,16 +451,15 @@ struct DeliveryCandidate {
 }
 
 impl DeliveryCandidate {
-    fn new(id: &str, record: &IssuedRecord, now: UnixMillis) -> Self {
-        let (ability, resource) =
-            super::ports::subscription::stream_ability(&record.component, &record.stream);
+    fn new(id: &str, record: &IssuedRecord, now: UnixMillis, topic: Option<&str>) -> Self {
         let stale = now.get().saturating_sub(record.session_verified_at.get())
             >= SESSION_REVERIFY_INTERVAL_MS;
         Self {
             id: id.to_owned(),
             principal: record.principal.clone(),
-            ability,
-            resource,
+            authority: record
+                .authority
+                .for_topic(&record.component, &record.stream, topic),
             transport: record.transport.clone(),
             socket: record.kind == TransportKind::WebSocket,
             member: record.membership.is_some(),
@@ -463,6 +469,8 @@ impl DeliveryCandidate {
 }
 
 pub(crate) struct IssuedRecord {
+    /// Sender identity survives a WebSocket's replacement of the physical transport key.
+    document_instance: String,
     subscription: SubscriptionId,
     pub(crate) descriptor: SubscriptionDescriptor,
     pub(crate) binding: SubscriptionBinding,
@@ -471,9 +479,12 @@ pub(crate) struct IssuedRecord {
     authorized: Arc<AuthorizedSubscription>,
     /// The principal the subscription was issued to, re-authorized against
     /// the stream's Gate before every delivery (LIVE-016). `None` when no
-    /// principal was signed in at issuance, which the subscription port
-    /// already denies.
+    /// principal was signed in at issuance. Only explicit public topics
+    /// allow that membership, so reconnect never invents a principal.
     principal: Option<String>,
+    authority: super::ports::subscription::SubscriptionAuthority,
+    /// Page bindings reload through their own controller and never receive model event data.
+    topic_binding: bool,
     /// The session the subscription was issued under, so destroying that
     /// session on this node retires the membership (LIVE-019).
     session: Option<SessionFingerprint>,
@@ -610,6 +621,7 @@ pub(crate) struct AsyncState {
     signals: BoundedPresentationSignalContracts,
     limits: AsyncLimits,
     replay_budget: Arc<SubscriptionReplayBudget>,
+    pub(crate) topics: super::topics::TopicState,
 }
 
 impl AsyncState {
@@ -618,10 +630,11 @@ impl AsyncState {
         clock: Arc<dyn Clock>,
         engine_registry: Arc<ComponentRegistry>,
         limits: AsyncLimits,
+        topics: super::topics::TopicState,
     ) -> Result<Arc<Self>, FrameworkError> {
         let signals = BoundedPresentationSignalContracts::new(Vec::new())
             .map_err(|_| FrameworkError::internal("Live async signal contracts were rejected"))?;
-        Ok(Arc::new_cyclic(|weak: &Weak<Self>| Self {
+        let state = Arc::new_cyclic(|weak: &Weak<Self>| Self {
             tables: Mutex::new(AsyncTables::default()),
             constructing: Mutex::new(HashMap::new()),
             service: SubscriptionService::new(keys),
@@ -634,7 +647,10 @@ impl AsyncState {
             signals,
             limits,
             replay_budget: Arc::new(SubscriptionReplayBudget::new(limits.replay_budget_bytes)),
-        }))
+            topics,
+        });
+        state.topics.start()?;
+        Ok(state)
     }
 
     /// The configured transport limit a new transport would go over: the
@@ -678,6 +694,7 @@ impl AsyncState {
         for id in expired {
             remove_issued(tables, &id);
         }
+        self.topics.retain_listeners(&tables.topics);
         let stale = tables
             .transports
             .iter()
@@ -697,6 +714,13 @@ impl AsyncState {
             {
                 tables.credentials.remove(&credential);
             }
+        }
+    }
+
+    pub(crate) fn prune_topics(&self) {
+        match self.now() {
+            Ok(now) => self.prune(&mut self.tables(), now),
+            Err(error) => tracing::error!(?error, "Live topic expiry clock is unavailable"),
         }
     }
 
@@ -805,6 +829,8 @@ impl AsyncState {
             .iter()
             .map(|topic| topic.as_str().to_owned())
             .collect::<Vec<_>>();
+        let (topics, authority, topic_binding) =
+            self.issued_topics(context, &component, &stream, topics);
         let binding = authorized.binding().clone();
         let binding_text = binding.to_base64url();
         let descriptor = issued.descriptor().clone();
@@ -820,123 +846,243 @@ impl AsyncState {
             self.limits.max_replay_events,
             Arc::clone(&self.replay_budget),
         )));
-        let mut guard = self.tables();
-        let tables = &mut *guard;
-        let transports_in_scope = tables
-            .transports
-            .values()
-            .filter(|transport| transport.scope == document_scope)
-            .count();
-        let credential = if let Some(transport) = tables.transports.get_mut(&transport_key) {
-            if transport.credential_expires_at <= now
-                && let Some(stale) = transport.credential.take()
-            {
-                tables.credentials.remove(&stale);
+        let view = {
+            let mut guard = self.tables();
+            let tables = &mut *guard;
+            let transports_in_scope = tables
+                .transports
+                .values()
+                .filter(|transport| transport.scope == document_scope)
+                .count();
+            let credential = if let Some(transport) = tables.transports.get_mut(&transport_key) {
+                if transport.credential_expires_at <= now
+                    && let Some(stale) = transport.credential.take()
+                {
+                    tables.credentials.remove(&stale);
+                }
+                if kind == TransportKind::Sse && transport.credential.is_none() {
+                    let minted = mint_credential();
+                    tables
+                        .credentials
+                        .insert(minted.clone(), transport_key.clone());
+                    transport.credential = Some(minted);
+                }
+                transport.credential_expires_at = transport.credential_expires_at.max(expires_at);
+                transport.credential.clone()
+            } else {
+                if let Some(limit) =
+                    self.transport_limit(transports_in_scope, tables.transports.len())
+                {
+                    tracing::warn!(limit = %limit, "Live async transport was refused");
+                    return Err(AsyncErrorKind::TransportLimit);
+                }
+                let credential = (kind == TransportKind::Sse).then(mint_credential);
+                if let Some(credential) = &credential {
+                    tables
+                        .credentials
+                        .insert(credential.clone(), transport_key.clone());
+                }
+                tables.transports.insert(
+                    transport_key.clone(),
+                    TransportRecord {
+                        kind,
+                        scope: document_scope.clone(),
+                        origin: origin.clone(),
+                        credential: credential.clone(),
+                        credential_expires_at: expires_at,
+                        handle: DocumentTransportHandle::from_bytes(&random_bytes(16))
+                            .map_err(|_| AsyncErrorKind::Unavailable)?,
+                        document: Arc::new(tokio::sync::Mutex::new(None)),
+                        retained_events: 0,
+                        retained_bytes: 0,
+                        degraded: false,
+                        generation: 0,
+                        reader_active: false,
+                        outbound: None,
+                        wake: Arc::new(Notify::new()),
+                        closed: Arc::new(Notify::new()),
+                        used_nonces: VecDeque::new(),
+                        memberships: BTreeSet::new(),
+                        controls_used: 0,
+                        coalesced: 0,
+                        degraded_lanes: 0,
+                    },
+                );
+                credential
+            };
+            let component_topic = format!("{}::{}", component.as_str(), stream.as_str());
+            for topic in &topics {
+                if (topic == &component_topic
+                    || self.topics.registry.application_topic(topic).is_some())
+                    && let Err(error) = self.topics.listen(self, topic)
+                {
+                    self.topics.retain_listeners(&tables.topics);
+                    tracing::error!(%error, topic, "Live topic listener issuance failed");
+                    return Err(AsyncErrorKind::Unavailable);
+                }
             }
-            if kind == TransportKind::Sse && transport.credential.is_none() {
-                let minted = mint_credential();
+            for topic in &topics {
                 tables
-                    .credentials
-                    .insert(minted.clone(), transport_key.clone());
-                transport.credential = Some(minted);
+                    .topics
+                    .entry(topic.clone())
+                    .or_default()
+                    .insert(id.clone());
             }
-            transport.credential_expires_at = transport.credential_expires_at.max(expires_at);
-            transport.credential.clone()
-        } else {
-            if let Some(limit) = self.transport_limit(transports_in_scope, tables.transports.len())
-            {
-                tracing::warn!(limit = %limit, "Live async transport was refused");
-                return Err(AsyncErrorKind::TransportLimit);
-            }
-            let credential = (kind == TransportKind::Sse).then(mint_credential);
-            if let Some(credential) = &credential {
-                tables
-                    .credentials
-                    .insert(credential.clone(), transport_key.clone());
-            }
-            tables.transports.insert(
-                transport_key.clone(),
-                TransportRecord {
+            let view = IssuedView::new(
+                &id,
+                &binding_text,
+                credential,
+                kind,
+                &document_scope,
+                &origin,
+                baseline,
+                expires_at,
+                claims,
+                Vec::new(),
+                "authoritative_no_tail",
+            );
+            reservation.consume(tables);
+            tables.issued.insert(
+                id.clone(),
+                IssuedRecord {
+                    document_instance: document_instance.to_owned(),
+                    subscription,
+                    descriptor,
+                    binding,
+                    binding_text,
+                    previous_binding: None,
+                    authorized: Arc::new(authorized),
+                    principal: (!principal.is_empty()).then_some(principal),
+                    authority,
+                    topic_binding,
+                    session: context.host_scope_facts().session().cloned(),
+                    session_id: session_id
+                        .filter(|candidate| crate::session::is_valid_session_id(candidate)),
+                    session_verified_at: now,
+                    context: Some(envelope_context),
+                    component,
+                    contract,
+                    stream,
+                    parameters,
+                    document_scope,
                     kind,
-                    scope: document_scope.clone(),
-                    origin: origin.clone(),
-                    credential: credential.clone(),
-                    credential_expires_at: expires_at,
-                    handle: DocumentTransportHandle::from_bytes(&random_bytes(16))
-                        .map_err(|_| AsyncErrorKind::Unavailable)?,
-                    document: Arc::new(tokio::sync::Mutex::new(None)),
-                    retained_events: 0,
-                    retained_bytes: 0,
-                    degraded: false,
-                    generation: 0,
-                    reader_active: false,
-                    outbound: None,
-                    wake: Arc::new(Notify::new()),
-                    closed: Arc::new(Notify::new()),
-                    used_nonces: VecDeque::new(),
-                    memberships: BTreeSet::new(),
-                    controls_used: 0,
-                    coalesced: 0,
-                    degraded_lanes: 0,
+                    transport: transport_key,
+                    modes,
+                    topics,
+                    log,
+                    delivery_cursor: Arc::new(AtomicU64::new(1)),
+                    resume_position: 0,
+                    expires_at,
+                    membership: None,
+                    control_in_flight: false,
+                    transport_wake: None,
                 },
             );
-            credential
+            view
         };
-        for topic in &topics {
-            tables
-                .topics
-                .entry(topic.clone())
-                .or_default()
-                .insert(id.clone());
-        }
-        let view = IssuedView::new(
-            &id,
-            &binding_text,
-            credential,
-            kind,
-            &document_scope,
-            &origin,
-            baseline,
-            expires_at,
-            claims,
-            Vec::new(),
-            "authoritative_no_tail",
-        );
-        reservation.consume(tables);
-        tables.issued.insert(
-            id.clone(),
-            IssuedRecord {
-                subscription,
-                descriptor,
-                binding,
-                binding_text,
-                previous_binding: None,
-                authorized: Arc::new(authorized),
-                principal: Some(principal),
-                session: context.host_scope_facts().session().cloned(),
-                session_id: session_id
-                    .filter(|candidate| crate::session::is_valid_session_id(candidate)),
-                session_verified_at: now,
-                context: Some(envelope_context),
-                component,
-                contract,
-                stream,
-                parameters,
-                document_scope,
-                kind,
-                transport: transport_key,
-                modes,
-                topics,
-                log,
-                delivery_cursor: Arc::new(AtomicU64::new(1)),
-                resume_position: 0,
-                expires_at,
-                membership: None,
-                control_in_flight: false,
-                transport_wake: None,
-            },
-        );
+        self.seed_topic_positions(&id).await?;
         Ok(view)
+    }
+
+    fn issued_topics(
+        &self,
+        context: &TrustedLiveRequestContext,
+        component: &ComponentName,
+        stream: &StreamName,
+        mut topics: Vec<String>,
+    ) -> (
+        Vec<String>,
+        super::ports::subscription::SubscriptionAuthority,
+        bool,
+    ) {
+        let topic_binding = context.mount().slot().as_str() == "topic"
+            && context.mount().document_key().as_str() == "topic";
+        let application_topic = self
+            .topics
+            .registry
+            .topic_for_component(component)
+            .is_some();
+        let authority = if topic_binding && !application_topic {
+            // A page port accepts only the topic whose cursor its controller rendered.
+            topics.clear();
+            super::ports::subscription::SubscriptionAuthority::component_stream(component, stream)
+        } else {
+            super::ports::subscription::SubscriptionAuthority::registered(
+                &self.topics.registry,
+                component,
+                stream,
+                topics.clone(),
+            )
+        };
+        if !application_topic {
+            topics.push(format!("{}::{}", component.as_str(), stream.as_str()));
+        }
+        topics.sort();
+        topics.dedup();
+        (topics, authority, topic_binding)
+    }
+
+    async fn seed_topic_positions(self: &Arc<Self>, id: &str) -> Result<(), AsyncErrorKind> {
+        // A write between render and issuance is restored from topic authority,
+        // through this membership's ordinary bounded log.
+        let seed_topics = {
+            let tables = self.tables();
+            tables
+                .issued
+                .get(id)
+                .map(|record| {
+                    let alias =
+                        format!("{}::{}", record.component.as_str(), record.stream.as_str());
+                    record
+                        .topics
+                        .iter()
+                        .filter(|topic| {
+                            *topic == &alias
+                                || self.topics.registry.application_topic(topic).is_some()
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        for topic in seed_topics {
+            // Unbound legacy aliases keep their existing initial stream contract.
+            let seed_zero = self.topics.registry.application_topic(&topic).is_some()
+                || self
+                    .tables()
+                    .issued
+                    .get(id)
+                    .is_some_and(|record| record.topic_binding);
+            let cursor = self
+                .topics
+                .hub
+                .live_topic_positions(&[topic.clone()])
+                .await
+                .map_err(|_| AsyncErrorKind::Unavailable)?;
+            if let Some(position) = cursor
+                .first()
+                .filter(|position| position.cursor > 0 || seed_zero)
+            {
+                let signal = crate::broadcasting::LiveTopicSignal {
+                    topic: topic.clone(),
+                    cursor: position.cursor,
+                    generation: position.generation,
+                    props: Vec::new(),
+                    exclusion: None,
+                };
+                self.publish_selected(
+                    &topic,
+                    &StreamPayloadSpec::TopicChange {
+                        signal,
+                        except: None,
+                    },
+                    Some(id),
+                )
+                .await
+                .map_err(|_| AsyncErrorKind::Unavailable)?;
+            }
+        }
+        Ok(())
     }
 
     /// Renews one existing subscription from its browser-observed position.
@@ -1346,6 +1492,31 @@ impl AsyncState {
         Ok(())
     }
 
+    /// Keeps anonymous admission tied to the principal on the issued membership.
+    pub(crate) fn anonymous_membership(&self, subscription_id: &str) -> bool {
+        self.tables()
+            .issued
+            .get(subscription_id)
+            .is_some_and(|record| record.principal.is_none())
+    }
+
+    /// A signed-in document's credential does not become anonymous after logout.
+    pub(crate) fn anonymous_transport(&self, key: &TransportKey) -> bool {
+        let tables = self.tables();
+        let mut found = false;
+        for record in tables
+            .issued
+            .values()
+            .filter(|record| record.transport == *key)
+        {
+            found = true;
+            if record.principal.is_some() {
+                return false;
+            }
+        }
+        found
+    }
+
     /// Adds one exact logical membership to a transport through the engine pipeline.
     pub(crate) async fn add_membership(
         self: &Arc<Self>,
@@ -1649,6 +1820,15 @@ impl AsyncState {
         topic: &str,
         spec: &StreamPayloadSpec,
     ) -> Result<(), PublishError> {
+        self.publish_selected(topic, spec, None).await
+    }
+
+    async fn publish_selected(
+        self: &Arc<Self>,
+        topic: &str,
+        spec: &StreamPayloadSpec,
+        only_membership: Option<&str>,
+    ) -> Result<(), PublishError> {
         TopicName::parse(topic).map_err(|_| PublishError::InvalidTopic)?;
         let now = self.now().map_err(|_| PublishError::InvalidPayload)?;
         let candidates = {
@@ -1659,8 +1839,31 @@ impl AsyncState {
             };
             ids.into_iter()
                 .filter_map(|id| {
+                    if only_membership.is_some_and(|target| target != id.as_str()) {
+                        return None;
+                    }
                     let record = tables.issued.get(&id)?;
-                    Some(DeliveryCandidate::new(&id, record, now))
+                    if let StreamPayloadSpec::TopicChange {
+                        signal,
+                        except: Some(socket),
+                    } = spec
+                        && let Some(exclusion) = &signal.exclusion
+                        && exclusion.socket == *socket
+                        && record.document_instance == *socket
+                    {
+                        let owns_document = match &exclusion.sender {
+                            crate::broadcasting::LiveTopicSender::Session(id) => {
+                                record.session_id.as_ref() == Some(id)
+                            }
+                            crate::broadcasting::LiveTopicSender::Principal(id) => {
+                                record.principal.as_ref() == Some(id)
+                            }
+                        };
+                        if owns_document {
+                            return None;
+                        }
+                    }
+                    Some(DeliveryCandidate::new(&id, record, now, Some(topic)))
                 })
                 .collect::<Vec<_>>()
         };
@@ -1675,17 +1878,10 @@ impl AsyncState {
                 _ => true,
             };
             let permitted = session_holds
-                && match &candidate.principal {
-                    Some(principal) => {
-                        crate::authorization::Gate::allows_async(
-                            &candidate.ability,
-                            principal,
-                            &candidate.resource,
-                        )
-                        .await
-                    }
-                    None => false,
-                };
+                && candidate
+                    .authority
+                    .allows(candidate.principal.as_deref())
+                    .await;
             if permitted {
                 allowed.push(candidate.id);
             } else {
@@ -1700,11 +1896,24 @@ impl AsyncState {
             let Some(record) = tables.issued.get(&id) else {
                 continue;
             };
+            if record.topic_binding && matches!(spec, StreamPayloadSpec::BrowserEvent { .. }) {
+                continue;
+            }
             let Some(context) = record.context() else {
                 continue;
             };
             let payload = match spec {
                 StreamPayloadSpec::Refresh => AsyncPayload::Refresh(RegisteredRefresh),
+                StreamPayloadSpec::TopicChange { signal, .. } => {
+                    let change = suprnova_live::async_updates::RegisteredTopicChange::new(
+                        signal.topic.clone(),
+                        signal.generation,
+                        signal.cursor,
+                        signal.props.clone(),
+                    )
+                    .map_err(|_| PublishError::InvalidPayload)?;
+                    AsyncPayload::TopicChange(change)
+                }
                 StreamPayloadSpec::BrowserEvent {
                     name,
                     version,
@@ -1830,7 +2039,7 @@ impl AsyncState {
                 .issued
                 .iter()
                 .filter(|(_, record)| matches(record))
-                .map(|(id, record)| DeliveryCandidate::new(id, record, now))
+                .map(|(id, record)| DeliveryCandidate::new(id, record, now, None))
                 .collect::<Vec<_>>()
         };
         for candidate in revoked {

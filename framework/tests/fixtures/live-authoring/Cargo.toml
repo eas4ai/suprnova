@@ -28,3 +28,7 @@ path = "compile-fail/invalid_view_attribute.rs"
 [[bin]]
 name = "windows-path-traversal"
 path = "compile-fail/windows_path_traversal.rs"
+
+[[bin]]
+name = "simulated-topic-authority"
+path = "compile-fail/simulated_topic_authority.rs"

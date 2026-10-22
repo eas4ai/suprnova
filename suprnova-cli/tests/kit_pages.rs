@@ -244,6 +244,128 @@ fn both_offer_more_before_cap_and_stop_at_exhaustion() {
     }
 
     #[test]
+    fn signal_004_inertia_kits_ship_one_live_core_and_framework_lifecycle_adapters() {
+        let core = include_str!("../src/templates/files/frontend/live/core.ts.tpl");
+        each_kit(|app| {
+            let root = app.read("templates/app.html");
+            for present in [
+                r#"<meta name="suprnova-live-root" content="{{ suprnova::url::root() }}" />"#,
+                r#""live_async_url"|value::<String>"#,
+                r#""live_async_sri"|value::<String>"#,
+                r#"<script type="module" src="{{ suprnova::url::root() }}{{ url }}" integrity="{{ sri }}" crossorigin="anonymous" nonce="{{ nonce }}"></script>"#,
+                r#"<script type="module" src="{{ suprnova::url::root() }}{{ url }}" integrity="{{ sri }}" crossorigin="anonymous"></script>"#,
+            ] {
+                assert!(
+                    root.contains(present),
+                    "{} root template lacks {present}:\n{root}",
+                    app.kit
+                );
+            }
+            assert!(
+                root.find("live_async_url").unwrap() < root.find("{{ head }}").unwrap(),
+                "{} loads the live async module after the Inertia head:\n{root}",
+                app.kit
+            );
+
+            assert_eq!(
+                app.read("frontend/src/lib/live/core.ts"),
+                core,
+                "{}: live core.ts",
+                app.kit
+            );
+            for present in [
+                "const value = page.liveBindings",
+                "baseline?.generation === position.generation",
+                "position.cursor <= baseline.cursor",
+                "position.generation !== binding.generation",
+                "[...entry.props.keys()]",
+                "options.router.on(\"before\"",
+                "router.reload({",
+                "only,",
+                "headers[\"X-Socket-ID\"] = transport.documentInstance",
+                "transport?.close()",
+            ] {
+                assert!(core.contains(present), "shared live core lacks {present}");
+            }
+
+            let adapter_path = match app.kit {
+                "svelte" => "frontend/src/lib/live/index.svelte.ts",
+                _ => "frontend/src/lib/live/index.ts",
+            };
+            let adapter = app.read(adapter_path);
+            for present in ["browserLiveTransport()", "startInertiaLive({"] {
+                assert!(
+                    adapter.contains(present),
+                    "{} live adapter lacks {present}:\n{adapter}",
+                    app.kit
+                );
+            }
+            let cleanup = if app.kit == "vue" {
+                "connection?.close()"
+            } else {
+                "connection.close"
+            };
+            assert!(adapter.contains(cleanup), "{} lacks live cleanup", app.kit);
+            if app.kit == "svelte" {
+                for present in [
+                    "$state<InertiaLiveState>",
+                    "$effect(() =>",
+                    "untrack(() =>",
+                    "get connected()",
+                    "get status()",
+                ] {
+                    assert!(
+                        adapter.contains(present),
+                        "svelte live adapter lacks {present}:\n{adapter}"
+                    );
+                }
+                assert!(
+                    !app.path("frontend/src/lib/live/index.ts").exists(),
+                    "svelte live adapter must use a .svelte.ts module"
+                );
+            }
+            let backend = app.read("src/controllers/dashboard.rs");
+            for present in [
+                "InertiaResponse::live::<DashboardProps>",
+                ".scope(\"notes\", user_id)",
+                ".load_with(",
+            ] {
+                assert!(
+                    backend.contains(present),
+                    "{} dashboard lacks {present}",
+                    app.kit
+                );
+            }
+            let bootstrap = app.read("src/bootstrap.rs");
+            assert!(bootstrap.contains("on_model_scoped::<crate::models::note::Note>"));
+            assert!(bootstrap.contains("instance == &format!(\"notes.{principal}\")"));
+            assert!(
+                app.read("src/live/mod.rs")
+                    .contains(".topic_family(\"notes\")?")
+            );
+            let dashboard = match app.kit {
+                "react" => app.read("frontend/src/pages/Dashboard.tsx"),
+                "svelte" => app.read("frontend/src/pages/Dashboard.svelte"),
+                "vue" => app.read("frontend/src/pages/Dashboard.vue"),
+                _ => unreachable!(),
+            };
+            for present in ["useLive()", "usePoll(10000, { only: ['stats'] })"] {
+                assert!(
+                    dashboard.contains(present),
+                    "{} dashboard lacks {present}:\n{dashboard}",
+                    app.kit
+                );
+            }
+            if app.kit == "svelte" {
+                assert!(
+                    dashboard.contains("from '../lib/live/index.svelte'"),
+                    "svelte dashboard must import the rune module explicitly:\n{dashboard}"
+                );
+            }
+        });
+    }
+
+    #[test]
     fn inertia_kit_pages_render_plain_english() {
         for (kit, ext, heading) in [
             ("react", "tsx", "Welcome to {title}"),
@@ -575,7 +697,9 @@ fn both_offer_more_before_cap_and_stop_at_exhaustion() {
             let dashboard = app.read("src/controllers/dashboard.rs");
             let index = function(&dashboard, "index");
             for needle in [
-                r#"InertiaResponse::new("Dashboard")"#,
+                r#"InertiaResponse::live::<DashboardProps>("Dashboard")"#,
+                r#".scope("notes", user_id)"#,
+                ".load_with(move |response| async move",
                 r#".defer("stats", "#,
                 r#".optional("recent_notes", "#,
             ] {
@@ -591,7 +715,7 @@ fn both_offer_more_before_cap_and_stop_at_exhaustion() {
                 app.kit
             );
             for needle in [
-                "#[derive(InertiaProps)]\npub struct DashboardProps {",
+                "#[derive(InertiaProps)]\n#[inertia(live(topic = \"notes\", only = [\"stats\"]))]\npub struct DashboardProps {",
                 "pub stats: Stats,",
                 "pub recent_notes: Vec<NoteSummary>,",
                 "#[derive(InertiaProps)]\npub struct Stats {",
@@ -1088,9 +1212,14 @@ fn both_offer_more_before_cap_and_stop_at_exhaustion() {
             assert!(!pages.trim().is_empty());
             for page in pages.lines() {
                 let component = page.trim().split(": ").next().unwrap();
+                let live = if component == "\"Dashboard\"" {
+                    "{ \"notes\": [\"stats\"] }"
+                } else {
+                    "{}"
+                };
                 assert!(
                     record.contains(&format!(
-                        "  {component}: {{ cacheable: false, public: [], perRequest: [] }},"
+                        "  {component}: {{ cacheable: false, public: [], perRequest: [], live: {live} }},"
                     )),
                     "{}: no boundary record for {component}",
                     app.kit
@@ -1133,7 +1262,7 @@ fn both_offer_more_before_cap_and_stop_at_exhaustion() {
                 "export interface SharedProps {\n  root: string;\n  auth: Auth;\n}",
                 "export interface Auth {\n  user: UserInfo | null;\n}",
                 "export interface UserInfo {\n  id: number;\n  name: string;\n  email: string;\n}",
-                "export interface DashboardProps {\n  stats: Stats;\n  recent_notes: Array<NoteSummary>;\n}",
+                "export interface DashboardProps {\n  stats?: Stats;\n  recent_notes?: Array<NoteSummary>;\n}",
                 "export interface Stats {\n  notes: number;\n  written_today: number;\n}",
                 "export interface NoteSummary {\n  id: number;\n  title: string;\n  created_at: string;\n  highlight: NoteHighlight | null;\n}",
                 "export interface NotesIndexProps {\n  notes: Array<NoteSummary>;\n  search: string;\n}",
@@ -1627,6 +1756,7 @@ mod svelte {
             "{#snippet fallback()}",
             "<WhenVisible data=\"recent_notes\">",
             "usePoll(10000, { only: ['stats'] })",
+            "useLive()",
             "useHttp(",
             "`${root}/profile/name`",
             "page.props.auth.user",
@@ -2142,6 +2272,7 @@ mod react {
             "<Deferred data=\"stats\" fallback=",
             "<WhenVisible data=\"recent_notes\" fallback=",
             "usePoll(10000, { only: ['stats'] })",
+            "useLive()",
             "useHttp<",
             ".optimistic(",
             ".post(`${root}/profile/name`",
@@ -2644,6 +2775,7 @@ mod vue {
             "<WhenVisible data=\"recent_notes\"",
             "<template #fallback>",
             "usePoll(10000, { only: ['stats'] })",
+            "useLive()",
             "useHttp",
             ".optimistic(",
             "`${root}/profile/name`",
@@ -2737,7 +2869,7 @@ mod vue {
             "export interface SharedData {\n  auth: Auth;\n}\n",
             "export interface Auth {\n  user: UserInfo | null;\n}\n",
             "export interface SharedProps {\n  root: string;\n  auth: Auth;\n}\n",
-            "export interface DashboardProps {\n  stats: Stats;\n  recent_notes: Array<NoteSummary>;\n}\n",
+            "export interface DashboardProps {\n  stats?: Stats;\n  recent_notes?: Array<NoteSummary>;\n}\n",
             "export interface NotesIndexProps {\n  notes: Array<NoteSummary>;\n  search: string;\n}\n",
             "export interface NotesShowProps {\n  note: NoteView;\n}\n",
             "export interface NoteSummary {",

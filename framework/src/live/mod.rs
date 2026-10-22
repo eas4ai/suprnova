@@ -39,6 +39,8 @@ pub(crate) use runtime::LiveMountRegistration;
 // module (`render_cache`) rather than only from within `live` itself.
 pub(crate) use runtime::build_key_ring;
 mod streams;
+pub(crate) mod topics;
+pub use topics::LiveTopics;
 mod tenant;
 mod upload;
 mod upload_host;

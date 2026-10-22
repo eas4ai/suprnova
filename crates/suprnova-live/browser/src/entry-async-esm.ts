@@ -1,7 +1,17 @@
 import { registerRuntimeFeature } from "./features/producer.js";
 import { asyncFeature } from "./async-updates/feature.js";
+import { browserAsyncOptions } from "./async-updates/browser-host.js";
+import { subscribeTopics } from "./async-updates/topics.js";
 
 export { asyncFeature };
+export { subscribeTopics };
+export type {
+  TopicChangeSignal,
+  TopicSubscription,
+  TopicSubscriptionBinding,
+  TopicSubscriptionBindings,
+  TopicSubscriptionCallbacks,
+} from "./async-updates/topics.js";
 export { AsyncDocumentOwner, configureAsync, createAsyncFeature } from "./async-updates/feature.js";
 export {
   BrowserAsyncAuthority,
@@ -40,5 +50,13 @@ export type {
 } from "./async-updates/types.js";
 export type { PollEnvironment, PollPolicy, PollStatus } from "./async-updates/poll.js";
 export const asyncRegistration = registerRuntimeFeature(globalThis, asyncFeature);
+
+// Ordinary Inertia documents load this reviewed module without the Live core.
+// Publish the page-level subscription bridge on the same surface as classic.
+Reflect.set(
+  globalThis,
+  "SuprnovaLiveAsync",
+  Object.freeze({ browserOptions: browserAsyncOptions, subscribeTopics }),
+);
 
 export default asyncFeature;

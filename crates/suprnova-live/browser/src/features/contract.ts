@@ -1,5 +1,9 @@
 import type { JsonValue } from "../canonical.js";
-import type { AuthorizedLogicalSubscription, SubscriptionState } from "../async-updates/types.js";
+import type {
+  AsyncPayload,
+  AuthorizedLogicalSubscription,
+  SubscriptionState,
+} from "../async-updates/types.js";
 import { MAX_PRESENT_DIRECTIVES } from "../directives/parser.js";
 import type { IslandExtensionIdentity } from "../extensions/registry.js";
 import type { LiveLimitBreach, LiveLimits } from "../limits.js";
@@ -102,6 +106,7 @@ export interface AsyncRuntimeIslandPort extends RuntimeFeatureIslandPortBase {
     capability: RegisteredBrowserEventCapability,
     event: RegisteredBrowserEventDispatch,
   ): RegisteredBrowserEventDisposition;
+  dispatchTopicChange?(change: Extract<AsyncPayload, { kind: "topic_change" }>): void;
   enqueueFreshRender(
     reason: FreshRenderReason,
     completion?: FreshRenderCompletionObserver,

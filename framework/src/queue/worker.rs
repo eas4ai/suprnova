@@ -469,6 +469,14 @@ fn dispatch_outcome(
 /// context scope around it. The worker calls this inside the scope it
 /// opened for the whole attempt.
 async fn run_pipeline(env: Envelope) -> Result<JobOutcome, FrameworkError> {
+    crate::broadcasting::request_socket::scope(
+        None,
+        crate::live::topics::scope(run_pipeline_inner(env)),
+    )
+    .await?
+}
+
+async fn run_pipeline_inner(env: Envelope) -> Result<JobOutcome, FrameworkError> {
     let job_name = env.job_name.clone();
     let mw_stack = middleware_for(&job_name);
     let unique_until_processing = job_is_unique_until_processing(&job_name);

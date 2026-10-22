@@ -1319,7 +1319,8 @@ fn coalescing_key(authorized: &AuthorizedAsyncBufferEntry) -> Option<CoalescingK
             signal: signal.name().clone(),
             schema: signal.schema(),
         }),
-        AsyncPayload::BrowserEvent(_)
+        AsyncPayload::TopicChange(_)
+        | AsyncPayload::BrowserEvent(_)
         | AsyncPayload::Heartbeat(_)
         | AsyncPayload::Complete(_)
         | AsyncPayload::Error(_) => None,
@@ -1371,6 +1372,7 @@ fn fanout_is_authorized(envelope: &AsyncEnvelope, fanout: usize, policy: AsyncPo
     match envelope.payload() {
         AsyncPayload::BrowserEvent(event) => fanout <= usize::from(event.maximum_fanout().get()),
         AsyncPayload::Refresh(_)
+        | AsyncPayload::TopicChange(_)
         | AsyncPayload::PresentationSignal(_)
         | AsyncPayload::Heartbeat(_)
         | AsyncPayload::Complete(_)

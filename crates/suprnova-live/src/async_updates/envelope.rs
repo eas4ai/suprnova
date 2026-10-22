@@ -1314,6 +1314,64 @@ impl RegisteredPresentationSignal {
     }
 }
 
+/// A data-free invalidation of page props on a trusted topic.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegisteredTopicChange {
+    topic: String,
+    generation: u64,
+    cursor: u64,
+    props: Vec<String>,
+}
+
+impl RegisteredTopicChange {
+    /// Rejects unbounded names and cursors that browsers cannot compare exactly.
+    pub fn new(
+        topic: String,
+        generation: u64,
+        cursor: u64,
+        mut props: Vec<String>,
+    ) -> Result<Self, AsyncEnvelopeError> {
+        crate::async_updates::TopicName::parse(&topic)
+            .map_err(|_| AsyncEnvelopeError::new(AsyncEnvelopeErrorKind::InvalidPayload))?;
+        if generation == 0
+            || generation > MAX_SAFE_INTEGER
+            || cursor > MAX_SAFE_INTEGER
+            || props.len() > 256
+            || props.iter().any(|name| name.is_empty() || name.len() > 256)
+        {
+            return Err(AsyncEnvelopeError::new(
+                AsyncEnvelopeErrorKind::InvalidPayload,
+            ));
+        }
+        props.sort();
+        props.dedup();
+        Ok(Self {
+            topic,
+            generation,
+            cursor,
+            props,
+        })
+    }
+
+    /// Returns the changed topic without any model value.
+    pub fn topic(&self) -> &str {
+        &self.topic
+    }
+    /// Returns a lifetime allocation, unique and increasing within its authority.
+    /// Clients compare generations for inequality only.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+    /// Returns the topic authority's cursor within its generation.
+    pub const fn cursor(&self) -> u64 {
+        self.cursor
+    }
+    /// Returns the affected prop names.
+    pub fn props(&self) -> &[String] {
+        &self.props
+    }
+}
+
 /// Transport heartbeat carrying sequence continuity but no productive authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Heartbeat;
@@ -1347,6 +1405,8 @@ pub enum StreamErrorCode {
 pub enum AsyncPayload {
     /// Queue one registered fresh render through the ordinary scheduler.
     Refresh(RegisteredRefresh),
+    /// Invalidate named props through their own page controller.
+    TopicChange(RegisteredTopicChange),
     /// Dispatch one current registered typed browser event.
     BrowserEvent(RegisteredBrowserEvent),
     /// Update one declared presentation-only local signal.
@@ -1779,6 +1839,49 @@ fn parse_payload(
             }
             Ok(AsyncPayload::Refresh(RegisteredRefresh))
         }
+        "topic_change" => {
+            require_exact_keys(
+                &fields,
+                &["kind", "topic", "generation", "cursor", "props"],
+                AsyncEnvelopeErrorKind::InvalidPayload,
+            )?;
+            let topic = string(take(&mut fields, "topic")?)?;
+            let CanonicalValue::Number(generation) = take(&mut fields, "generation")? else {
+                return Err(AsyncEnvelopeError::new(
+                    AsyncEnvelopeErrorKind::InvalidPayload,
+                ));
+            };
+            let generation = generation.get();
+            if generation.fract() != 0.0 || generation < 1.0 || generation > MAX_SAFE_INTEGER as f64
+            {
+                return Err(AsyncEnvelopeError::new(
+                    AsyncEnvelopeErrorKind::InvalidPayload,
+                ));
+            }
+            let cursor_value = take(&mut fields, "cursor")?;
+            let CanonicalValue::Number(number) = cursor_value else {
+                return Err(AsyncEnvelopeError::new(
+                    AsyncEnvelopeErrorKind::InvalidPayload,
+                ));
+            };
+            let cursor = number.get();
+            if cursor.fract() != 0.0 || cursor < 0.0 || cursor > MAX_SAFE_INTEGER as f64 {
+                return Err(AsyncEnvelopeError::new(
+                    AsyncEnvelopeErrorKind::InvalidPayload,
+                ));
+            }
+            let CanonicalValue::Array(values) = take(&mut fields, "props")? else {
+                return Err(AsyncEnvelopeError::new(
+                    AsyncEnvelopeErrorKind::InvalidPayload,
+                ));
+            };
+            let props = values
+                .into_iter()
+                .map(string)
+                .collect::<Result<Vec<_>, _>>()?;
+            RegisteredTopicChange::new(topic, generation as u64, cursor as u64, props)
+                .map(AsyncPayload::TopicChange)
+        }
         "browser_event" => parse_browser_event(fields, context).map(AsyncPayload::BrowserEvent),
         "presentation_signal" => {
             parse_presentation_signal(fields, context).map(AsyncPayload::PresentationSignal)
@@ -1941,6 +2044,7 @@ fn validate_registered_payload(
         AsyncPayload::BrowserEvent(event) => validate_registered_event(context, event),
         AsyncPayload::PresentationSignal(signal) => validate_registered_signal(context, signal),
         AsyncPayload::Refresh(_)
+        | AsyncPayload::TopicChange(_)
         | AsyncPayload::Heartbeat(_)
         | AsyncPayload::Complete(_)
         | AsyncPayload::Error(_) => Ok(()),
@@ -2071,6 +2175,29 @@ fn payload_value(payload: &AsyncPayload) -> Result<CanonicalValue, AsyncEnvelope
         AsyncPayload::Refresh(_) => object_value([
             ("kind", CanonicalValue::String("refresh".to_owned())),
             ("name", CanonicalValue::String("refresh".to_owned())),
+        ]),
+        AsyncPayload::TopicChange(signal) => object_value([
+            ("kind", CanonicalValue::String("topic_change".to_owned())),
+            ("topic", CanonicalValue::String(signal.topic.clone())),
+            (
+                "generation",
+                CanonicalValue::number(signal.generation as f64).map_err(map_canonical)?,
+            ),
+            (
+                "cursor",
+                CanonicalValue::number(signal.cursor as f64).map_err(map_canonical)?,
+            ),
+            (
+                "props",
+                CanonicalValue::Array(
+                    signal
+                        .props
+                        .iter()
+                        .cloned()
+                        .map(CanonicalValue::String)
+                        .collect(),
+                ),
+            ),
         ]),
         AsyncPayload::BrowserEvent(event) => object_value([
             (

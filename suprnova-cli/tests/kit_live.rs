@@ -593,6 +593,55 @@ mod components {
     }
 
     #[test]
+    fn signal_001_live_and_inertia_pages_share_the_vendored_async_transport() {
+        let app = Scaffold::new();
+        let stats = app.read("src/live/note_stats.rs");
+        assert!(
+            contains(
+                &stats,
+                "streams(stream(name = \"notes\", topics(\"notes/:principal\"), events(NotesChanged)))",
+            ),
+            "the Live island no longer subscribes through its notes topic:\n{stats}"
+        );
+
+        let views = app.read("src/views/mod.rs");
+        assert!(
+            contains(
+                &views,
+                "document.bootstrap(LiveBootstrapOptions::esm().with_suprnova_ui())?",
+            ),
+            "the Live documents no longer boot the ESM transport:\n{views}"
+        );
+
+        let live_boot = include_str!("../../framework/src/live/assets.rs");
+        for present in [
+            "suprnova-live.async.esm.js",
+            "configureAsync(browserAsyncOptions())",
+        ] {
+            assert!(
+                live_boot.contains(present),
+                "the Live ESM bootstrap lacks {present}:\n{live_boot}"
+            );
+        }
+
+        let async_artifact =
+            include_str!("../../crates/suprnova-live/browser/dist/suprnova-live.async.esm.js");
+        for present in [
+            "EventSource",
+            "WebSocket",
+            "poll",
+            "topic_change",
+            "SuprnovaLiveAsync",
+            "subscribeTopics",
+        ] {
+            assert!(
+                async_artifact.contains(present),
+                "the shared async artifact lacks {present}"
+            );
+        }
+    }
+
+    #[test]
     fn kit_live_notes_list_searches_by_url_and_loads_more() {
         let app = Scaffold::new();
         let list = app.read("src/live/note_list.rs");

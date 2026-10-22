@@ -628,6 +628,187 @@ request - and those resolvers run concurrently (capped by
 `max_concurrent_resolvers`), so a dashboard polling six widgets issues six
 parallel queries per tick instead of six serial ones.
 
+## Live topic bindings
+
+A typed page can subscribe its props to a Live application topic. Add a
+repeatable `#[inertia(live(...))]` declaration to its `InertiaProps` type:
+
+```rust
+use suprnova::{InertiaProps, InertiaResponse, Request, Response};
+
+#[derive(InertiaProps)]
+#[serde(rename_all = "camelCase")]
+#[inertia(live(topic = "posts", only = ["posts", "postCount"]))]
+pub struct DashboardProps {
+    pub posts: Vec<PostSummary>,
+    pub post_count: usize,
+}
+
+pub async fn dashboard(req: Request) -> Response {
+    Ok(InertiaResponse::live::<DashboardProps>("Dashboard")
+        .load(|| async {
+            Ok(DashboardProps {
+                posts: recent_posts().await?,
+                post_count: count_posts().await?,
+            })
+        })
+        .await?
+        .resolve(&req)
+        .await?)
+}
+```
+
+The topic must be declared in the [Live registry](live.md#topic-signals).
+`only` contains serialized prop names, after a `serde` rename such as
+`post_count` to `postCount`. The derive rejects an unknown name or a duplicate
+name at compile time. Repeat the attribute to bind another topic.
+
+Use `InertiaResponse::live::<P>` and a loader for every bound page. The
+framework reads the authorized bindings' generations and cursors in one hub read before it
+calls the loader. This includes eager queries inside the loader. A write
+committed after the query remains newer than the rendered cursor. Prebuilt
+bound props are rejected by `inertia_response!` instead of acquiring a newer
+cursor after their data was read.
+
+A family binding uses the family name in the attribute and supplies its key
+before loading. The runtime metadata contains the resolved instance name:
+
+```rust
+InertiaResponse::live::<NotesDashboardProps>("Dashboard")
+    .scope("notes", user_id)
+    .load_with(move |response| async move {
+        Ok(response
+            .defer("stats", move || note_stats(user_id))
+            .optional("recent_notes", move || recent_notes(user_id)))
+    })
+    .await?
+    .resolve(&req)
+    .await?
+```
+
+`load` returns typed `P` props. `load_with` receives the response builder so
+existing deferred and optional resolvers keep their filtering rules. Both use
+the same pre-loader cursor boundary. A missing family scope fails with an
+internal error naming the component and family. A family key is one trusted
+Live mount parameter, at most 128 unreserved ASCII bytes. The full instance
+still follows the topic-name bound.
+
+The response carries the checked metadata in the reserved top-level page field
+`liveBindings`, outside `props`. Partial reload filtering never drops it. Each
+topic has this shape:
+
+```json
+{
+  "liveBindings": {
+    "posts": {
+      "only": ["posts", "postCount"],
+      "cursor": 42,
+      "generation": 1792688181000,
+      "island": {
+        "component": "suprnova.topic.a44f1b975171163546d46ba5ca80652f85fcad7f665cf55d00a202ff9d0f7dbe",
+        "slot": "topic",
+        "document_key": "topic"
+      },
+      "stream": "changes"
+    }
+  }
+}
+```
+
+`only` is the partial reload list. `generation` identifies one lifetime of
+the topic's authority state. Generations are unique and increasing within an
+authority and unique across in-process restarts; across process restarts they
+differ except with negligible probability. Clients compare generations for
+inequality only. `cursor` is the position within that generation. Both are
+captured before the loader runs, and `island` plus `stream` describe the
+authorized Live subscription. The generated frontend types expose the same table as
+`LiveBindings` and map page components through `InertiaLiveBindings`. The
+existing `inertiaPropCache` record also carries each page's topic-to-prop map
+under `live`, beside `cacheable`, `public`, and `perRequest`.
+
+When a `topic_change` arrives, the adapter reloads the named props through the
+ordinary Inertia partial reload path. An empty signal prop list reloads all
+props in the binding. The signal carries only `topic`, `generation`, `cursor`, and `props`,
+so page data still comes from the controller under its normal authorization.
+
+A topic may instead be a component-stream alias such as
+`app.activity-feed::activity`. The component's stream ability authorizes that
+subscription. A binding by application topic name uses the application's
+`live:topic.<topic>` ability. See
+[Asynchronous updates](live.md#asynchronous-updates) for component streams.
+
+Mount the generated adapter in the page component. React and Vue import
+`useLive` from `../lib/live`; Svelte imports it from
+`../lib/live/index.svelte`. Keep a configured `usePoll` interval for browsers
+without push delivery. For example, this React page keeps a ten-second fallback:
+
+```tsx
+import { usePage, usePoll } from '@inertiajs/react'
+import { useLive } from '../lib/live'
+
+export default function Dashboard() {
+  useLive()
+  usePoll(10000, { only: ['posts', 'postCount'] })
+  const { props } = usePage()
+  return <main>{String(props.postCount ?? 0)} posts</main>
+}
+```
+
+The Vue composable uses the same `useLive()` call inside `setup`. The Svelte
+rune store also exposes connection state:
+
+```svelte
+<script lang="ts">
+  import { usePoll } from '@inertiajs/svelte'
+  import { useLive } from '../lib/live/index.svelte'
+
+  const live = useLive()
+  usePoll(10000, { only: ['posts', 'postCount'] })
+</script>
+
+<p>Live updates: {live.status}</p>
+```
+
+The shared core uses SSE for a page without an existing Live connection. It
+reuses the document's WebSocket when Live already owns one. Live's hybrid
+polling takes over when push continuity fails; `usePoll` also works when the
+async artifact cannot load. Unmounting releases the page's subscriptions.
+Signals within 25 milliseconds become one reload of the affected prop union.
+Only props present in the response advance their rendered cursors. A rescued
+or omitted deferred prop keeps its invalidation. Failed or canceled reloads
+retry after 1, 2, 4, 8, and 16 seconds, then every 30 seconds. A successful
+reload resets this backoff. The page keeps its polling fallback during retries.
+A changed generation reloads every prop bound to that topic regardless of
+its old cursor. Each prop keeps its own rendered generation and cursor, so a partial response cannot consume
+a change for a prop it did not reload. Page subscriptions pass every signal
+to these per-prop checks. A full recovery signal with a lower cursor can
+therefore refresh props that an earlier partial signal did not refresh.
+Full island refreshes use one position for the whole island. Every Inertia
+visit carries the Live document identity in `X-Socket-ID` while the adapter
+is mounted.
+
+A private binding is included only when the current principal has its topic
+or stream ability. Otherwise the page renders without that binding or cursor
+and keeps its polling fallback. The framework logs the page component and
+declared topic or family once at warn per process, then at debug on later
+denied renders. The resolved instance name remains in the log fields.
+
+The client core regression suite uses Bun. Run it from the repository root:
+
+```sh
+bun test suprnova-cli/tests/frontend-live-core.test.ts
+```
+
+The ignored Rust wrapper requires Bun on PATH and supplies a real rendered
+page to the same suite. Its ignore reason is `requires Bun`.
+
+### Why Suprnova diverges
+
+Laravel has no built-in equivalent for topic-driven Inertia partial reloads.
+The similarly named `inertia-live` is an external package, not Laravel
+framework behavior. Suprnova makes the binding part of the checked Rust props
+contract and reuses Live authorization, cursors, and fanout for delivery.
+
 ## Shared props
 
 Anything you register as a shared prop at boot - typically the current user,
