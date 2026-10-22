@@ -254,9 +254,9 @@ impl InMemoryBroadcastHub {
         }
     }
 
-    /// Simulates a separate process with a fixed nonce and isolated high-water mark for tests.
-    #[doc(hidden)]
-    pub fn with_live_topic_nonce_for_test(nonce: u32) -> Result<Self, FrameworkError> {
+    /// Isolates simulated process allocations from the production high-water mark.
+    #[cfg(test)]
+    pub(crate) fn with_live_topic_nonce_for_test(nonce: u32) -> Result<Self, FrameworkError> {
         Ok(Self {
             live_topics: LiveTopicRuntime::with_nonce_for_test(nonce)?,
             ..Self::new()

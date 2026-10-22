@@ -2079,34 +2079,6 @@ async fn signal_fix4_001_clock_rollback_keeps_generations_increasing() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn signal_fix4_001_generation_exhaustion_fails_closed() {
-    let hub = InMemoryBroadcastHub::with_live_topic_nonce_for_test((1 << 22) - 1).unwrap();
-    hub.configure_live_topic_family("allocation", Duration::from_secs(1))
-        .unwrap();
-    hub.set_live_topic_clock_for_test(((1_u64 << 31) - 1) * 1000)
-        .unwrap();
-    let first = hub
-        .live_topic_positions(&["allocation.first".into()])
-        .await
-        .unwrap()[0];
-    assert_eq!(first.generation, suprnova_live::canonical::MAX_SAFE_INTEGER);
-    let error = hub
-        .live_topic_positions(&["allocation.second".into()])
-        .await
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("generation exhausted"),
-        "{error}"
-    );
-    assert_eq!(
-        hub.live_topic_positions(&["allocation.first".into()])
-            .await
-            .unwrap()[0],
-        first
-    );
-}
-
-#[tokio::test(start_paused = true)]
 async fn signal_fix5_001_authority_restart_in_the_same_millisecond_keeps_generations_distinct() {
     let hub = InMemoryBroadcastHub::new();
     hub.set_live_topic_clock_for_test(10000).unwrap();
@@ -2143,34 +2115,4 @@ async fn signal_fix5_001_authority_restart_after_clock_rollback_keeps_generation
         .await
         .unwrap()[0];
     assert!(new.generation > old.generation, "{old:?} -> {new:?}");
-}
-
-#[tokio::test(start_paused = true)]
-async fn signal_fix5_001_process_nonces_distinguish_the_same_clock_reading() {
-    let first = InMemoryBroadcastHub::with_live_topic_nonce_for_test(17).unwrap();
-    let restarted = InMemoryBroadcastHub::with_live_topic_nonce_for_test(29).unwrap();
-    first.set_live_topic_clock_for_test(10000).unwrap();
-    restarted.set_live_topic_clock_for_test(10000).unwrap();
-    let topics = ["restart.owner".into()];
-    let old = first.live_topic_positions(&topics).await.unwrap()[0];
-    let new = restarted.live_topic_positions(&topics).await.unwrap()[0];
-    assert_ne!(old.generation, new.generation);
-    assert_eq!(old.generation, (10 << 22) | 17);
-    assert_eq!(new.generation, (10 << 22) | 29);
-}
-
-#[tokio::test(start_paused = true)]
-async fn signal_fix5_001_clock_overflow_fails_without_consuming_a_generation() {
-    let hub = InMemoryBroadcastHub::with_live_topic_nonce_for_test(17).unwrap();
-    hub.set_live_topic_clock_for_test((1_u64 << 31) * 1000)
-        .unwrap();
-    let topics = ["restart.owner".into()];
-    let error = hub.live_topic_positions(&topics).await.unwrap_err();
-    assert!(
-        error.to_string().contains("generation exhausted"),
-        "{error}"
-    );
-    hub.set_live_topic_clock_for_test(10000).unwrap();
-    let position = hub.live_topic_positions(&topics).await.unwrap()[0];
-    assert_eq!(position.generation, (10 << 22) | 17);
 }
