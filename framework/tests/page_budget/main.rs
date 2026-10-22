@@ -938,3 +938,110 @@ async fn budget_001_cross_origin_scope_agrees_in_all_modes() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn budget_001_manifest_output_files_require_immutable_in_all_modes() {
+    use suprnova::http_client::{FakeResponse, Http};
+    let _container = suprnova::testing::TestContainer::fake();
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("custom-manifest.json");
+    std::fs::write(&manifest, include_str!("fixtures/build-manifest.json")).unwrap();
+    suprnova::Inertia::install(
+        &suprnova::InertiaConfig::new()
+            .development(true)
+            .manifest_path(&manifest)
+            .assets_base_url("/build"),
+    )
+    .unwrap();
+    let html = "<script src='/build/app-deadbeef.js'></script><link rel=stylesheet href='/build/app-abcdefgh.css'><link rel=preload as=font href='/build/font-abcdefgh.woff2'><link rel=modulepreload href='/build/lazy-abcdefgh.js'><link rel=manifest href='/build/site-manifest.json'>";
+    let resources = [
+        ("/build/app-deadbeef.js", "text/javascript", "ok"),
+        ("/build/app-abcdefgh.css", "text/css", "body{}"),
+        ("/build/font-abcdefgh.woff2", "font/woff2", "font"),
+        ("/build/lazy-abcdefgh.js", "text/javascript", "ok"),
+        (
+            "/build/site-manifest.json",
+            "application/manifest+json",
+            "{}",
+        ),
+    ];
+    let mut router = Router::new().get("/", move |_: Request| async move {
+        Ok(HttpResponse::html(html))
+    });
+    for (path, mime, body) in resources {
+        router =
+            router.get(path, move |_: Request| async move {
+                Ok(HttpResponse::bytes_body(body, mime)
+                    .header("Cache-Control", "public, max-age=3600"))
+            });
+    }
+    let helper = TestClient::new(router, MiddlewareRegistry::new())
+        .audit_page("/", &PageBudget::default())
+        .await
+        .unwrap();
+    let mut entries = vec![entry("/", 200, "text/html", html, html.len() as u64, &[])];
+    for (path, mime, body) in resources {
+        entries.push(entry(
+            path,
+            200,
+            mime,
+            body,
+            body.len() as u64,
+            &[("Cache-Control", "public, max-age=3600")],
+        ));
+    }
+    let capture = har(entries);
+    let captured = PageBudget::default().audit_har(&capture).unwrap();
+    assert_eq!(helper, captured);
+    let har_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(har_file.path(), &capture).unwrap();
+    let command = suprnova::console::test(["budget:audit", har_file.path().to_str().unwrap()])
+        .run()
+        .await;
+    command.assert_exit_code(1);
+    assert!(
+        command.output().contains(&helper.to_string()),
+        "{}",
+        command.output()
+    );
+    assert_eq!(helper.findings.len(), 4, "{helper}");
+    assert!(
+        helper
+            .findings
+            .iter()
+            .all(|finding| finding.rule == "fingerprint-cache")
+    );
+    Http::fake(|| async {
+        Http::prevent_stray_requests(true);
+        Http::fake_url(
+            "http://localhost/",
+            FakeResponse::new(200)
+                .body(html)
+                .header("Content-Type", "text/html"),
+        );
+        for (path, mime, body) in resources {
+            Http::fake_url(
+                &format!("http://localhost{path}"),
+                FakeResponse::new(200)
+                    .body(body)
+                    .header("Content-Type", mime)
+                    .header("Cache-Control", "public, max-age=3600"),
+            );
+        }
+        let live = PageBudget::default()
+            .audit_url("http://localhost/")
+            .await
+            .unwrap();
+        assert_eq!(helper, live);
+        let command = suprnova::console::test(["budget:audit", "http://localhost/"])
+            .run()
+            .await;
+        command.assert_exit_code(1);
+        assert!(
+            command.output().contains(&helper.to_string()),
+            "{}",
+            command.output()
+        );
+    })
+    .await;
+}

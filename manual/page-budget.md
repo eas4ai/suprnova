@@ -73,10 +73,16 @@ and measure changes in review. PNG recompression is lossless and preserves
 the media pipeline's colour and metadata policy. Lossy media output keeps
 the framework's default quality of 85.
 
-Fingerprint detection uses a configurable regular expression against the file
-name without its extension. The default matches Vite's eight-character hash when it contains a digit,
+The configured Vite build manifest is the authority for fingerprints. Every
+entry's `file`, `css` and `assets` output receives immutable caching, including
+hashes made entirely of lowercase letters. The static handler, publisher and
+all audit modes read the installed `InertiaConfig` and its `manifest_path`.
+For files outside that manifest, fingerprint detection uses a configurable
+regular expression against the file name without its extension. The fallback
+matches Vite's eight-character hash when it contains a digit,
 uppercase letter, underscore or hyphen, in names such as
-`main-BjmpJyAU.js`. Fingerprinted assets require
+`main-BjmpJyAU.js`. An all-lowercase hash outside the manifest is not
+recognized by the fallback; configure the pattern for it. Fingerprinted assets require
 `public, max-age=31536000, immutable`. Other static files default to
 `public, max-age=3600`, or the handler's configured cache policy. Static file
 responses skip session persistence and cookie issuance only when the handler

@@ -67,6 +67,7 @@ pub struct ManifestEntry {
 #[derive(Debug, Clone)]
 pub struct ViteManifest {
     entries: HashMap<String, ManifestEntry>,
+    outputs: HashSet<String>,
 }
 
 /// Resolution of a manifest entry into the asset tags the HTML shell
@@ -91,21 +92,48 @@ impl ViteManifest {
                 e
             ))
         })?;
-        let entries: HashMap<String, ManifestEntry> =
-            serde_json::from_slice(&bytes).map_err(|e| {
-                FrameworkError::internal(format!(
-                    "Vite manifest at {} is not valid JSON: {}",
-                    path.display(),
-                    e
-                ))
-            })?;
-        Ok(Self { entries })
+        #[derive(Deserialize)]
+        struct BuildEntry {
+            #[serde(flatten)]
+            entry: ManifestEntry,
+            #[serde(default)]
+            assets: Vec<String>,
+        }
+        let entries: HashMap<String, BuildEntry> = serde_json::from_slice(&bytes).map_err(|e| {
+            FrameworkError::internal(format!(
+                "Vite manifest at {} is not valid JSON: {}",
+                path.display(),
+                e
+            ))
+        })?;
+        let assets: HashSet<_> = entries
+            .values()
+            .flat_map(|entry| entry.assets.iter().cloned())
+            .collect();
+        let mut manifest = Self::from_entries(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key, value.entry))
+                .collect(),
+        );
+        manifest.outputs.extend(assets);
+        Ok(manifest)
     }
 
     /// Build from an already-parsed entry map. Test hook.
     #[doc(hidden)]
     pub fn from_entries(entries: HashMap<String, ManifestEntry>) -> Self {
-        Self { entries }
+        let outputs = entries
+            .values()
+            .flat_map(|entry| std::iter::once(&entry.file).chain(&entry.css))
+            .cloned()
+            .collect();
+        Self { entries, outputs }
+    }
+
+    /// Whether a build lists this output, including CSS, assets and lazy entries.
+    pub(crate) fn contains_output(&self, path: &str) -> bool {
+        self.outputs.contains(path)
     }
 
     /// Resolve a source-path entry-point to the assets the browser

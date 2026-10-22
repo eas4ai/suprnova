@@ -12,13 +12,11 @@ use std::fmt;
 use std::time::Duration;
 use url::Url;
 
-/// Vite's default `[name]-[hash]` output: a hyphen and eight base64url
-/// characters. At least one of the eight must be a digit, an uppercase
-/// letter, an underscore or a hyphen, so an eight-letter word after a
-/// hyphen (`site-manifest.json`, `app-settings.js`) is not a fingerprint
-/// and is never served as immutable. A real hash that is all lowercase
-/// letters is rare (about one in a thousand) and only loses the long
-/// lifetime.
+/// Fallback for files outside the configured Vite manifest: a hyphen and
+/// eight base64url characters, including a digit, uppercase letter,
+/// underscore or hyphen. This avoids mutable names like `site-manifest.json`.
+/// An all-lowercase hash outside the manifest is not recognized by this
+/// pattern; configure the pattern to match that naming convention.
 pub(crate) const DEFAULT_FINGERPRINT_PATTERN: &str = r"-(?:[A-Z0-9_-][A-Za-z0-9_-]{7}|[a-z][A-Z0-9_-][A-Za-z0-9_-]{6}|[a-z]{2}[A-Z0-9_-][A-Za-z0-9_-]{5}|[a-z]{3}[A-Z0-9_-][A-Za-z0-9_-]{4}|[a-z]{4}[A-Z0-9_-][A-Za-z0-9_-]{3}|[a-z]{5}[A-Z0-9_-][A-Za-z0-9_-]{2}|[a-z]{6}[A-Z0-9_-][A-Za-z0-9_-]|[a-z]{7}[A-Z0-9_-])$";
 
 /// Limits shared by the test helper and deployment audit.
@@ -233,10 +231,40 @@ pub(crate) fn fingerprint_regex(pattern: &str) -> Result<Regex, FrameworkError> 
         .map_err(|e| FrameworkError::bad_request(format!("page budget fingerprint pattern: {e}")))
 }
 
-pub(crate) fn fingerprinted(url: &Url, pattern: &Regex) -> bool {
-    let file = url.path().rsplit('/').next().unwrap_or("");
-    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
-    pattern.is_match(stem)
+fn fingerprinted(url: &Url, pattern: &Regex, config: Option<&crate::InertiaConfig>) -> bool {
+    fingerprinted_with(url.path(), pattern, config)
+}
+
+/// The installed build is authoritative; the pattern covers other asset paths.
+pub(crate) fn fingerprinted_path(path: &str, pattern: &Regex) -> bool {
+    let config = crate::App::inertia_registry().installed_config();
+    fingerprinted_with(path, pattern, config.as_ref())
+}
+
+fn fingerprinted_with(path: &str, pattern: &Regex, config: Option<&crate::InertiaConfig>) -> bool {
+    if let Some(config) = config
+        && let Some(manifest) = config.vite_manifest()
+    {
+        let base = Url::parse(&config.assets_base_url).ok();
+        let prefix = base
+            .as_ref()
+            .map_or(config.assets_base_url.as_str(), Url::path)
+            .trim_matches('/');
+        let path = path.trim_start_matches('/');
+        let output = if prefix.is_empty() {
+            Some(path)
+        } else {
+            path.strip_prefix(prefix)
+                .and_then(|path| path.strip_prefix('/'))
+        };
+        if output.is_some_and(|path| manifest.contains_output(path)) {
+            return true;
+        }
+    }
+    std::path::Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| pattern.is_match(stem))
 }
 
 impl PageBudget {
@@ -421,7 +449,7 @@ impl PageBudget {
                 .collect::<Vec<_>>()
                 .join(", ");
             if self.require_immutable
-                && fingerprinted(&resource.url, &pattern)
+                && fingerprinted(&resource.url, &pattern, capture.inertia.as_ref())
                 && !immutable(&cache_control)
             {
                 audit.fail(

@@ -240,10 +240,7 @@ impl Publisher {
         Ok(self)
     }
     fn fingerprinted(&self, path: &str) -> bool {
-        std::path::Path::new(path)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .is_some_and(|stem| self.fingerprint.is_match(stem))
+        crate::page_budget::fingerprinted_path(path, &self.fingerprint)
     }
     /// Reads the durable truth rather than a process-local manifest copy.
     pub async fn manifest(&self) -> Result<Manifest, FrameworkError> {

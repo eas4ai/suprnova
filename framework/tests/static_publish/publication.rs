@@ -1835,3 +1835,62 @@ mod sets;
 
 #[path = "maintenance.rs"]
 mod maintenance;
+
+#[tokio::test]
+async fn pub_002_manifest_output_files_are_immutable() {
+    let _container = suprnova::testing::TestContainer::fake();
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("custom-manifest.json");
+    std::fs::write(
+        &manifest,
+        include_str!("../page_budget/fixtures/build-manifest.json"),
+    )
+    .unwrap();
+    suprnova::Inertia::install(
+        &suprnova::InertiaConfig::new()
+            .development(true)
+            .manifest_path(&manifest)
+            .assets_base_url("/build"),
+    )
+    .unwrap();
+    let (publisher, _) = publisher("v1");
+    let mut page = page("manifest authority");
+    for file in [
+        "app-deadbeef.js",
+        "app-abcdefgh.css",
+        "font-abcdefgh.woff2",
+        "lazy-abcdefgh.js",
+        "site-manifest.json",
+        "outside-deadbeef.js",
+    ] {
+        page.assets.insert(
+            format!("build/{file}"),
+            (
+                Bytes::from_static(b"asset"),
+                "application/octet-stream".into(),
+            ),
+        );
+    }
+    publisher.publish(vec![page]).await.unwrap();
+    let manifest = publisher.manifest().await.unwrap();
+    let objects = &manifest.versions[&manifest.live].objects;
+    for file in [
+        "app-deadbeef.js",
+        "app-abcdefgh.css",
+        "font-abcdefgh.woff2",
+        "lazy-abcdefgh.js",
+        "site-manifest.json",
+        "outside-deadbeef.js",
+    ] {
+        let url = format!("/build/{file}");
+        let asset = objects.iter().find(|object| object.url == url).unwrap();
+        if matches!(file, "site-manifest.json" | "outside-deadbeef.js") {
+            assert!(!asset.headers["cache-control"].contains("immutable"));
+        } else {
+            assert_eq!(
+                asset.headers["cache-control"], "public, max-age=31536000, immutable",
+                "{file}"
+            );
+        }
+    }
+}
