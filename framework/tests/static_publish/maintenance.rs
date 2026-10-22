@@ -115,3 +115,166 @@ async fn pub_008_round4_2_prune_stops_before_deletion_after_lease_replacement() 
         assert!(raw.exists(&object.path).await.unwrap());
     }
 }
+
+fn asset_page(text: &str) -> PageObject {
+    let mut page = page(text);
+    page.html = Bytes::from(format!(
+        "<p>{text}</p><link rel=\"stylesheet\" href=\"/theme.css\">"
+    ));
+    page.assets.insert(
+        "theme.css".into(),
+        (
+            Bytes::from(format!("body{{background:url(./bg.png)}}/*{text}*/")),
+            "text/css".into(),
+        ),
+    );
+    page.assets.insert(
+        "bg.png".into(),
+        (Bytes::from_static(b"pixels"), "image/png".into()),
+    );
+    page
+}
+#[tokio::test]
+async fn pub_008_round4_3_failed_deletion_drops_references_before_set_reuse_and_orphan_sweep() {
+    let raw = memory();
+    let probe = Arc::new(Probe::default());
+    let disk = raw.clone().layer(ProbeLayer(probe.clone()));
+    let p = Publisher::from_operator(disk, "v1", PublishConfig::default()).unwrap();
+    let mut sets = Vec::new();
+    for text in ["a", "b"] {
+        let rendered = asset_page(text);
+        let id = p.publish(vec![rendered.clone()]).await.unwrap().version;
+        sets.push((id, rendered));
+    }
+    let live = p.publish(vec![asset_page("c")]).await.unwrap().version;
+    let mut manifest = p.manifest().await.unwrap();
+    sets.sort_by_key(|(id, _)| manifest.versions[id].asset_set_digest.clone());
+    let root = |id: &str| {
+        format!(
+            "_pub/v1/_assets/{}/",
+            manifest.versions[id].asset_set_digest
+        )
+    };
+    let reused_root = root(&sets[0].0);
+    let orphan_root = root(&sets[1].0);
+    for (id, _) in &sets {
+        manifest.versions.get_mut(id).unwrap().retired_at_ms = Some(0);
+    }
+    raw.write("_pub/manifest.json", serde_json::to_vec(&manifest).unwrap())
+        .await
+        .unwrap();
+    *probe.refuse_delete.lock().unwrap() = Some(format!("{reused_root}theme.css"));
+    *probe.observe_delete_manifest.lock().unwrap() = Some(raw.clone());
+    assert!(
+        p.prune()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("injected object deletion")
+    );
+    let pruned = p.manifest().await.unwrap();
+    assert_eq!(
+        pruned.versions.len(),
+        1,
+        "expired records must be committed before deletion can fail"
+    );
+    assert_eq!(pruned.live, live);
+    for bytes in probe.deletion_manifests.lock().unwrap().iter() {
+        let observed: suprnova::static_publish::Manifest = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(
+            observed, pruned,
+            "the first deletion must already observe the pruned manifest"
+        );
+    }
+    assert!(!raw.exists(&format!("{reused_root}bg.png")).await.unwrap());
+    assert!(
+        raw.exists(&format!("{reused_root}theme.css"))
+            .await
+            .unwrap()
+    );
+    assert!(raw.exists(&format!("{orphan_root}bg.png")).await.unwrap());
+    *probe.observe_delete_manifest.lock().unwrap() = None;
+    let writes = probe
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|key| key.starts_with(&reused_root))
+        .count();
+    let outcome = p.publish(vec![sets[0].1.clone()]).await.unwrap();
+    assert_eq!(
+        probe
+            .writes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|key| key.starts_with(&reused_root))
+            .count()
+            - writes,
+        2,
+        "an unreferenced set must write every member again"
+    );
+    for key in ["theme.css", "bg.png"] {
+        assert!(raw.exists(&format!("{reused_root}{key}")).await.unwrap());
+    }
+    assert!(
+        outcome
+            .prune
+            .removed
+            .contains(&format!("{orphan_root}bg.png")),
+        "the following retention pass sweeps orphaned set directories"
+    );
+    assert!(
+        raw.list_with(&orphan_root)
+            .recursive(true)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        outcome
+            .prune
+            .removed
+            .iter()
+            .all(|key| !key.starts_with(&reused_root))
+    );
+}
+
+#[tokio::test]
+async fn pub_008_round4_3_refused_prune_manifest_leaves_all_objects_present() {
+    let raw = memory();
+    let probe = Arc::new(Probe::default());
+    let p = Publisher::from_operator(
+        raw.clone().layer(ProbeLayer(probe.clone())),
+        "v1",
+        PublishConfig::default(),
+    )
+    .unwrap();
+    let old = p.publish(vec![asset_page("old")]).await.unwrap().version;
+    p.publish(vec![asset_page("live")]).await.unwrap();
+    let mut manifest = p.manifest().await.unwrap();
+    manifest.versions.get_mut(&old).unwrap().retired_at_ms = Some(0);
+    raw.write("_pub/manifest.json", serde_json::to_vec(&manifest).unwrap())
+        .await
+        .unwrap();
+    let before = probe.deleted.lock().unwrap().len();
+    *probe.refuse.lock().unwrap() = Some("_pub/manifest.json".into());
+    assert!(p.prune().await.is_err());
+    assert_eq!(
+        probe.deleted.lock().unwrap().len() - before,
+        1,
+        "only the lease release may delete after a failed prune commit"
+    );
+    assert_eq!(p.manifest().await.unwrap(), manifest);
+    for object in manifest
+        .versions
+        .values()
+        .flat_map(|version| &version.objects)
+    {
+        assert!(
+            raw.exists(&object.path).await.unwrap(),
+            "manifest must not reference deleted {}",
+            object.path
+        );
+    }
+}

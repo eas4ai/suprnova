@@ -1362,12 +1362,34 @@ impl Publisher {
             .recursive(true)
             .await
             .map_err(error)?;
-        let mut paths: BTreeSet<_> = entries
-            .into_iter()
-            .filter(|entry| !entry.metadata().is_dir())
-            .map(|entry| entry.path().to_string())
-            .collect();
+        let mut directories = Vec::new();
+        let mut paths = BTreeSet::new();
+        for entry in entries {
+            if entry.metadata().is_dir() {
+                directories.push(entry.path().to_string());
+            } else {
+                paths.insert(entry.path().to_string());
+            }
+        }
         paths.extend(expired.iter().cloned());
+        // Drop references first; a failed delete can then leave only safe orphaned objects.
+        let before = manifest.versions.len();
+        manifest.versions.retain(|id, _| retained.contains(id));
+        lease.verify().await?;
+        if before != manifest.versions.len() {
+            snapshot.commit(&self.disk, &manifest).await?;
+        } else {
+            snapshot.verify(&self.disk).await?;
+        }
+        let orphan_set = |key: &str| {
+            key.strip_prefix("_pub/")
+                .and_then(|key| key.split_once("/_assets/"))
+                .and_then(|(_, key)| key.split_once('/'))
+                .is_some_and(|(hash, _)| {
+                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                && !protected_sets.iter().any(|root| key.starts_with(root))
+        };
         let mut report = PruneOutcome::default();
         for key in paths {
             if protected.contains(&key) || protected_sets.iter().any(|root| key.starts_with(root)) {
@@ -1376,6 +1398,7 @@ impl Publisher {
             }
             let old = if expired.contains(&key)
                 || expired_sets.iter().any(|root| key.starts_with(root))
+                || orphan_set(&key)
             {
                 true
             } else {
@@ -1400,11 +1423,14 @@ impl Publisher {
                 report.kept.push(key);
             }
         }
-        let before = manifest.versions.len();
-        manifest.versions.retain(|id, _| retained.contains(id));
-        if before != manifest.versions.len() {
-            lease.verify().await?;
-            snapshot.commit(&self.disk, &manifest).await?;
+        // Remove empty backend directory markers after their members, with the same lease fence.
+        directories.sort_by_key(|key| std::cmp::Reverse(key.len()));
+        for key in directories {
+            if orphan_set(&key) {
+                lease.verify().await?;
+                self.disk.delete(&key).await.map_err(error)?;
+                report.removed.push(key);
+            }
         }
         Ok(report)
     }

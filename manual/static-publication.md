@@ -409,8 +409,12 @@ publication with the route and the reason.
 Every successful attempt prunes, including an unchanged inventory. The same pass is available on
 demand. Reports list removed and kept keys. Live objects, stable aliases and
 versions inside the grace period stay protected. Grace starts when a version
-stops being live. Objects with no reliable age stay protected. A prune failure
-does not remove the live version or undo its switch.
+stops being live. Prune commits removal of expired version records before any
+object deletion. A failed deletion leaves orphans rather than dangling manifest
+references. Set reuse consults only versions still in the manifest. The next
+prune sweeps unreferenced asset-set directories, including failed staging sets,
+within the publication deadline. Other objects with no reliable age stay
+protected. A prune failure does not remove the live version or undo its switch.
 
 ```bash
 suprnova static:prune

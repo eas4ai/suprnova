@@ -451,6 +451,9 @@ struct LeaseRace {
 struct Probe {
     writes: Mutex<Vec<String>>,
     deleted: Mutex<Vec<String>>,
+    refuse_delete: Mutex<Option<String>>,
+    observe_delete_manifest: Mutex<Option<Operator>>,
+    deletion_manifests: Mutex<Vec<Bytes>>,
     lease_race: Mutex<Option<Arc<LeaseRace>>>,
     replace_lease_on_list: Mutex<Option<Operator>>,
     refuse: Mutex<Option<String>>,
@@ -740,6 +743,28 @@ impl oio::OneShotDelete for ProbeDelete {
             if index < 2 {
                 race.entered_event.notify_one();
                 race.gates[index].notified().await;
+            }
+        }
+        if path != "_pub/lease.json" {
+            let observer = self.state.observe_delete_manifest.lock().unwrap().clone();
+            if let Some(disk) = observer {
+                let bytes = disk.read("_pub/manifest.json").await?.to_bytes();
+                self.state.deletion_manifests.lock().unwrap().push(bytes);
+            }
+            let refused = {
+                let mut refuse = self.state.refuse_delete.lock().unwrap();
+                if refuse.as_deref() == Some(path.as_str()) {
+                    refuse.take();
+                    true
+                } else {
+                    false
+                }
+            };
+            if refused {
+                return Err(opendal::Error::new(
+                    opendal::ErrorKind::PermissionDenied,
+                    "injected object deletion failure",
+                ));
             }
         }
         let mut deleter = self.inner.delete(&self.ctx)?;
