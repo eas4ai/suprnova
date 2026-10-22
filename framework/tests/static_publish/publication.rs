@@ -442,6 +442,8 @@ struct Probe {
     active: AtomicUsize,
     maximum: AtomicUsize,
     maximum_asset_read: std::sync::atomic::AtomicU64,
+    force_metadata: AtomicBool,
+    metadata_writes: Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>,
     force_cas: AtomicBool,
     conditional_writes: Mutex<Vec<(String, String)>>,
     gate_manifest: AtomicBool,
@@ -476,6 +478,9 @@ impl Service for ProbeService {
         let mut capability = self.inner.capability();
         if self.state.force_cas.load(Ordering::SeqCst) {
             capability.write_with_if_match = true;
+        }
+        if self.state.force_metadata.load(Ordering::SeqCst) {
+            capability.write_with_user_metadata = true;
         }
         capability
     }
@@ -579,6 +584,27 @@ impl Service for ProbeService {
             && path != "_pub/manifest.json"
             && path != "_pub/status.json"
             && path != "_pub/lease.json";
+        let args = if self.state.force_metadata.load(Ordering::SeqCst) {
+            if let Some(metadata) = args.user_metadata() {
+                self.state.metadata_writes.lock().unwrap().push((
+                    path.to_string(),
+                    metadata
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
+                ));
+            }
+            let (native, _): (OpWrite, opendal::raw::OpWriter) = opendal::options::WriteOptions {
+                content_type: args.content_type().map(str::to_string),
+                cache_control: args.cache_control().map(str::to_string),
+                if_not_exists: args.if_not_exists(),
+                ..Default::default()
+            }
+            .into();
+            native
+        } else {
+            args
+        };
         // The probe records the conditional argument; memory cannot execute it.
         let args = if self.state.force_cas.load(Ordering::SeqCst) && args.if_match().is_some() {
             OpWrite::default()
@@ -1322,4 +1348,43 @@ impl oio::Read for ProbeReader {
         }
         self.inner.read(range).await
     }
+}
+
+#[tokio::test]
+async fn pub_002_round2_5_metadata_excludes_representation_headers() {
+    let state = Arc::new(Probe::default());
+    state.force_metadata.store(true, Ordering::SeqCst);
+    let disk = memory();
+    let p = Publisher::from_operator(
+        disk.clone().layer(ProbeLayer(state.clone())),
+        "v1",
+        PublishConfig::default(),
+    )
+    .unwrap();
+    let mut rendered = page("public");
+    rendered
+        .headers
+        .insert("content-security-policy".into(), "script-src 'self'".into());
+    rendered.headers.insert(
+        "strict-transport-security".into(),
+        "max-age=31536000".into(),
+    );
+    p.publish(vec![rendered]).await.unwrap();
+    let writes = state.metadata_writes.lock().unwrap();
+    let (key, metadata) = writes
+        .iter()
+        .find(|(key, _)| key.starts_with("_pub/") && key.ends_with(".html"))
+        .unwrap();
+    assert!(metadata.contains_key("content-security-policy"));
+    assert!(metadata.contains_key("strict-transport-security"));
+    for name in ["content-type", "content-length", "etag", "content-encoding"] {
+        assert!(
+            !metadata.contains_key(name),
+            "representation header {name} cannot be policy metadata"
+        );
+    }
+    assert_eq!(
+        disk.stat(key).await.unwrap().content_type(),
+        Some("text/html; charset=utf-8")
+    );
 }

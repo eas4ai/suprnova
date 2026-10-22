@@ -567,3 +567,39 @@ async fn pub_002_fix_e_unrepresentable_header_refuses_before_any_switch() {
     assert!(cause.contains("via"), "{cause}");
     assert!(mock.requests().is_empty());
 }
+
+#[test]
+fn pub_002_round2_5_compressed_response_retains_its_representation() {
+    let js = format!(
+        r#"{}
+const assert = require('node:assert/strict');
+const response = handler({{response:{{headers:{{
+  'content-type':{{value:'text/html'}},
+  'content-encoding':{{value:'gzip'}},
+  'content-length':{{value:'29'}},
+  'etag':{{value:'W/"compressed"'}},
+  'x-amz-meta-content-length':{{value:'3000'}},
+  'x-amz-meta-etag':{{value:'"original"'}},
+  'x-amz-meta-content-encoding':{{value:'identity'}},
+  'x-amz-meta-content-security-policy':{{value:"script-src 'self'"}},
+  'x-amz-meta-cache-control':{{value:'public, s-maxage=60'}}
+}}}}}});
+assert.equal(response.headers['content-encoding'].value, 'gzip');
+assert.equal(response.headers['content-length'].value, '29');
+assert.equal(response.headers['etag'].value, 'W/"compressed"');
+assert.equal(response.headers['content-security-policy'].value, "script-src 'self'");
+assert.equal(response.headers['cache-control'].value, 'public, s-maxage=60');
+assert.equal(Object.keys(response.headers).some(key=>key.startsWith('x-amz-meta-')), false);
+"#,
+        suprnova::static_publish::cdn::RESPONSE_HEADERS_FUNCTION
+    );
+    let result = std::process::Command::new("bun")
+        .args(["--no-env-file", "-e", &js])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}

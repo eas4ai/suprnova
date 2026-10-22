@@ -5,7 +5,9 @@ function handler(event) {
     for (var key in headers) {
         if (key.indexOf('x-amz-meta-') === 0) {
             var name = key.substring('x-amz-meta-'.length);
-            headers[name] = { value: headers[key].value };
+            if (name !== 'content-type' && name !== 'content-length' && name !== 'etag' && name !== 'content-encoding') {
+                headers[name] = { value: headers[key].value };
+            }
             delete headers[key];
         }
     }

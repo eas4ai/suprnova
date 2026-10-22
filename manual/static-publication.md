@@ -249,6 +249,12 @@ The origin applies HSTS only for trusted HTTPS delivery. It blocks scripts in an
 that has lost its CSP metadata. This follows the
 [CloudFront response event format](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/functions-event-structure.html).
 
+Storage writes delivery policy headers as metadata: Cache-Control, CSP, Vary,
+HSTS, reporting, content type protection, referrer and permissions policies,
+cross-origin policies and validated application headers. Content-Type is native
+storage metadata. Content-Length, ETag and Content-Encoding belong to the served
+representation; the CloudFront function preserves them after compression.
+
 A local static server or another CDN must likewise serve the manifest's
 `headers` as HTTP headers. A plain S3 website exposes custom headers only as
 metadata; place a header bridge in front of it before serving public documents.

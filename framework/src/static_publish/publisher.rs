@@ -531,8 +531,7 @@ impl Publisher {
                             == object.headers.get("cache-control").map(String::as_str))
                     && (!self.disk.info().capability().write_with_user_metadata
                         || metadata.user_metadata().is_some_and(|values| {
-                            object
-                                .headers
+                            policy_headers(&object.headers)
                                 .iter()
                                 .all(|(key, value)| values.get(key) == Some(value))
                         }))
@@ -934,7 +933,7 @@ impl Publisher {
             write = write.cache_control(value);
         }
         if capability.write_with_user_metadata {
-            write = write.user_metadata(headers.clone());
+            write = write.user_metadata(policy_headers(headers));
         }
         write.await.map_err(error)?;
         Ok(())
@@ -1108,4 +1107,18 @@ fn digest(bytes: &[u8]) -> String {
 }
 fn now_ms() -> u64 {
     u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
+}
+
+// Native storage and the CDN own representation headers after encoding or compression.
+fn policy_headers(headers: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    headers
+        .iter()
+        .filter(|(name, _)| {
+            !matches!(
+                name.as_str(),
+                "content-type" | "content-length" | "etag" | "content-encoding"
+            )
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
 }
