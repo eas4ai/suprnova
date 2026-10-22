@@ -17,11 +17,12 @@ use crate::error::FrameworkError;
 use super::color::Color;
 use super::custom::{CustomTransformation, TransformationSettings};
 
-/// Default encode quality, matching Laravel's `Image::quality()` default.
+/// Default lossy encode quality: 85, not Laravel's 70, because lower quality
+/// blurs images.
 ///
 /// Only the lossy encoders read it. See [`ImagePipeline::quality`] for which
 /// formats honour the knob and which ignore it.
-pub const DEFAULT_IMAGE_QUALITY: u8 = 70;
+pub const DEFAULT_IMAGE_QUALITY: u8 = 85;
 
 /// The container an [`Image`](super::Image) pipeline encodes to.
 ///

@@ -76,6 +76,7 @@ mod magick;
 mod metadata;
 mod orientation;
 mod oxideav;
+mod png;
 mod sniff;
 
 use std::path::{Path, PathBuf};
@@ -95,6 +96,7 @@ pub use custom::{
 pub use driver::{DEFAULT_IMAGE_QUALITY, ImageDriver, ImagePipeline, OutputFormat, Transformation};
 pub use magick::MagickCliDriver;
 pub use oxideav::OxideAvImageDriver;
+pub use png::{PngEffort, recompress_png};
 
 /// Default cap on either pixel dimension of a decoded image.
 ///
@@ -481,6 +483,7 @@ pub struct Image {
     pipeline: ImagePipeline,
     /// The built-in driver this image chose, over the process default.
     driver: Option<ImageDriverKind>,
+    png_effort: Option<PngEffort>,
 }
 
 impl Image {
@@ -489,6 +492,7 @@ impl Image {
             source,
             pipeline: ImagePipeline::default(),
             driver: None,
+            png_effort: None,
         }
     }
 
@@ -732,7 +736,7 @@ impl Image {
         self
     }
 
-    /// Set the encode quality. Clamped to `1..=100`; defaults to 70.
+    /// Set the encode quality. Clamped to `1..=100`; defaults to 85.
     ///
     /// Only the lossy encoders read it - see [`ImagePipeline::quality`].
     pub fn quality(mut self, quality: u8) -> Self {
@@ -765,6 +769,18 @@ impl Image {
         self.to_format(OutputFormat::Png)
     }
 
+    /// Reduce PNG transfer size without changing its pixels or using quality.
+    ///
+    /// [`PngEffort::Fast`] suits page budget audits. [`PngEffort::Maximum`]
+    /// spends more CPU time on PNGs retained during static publication.
+    /// Recompression runs after every pixel transformation, on the blocking
+    /// worker. The final output must be PNG, either inferred from the source
+    /// or chosen with [`Image::to_png`]; other formats return an error.
+    pub fn recompress_png(mut self, effort: PngEffort) -> Self {
+        self.png_effort = Some(effort);
+        self
+    }
+
     /// Encode to GIF: [`OutputFormat::Gif`].
     pub fn to_gif(self) -> Self {
         self.to_format(OutputFormat::Gif)
@@ -793,7 +809,12 @@ impl Image {
     /// so a slow disk never occupies a blocking worker.
     async fn blocking<T, F>(self, op: F) -> Result<T, FrameworkError>
     where
-        F: FnOnce(&'static dyn ImageDriver, &[u8], &ImagePipeline) -> Result<T, FrameworkError>
+        F: FnOnce(
+                &'static dyn ImageDriver,
+                &[u8],
+                &ImagePipeline,
+                Option<PngEffort>,
+            ) -> Result<T, FrameworkError>
             + Send
             + 'static,
         T: Send + 'static,
@@ -804,24 +825,27 @@ impl Image {
         };
         let contents = read_source(self.source).await?;
         let pipeline = self.pipeline;
-        tokio::task::spawn_blocking(move || op(driver, &contents, &pipeline))
+        let png_effort = self.png_effort;
+        tokio::task::spawn_blocking(move || op(driver, &contents, &pipeline, png_effort))
             .await
             .map_err(|e| FrameworkError::internal(format!("image driver panicked: {e}")))?
     }
 
     /// Run the pipeline and return the encoded bytes.
     pub async fn to_bytes(self) -> Result<Vec<u8>, FrameworkError> {
-        self.blocking(|driver, contents, pipeline| driver.process(contents, pipeline))
-            .await
+        self.blocking(|driver, contents, pipeline, png_effort| {
+            process_image(driver, contents, pipeline, png_effort)
+        })
+        .await
     }
 
     /// Run the pipeline and return it as an HTTP response with the right
     /// `Content-Type`.
     pub async fn to_response(self) -> Result<HttpResponse, FrameworkError> {
         let (bytes, mime) = self
-            .blocking(|driver, contents, pipeline| {
+            .blocking(|driver, contents, pipeline, png_effort| {
                 let mime = resolve_mime(contents, pipeline)?;
-                Ok((driver.process(contents, pipeline)?, mime))
+                Ok((process_image(driver, contents, pipeline, png_effort)?, mime))
             })
             .await?;
         Ok(HttpResponse::bytes_body(bytes, mime))
@@ -849,9 +873,9 @@ impl Image {
     pub async fn to_data_uri(self) -> Result<String, FrameworkError> {
         use base64::Engine as _;
         let (bytes, mime) = self
-            .blocking(|driver, contents, pipeline| {
+            .blocking(|driver, contents, pipeline, png_effort| {
                 let mime = resolve_mime(contents, pipeline)?;
-                Ok((driver.process(contents, pipeline)?, mime))
+                Ok((process_image(driver, contents, pipeline, png_effort)?, mime))
             })
             .await?;
         // The prefix, then the base64 encoded straight after it into the
@@ -909,17 +933,20 @@ impl Image {
     /// are in.
     #[cfg(feature = "filesystem")]
     async fn processed_with_format(self) -> Result<(Vec<u8>, OutputFormat), FrameworkError> {
-        self.blocking(|driver, contents, pipeline| {
+        self.blocking(|driver, contents, pipeline, png_effort| {
             let format = resolve_format(contents, pipeline)?;
-            Ok((driver.process(contents, pipeline)?, format))
+            Ok((
+                process_image(driver, contents, pipeline, png_effort)?,
+                format,
+            ))
         })
         .await
     }
 
     /// Dimensions of the **processed** image, as Laravel reports them.
     pub async fn dimensions(self) -> Result<(u32, u32), FrameworkError> {
-        self.blocking(|driver, contents, pipeline| {
-            let processed = driver.process(contents, pipeline)?;
+        self.blocking(|driver, contents, pipeline, png_effort| {
+            let processed = process_image(driver, contents, pipeline, png_effort)?;
             driver.dimensions(&processed)
         })
         .await
@@ -942,9 +969,9 @@ impl Image {
     /// The pipeline still runs: reporting a type for an image that cannot
     /// actually be produced would be a lie a caller only discovers later.
     pub async fn mime_type(self) -> Result<String, FrameworkError> {
-        self.blocking(|driver, contents, pipeline| {
+        self.blocking(|driver, contents, pipeline, png_effort| {
             let mime = resolve_mime(contents, pipeline)?;
-            driver.process(contents, pipeline)?;
+            process_image(driver, contents, pipeline, png_effort)?;
             Ok(mime)
         })
         .await
@@ -952,11 +979,25 @@ impl Image {
 
     /// Average colour of the **processed** image, as `#rrggbb`.
     pub async fn dominant_color(self) -> Result<String, FrameworkError> {
-        self.blocking(|driver, contents, pipeline| {
-            let processed = driver.process(contents, pipeline)?;
+        self.blocking(|driver, contents, pipeline, png_effort| {
+            let processed = process_image(driver, contents, pipeline, png_effort)?;
             driver.dominant_color(&processed)
         })
         .await
+    }
+}
+
+/// Every terminal applies recompression to the same processed output.
+fn process_image(
+    driver: &dyn ImageDriver,
+    contents: &[u8],
+    pipeline: &ImagePipeline,
+    png_effort: Option<PngEffort>,
+) -> Result<Vec<u8>, FrameworkError> {
+    let bytes = driver.process(contents, pipeline)?;
+    match png_effort {
+        Some(effort) => png::recompress_processed_png(&bytes, effort),
+        None => Ok(bytes),
     }
 }
 

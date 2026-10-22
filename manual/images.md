@@ -92,9 +92,13 @@ filled memory.
 | `grayscale()` | Desaturate. Spelled the Laravel way |
 | `to_format(format)` | Choose the output container: `Jpeg`, `Png`, `WebP`, `WebPLossless`, `Gif` or `Bmp` |
 | `to_webp()`, `to_jpg()`, `to_jpeg()`, `to_png()`, `to_gif()`, `to_bmp()` | Shortcuts for `to_format` |
-| `quality(q)` | Encode quality, clamped to `1..=100`, default `70` |
+| `quality(q)` | Encode quality, clamped to `1..=100`, default `85` |
+| `recompress_png(effort)` | Compress PNG losslessly after pixel operations |
 | `optimize(format, q)` | `to_format(format).quality(q)` in one call |
 | `using(driver)` | Process this image with the `oxideav` or `magick` driver (see [Backends](#backends)) |
+
+The default departs from Laravel's 70 because quality below 85 blurs
+images.
 
 Values that would be nonsense are clamped rather than rejected:
 `blur(500)` records `100`, `quality(0)` records `1`, and a side of `0`
@@ -412,7 +416,7 @@ converts cleanly rather than erroring.
 ### WebP
 
 `OutputFormat::WebP` is lossy and uses the quality of the pipeline, the
-same dial JPEG has. The quality is `70` when you set none.
+same dial JPEG has. The quality is `85` when you set none.
 `OutputFormat::WebPLossless` is always lossless and ignores the quality.
 Use it when the pixels of the file must be exact. Both variants have the
 content type `image/webp` and the extension `webp`.
@@ -452,6 +456,41 @@ the alpha channel. It writes `WebPLossless` lossless.
 
 A WebP source that you resize and do not convert is written as `WebP`.
 An opaque one is therefore written lossy.
+
+### Lossless PNG recompression
+
+Use `recompress_png` when an image must stay PNG. It has no quality
+setting and keeps every pixel, transparency and indexed palettes. It
+removes text, time and location metadata while keeping the ICC profile
+and colour chunks. The returned PNG is no larger than its input.
+
+- `PngEffort::Fast` uses oxipng's default level 2 for page budget audits.
+- `PngEffort::Maximum` uses level 6 with Zopfli for PNGs kept during
+  static publication. It takes more CPU time.
+
+```rust
+use std::path::Path;
+use suprnova::{FrameworkError, Image, PngEffort};
+
+async fn compress_icon() -> Result<(), FrameworkError> {
+    Image::from_path("storage/icons/app.png")
+        .to_png()
+        .recompress_png(PngEffort::Maximum)
+        .save(Path::new("storage/icons/app-small.png"))
+        .await
+}
+```
+
+The pipeline recompresses after all pixel operations, on a blocking
+worker. Its final format must be PNG. Other formats return an error.
+The synchronous `suprnova::recompress_png(&bytes, effort)` helper works
+on existing PNG bytes without decoding through an image driver or
+applying orientation. Async callers run that helper on a blocking worker.
+
+### Why Suprnova diverges
+
+Laravel has no equivalent lossless PNG recompression API. Suprnova uses
+oxipng to reduce transfer size without lowering image quality.
 
 ## Storage
 

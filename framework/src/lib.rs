@@ -628,7 +628,8 @@ pub use media::{
     Color, CustomTransformation, DEFAULT_IMAGE_MAGICK_TIMEOUT_SECS, DEFAULT_IMAGE_MAX_ALLOC_BYTES,
     DEFAULT_IMAGE_MAX_DIMENSION, DEFAULT_IMAGE_QUALITY, Image, ImageConfig, ImageDriver,
     ImageDriverKind, ImagePipeline, ImagePixels, MagickCliDriver, OutputFormat, OxideAvImageDriver,
-    Transformation, TransformationSettings, register_transformation, register_transformation_with,
+    PngEffort, Transformation, TransformationSettings, recompress_png, register_transformation,
+    register_transformation_with,
 };
 #[cfg(feature = "graph-memgraph")]
 pub use recommendations::graph::memgraph::MemgraphGraphStore;
