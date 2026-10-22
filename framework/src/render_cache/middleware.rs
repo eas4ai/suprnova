@@ -4025,17 +4025,29 @@ async fn store_entry(
 
 /// The two request `Cache-Control` directives the cache honors (CACHE-007).
 #[derive(Clone, Copy, Default)]
-struct RequestCacheDirectives {
-    no_cache: bool,
-    no_store: bool,
+pub(crate) struct RequestCacheDirectives {
+    pub(crate) no_cache: bool,
+    pub(crate) no_store: bool,
 }
 
 /// Parses the request's `Cache-Control` for `no-cache` and `no-store`:
 /// comma-separated, case-insensitive, whole tokens only.
 fn request_cache_directives(request: &Request) -> RequestCacheDirectives {
+    header_cache_directives(
+        request
+            .headers()
+            .get_all("cache-control")
+            .iter()
+            .filter_map(|value| value.to_str().ok()),
+    )
+}
+
+/// The same request directive rules apply before the static-publication lookup.
+pub(crate) fn header_cache_directives<'a>(
+    values: impl IntoIterator<Item = &'a str>,
+) -> RequestCacheDirectives {
     let mut directives = RequestCacheDirectives::default();
-    for directive in request
-        .header("cache-control")
+    for directive in values
         .into_iter()
         .flat_map(|value| value.split(','))
         .map(str::trim)

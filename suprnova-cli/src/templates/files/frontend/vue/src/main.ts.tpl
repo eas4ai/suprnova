@@ -3,6 +3,7 @@ import { createApp, createSSRApp, h } from 'vue'
 import AppLayout from './layouts/AppLayout.vue'
 import GuestLayout from './layouts/GuestLayout.vue'
 import { installPageTools } from './lib/agents'
+import { staticHttpClient } from './lib/static'
 
 // Exception text can include copied URLs or credentials even without request context.
 function redactBrowserText(text: string): string {
@@ -163,6 +164,7 @@ const nonce =
 installPageTools(router)
 
 createInertiaApp({
+  http: staticHttpClient(),
   // The Vite plugin (`@inertiajs/vite`) turns this into a resolver over
   // `./pages/**/*.vue`, one code-split chunk per page.
   pages: './pages',

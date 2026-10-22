@@ -268,6 +268,9 @@ impl InertiaHeadersMiddleware {
 #[async_trait]
 impl Middleware for InertiaHeadersMiddleware {
     async fn handle(&self, mut request: Request, next: Next) -> Response {
+        if super::publication::active() {
+            return next(request).await;
+        }
         if self.has_hooks() {
             super::cache::refuse_request_hooks(&request)?;
         }

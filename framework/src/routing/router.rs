@@ -1079,6 +1079,50 @@ impl Router {
         Ok(self)
     }
 
+    /// Marks a registered GET page for publication and checks its typed props.
+    ///
+    /// Declaration refusals are reported by the publication task without stopping boot.
+    pub fn public_page<P: crate::inertia::CacheableInertiaProps>(
+        mut self,
+        pattern: &str,
+        component: &str,
+    ) -> Result<Self, FrameworkError> {
+        if !self
+            .get_routes
+            .at(pattern)
+            .is_ok_and(|matched| matched.value.0 == pattern)
+        {
+            return Err(FrameworkError::internal(format!(
+                "Public page `{pattern}` must name a registered GET route"
+            )));
+        }
+        crate::Inertia::public_page::<P>(pattern, component)?;
+        self.render_cache_policies.mark_public_route(pattern);
+        Ok(self)
+    }
+
+    /// Marks all registered GET routes beneath a prefix for publication.
+    /// Each page still needs its typed `Inertia::public_page` declaration.
+    pub fn public_page_group(mut self, prefix: &str) -> Self {
+        self.render_cache_policies.mark_public_group(prefix);
+        self
+    }
+
+    /// Registered GET patterns explicitly marked for public publication.
+    #[must_use]
+    pub fn public_page_patterns(&self) -> Vec<String> {
+        self.registered_patterns
+            .iter()
+            .filter(|pattern| self.render_cache_policies.is_public_page(pattern))
+            .filter(|pattern| {
+                self.get_routes
+                    .at(pattern)
+                    .is_ok_and(|matched| matched.value.0 == **pattern)
+            })
+            .cloned()
+            .collect()
+    }
+
     /// The registered RenderCache policy table.
     pub(crate) fn render_cache_policies(
         &self,

@@ -2,6 +2,7 @@ import { createInertiaApp, router } from '@inertiajs/react'
 import type { ErrorInfo } from 'react'
 import { createRoot, hydrateRoot } from 'react-dom/client'
 import { installPageTools } from './lib/agents'
+import { staticHttpClient } from './lib/static'
 import { layout, title } from './lib/app'
 
 // Exception text can include copied URLs or credentials even without request context.
@@ -144,6 +145,7 @@ const nonce =
 installPageTools(router)
 
 createInertiaApp({
+  http: staticHttpClient(),
   // The Inertia Vite plugin replaces `pages` with a resolver that loads
   // `./pages/<name>.tsx`, each page in its own chunk.
   pages: './pages',

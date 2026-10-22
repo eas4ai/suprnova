@@ -108,6 +108,60 @@ pub(crate) struct TxState {
     /// is nothing to measure "registered above the savepoint" against. See
     /// [`after_commit::SavepointMark`](super::after_commit::SavepointMark).
     pub(crate) savepoints: std::sync::Mutex<Vec<super::after_commit::SavepointMark>>,
+    #[cfg(feature = "filesystem")]
+    publication_generations: PublicationGenerations,
+    #[cfg(feature = "filesystem")]
+    publication_scope: Option<Arc<crate::static_publish::batch::Lease>>,
+}
+
+#[cfg(feature = "filesystem")]
+type PublicationGenerations =
+    Arc<std::sync::Mutex<std::collections::BTreeMap<uuid::Uuid, Vec<[u8; 32]>>>>;
+
+// Each callback owns its membership. Dropping a savepoint's callbacks removes
+// their digests, while the first callback after the outer commit drains all
+// surviving memberships into one notification, before a worker can run.
+#[cfg(feature = "filesystem")]
+struct PublicationGenerationEntry {
+    batch: PublicationGenerations,
+    id: uuid::Uuid,
+    scope: Option<Arc<crate::static_publish::batch::Lease>>,
+}
+
+#[cfg(feature = "filesystem")]
+impl PublicationGenerationEntry {
+    async fn committed(self) -> Result<(), FrameworkError> {
+        let digests = {
+            let mut batch = self
+                .batch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *batch)
+                .into_values()
+                .flatten()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        if !digests.is_empty() {
+            if let Some(scope) = &self.scope {
+                scope.committed(digests);
+            } else {
+                crate::static_publish::committed_generations(digests).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "filesystem")]
+impl Drop for PublicationGenerationEntry {
+    fn drop(&mut self) {
+        self.batch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.id);
+    }
 }
 
 /// Cancellation finalizer for the [`DB::transaction`] closure scope.
@@ -509,9 +563,29 @@ pub struct Transaction {
 pub struct TxHandle {
     pub(crate) inner: Arc<DatabaseTransaction>,
     pub(crate) connection_name: Arc<str>,
+    #[cfg(feature = "filesystem")]
+    registry: Arc<TxState>,
 }
 
 impl TxHandle {
+    /// Registers framework work on the same commit/savepoint registry as its owner.
+    #[cfg(feature = "filesystem")]
+    pub(crate) fn queue_publication_generations(&self, digests: Vec<[u8; 32]>) {
+        let entry = PublicationGenerationEntry {
+            batch: self.registry.publication_generations.clone(),
+            id: uuid::Uuid::now_v7(),
+            scope: self.registry.publication_scope.clone(),
+        };
+        entry
+            .batch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(entry.id, digests);
+        super::after_commit::queue_on(
+            &self.registry,
+            Box::new(move || Box::pin(entry.committed())),
+        );
+    }
     /// Borrow the underlying SeaORM transaction. Internal - exposed
     /// `pub(crate)` so the executor-dispatch helpers in
     /// [`ExecutorChoice`] can reach the same `DatabaseTransaction` the
@@ -1407,6 +1481,8 @@ impl Transaction {
         TxHandle {
             inner: self.inner.clone(),
             connection_name: self.connection_name.clone(),
+            #[cfg(feature = "filesystem")]
+            registry: self.registry.clone(),
         }
     }
 
@@ -1978,6 +2054,16 @@ impl DB {
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         }
         let tx_state = Arc::new(TxState {
+            #[cfg(feature = "filesystem")]
+            publication_scope: parent
+                .as_ref()
+                .and_then(|state| state.publication_scope.clone())
+                .or_else(crate::static_publish::batch::capture),
+            #[cfg(feature = "filesystem")]
+            publication_generations: parent
+                .as_ref()
+                .map(|state| state.publication_generations.clone())
+                .unwrap_or_default(),
             parent,
             depth,
             children: Arc::new(ChildFinalizers::default()),
@@ -2066,6 +2152,10 @@ impl DB {
         // `Transaction::rollback`. It is never installed as `CURRENT_TX`, so
         // only calls that name the handle reach it.
         let registry = Arc::new(TxState {
+            #[cfg(feature = "filesystem")]
+            publication_scope: crate::static_publish::batch::capture(),
+            #[cfg(feature = "filesystem")]
+            publication_generations: PublicationGenerations::default(),
             parent: None,
             depth: 1,
             children: Arc::new(ChildFinalizers::default()),

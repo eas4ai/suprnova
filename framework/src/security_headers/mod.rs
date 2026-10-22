@@ -4,7 +4,9 @@
 //! regardless of registration order. Route overrides run directly inside it so
 //! cached responses obey the route's policy too.
 
+mod hashes;
 mod nonce;
+pub(crate) use hashes::trusted_script_hashes;
 mod policy;
 pub use nonce::CspNonce;
 pub(crate) use nonce::NonceState;
@@ -39,6 +41,7 @@ pub struct SecurityHeaders {
     /// A consent page's policy ([`ConsentPageHeaders`]): whatever answer it
     /// decorates last refuses framing and is never cached or referred.
     refuses_framing: bool,
+    hash_public_pages: bool,
 }
 
 impl SecurityHeaders {
@@ -127,7 +130,26 @@ impl SecurityHeaders {
             report_to: None,
             reporting_dsns: Vec::new(),
             refuses_framing: false,
+            hash_public_pages: false,
         }
+    }
+
+    /// Uses hashes of trusted inline scripts for public publication renders.
+    /// Ordinary private requests keep the configured nonce policy.
+    #[must_use]
+    pub fn hash_public_pages(mut self) -> Self {
+        self.hash_public_pages = true;
+        self
+    }
+
+    fn for_public_render(mut self) -> Self {
+        if self.hash_public_pages && crate::inertia::publication::active() {
+            self.csp = self.csp.map(ContentSecurityPolicy::for_public_render);
+            self.csp_report_only = self
+                .csp_report_only
+                .map(ContentSecurityPolicy::for_public_render);
+        }
+        self
     }
 
     /// Validates every security environment setting so misspellings fail at boot.
@@ -419,6 +441,11 @@ impl SecurityHeaders {
                     csp = widened;
                 }
             }
+            if self.hash_public_pages && crate::inertia::publication::active() {
+                csp = csp
+                    .for_public_render()
+                    .with_public_script_hashes(&crate::inertia::publication::script_hashes());
+            }
             if !csp.uses_nonce() || is_html(&response) {
                 if response.header_value(name).is_none() {
                     response =
@@ -449,8 +476,10 @@ impl Middleware for SecurityHeaders {
         let ambient = POLICY.try_with(Clone::clone);
         let server_decorates = ambient.is_ok();
         let effective = ambient.unwrap_or_else(|_| Arc::new(RwLock::new(self.clone())));
-        *effective.write().unwrap_or_else(|p| p.into_inner()) = self.clone();
-        let nonce = match make_nonce(self.uses_nonce()) {
+        let initial = self.clone().for_public_render();
+        let uses_nonce = initial.uses_nonce();
+        *effective.write().unwrap_or_else(|p| p.into_inner()) = initial;
+        let nonce = match make_nonce(uses_nonce) {
             Ok(nonce) => nonce,
             Err(error) => return Err(error.into()),
         };
@@ -545,7 +574,7 @@ impl Middleware for SecurityHeadersOverride {
             if let Some(csp) = &self.csp {
                 policy = policy.content_security_policy(csp.clone());
             }
-            policy
+            policy.for_public_render()
         };
         if let Some(state) = request.csp_nonce_state() {
             let nonce = if updated.uses_nonce() {
@@ -693,6 +722,54 @@ fn is_html(response: &HttpResponse) -> bool {
             .next()
             .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/html"))
     })
+}
+
+/// Route overrides can select a nonce policy without having allocated a nonce yet.
+pub(crate) fn public_render_uses_nonce() -> bool {
+    POLICY
+        .try_with(|policy| {
+            policy
+                .read()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .uses_nonce()
+        })
+        .unwrap_or(false)
+}
+
+/// Isolates a public render from the origin request's nonce and final decorator.
+/// The policy is applied before the trusted publication capture leaves scope.
+pub(crate) async fn scope_publication<F: std::future::Future<Output = Response>>(
+    future: F,
+) -> Response {
+    let effective = Arc::new(RwLock::new(SecurityHeaders::off()));
+    let nonce = NonceState::default();
+    POLICY
+        .scope(
+            effective.clone(),
+            CspNonce::scope_state(nonce.clone(), async move {
+                let response = future.await;
+                let policy = effective
+                    .read()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .clone();
+                let local = Config::is_development();
+                let origin = if local { vite_origin() } else { None };
+                let decorate = |response| {
+                    policy.decorate(
+                        response,
+                        true,
+                        local,
+                        nonce.get().as_deref(),
+                        origin.as_deref(),
+                    )
+                };
+                match response {
+                    Ok(response) => Ok(decorate(response)),
+                    Err(response) => Err(decorate(response)),
+                }
+            }),
+        )
+        .await
 }
 
 /// Keeps the effective policy alive across the server's panic boundary and
@@ -1115,5 +1192,58 @@ mod reporting_tests {
                 assert!(response.header_value("content-security-policy").is_none());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    #[tokio::test]
+    async fn pub_001_hash_policy_uses_only_trusted_render_private_policy_keeps_nonce()
+    -> Result<(), FrameworkError> {
+        let policy = SecurityHeaders::balanced().hash_public_pages();
+        let hash = |script: &str| {
+            format!(
+                "'sha256-{}'",
+                base64::engine::general_purpose::STANDARD.encode(Sha256::digest(script.as_bytes()))
+            )
+        };
+        let (result, _, _) = crate::inertia::publication::scope("/public".to_owned(), async {
+            let trusted = HttpResponse::html("<html><script>trusted()</script></html>");
+            crate::inertia::publication::capture(&trusted, b"{}")?;
+            let injected = HttpResponse::html(
+                "<html><script>trusted()</script><script>injected()</script></html>",
+            );
+            let response = policy
+                .clone()
+                .for_public_render()
+                .decorate(injected, false, false, None, None);
+            let csp = response
+                .header_value("content-security-policy")
+                .unwrap_or_default();
+            assert!(csp.contains(&hash("trusted()")), "{csp}");
+            assert!(!csp.contains(&hash("injected()")), "{csp}");
+            assert!(!csp.contains("nonce-"), "{csp}");
+            assert_eq!(csp.matches("sha256-").count(), 1);
+            Ok::<_, FrameworkError>(())
+        })
+        .await;
+        result?;
+        let private = policy.decorate(
+            HttpResponse::html("<html></html>"),
+            false,
+            false,
+            Some("private-nonce"),
+            None,
+        );
+        let csp = private
+            .header_value("content-security-policy")
+            .unwrap_or_default();
+        assert!(csp.contains("'nonce-private-nonce'"), "{csp}");
+        assert!(!csp.contains("sha256-"), "{csp}");
+        Ok(())
     }
 }

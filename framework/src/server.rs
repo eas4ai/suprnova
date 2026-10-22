@@ -507,6 +507,8 @@ impl Server {
 
         let router = self.router;
         let middleware = Arc::new(self.middleware);
+        #[cfg(feature = "filesystem")]
+        let _static_publication = crate::static_publish::spawn_after_bind(&middleware);
         // The OAuth server prunes its ended rows, and agent auth expires
         // unclaimed registrations and prunes spent replay records, every five
         // minutes while the server runs; the pass is idempotent across nodes,
@@ -768,6 +770,11 @@ impl Server {
         // events they emit on the way down are caught, and before the telemetry
         // flush so listener spans land in the batch.
         crate::events::drain_queued_at_shutdown().await;
+
+        #[cfg(feature = "filesystem")]
+        if let Some(mut publication) = _static_publication {
+            publication.shutdown().await;
+        }
 
         // Work and listeners have stopped producing events, so the sender
         // can drain its final accepted reports before the runtime ends.
@@ -1195,6 +1202,8 @@ async fn route_request(
         &path,
         peer_ip,
     ));
+    #[cfg(feature = "filesystem")]
+    let inner = Box::pin(crate::static_publish::batch::with_batch(inner));
     let socket_scoped = Box::pin(crate::broadcasting::request_socket::scope(
         request_socket_id,
         crate::auth::request_state::scope(inner),
@@ -1355,6 +1364,33 @@ async fn handle_request_inner(
     // hasn't been run yet (in-process tests, WS-upgrade replay) - the
     // accessors then ignore proxy headers, which is the fail-safe
     // policy spelled out in `TrustedProxiesConfig`'s docs.
+    #[cfg(feature = "filesystem")]
+    if matches!(method, hyper::Method::GET | hyper::Method::HEAD)
+        && let Ok(Some(runtime)) = crate::static_publish::StaticPublication::current()
+    {
+        let trusted = Config::get::<crate::config::AppConfig>()
+            .is_some_and(|config| config.trusted_proxies.trusts(peer_ip));
+        let (uri, headers, query) = match &req {
+            Inbound::Wire(request) => (request.uri(), request.headers(), request.uri().query()),
+            #[cfg(feature = "agents")]
+            Inbound::Internal(request) => (request.uri(), request.headers(), request.query()),
+        };
+        let secure = Request::head_is_secure(uri, headers, trusted);
+        match runtime.respond(path, headers, query).await {
+            Ok(Some(response)) => {
+                let response = if secure {
+                    response
+                } else {
+                    response.without_header("strict-transport-security")
+                };
+                return into_hyper_in_scope(response);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(route = path, %error, "static origin lookup failed; serving origin")
+            }
+        }
+    }
     let trusted_proxies = crate::config::Config::get::<crate::config::AppConfig>()
         .map(|cfg| cfg.trusted_proxies)
         .unwrap_or_else(crate::http::TrustedProxiesConfig::empty);
@@ -1585,8 +1621,26 @@ async fn handle_request_inner(
             //    handlers / logs see the wire-level verb (HEAD vs GET);
             //    middleware that needs to discriminate the two can still
             //    check `request.method()`.
+            let private_origin = request.query().is_some_and(|query| {
+                url::form_urlencoded::parse(query.as_bytes())
+                    .any(|(key, _)| key == "__suprnova_origin")
+            });
+            let private_redirect = private_origin;
+            let origin = format!(
+                "{}://{}",
+                if request.secure() { "https" } else { "http" },
+                request.header("host").unwrap_or("localhost")
+            );
+            if private_origin {
+                request.mark_private_origin();
+            }
             let http_response =
                 dispatch_chain(chain, request, handler, &method, path, request_id).await;
+            let http_response = if private_redirect {
+                private_origin_response(http_response, &origin)
+            } else {
+                http_response
+            };
 
             // The 5xx -> OTel `Status::Error` marker is recorded inside
             // `RequestIdMiddleware` (the outermost middleware), where the
@@ -4064,4 +4118,37 @@ mod tests {
              and shuts the runtime down"
         );
     }
+}
+
+/// Redirected private visits must keep their cache bypass through the final GET.
+fn private_origin_response(mut response: HttpResponse, origin: &str) -> HttpResponse {
+    for header in ["location", "x-inertia-location"] {
+        if let Some(location) = response.header_value(header).map(str::to_owned)
+            && let Ok(base) = url::Url::parse(origin)
+            && let Ok(mut url) = base.join(&location)
+            && url.origin() == base.origin()
+            && url.username().is_empty()
+            && url.password().is_none()
+        {
+            let mut query: Vec<_> = url
+                .query_pairs()
+                .filter(|(key, _)| key != "__suprnova_origin")
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            query.push(("__suprnova_origin".into(), "1".into()));
+            url.query_pairs_mut().clear().extend_pairs(query);
+            let location = if location.starts_with('/') && !location.starts_with("//") {
+                format!(
+                    "{}{}{}",
+                    url.path(),
+                    url.query().map(|q| format!("?{q}")).unwrap_or_default(),
+                    url.fragment().map(|f| format!("#{f}")).unwrap_or_default()
+                )
+            } else {
+                url.to_string()
+            };
+            response = response.replace_header(header, location);
+        }
+    }
+    response.replace_header("Cache-Control", "private, no-store")
 }

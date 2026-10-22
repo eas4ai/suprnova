@@ -387,6 +387,8 @@ pub async fn run_through_middleware(env: Envelope) -> Result<JobOutcome, Framewo
     let context = crate::Context::hydrate(env.context.as_ref());
     context.reporting.start("queue.job", &env.job_name);
     let job = crate::context::Context::scope(context, run_pipeline(env));
+    #[cfg(feature = "filesystem")]
+    let job = crate::static_publish::batch::with_batch(job);
     crate::container::scope::run_in_new_scope(job).await
 }
 
@@ -528,6 +530,7 @@ async fn run_pipeline(env: Envelope) -> Result<JobOutcome, FrameworkError> {
 /// resolves the same scoped values the job resolves, and the values are
 /// dropped when the attempt settles.
 async fn in_attempt<F>(
+    #[cfg(feature = "filesystem")] publication_batch: &crate::static_publish::batch::Scope,
     scope: crate::container::scope::ContainerScope,
     context: crate::context::ContextStore,
     fut: F,
@@ -536,6 +539,8 @@ where
     F: std::future::Future,
 {
     let in_context = crate::context::Context::scope(context, fut);
+    #[cfg(feature = "filesystem")]
+    let in_context = publication_batch.run(in_context);
     scope.run(in_context).await
 }
 
@@ -1087,9 +1092,13 @@ async fn run_labelled_worker(
         // is: the attempt's scoped bindings are built once, shared by the job
         // and its lifecycle events, and dropped when the attempt settles.
         let job_scope = crate::container::scope::ContainerScope::new();
+        #[cfg(feature = "filesystem")]
+        let publication_batch = crate::static_publish::batch::Scope::new();
 
         let identity_pre = queue_events::JobIdentity::from_env(&env, &connection);
         let _ = in_attempt(
+            #[cfg(feature = "filesystem")]
+            &publication_batch,
             job_scope.clone(),
             job_context.clone(),
             EventFacade::dispatch(queue_events::JobProcessing {
@@ -1126,29 +1135,35 @@ async fn run_labelled_worker(
             // and throws, so `JobExceptionOccurred` and `JobAttempted` follow.
             let reason = "attempts exhausted without settlement; the previous workers did not \
                           survive this job";
-            in_attempt(job_scope.clone(), job_context.clone(), async {
-                if handle_dead_letter(
-                    &*driver,
-                    &res.token,
-                    &env,
-                    &connection,
-                    reason,
-                    false,
-                    &SettlementDeps::current(),
-                )
-                .await
-                {
-                    let _ = EventFacade::dispatch(queue_events::JobExceptionOccurred {
-                        job: identity_pre.clone(),
-                        exception: reason.to_owned(),
-                    })
-                    .await;
-                    let _ = EventFacade::dispatch(queue_events::JobAttempted {
-                        job: identity_pre.clone(),
-                    })
-                    .await;
-                }
-            })
+            in_attempt(
+                #[cfg(feature = "filesystem")]
+                &publication_batch,
+                job_scope.clone(),
+                job_context.clone(),
+                async {
+                    if handle_dead_letter(
+                        &*driver,
+                        &res.token,
+                        &env,
+                        &connection,
+                        reason,
+                        false,
+                        &SettlementDeps::current(),
+                    )
+                    .await
+                    {
+                        let _ = EventFacade::dispatch(queue_events::JobExceptionOccurred {
+                            job: identity_pre.clone(),
+                            exception: reason.to_owned(),
+                        })
+                        .await;
+                        let _ = EventFacade::dispatch(queue_events::JobAttempted {
+                            job: identity_pre.clone(),
+                        })
+                        .await;
+                    }
+                },
+            )
             .await;
             processed += 1;
             continue;
@@ -1160,6 +1175,8 @@ async fn run_labelled_worker(
         // settlement, not a failure: ack, report, move on.
         if envelope_was_superseded(&env).await {
             let _ = in_attempt(
+                #[cfg(feature = "filesystem")]
+                &publication_batch,
                 job_scope.clone(),
                 job_context.clone(),
                 EventFacade::dispatch(queue_events::JobDebounced {
@@ -1179,6 +1196,8 @@ async fn run_labelled_worker(
             // without throwing, so its worker fires `JobProcessed` and then
             // `JobAttempted`: the drop settles the attempt for good.
             let _ = in_attempt(
+                #[cfg(feature = "filesystem")]
+                &publication_batch,
                 job_scope.clone(),
                 job_context.clone(),
                 EventFacade::dispatch(queue_events::JobProcessed {
@@ -1187,6 +1206,8 @@ async fn run_labelled_worker(
             )
             .await;
             let _ = in_attempt(
+                #[cfg(feature = "filesystem")]
+                &publication_batch,
                 job_scope.clone(),
                 job_context.clone(),
                 EventFacade::dispatch(queue_events::JobAttempted {
@@ -1206,6 +1227,8 @@ async fn run_labelled_worker(
         // a panic would unwind out of `run_worker`, kill the worker task, and
         // strand the envelope's reservation until visibility expiry.
         let dispatch_fut = crate::error::catch_panic(in_attempt(
+            #[cfg(feature = "filesystem")]
+            &publication_batch,
             job_scope.clone(),
             job_context.clone(),
             attempt_recording_failure(run_pipeline(env_for_dispatch)),
@@ -1253,221 +1276,241 @@ async fn run_labelled_worker(
 
         // Settled inside the job's context and container scope, so the events
         // a settlement raises carry what the job carried.
-        in_attempt(job_scope, job_context, async {
-            match outcome {
-                DispatchOutcome::Settled(JobOutcome::Completed) => {
-                    if sweep_unique_lock {
-                        release_unique_lock_if_held(&env).await;
-                    }
-                    handle_completed(&*driver, &res.token, &env, &connection, &deps).await;
-                }
-                DispatchOutcome::Settled(JobOutcome::Released { delay }) => {
-                    handle_released(&*driver, &res.token, &env, delay, &connection, "middleware")
-                        .await;
-                }
-                DispatchOutcome::Settled(JobOutcome::Failed { reason }) => {
-                    if sweep_unique_lock {
-                        release_unique_lock_if_held(&env).await;
-                    }
-                    if handle_dead_letter(
-                        &*driver,
-                        &res.token,
-                        &env,
-                        &connection,
-                        &reason,
-                        false,
-                        &deps,
-                    )
-                    .await
-                    {
-                        if failed_by_error.is_some() {
-                            // `FailOnException` fails the job and rethrows
-                            // (FailOnException.php:59-62): the attempt ended
-                            // in an error.
-                            let _ = EventFacade::dispatch(queue_events::JobExceptionOccurred {
-                                job: identity_pre.clone(),
-                                exception: reason.clone(),
-                            })
-                            .await;
-                        } else {
-                            // A middleware failed the job and returned, so the
-                            // pipeline returned without an error.
-                            let _ = EventFacade::dispatch(queue_events::JobProcessed {
-                                job: identity_pre.clone(),
-                            })
-                            .await;
+        in_attempt(
+            #[cfg(feature = "filesystem")]
+            &publication_batch,
+            job_scope,
+            job_context,
+            async {
+                match outcome {
+                    DispatchOutcome::Settled(JobOutcome::Completed) => {
+                        if sweep_unique_lock {
+                            release_unique_lock_if_held(&env).await;
                         }
-                        let _ = EventFacade::dispatch(queue_events::JobAttempted {
-                            job: identity_pre.clone(),
-                        })
+                        handle_completed(&*driver, &res.token, &env, &connection, &deps).await;
+                    }
+                    DispatchOutcome::Settled(JobOutcome::Released { delay }) => {
+                        handle_released(
+                            &*driver,
+                            &res.token,
+                            &env,
+                            delay,
+                            &connection,
+                            "middleware",
+                        )
                         .await;
                     }
-                    // Laravel's worker reports the error `FailOnException`
-                    // rethrows, after the attempt settles (PAR-111).
-                    if let Some(error) = &failed_by_error {
-                        crate::error::Exceptions::report(error);
-                    }
-                }
-                DispatchOutcome::Settled(JobOutcome::Deleted) => {
-                    if sweep_unique_lock {
-                        release_unique_lock_if_held(&env).await;
-                    }
-                    handle_deleted(&*driver, &res.token, &env, &connection, &deps).await;
-                }
-                DispatchOutcome::Failed(e) => {
-                    if sweep_unique_lock {
-                        release_unique_lock_if_held(&env).await;
-                    }
-                    // An error the application named with `dont_retry` or
-                    // `dont_retry_when` fails the job at once, whatever
-                    // attempts it has left: Laravel's
-                    // `markJobAsFailedIfItShouldntBeRetried` (PAR-111).
-                    if env.attempts >= env.max_tries
-                        || crate::error::Exceptions::should_stop_retries(&e)
-                    {
-                        // Laravel fails the job before it raises
-                        // JobExceptionOccurred (Worker.php:631, :644), and
-                        // releases nothing for a failed job.
+                    DispatchOutcome::Settled(JobOutcome::Failed { reason }) => {
+                        if sweep_unique_lock {
+                            release_unique_lock_if_held(&env).await;
+                        }
                         if handle_dead_letter(
                             &*driver,
                             &res.token,
                             &env,
                             &connection,
-                            &e.to_string(),
+                            &reason,
                             false,
                             &deps,
                         )
                         .await
                         {
+                            if failed_by_error.is_some() {
+                                // `FailOnException` fails the job and rethrows
+                                // (FailOnException.php:59-62): the attempt ended
+                                // in an error.
+                                let _ = EventFacade::dispatch(queue_events::JobExceptionOccurred {
+                                    job: identity_pre.clone(),
+                                    exception: reason.clone(),
+                                })
+                                .await;
+                            } else {
+                                // A middleware failed the job and returned, so the
+                                // pipeline returned without an error.
+                                let _ = EventFacade::dispatch(queue_events::JobProcessed {
+                                    job: identity_pre.clone(),
+                                })
+                                .await;
+                            }
+                            let _ = EventFacade::dispatch(queue_events::JobAttempted {
+                                job: identity_pre.clone(),
+                            })
+                            .await;
+                        }
+                        // Laravel's worker reports the error `FailOnException`
+                        // rethrows, after the attempt settles (PAR-111).
+                        if let Some(error) = &failed_by_error {
+                            crate::error::Exceptions::report(error);
+                        }
+                    }
+                    DispatchOutcome::Settled(JobOutcome::Deleted) => {
+                        if sweep_unique_lock {
+                            release_unique_lock_if_held(&env).await;
+                        }
+                        handle_deleted(&*driver, &res.token, &env, &connection, &deps).await;
+                    }
+                    DispatchOutcome::Failed(e) => {
+                        if sweep_unique_lock {
+                            release_unique_lock_if_held(&env).await;
+                        }
+                        // An error the application named with `dont_retry` or
+                        // `dont_retry_when` fails the job at once, whatever
+                        // attempts it has left: Laravel's
+                        // `markJobAsFailedIfItShouldntBeRetried` (PAR-111).
+                        if env.attempts >= env.max_tries
+                            || crate::error::Exceptions::should_stop_retries(&e)
+                        {
+                            // Laravel fails the job before it raises
+                            // JobExceptionOccurred (Worker.php:631, :644), and
+                            // releases nothing for a failed job.
+                            if handle_dead_letter(
+                                &*driver,
+                                &res.token,
+                                &env,
+                                &connection,
+                                &e.to_string(),
+                                false,
+                                &deps,
+                            )
+                            .await
+                            {
+                                let _ = EventFacade::dispatch(queue_events::JobExceptionOccurred {
+                                    job: identity_pre.clone(),
+                                    exception: e.to_string(),
+                                })
+                                .await;
+                                let _ = EventFacade::dispatch(queue_events::JobAttempted {
+                                    job: identity_pre.clone(),
+                                })
+                                .await;
+                            }
+                        } else {
                             let _ = EventFacade::dispatch(queue_events::JobExceptionOccurred {
                                 job: identity_pre.clone(),
                                 exception: e.to_string(),
                             })
                             .await;
-                            let _ = EventFacade::dispatch(queue_events::JobAttempted {
-                                job: identity_pre.clone(),
-                            })
-                            .await;
-                        }
-                    } else {
-                        let _ = EventFacade::dispatch(queue_events::JobExceptionOccurred {
-                            job: identity_pre.clone(),
-                            exception: e.to_string(),
-                        })
-                        .await;
-                        // A failure that carries a retry hint is retried when
-                        // the refusing service asked, not on the job's schedule.
-                        let delay = delay_after_failure(&env.backoff, env.attempts, &e);
-                        tracing::warn!(
-                            job = %env.job_name,
-                            id = %env.id,
-                            attempt = env.attempts,
-                            retry_in = ?delay,
-                            retry_hint = e.retry_after().is_some(),
-                            error = %e,
-                            "queue job failed, will retry"
-                        );
-                        if let Err(nack_err) = driver.nack(&res.token, delay).await {
-                            settlement_failure(&*driver, &env, "nack", "retry", &nack_err);
-                        } else {
-                            let _ =
-                                EventFacade::dispatch(queue_events::JobReleasedAfterException {
+                            // A failure that carries a retry hint is retried when
+                            // the refusing service asked, not on the job's schedule.
+                            let delay = delay_after_failure(&env.backoff, env.attempts, &e);
+                            tracing::warn!(
+                                job = %env.job_name,
+                                id = %env.id,
+                                attempt = env.attempts,
+                                retry_in = ?delay,
+                                retry_hint = e.retry_after().is_some(),
+                                error = %e,
+                                "queue job failed, will retry"
+                            );
+                            if let Err(nack_err) = driver.nack(&res.token, delay).await {
+                                settlement_failure(&*driver, &env, "nack", "retry", &nack_err);
+                            } else {
+                                let _ = EventFacade::dispatch(
+                                    queue_events::JobReleasedAfterException {
+                                        job: identity_pre.clone(),
+                                        exception: e.to_string(),
+                                        delay_secs: delay.as_secs(),
+                                    },
+                                )
+                                .await;
+                                // Laravel's `process` raises JobAttempted in its
+                                // `finally` for a retried attempt too.
+                                let _ = EventFacade::dispatch(queue_events::JobAttempted {
                                     job: identity_pre.clone(),
-                                    exception: e.to_string(),
-                                    delay_secs: delay.as_secs(),
                                 })
                                 .await;
-                            // Laravel's `process` raises JobAttempted in its
-                            // `finally` for a retried attempt too.
-                            let _ = EventFacade::dispatch(queue_events::JobAttempted {
-                                job: identity_pre.clone(),
-                            })
+                            }
+                        }
+                        // Report after settlement, retaining the original panic
+                        // location without reporting the hook and its wrapper twice.
+                        match &panic_details {
+                            Some(panic) => crate::error::Exceptions::report_panic(
+                                &panic.message,
+                                panic.location.as_deref(),
+                            ),
+                            None => crate::error::Exceptions::report(&e),
+                        }
+                    }
+                    DispatchOutcome::TimedOut(t) => {
+                        // Laravel's alarm handler fails the job first, then raises
+                        // JobTimedOut, then kills the worker process
+                        // (Worker.php:309-326), so its `process` never reaches the
+                        // `finally` that raises JobAttempted. This worker drops
+                        // the attempt and keeps running, and raises the same
+                        // events: JobFailed when the timeout fails the job, then
+                        // JobTimedOut, and no JobAttempted.
+                        let timed_out = queue_events::JobTimedOut {
+                            job: identity_pre.clone(),
+                            timeout: t,
+                        };
+                        // The timeout as an error, Laravel's
+                        // `TimeoutExceededException`: the callbacks and the
+                        // don't-retry list see it as they see an error an
+                        // attempt returned (PAR-111).
+                        let error = FrameworkError::from_external(crate::queue::TimeoutExceeded {
+                            job_name: env.job_name.clone(),
+                            timeout: t,
+                        });
+                        // An error the application named with `dont_retry` or
+                        // `dont_retry_when` ends the retries of a timed-out
+                        // attempt too, as it does for a failed one.
+                        let exhausted = env.fail_on_timeout
+                            || env.attempts >= env.max_tries
+                            || crate::error::Exceptions::should_stop_retries(&error);
+                        if exhausted {
+                            // A stalled middleware times out the whole pipeline, so the
+                            // core may never have run and the release at processing
+                            // start may never have happened. This envelope is
+                            // dead-lettered and will not come back, so a held lock would
+                            // block re-dispatch for the rest of `unique_for` on a job
+                            // that no longer exists. Owner-scoped, so it costs one
+                            // no-op release when the core did run and already released.
+                            if sweep_unique_lock {
+                                release_unique_lock_if_held(&env).await;
+                            }
+                            let reason = format!(
+                                "job exceeded per-attempt timeout of {} seconds",
+                                t.as_secs()
+                            );
+                            handle_dead_letter(
+                                &*driver,
+                                &res.token,
+                                &env,
+                                &connection,
+                                &reason,
+                                true,
+                                &deps,
+                            )
                             .await;
+                            let _ = EventFacade::dispatch(timed_out).await;
+                        } else {
+                            let _ = EventFacade::dispatch(timed_out).await;
+                            let delay = next_delay(&env.backoff, env.attempts, None);
+                            tracing::warn!(
+                                job = %env.job_name,
+                                id = %env.id,
+                                attempt = env.attempts,
+                                retry_in = ?delay,
+                                timeout_secs = t.as_secs(),
+                                "queue job timed out, will retry"
+                            );
+                            if let Err(nack_err) = driver.nack(&res.token, delay).await {
+                                settlement_failure(
+                                    &*driver,
+                                    &env,
+                                    "nack",
+                                    "timeout_retry",
+                                    &nack_err,
+                                );
+                            }
                         }
-                    }
-                    // Report after settlement, retaining the original panic
-                    // location without reporting the hook and its wrapper twice.
-                    match &panic_details {
-                        Some(panic) => crate::error::Exceptions::report_panic(
-                            &panic.message,
-                            panic.location.as_deref(),
-                        ),
-                        None => crate::error::Exceptions::report(&e),
+                        // Reported once the attempt has settled, retried or
+                        // not, as the error of a failed attempt is (PAR-111).
+                        crate::error::Exceptions::report(&error);
                     }
                 }
-                DispatchOutcome::TimedOut(t) => {
-                    // Laravel's alarm handler fails the job first, then raises
-                    // JobTimedOut, then kills the worker process
-                    // (Worker.php:309-326), so its `process` never reaches the
-                    // `finally` that raises JobAttempted. This worker drops
-                    // the attempt and keeps running, and raises the same
-                    // events: JobFailed when the timeout fails the job, then
-                    // JobTimedOut, and no JobAttempted.
-                    let timed_out = queue_events::JobTimedOut {
-                        job: identity_pre.clone(),
-                        timeout: t,
-                    };
-                    // The timeout as an error, Laravel's
-                    // `TimeoutExceededException`: the callbacks and the
-                    // don't-retry list see it as they see an error an
-                    // attempt returned (PAR-111).
-                    let error = FrameworkError::from_external(crate::queue::TimeoutExceeded {
-                        job_name: env.job_name.clone(),
-                        timeout: t,
-                    });
-                    // An error the application named with `dont_retry` or
-                    // `dont_retry_when` ends the retries of a timed-out
-                    // attempt too, as it does for a failed one.
-                    let exhausted = env.fail_on_timeout
-                        || env.attempts >= env.max_tries
-                        || crate::error::Exceptions::should_stop_retries(&error);
-                    if exhausted {
-                        // A stalled middleware times out the whole pipeline, so the
-                        // core may never have run and the release at processing
-                        // start may never have happened. This envelope is
-                        // dead-lettered and will not come back, so a held lock would
-                        // block re-dispatch for the rest of `unique_for` on a job
-                        // that no longer exists. Owner-scoped, so it costs one
-                        // no-op release when the core did run and already released.
-                        if sweep_unique_lock {
-                            release_unique_lock_if_held(&env).await;
-                        }
-                        let reason = format!(
-                            "job exceeded per-attempt timeout of {} seconds",
-                            t.as_secs()
-                        );
-                        handle_dead_letter(
-                            &*driver,
-                            &res.token,
-                            &env,
-                            &connection,
-                            &reason,
-                            true,
-                            &deps,
-                        )
-                        .await;
-                        let _ = EventFacade::dispatch(timed_out).await;
-                    } else {
-                        let _ = EventFacade::dispatch(timed_out).await;
-                        let delay = next_delay(&env.backoff, env.attempts, None);
-                        tracing::warn!(
-                            job = %env.job_name,
-                            id = %env.id,
-                            attempt = env.attempts,
-                            retry_in = ?delay,
-                            timeout_secs = t.as_secs(),
-                            "queue job timed out, will retry"
-                        );
-                        if let Err(nack_err) = driver.nack(&res.token, delay).await {
-                            settlement_failure(&*driver, &env, "nack", "timeout_retry", &nack_err);
-                        }
-                    }
-                    // Reported once the attempt has settled, retried or
-                    // not, as the error of a failed attempt is (PAR-111).
-                    crate::error::Exceptions::report(&error);
-                }
-            }
-        })
+            },
+        )
         .await;
 
         // One settlement = one processed job for the max_jobs cap, regardless

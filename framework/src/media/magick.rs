@@ -188,6 +188,40 @@ impl MagickCliDriver {
         &self.binary
     }
 
+    /// Encode a processed PNG as AVIF for static publication.
+    ///
+    /// The PNG must already have passed the image pipeline, which applies
+    /// orientation and removes private metadata. The existing policy, memory
+    /// limits and process timeout apply. Quality outside `85..=100`, malformed
+    /// input, a missing codec or a failed process returns an error.
+    pub(crate) fn publication_avif(
+        &self,
+        png: &[u8],
+        quality: u8,
+    ) -> Result<Vec<u8>, FrameworkError> {
+        if !(85..=100).contains(&quality) {
+            return Err(FrameworkError::param(
+                "publication image quality must be 85..=100",
+            ));
+        }
+        let config = super::config();
+        if sniff::guard(png, &config)? != Some(sniff::InputFormat::Png) {
+            return Err(FrameworkError::param("publication AVIF input must be PNG"));
+        }
+        let mut args = limit_args(&config);
+        args.extend([
+            "png:-[0]".to_string(),
+            "+profile".into(),
+            "!icc,*".into(),
+            "+set".into(),
+            "comment".into(),
+            "-quality".into(),
+            quality.to_string(),
+            "avif:-".into(),
+        ]);
+        self.run(&args, png, &config)
+    }
+
     /// The ImageMagick security policy every run of this driver reads
     /// (HRD-010).
     ///

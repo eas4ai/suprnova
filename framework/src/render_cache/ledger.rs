@@ -391,7 +391,9 @@ pub async fn advance_in_current_transaction(
     let tx = Transaction::current().ok_or_else(|| {
         FrameworkError::internal("RenderCache generation advance requires the owning transaction")
     })?;
-    advance_through(&ExecutorChoice::from_tx(&tx), identities).await
+    advance_through(&ExecutorChoice::from_tx(&tx), identities).await?;
+    publication_after_commit(&tx.handle(), identities);
+    Ok(())
 }
 
 /// Advances `identities` inside a transaction that `orm::advance`'s
@@ -414,7 +416,9 @@ pub(crate) async fn advance_in_dedicated_transaction(
     let tx = Transaction::current().ok_or_else(|| {
         FrameworkError::internal("RenderCache generation advance requires the owning transaction")
     })?;
-    advance_through(&ExecutorChoice::from_tx(&tx), identities).await
+    advance_through(&ExecutorChoice::from_tx(&tx), identities).await?;
+    publication_after_commit(&tx.handle(), identities);
+    Ok(())
 }
 
 /// Advances `identities` through `txn`, a raw SeaORM transaction its caller
@@ -701,7 +705,22 @@ pub async fn advance_via_handle(
     if !super::write_side_open(true).await? {
         return Ok(());
     }
-    advance_through(&ExecutorChoice::from_handle(handle), identities).await
+    advance_through(&ExecutorChoice::from_handle(handle), identities).await?;
+    publication_after_commit(handle, identities);
+    Ok(())
+}
+
+// A credible precommit hint may be sent by advance_with even if its owner
+// later rolls back. Static publication waits on the actual owner's registry,
+// including explicit handles, nested scopes and savepoint rollback.
+fn publication_after_commit(handle: &TxHandle, identities: &[DependencyIdentity]) {
+    #[cfg(feature = "filesystem")]
+    if !identities.is_empty() {
+        let digests = identities.iter().map(DependencyIdentity::digest).collect();
+        handle.queue_publication_generations(digests);
+    }
+    #[cfg(not(feature = "filesystem"))]
+    let _ = (handle, identities);
 }
 
 /// The application-database generation authority: a [`GenerationLedger`]

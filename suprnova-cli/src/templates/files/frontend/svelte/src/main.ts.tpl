@@ -3,6 +3,7 @@ import { hydrate, mount } from 'svelte'
 import AppLayout from './layouts/AppLayout.svelte'
 import GuestLayout from './layouts/GuestLayout.svelte'
 import { installPageTools } from './lib/agents'
+import { staticHttpClient } from './lib/static'
 import { pageTitle } from './lib/title'
 
 // Exception text can include copied URLs or credentials even without request context.
@@ -154,6 +155,7 @@ const nonce =
 installPageTools(router)
 
 createInertiaApp({
+  http: staticHttpClient(),
   // `@inertiajs/vite` turns this into the page resolver: `Notes/Index`
   // loads `./pages/Notes/Index.svelte`, each page in its own chunk.
   pages: './pages',

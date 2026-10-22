@@ -503,6 +503,50 @@ impl Request {
         self
     }
 
+    /// Builds a credential-free GET request for an application publication task.
+    pub(crate) fn for_publication(path: &str) -> Result<Self, crate::FrameworkError> {
+        let parts = hyper::Request::builder()
+            .method(hyper::Method::GET)
+            .uri(path)
+            .header(hyper::header::ACCEPT, "text/html")
+            .body(())
+            .map_err(|error| {
+                crate::FrameworkError::internal(format!(
+                    "Public page `{path}` has an invalid request URI: {error}"
+                ))
+            })?
+            .into_parts()
+            .0;
+        Ok(Self {
+            parts,
+            body: BodyState::Buffered(Bytes::new()),
+            params: HashMap::new(),
+            route_pattern: None,
+            peer_addr: None,
+            trusted_proxies: TrustedProxiesConfig::empty(),
+            auth_user_id: None,
+            live_request_identity: LiveRequestIdentity::fresh(),
+            live_security_attestation: LiveSecurityAttestation::default(),
+            live_tenant: None,
+            live_cancellation: None,
+            render_cache_prepared: None,
+            connection_holds: Vec::new(),
+            public_root: None,
+            route_settings: None,
+            missing_answer: None,
+            agent: Default::default(),
+            oauth: Default::default(),
+        })
+    }
+
+    /// Private reload URLs must bypass caches even when a caller omits the header.
+    pub(crate) fn mark_private_origin(&mut self) {
+        self.parts.headers.insert(
+            hyper::header::CACHE_CONTROL,
+            hyper::header::HeaderValue::from_static("no-store"),
+        );
+    }
+
     /// Build a `Request` for tests, with no live connection behind it.
     ///
     /// [`Request::new`] takes a `hyper::body::Incoming`, which cannot be

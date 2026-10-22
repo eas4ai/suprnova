@@ -45,6 +45,35 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `tests/page_budget.rs` over their public pages; the dogfood application runs
   the same audit.
 
+- **Static publication of public Inertia pages.** A route declared with
+  `Router::public_page::<Props>` (or a public group plus
+  `Inertia::public_page::<Props>`) renders without a session, CSRF token or
+  nonce, and the application publishes its HTML and JSON objects, its
+  fingerprinted assets and its transcoded images to a storage disk the CDN
+  serves. Publication runs as an application boot task after the listener is
+  bound, so the health check never waits for it. Every page references its
+  assets by versioned key and the manifest write is the only switch, so the
+  previous publication stays live until the new one is complete; a storage
+  lease and a conditional manifest write keep two publishers from racing, and
+  graceful shutdown waits for a delivery in progress. Pages regenerate by
+  dependency tag after a committed transaction or job, delivered across
+  processes through the bound `BroadcastHub`, and on a revalidate interval. The
+  `CdnDriver` trait ships a CloudFront driver (origin switch, invalidation, a
+  viewer-response function that restores the recorded headers); without a
+  driver the origin serves the published objects from the manifest and mirrors
+  them to stable bucket keys after the switch. Public pages get a
+  hash-based `Content-Security-Policy` with `'unsafe-inline'` and nonces
+  removed from every script directive; private pages keep their nonces, and the
+  origin sends `Strict-Transport-Security` only on HTTPS it can trust.
+  Images are published as WebP at quality 85 or higher, AVIF when ImageMagick
+  is configured, with the metadata-stripped original as the fallback, and kept
+  PNGs go through `recompress_png` at the maximum preset. `static:publish`,
+  `static:status` and `static:prune` are the console commands; prune keeps the
+  live publication and retired versions inside their grace period. The React,
+  Vue and Svelte kits ship a client that fetches the published JSON for public
+  navigations and sends everything else to the origin
+  (`manual/static-publication.md`).
+
 ### Changed
 
 - **The default lossy encode quality is 85, not 70.** JPEG and lossy WebP
@@ -65,6 +94,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   XSRF cookie when the request left the session untouched; a request that
   changed the session (a remember-me rotation, a regeneration) still gets its
   cookies.
+
+- **`cdn-cloudfront` is a default feature.** It reuses the AWS signing stack
+  the S3 disk and the SQS queue driver already carry and adds `quick-xml` for
+  the distribution configuration; turn it off with `default-features = false`.
 
 ### Fixed
 

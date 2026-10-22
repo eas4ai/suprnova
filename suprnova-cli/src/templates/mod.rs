@@ -1411,6 +1411,26 @@ pub fn scaffold_frontend(
             .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
     }
 
+    // Static publication uses one transport core with a kit entry adapter.
+    let static_client = lib.join("static");
+    fs::create_dir_all(&static_client)
+        .map_err(|e| format!("Failed to create {}: {}", static_client.display(), e))?;
+    let static_adapter = match kit {
+        InertiaKit::React => include_str!("files/frontend/static/react.ts.tpl"),
+        InertiaKit::Svelte => include_str!("files/frontend/static/svelte.ts.tpl"),
+        InertiaKit::Vue => include_str!("files/frontend/static/vue.ts.tpl"),
+    };
+    for (path, content) in [
+        (
+            static_client.join("core.ts"),
+            include_str!("files/frontend/static/core.ts.tpl"),
+        ),
+        (static_client.join("index.ts"), static_adapter),
+    ] {
+        fs::write(&path, content)
+            .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    }
+
     // The stream client: one shared engine and the kit's hooks over it.
     let stream = lib.join("stream");
     fs::create_dir_all(&stream)

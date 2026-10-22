@@ -484,9 +484,43 @@ tags, but no CSP, HSTS or policy middleware. Applications use packages such as
 Live and RenderCache writers share one per-request nonce and its scaffolds
 start with a browser policy.
 
+The origin trusts a forwarded HTTPS scheme only from the proxies named in
+`APP_TRUSTED_PROXIES`; `APP_TRUSTED_PROXIES` is empty by default, so a deployment
+behind a TLS-terminating proxy must list it or HSTS is never sent.
+
 ## Next
 
 - [Middleware](middleware.md) covers global order and route middleware.
 - [Inertia Responses](frontend-inertia-responses.md) covers application root documents.
 - [Environment Variables](env-vars.md) lists every configuration setting.
 - [Agents](agents.md) covers the tools WebMCP registers.
+
+## Public Inertia publication
+
+Opt public pages into hash CSP explicitly with
+`SecurityHeaders::balanced().hash_public_pages()`. Private responses keep their
+fresh nonce policy. During a public render the framework emits no nonce
+attributes and hashes only executable inline scripts in the trusted Inertia
+document. JSON data scripts, external scripts, comments and inert template
+content supply no hashes. Middleware that injects an inline script later cannot
+add that script to the policy.
+
+Mark a registered GET route with
+`router.public_page::<AboutProps>("/about", "About")?`, or mark a prefix with
+`public_page_group("/docs")` and declare each component with
+`Inertia::public_page::<DocsProps>("/docs", "Docs")?`. The props type must derive
+`InertiaProps` with `#[inertia(cacheable)]` and public fields. Per-request fields
+refuse publication. A RenderCache policy alone does not mark a page public.
+
+List named public shares with `Inertia::public_shared(&["app"])?`. Public renders
+skip the session. Shared providers, `auth`, errors, flash and credential shares
+refuse publication without being evaluated. An unlisted named share, a session read in the handler or a
+nonce policy refuses that route with its path and cause. The listener keeps
+serving even when a route refuses publication. The HTML and page JSON come from
+the same resolved page, so publishing both does not run a lazy resolver twice.
+
+Public hash mode removes nonces and `unsafe-inline` from `script-src`,
+`script-src-elem` and `script-src-attr`. An empty attribute policy becomes
+`script-src-attr 'none'`. Inline event handlers do not gain permission from the
+hashes of inline script elements. A script inside SVG or MathML refuses
+publication because foreign-content executable text follows different rules.

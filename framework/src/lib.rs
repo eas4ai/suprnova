@@ -93,6 +93,8 @@ pub mod mail;
 pub mod media;
 pub mod middleware;
 pub mod security_headers;
+#[cfg(feature = "filesystem")]
+pub mod static_publish;
 // The MongoDB backend (PAR-182 onward), behind `database-mongodb`.
 #[cfg(feature = "database-mongodb")]
 pub mod mongodb;

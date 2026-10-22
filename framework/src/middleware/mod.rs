@@ -26,7 +26,7 @@
 mod aliases;
 mod chain;
 mod identity;
-pub(crate) use identity::inertia_hooks_of;
+pub(crate) use identity::{inertia_hooks_of, type_of};
 mod pipeline;
 mod registry;
 mod terminable;
@@ -117,7 +117,6 @@ pub trait Middleware: Send + Sync {
 #[cfg(feature = "agents")]
 #[cfg(feature = "agents")]
 pub(crate) use identity::page_tools_of;
-pub(crate) use identity::type_of;
 pub(crate) use identity::{MiddlewareExclusion, alias_of, boxed_as, inherit_identity, name_as};
 
 /// Convert a Middleware trait object into a BoxedMiddleware

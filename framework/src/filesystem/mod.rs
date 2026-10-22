@@ -330,6 +330,21 @@ pub(crate) fn local_fs_operator(root: &str) -> Result<Operator, FrameworkError> 
     operator.map_err(|e| FrameworkError::internal(format!("opendal fs init: {e}")))
 }
 
+/// Lease epochs need kernel-exclusive publication even when an application Fs writer stages by rename.
+pub(crate) fn exclusive_create_operator(disk: &Operator) -> Result<Operator, FrameworkError> {
+    let info = disk.info();
+    if info.scheme() != "fs" {
+        return Ok(disk.clone());
+    }
+    // Use the same root, but keep application layers on all ordinary publication operations.
+    local_fs_operator(&info.root())
+        .map(|operator| operator.layer(path_guard::PathGuardLayer))
+        .map_err(|failure| FrameworkError::internal(format!(
+            "static publication cannot make Fs lease creation exclusive with atomic_write_dir: {failure}; \
+             use a valid registered-disk root through Storage::register_fs"
+        )))
+}
+
 /// Static facade for the named-disk storage system.
 ///
 /// `Storage` itself holds no state; all disks live in a process-global

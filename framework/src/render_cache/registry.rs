@@ -1,6 +1,6 @@
 //! Deterministic route and group policy resolution.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use suprnova_live::render_cache::{PolicyPatch, RenderCachePolicy, VarianceDimension};
 
@@ -81,9 +81,31 @@ impl From<PolicyPatch> for GroupPolicy {
 pub struct RenderCachePolicyTable {
     routes: BTreeMap<String, GroupPolicy>,
     groups: BTreeMap<String, GroupPolicy>,
+    public_routes: BTreeSet<String>,
+    public_groups: BTreeSet<String>,
 }
 
 impl RenderCachePolicyTable {
+    /// Explicitly marks a GET route as eligible for static publication.
+    pub fn mark_public_route(&mut self, pattern: &str) {
+        self.public_routes.insert(pattern.to_owned());
+    }
+
+    /// Explicitly marks GET routes under a prefix as eligible for publication.
+    pub fn mark_public_group(&mut self, prefix: &str) {
+        self.public_groups.insert(prefix.to_owned());
+    }
+
+    /// A policy alone never opts a route into static publication.
+    #[must_use]
+    pub fn is_public_page(&self, pattern: &str) -> bool {
+        self.public_routes.contains(pattern)
+            || self.public_groups.iter().any(|prefix| {
+                pattern == prefix
+                    || pattern.starts_with(&format!("{}/", prefix.trim_end_matches('/')))
+            })
+    }
+
     /// Registers a group prefix once.
     pub fn register_group(
         &mut self,
