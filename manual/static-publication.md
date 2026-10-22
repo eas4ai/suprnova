@@ -159,6 +159,13 @@ suprnova static:status
 A refused lease or manifest commit appears in status. It leaves the live version
 in place. Boot continues serving the previous version.
 
+Mutable assets in a new render inventory keep their public relative paths under
+that revision's `_assets/` directory. Unchanged mutable dependencies are copied
+server side when storage supports copy, or uploaded again otherwise. Relative
+CSS URLs and module imports therefore resolve in the same revision. Fingerprinted
+assets retain their canonical names; a mutable graph also has revision-local
+copies of its fingerprinted dependencies for relative references.
+
 ## CDN drivers
 
 `CdnDriver` is the single publish-side interface. It switches a version,
@@ -361,6 +368,12 @@ publication.images(images)?;
 manifest PNG icons use oxipng Maximum with Zopfli. Metadata is stripped from
 every prepared raster. External and data URLs stay external. SVG and ICO files
 keep their existing representation. See [Images](images.md).
+
+The collector reads the complete Vite inventory before image preparation.
+A raster referenced only by a Vite entry or CSS keeps its key and its original
+format. The media pipeline strips its metadata and recompresses retained PNGs
+with the Maximum preset. Without the media feature, these dependencies refuse
+publication with the route and the reason.
 
 ## Prune retired objects
 

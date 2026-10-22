@@ -610,21 +610,10 @@ impl Publisher {
         let mut seen = BTreeSet::new();
         for mut page in pages {
             let mut asset_paths = BTreeMap::new();
-            for (key, (bytes, content_type)) in &page.assets {
+            for key in page.assets.keys() {
                 let fingerprinted = self.fingerprinted(key);
-                let old = previous.versions.get(&previous.live).and_then(|version| {
-                    version.objects.iter().find(|entry| {
-                        entry.asset
-                            && entry.url == format!("/{key}")
-                            && entry.digest == digest(bytes)
-                            && entry.headers.get("content-type") == Some(content_type)
-                            && entry.headers.get("cache-control") == Some(&self.page_control())
-                    })
-                });
                 let target = if fingerprinted {
                     key.clone()
-                } else if let Some(old) = old {
-                    old.path.clone()
                 } else {
                     format!("_pub/{revision}/_assets/{key}")
                 };
@@ -705,6 +694,7 @@ impl Publisher {
                     source: None,
                 });
             }
+            let mutable_graph = page.assets.keys().any(|key| !self.fingerprinted(key));
             for (key, (bytes, content_type)) in page.assets {
                 safe_path(&format!("/{key}"))?;
                 if key.starts_with("_pub/") {
@@ -724,16 +714,39 @@ impl Publisher {
                         },
                     ),
                 ]);
+                let entry = ObjectEntry {
+                    path: asset_paths[&key].trim_start_matches('/').to_string(),
+                    url: format!("/{key}"),
+                    digest: digest(&bytes),
+                    asset: true,
+                    asset_version: self.asset_version.clone(),
+                    dependency_tags: Vec::new(),
+                    headers,
+                };
+                if fingerprinted && mutable_graph {
+                    // Relative imports from a mutable entry resolve inside this revision too.
+                    let mut relative = entry.clone();
+                    relative.path = format!("_pub/{revision}/_assets/{key}");
+                    relative.url = format!("/{}", relative.path);
+                    let source = previous
+                        .versions
+                        .get(&previous.live)
+                        .and_then(|version| {
+                            version.objects.iter().find(|old| {
+                                old.path == entry.path
+                                    && old.digest == entry.digest
+                                    && old.headers == entry.headers
+                            })
+                        })
+                        .map(|old| old.path.clone());
+                    uploads.push(Upload {
+                        entry: relative,
+                        bytes: bytes.clone(),
+                        source,
+                    });
+                }
                 uploads.push(Upload {
-                    entry: ObjectEntry {
-                        path: asset_paths[&key].trim_start_matches('/').to_string(),
-                        url: format!("/{key}"),
-                        digest: digest(&bytes),
-                        asset: true,
-                        asset_version: self.asset_version.clone(),
-                        dependency_tags: Vec::new(),
-                        headers,
-                    },
+                    entry,
                     bytes,
                     source: None,
                 });
@@ -833,15 +846,15 @@ impl Publisher {
                     bytes: Bytes::new(),
                     source: Some(old.path.clone()),
                 });
+            } else {
+                objects.push(entry);
             }
-            objects.push(entry);
         }
         for upload in &mut uploads {
-            if upload.source.is_some() {
-                continue;
-            }
-            if let Some(old) = unchanged(upload)
+            if upload.source.is_none()
+                && let Some(old) = unchanged(upload)
                 && self.driver.is_none()
+                && !upload.entry.asset
             {
                 upload.entry.path.clone_from(&old.path);
             }

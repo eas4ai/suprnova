@@ -442,6 +442,9 @@ struct Probe {
     active: AtomicUsize,
     maximum: AtomicUsize,
     maximum_asset_read: std::sync::atomic::AtomicU64,
+    force_copy: AtomicBool,
+    disable_copy: AtomicBool,
+    copies: AtomicUsize,
     force_metadata: AtomicBool,
     metadata_writes: Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>,
     force_cas: AtomicBool,
@@ -476,6 +479,12 @@ impl Service for ProbeService {
     }
     fn capability(&self) -> Capability {
         let mut capability = self.inner.capability();
+        if self.state.force_copy.load(Ordering::SeqCst) {
+            capability.copy = true;
+        }
+        if self.state.disable_copy.load(Ordering::SeqCst) {
+            capability.copy = false;
+        }
         if self.state.force_cas.load(Ordering::SeqCst) {
             capability.write_with_if_match = true;
         }
@@ -554,6 +563,36 @@ impl Service for ProbeService {
         args: OpCopy,
         opts: OpCopier,
     ) -> opendal::Result<Self::Copier> {
+        self.state.copies.fetch_add(1, Ordering::SeqCst);
+        if self.state.force_copy.load(Ordering::SeqCst) {
+            let (inner, ctx, from, to) = (
+                self.inner.clone(),
+                ctx.clone(),
+                from.to_string(),
+                to.to_string(),
+            );
+            return Ok(Box::new(oio::OneShotCopier::new(async move {
+                use opendal::raw::oio::{Read as _, Write as _};
+                let metadata = inner
+                    .stat(&ctx, &from, OpStat::new())
+                    .await?
+                    .into_metadata();
+                let reader = inner.read(&ctx, &from, OpRead::new())?;
+                let (_, bytes) = reader
+                    .read(opendal::BytesRange::new(0, Some(metadata.content_length())))
+                    .await?;
+                let mut write = OpWrite::new();
+                if let Some(value) = metadata.content_type() {
+                    write = write.with_content_type(value);
+                }
+                if let Some(value) = metadata.cache_control() {
+                    write = write.with_cache_control(value);
+                }
+                let mut writer = inner.write(&ctx, &to, write)?;
+                writer.write(bytes).await?;
+                writer.close().await
+            })));
+        }
         self.inner.copy(ctx, from, to, args, opts)
     }
     fn write(
@@ -1387,4 +1426,68 @@ async fn pub_002_round2_5_metadata_excludes_representation_headers() {
         disk.stat(key).await.unwrap().content_type(),
         Some("text/html; charset=utf-8")
     );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn pub_002_round2_3_mutable_dependencies_share_the_new_revision() {
+    let _container = suprnova::testing::TestContainer::fake();
+    for disable_copy in [false, true] {
+        let router = asset_router();
+        let state = Arc::new(Probe::default());
+        state.force_copy.store(true, Ordering::SeqCst);
+        state.disable_copy.store(disable_copy, Ordering::SeqCst);
+        let disk = memory().layer(ProbeLayer(state.clone()));
+        let p = Publisher::from_operator(disk.clone(), "v1", PublishConfig::default()).unwrap();
+        let make = |css: &'static [u8]| {
+            let mut page = page("public");
+            page.html = Bytes::from_static(br#"<link rel="stylesheet" href="/theme.css">"#);
+            for (key, bytes, mime) in [
+                ("theme.css", css, "text/css"),
+                ("bg.png", b"pixels".as_slice(), "image/png"),
+                ("bg-AbC12345.png", b"fingerprint".as_slice(), "image/png"),
+            ] {
+                page.assets
+                    .insert(key.into(), (Bytes::from_static(bytes), mime.into()));
+            }
+            page
+        };
+        p.publish(vec![make(b"body{background:url(./bg.png)}")])
+            .await
+            .unwrap();
+        let second = p
+            .publish(vec![make(
+                b"body{background:url(./bg.png),url(./bg-AbC12345.png);color:red}",
+            )])
+            .await
+            .unwrap();
+        let manifest = p.manifest().await.unwrap();
+        let assets = &manifest.versions[&manifest.live].objects;
+        let bg = assets.iter().find(|o| o.url == "/bg.png").unwrap();
+        assert_eq!(bg.path, format!("_pub/{}/_assets/bg.png", second.version));
+        assert!(assets.iter().any(|o| o.path == "bg-AbC12345.png"));
+        suprnova::static_publish::StaticPublication::install(
+            &router,
+            Publisher::from_operator(disk, "v1", PublishConfig::default()).unwrap(),
+        )
+        .unwrap();
+        let client =
+            suprnova::testing::TestClient::new(router, suprnova::MiddlewareRegistry::new());
+        for (key, body) in [("bg.png", "pixels"), ("bg-AbC12345.png", "fingerprint")] {
+            let response = client
+                .get(format!("/_pub/{}/_assets/{key}", second.version))
+                .send()
+                .await;
+            response.assert_ok();
+            assert_eq!(response.body_text(), body);
+        }
+        if disable_copy {
+            assert_eq!(state.copies.load(Ordering::SeqCst), 0);
+        } else {
+            assert!(
+                state.copies.load(Ordering::SeqCst) > 0,
+                "reuse should use a server-side copy"
+            );
+        }
+    }
 }

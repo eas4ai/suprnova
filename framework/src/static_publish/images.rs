@@ -122,18 +122,7 @@ impl Preparation<'_> {
             .ok_or_else(|| {
                 FrameworkError::param(format!("publication image `{path}` has an unknown format"))
             })?;
-        let original_format = match mime {
-            "image/png" => OutputFormat::Png,
-            "image/jpeg" => OutputFormat::Jpeg,
-            "image/webp" => OutputFormat::WebP,
-            "image/gif" => OutputFormat::Gif,
-            "image/bmp" | "image/x-ms-bmp" => OutputFormat::Bmp,
-            _ => {
-                return Err(FrameworkError::param(format!(
-                    "publication image `{path}` cannot retain its original format `{mime}`"
-                )));
-            }
-        };
+        let original_format = fallback_format(mime, path)?;
         let pipeline = Image::from_bytes(bytes).quality(self.options.quality);
         let original = if original_format == OutputFormat::Png && keep {
             pipeline
@@ -433,5 +422,44 @@ pub async fn prepare(
         html,
         assets: preparation.objects.into_values().collect(),
         replacements: preparation.replacements,
+    })
+}
+
+fn fallback_format(mime: &str, path: &str) -> Result<OutputFormat, FrameworkError> {
+    match mime {
+        "image/png" => Ok(OutputFormat::Png),
+        "image/jpeg" => Ok(OutputFormat::Jpeg),
+        "image/webp" => Ok(OutputFormat::WebP),
+        "image/gif" => Ok(OutputFormat::Gif),
+        "image/bmp" | "image/x-ms-bmp" => Ok(OutputFormat::Bmp),
+        _ => {
+            return Err(FrameworkError::param(format!(
+                "publication image `{path}` cannot retain its original format `{mime}`"
+            )));
+        }
+    }
+}
+// Inventory-only rasters retain their keys so CSS and module references stay valid.
+pub(crate) async fn prepare_fallback(
+    path: &str,
+    bytes: Bytes,
+    quality: u8,
+) -> Result<ImageObject, FrameworkError> {
+    let mime = infer::get(&bytes)
+        .map(|kind| kind.mime_type())
+        .ok_or_else(|| {
+            FrameworkError::param(format!("publication image `{path}` has an unknown format"))
+        })?;
+    let format = fallback_format(mime, path)?;
+    let image = Image::from_bytes(bytes).quality(quality).to_format(format);
+    let image = if format == OutputFormat::Png {
+        image.recompress_png(PngEffort::Maximum)
+    } else {
+        image
+    };
+    Ok(ImageObject {
+        path: path.to_string(),
+        bytes: image.to_bytes().await?.into(),
+        content_type: format.mime_type().to_string(),
     })
 }

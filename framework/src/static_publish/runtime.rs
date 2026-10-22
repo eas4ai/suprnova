@@ -338,9 +338,18 @@ impl StaticPublication {
     }
     async fn prepare(&self, page: &mut PageObject) -> Result<(), FrameworkError> {
         let source = crate::lock::read(&self.source, "publication asset source")?.clone();
+        let html_inventory = super::assets::referenced_assets(&page.html, &page.path)?;
+        let vite_inventory = if let Some(source) = &source {
+            super::assets::vite_assets(source, "assets/.vite/manifest.json", &html_inventory)
+                .await?
+        } else {
+            BTreeSet::new()
+        };
+        let mut inventory = html_inventory;
+        inventory.extend(vite_inventory.iter().cloned());
         #[cfg(not(feature = "media"))]
-        for path in super::assets::referenced_assets(&page.html, &page.path)? {
-            if super::assets::is_raster(&path) {
+        for path in &inventory {
+            if super::assets::is_raster(path) {
                 return Err(error(format!(
                     "route {}: raster {path} requires the media feature",
                     page.path
@@ -349,9 +358,10 @@ impl StaticPublication {
         }
         if let Some(source) = &source {
             #[cfg(feature = "media")]
+            let mut options =
+                crate::lock::read(&self.image_options, "publication image options")?.clone();
+            #[cfg(feature = "media")]
             {
-                let mut options =
-                    crate::lock::read(&self.image_options, "publication image options")?.clone();
                 options.document_path.clone_from(&page.path);
                 let prepared = super::images::prepare(&page.html, source, &options).await?;
                 page.html = prepared.html;
@@ -365,23 +375,31 @@ impl StaticPublication {
                         .insert(asset.path, (asset.bytes, asset.content_type));
                 }
             }
+            // HTML variants replace their original references; Vite consumers retain their keys.
             let mut referenced = super::assets::referenced_assets(&page.html, &page.path)?;
-            referenced.extend(
-                super::assets::vite_assets(source, "assets/.vite/manifest.json", &referenced)
-                    .await?,
-            );
+            referenced.extend(vite_inventory);
             for path in referenced {
                 if !page.assets.contains_key(&path) {
                     let bytes = source.read(&path).await.map_err(error)?.to_bytes();
+                    let raster = !super::assets::is_vector_or_icon(&path)
+                        && (super::assets::is_raster(&path)
+                            || infer::get(&bytes)
+                                .is_some_and(|kind| kind.mime_type().starts_with("image/")));
                     #[cfg(not(feature = "media"))]
-                    if !super::assets::is_vector_or_icon(&path)
-                        && infer::get(&bytes)
-                            .is_some_and(|kind| kind.mime_type().starts_with("image/"))
-                    {
+                    if raster {
                         return Err(error(format!(
                             "route {}: raster {path} requires the media feature",
                             page.path
                         )));
+                    }
+                    #[cfg(feature = "media")]
+                    if raster {
+                        let asset = super::images::prepare_fallback(&path, bytes, options.quality)
+                            .await
+                            .map_err(|failure| error(format!("route {}: {failure}", page.path)))?;
+                        page.assets
+                            .insert(asset.path, (asset.bytes, asset.content_type));
+                        continue;
                     }
                     let mime = crate::http::file_response::content_type_from_extension(
                         std::path::Path::new(&path),

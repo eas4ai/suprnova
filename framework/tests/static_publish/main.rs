@@ -31,3 +31,5 @@ mod client;
 
 #[cfg(not(feature = "media"))]
 mod raster_guard;
+
+mod inventory;
