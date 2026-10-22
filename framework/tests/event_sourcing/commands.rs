@@ -86,3 +86,13 @@ fn es_005_chapter_is_linked_and_distinguishes_events_and_workflows() {
         assert!(manual.contains("event-sourcing.md"));
     }
 }
+
+#[test]
+fn es_005_manual_warns_about_destructive_event_history_rollback() {
+    let chapter = include_str!("../../../manual/event-sourcing.md");
+    let migration_section = chapter
+        .split("## Record and rebuild an aggregate")
+        .next()
+        .unwrap();
+    assert!(migration_section.contains("Rolling the framework migration back drops `stored_events`, `snapshots` and\n`projector_checkpoints`, so back history up before a rollback."));
+}

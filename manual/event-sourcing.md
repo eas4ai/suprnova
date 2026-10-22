@@ -20,6 +20,9 @@ constraint rejects a second fact at the same aggregate version. `snapshots` keep
 UUID, aggregate version, JSON state and capture time. SQLite, PostgreSQL and
 MySQL/MariaDB use the same migration.
 
+Rolling the framework migration back drops `stored_events`, `snapshots` and
+`projector_checkpoints`, so back history up before a rollback.
+
 ## Record and rebuild an aggregate
 
 The attribute registers a stable event name. Renaming the Rust struct preserves
