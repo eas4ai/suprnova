@@ -126,6 +126,10 @@ impl LiveRegistry {
         })
     }
 
+    pub(crate) fn families(&self) -> impl Iterator<Item = &str> {
+        self.inner.families.keys().map(String::as_str)
+    }
+
     pub(crate) fn is_family(&self, name: &str) -> bool {
         self.inner.families.contains_key(name)
     }

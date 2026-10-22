@@ -1276,6 +1276,32 @@ impl BroadcastHub for SeaStreamerBroadcastHub {
         self.local.subscribe_live_topic(topic)
     }
 
+    fn configure_live_topic_family(
+        &self,
+        family: &str,
+        retention: Duration,
+    ) -> Result<(), FrameworkError> {
+        match &self.live_topics {
+            FanoutLiveTopics::Memory(state) => state.configure_family(family, retention),
+            FanoutLiveTopics::Redis(state) => state.configure_family(family, retention),
+        }
+    }
+
+    fn live_topic_membership(&self, topic: &str, active: bool) -> Result<(), FrameworkError> {
+        if let FanoutLiveTopics::Memory(state) = &self.live_topics {
+            state.membership(topic, active);
+        }
+        Ok(())
+    }
+
+    fn prune_live_topics(&self) -> Result<usize, FrameworkError> {
+        self.local.prune_live_topics()?;
+        Ok(match &self.live_topics {
+            FanoutLiveTopics::Memory(state) => state.prune(),
+            FanoutLiveTopics::Redis(_) => 0,
+        })
+    }
+
     async fn live_topic_cursor(&self, topic: &str) -> Result<u64, FrameworkError> {
         match &self.live_topics {
             FanoutLiveTopics::Memory(live_topics) => Ok(live_topics.cursor(topic).await),

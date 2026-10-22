@@ -780,7 +780,8 @@ document identity in `X-Socket-ID` while the adapter is mounted.
 A private binding is included only when the current principal has its topic
 or stream ability. Otherwise the page renders without that binding or cursor
 and keeps its polling fallback. The framework logs the page component and
-topic once at warn per process, then at debug on later denied renders.
+declared topic or family once at warn per process, then at debug on later
+denied renders. The resolved instance name remains in the log fields.
 
 The client core regression suite uses Bun. Run it from the repository root:
 

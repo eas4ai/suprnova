@@ -124,6 +124,12 @@ async fn write_handler(_request: Request) -> Response {
     Ok(HttpResponse::json(json!({"saved": true})))
 }
 fn signal_runtime() -> (Arc<Router>, LiveRuntime, Arc<InMemoryBroadcastHub>) {
+    signal_runtime_with_clock(None)
+}
+
+fn signal_runtime_with_clock(
+    clock: Option<Arc<suprnova::live::testing::AdjustableTestClock>>,
+) -> (Arc<Router>, LiveRuntime, Arc<InMemoryBroadcastHub>) {
     App::init();
     ensure_crypt();
     let hub = Arc::new(InMemoryBroadcastHub::new());
@@ -148,7 +154,13 @@ fn signal_runtime() -> (Arc<Router>, LiveRuntime, Arc<InMemoryBroadcastHub>) {
         .post("/signal/owned-write", socket_origin_write)
         .into();
     let router = router.try_live().unwrap().try_live_mount(&mount).unwrap();
-    let runtime = prepare_live_router_for_test(&router).unwrap();
+    let runtime = match clock {
+        Some(clock) => {
+            suprnova::live::testing::prepare_live_router_with_clock_for_test(&router, clock)
+                .unwrap()
+        }
+        None => prepare_live_router_for_test(&router).unwrap(),
+    };
     App::singleton(runtime.clone());
     (Arc::new(router), runtime, hub)
 }
@@ -1637,4 +1649,192 @@ async fn signal_fix_003_forged_socket_cannot_exclude_another_principal() {
 #[serial_test::serial]
 async fn signal_fix_003_forged_socket_cannot_exclude_a_fanout_membership() {
     forged_socket_regression(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[serial_test::serial]
+async fn signal_fix2_001_publications_never_create_family_listeners() {
+    let _container = TestContainer::fake();
+    ensure_crypt();
+    let hub = Arc::new(InMemoryBroadcastHub::new());
+    TestContainer::bind::<dyn BroadcastHub>(hub.clone());
+    TestContainer::singleton(
+        LiveRegistry::builder()
+            .public_topic_family("churn")
+            .unwrap()
+            .build(),
+    );
+    TestContainer::singleton(
+        suprnova::live::LiveConfig::builder()
+            .topic_instance_retention_secs(2)
+            .build()
+            .unwrap(),
+    );
+    let runtime = prepare_live_router_for_test(&Router::new()).unwrap();
+    let topics = LiveTopics::from_runtime(&runtime);
+    for key in 0..64 {
+        let topic = format!("churn.{key}");
+        topics.changed(&topic, &["stats"]).await.unwrap();
+        assert_eq!(topics.cursor(&topic).await.unwrap(), 1);
+        assert_eq!(
+            hub.subscriber_count(&format!("__live.topic.{topic}")),
+            0,
+            "publication retained a listener for {topic}"
+        );
+    }
+    assert_eq!(
+        suprnova::live::testing::prune_live_topic_listeners_for_test(&runtime),
+        0
+    );
+    tokio::time::advance(Duration::from_secs(3)).await;
+    assert_eq!(hub.prune_live_topics().unwrap(), 64);
+    assert_eq!(hub.prune_live_topics().unwrap(), 0);
+    assert_eq!(
+        suprnova::live::testing::prune_live_topic_listeners_for_test(&runtime),
+        0
+    );
+    assert_eq!(topics.cursor("churn.0").await.unwrap(), 0);
+    topics.changed("churn.0", &["stats"]).await.unwrap();
+    assert_eq!(topics.cursor("churn.0").await.unwrap(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn signal_fix2_001_baselines_memberships_pending_and_static_state_survive_pruning() {
+    let hub = InMemoryBroadcastHub::new();
+    hub.configure_live_topic_family("retained", Duration::from_secs(2))
+        .unwrap();
+    let interval = Duration::from_millis(1);
+    for topic in ["retained.read", "retained.member", "static"] {
+        hub.publish_live_topic(topic, &[], None, interval)
+            .await
+            .unwrap();
+    }
+    hub.live_topic_membership("retained.member", true).unwrap();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(
+        hub.live_topic_cursors(&["retained.read".into()])
+            .await
+            .unwrap(),
+        [1]
+    );
+    tokio::time::advance(Duration::from_millis(1500)).await;
+    assert_eq!(hub.prune_live_topics().unwrap(), 0);
+    hub.live_topic_membership("retained.member", false).unwrap();
+    tokio::time::advance(Duration::from_secs(3)).await;
+    assert_eq!(hub.prune_live_topics().unwrap(), 2);
+    assert_eq!(hub.live_topic_cursor("static").await.unwrap(), 1);
+    let mut receiver = hub.subscribe_live_topic("retained.pending").unwrap();
+    hub.publish_live_topic(
+        "retained.pending",
+        &["first".into()],
+        None,
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    receiver.recv().await.unwrap();
+    hub.publish_live_topic(
+        "retained.pending",
+        &["last".into()],
+        None,
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    tokio::time::advance(Duration::from_secs(3)).await;
+    assert_eq!(
+        hub.prune_live_topics().unwrap(),
+        0,
+        "pending invalidations must survive a shorter retention window"
+    );
+    tokio::time::advance(Duration::from_secs(3)).await;
+    assert_eq!(
+        receiver.recv().await.unwrap().data["props"],
+        json!(["last"])
+    );
+}
+
+#[test]
+fn signal_fix2_001_retention_configuration_is_positive_and_defaults_to_one_day() {
+    assert_eq!(
+        suprnova::live::LiveConfig::default().topic_instance_retention_secs(),
+        86400
+    );
+    let error = suprnova::live::LiveConfig::builder()
+        .topic_instance_retention_secs(0)
+        .build()
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("LIVE_TOPIC_INSTANCE_RETENTION_SECS")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn signal_fix2_001_pruning_the_last_issued_membership_releases_its_listener() {
+    let clock = Arc::new(suprnova::live::testing::AdjustableTestClock::new(
+        1_700_000_000_000,
+    ));
+    let (router, runtime, hub) = signal_runtime_with_clock(Some(clock.clone()));
+    let server = spawn_server(router).await;
+    let alice = Identity::alice();
+    let binding = page_binding(&server).await;
+    let _issued = issue_page(&server, &binding, "retention-document-0001", &alice).await;
+    assert_eq!(hub.subscriber_count("__live.topic.signal.posts"), 1);
+    assert_eq!(
+        suprnova::live::testing::prune_live_topic_listeners_for_test(&runtime),
+        1
+    );
+    clock.advance_ms(120001);
+    assert_eq!(
+        suprnova::live::testing::prune_live_topic_listeners_for_test(&runtime),
+        0
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while hub.subscriber_count("__live.topic.signal.posts") != 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "aborted listener still owns its receiver"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+#[test]
+fn signal_fix2_001_retention_environment_is_checked() {
+    if let Ok(value) = std::env::var("SIGNAL_RETENTION_CHILD") {
+        let result = suprnova::live::LiveConfig::from_env();
+        if value == "0" {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("LIVE_TOPIC_INSTANCE_RETENTION_SECS")
+            );
+        } else {
+            assert_eq!(result.unwrap().topic_instance_retention_secs(), 2);
+        }
+        return;
+    }
+    for value in ["0", "2"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "signals::signal_fix2_001_retention_environment_is_checked",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("SIGNAL_RETENTION_CHILD", value)
+            .env("LIVE_TOPIC_INSTANCE_RETENTION_SECS", value)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

@@ -136,6 +136,27 @@ pub trait BroadcastHub: Send + Sync + 'static {
         Err(live_topics_unsupported())
     }
 
+    /// Registers a boot-declared family policy without storing any instance names.
+    fn configure_live_topic_family(
+        &self,
+        _family: &str,
+        _retention: Duration,
+    ) -> Result<(), FrameworkError> {
+        Err(live_topics_unsupported())
+    }
+
+    /// Records listener ownership so in-memory instances stay pinned while memberships exist.
+    /// Redis listeners renew their instance TTL through baseline heartbeats.
+    fn live_topic_membership(&self, _topic: &str, _active: bool) -> Result<(), FrameworkError> {
+        Ok(())
+    }
+
+    /// Retires idle family instances during Live's existing membership prune pass.
+    /// Returns the number of in-memory instances retired; Redis expires its own keys.
+    fn prune_live_topics(&self) -> Result<usize, FrameworkError> {
+        Ok(0)
+    }
+
     /// Read the last publication cursor accepted for an Inertia Live topic.
     async fn live_topic_cursor(&self, _topic: &str) -> Result<u64, FrameworkError> {
         Err(live_topics_unsupported())
@@ -241,6 +262,7 @@ impl InMemoryBroadcastHub {
         {
             return tx.subscribe();
         }
+        self.live_topics.prune();
         // Slow path - create the channel under a write lock and sweep
         // any dead siblings while we hold it.
         match lock::write(&self.channels, "broadcast hub channels") {
@@ -336,6 +358,29 @@ impl BroadcastHub for InMemoryBroadcastHub {
         topic: &str,
     ) -> Result<broadcast::Receiver<BroadcastEnvelope>, FrameworkError> {
         Ok(self.subscribe_for(&live_topic_channel(topic)))
+    }
+
+    fn configure_live_topic_family(
+        &self,
+        family: &str,
+        retention: Duration,
+    ) -> Result<(), FrameworkError> {
+        self.live_topics.configure_family(family, retention)
+    }
+
+    fn live_topic_membership(&self, topic: &str, active: bool) -> Result<(), FrameworkError> {
+        self.live_topics.membership(topic, active);
+        Ok(())
+    }
+
+    fn prune_live_topics(&self) -> Result<usize, FrameworkError> {
+        let retired = self.live_topics.prune();
+        let mut channels = self
+            .channels
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        channels.retain(|_, sender| sender.receiver_count() > 0);
+        Ok(retired)
     }
 
     async fn live_topic_cursor(&self, topic: &str) -> Result<u64, FrameworkError> {

@@ -1,7 +1,7 @@
 //! Redis-backed cursor and coalescing state for Inertia Live signals.
 
 use crate::FrameworkError;
-use crate::broadcasting::live::{LIVE_TOPIC_EVENT, live_topic_channel};
+use crate::broadcasting::live::{LIVE_TOPIC_EVENT, LiveTopicRetention, live_topic_channel};
 use redis::Script;
 use redis::aio::ConnectionManager;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -51,6 +51,15 @@ local pending = redis.call('HGET', KEYS[1], 'pending') == '1'
 local interval = tonumber(ARGV[1])
 local props = cjson.decode(ARGV[8])
 local max_props = tonumber(ARGV[10])
+local retention = tonumber(ARGV[11])
+local function retain_instance(deadline)
+    if retention > 0 then
+        redis.call('HSET', KEYS[1], 'retention_ms', retention)
+        local ttl = retention + math.max(0, deadline - now)
+        redis.call('PEXPIRE', KEYS[1], ttl)
+        redis.call('PEXPIRE', KEYS[2], ttl)
+    end
+end
 
 if not pending and now >= next_at then
     local envelope = {
@@ -75,6 +84,7 @@ if not pending and now >= next_at then
         end
         return redis.error_reply(written.err)
     end
+    retain_instance(now)
     return {0, cursor, 0}
 end
 
@@ -107,6 +117,7 @@ end
 
 if next_at == 0 then next_at = now + interval end
 redis.call('ZADD', KEYS[3], next_at, KEYS[1])
+retain_instance(next_at)
 return {1, cursor, next_at}
 "#;
 
@@ -157,6 +168,8 @@ redis.call('HDEL', KEYS[1], 'pending', 'pending_all', 'topic', 'interval', 'exce
 redis.call('DEL', KEYS[2])
 redis.call('ZREM', KEYS[3], KEYS[1])
 redis.call('HSET', KEYS[1], 'next_at', now + interval)
+local retention = tonumber(redis.call('HGET', KEYS[1], 'retention_ms') or '0')
+if retention > 0 then redis.call('PEXPIRE', KEYS[1], retention) end
 return 1
 "#;
 
@@ -166,6 +179,7 @@ pub(super) struct RedisLiveTopics {
     connection: ConnectionManager,
     stream: String,
     schedule: String,
+    retention: LiveTopicRetention,
 }
 
 impl RedisLiveTopics {
@@ -175,6 +189,7 @@ impl RedisLiveTopics {
             connection,
             stream: stream.to_owned(),
             schedule: format!("{stream}:{LIVE_KEY_SEGMENT}:schedule"),
+            retention: LiveTopicRetention::default(),
         }
     }
 
@@ -225,6 +240,7 @@ impl RedisLiveTopics {
             .arg(props_json)
             .arg(super::sea_streamer::MESSAGE_FIELD)
             .arg(MAX_REGISTERED_TOPIC_CHANGE_PROPS)
+            .arg(self.retention.window(topic).map_or(0, duration_millis))
             .invoke_async(&mut self.connection.clone())
             .await
             .map_err(|error| {
@@ -235,20 +251,17 @@ impl RedisLiveTopics {
         Ok(result.1)
     }
 
-    /// Read the shared cursor for `topic`.
+    pub(super) fn configure_family(
+        &self,
+        family: &str,
+        retention: Duration,
+    ) -> Result<(), FrameworkError> {
+        self.retention.configure(family, retention)
+    }
+
+    /// Baseline reads renew the instance TTL through the same bulk command.
     pub(super) async fn cursor(&self, topic: &str) -> Result<u64, FrameworkError> {
-        let (meta, _) = self.topic_keys(topic);
-        redis::cmd("HGET")
-            .arg(meta)
-            .arg("cursor")
-            .query_async::<Option<u64>>(&mut self.connection.clone())
-            .await
-            .map(|cursor| cursor.unwrap_or(0))
-            .map_err(|error| {
-                FrameworkError::internal(format!(
-                    "SeaStreamerBroadcastHub: live topic cursor read failed: {error}"
-                ))
-            })
+        Ok(self.cursors(&[topic.to_owned()]).await?[0])
     }
 
     /// A single Redis command captures all requested family and static baselines.
@@ -257,11 +270,33 @@ impl RedisLiveTopics {
             return Ok(Vec::new());
         }
         let script = Script::new(
-            "local values = {} for i, key in ipairs(KEYS) do values[i] = tonumber(redis.call('HGET', key, 'cursor') or '0') end return values",
+            r#"
+local values = {}
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+for i, key in ipairs(KEYS) do
+    values[i] = tonumber(redis.call('HGET', key, 'cursor') or '0')
+    local retention = tonumber(ARGV[i])
+    if retention > 0 then
+        redis.call('HSETNX', key, 'cursor', 0)
+        redis.call('HSET', key, 'retention_ms', retention)
+        local next_at = tonumber(redis.call('HGET', key, 'next_at') or '0')
+        local pending = redis.call('HGET', key, 'pending') == '1'
+        local ttl = retention
+        if pending then ttl = ttl + math.max(0, next_at - now) end
+        redis.call('PEXPIRE', key, ttl)
+        redis.call('PEXPIRE', key .. ':props', ttl)
+    end
+end
+return values
+"#,
         );
         let mut invocation = script.prepare_invoke();
         for topic in topics {
             invocation.key(self.topic_keys(topic).0);
+        }
+        for topic in topics {
+            invocation.arg(self.retention.window(topic).map_or(0, duration_millis));
         }
         invocation
             .invoke_async(&mut self.connection.clone())

@@ -985,3 +985,95 @@ async fn owned_signal_fanout(first: &SeaStreamerBroadcastHub, second: &SeaStream
         );
     }
 }
+
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn signal_fix2_001_redis_instance_ttl_is_refreshed_and_static_topics_do_not_expire() {
+    let server = crate::redis_server::PasswordRedis::start("signal-retention-test");
+    let url = format!("redis://:signal-retention-test@127.0.0.1:{}", server.port);
+    let stream = format!("signal-retention-{}", uuid::Uuid::new_v4());
+    let hub = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    hub.configure_live_topic_family("notes", Duration::from_secs(2))
+        .unwrap();
+    let mut connection = redis::Client::open(url)
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let identity = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("{stream}\0notes.42").as_bytes(),
+    );
+    let meta = format!("{stream}:__live:topic:{identity}");
+    assert_eq!(hub.live_topic_cursor("notes.42").await.unwrap(), 0);
+    let initial: i64 = redis::cmd("PTTL")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!((1500..=2000).contains(&initial), "baseline TTL: {initial}");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let older: i64 = redis::cmd("PTTL")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    hub.publish_live_topic(
+        "notes.42",
+        &["stats".into()],
+        None,
+        Duration::from_millis(10),
+    )
+    .await
+    .unwrap();
+    let published: i64 = redis::cmd("PTTL")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        published > older + 300 && published <= 2000,
+        "publication TTL: {older} -> {published}"
+    );
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        hub.live_topic_cursors(&["notes.42".into()]).await.unwrap(),
+        [1]
+    );
+    let baseline: i64 = redis::cmd("PTTL")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!(baseline > 1700, "bulk baseline TTL: {baseline}");
+    hub.publish_live_topic("static", &[], None, Duration::from_millis(1))
+        .await
+        .unwrap();
+    let static_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("{stream}\0static").as_bytes(),
+    );
+    let ttl: i64 = redis::cmd("PTTL")
+        .arg(format!("{stream}:__live:topic:{static_id}"))
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(ttl, -1);
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    let exists: bool = redis::cmd("EXISTS")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!(!exists, "Redis did not retire the instance hash");
+    assert_eq!(hub.live_topic_cursor("notes.42").await.unwrap(), 0);
+    hub.publish_live_topic(
+        "notes.42",
+        &["stats".into()],
+        None,
+        Duration::from_millis(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(hub.live_topic_cursor("notes.42").await.unwrap(), 1);
+}

@@ -200,6 +200,32 @@ describe("Inertia live client core", () => {
     connection = null;
   });
 
+  it.skipIf(!Bun.env.SIGNAL_LIVE_RETIRED_PAGE)(
+    "accepts a reused family signal after the actual retired Rust baseline resets the old page",
+    async () => {
+      const { startInertiaLive } = await loadCore();
+      const app = fixture();
+      const retired = await Bun.file(Bun.env.SIGNAL_LIVE_RETIRED_PAGE!).json();
+      app.setPage(retired.oldPage);
+      connection = startInertiaLive({
+        clearTimer: app.clearTimer,
+        getPage: () => app.page,
+        router: app.router,
+        setTimer: app.setTimer,
+        transport: app.transport,
+      });
+      expect(app.page.liveBindings["notes.42"].cursor).toBe(10);
+      const visit = app.beginVisit();
+      app.setPage(retired.resetPage);
+      app.renderVisit("success", visit);
+      app.finishVisit(visit);
+      expect(app.page.liveBindings["notes.42"].cursor).toBe(0);
+      app.handlers.onSignal(retired.signal);
+      expect(app.runNextTimer()).toBe(25);
+      expect(app.reloads[0]?.only).toEqual(["stats"]);
+    },
+  );
+
   it.skipIf(!Bun.env.SIGNAL_LIVE_BASELINE_PAGE)(
     "accepts the committed signal newer than the actual Rust loader page",
     async () => {

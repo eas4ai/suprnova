@@ -786,6 +786,13 @@ topic signals reach this process only. A custom hub that keeps the trait's
 default topic methods reports that topic fanout is unsupported instead of
 silently acting as a process-local hub.
 
+Family instances use the configured `LIVE_TOPIC_INSTANCE_RETENTION_SECS`
+window, which defaults to 86400 seconds. Redis expires idle instance hashes;
+its cursor and rate schedule metadata share that TTL. Publications and baseline
+reads renew it. Membership heartbeats keep a connected instance alive. In-memory
+hubs prune idle instances without memberships. Static topics do not expire.
+See [Topic signals](live.md#topic-signals) for configuration and cursor resets.
+
 Topic traffic uses a reserved internal channel that ordinary `publish` calls
 cannot spoof. The hub envelope's `except` socket id is preserved across
 fanout. A write made by an Inertia visit can therefore skip the transport that

@@ -75,18 +75,20 @@ pub(crate) struct TopicState {
     pub(crate) registry: LiveRegistry,
     pub(crate) hub: Arc<dyn BroadcastHub>,
     interval: Duration,
+    retention: Duration,
     listeners: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     models: Mutex<HashMap<TypeId, Vec<ModelBinding>>>,
 }
 
 impl TopicState {
-    pub(crate) fn new(registry: LiveRegistry, interval: Duration) -> Self {
+    pub(crate) fn new(registry: LiveRegistry, interval: Duration, retention: Duration) -> Self {
         let hub = App::make::<dyn BroadcastHub>()
             .unwrap_or_else(|| Arc::new(InMemoryBroadcastHub::new()));
         Self {
             registry,
             hub,
             interval,
+            retention,
             listeners: Mutex::new(HashMap::new()),
             models: Mutex::new(HashMap::new()),
         }
@@ -110,9 +112,24 @@ impl TopicState {
         })?;
         let weak: Weak<AsyncState> = Arc::downgrade(state);
         let topic_name = topic.to_owned();
+        self.hub.live_topic_membership(topic, true)?;
+        let heartbeat = self.retention.min(Duration::from_secs(60)) / 2;
         let task = handle.spawn(async move {
+            let mut heartbeat = tokio::time::interval(heartbeat);
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                match receiver.recv().await {
+                let delivery = tokio::select! {
+                    delivery = receiver.recv() => delivery,
+                    _ = heartbeat.tick() => {
+                        let Some(state) = weak.upgrade() else { break; };
+                        state.prune_topics();
+                        if let Err(error) = state.topics.hub.live_topic_cursor(&topic_name).await {
+                            tracing::error!(%error, topic = topic_name, "Live topic membership renewal failed");
+                        }
+                        continue;
+                    }
+                };
+                match delivery {
                     Ok(envelope) => {
                         let Some(state) = weak.upgrade() else {
                             break;
@@ -155,23 +172,53 @@ impl TopicState {
         Ok(())
     }
 
-    pub(crate) fn start(&self, state: &Arc<AsyncState>) -> Result<(), FrameworkError> {
-        for topic in self.registry.topics().keys() {
-            self.listen(state, topic)?;
+    pub(crate) fn start(&self) -> Result<(), FrameworkError> {
+        for family in self.registry.families() {
+            self.hub
+                .configure_live_topic_family(family, self.retention)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn retain_listeners(&self, active: &HashMap<String, BTreeSet<String>>) {
+        self.listeners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|topic, task| {
+                if active.contains_key(topic) {
+                    return true;
+                }
+                task.abort();
+                if let Err(error) = self.hub.live_topic_membership(topic, false) {
+                    tracing::error!(%error, topic, "Live topic membership release failed");
+                }
+                false
+            });
+        if let Err(error) = self.hub.prune_live_topics() {
+            tracing::error!(%error, "Live topic pruning failed");
+        }
+    }
+
+    pub(crate) fn listener_count(&self) -> usize {
+        self.listeners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 }
 
 impl Drop for TopicState {
     fn drop(&mut self) {
-        for task in self
+        for (topic, task) in self
             .listeners
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
+            .iter()
         {
             task.abort();
+            if let Err(error) = self.hub.live_topic_membership(topic, false) {
+                tracing::error!(%error, topic, "Live topic membership release failed");
+            }
         }
     }
 }
@@ -206,7 +253,6 @@ impl LiveTopics {
     /// Reads the hub's cursor, or the process-local cursor without a configured hub.
     pub async fn cursor(&self, topic: &str) -> Result<u64, FrameworkError> {
         self.check_topic(topic)?;
-        self.state.topics.listen(&self.state, topic)?;
         self.state.topics.hub.live_topic_cursor(topic).await
     }
 
@@ -481,10 +527,6 @@ impl Pending {
     }
 
     async fn publish(self) -> Result<(), FrameworkError> {
-        self.publisher
-            .state
-            .topics
-            .listen(&self.publisher.state, &self.topic)?;
         self.publisher
             .state
             .topics

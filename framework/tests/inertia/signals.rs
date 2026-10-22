@@ -141,10 +141,19 @@ fn signal_004_shared_client_drops_stale_cursors_and_coalesces_bounded_reloads() 
         .block_on(loader_race_page());
     std::fs::write(&fixture, serde_json::to_vec(&page).expect("page JSON"))
         .expect("write actual baseline page");
+    let retirement = directory.path().join("retired-instance.json");
+    let retired = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .expect("retirement fixture runtime")
+        .block_on(retired_instance_fixture());
+    std::fs::write(&retirement, serde_json::to_vec(&retired).unwrap()).unwrap();
     let output = std::process::Command::new("bun")
         .arg("test")
         .arg(suite)
         .env("SIGNAL_LIVE_BASELINE_PAGE", fixture)
+        .env("SIGNAL_LIVE_RETIRED_PAGE", retirement)
         .output()
         .expect("requires Bun on PATH to run the client core regression suite");
     print!("{}", String::from_utf8_lossy(&output.stdout));
@@ -698,4 +707,82 @@ fn compile_manual_example(example: &str) {
         "manual example does not compile: {}\n{example}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[derive(InertiaProps)]
+#[inertia(live(topic = "notes", only = ["stats", "recent_notes"]))]
+struct RetiredPage {
+    stats: u64,
+    recent_notes: Vec<String>,
+}
+
+async fn retired_instance_fixture() -> Value {
+    use suprnova::broadcasting::BroadcastHub;
+    let _guard = TestContainer::fake();
+    suprnova::Crypt::init(suprnova::EncryptionKey::generate());
+    let hub = std::sync::Arc::new(suprnova::InMemoryBroadcastHub::new());
+    suprnova::App::bind::<dyn BroadcastHub>(hub.clone());
+    TestContainer::singleton(
+        suprnova::live::LiveConfig::builder()
+            .topic_instance_retention_secs(2)
+            .build()
+            .unwrap(),
+    );
+    TestContainer::singleton(
+        LiveRegistry::builder()
+            .public_topic_family("notes")
+            .unwrap()
+            .build(),
+    );
+    let runtime = prepare_live_router_for_test(&Router::new()).unwrap();
+    for _ in 0..10 {
+        hub.publish_live_topic(
+            "notes.42",
+            &["stats".into()],
+            None,
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+        tokio::time::advance(std::time::Duration::from_millis(2)).await;
+    }
+    async fn page() -> Value {
+        let request = Request::for_test_with_headers("GET", "/retired", [("X-Inertia", "true")]);
+        json(
+            InertiaResponse::live::<RetiredPage>("__tests__/TypedProps")
+                .scope("notes", "42")
+                .load(|| async {
+                    Ok(RetiredPage {
+                        stats: 0,
+                        recent_notes: vec![],
+                    })
+                })
+                .await
+                .unwrap()
+                .resolve(&request)
+                .await
+                .unwrap(),
+        )
+        .await
+    }
+    let old = page().await;
+    assert_eq!(old["liveBindings"]["notes.42"]["cursor"], 10);
+    tokio::time::advance(std::time::Duration::from_secs(3)).await;
+    assert_eq!(hub.prune_live_topics().unwrap(), 1);
+    let reset = page().await;
+    assert_eq!(reset["liveBindings"]["notes.42"]["cursor"], 0);
+    let mut receiver = hub.subscribe_live_topic("notes.42").unwrap();
+    LiveTopics::from_runtime(&runtime)
+        .changed("notes.42", &["stats"])
+        .await
+        .unwrap();
+    let signal = receiver.recv().await.unwrap().data;
+    assert_eq!(signal["cursor"], 1);
+    serde_json::json!({ "oldPage": old, "resetPage": reset, "signal": signal })
+}
+
+#[tokio::test(start_paused = true)]
+#[serial_test::serial]
+async fn signal_fix2_001_retired_family_renders_zero_before_its_first_new_signal() {
+    retired_instance_fixture().await;
 }

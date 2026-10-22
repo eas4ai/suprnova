@@ -2139,6 +2139,7 @@ fn assemble_runtime(
         super::topics::TopicState::new(
             registry.clone(),
             std::time::Duration::from_millis(config.topic_signal_interval_ms()),
+            std::time::Duration::from_secs(config.topic_instance_retention_secs()),
         ),
     )?;
 

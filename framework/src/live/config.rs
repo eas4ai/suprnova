@@ -131,6 +131,7 @@ pub struct LiveConfig {
     max_response_items: usize,
     max_context_lifetime_ms: u64,
     topic_signal_interval_ms: u64,
+    topic_instance_retention_secs: u64,
     request_timeout_ms: u32,
     max_queued_per_island: u8,
     max_parallel_per_island: u8,
@@ -875,6 +876,7 @@ impl LiveConfig {
             max_response_items: DEFAULT_ITEMS,
             max_context_lifetime_ms: DEFAULT_CONTEXT_LIFETIME_MS,
             topic_signal_interval_ms: 100,
+            topic_instance_retention_secs: 86400,
             request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             max_queued_per_island: DEFAULT_QUEUED_PER_ISLAND,
             max_parallel_per_island: DEFAULT_PARALLEL_PER_ISLAND,
@@ -1055,6 +1057,12 @@ impl LiveConfig {
         self.topic_signal_interval_ms
     }
 
+    /// Idle family instance lifetime; static topics do not expire. Defaults to one day.
+    #[must_use]
+    pub const fn topic_instance_retention_secs(self) -> u64 {
+        self.topic_instance_retention_secs
+    }
+
     /// Events one reconnect replay may carry (`LIVE_ASYNC_MAX_REPLAY_EVENTS`).
     /// A replay is queued whole, so it fits inside the queued-event limit.
     #[must_use]
@@ -1165,6 +1173,7 @@ pub struct LiveConfigBuilder {
     max_response_items: usize,
     max_context_lifetime_ms: u64,
     topic_signal_interval_ms: u64,
+    topic_instance_retention_secs: u64,
     request_timeout_ms: u32,
     max_queued_per_island: u8,
     max_parallel_per_island: u8,
@@ -1209,6 +1218,7 @@ impl LiveConfigBuilder {
             max_response_items: DEFAULT_ITEMS,
             max_context_lifetime_ms: DEFAULT_CONTEXT_LIFETIME_MS,
             topic_signal_interval_ms: 100,
+            topic_instance_retention_secs: 86400,
             request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             max_queued_per_island: DEFAULT_QUEUED_PER_ISLAND,
             max_parallel_per_island: DEFAULT_PARALLEL_PER_ISLAND,
@@ -1275,6 +1285,14 @@ impl LiveConfigBuilder {
         let narrow32 = |value: u64| u32::try_from(value).unwrap_or(u32::MAX);
         let narrow8 = |value: u64| u8::try_from(value).unwrap_or(u8::MAX);
         let mut builder = Self::new();
+        if let Some(value) = number("LIVE_TOPIC_INSTANCE_RETENTION_SECS")? {
+            if value == 0 {
+                return Err(FrameworkError::internal(
+                    "LIVE_TOPIC_INSTANCE_RETENTION_SECS must be positive",
+                ));
+            }
+            builder.topic_instance_retention_secs = value;
+        }
         if let Some(value) = number("LIVE_TOPIC_SIGNAL_INTERVAL_MS")? {
             if value == 0 {
                 return Err(FrameworkError::internal(
@@ -1665,6 +1683,13 @@ impl LiveConfigBuilder {
         self
     }
 
+    /// Sets the idle retention window for family instances in seconds; zero is rejected.
+    #[must_use]
+    pub const fn topic_instance_retention_secs(mut self, seconds: u64) -> Self {
+        self.topic_instance_retention_secs = seconds;
+        self
+    }
+
     /// Validates every limit and creates the immutable configuration.
     ///
     /// # Errors
@@ -1678,6 +1703,12 @@ impl LiveConfigBuilder {
             Kind::InvalidAsyncLimits,
             "LIVE_TOPIC_SIGNAL_INTERVAL_MS",
             "must be positive milliseconds",
+        )?;
+        check(
+            self.topic_instance_retention_secs > 0,
+            Kind::InvalidAsyncLimits,
+            "LIVE_TOPIC_INSTANCE_RETENTION_SECS",
+            "must be positive seconds",
         )?;
         let request = self.max_request_bytes;
         check(
@@ -1849,6 +1880,7 @@ impl LiveConfigBuilder {
             max_response_items: self.max_response_items,
             max_context_lifetime_ms: self.max_context_lifetime_ms,
             topic_signal_interval_ms: self.topic_signal_interval_ms,
+            topic_instance_retention_secs: self.topic_instance_retention_secs,
             request_timeout_ms: self.request_timeout_ms,
             max_queued_per_island: self.max_queued_per_island,
             max_parallel_per_island: self.max_parallel_per_island,

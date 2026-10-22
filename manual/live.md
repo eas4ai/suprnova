@@ -784,7 +784,7 @@ topics.on_model::<Post>("posts", &["posts", "post_count"])?;
 ```
 
 The cursor belongs to the topic, not to a subscriber. A binding records its
-current value when the page renders, so reconnect can distinguish a current
+current value before its page loader runs, so reconnect can distinguish a current
 subscription from one that needs a reload. With a cross-process hub, every
 replica observes the same cursor. Without a configured hub, Live binds its
 in-memory fallback and signals reach only this process. See [Inertia Live topic
@@ -793,6 +793,29 @@ In-process counters and memberships end with the process. A recovery reload
 takes the new rendered baseline from the page object; the polling fallback
 keeps the page current while push reconnects. Redis-backed cursor state lives
 in the configured hub instead of an individual process.
+
+Family listeners exist only while this runtime has issued memberships for the
+instance. Publishing or reading a cursor does not create a listener. When the
+last membership expires and is pruned, its listener and receiver are released.
+
+Idle instances expire after `LIVE_TOPIC_INSTANCE_RETENTION_SECS=86400` seconds.
+Zero is rejected. A publication, baseline read or membership renews activity.
+In-memory pruning retains active memberships and pending rate-limited signals;
+Redis renews the instance hash TTL on publication, baseline reads and membership
+heartbeats. Pending signals survive until their permitted publication. Static
+topics never expire. Configure the same retention window on every replica:
+
+```rust
+let config = suprnova::live::LiveConfig::builder()
+    .topic_instance_retention_secs(86400)
+    .build()?;
+suprnova::App::singleton(config);
+```
+
+A retired instance has baseline cursor 0. Its next publication advances to 1.
+This matches a volatile process restart. A recovery reload installs the lower
+baseline before the client accepts the reused instance's signals. Keep polling
+as the fallback while a disconnected page recovers its baseline.
 
 A binding may also name an existing component stream as
 `component::stream`. Such a binding uses the component ability

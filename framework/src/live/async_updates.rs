@@ -649,9 +649,7 @@ impl AsyncState {
             replay_budget: Arc::new(SubscriptionReplayBudget::new(limits.replay_budget_bytes)),
             topics,
         });
-        if tokio::runtime::Handle::try_current().is_ok() {
-            state.topics.start(&state)?;
-        }
+        state.topics.start()?;
         Ok(state)
     }
 
@@ -696,6 +694,7 @@ impl AsyncState {
         for id in expired {
             remove_issued(tables, &id);
         }
+        self.topics.retain_listeners(&tables.topics);
         let stale = tables
             .transports
             .iter()
@@ -715,6 +714,13 @@ impl AsyncState {
             {
                 tables.credentials.remove(&credential);
             }
+        }
+    }
+
+    pub(crate) fn prune_topics(&self) {
+        match self.now() {
+            Ok(now) => self.prune(&mut self.tables(), now),
+            Err(error) => tracing::error!(?error, "Live topic expiry clock is unavailable"),
         }
     }
 
@@ -825,16 +831,6 @@ impl AsyncState {
             .collect::<Vec<_>>();
         let (topics, authority, topic_binding) =
             self.issued_topics(context, &component, &stream, topics);
-        let component_topic = format!("{}::{}", component.as_str(), stream.as_str());
-        for topic in &topics {
-            // Parameterized legacy topics use direct refresh publication, not hub signals.
-            if topic == &component_topic || self.topics.registry.application_topic(topic).is_some()
-            {
-                self.topics
-                    .listen(self, topic)
-                    .map_err(|_| AsyncErrorKind::Unavailable)?;
-            }
-        }
         let binding = authorized.binding().clone();
         let binding_text = binding.to_base64url();
         let descriptor = issued.descriptor().clone();
@@ -914,6 +910,17 @@ impl AsyncState {
                 );
                 credential
             };
+            let component_topic = format!("{}::{}", component.as_str(), stream.as_str());
+            for topic in &topics {
+                if (topic == &component_topic
+                    || self.topics.registry.application_topic(topic).is_some())
+                    && let Err(error) = self.topics.listen(self, topic)
+                {
+                    self.topics.retain_listeners(&tables.topics);
+                    tracing::error!(%error, topic, "Live topic listener issuance failed");
+                    return Err(AsyncErrorKind::Unavailable);
+                }
+            }
             for topic in &topics {
                 tables
                     .topics
