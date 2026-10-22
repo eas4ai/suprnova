@@ -18,6 +18,7 @@ mod data;
 mod describe;
 mod document;
 mod domain_error;
+mod domain_event;
 mod factory;
 mod handler;
 mod inertia;
@@ -1819,4 +1820,16 @@ pub fn scopes(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_derive(Factory, attributes(factory))]
 pub fn derive_factory(input: TokenStream) -> TokenStream {
     factory::derive_factory_impl(input)
+}
+
+/// Declares a durable event's stable name, schema version and optional upgrade function.
+#[proc_macro_attribute]
+pub fn domain_event(args: TokenStream, input: TokenStream) -> TokenStream {
+    domain_event::domain_event(args, input)
+}
+
+/// Registers an AggregateRoot state for the snapshot console command.
+#[proc_macro_attribute]
+pub fn aggregate(args: TokenStream, input: TokenStream) -> TokenStream {
+    domain_event::aggregate(args, input)
 }

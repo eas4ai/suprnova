@@ -718,3 +718,8 @@ required-features = ["testing", "database-sqlite"]
 [[test]]
 name = "page_budget"
 path = "tests/page_budget/main.rs"
+
+[[test]]
+name = "event_sourcing"
+path = "tests/event_sourcing/main.rs"
+required-features = ["testing", "database-sqlite"]

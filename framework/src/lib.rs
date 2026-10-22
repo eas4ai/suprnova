@@ -69,6 +69,7 @@ pub mod database;
 pub mod date;
 pub mod eloquent;
 pub mod error;
+pub mod event_sourcing;
 pub mod events;
 pub mod factory;
 pub mod features;
@@ -1125,3 +1126,13 @@ pub use search::settings::{MediaKind, MediaSource};
 pub use search::embedder::profiles::embeddinggemma_media_profile;
 
 pub use search::load_search_media;
+
+// Domain history names remain separate from the idempotency Replay facade.
+pub use event_sourcing::{
+    Aggregate, AggregateEntry, AggregateRoot, CreateEventSourcingTables, DomainEvent,
+    DomainEventEntry, EventStore, Snapshot, StoredEvent,
+};
+pub use suprnova_macros::{aggregate, domain_event};
+
+/// SeaORM migration contracts for application-owned migrators.
+pub use ::sea_orm_migration;
