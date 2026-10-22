@@ -521,3 +521,13 @@ async fn signal_fix_004_prebuilt_bound_props_require_a_loader() {
             .contains("loader")
     );
 }
+
+#[test]
+fn signal_fix_008_live_binding_public_types_are_exported_from_the_root() {
+    fn bindings<P: suprnova::InertiaProps>() -> &'static [suprnova::LiveBinding] {
+        P::live_bindings()
+    }
+    let _: Option<suprnova::LiveTopics> = None;
+    let _: Option<suprnova::LiveTopicSignal> = None;
+    assert_eq!(bindings::<Page>()[0].topic, "signal.render");
+}
