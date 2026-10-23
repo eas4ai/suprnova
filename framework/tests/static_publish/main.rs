@@ -1,5 +1,7 @@
 #![cfg(all(feature = "testing", feature = "filesystem"))]
 
+#[cfg(feature = "cdn-cloudflare")]
+mod cloudflare;
 #[cfg(feature = "cdn-cloudfront")]
 mod cloudfront;
 mod eligibility;

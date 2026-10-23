@@ -228,8 +228,8 @@ references it; the live version and retired versions inside grace retain theirs.
 
 `CdnDriver` is the single publish-side interface. It switches a version,
 advertises purge capabilities and purges tags, URLs or a prefix. The in-memory
-driver records operations for tests. An application can add Cloudflare or
-Bunny by implementing this same trait.
+driver records operations for tests. CloudFront and Cloudflare drivers ship with
+the framework. An application can add another provider by implementing this trait.
 
 ```rust
 use std::sync::Arc;
@@ -247,7 +247,7 @@ changes the selected origin's path, sends `If-Match`, waits for deployment and
 creates invalidations. Static keys can be passed from `S3Config`; otherwise
 the AWS profile or instance role supplies credentials.
 
-The default `cdn-cloudfront` feature supplies the driver independently of SQS.
+The default `cdn-cloudfront` and `cdn-cloudflare` features supply their drivers independently of SQS.
 Register the publication disk and construct the driver from its configuration:
 
 ```rust
@@ -336,6 +336,129 @@ use suprnova::static_publish::{Publisher, PublishConfig};
 let publisher = Publisher::new("pages", "build-42", PublishConfig::default())?
     .fingerprint(r"\.release$")?;
 ```
+
+### Cloudflare and R2
+
+Use an R2 bucket as the publication disk and a Worker on the site's hostname.
+Keep that hostname's DNS record pointed at the application and enable Cloudflare's
+proxy. A Worker route intercepts requests before they reach the application.
+An R2 custom domain alone cannot send unpublished paths to the application.
+
+Register the bucket through `S3Config`. R2 uses its account endpoint and the
+`auto` region. Supply static access and secret keys from an R2 API token with
+read and write access to the bucket. The separate zone API token needs Cache
+Purge permission. Read these credentials from the application's configuration
+and pass them to the driver; the driver reads no environment variables.
+
+```rust
+use std::{sync::Arc, time::Duration};
+use suprnova::{FrameworkError, S3Config, Storage};
+use suprnova::static_publish::{PublishConfig, Publisher};
+use suprnova::static_publish::cdn::CloudflareDriver;
+
+fn cloudflare(
+    account_id: &str,
+    access_key: &str,
+    secret_key: &str,
+    zone_id: &str,
+    purge_token: &str,
+) -> Result<Publisher, FrameworkError> {
+    let s3 = S3Config {
+        bucket: "public-pages".into(),
+        endpoint: Some(format!("https://{account_id}.r2.cloudflarestorage.com")),
+        region: Some("auto".into()),
+        access_key_id: Some(access_key.into()),
+        secret_access_key: Some(secret_key.into()),
+        root: Some("pages".into()),
+    };
+    Storage::register_s3("pages", s3.clone())?;
+    let driver = CloudflareDriver::new(zone_id, "www.example.com", purge_token, &s3)?
+        .with_manifest_ttl(Duration::from_secs(5))?;
+    Ok(Publisher::new("pages", "build-42", PublishConfig::default())?
+        .with_cdn(Arc::new(driver)))
+}
+```
+
+Write the shipped Worker to the deployment directory with a small binary:
+
+```rust
+use suprnova::static_publish::cdn::CLOUDFLARE_WORKER;
+
+fn main() -> std::io::Result<()> {
+    std::fs::write("cloudflare_worker.js", CLOUDFLARE_WORKER)
+}
+```
+
+Create `wrangler.toml` beside that file, then run `wrangler deploy`:
+
+```toml
+name = "suprnova-publication"
+main = "cloudflare_worker.js"
+compatibility_date = "2026-10-23"
+routes = [{ pattern = "www.example.com/*", zone_name = "example.com" }]
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "public-pages"
+
+[vars]
+ROOT_PREFIX = "pages"
+MANIFEST_TTL_SECONDS = "5"
+```
+
+`ROOT_PREFIX` must match `S3Config.root`; use an empty string when the disk has
+no root. The constructor refuses the same ambiguous root segments as CloudFront.
+The Worker reads `<root>/_pub/manifest.json` and selects its `live` revision.
+It serves GET and HEAD from R2, returns ETag-based 304 responses and restores
+native HTTP metadata and validated public headers. It preserves CSP metadata
+and applies the same restrictive default CSP as the CloudFront function when
+HTML has none. Other methods, missing objects and missing or unreadable manifests
+go to the application with `fetch(request)`. The manifest and status objects
+are never served from R2.
+
+The Worker maps page paths to versioned HTML, `/index.json` paths to versioned
+JSON, and asset paths directly to their bucket keys. When the manifest includes
+a page inventory, its recorded keys take precedence. This supports the current
+publisher's flat page stems as well as directory-style `index.html` keys.
+Fingerprint names and `/_pub/<version>/_assets/...` paths retain the disk root.
+The Worker uses Cloudflare's Cache API to cache R2 responses under their unchanged
+public URLs. Requests with query strings read R2 directly because the publisher's
+purge URLs have no query dimension. This avoids Worker-defined custom cache keys,
+which [single-file purge cannot clear](https://developers.cloudflare.com/workers/reference/how-the-cache-works/#purge-assets-stored-with-the-cache-api).
+Each cached entry records its object key internally, so a manifest change cannot
+reuse a previous revision's page. That internal header is removed before delivery.
+The Worker attaches dependency Cache-Tag headers to cached entries for tag purges.
+It never caches application fallback responses. Cache writes run through
+`waitUntil` when the runtime provides a request context. This follows the
+[R2 Cache API example](https://developers.cloudflare.com/r2/examples/cache-api/).
+The Cache API honors the shared cache lifetime but does not implement
+`stale-while-revalidate` or `stale-if-error`; see its
+[runtime contract](https://developers.cloudflare.com/workers/runtime-apis/cache/).
+
+The manifest cache defaults to five seconds per Worker isolate. Set
+`with_manifest_ttl` to the same duration as `MANIFEST_TTL_SECONDS`.
+`selected_version` returns unknown because the manifest selects the version.
+Switching waits one TTL without changing Cloudflare configuration. The current
+publisher calls the switch before committing its manifest, so the driver also
+waits one TTL at purge time, after commit. This keeps the purge behind cached
+manifest selections. Include both waits in the publication timeout; recovery
+realignment can add another switch wait before rendering. Rollback
+has no provider configuration to restore; the durable manifest remains authoritative.
+
+URL purges send full HTTPS URLs in conservative batches of 30. Cloudflare's
+current limits are 100 URLs per request on Free, Pro and Business, and 500 on
+Enterprise, rather than a 30-URL API limit. Single-file rate limits are 800 URLs
+per second on Free, 1500 on Pro and Business, and 3000 on Enterprise.
+Prefix and tag purges are available on all current plans. Enable them explicitly
+with `with_enterprise_purge()?`; the method retains the Enterprise naming convention
+but does not check the account plan. Their request limits are 5 per minute on
+Free, 5 per second on Pro, 10 per second on Business and 50 per second on Enterprise,
+with at most 100 operations per request. Tags are batched accordingly.
+Prefix values contain a host and path without a scheme, query or fragment.
+Provider refusals include the HTTP status and first error code and message,
+with the token redacted. See the [purge API](https://developers.cloudflare.com/api/resources/cache/methods/purge/),
+[single-file guide](https://developers.cloudflare.com/cache/how-to/purge-cache/purge-by-single-file/)
+and [current plan limits](https://developers.cloudflare.com/cache/how-to/purge-cache/#availability-and-limits).
 
 ## CSP and private requests
 
