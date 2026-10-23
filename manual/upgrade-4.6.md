@@ -176,8 +176,8 @@ savepoint and check that the callback only describes committed work.
   `HttpEmbedder::with_transport` to send embedding requests through your own
   HTTP client, `LazyEmbedder` to register a local model that loads on first
   use, `generations::reclaim_generation` or `search:reclaim` to resume a
-  generation an interrupted build left behind, `CloudflareDriver` to publish
-  public pages to an R2 bucket behind a Cloudflare custom domain, and
+  generation an interrupted build left behind, `CloudflareDriver` to serve
+  public pages from an R2 bucket's custom domain with no Worker, and
   `HttpResponse::error_view()` on a 5xx page you build yourself so the
   production error view sends it as built. (4.6.2)
 - **`cdn-cloudflare` is a default feature.** The Cloudflare driver is on by

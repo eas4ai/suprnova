@@ -39,16 +39,19 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   migration lock; `SearchEngine::release_creation_lease` is the driver hook,
   a no-op for drivers without leases (#215).
 - **A Cloudflare CDN driver for static publication.** `CloudflareDriver`
-  (feature `cdn-cloudflare`, on by default and free of new dependencies)
-  serves published pages from an R2 bucket, which is the publication disk
-  through `S3Config` with the R2 endpoint, behind a Worker whose source ships
-  as `CLOUDFLARE_WORKER`: the Worker reads the live version from the
-  publication manifest, maps a page path and its `index.json` to the live
-  objects, restores the published headers from the object's metadata, and
-  passes every unpublished path to the application, so the hostname keeps
-  answering as PUB-006 requires. The driver purges the Cloudflare cache by URL
-  in batches of 100 (or by prefix) and waits the
-  Worker's manifest interval before the purge that follows a switch.
+  (feature `cdn-cloudflare`, on by default and free of new dependencies) works
+  the way an R2 bucket with a custom domain already does: the bucket is the
+  publication disk through `S3Config` with the R2 endpoint, the custom domain
+  serves it, and nothing runs at the edge. The driver owns a few rules on the
+  zone, created on the first switch and corrected on every later one: two URL
+  rewrites that serve `/about` and `/about/` from the mirrored
+  `about/index.html`, a response header rule that carries the published
+  headers, and a cache rule that makes HTML and JSON cacheable with the
+  origin's TTLs. It purges by URL in batches of 100 or by prefix, and removes
+  its rules on a first-publication rollback. `CloudflareDriver::for_origin`
+  covers a hostname that mixes dynamic pages: the proxied application serves
+  the published objects itself and the driver keeps the cache rule and the
+  purges. R2 charges no egress.
 - **An application's own 5xx page is sent as built.** With debug off, the
   framework answered every browser 5xx with its minimal status-only view,
   which also replaced a 503 page the application built on purpose, with its
