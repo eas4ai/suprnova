@@ -55,7 +55,7 @@
    "framework/src/broadcasting/pusher/config.rs:246"
   ],
   "MYSQL_TEST_URL": [
-   "framework/src/search/commands.rs:268"
+   "framework/src/search/commands.rs:295"
   ],
   "PAGE_BUDGET_ASSET_BYTES": [
    "framework/src/page_budget/mod.rs:347"
@@ -103,7 +103,7 @@
    "suprnova-cli/src/registry/scan/contract.rs:183"
   ],
   "PG_TEST_URL": [
-   "framework/src/search/commands.rs:267"
+   "framework/src/search/commands.rs:294"
   ],
   "SCREAMING_SNAKE_CASE": [
    "suprnova-cli/src/commands/generate_types.rs:365",
@@ -140,5 +140,5 @@
   "demo application code (app/), test-support crates and fixtures"
  ],
  "sibling_reexports_folded_into_aliases": 713,
- "source_rev": "a7569d398"
+ "source_rev": "341a91df1"
 }
