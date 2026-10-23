@@ -257,6 +257,19 @@ ITEMS = {
     "suprnova::clear_middleware_alias": REFUSE,
     "suprnova::clear_middleware_group": REFUSE,
     "suprnova::middleware::clear_middleware_priority_for_test": REFUSE,
+    # Publication policy: marking a route or a group as a public page, or a
+    # shared prop as public, publishes what it renders to the CDN for anyone.
+    # That is the application's decision; a component cannot make a page public.
+    "suprnova::Router::public_page": REFUSE,
+    "suprnova::Router::public_page_group": REFUSE,
+    "suprnova::Inertia::public_page": REFUSE,
+    "suprnova::Inertia::public_shared": REFUSE,
+    "suprnova::render_cache::registry::RenderCachePolicyTable::mark_public_route": REFUSE,
+    "suprnova::render_cache::registry::RenderCachePolicyTable::mark_public_group": REFUSE,
+    # Test hooks that move a broadcast hub's topic clock or pause its pending
+    # flush change signal delivery for every page on the hub.
+    "suprnova::InMemoryBroadcastHub::set_live_topic_clock_for_test": REFUSE,
+    "suprnova::broadcasting::fanout::SeaStreamerBroadcastHub::pause_live_topic_flush_for_test": REFUSE,
     "suprnova::append_middleware_priority": REFUSE,
     "suprnova::prepend_middleware_priority": REFUSE,
     "suprnova::register_terminable": REFUSE,

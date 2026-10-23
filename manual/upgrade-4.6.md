@@ -143,6 +143,10 @@ savepoint and check that the callback only describes committed work.
 
 ## Fixed entries with no upgrade step
 
+- **The MariaDB vector driver reads a quoted index distance.** On MariaDB
+  12.3.3 every `similar` call failed with a distance mismatch against a table
+  the driver had created itself. It now works on 12.3.3 and on earlier
+  releases. Nothing to change.
 - **The built-in driver honours the JPEG quality setting.** The OxideAV
   driver wrote every JPEG at 75 whatever the pipeline asked. It now writes the
   quality you set, 85 by default. Nothing to change.

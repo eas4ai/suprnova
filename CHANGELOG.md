@@ -4,7 +4,7 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
-## 4.6.0 - 2026-10-21
+## 4.6.0 - 2026-10-22
 
 ### Added
 
@@ -176,6 +176,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Fixed
 
+- **The MariaDB vector driver reads a quoted index distance.** MariaDB 12.3.3
+  renders the vector index option as `` `DISTANCE`='cosine' `` in
+  `SHOW CREATE TABLE`, where 12.3.1 rendered `DISTANCE=cosine`. The driver
+  kept the quotes, saw a distance mismatch and refused every `similar` call;
+  it now strips them (#216).
 - **A savepoint rollback discards the callbacks of the work it rolls back.**
   Nested transactions and named savepoints in `DB::transaction` now record
   their after-commit and rollback callbacks under one lock with the savepoint
