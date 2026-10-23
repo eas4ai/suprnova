@@ -1,0 +1,294 @@
+//! Implementation of the `CustomerStore` trait for `StripeProvider`.
+//!
+//! Maps Suprnova's provider-neutral customer lifecycle onto Stripe's
+//! `/v1/customers` API.
+
+use crate::StripeProvider;
+use crate::deadline;
+use crate::sdk_error;
+use async_trait::async_trait;
+use serde::Serialize;
+use std::collections::HashMap;
+use stripe_client_core::{RequestBuilder, StripeMethod};
+use stripe_shared::{Customer, DeletedCustomer};
+use suprnova::payments::{
+    CreateCustomerRequest, CustomerRef, CustomerStore, PaymentResult, UpdateCustomerRequest,
+};
+
+// ---------------------------------------------------------------------------
+// Param structs
+// ---------------------------------------------------------------------------
+//
+// Stripe accepts metadata as bracketed form pairs (`metadata[key]=value`).
+// `stripe_client_core::RequestBuilder::form` serialises with `serde_qs`, which
+// renders a `HashMap<String, String>` exactly in that shape - matching the
+// `CreateCustomerBuilder` field type in async-stripe-core's own customer
+// requests module.
+
+#[derive(Serialize)]
+struct CreateCustomerParams<'a> {
+    email: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<HashMap<String, String>>,
+}
+
+#[derive(Serialize)]
+struct UpdateCustomerParams<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<HashMap<String, String>>,
+}
+
+/// Flatten the public `Option<serde_json::Value>` metadata input into the
+/// Stripe-friendly `Option<HashMap<String, String>>` shape.
+///
+/// Stripe metadata is a flat map of strings to strings. Top-level scalar
+/// values are stringified (numbers, booleans, etc.); nested objects/arrays
+/// are JSON-encoded so a value still round-trips, matching how Stripe's
+/// own dashboard renders complex metadata pasted into the field.
+///
+/// `None` and `Some(serde_json::Value::Null)` both produce `None` so the
+/// `#[serde(skip_serializing_if = "Option::is_none")]` attribute keeps the
+/// outgoing form body empty when no metadata was supplied.
+pub(crate) fn metadata_to_string_map(
+    value: Option<&serde_json::Value>,
+) -> Option<HashMap<String, String>> {
+    let obj = value?.as_object()?;
+    if obj.is_empty() {
+        return None;
+    }
+    let mut map = HashMap::with_capacity(obj.len());
+    for (k, v) in obj {
+        let s = match v {
+            serde_json::Value::Null => continue,
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        map.insert(k.clone(), s);
+    }
+    if map.is_empty() { None } else { Some(map) }
+}
+
+// ---------------------------------------------------------------------------
+// Helper
+// ---------------------------------------------------------------------------
+
+fn customer_to_ref(
+    c: Customer,
+    user_id: Option<String>,
+    metadata_fallback: serde_json::Value,
+) -> CustomerRef {
+    let provider_metadata = pick_provider_metadata(c.metadata.as_ref(), metadata_fallback);
+    CustomerRef {
+        provider_customer_id: c.id.as_str().to_string(),
+        user_id,
+        email: c.email.unwrap_or_default(),
+        provider_metadata,
+    }
+}
+
+/// Resolve `CustomerRef::provider_metadata` for a CustomerStore read /
+/// update response. Prefers the metadata Stripe returned over the
+/// request-side echo - Stripe normalises (drops nulls, truncates long
+/// values) and admin / reconciliation tooling needs the server's
+/// authoritative view, not the client's pre-flight copy. Falls back to
+/// the request-side metadata only when Stripe returned no metadata or
+/// returned an empty object.
+fn pick_provider_metadata(
+    server: Option<&HashMap<String, String>>,
+    fallback: serde_json::Value,
+) -> serde_json::Value {
+    match server {
+        Some(m) if !m.is_empty() => serde_json::Value::Object(
+            m.iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect(),
+        ),
+        _ => fallback,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trait implementation
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl CustomerStore for StripeProvider {
+    async fn create_customer(&self, req: CreateCustomerRequest) -> PaymentResult<CustomerRef> {
+        let params = CreateCustomerParams {
+            email: &req.email,
+            name: req.name.as_deref(),
+            metadata: metadata_to_string_map(req.metadata.as_ref()),
+        };
+
+        let call = RequestBuilder::new(StripeMethod::Post, "/customers")
+            .form(&params)
+            .customize::<Customer>()
+            .send(self.client());
+        let c: Customer = deadline::change("customers.create", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("customers.create", e))?;
+
+        Ok(customer_to_ref(
+            c,
+            Some(req.user_id),
+            req.metadata.unwrap_or(serde_json::json!({})),
+        ))
+    }
+
+    async fn update_customer(&self, req: UpdateCustomerRequest) -> PaymentResult<CustomerRef> {
+        let path = format!("/customers/{}", req.provider_customer_id);
+        let params = UpdateCustomerParams {
+            email: req.email.as_deref(),
+            name: req.name.as_deref(),
+            metadata: metadata_to_string_map(req.metadata.as_ref()),
+        };
+
+        let call = RequestBuilder::new(StripeMethod::Post, &path)
+            .form(&params)
+            .customize::<Customer>()
+            .send(self.client());
+        let c: Customer = deadline::change("customers.update", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("customers.update", e))?;
+
+        // update_customer returns user_id: None because Stripe's
+        // Customer object doesn't carry the app's user identifier as a
+        // first-class field - callers that need the app-side id should
+        // read the DB mirror entity. See CustomerRef::user_id docs.
+        Ok(customer_to_ref(
+            c,
+            None,
+            req.metadata.unwrap_or(serde_json::json!({})),
+        ))
+    }
+
+    async fn get_customer(&self, provider_customer_id: &str) -> PaymentResult<CustomerRef> {
+        let path = format!("/customers/{provider_customer_id}");
+        let call = RequestBuilder::new(StripeMethod::Get, &path)
+            .customize::<Customer>()
+            .send(self.client());
+        let c: Customer = deadline::read("customers.retrieve", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("customers.retrieve", e))?;
+
+        // See update_customer above for why user_id is None on the
+        // get path. customer_to_ref reads `c.metadata` and only falls
+        // back to the placeholder argument if Stripe omitted metadata
+        // entirely - so admin / reconciliation tooling reading
+        // CustomerStore::get_customer always sees the server's view.
+        Ok(customer_to_ref(c, None, serde_json::json!({})))
+    }
+
+    async fn delete_customer(&self, provider_customer_id: &str) -> PaymentResult<()> {
+        let path = format!("/customers/{provider_customer_id}");
+        // Stripe customer deletion returns a DeletedCustomer object.
+        // We only care that the call succeeded - discard the result.
+        let call = RequestBuilder::new(StripeMethod::Delete, &path)
+            .customize::<DeletedCustomer>()
+            .send(self.client());
+        let _: DeletedCustomer = deadline::change("customers.delete", call)
+            .await?
+            .map_err(|e| sdk_error::provider_error("customers.delete", e))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn metadata_to_string_map_none_when_input_none() {
+        assert!(metadata_to_string_map(None).is_none());
+    }
+
+    #[test]
+    fn metadata_to_string_map_none_when_input_null() {
+        let v = serde_json::Value::Null;
+        assert!(metadata_to_string_map(Some(&v)).is_none());
+    }
+
+    #[test]
+    fn metadata_to_string_map_none_when_input_empty_object() {
+        let v = json!({});
+        assert!(metadata_to_string_map(Some(&v)).is_none());
+    }
+
+    #[test]
+    fn metadata_to_string_map_none_when_input_not_an_object() {
+        // Non-object JSON (string, array, number) cannot be Stripe metadata
+        // and should be skipped rather than silently mis-encoded.
+        for v in [json!("just-a-string"), json!([1, 2, 3]), json!(42)] {
+            assert!(metadata_to_string_map(Some(&v)).is_none(), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn metadata_to_string_map_string_values_pass_through_unquoted() {
+        let v = json!({ "plan": "pro", "tier": "gold" });
+        let map = metadata_to_string_map(Some(&v)).expect("map present");
+        assert_eq!(map.get("plan").map(String::as_str), Some("pro"));
+        assert_eq!(map.get("tier").map(String::as_str), Some("gold"));
+    }
+
+    #[test]
+    fn metadata_to_string_map_scalars_are_stringified() {
+        let v = json!({ "seats": 5, "trial": true });
+        let map = metadata_to_string_map(Some(&v)).expect("map present");
+        assert_eq!(map.get("seats").map(String::as_str), Some("5"));
+        assert_eq!(map.get("trial").map(String::as_str), Some("true"));
+    }
+
+    #[test]
+    fn metadata_to_string_map_skips_null_values() {
+        let v = json!({ "valid": "yes", "skipped": serde_json::Value::Null });
+        let map = metadata_to_string_map(Some(&v)).expect("map present");
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("valid"));
+        assert!(!map.contains_key("skipped"));
+    }
+
+    // ---- pick_provider_metadata --------------------------------------------
+    //
+    // `customer_to_ref` is impossible to unit-test directly:
+    // `stripe_shared::Customer` is non-exhaustive AND uses miniserde
+    // (not regular serde::Deserialize), so neither struct-literal nor
+    // serde_json::from_value can build a fixture. The helper extracted
+    // below is where the metadata-selection logic actually lives.
+
+    #[test]
+    fn pick_metadata_prefers_server_returned_over_fallback() {
+        let mut server = HashMap::new();
+        server.insert("plan".into(), "pro".into());
+        server.insert("tier".into(), "gold".into());
+        let fallback = json!({ "plan": "free" }); // intentionally different
+        let out = pick_provider_metadata(Some(&server), fallback);
+        let obj = out.as_object().expect("object");
+        assert_eq!(obj.get("plan").unwrap(), &json!("pro"));
+        assert_eq!(obj.get("tier").unwrap(), &json!("gold"));
+    }
+
+    #[test]
+    fn pick_metadata_falls_back_when_server_returns_none() {
+        let fallback = json!({ "from_request": "yes" });
+        let out = pick_provider_metadata(None, fallback);
+        let obj = out.as_object().expect("object");
+        assert_eq!(obj.get("from_request").unwrap(), &json!("yes"));
+    }
+
+    #[test]
+    fn pick_metadata_falls_back_when_server_returns_empty() {
+        let empty = HashMap::new();
+        let fallback = json!({ "from_request": "yes" });
+        let out = pick_provider_metadata(Some(&empty), fallback);
+        let obj = out.as_object().expect("object");
+        assert_eq!(obj.get("from_request").unwrap(), &json!("yes"));
+    }
+}
