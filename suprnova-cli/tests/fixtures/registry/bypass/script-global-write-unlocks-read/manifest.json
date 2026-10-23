@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-global-write-unlocks-read",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

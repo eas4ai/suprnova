@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-limit-line-separator-bomb",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

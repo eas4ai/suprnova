@@ -1,0 +1,23 @@
+<section live:signal="open:false" live:effect="focus-search">
+  <button live:click.prevent="save" live:toggle="open">Save</button>
+  <form live:submit.prevent="save">
+    <input live:input="refresh" live:change="refresh" live:model.blur="query">
+    <button type="button" live:keydown.enter="refresh">Refresh</button>
+    <output live:error.live.polite="query"></output>
+  </form>
+  <div live:init="refresh" live:show="open" live:class="is-open:open" live:attr="aria-hidden:open"></div>
+  <div live:selected="open" live:expanded="open" live:inert="open" live:focus="open"></div>
+  <div live:idle.show="save" live:dirty.class="save" live:queued.show="save" live:loading.disabled="save"></div>
+  <div live:validating.busy="save" live:success.live.polite="save" live:interrupted.show="save"></div>
+  <div live:offline.live.assertive="save" live:retrying.busy="save"></div>
+  <output live:url.reflect="page" live:on.once="profile-saved" live:call="focus-search"></output>
+  <article live:component="tests.child" live:key="child-result" live:lazy.visible></article>
+  <div live:key="preserved-panel" live:preserve.self></div>
+  <div live:key="owned-widget" live:ignore.children></div>
+  <div live:key="replaceable-panel" live:replace.subtree></div>
+  <div live:key="persistent-panel" live:persist="draft-panel"></div>
+  <div id="modal-root"></div>
+  <div live:key="modal-panel" live:teleport="#modal-root"></div>
+  <div live:transition.enter="fade"></div>
+  <a href="/next" live:navigate.transition live:prefetch.hover>Next</a>
+</section>
