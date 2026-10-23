@@ -600,7 +600,7 @@ async fn budget_002_manifest_output_files_are_immutable() {
         "site-manifest.json",
         "outside-deadbeef.js",
     ] {
-        let response = client.get(&format!("/build/{file}")).send().await;
+        let response = client.get(format!("/build/{file}")).send().await;
         response.assert_ok();
         let listed = !matches!(file, "site-manifest.json" | "outside-deadbeef.js");
         assert_eq!(
@@ -653,7 +653,7 @@ async fn budget_002_review_manifest_mutable_names_keep_revalidation() {
         fallback!(suprnova::StaticFiles::from_dir(dir.path()).handler()).register(Router::new());
     let client = suprnova::testing::TestClient::new(router, MiddlewareRegistry::new());
     for file in files {
-        let response = client.get(&format!("/build/{file}")).send().await;
+        let response = client.get(format!("/build/{file}")).send().await;
         response.assert_ok();
         let expected = if matches!(file, "app-deadbeef.js" | "vendor-Ab-cD12x.js") {
             "public, max-age=31536000, immutable"

@@ -17,16 +17,19 @@ use crate::{FrameworkError, filesystem::S3Config};
 /// The [API](https://developers.cloudflare.com/api/resources/cache/methods/purge/)
 /// accepts `files`, `prefixes` or `tags` at `POST /zones/{zone_id}/purge_cache`.
 /// [Single-file purges](https://developers.cloudflare.com/cache/how-to/purge-cache/purge-by-single-file/)
-/// use full URLs. This driver batches 30 URLs conservatively; the current
-/// [limits](https://developers.cloudflare.com/cache/how-to/purge-cache/#availability-and-limits)
-/// allow 100 on Free, Pro and Business, and 500 on Enterprise. All plans support tags and prefixes.
+/// use full URLs, batched at 100 per request, the
+/// [limit](https://developers.cloudflare.com/cache/how-to/purge-cache/#availability-and-limits)
+/// on Free, Pro and Business (Enterprise allows 500). Every plan purges by prefix
+/// and by tag too; the driver advertises URL and prefix purges to the publisher and
+/// leaves tag purges to callers whose responses carry a `Cache-Tag` header, which
+/// the shipped Worker does not set, so a tag purge from the publisher would clear
+/// nothing.
 pub struct CloudflareDriver {
     zone_id: String,
     host: String,
     authorization: HeaderValue,
     endpoint: url::Url,
     client: reqwest::Client,
-    enterprise_purge: bool,
     manifest_ttl: Duration,
 }
 
@@ -106,7 +109,6 @@ impl CloudflareDriver {
             endpoint: url::Url::parse("https://api.cloudflare.com/client/v4/")
                 .map_err(|_| failure("parse API endpoint"))?,
             client,
-            enterprise_purge: false,
             manifest_ttl: Duration::from_secs(5),
         })
     }
@@ -137,13 +139,6 @@ impl CloudflareDriver {
         }
         endpoint.set_path("/client/v4/");
         self.endpoint = endpoint;
-        Ok(self)
-    }
-
-    /// Opts into prefix and tag purges so applications choose their wider invalidation scope.
-    /// The name retains the Enterprise convention; Cloudflare now offers both on every plan.
-    pub fn with_enterprise_purge(mut self) -> Result<Self, FrameworkError> {
-        self.enterprise_purge = true;
         Ok(self)
     }
 
@@ -218,8 +213,8 @@ impl CdnDriver for CloudflareDriver {
     fn capabilities(&self) -> CdnCapabilities {
         CdnCapabilities {
             urls: true,
-            prefix: self.enterprise_purge,
-            tags: self.enterprise_purge,
+            prefix: true,
+            tags: false,
         }
     }
 
@@ -290,16 +285,11 @@ impl CdnDriver for CloudflareDriver {
                     .iter()
                     .map(|path| self.purge_url(path))
                     .collect::<Result<Vec<_>, _>>()?;
-                urls.chunks(30)
+                urls.chunks(100)
                     .map(|batch| json!({"files": batch}))
                     .collect::<Vec<_>>()
             }
             Purge::Prefix(prefix) => {
-                if !self.enterprise_purge {
-                    return Err(failure(
-                        "prefix purge requires with_enterprise_purge(); available on all current Cloudflare plans",
-                    ));
-                }
                 self.purge_url(&prefix)?;
                 if prefix.contains('?') {
                     return Err(failure("prefix purge does not accept a query string"));
@@ -307,11 +297,6 @@ impl CdnDriver for CloudflareDriver {
                 vec![json!({"prefixes": [format!("{}{prefix}", self.host)]})]
             }
             Purge::Tags(tags) => {
-                if !self.enterprise_purge {
-                    return Err(failure(
-                        "tag purge requires with_enterprise_purge(); available on all current Cloudflare plans",
-                    ));
-                }
                 if tags
                     .iter()
                     .any(|tag| tag.is_empty() || tag.chars().any(char::is_control))

@@ -395,8 +395,8 @@ default = [
     "magnetar-oauth",
     "media",
     "queue-sqs",
-    "cdn-cloudfront",
     "cdn-cloudflare",
+    "cdn-cloudfront",
     "agents",
 ]
 # The `sqs` queue driver. Default-on because SQS is one of Laravel's queue
@@ -405,10 +405,13 @@ default = [
 # S3 service already brings the same reqsign crates.
 reporting-sentry = ["dep:sentry"]
 queue-sqs = ["filesystem", "dep:reqsign-aws-v4", "dep:reqsign-core", "dep:reqsign-file-read-tokio"]
-# CloudFront uses the same AWS credential chain as S3 without requiring SQS.
-cdn-cloudfront = ["filesystem", "dep:reqsign-aws-v4", "dep:reqsign-core", "dep:reqsign-file-read-tokio", "dep:quick-xml"]
-# Cloudflare purges a Worker-backed R2 disk through the existing HTTP client.
+# The CDN drivers for static publication, both default-on like the S3 disk so
+# neither can rot unseen (owner ruling 2026-10-23). Cloudflare is the
+# recommended one: R2 charges no egress and the driver needs nothing beyond the
+# HTTP client the framework already carries. CloudFront uses the same AWS
+# credential chain as S3 without requiring SQS and adds `quick-xml`.
 cdn-cloudflare = ["filesystem"]
+cdn-cloudfront = ["filesystem", "dep:reqsign-aws-v4", "dep:reqsign-core", "dep:reqsign-file-read-tokio", "dep:quick-xml"]
 # Exposes framework test hooks such as encryption-key installation, a
 # force-the-next-encrypt-call-to-fail switch, and request query overrides.
 # Filesystem fakes additionally require `filesystem`.

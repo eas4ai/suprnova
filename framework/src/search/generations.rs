@@ -1,7 +1,5 @@
 //! Publication and pending references share a database fence across queue drivers.
-use super::{
-    GenerationId, IndexSettings, SearchConfig, SearchEngine, SearchRegistry, SettingsChange,
-};
+use super::{GenerationId, IndexSettings, SearchConfig, SearchRegistry, SettingsChange};
 use crate::{DB, FrameworkError, console};
 use sea_orm::{
     ConnectionTrait, DatabaseTransaction, DbBackend, QueryResult, Statement, TransactionTrait,
@@ -514,17 +512,9 @@ async fn reclaim_generation_inner(
     match state.as_str() {
         "creating" => {
             let descriptor = (SearchRegistry::by_index(index)?.descriptor)();
-            if engine.name() == "database" {
-                // Registry handles do not forward creation leases. The outer index
-                // connection scope routes this metadata-only database operation.
-                super::DatabaseSearchEngine::new()
-                    .release_creation_lease(descriptor, generation)
-                    .await?;
-            } else {
-                engine
-                    .release_creation_lease(descriptor, generation)
-                    .await?;
-            }
+            engine
+                .release_creation_lease(descriptor, generation)
+                .await?;
             Ok(Reclaimed::LeaseReleased)
         }
         "building" => {

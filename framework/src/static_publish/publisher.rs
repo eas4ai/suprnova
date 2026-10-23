@@ -570,15 +570,16 @@ impl Publisher {
         }
         if let Some(driver) = &self.driver {
             let capabilities = driver.capabilities();
-            let request = if capabilities.tags {
-                Some(Purge::Tags(
-                    uploads
-                        .iter()
-                        .flat_map(|u| u.entry.dependency_tags.clone())
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect(),
-                ))
+            let tags: Vec<String> = uploads
+                .iter()
+                .flat_map(|u| u.entry.dependency_tags.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            // A tag purge of pages that carry no tag would purge nothing, so
+            // those pages are purged by URL instead.
+            let request = if capabilities.tags && !tags.is_empty() {
+                Some(Purge::Tags(tags))
             } else if capabilities.urls {
                 Some(Purge::Urls(
                     uploads.iter().map(|u| u.entry.url.clone()).collect(),

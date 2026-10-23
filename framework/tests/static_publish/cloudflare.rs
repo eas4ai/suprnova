@@ -121,16 +121,18 @@ fn driver() -> CloudflareDriver {
 }
 
 #[tokio::test]
-async fn cloudflare_urls_use_bearer_and_batches_of_thirty() {
+async fn cloudflare_urls_use_bearer_and_batches_of_one_hundred() {
     let mock = Mock::start(vec![Reply::ok(), Reply::ok(), Reply::ok()]).await;
     mock.driver()
-        .purge(Purge::Urls((0..70).map(|i| format!("/page/{i}")).collect()))
+        .purge(Purge::Urls(
+            (0..230).map(|i| format!("/page/{i}")).collect(),
+        ))
         .await
         .unwrap();
     let requests = mock.requests();
     assert_eq!(requests.len(), 3);
     let mut files = Vec::new();
-    for (request, size) in requests.iter().zip([30, 30, 10]) {
+    for (request, size) in requests.iter().zip([100, 100, 30]) {
         assert_eq!(request.method, http::Method::POST);
         assert_eq!(request.path, "/client/v4/zones/zone123/purge_cache");
         assert_eq!(request.headers["authorization"], format!("Bearer {TOKEN}"));
@@ -141,30 +143,20 @@ async fn cloudflare_urls_use_bearer_and_batches_of_thirty() {
     }
     assert_eq!(
         files,
-        (0..70)
+        (0..230)
             .map(|i| json!(format!("https://www.example.com/page/{i}")))
             .collect::<Vec<_>>()
     );
 }
 
 #[tokio::test]
-async fn cloudflare_prefix_and_tags_require_explicit_opt_in() {
+async fn cloudflare_purges_by_prefix_and_by_tag_when_asked() {
     let mock = Mock::start(vec![Reply::ok(), Reply::ok()]).await;
     let driver = mock.driver();
-    assert!(driver.capabilities().urls);
-    assert!(!driver.capabilities().prefix);
-    assert!(!driver.capabilities().tags);
-    for purge in [
-        Purge::Prefix("/blog/".into()),
-        Purge::Tags(vec!["posts".into()]),
-    ] {
-        let error = driver.purge(purge).await.unwrap_err().to_string();
-        assert!(error.contains("with_enterprise_purge"), "{error}");
-        assert!(error.contains("plans"), "{error}");
-    }
-    assert!(mock.requests().is_empty());
-    let driver = driver.with_enterprise_purge().unwrap();
-    assert!(driver.capabilities().prefix && driver.capabilities().tags);
+    let capabilities = driver.capabilities();
+    // The Worker sets no Cache-Tag header, so the publisher is steered to URLs;
+    // a caller that sets the header itself can still purge by tag.
+    assert!(capabilities.urls && capabilities.prefix && !capabilities.tags);
     driver.purge(Purge::Prefix("/blog/".into())).await.unwrap();
     driver
         .purge(Purge::Tags(vec!["posts".into(), "authors".into()]))
@@ -355,8 +347,6 @@ async fn cloudflare_rejects_nonlocal_purges_before_any_request() {
     }
     assert!(
         mock.driver()
-            .with_enterprise_purge()
-            .unwrap()
             .purge(Purge::Prefix("/path?query".into()))
             .await
             .is_err()
