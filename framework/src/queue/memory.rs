@@ -1,0 +1,718 @@
+//! In-memory queue driver.
+//!
+//! Canonical test surface. Backed by:
+//! - a `VecDeque<Envelope>` for the visible queue,
+//! - a `HashMap<ReservationToken, Envelope>` for reservations,
+//! - a `tokio_util::time::DelayQueue<ReservationToken>` for visibility-timeout expiry,
+//! - a `DelayedStore` (`tokio_util::time::DelayQueue<Uuid>` plus an
+//!   id-keyed `HashMap<Uuid, Envelope>`) for delayed jobs - split so the
+//!   delayed set is listable, which a bare `DelayQueue<Envelope>` is not.
+//!
+//! # Design note - paused-clock compatibility
+//!
+//! Both DelayQueues run on Tokio's virtual clock. Under
+//! `#[tokio::test(start_paused = true)]`, `tokio::time::advance(N)` correctly
+//! fires their expirations, so paused-clock tests for delayed jobs work without
+//! any wall-clock comparison.
+//!
+//! `pop` drains both DelayQueues synchronously (via a noop-waker context) before
+//! checking the visible queue. This means that even when the background reaper's
+//! `sleep(50ms)` never fires, reclaim and delayed-job promotion both happen on
+//! the next `pop` call after the caller has advanced the virtual clock.
+//!
+//! The reaper is retained for production use where `pop` is infrequent
+//! and background reclaim is needed.
+
+use crate::error::FrameworkError;
+use crate::lock;
+use crate::queue::driver::{QueueDriver, Reservation, ReservationToken};
+use crate::queue::envelope::{Envelope, queue_filter, queue_matches};
+use crate::queue::inspect::InspectedJob;
+use async_trait::async_trait;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::task::Poll;
+use std::time::Duration;
+use tokio::sync::Mutex as AsyncMutex;
+use tokio_util::time::DelayQueue;
+use uuid::Uuid;
+
+#[derive(Default)]
+struct Inner {
+    visible: VecDeque<Envelope>,
+    reserved: HashMap<ReservationToken, Envelope>,
+}
+
+/// Delayed-job storage: `queue` wakes envelope ids on Tokio's virtual-clock
+/// timer wheel, `by_id` owns the actual envelopes.
+///
+/// The two are split because `DelayQueue<T>` has no iteration API - only
+/// expiry polling - so a bare `DelayQueue<Envelope>` (the pre-inspection-API
+/// shape) cannot be listed. Keying the timer wheel on `Uuid` and moving
+/// ownership of the envelope into `by_id` is what makes `delayed_jobs()`
+/// possible: the map is directly iterable, and a wake just looks up and
+/// removes the id it names.
+#[derive(Default)]
+struct DelayedStore {
+    queue: DelayQueue<Uuid>,
+    by_id: HashMap<Uuid, Envelope>,
+}
+
+impl DelayedStore {
+    /// Park `env` for `delay`, recorded under its own id in both halves.
+    ///
+    /// Re-inserting an id is last-writer-wins: `by_id` keeps the newest
+    /// envelope, and the timer key from the earlier insert is left in `queue`
+    /// rather than cancelled. That costs one extra wake and nothing else -
+    /// whichever key fires first promotes the surviving envelope and takes it
+    /// out of `by_id`, and [`drain_delayed`] skips the other as a stale echo.
+    /// The visible effect is that the envelope becomes visible at the *earlier*
+    /// of the two delays. Deliberately unasserted: tests legitimately park the
+    /// same id twice, and a driver that panicked on it would be the wrong
+    /// trade for an in-process test double.
+    fn insert(&mut self, env: Envelope, delay: Duration) {
+        self.queue.insert(env.id, delay);
+        self.by_id.insert(env.id, env);
+    }
+
+    /// Number of envelopes currently parked. `by_id` is authoritative -
+    /// every `insert` and every successful drain keeps the two in lockstep.
+    fn len(&self) -> usize {
+        self.by_id.len()
+    }
+
+    fn clear(&mut self) {
+        self.queue.clear();
+        self.by_id.clear();
+    }
+}
+
+/// In-process [`QueueDriver`] backed by a FIFO `VecDeque` plus
+/// `DelayQueue`s for visibility timeouts and delayed dispatches.
+/// Lost on process restart.
+pub struct MemoryQueueDriver {
+    inner: Arc<Mutex<Inner>>,
+    /// Async mutex guards the visibility DelayQueue so both `pop` and the reaper
+    /// can poll it synchronously after acquiring the lock.
+    visibility: Arc<AsyncMutex<DelayQueue<ReservationToken>>>,
+    /// Async mutex guards [`DelayedStore`] - runs on Tokio's virtual clock so
+    /// `tokio::time::advance` correctly fires expirations in paused-clock tests.
+    delayed: Arc<AsyncMutex<DelayedStore>>,
+    reaper: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for MemoryQueueDriver {
+    fn drop(&mut self) {
+        self.reaper.abort();
+    }
+}
+
+/// Drain all currently-expired visibility reservations from `dq` back into
+/// the visible queue (push_front - reservation reclaim is priority).
+/// The noop waker context must be created and dropped within this call -
+/// callers must ensure it is not held across an await.
+fn drain_expired(
+    inner: &Mutex<Inner>,
+    dq: &mut DelayQueue<ReservationToken>,
+) -> Result<(), FrameworkError> {
+    let waker = futures::task::noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    let mut expired_tokens = Vec::new();
+    while let Poll::Ready(Some(item)) = dq.poll_expired(&mut cx) {
+        expired_tokens.push(item.into_inner());
+    }
+    // cx / waker are dropped here - no await has occurred.
+    if !expired_tokens.is_empty() {
+        let mut g = lock::lock(inner, "memory queue state")?;
+        for token in expired_tokens {
+            if let Some(mut env) = g.reserved.remove(&token) {
+                // A reservation reaching here lapsed without being settled:
+                // the worker holding it never acked, nacked or released. It
+                // died mid-handler. That is a consumed attempt, and it has
+                // to be counted here because nothing else will - a job that
+                // *fails* is nacked and counted by `requeue`, but a job that
+                // *kills its worker* settles nothing. Leaving the count
+                // alone makes such a job immortal: it kills each worker
+                // that claims it, is redelivered unchanged, and kills the
+                // next one.
+                //
+                // The database driver counts the same event in its reclaim
+                // path; the semantics have to match, because swapping the
+                // driver must not change whether a poison job can be
+                // dead-lettered.
+                env.attempts += 1;
+                g.visible.push_front(env);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Drain all currently-expired delayed envelopes from `store` into the
+/// visible queue (push_back - delayed jobs join the back of the FIFO line).
+/// The noop waker context must be created and dropped within this call -
+/// callers must ensure it is not held across an await.
+fn drain_delayed(inner: &Mutex<Inner>, store: &mut DelayedStore) -> Result<(), FrameworkError> {
+    let waker = futures::task::noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    let mut ready_ids = Vec::new();
+    while let Poll::Ready(Some(item)) = store.queue.poll_expired(&mut cx) {
+        ready_ids.push(item.into_inner());
+    }
+    // cx / waker are dropped here - no await has occurred.
+    if !ready_ids.is_empty() {
+        let mut g = lock::lock(inner, "memory queue state")?;
+        for id in ready_ids {
+            // A wake whose id is no longer in `by_id` was already promoted
+            // or cleared (e.g. by a concurrent drain, or by `clear()`) - the
+            // timer firing for it now is a stale echo, not new work.
+            if let Some(env) = store.by_id.remove(&id) {
+                g.visible.push_back(env);
+            }
+        }
+    }
+    Ok(())
+}
+
+impl MemoryQueueDriver {
+    /// Construct a fresh in-process queue driver. Spawns a Tokio reaper
+    /// task that reclaims expired visibility reservations; the task is
+    /// aborted when the driver is dropped.
+    pub fn new() -> Self {
+        let inner = Arc::new(Mutex::new(Inner::default()));
+        let visibility = Arc::new(AsyncMutex::new(DelayQueue::new()));
+        let delayed: Arc<AsyncMutex<DelayedStore>> =
+            Arc::new(AsyncMutex::new(DelayedStore::default()));
+
+        let inner2 = inner.clone();
+        let visibility2 = visibility.clone();
+        let delayed2 = delayed.clone();
+
+        let reaper = tokio::spawn(async move {
+            loop {
+                // Promote expired delayed jobs into the visible queue.
+                // Log poison/internal errors but DO NOT abort the reaper -
+                // a single panicking producer must not strand every
+                // delayed job in the queue. The reaper backs off via the
+                // normal 50ms sleep below before the next attempt.
+                {
+                    let mut store = delayed2.lock().await;
+                    if let Err(e) = drain_delayed(&inner2, &mut store) {
+                        tracing::error!(
+                            error = %e,
+                            "memory queue reaper: drain_delayed failed; continuing"
+                        );
+                    }
+                }
+
+                // Reclaim expired visibility reservations.
+                {
+                    let mut dq = visibility2.lock().await;
+                    if let Err(e) = drain_expired(&inner2, &mut dq) {
+                        tracing::error!(
+                            error = %e,
+                            "memory queue reaper: drain_expired failed; continuing"
+                        );
+                    }
+                }
+
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+
+        Self {
+            inner,
+            visibility,
+            delayed,
+            reaper,
+        }
+    }
+}
+
+impl Default for MemoryQueueDriver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl QueueDriver for MemoryQueueDriver {
+    async fn push(&self, env: Envelope) -> Result<(), FrameworkError> {
+        let now = crate::clock::now();
+        if env.available_at <= now {
+            let mut g = lock::lock(&self.inner, "memory queue state")?;
+            g.visible.push_back(env);
+        } else {
+            // Compute delay on the Tokio virtual clock so paused-clock tests work.
+            let delay = (env.available_at - now).to_std().unwrap_or(Duration::ZERO);
+            let mut store = self.delayed.lock().await;
+            store.insert(env, delay);
+        }
+        Ok(())
+    }
+
+    async fn pop_from(
+        &self,
+        visibility_timeout: Duration,
+        queues: &[String],
+    ) -> Result<Option<Reservation>, FrameworkError> {
+        self.pop_filtered(visibility_timeout, queues).await
+    }
+
+    fn queue_filter_capability(&self) -> crate::queue::driver::QueueFilterCapability {
+        crate::queue::driver::QueueFilterCapability::Supported
+    }
+
+    async fn pop(
+        &self,
+        visibility_timeout: Duration,
+    ) -> Result<Option<Reservation>, FrameworkError> {
+        self.pop_filtered(visibility_timeout, &[]).await
+    }
+
+    async fn ack(&self, token: &ReservationToken) -> Result<(), FrameworkError> {
+        let mut g = lock::lock(&self.inner, "memory queue state")?;
+        g.reserved.remove(token);
+        Ok(())
+    }
+
+    async fn nack(
+        &self,
+        token: &ReservationToken,
+        requeue_delay: Duration,
+    ) -> Result<(), FrameworkError> {
+        self.requeue(token, requeue_delay, true).await
+    }
+
+    async fn release(
+        &self,
+        token: &ReservationToken,
+        _env: &Envelope,
+        delay: Duration,
+    ) -> Result<(), FrameworkError> {
+        // The reserved copy still holds the pre-run attempt count - the worker
+        // bumps only its own local envelope - so requeuing it without a bump
+        // is exactly "try again without burning an attempt".
+        self.requeue(token, delay, false).await
+    }
+
+    async fn size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        let filter = queue_filter(queue);
+        let ready_and_reserved = {
+            let state = lock::lock(&self.inner, "memory queue state")?;
+            state
+                .visible
+                .iter()
+                .chain(state.reserved.values())
+                .filter(|env| queue_matches(env.queue.as_deref(), &filter))
+                .count() as u64
+        };
+        Ok(ready_and_reserved + self.delayed_size(queue).await?)
+    }
+
+    async fn pending_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        let filter = queue_filter(queue);
+        let g = lock::lock(&self.inner, "memory queue state")?;
+        Ok(g.visible
+            .iter()
+            .filter(|env| queue_matches(env.queue.as_deref(), &filter))
+            .count() as u64)
+    }
+
+    async fn delayed_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        let filter = queue_filter(queue);
+        Ok(self
+            .delayed
+            .lock()
+            .await
+            .by_id
+            .values()
+            .filter(|env| queue_matches(env.queue.as_deref(), &filter))
+            .count() as u64)
+    }
+
+    async fn reserved_size(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        let filter = queue_filter(queue);
+        let g = lock::lock(&self.inner, "memory queue state")?;
+        Ok(g.reserved
+            .values()
+            .filter(|env| queue_matches(env.queue.as_deref(), &filter))
+            .count() as u64)
+    }
+
+    async fn clear(&self, queue: Option<&str>) -> Result<u64, FrameworkError> {
+        let filter = queue_filter(queue);
+        // Hold both timers before changing state so promotion, reclaim and
+        // cancellation cannot leave a cleared job visible or newly reserved.
+        let mut store = self.delayed.lock().await;
+        let mut visibility = self.visibility.lock().await;
+        let dropped_visible_reserved = {
+            let mut g = lock::lock(&self.inner, "memory queue state")?;
+            let before = g.visible.len() + g.reserved.len();
+            g.visible
+                .retain(|env| !queue_matches(env.queue.as_deref(), &filter));
+            g.reserved
+                .retain(|_, env| !queue_matches(env.queue.as_deref(), &filter));
+            (before - g.visible.len() - g.reserved.len()) as u64
+        };
+        let delayed_dropped = {
+            let before = store.len();
+            if queue.is_none() {
+                store.clear();
+            } else {
+                store
+                    .by_id
+                    .retain(|_, env| !queue_matches(env.queue.as_deref(), &filter));
+                // Cancel removed ids' timers so a later dispatch of the same id
+                // cannot inherit their earlier deadline. Preserve surviving deadlines.
+                let mut remaining = Vec::new();
+                while let Some(key) = store.queue.peek() {
+                    let timer = store.queue.remove(&key);
+                    let deadline = timer.deadline();
+                    let id = timer.into_inner();
+                    if store.by_id.contains_key(&id) {
+                        remaining.push((id, deadline));
+                    }
+                }
+                for (id, deadline) in remaining {
+                    store.queue.insert_at(id, deadline);
+                }
+            }
+            (before - store.len()) as u64
+        };
+        // Remaining reservations keep their original expiry timers.
+        if queue.is_none() {
+            visibility.clear();
+        }
+        Ok(dropped_visible_reserved + delayed_dropped)
+    }
+
+    async fn pending_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        self.drain_delayed_only().await?;
+        let filter = queue_filter(queue);
+        let g = lock::lock(&self.inner, "memory queue state")?;
+        Ok(g.visible
+            .iter()
+            .filter(|env| queue_matches(env.queue.as_deref(), &filter))
+            .map(InspectedJob::from_envelope)
+            .collect())
+    }
+
+    async fn delayed_jobs(&self, queue: Option<&str>) -> Result<Vec<InspectedJob>, FrameworkError> {
+        self.drain_delayed_only().await?;
+        let filter = queue_filter(queue);
+        let store = self.delayed.lock().await;
+        Ok(store
+            .by_id
+            .values()
+            .filter(|env| queue_matches(env.queue.as_deref(), &filter))
+            .map(InspectedJob::from_envelope)
+            .collect())
+    }
+
+    async fn reserved_jobs(
+        &self,
+        queue: Option<&str>,
+    ) -> Result<Vec<InspectedJob>, FrameworkError> {
+        self.drain_delayed_only().await?;
+        let filter = queue_filter(queue);
+        let g = lock::lock(&self.inner, "memory queue state")?;
+        Ok(g.reserved
+            .values()
+            .filter(|env| queue_matches(env.queue.as_deref(), &filter))
+            .map(InspectedJob::from_envelope)
+            .collect())
+    }
+
+    fn name(&self) -> &'static str {
+        "memory"
+    }
+}
+
+impl MemoryQueueDriver {
+    /// Shared body of [`QueueDriver::nack`] and [`QueueDriver::release`],
+    /// which differ only in whether the requeue consumes an attempt.
+    ///
+    /// Taking the envelope out of `reserved` and putting it back is one
+    /// operation from any caller's point of view: the message is never
+    /// simultaneously reserved and visible, and never neither. That holds
+    /// under cancellation too, because nothing awaits between the two: the
+    /// delayed store is locked before the envelope leaves `reserved`, so a
+    /// caller cancelled while it waits for the store has moved nothing, and
+    /// the job stays reserved until its visibility timeout reclaims it.
+    async fn requeue(
+        &self,
+        token: &ReservationToken,
+        delay: Duration,
+        consume_attempt: bool,
+    ) -> Result<(), FrameworkError> {
+        if delay.is_zero() {
+            let mut g = lock::lock(&self.inner, "memory queue state")?;
+            if let Some(mut env) = g.reserved.remove(token) {
+                if consume_attempt {
+                    env.attempts += 1;
+                }
+                g.visible.push_front(env);
+            }
+            return Ok(());
+        }
+        // Resolved before the envelope moves, so an unrepresentable delay
+        // fails with the job still reserved.
+        let available_at = chrono::Duration::from_std(delay)
+            .ok()
+            .and_then(|delay| crate::clock::now().checked_add_signed(delay))
+            .ok_or_else(|| {
+                FrameworkError::internal(format!("requeue delay overflow: {delay:?}"))
+            })?;
+        // Insert into the Tokio-virtual-clock DelayedStore.
+        let mut store = self.delayed.lock().await;
+        let env = {
+            let mut g = lock::lock(&self.inner, "memory queue state")?;
+            g.reserved.remove(token)
+        };
+        if let Some(mut env) = env {
+            if consume_attempt {
+                env.attempts += 1;
+            }
+            env.available_at = available_at;
+            store.insert(env, delay);
+        }
+        Ok(())
+    }
+
+    /// Drain only the delayed-job promotion queue - never reservation
+    /// reclaim - so `inner`'s visible queue reflects any envelope whose
+    /// `available_at` has already passed.
+    ///
+    /// Shared by `pending_jobs`/`delayed_jobs`/`reserved_jobs` and by
+    /// [`pop_filtered`](Self::pop_filtered). Without the promotion drain, a
+    /// delayed job whose `available_at` had already passed but whose
+    /// 50ms-interval reaper tick hadn't yet run would still show up in
+    /// `delayed_jobs()` even though a `pop` right after would have
+    /// returned it as pending.
+    ///
+    /// # Why not `drain_expired` too
+    ///
+    /// `drain_expired` reclaims lapsed visibility reservations back onto
+    /// the visible queue **and bumps their `attempts` counter** - it is
+    /// reclaim accounting, not a read. An inspection call must be
+    /// read-only: a caller who only wanted to look at what's reserved
+    /// should never spend one of a job's retry attempts by looking. So a
+    /// reservation whose visibility timeout has lapsed keeps showing up
+    /// under `reserved_jobs()` (and not yet under `pending_jobs()`) until
+    /// something that is already allowed to mutate state - the reaper, or
+    /// a `pop`/`pop_from` call - reclaims it.
+    async fn drain_delayed_only(&self) -> Result<(), FrameworkError> {
+        let mut store = self.delayed.lock().await;
+        drain_delayed(&self.inner, &mut store)
+    }
+
+    /// Shared body of [`QueueDriver::pop`] and [`QueueDriver::pop_from`].
+    ///
+    /// An empty `queues` scans nothing and pops the head, which keeps the
+    /// unfiltered path exactly as it was before routing existed.
+    ///
+    /// Delayed-job promotion comes first, then reservation reclaim. Reclaim
+    /// is folded in because a pop is already a mutating call (it is about to
+    /// hand out a reservation), so it adds no side effect a caller would not
+    /// expect; the listings must not reclaim - see
+    /// [`drain_delayed_only`](Self::drain_delayed_only).
+    ///
+    /// The visibility queue stays locked from the reclaim until the new
+    /// reservation's timer is set, so nothing awaits between taking the
+    /// envelope out of `visible` and arming the timer that would reclaim it.
+    /// A pop cancelled while it waits for that lock has taken nothing, and a
+    /// reservation never exists without its timer.
+    async fn pop_filtered(
+        &self,
+        visibility_timeout: Duration,
+        queues: &[String],
+    ) -> Result<Option<Reservation>, FrameworkError> {
+        self.drain_delayed_only().await?;
+        let mut dq = self.visibility.lock().await;
+        drain_expired(&self.inner, &mut dq)?;
+
+        let env_opt = {
+            let mut g = lock::lock(&self.inner, "memory queue state")?;
+            if queues.is_empty() {
+                g.visible.pop_front()
+            } else {
+                // Scan for the first envelope this worker is allowed to take.
+                // Order is preserved for the queues being drained; envelopes
+                // for other queues stay put rather than being consumed and
+                // re-queued, so a filtered worker never perturbs FIFO order
+                // for the pool that owns them.
+                let idx = g
+                    .visible
+                    .iter()
+                    .position(|e| queue_matches(e.queue.as_deref(), queues));
+                match idx {
+                    Some(i) => g.visible.remove(i),
+                    None => None,
+                }
+            }
+        };
+
+        if let Some(env) = env_opt {
+            let token = ReservationToken(Uuid::new_v4());
+            {
+                let mut g = lock::lock(&self.inner, "memory queue state")?;
+                g.reserved.insert(token.clone(), env.clone());
+            }
+            dq.insert(token.clone(), visibility_timeout);
+            Ok(Some(Reservation {
+                envelope: env,
+                token,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ready_envelope() -> Envelope {
+        Envelope {
+            schema_version: crate::queue::CURRENT_SCHEMA_VERSION,
+            id: Uuid::new_v4(),
+            job_name: "drivers-059".into(),
+            queue: None,
+            payload: serde_json::json!({}),
+            dispatched_at: crate::clock::now(),
+            available_at: crate::clock::now(),
+            attempts: 0,
+            max_tries: 3,
+            backoff: crate::queue::BackoffSchedule::default(),
+            timeout_secs: None,
+            fail_on_timeout: false,
+            idempotency_key: None,
+            message_group: None,
+            deduplication_id: None,
+            unique_lock_owner: None,
+            debounce_id: None,
+            debounce_owner: None,
+            batch_id: None,
+            chain_remaining: Vec::new(),
+            context: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_clear_cancelled_while_waiting_for_either_timer_keeps_the_job() {
+        let driver = MemoryQueueDriver::new();
+        let mut envelope = ready_envelope();
+        envelope.queue = Some("reports".into());
+        driver
+            .push(envelope)
+            .await
+            .expect("queue operation succeeds");
+        let held = driver.delayed.lock().await;
+        {
+            let clear = driver.clear(Some("reports"));
+            tokio::pin!(clear);
+            assert!(futures::poll!(clear.as_mut()).is_pending());
+        }
+        drop(held);
+        assert_eq!(
+            driver
+                .pending_size(Some("reports"))
+                .await
+                .expect("queue operation succeeds"),
+            1
+        );
+        let held = driver.visibility.lock().await;
+        {
+            let clear = driver.clear(Some("reports"));
+            tokio::pin!(clear);
+            assert!(futures::poll!(clear.as_mut()).is_pending());
+        }
+        drop(held);
+        assert_eq!(
+            driver
+                .pending_size(Some("reports"))
+                .await
+                .expect("queue operation succeeds"),
+            1
+        );
+        assert_eq!(
+            driver
+                .clear(Some("reports"))
+                .await
+                .expect("queue operation succeeds"),
+            1
+        );
+    }
+
+    /// DRIVERS-059: a delayed requeue took the envelope out of `reserved`,
+    /// then waited for the delayed store. Cancelled while it waited - a worker
+    /// aborted during contention with the reaper - it dropped the only copy.
+    #[tokio::test]
+    async fn a_requeue_cancelled_while_it_waits_keeps_the_job() {
+        let driver = MemoryQueueDriver::new();
+        driver.push(ready_envelope()).await.unwrap();
+        let reserved = driver
+            .pop(Duration::from_secs(30))
+            .await
+            .unwrap()
+            .expect("reserved");
+
+        let held = driver.delayed.lock().await;
+        {
+            let nack = driver.nack(&reserved.token, Duration::from_secs(5));
+            tokio::pin!(nack);
+            assert!(futures::poll!(nack.as_mut()).is_pending());
+        }
+        drop(held);
+
+        assert_eq!(
+            driver.size(None).await.unwrap(),
+            1,
+            "the cancelled requeue dropped the job: it was neither reserved, \
+             visible nor delayed"
+        );
+    }
+
+    /// The pop half of DRIVERS-059: a pop recorded its reservation, then
+    /// waited for the visibility queue a second time to arm the reservation's
+    /// timer. Cancelled at that second wait, it left a reservation no timer
+    /// would ever reclaim.
+    ///
+    /// Reaching that wait takes a second waiter. Tokio's mutex is fair, so a
+    /// waiter queued behind the pop takes the lock as soon as the pop's first
+    /// hold of it ends: a pop that waits for the lock again parks right there,
+    /// with the job already out of `visible`.
+    #[tokio::test(start_paused = true)]
+    async fn a_pop_cancelled_while_it_waits_leaves_the_job_poppable() {
+        let driver = MemoryQueueDriver::new();
+        // The reaper runs once and sleeps, so it is not queued on the lock.
+        tokio::task::yield_now().await;
+        driver.push(ready_envelope()).await.unwrap();
+
+        let held = driver.visibility.lock().await;
+        let mut pop = Box::pin(driver.pop(Duration::from_secs(30)));
+        assert!(futures::poll!(pop.as_mut()).is_pending());
+        let mut behind = Box::pin(driver.visibility.lock());
+        assert!(futures::poll!(behind.as_mut()).is_pending());
+        drop(held);
+
+        // The pop takes the lock and, once its hold ends, the waiter behind it
+        // has the lock. A pop with a second wait for it parks there now.
+        let first = futures::poll!(pop.as_mut());
+        drop(pop);
+        drop(behind);
+
+        // Whatever the first pop did, once its visibility timeout passes the
+        // job is visible again: either it was never taken, or its reservation
+        // has a timer that reclaims it.
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert!(
+            driver.pop(Duration::from_secs(30)).await.unwrap().is_some(),
+            "the cancelled pop left a reservation that no timer reclaims (first \
+             poll: {})",
+            if first.is_ready() { "ready" } else { "pending" }
+        );
+    }
+}
