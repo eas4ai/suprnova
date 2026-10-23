@@ -1,7 +1,0 @@
-<!DOCTYPE html>
-<html lang="{{ lang }}"><head>{{ title }}{{ head }}</head><body>{{ body }}
-<script{% if let Some(nonce) = nonce %} nonce="{{ nonce }}"{% endif %}>trusted()</script>
-<script type="module"{% if let Some(nonce) = nonce %} nonce="{{ nonce }}"{% endif %}>module()</script>
-<script type="application/json">{"data":"inert()"}</script>
-<!-- <script>comment()</script> -->
-</body></html>
