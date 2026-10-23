@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-app-item",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}
