@@ -1,0 +1,22 @@
+@layer suprnova-ui {
+  .sn-aspect-image {
+    display: block;
+    inline-size: 100%;
+    block-size: auto;
+    object-fit: cover;
+    border-radius: var(--sn-radius-md);
+    background: var(--sn-color-surface-sunken);
+  }
+
+  .sn-aspect-image[data-sn-ratio="wide"] {
+    aspect-ratio: 16 / 9;
+  }
+
+  .sn-aspect-image[data-sn-ratio="square"] {
+    aspect-ratio: 1;
+  }
+
+  .sn-aspect-image[data-sn-ratio="portrait"] {
+    aspect-ratio: 3 / 4;
+  }
+}
