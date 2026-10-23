@@ -39,8 +39,9 @@ Status: Observed
   and identify dependencies, not published objects
   (`crates/suprnova-live/src/render_cache/generation.rs:58`).
 - Storage disks are OpenDAL operators: local, S3, GCS and Azure
-  (`framework/src/filesystem/mod.rs:179,300,349`). No XSRF cookie is
-  issued; the CSRF token travels in the document and the session.
+  (`framework/src/filesystem/mod.rs:179,300,349`). The CSRF middleware
+  issues an `XSRF-TOKEN` cookie carrying the session's token, which also
+  travels in the document (`framework/src/csrf/middleware.rs:169`).
 - The starter kits share `auth` on every page and install the session and
   CSRF middleware (`suprnova-cli/src/templates/files/backend/bootstrap.rs.tpl:130,236,251`).
 - The media pipeline's default encode quality is 70, Laravel's default
