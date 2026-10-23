@@ -1,0 +1,5 @@
+error: `timestamps = true` names no timestamp columns: add `made_at` and `changed_at`, or drop `timestamps = true`
+  --> tests/eloquent/compile_fail/timestamps_flag_without_renamed_columns.rs:10:12
+   |
+10 | pub struct RenamedStampRow {
+   |            ^^^^^^^^^^^^^^^

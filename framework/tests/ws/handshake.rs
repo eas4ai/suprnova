@@ -1,0 +1,333 @@
+//! What the WebSocket upgrade response carries, and what runs around it.
+//!
+//! Each test drives the real `handle_request` over a loopback socket with
+//! `.with_upgrades()` and a real `tokio-tungstenite` client, because the
+//! 101 handshake and the client's own validation of it cannot be observed
+//! through a bare in-process call. Every test registers its own route path
+//! so the process-global terminable registry can tell their requests apart.
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use futures_util::{SinkExt, StreamExt};
+use suprnova::http::{HttpResponse, Request};
+use suprnova::ws::{OriginPolicy, WebSocketHandler, WsConfig, WsSocket};
+use suprnova::{
+    FrameworkError, Middleware, MiddlewareRegistry, Next, Response, Router, Terminable,
+    TerminationSnapshot, register_terminable,
+};
+use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+
+/// Echoes each text frame back, so a test can prove the socket works.
+struct EchoHandler;
+
+#[async_trait]
+impl WebSocketHandler for EchoHandler {
+    async fn handle(&self, mut socket: WsSocket, _req: Request) -> Result<(), FrameworkError> {
+        while let Some(text) = socket.recv_text().await? {
+            socket.send_text(format!("echo: {text}")).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Sends the `id` path parameter the handler received, then ends.
+struct ParamHandler;
+
+#[async_trait]
+impl WebSocketHandler for ParamHandler {
+    async fn handle(&self, mut socket: WsSocket, req: Request) -> Result<(), FrameworkError> {
+        let id = req.param("id").unwrap_or("<missing>").to_string();
+        socket.send_text(id).await?;
+        Ok(())
+    }
+}
+
+/// Lets the upgrade through, then decorates the success response the way
+/// a session middleware does: cookies plus a custom header. It also tries
+/// to overwrite the fields the handshake owns, which must not break it.
+struct DecoratingMiddleware;
+
+#[async_trait]
+impl Middleware for DecoratingMiddleware {
+    async fn handle(&self, request: Request, next: Next) -> Response {
+        let response = next(request).await?;
+        Ok(response
+            .header("Set-Cookie", "session=abc; Path=/; HttpOnly")
+            .header("Set-Cookie", "XSRF-TOKEN=xyz; Path=/")
+            .header("X-Handshake-Probe", "kept")
+            .header("Sec-WebSocket-Accept", "bogus")
+            .header("Connection", "close")
+            .header("Upgrade", "h2c")
+            .header("Content-Length", "99"))
+    }
+}
+
+/// Rejects every upgrade, as an auth gate would.
+struct RejectingMiddleware;
+
+#[async_trait]
+impl Middleware for RejectingMiddleware {
+    async fn handle(&self, _request: Request, _next: Next) -> Response {
+        Err(HttpResponse::text("not allowed").status(401))
+    }
+}
+
+/// The client in these tests sends no `Origin`, so every route opts out of
+/// the default same-origin policy; origin checks are not under test here.
+fn open_config() -> WsConfig {
+    WsConfig {
+        origin_policy: OriginPolicy::AllowAny,
+        ..Default::default()
+    }
+}
+
+/// Serve `router` with an empty global registry on a free port.
+async fn spawn_server(router: Router) -> u16 {
+    let router = Arc::new(router);
+    let middleware = Arc::new(MiddlewareRegistry::new());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind free port");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let io = hyper_util::rt::TokioIo::new(stream);
+            let router = router.clone();
+            let middleware = middleware.clone();
+            tokio::spawn(async move {
+                let service = hyper::service::service_fn(move |req| {
+                    let router = router.clone();
+                    let middleware = middleware.clone();
+                    async move {
+                        Ok::<_, std::convert::Infallible>(
+                            suprnova::server::handle_request(router, middleware, req).await,
+                        )
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, service)
+                    .with_upgrades()
+                    .await;
+            });
+        }
+    });
+    port
+}
+
+/// IDENTITY-033: the route accepts `chat`; the client offers only `CHAT`.
+/// The match is case-insensitive, so the upgrade succeeds, and the 101
+/// must name the token the client offered. A client that checks the
+/// response against its own offer (tungstenite does, browsers do) fails
+/// the handshake if the server answers with its own spelling.
+#[tokio::test]
+async fn subprotocol_echo_uses_the_client_spelling() {
+    let port = spawn_server(Router::new().ws_with_config(
+        "/ws/handshake/subprotocol",
+        EchoHandler,
+        WsConfig {
+            accepted_protocols: vec!["chat".into()],
+            ..open_config()
+        },
+    ))
+    .await;
+
+    let mut request = format!("ws://127.0.0.1:{port}/ws/handshake/subprotocol")
+        .into_client_request()
+        .expect("client request");
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        "CHAT".parse().expect("header value"),
+    );
+
+    let (mut ws, response) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("the client must accept the 101: it names the token the client offered");
+    assert_eq!(
+        response
+            .headers()
+            .get("sec-websocket-protocol")
+            .and_then(|v| v.to_str().ok()),
+        Some("CHAT")
+    );
+
+    ws.send(Message::text("ping")).await.expect("send");
+    let reply = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("reply in time")
+        .expect("a frame")
+        .expect("a valid frame");
+    assert_eq!(reply, Message::text("echo: ping"));
+}
+
+/// ROOT-17: headers a middleware adds to a successful upgrade reach the
+/// client on the 101. A session middleware that starts or regenerates a
+/// session appends its `Set-Cookie` there; dropping it persists a session
+/// id the browser never receives. The fields the handshake owns stay the
+/// upgrade's own, so the client still completes the handshake.
+#[tokio::test]
+async fn successful_upgrade_carries_middleware_response_headers() {
+    let port = spawn_server(Router::new().ws_with_middleware_and_config(
+        "/ws/handshake/headers",
+        EchoHandler,
+        vec![suprnova::middleware::into_boxed(DecoratingMiddleware)],
+        open_config(),
+    ))
+    .await;
+
+    let url = format!("ws://127.0.0.1:{port}/ws/handshake/headers");
+    let (mut ws, response) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("the handshake fields stay the upgrade's own, so the client accepts it");
+
+    let cookies: Vec<&str> = response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    assert_eq!(
+        cookies,
+        vec!["session=abc; Path=/; HttpOnly", "XSRF-TOKEN=xyz; Path=/"],
+        "every Set-Cookie the middleware appended must reach the client"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-handshake-probe")
+            .and_then(|v| v.to_str().ok()),
+        Some("kept")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("upgrade")
+            .and_then(|v| v.to_str().ok()),
+        Some("websocket")
+    );
+    assert!(
+        response.headers().get("content-length").is_none(),
+        "a 101 carries no body framing"
+    );
+    assert!(
+        response.headers().get("x-request-id").is_some(),
+        "the upgrade still echoes its request id"
+    );
+
+    ws.send(Message::text("ping")).await.expect("send");
+    let reply = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("reply in time")
+        .expect("a frame")
+        .expect("a valid frame");
+    assert_eq!(reply, Message::text("echo: ping"));
+}
+
+/// ROOT-20: the handler of a WebSocket route reads a percent-decoded path
+/// parameter, the same value an HTTP route on the same path would read.
+#[tokio::test]
+async fn ws_handler_reads_percent_decoded_path_params() {
+    let port = spawn_server(Router::new().ws_with_config(
+        "/ws/handshake/rooms/{id}",
+        ParamHandler,
+        open_config(),
+    ))
+    .await;
+
+    let url = format!("ws://127.0.0.1:{port}/ws/handshake/rooms/a%20b%2Fc");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("upgrade");
+    let frame = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("frame in time")
+        .expect("a frame")
+        .expect("a valid frame");
+    assert_eq!(frame, Message::text("a b/c"));
+}
+
+/// Every WebSocket termination this binary's routes produced, as
+/// `(path, status)`. The terminable registry is process-global and keyed
+/// by type, so one recorder serves every test; each test reads only its
+/// own path.
+static WS_TERMINATIONS: Mutex<Vec<(String, u16)>> = Mutex::new(Vec::new());
+
+struct RecordTerminations;
+
+#[async_trait]
+impl Terminable for RecordTerminations {
+    async fn terminate(&self, snapshot: &TerminationSnapshot) {
+        if let Ok(mut seen) = WS_TERMINATIONS.lock() {
+            seen.push((snapshot.path.clone(), snapshot.status));
+        }
+    }
+}
+
+/// The statuses recorded for `path`, waiting up to two seconds for the
+/// first one: termination is dispatched on a spawned task.
+async fn terminations_for(path: &str) -> Vec<u16> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let statuses: Vec<u16> = WS_TERMINATIONS
+            .lock()
+            .map(|seen| {
+                seen.iter()
+                    .filter(|(p, _)| p == path)
+                    .map(|(_, status)| *status)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !statuses.is_empty() || tokio::time::Instant::now() >= deadline {
+            return statuses;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// PRIOR-06: a WebSocket upgrade that middleware rejects is a response
+/// like any other, so registered terminables run for it with its status.
+#[tokio::test]
+async fn rejected_upgrade_runs_terminables() {
+    register_terminable(RecordTerminations);
+    let path = "/ws/handshake/terminable-rejected";
+    let port = spawn_server(Router::new().ws_with_middleware_and_config(
+        path,
+        EchoHandler,
+        vec![suprnova::middleware::into_boxed(RejectingMiddleware)],
+        open_config(),
+    ))
+    .await;
+
+    match tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}{path}")).await {
+        Err(WsError::Http(response)) => assert_eq!(response.status(), 401),
+        other => panic!("expected the middleware's 401, got {other:?}"),
+    }
+
+    assert_eq!(terminations_for(path).await, vec![401]);
+}
+
+/// PRIOR-06: a successful upgrade runs registered terminables once, with
+/// the 101 the client received.
+#[tokio::test]
+async fn successful_upgrade_runs_terminables() {
+    register_terminable(RecordTerminations);
+    let path = "/ws/handshake/terminable-accepted";
+    let port = spawn_server(Router::new().ws_with_config(path, EchoHandler, open_config())).await;
+
+    let (mut ws, response) =
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}{path}"))
+            .await
+            .expect("upgrade");
+    assert_eq!(response.status(), 101);
+    ws.close(None).await.expect("close");
+
+    assert_eq!(terminations_for(path).await, vec![101]);
+}
