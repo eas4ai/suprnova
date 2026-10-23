@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-setnameditem",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
