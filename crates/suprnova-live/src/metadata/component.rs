@@ -1,0 +1,396 @@
+//! Canonical metadata for one registered Live component.
+
+use std::collections::BTreeSet;
+
+use crate::async_updates::{EventSource, MAX_SUBSCRIPTIONS, SubscriptionMetadata};
+use crate::identity::{ComponentName, ContentDigest, ViewName};
+use crate::snapshot::state::FieldCategory;
+
+use super::digest::contract_digest;
+use super::{
+    ActionMetadata, ContractVersions, EffectMetadata, EventMetadata, FieldMetadata, MetadataError,
+    MetadataErrorKind,
+};
+
+const MAX_FIELDS: usize = 512;
+const MAX_ACTIONS: usize = 256;
+// Mirrors MAX_AGENT_TOOLS in browser/src/islands/metadata.ts so metadata cannot disable an island.
+const MAX_BROWSER_TOOLS: usize = 64;
+const MAX_EVENTS: usize = 256;
+const MAX_EFFECTS: usize = 256;
+
+/// Complete canonical metadata used by macros, checking, and runtime lookup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComponentMetadata {
+    identity: ComponentName,
+    view: ViewName,
+    versions: ContractVersions,
+    fields: Vec<FieldMetadata>,
+    actions: Vec<ActionMetadata>,
+    events: Vec<EventMetadata>,
+    effects: Vec<EffectMetadata>,
+    subscriptions: Vec<SubscriptionMetadata>,
+    refresh_on_promote: bool,
+    contract_digest: ContentDigest,
+}
+
+impl ComponentMetadata {
+    /// Creates bounded metadata, rejecting duplicate identities before serving.
+    pub fn new(
+        identity: ComponentName,
+        view: ViewName,
+        versions: ContractVersions,
+        fields: Vec<FieldMetadata>,
+        actions: Vec<ActionMetadata>,
+    ) -> Result<Self, MetadataError> {
+        Self::new_with_browser_contracts(
+            identity,
+            view,
+            versions,
+            fields,
+            actions,
+            Vec::new(),
+            Vec::new(),
+            false,
+        )
+    }
+
+    /// Creates complete metadata including declared browser payload contracts.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the macro supplies one closed contract tuple"
+    )]
+    pub fn new_with_browser_contracts(
+        identity: ComponentName,
+        view: ViewName,
+        versions: ContractVersions,
+        fields: Vec<FieldMetadata>,
+        actions: Vec<ActionMetadata>,
+        events: Vec<EventMetadata>,
+        effects: Vec<EffectMetadata>,
+        refresh_on_promote: bool,
+    ) -> Result<Self, MetadataError> {
+        Self::new_with_async_contracts(
+            identity,
+            view,
+            versions,
+            fields,
+            actions,
+            events,
+            effects,
+            Vec::new(),
+            refresh_on_promote,
+        )
+    }
+
+    /// Creates complete metadata including event and stream-subscription contracts.
+    /// Rejects more than 64 browser tools because the browser would invalidate the island.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the macro supplies one closed contract tuple"
+    )]
+    pub fn new_with_async_contracts(
+        identity: ComponentName,
+        view: ViewName,
+        versions: ContractVersions,
+        mut fields: Vec<FieldMetadata>,
+        mut actions: Vec<ActionMetadata>,
+        mut events: Vec<EventMetadata>,
+        mut effects: Vec<EffectMetadata>,
+        mut subscriptions: Vec<SubscriptionMetadata>,
+        refresh_on_promote: bool,
+    ) -> Result<Self, MetadataError> {
+        if refresh_on_promote && versions.minimum_protocol() < 2 {
+            return Err(MetadataError::new(MetadataErrorKind::UnsupportedProtocol));
+        }
+        if fields.len() > MAX_FIELDS {
+            return Err(MetadataError::new(MetadataErrorKind::TooManyFields));
+        }
+        if actions.len() > MAX_ACTIONS {
+            return Err(MetadataError::new(MetadataErrorKind::TooManyActions));
+        }
+        if actions
+            .iter()
+            .filter_map(ActionMetadata::tool)
+            .filter(|tool| tool.browser())
+            .count()
+            > MAX_BROWSER_TOOLS
+        {
+            return Err(MetadataError::new(MetadataErrorKind::TooManyBrowserTools));
+        }
+        if events.len() > MAX_EVENTS {
+            return Err(MetadataError::new(MetadataErrorKind::TooManyEvents));
+        }
+        if effects.len() > MAX_EFFECTS {
+            return Err(MetadataError::new(MetadataErrorKind::TooManyEffects));
+        }
+        if subscriptions.len() > MAX_SUBSCRIPTIONS {
+            return Err(MetadataError::new(MetadataErrorKind::TooManySubscriptions));
+        }
+
+        fields.sort_by(|left, right| left.name().cmp(right.name()));
+        if fields
+            .windows(2)
+            .any(|pair| pair[0].name() == pair[1].name())
+        {
+            return Err(MetadataError::new(MetadataErrorKind::DuplicateField));
+        }
+        if fields.iter().any(|field| match field.category() {
+            FieldCategory::Model | FieldCategory::Transient => {
+                field.model_codec().is_none() || field.binding_timing().is_none()
+            }
+            FieldCategory::Session => field.session_codec().is_none(),
+            _ => false,
+        }) {
+            return Err(MetadataError::new(
+                MetadataErrorKind::InvalidBindingMetadata,
+            ));
+        }
+        let mut url_query_keys = BTreeSet::new();
+        if fields
+            .iter()
+            .filter_map(FieldMetadata::url_binding)
+            .any(|binding| !url_query_keys.insert(binding.query_key()))
+        {
+            return Err(MetadataError::new(MetadataErrorKind::DuplicateUrlQueryKey));
+        }
+
+        actions.sort_by(|left, right| left.name().cmp(right.name()));
+        if actions
+            .windows(2)
+            .any(|pair| pair[0].name() == pair[1].name())
+        {
+            return Err(MetadataError::new(MetadataErrorKind::DuplicateAction));
+        }
+        // A browser and the MCP endpoint find a tool by its base name, so one
+        // component cannot declare a name twice.
+        let mut tool_names = BTreeSet::new();
+        if actions
+            .iter()
+            .filter_map(ActionMetadata::tool)
+            .any(|tool| !tool_names.insert(tool.name()))
+        {
+            return Err(MetadataError::new(MetadataErrorKind::InvalidActionMetadata));
+        }
+        if fields.iter().any(|field| {
+            field.upload_policy().is_some_and(|policy| {
+                !actions
+                    .iter()
+                    .any(|action| action.name() == policy.finalize_action())
+            })
+        }) {
+            return Err(MetadataError::new(MetadataErrorKind::InvalidUploadMetadata));
+        }
+
+        events.sort_by(|left, right| left.name().cmp(right.name()));
+        if events
+            .windows(2)
+            .any(|pair| pair[0].name() == pair[1].name())
+        {
+            return Err(MetadataError::new(MetadataErrorKind::DuplicateEvent));
+        }
+
+        effects.sort_by(|left, right| left.name().cmp(right.name()));
+        if effects
+            .windows(2)
+            .any(|pair| pair[0].name() == pair[1].name())
+        {
+            return Err(MetadataError::new(MetadataErrorKind::DuplicateEffect));
+        }
+
+        subscriptions.sort_by(|left, right| left.stream().cmp(right.stream()));
+        if subscriptions
+            .windows(2)
+            .any(|pair| pair[0].stream() == pair[1].stream())
+        {
+            return Err(MetadataError::new(MetadataErrorKind::DuplicateSubscription));
+        }
+        if subscriptions.iter().any(|subscription| {
+            subscription.events().as_slice().iter().any(|event_name| {
+                !events.iter().any(|event| {
+                    event.name() == event_name && event.source() == EventSource::Stream
+                })
+            })
+        }) {
+            return Err(MetadataError::new(
+                MetadataErrorKind::UnknownSubscriptionEvent,
+            ));
+        }
+        if events.iter().any(|event| {
+            event.source() == EventSource::Stream
+                && !subscriptions.iter().any(|subscription| {
+                    subscription
+                        .events()
+                        .as_slice()
+                        .iter()
+                        .any(|name| name == event.name())
+                })
+        }) {
+            return Err(MetadataError::new(
+                MetadataErrorKind::UnregisteredStreamEvent,
+            ));
+        }
+
+        let contract_digest = contract_digest(
+            &identity,
+            &view,
+            versions,
+            &fields,
+            &actions,
+            &events,
+            &effects,
+            &subscriptions,
+            refresh_on_promote,
+        )?;
+        Ok(Self {
+            identity,
+            view,
+            versions,
+            fields,
+            actions,
+            events,
+            effects,
+            subscriptions,
+            refresh_on_promote,
+            contract_digest,
+        })
+    }
+
+    /// Returns the stable registered component identity.
+    #[must_use]
+    pub const fn identity(&self) -> &ComponentName {
+        &self.identity
+    }
+
+    /// Returns the checked external-template identity.
+    #[must_use]
+    pub const fn view(&self) -> &ViewName {
+        &self.view
+    }
+
+    /// Returns the independent version set.
+    #[must_use]
+    pub const fn versions(&self) -> ContractVersions {
+        self.versions
+    }
+
+    /// Returns fields in canonical identity order.
+    #[must_use]
+    pub fn fields(&self) -> &[FieldMetadata] {
+        &self.fields
+    }
+
+    /// Returns actions in canonical identity order.
+    #[must_use]
+    pub fn actions(&self) -> &[ActionMetadata] {
+        &self.actions
+    }
+
+    /// Returns declared browser events in canonical identity order.
+    #[must_use]
+    pub fn events(&self) -> &[EventMetadata] {
+        &self.events
+    }
+
+    /// Returns declared browser effects in canonical identity order.
+    #[must_use]
+    pub fn effects(&self) -> &[EffectMetadata] {
+        &self.effects
+    }
+
+    /// Returns declared asynchronous subscriptions in canonical stream order.
+    #[must_use]
+    pub fn subscriptions(&self) -> &[SubscriptionMetadata] {
+        &self.subscriptions
+    }
+
+    /// Returns whether seed promotion must resolve as a protocol-v2 fresh render.
+    #[must_use]
+    pub const fn refresh_on_promote(&self) -> bool {
+        self.refresh_on_promote
+    }
+
+    /// Returns the purpose-specific canonical semantic contract digest.
+    #[must_use]
+    pub const fn contract_digest(&self) -> &ContentDigest {
+        &self.contract_digest
+    }
+
+    /// The actions declared agent tools, each with its declaration, in
+    /// canonical action order.
+    pub fn tools(&self) -> impl Iterator<Item = (&ActionMetadata, &super::ActionToolMetadata)> {
+        self.actions
+            .iter()
+            .filter_map(|action| action.tool().map(|tool| (action, tool)))
+    }
+
+    /// Whether the browser registers any of the component's tools, which
+    /// binds its islands to the tool instance-key grammar.
+    #[must_use]
+    pub fn has_browser_tools(&self) -> bool {
+        self.tools().any(|(_, tool)| tool.browser())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::ActionName;
+    use crate::metadata::ActionToolMetadata;
+
+    fn metadata_with_actions(
+        action_count: usize,
+        browser_tools: usize,
+        headless_tools: usize,
+    ) -> Result<ComponentMetadata, MetadataError> {
+        let actions = (0..action_count)
+            .map(|index| {
+                let name = format!("action_{index}");
+                let action =
+                    ActionMetadata::new(ActionName::parse(&name).expect("action name"), 1)?;
+                if index < browser_tools + headless_tools {
+                    action.with_tool(
+                        ActionToolMetadata::new(&name, "A test tool.")?
+                            .for_browser(index < browser_tools)
+                            .headless(true),
+                    )
+                } else {
+                    Ok(action)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        ComponentMetadata::new(
+            ComponentName::parse("tests.tools").expect("component name"),
+            ViewName::parse("live/tests/tools.html").expect("view name"),
+            ContractVersions::new(1, 1, 1, 1, 1)?,
+            Vec::new(),
+            actions,
+        )
+    }
+
+    #[test]
+    fn too_many_actions_are_refused() {
+        let error = metadata_with_actions(257, 0, 0).expect_err("257 actions exceed the limit");
+        assert_eq!(error.kind(), MetadataErrorKind::TooManyActions);
+        assert_eq!(error.to_string(), "too_many_component_actions");
+    }
+
+    #[test]
+    fn too_many_browser_tools_are_refused() {
+        let error =
+            metadata_with_actions(65, 65, 0).expect_err("65 browser tools exceed the limit");
+        assert_eq!(error.kind(), MetadataErrorKind::TooManyBrowserTools);
+        assert_eq!(error.to_string(), "too_many_browser_tools");
+    }
+
+    #[test]
+    fn browser_tool_limit_leaves_room_for_headless_tools_and_plain_actions() {
+        let metadata = metadata_with_actions(256, 64, 65).expect("64 browser tools fit");
+        assert_eq!(
+            metadata.tools().filter(|(_, tool)| tool.browser()).count(),
+            64
+        );
+        assert_eq!(metadata.tools().count(), 129);
+        assert_eq!(metadata.actions().len(), 256);
+    }
+}

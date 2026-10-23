@@ -1,0 +1,5 @@
+error: expected one `#[inertia(cacheable)]`; declare public and per_request on fields
+ --> tests/inertia/compile_fail/cache/cache_013_unknown_field.rs:4:22
+  |
+4 | #[inertia(cacheable, public = "missing")]
+  |                      ^^^^^^
