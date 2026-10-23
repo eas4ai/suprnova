@@ -53,6 +53,7 @@ async fn audit_public_pages() -> Result<(), Box<dyn std::error::Error>> {
     Auth::register_provider("users", Arc::new(EloquentUserProvider::<User>::new()))?;
     App::bind_if_absent::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
     App::singleton(live::registry()?);
+    live::authorize();
     bootstrap::try_register_http_stack()?;
     let router = live::routes_with_render_cache(agents::serve(routes::register())?).await?;
     let prepared = suprnova::live::testing::prepare_live_router_for_test(&router)?;
