@@ -279,7 +279,7 @@ fn fingerprinted_with(path: &str, pattern: &Regex, config: Option<&crate::Inerti
         if let Some(output) = output
             && manifest.contains_output(output)
         {
-            return build_hash_segment(output);
+            return build_hash_segment(output, pattern);
         }
     }
     std::path::Path::new(path)
@@ -288,24 +288,32 @@ fn fingerprinted_with(path: &str, pattern: &Regex, config: Option<&crate::Inerti
         .is_some_and(|stem| pattern.is_match(stem))
 }
 
-fn build_hash_segment(path: &str) -> bool {
-    let Some(name) = std::path::Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-    else {
+/// A manifest output counts as fingerprinted only when it has an extension and
+/// its stem ends in Vite's default eight-character hash: the strict pattern (a
+/// hash with a digit, capital, `_` or `-`) or exactly eight letters, digits or
+/// `_` after the last `-` or `.`. That admits an all-lowercase hash such as
+/// `app-deadbeef` without admitting a hyphenated name such as
+/// `my-component-library`; a longer configured hash keeps revalidating.
+fn build_hash_segment(path: &str, pattern: &Regex) -> bool {
+    let path = std::path::Path::new(path);
+    if path
+        .extension()
+        .is_none_or(|extension| extension.is_empty())
+    {
+        return false;
+    }
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
         return false;
     };
-    let Some((stem, extension)) = name.rsplit_once('.') else {
-        return false;
-    };
-    !extension.is_empty()
-        && stem.match_indices(['-', '.']).any(|(offset, _)| {
-            let hash = &stem[offset + 1..];
-            hash.len() >= 8
-                && hash
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        })
+    if pattern.is_match(stem) {
+        return true;
+    }
+    stem.rsplit_once(['-', '.']).is_some_and(|(_, hash)| {
+        hash.len() == 8
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    })
 }
 
 impl PageBudget {

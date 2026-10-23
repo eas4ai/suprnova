@@ -640,6 +640,8 @@ async fn budget_002_review_manifest_mutable_names_keep_revalidation() {
         "theme.css",
         "logo.svg",
         "app-deadbeef.js",
+        "vendor-Ab-cD12x.js",
+        "my-component-library.js",
         "escape-abcdefgh.js",
         "abs-abcdefgh.js",
         "site-manifest.json",
@@ -653,7 +655,7 @@ async fn budget_002_review_manifest_mutable_names_keep_revalidation() {
     for file in files {
         let response = client.get(&format!("/build/{file}")).send().await;
         response.assert_ok();
-        let expected = if file == "app-deadbeef.js" {
+        let expected = if matches!(file, "app-deadbeef.js" | "vendor-Ab-cD12x.js") {
             "public, max-age=31536000, immutable"
         } else {
             "public, max-age=3600"

@@ -1213,7 +1213,7 @@ async fn budget_001_review_manifest_mutable_names_keep_revalidation() {
         ));
     }
     let audit = PageBudget::default().audit_har(&har(entries)).unwrap();
-    assert_eq!(audit.findings.len(), 2, "{audit}");
+    assert_eq!(audit.findings.len(), 1, "{audit}");
     assert!(
         audit
             .findings
@@ -1221,9 +1221,10 @@ async fn budget_001_review_manifest_mutable_names_keep_revalidation() {
             .any(|finding| finding.asset.ends_with("/app.deadbeef.js"))
     );
     assert!(
-        audit
+        !audit
             .findings
             .iter()
-            .any(|finding| finding.asset.ends_with("/app-abcdefghijkl.css"))
+            .any(|finding| finding.asset.ends_with("/app-abcdefghijkl.css")),
+        "a twelve-letter segment is not Vite's default hash"
     );
 }
