@@ -183,7 +183,7 @@ banner separately retain Idiomorph's name, version, and 0BSD license metadata.
 | Cargo | cssparser-macros | 0.7.1 | Workspace resolved | MPL-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | cssparser | 0.38.0 | Workspace resolved | MPL-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | ctr | 0.9.2 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
-| Cargo | ctutils | 0.4.2 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
+| Cargo | ctutils | 0.4.5 | Workspace resolved | Apache-2.0 OR MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | daachorse | 3.0.3 | Workspace resolved | MIT OR Apache-2.0 | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | darling_core | 0.20.11 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
 | Cargo | darling_core | 0.23.0 | Workspace resolved | MIT | registry+https://github.com/rust-lang/crates.io-index |
