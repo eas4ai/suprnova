@@ -568,6 +568,12 @@ impl CdnDriver for CloudflareDriver {
         }
     }
 
+    /// The custom domain serves the bucket's stable mirror; the application's own
+    /// origin serves the versioned objects itself and needs none.
+    fn serves_mirror(&self) -> bool {
+        matches!(self.mode, Mode::R2Domain { .. })
+    }
+
     fn validate_headers(&self, headers: &BTreeMap<String, String>) -> Result<(), FrameworkError> {
         let mut accepted = BTreeMap::new();
         for (name, value) in headers {

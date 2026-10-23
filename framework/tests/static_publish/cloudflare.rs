@@ -664,6 +664,25 @@ async fn cloudflare_publication_creates_the_rules_and_purges_the_page_urls() {
         )),
         "{calls:?}"
     );
+    // The custom domain serves the stable mirror, so the publication must have
+    // written it, and must have done so before the purge.
+    let disk = Storage::disk(&name).unwrap();
+    assert_eq!(
+        disk.read("about/index.html")
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        b"<html>published</html>"
+    );
+    assert!(disk.read("about/index.json").await.is_ok());
+    assert!(mock.driver().serves_mirror());
+    assert!(
+        !CloudflareDriver::for_origin("zone123", HOST, TOKEN)
+            .unwrap()
+            .serves_mirror(),
+        "the application's origin serves the versioned objects itself"
+    );
     let purge = mock
         .requests()
         .into_iter()

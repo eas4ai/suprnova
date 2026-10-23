@@ -41,6 +41,15 @@ pub enum Purge {
 pub trait CdnDriver: Send + Sync + 'static {
     /// Advertises supported invalidation operations.
     fn capabilities(&self) -> CdnCapabilities;
+    /// Whether the provider serves the live version through the bucket's stable
+    /// mirror (`<path>/index.html`, `<path>/index.json`) instead of through a
+    /// version switch of its own, as an R2 custom domain does. The publisher then
+    /// writes the mirror after every manifest commit and before the purge, so no
+    /// edge refetches an old copy and keeps it; a provider that switches an origin
+    /// path, as CloudFront does, leaves this `false` and gets no mirror.
+    fn serves_mirror(&self) -> bool {
+        false
+    }
     /// Rejects response headers the provider cannot preserve before any upload or switch.
     fn validate_headers(
         &self,

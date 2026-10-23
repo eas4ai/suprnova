@@ -53,6 +53,14 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   covers a hostname that mixes dynamic pages: the proxied application serves
   the published objects itself and the driver keeps the cache rule and the
   purges. R2 charges no egress.
+- **A provider that serves the bucket's mirror gets it before the purge.** The
+  publisher wrote the stable copies of the live version (`about/index.html`,
+  `about/index.json`) only when no CDN driver was installed, and only in the
+  maintenance pass after the purge, so an R2 custom domain had nothing to
+  serve. `CdnDriver::serves_mirror` (true for `CloudflareDriver::new`, false
+  for `for_origin` and CloudFront) makes the publisher write the mirror right
+  after the manifest commit and before the purge, and keep it converging in
+  maintenance. This fix landed after the `v4.6.2` tag.
 - **An application's own 5xx page is sent as built.** With debug off, the
   framework answered every browser 5xx with its minimal status-only view,
   which also replaced a 503 page the application built on purpose, with its
