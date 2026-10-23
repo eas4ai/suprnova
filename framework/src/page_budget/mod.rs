@@ -254,7 +254,7 @@ fn fingerprinted(url: &Url, pattern: &Regex, config: Option<&crate::InertiaConfi
     fingerprinted_with(url.path(), pattern, config)
 }
 
-/// The installed build is authoritative; the pattern covers other asset paths.
+/// Build outputs need a hash segment; the pattern covers other asset paths.
 pub(crate) fn fingerprinted_path(path: &str, pattern: &Regex) -> bool {
     let config = crate::App::inertia_registry().installed_config();
     fingerprinted_with(path, pattern, config.as_ref())
@@ -276,14 +276,36 @@ fn fingerprinted_with(path: &str, pattern: &Regex, config: Option<&crate::Inerti
             path.strip_prefix(prefix)
                 .and_then(|path| path.strip_prefix('/'))
         };
-        if output.is_some_and(|path| manifest.contains_output(path)) {
-            return true;
+        if let Some(output) = output
+            && manifest.contains_output(output)
+        {
+            return build_hash_segment(output);
         }
     }
     std::path::Path::new(path)
         .file_stem()
         .and_then(|stem| stem.to_str())
         .is_some_and(|stem| pattern.is_match(stem))
+}
+
+fn build_hash_segment(path: &str) -> bool {
+    let Some(name) = std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    let Some((stem, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    !extension.is_empty()
+        && stem.match_indices(['-', '.']).any(|(offset, _)| {
+            let hash = &stem[offset + 1..];
+            hash.len() >= 8
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
 }
 
 impl PageBudget {

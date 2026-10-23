@@ -108,7 +108,9 @@ impl ViteManifest {
         })?;
         let assets: HashSet<_> = entries
             .values()
-            .flat_map(|entry| entry.assets.iter().cloned())
+            .flat_map(|entry| &entry.assets)
+            .filter(|path| valid_output(path))
+            .cloned()
             .collect();
         let mut manifest = Self::from_entries(
             entries
@@ -126,6 +128,7 @@ impl ViteManifest {
         let outputs = entries
             .values()
             .flat_map(|entry| std::iter::once(&entry.file).chain(&entry.css))
+            .filter(|path| valid_output(path))
             .cloned()
             .collect();
         Self { entries, outputs }
@@ -180,6 +183,14 @@ impl ViteManifest {
             self.collect_imports(imp, preload, css, visited);
         }
     }
+}
+
+fn valid_output(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains("..")
+        && !path.contains('\\')
+        && url::Url::parse(path).is_err()
 }
 
 #[cfg(test)]

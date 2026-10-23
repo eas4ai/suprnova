@@ -73,10 +73,14 @@ and measure changes in review. PNG recompression is lossless and preserves
 the media pipeline's colour and metadata policy. Lossy media output keeps
 the framework's default quality of 85.
 
-The configured Vite build manifest is the authority for fingerprints. Every
-entry's `file`, `css` and `assets` output receives immutable caching, including
-hashes made entirely of lowercase letters. The static handler, publisher and
-all audit modes read the installed `InertiaConfig` and its `manifest_path`.
+The configured Vite build manifest identifies build outputs in each entry's
+`file`, `css` and `assets`. A listed file receives immutable caching only when
+its filename has a hyphen or dot followed by at least eight base64url characters
+(`A-Z`, `a-z`, `0-9`, `_` or `-`) before the extension. This includes
+`app-deadbeef.js`; mutable names such as `index.html` and `app.js` retain the
+revalidating policy. Empty outputs, absolute URLs or paths, and outputs containing
+`..` or a backslash are ignored. The static handler, publisher and all audit modes
+share this classification and read the installed `InertiaConfig` and its `manifest_path`.
 For files outside that manifest, fingerprint detection uses a configurable
 regular expression against the file name without its extension. The fallback
 matches Vite's eight-character hash when it contains a digit,

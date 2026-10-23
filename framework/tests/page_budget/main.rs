@@ -1131,3 +1131,99 @@ async fn budget_001_cross_origin_redirect_port_keeps_the_same_scope() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn budget_001_review_manifest_mutable_names_keep_revalidation() {
+    if std::env::var_os("REVIEW_MANIFEST_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "budget_001_review_manifest_mutable_names_keep_revalidation",
+                "--nocapture",
+            ])
+            .env("REVIEW_MANIFEST_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let _container = suprnova::testing::TestContainer::fake();
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("review-manifest.json");
+    std::fs::write(&manifest, include_str!("fixtures/review-manifest.json")).unwrap();
+    suprnova::Inertia::install(
+        &suprnova::InertiaConfig::new()
+            .development(true)
+            .manifest_path(&manifest)
+            .assets_base_url("/build"),
+    )
+    .unwrap();
+    let files = [
+        "index.html",
+        "app.js",
+        "theme.css",
+        "logo.svg",
+        "app-deadbeef.js",
+        "escape-abcdefgh.js",
+        "abs-abcdefgh.js",
+        "site-manifest.json",
+    ];
+    let mut entries = vec![entry("/", 200, "text/html", "", 0, &[])];
+    for file in files {
+        entries.push(entry(
+            &format!("/build/{file}"),
+            200,
+            "text/javascript",
+            "asset",
+            5,
+            &[("Cache-Control", "public, max-age=3600")],
+        ));
+    }
+    let audit = PageBudget::default().audit_har(&har(entries)).unwrap();
+    assert_eq!(audit.findings.len(), 1, "{audit}");
+    assert_eq!(audit.findings[0].rule, "fingerprint-cache");
+    assert!(audit.findings[0].asset.ends_with("/build/app-deadbeef.js"));
+    std::fs::write(&manifest, r#"{"entry":{"file":"app.deadbeef.js","css":["app-abcdefghijkl.css"],"assets":["short-abcdefg.js","noextension-deadbeef"]}}"#).unwrap();
+    suprnova::Inertia::install(
+        &suprnova::InertiaConfig::new()
+            .development(true)
+            .manifest_path(&manifest)
+            .assets_base_url("/build"),
+    )
+    .unwrap();
+    let mut entries = vec![entry("/", 200, "text/html", "", 0, &[])];
+    for file in [
+        "app.deadbeef.js",
+        "app-abcdefghijkl.css",
+        "short-abcdefg.js",
+        "noextension-deadbeef",
+    ] {
+        entries.push(entry(
+            &format!("/build/{file}"),
+            200,
+            "text/javascript",
+            "asset",
+            5,
+            &[("Cache-Control", "public, max-age=3600")],
+        ));
+    }
+    let audit = PageBudget::default().audit_har(&har(entries)).unwrap();
+    assert_eq!(audit.findings.len(), 2, "{audit}");
+    assert!(
+        audit
+            .findings
+            .iter()
+            .any(|finding| finding.asset.ends_with("/app.deadbeef.js"))
+    );
+    assert!(
+        audit
+            .findings
+            .iter()
+            .any(|finding| finding.asset.ends_with("/app-abcdefghijkl.css"))
+    );
+}
