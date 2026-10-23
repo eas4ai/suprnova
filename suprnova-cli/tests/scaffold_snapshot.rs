@@ -1,0 +1,1017 @@
+//! Golden tests for `suprnova new`.
+//!
+//! Codex review finding #6 (S4 follow-up): the generated `--api` and
+//! default Inertia starters previously shipped TODO-laden bodies, stub
+//! `all_example` / `find_example` helpers, and an in-memory Torii config
+//! that was unsafe for production. These tests make the absence of those
+//! markers a hard guarantee:
+//!
+//! 1. Walk every generated `.rs`, `.toml`, and template-driven config
+//!    file and reject occurrences of `TODO`, `FIXME`, `unimplemented!`,
+//!    `panic!(`, or the historical stub helpers.
+//! 2. Confirm that a freshly scaffolded project compiles end-to-end by
+//!    rewriting its `suprnova` dependency to point at the in-tree
+//!    framework crate and running `cargo check`. Marked `#[ignore]` so
+//!    `cargo test --workspace` stays fast - run with
+//!    `cargo test --workspace -- --ignored` to exercise them.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use tempfile::TempDir;
+
+/// Substring markers that must NEVER appear in scaffolder output. We
+/// search literal substrings rather than comment-only patterns because
+/// the production templates have no legitimate reason to include any
+/// of these - every prior occurrence was a punted implementation.
+const FORBIDDEN_MARKERS: &[&str] = &[
+    "TODO",
+    "FIXME",
+    "unimplemented!",
+    "panic!(",
+    "all_example",
+    "find_example",
+    "sqlite_in_memory",
+];
+
+/// File extensions whose contents we audit. The scaffolder writes
+/// frontend files (`.tsx`, `.svelte`, `.vue`, `.ts`, `.json`,
+/// `.html`, `.css`) plus Rust source and TOML manifests - every one is
+/// fair game for stub markers. We deliberately do *not* audit binary
+/// blobs or lockfiles.
+const AUDITED_EXTENSIONS: &[&str] = &[
+    "rs", "toml", "ts", "tsx", "svelte", "vue", "json", "html", "css", "yml", "yaml",
+];
+
+/// Paths whose substrings indicate generated / external content we
+/// don't own. `target/` and `node_modules/` won't exist before
+/// `cargo check` / `npm install`, but the filter is cheap and matches
+/// what users would see after a real boot.
+const SKIP_PATH_FRAGMENTS: &[&str] = &["/target/", "/node_modules/"];
+
+fn cli_binary() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_suprnova"))
+}
+
+/// Run `suprnova new ...` inside `tmp` and return the project root.
+fn scaffold(tmp: &TempDir, project_name: &str, extra_args: &[&str]) {
+    let mut cmd = Command::new(cli_binary());
+    cmd.arg("new")
+        .arg(project_name)
+        .arg("--no-interaction")
+        .arg("--no-git");
+    for a in extra_args {
+        cmd.arg(a);
+    }
+    let output = cmd
+        .current_dir(tmp.path())
+        .output()
+        .expect("`suprnova new` should run");
+    assert!(
+        output.status.success(),
+        "`suprnova new {project_name} {extra_args:?}` failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// Walk the scaffolded project and collect any forbidden-marker hits.
+fn collect_marker_hits(root: &Path) -> Vec<(PathBuf, &'static str, usize, String)> {
+    let mut hits = Vec::new();
+    for entry in walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+    {
+        let path = entry.path();
+        let path_str = path.to_string_lossy();
+        if SKIP_PATH_FRAGMENTS
+            .iter()
+            .any(|frag| path_str.contains(frag))
+        {
+            continue;
+        }
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        if !AUDITED_EXTENSIONS.contains(&ext) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for (line_idx, line) in content.lines().enumerate() {
+            for marker in FORBIDDEN_MARKERS {
+                if line.contains(marker) {
+                    hits.push((
+                        path.to_owned(),
+                        *marker,
+                        line_idx + 1,
+                        line.trim().to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    hits
+}
+
+fn assert_no_marker_hits(root: &Path) {
+    let hits = collect_marker_hits(root);
+    assert!(
+        hits.is_empty(),
+        "scaffolded project under {} contains forbidden stub markers:\n{}",
+        root.display(),
+        hits.iter()
+            .map(|(p, marker, line, text)| {
+                format!("  {}:{} [{}] {}", p.display(), line, marker, text)
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stub-marker audits (fast - no compilation involved).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn api_starter_has_no_stub_markers() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(&tmp, "marker_api", &["--api"]);
+    assert_no_marker_hits(&tmp.path().join("marker_api"));
+}
+
+#[test]
+fn default_starter_has_no_stub_markers_svelte() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(&tmp, "marker_svelte", &["--frontend", "svelte"]);
+    assert_no_marker_hits(&tmp.path().join("marker_svelte"));
+}
+
+#[test]
+fn default_starter_has_no_stub_markers_react() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(&tmp, "marker_react", &["--frontend", "react"]);
+    assert_no_marker_hits(&tmp.path().join("marker_react"));
+}
+
+#[test]
+fn default_starter_has_no_stub_markers_vue() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(&tmp, "marker_vue", &["--frontend", "vue"]);
+    assert_no_marker_hits(&tmp.path().join("marker_vue"));
+}
+
+#[test]
+fn default_starter_has_no_stub_markers_live() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(&tmp, "marker_live", &["--frontend", "live"]);
+    assert_no_marker_hits(&tmp.path().join("marker_live"));
+}
+
+// ---------------------------------------------------------------------------
+// Auth contract audits - the scaffolded model must keep the trait overrides
+// the login flow depends on.
+// ---------------------------------------------------------------------------
+
+/// The scaffolded `User` must override `Authenticatable::get_auth_password`
+/// to expose the stored hash. The trait default returns `None`, which makes
+/// `EloquentUserProvider::validate_credentials` reject every password - a
+/// freshly scaffolded app's `Auth::attempt` login 422s on correct
+/// credentials. The project still compiles without the override, so only a
+/// content check catches the regression.
+#[test]
+fn scaffolded_user_model_exposes_auth_password() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(&tmp, "auth_pw", &["--frontend", "svelte"]);
+    let model = tmp.path().join("auth_pw").join("src/models/user.rs");
+    let body = std::fs::read_to_string(&model).expect("scaffolded user model should exist");
+    assert!(
+        body.contains("fn get_auth_password"),
+        "scaffolded User must override get_auth_password or Auth::attempt \
+         rejects every password:\n{body}"
+    );
+    assert!(
+        body.contains("Some(&self.password)"),
+        "get_auth_password must return the stored hash:\n{body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Inertia client pin - the scaffolds must ship a current `@inertiajs/*`
+// adapter. A typo or accidental downgrade compiles fine (npm isn't part of
+// `cargo check`), so only a content assertion catches drift.
+// ---------------------------------------------------------------------------
+
+/// The expected `@inertiajs/*` caret pin every frontend scaffold ships.
+/// Bump this in lockstep with the `package.json.tpl` files.
+const EXPECTED_INERTIA_PIN: &str = "^3.8.0";
+
+fn assert_inertia_pin(tmp: &TempDir, project: &str, frontend: &str, adapter: &str) {
+    scaffold(tmp, project, &["--frontend", frontend]);
+    let pkg = tmp
+        .path()
+        .join(project)
+        .join("frontend")
+        .join("package.json");
+    let body = std::fs::read_to_string(&pkg).expect("scaffolded package.json should exist");
+    let needle = format!("\"@inertiajs/{adapter}\": \"{EXPECTED_INERTIA_PIN}\"");
+    assert!(
+        body.contains(&needle),
+        "{frontend} scaffold must pin @inertiajs/{adapter} at {EXPECTED_INERTIA_PIN}:\n{body}"
+    );
+}
+
+#[test]
+fn scaffold_pins_current_inertia_client() {
+    let tmp = TempDir::new().unwrap();
+    assert_inertia_pin(&tmp, "inertia_svelte", "svelte", "svelte");
+    assert_inertia_pin(&tmp, "inertia_react", "react", "react");
+    assert_inertia_pin(&tmp, "inertia_vue", "vue", "vue3");
+}
+
+// ---------------------------------------------------------------------------
+// make:* generator audits - ensure the in-place commands emit clean code.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn make_middleware_generates_clean_code() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(&tmp, "make_mid", &["--frontend", "svelte"]);
+    let project = tmp.path().join("make_mid");
+
+    let status = Command::new(cli_binary())
+        .args(["make:middleware", "RateLimit"])
+        .current_dir(&project)
+        .status()
+        .expect("`suprnova make:middleware` should run");
+    assert!(status.success(), "make:middleware should succeed");
+
+    assert_no_marker_hits(&project.join("src/middleware/rate_limit.rs"));
+}
+
+#[test]
+fn make_action_generates_clean_code() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(&tmp, "make_act", &["--frontend", "svelte"]);
+    let project = tmp.path().join("make_act");
+
+    let status = Command::new(cli_binary())
+        .args(["make:action", "SendInvoice"])
+        .current_dir(&project)
+        .status()
+        .expect("`suprnova make:action` should run");
+    assert!(status.success(), "make:action should succeed");
+
+    assert_no_marker_hits(&project.join("src/actions/send_invoice_action.rs"));
+}
+
+#[test]
+fn make_task_generates_clean_code() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(&tmp, "make_tsk", &["--frontend", "svelte"]);
+    let project = tmp.path().join("make_tsk");
+
+    // make:task creates the tasks directory itself if missing.
+    let status = Command::new(cli_binary())
+        .args(["make:task", "RotateAuditLog"])
+        .current_dir(&project)
+        .status()
+        .expect("`suprnova make:task` should run");
+    assert!(status.success(), "make:task should succeed");
+
+    // Walk the project - the generated task file is what we want clean,
+    // but a broader sweep also confirms nothing else regressed.
+    assert_no_marker_hits(&project);
+}
+
+// ---------------------------------------------------------------------------
+// --with-portless contract: portless.json present with the flag, absent without.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn with_portless_emits_portless_json() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(
+        &tmp,
+        "portless_app",
+        &["--frontend", "svelte", "--with-portless"],
+    );
+    let pj = tmp.path().join("portless_app").join("portless.json");
+    assert!(
+        pj.is_file(),
+        "portless.json should be present when --with-portless is passed"
+    );
+    let body = std::fs::read_to_string(&pj).unwrap();
+    assert!(
+        body.contains("\"name\": \"portless_app\""),
+        "portless.json name field wrong:\n{body}"
+    );
+    assert!(
+        body.contains("\"appPort\": 8765"),
+        "portless.json appPort field wrong:\n{body}"
+    );
+}
+
+#[test]
+fn without_portless_omits_portless_json() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(&tmp, "plain_app", &["--frontend", "svelte"]);
+    assert!(
+        !tmp.path().join("plain_app").join("portless.json").exists(),
+        "portless.json must be absent without --with-portless"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Compile checks - slow (full transitive build); ignored by default.
+// ---------------------------------------------------------------------------
+
+/// Rewrite the scaffolded `Cargo.toml` so it builds against the
+/// in-tree `framework/` crate instead of the published `suprnova`
+/// release. The published crate exists for end users but isn't
+/// resolvable inside this workspace's test harness; swapping the dep
+/// line for a `path =` reference is what lets `cargo check` succeed
+/// before the crate is on crates.io.
+fn patch_local_suprnova(project: &Path) {
+    let framework_dir = workspace_framework_dir();
+    let cargo_toml = project.join("Cargo.toml");
+    let original = std::fs::read_to_string(&cargo_toml).expect("read scaffolded Cargo.toml");
+
+    let mut rewritten = String::with_capacity(original.len() + 14);
+    let mut replaced = false;
+    let mut has_workspace = false;
+    for line in original.lines() {
+        if line.trim() == "[workspace]" {
+            has_workspace = true;
+        }
+        if line.trim_start().starts_with("suprnova = ") {
+            rewritten.push_str(&format!(
+                "suprnova = {{ path = \"{}\" }}\n",
+                framework_dir.display(),
+            ));
+            replaced = true;
+        } else {
+            rewritten.push_str(line);
+            rewritten.push('\n');
+        }
+    }
+    assert!(
+        replaced,
+        "scaffolded Cargo.toml must contain a `suprnova = ...` dependency line"
+    );
+    if !has_workspace {
+        rewritten.push_str("\n[workspace]\n");
+    }
+    std::fs::write(&cargo_toml, rewritten).expect("write patched Cargo.toml");
+}
+
+fn workspace_framework_dir() -> PathBuf {
+    // `CARGO_MANIFEST_DIR` points at `suprnova-cli/`, so the sibling
+    // workspace member lives one level up.
+    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    here.parent()
+        .expect("suprnova-cli must have a workspace parent")
+        .join("framework")
+}
+
+fn run_cargo_check(project: &Path) {
+    let output = Command::new(env!("CARGO"))
+        .arg("check")
+        .current_dir(project)
+        .output()
+        .expect("cargo check should run");
+    assert!(
+        output.status.success(),
+        "scaffolded project at {} failed cargo check.\n\
+         stdout:\n{}\nstderr:\n{}",
+        project.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+#[ignore = "compile check - runs `cargo check` on a scaffolded project; slow"]
+fn api_starter_compiles_with_cargo_check() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(&tmp, "compile_api", &["--api"]);
+    let project = tmp.path().join("compile_api");
+    patch_local_suprnova(&project);
+    run_cargo_check(&project);
+}
+
+#[test]
+#[ignore = "compile check - runs `cargo check` on a scaffolded project; slow"]
+fn default_starter_compiles_with_cargo_check() {
+    let tmp = TempDir::new().unwrap();
+    scaffold(&tmp, "compile_default", &["--frontend", "svelte"]);
+    let project = tmp.path().join("compile_default");
+    patch_local_suprnova(&project);
+    run_cargo_check(&project);
+}
+
+// ---------------------------------------------------------------------------
+// The Live starter kit (PAR-192): compiled, served, and its documents read.
+// ---------------------------------------------------------------------------
+
+/// The build directory the Live kit's scaffold shares with this package:
+/// the parent of `CARGO_TARGET_TMPDIR`, as `kit_browser.rs` does, so the
+/// framework this workspace already compiled is reused and only the
+/// scaffolded application builds.
+fn shared_target_dir() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .parent()
+        .expect("CARGO_TARGET_TMPDIR has a parent")
+        .to_path_buf()
+}
+
+/// Runs `cargo <args>` in `project` against the shared build directory, and
+/// returns what it printed to stdout.
+fn run_cargo_shared(project: &Path, args: &[&str]) -> String {
+    run_cargo_shared_with(project, args, &[])
+}
+
+/// [`run_cargo_shared`] with `envs` in cargo's environment, which the tests
+/// it runs inherit: a test process loads no `.env`.
+fn run_cargo_shared_with(project: &Path, args: &[&str], envs: &[(&str, &str)]) -> String {
+    let output = Command::new(env!("CARGO"))
+        .args(args)
+        .current_dir(project)
+        .env("CARGO_TARGET_DIR", shared_target_dir())
+        .envs(envs.iter().copied())
+        .output()
+        .expect("cargo should run");
+    assert!(
+        output.status.success(),
+        "`cargo {}` failed for the Live scaffold at {}.\nstdout:\n{}\nstderr:\n{}",
+        args.join(" "),
+        project.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Scaffold a Live kit named `name` in `tmp`, built against the in-tree
+/// framework and this workspace's lock, as `live_kit_compiles_and_renders`
+/// builds one.
+fn live_scaffold(tmp: &TempDir, name: &str, dev_dependencies: &[&str]) -> PathBuf {
+    scaffold(tmp, name, &["--frontend", "live"]);
+    let project = tmp.path().join(name);
+    if !dev_dependencies.is_empty() {
+        add_dev_dependencies(&project, dev_dependencies);
+    }
+    patch_local_suprnova(&project);
+    // The workspace's lock, so the scaffold resolves the dependency
+    // versions this workspace builds and tests rather than whatever is
+    // newest today; cargo drops the entries the scaffold does not use.
+    let workspace_lock = workspace_framework_dir()
+        .parent()
+        .expect("framework sits in the workspace")
+        .join("Cargo.lock");
+    std::fs::copy(&workspace_lock, project.join("Cargo.lock")).expect("copy Cargo.lock");
+    project
+}
+
+/// Append `lines` to the `[dev-dependencies]` table a scaffold's manifest
+/// ends with. Asserted rather than assumed: a table after it would take
+/// the lines instead.
+fn add_dev_dependencies(project: &Path, lines: &[&str]) {
+    let path = project.join("Cargo.toml");
+    let mut manifest = std::fs::read_to_string(&path).expect("read scaffolded Cargo.toml");
+    let last_table = manifest
+        .lines()
+        .rev()
+        .find(|line| line.trim().starts_with('['))
+        .expect("a table header");
+    assert_eq!(
+        last_table.trim(),
+        "[dev-dependencies]",
+        "the scaffold's manifest ends with its dev-dependencies"
+    );
+    if !manifest.ends_with('\n') {
+        manifest.push('\n');
+    }
+    for line in lines {
+        manifest.push_str(line);
+        manifest.push('\n');
+    }
+    std::fs::write(&path, manifest).expect("write patched Cargo.toml");
+}
+
+/// The scaffold's server process, stopped when the test ends however it
+/// ends.
+struct LiveServer(std::process::Child);
+
+impl Drop for LiveServer {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// One `GET` over HTTP/1.1 to the local server, as a browser asks for a
+/// page: the status and the body.
+fn get(port: u16, path: &str) -> std::io::Result<(u16, String)> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: text/html\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .unwrap_or_default();
+    Ok((status, body))
+}
+
+/// PAR-192: a fresh `--frontend live` scaffold compiles against the
+/// in-tree framework, its own document test renders every page for its
+/// visitor, and its server answers each guest page with a Live document in
+/// its layout. The scaffold builds its debug binary, the one `suprnova
+/// serve` runs, into the shared build directory.
+#[test]
+#[ignore = "compile check - builds and serves a Live kit scaffold; slow"]
+fn live_kit_compiles_and_renders() {
+    let tmp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("tempdir");
+    let name = "live_render";
+    let project = live_scaffold(&tmp, name, &[]);
+
+    run_cargo_shared(&project, &["check"]);
+    // The kit's own `tests/documents.rs`: every document rendered through
+    // the test client as its visitor sees it, the account pages as a
+    // signed-in user with a note, the error page and the profile endpoint.
+    run_cargo_shared(&project, &["test", "--test", "documents"]);
+    run_cargo_shared(&project, &["build", "--bin", name]);
+
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("a free port")
+        .port();
+    let database = format!(
+        "sqlite://{}?mode=rwc",
+        tmp.path().join("live_render.sqlite").display()
+    );
+    let log_path = tmp.path().join("server.log");
+    let log = std::fs::File::create(&log_path).expect("server log");
+    let mut server = LiveServer(
+        Command::new(shared_target_dir().join("debug").join(name))
+            .arg("web:run")
+            .current_dir(&project)
+            .env("APP_ENV", "local")
+            .env("APP_URL", format!("http://127.0.0.1:{port}"))
+            .env("SERVER_HOST", "127.0.0.1")
+            .env("SERVER_PORT", port.to_string())
+            .env("SESSION_SECURE", "false")
+            .env("SESSION_COOKIE_PREFIX", "")
+            .env("DATABASE_URL", database)
+            .env("MAIL_DRIVER", "memory")
+            .stdout(log.try_clone().expect("server log"))
+            .stderr(log)
+            .spawn()
+            .expect("start the scaffold's server"),
+    );
+    let server_log = || std::fs::read_to_string(&log_path).unwrap_or_default();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        if let Some(status) = server.0.try_wait().expect("poll the server") {
+            panic!(
+                "the server exited before it answered: {status}\n{}",
+                server_log()
+            );
+        }
+        if matches!(get(port, "/"), Ok((200, _))) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the server did not answer `/` in time:\n{}",
+            server_log()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    for (path, layout, island) in [
+        ("/", "app", None),
+        ("/login", "guest", Some("login-form")),
+        ("/register", "guest", Some("register-form")),
+        ("/forgot-password", "guest", Some("forgot-password-form")),
+    ] {
+        let (status, body) = get(port, path).unwrap_or_else(|e| panic!("GET {path}: {e}"));
+        assert_eq!(status, 200, "GET {path}:\n{body}\n{}", server_log());
+        // The bootstrap tags: the inert configuration element and the
+        // runtime the framework serves under the reserved namespace.
+        assert!(
+            body.contains(r#"<script id="suprnova-live-config" type="application/json">"#),
+            "GET {path} has no Live configuration element:\n{body}"
+        );
+        assert!(
+            body.contains(r#"<script type="module" src="/__live/assets/"#),
+            "GET {path} loads no Live runtime:\n{body}"
+        );
+        assert!(
+            body.contains(&format!(r#"data-layout="{layout}""#)),
+            "GET {path} is not in the {layout} layout:\n{body}"
+        );
+        if let Some(island) = island {
+            assert!(
+                body.contains(&format!(
+                    r#"data-suprnova-live-component="{name}.{island}""#
+                )),
+                "GET {path} mounts no {island} island:\n{body}"
+            );
+        }
+    }
+
+    // The library's stylesheets and the kit's own are served, a page that
+    // needs a user sends a guest to sign in, and an unknown path is the
+    // error page.
+    for path in ["/suprnova-ui/card/card.css", "/css/app.css"] {
+        let (status, _) = get(port, path).unwrap_or_else(|e| panic!("GET {path}: {e}"));
+        assert_eq!(status, 200, "GET {path}");
+    }
+    let (status, _) = get(port, "/dashboard").expect("GET /dashboard");
+    assert_eq!(status, 302, "a guest is sent from the dashboard to sign in");
+    let (status, body) = get(port, "/no-such-page").expect("GET /no-such-page");
+    assert_eq!(status, 404);
+    assert!(
+        body.contains(r#"<h1 class="kit-error-status" id="error-status">404</h1>"#),
+        "{body}"
+    );
+
+    drop(server);
+}
+
+// ---------------------------------------------------------------------------
+// AGENT-017 in a generated Inertia application: the agents' pages, served.
+// ---------------------------------------------------------------------------
+
+/// The account-flows harness: the Vue scaffold, its manifest pointed at the
+/// in-tree framework, and its `.env` handed to the run. It builds into the
+/// account-flows target directory, so the framework builds once for both.
+#[path = "scaffold_account_flows/harness.rs"]
+mod account_flows_harness;
+
+/// The test that runs inside the generated project.
+const AGENT_PAGES_TEST: &str = concat!(
+    include_str!("fixtures/scaffold/agent_pages.rs"),
+    "\nmod tool_budget_probe {\n",
+    include_str!("fixtures/scaffold/tool_budget_probe.rs"),
+    "\n}\n",
+);
+
+/// Every case `tests/fixtures/scaffold/agent_pages.rs` runs, which must each
+/// report `ok`.
+const AGENT_PAGES_CASES: &[&str] = &[
+    "agent_017_kit_migrator_creates_the_plugins_tables_and_the_email_index_on_sqlite",
+    "agent_017_inertia_serves_the_endpoint_and_both_plugins",
+    "agent_017_inertia_approval_round_trip",
+    "agent_017_inertia_claim_round_trip",
+    "agent_017_inertia_connected_agents_lists_and_revokes_only_the_users_own",
+    "agent_017_inertia_consent_forms_need_the_csrf_token",
+    "agent_017_inertia_consent_pages_refuse_framing_caching_and_referrers",
+    "agent_017_inertia_another_user_cannot_decide_or_confirm",
+    "agent_017_inertia_a_guest_decides_and_confirms_nothing",
+    "agent_017_inertia_a_native_form_post_decides",
+    "agent_017_inertia_the_last_wrong_code_ends_the_claim",
+    "agent_017_login_returns_to_a_same_origin_address",
+    "agent_017_login_ignores_a_foreign_return_to",
+    "agent_008_registration_lowercases_and_refuses_a_mixed_case_duplicate",
+    "kit_registration_refuses_a_name_over_255_and_an_email_over_254",
+    "kit_a_signed_in_user_writes_a_note",
+    "agent_014_inertia_notes_page_offers_the_notes_tools",
+    "agent_001_notes_search_is_matched_before_a_note_id",
+    "agent_001_notes_search_reads_its_input_from_the_query",
+    "agent_002_notes_tools_act_for_the_caller_only",
+];
+
+/// AGENT-017: a fresh Inertia application serves the MCP endpoint, the
+/// OAuth server and agent auth with its own approval, claim and
+/// connected-agents pages, and its sign-in follows a same-origin
+/// `return_to` and nothing else. Its own test drives every page through the
+/// application's router, under the settings and the signing key
+/// `suprnova new` wrote, on SQLite with the kit's own migrator, and calls the
+/// two notes tools from the notes page and over MCP.
+#[test]
+#[ignore = "AGENT-017 evidence: runs the generated application's own test; builds the framework and the app; slow"]
+fn agent_017_a_generated_inertia_application_serves_the_agent_pages() {
+    let tmp = account_flows_harness::scratch_dir();
+    let project = account_flows_harness::scaffold(tmp.path(), "agent_pages");
+    account_flows_harness::patch_manifest(&project);
+    // What `npm run build` would leave behind: a script every page loads.
+    let assets = project.join("public/assets");
+    std::fs::create_dir_all(&assets).expect("create public/assets");
+    std::fs::write(assets.join("app-agents.js"), "console.log('built')\n").expect("write asset");
+    // The OAuth server's issuer is the application's URL, which must be
+    // HTTPS or a loopback host.
+    let output = account_flows_harness::run_project_test(
+        tmp.path(),
+        &project,
+        "agent_pages",
+        AGENT_PAGES_TEST,
+        "http://localhost",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the generated application's agents test failed:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let missing: Vec<&str> = AGENT_PAGES_CASES
+        .iter()
+        .copied()
+        .filter(|case| !stdout.contains(&format!("case {case} ... ok")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these cases did not run and pass: {missing:#?}\nstdout:\n{stdout}"
+    );
+    // `--nocapture` prints the cases between the test's name and its `ok`.
+    assert!(
+        stdout.contains("test result: ok. 1 passed;"),
+        "the in-project test must have run and passed:\n{stdout}"
+    );
+}
+
+/// The test `agent_017_a_generated_live_application_serves_the_agent_pages`
+/// writes into the scaffold as `tests/agent_pages.rs`. `__PACKAGE__` is the
+/// scaffold's crate name.
+const LIVE_AGENT_PAGES: &str = concat!(
+    include_str!("fixtures/scaffold/live_agent_pages.rs"),
+    "\nmod tool_budget_probe {\n",
+    include_str!("fixtures/scaffold/tool_budget_probe.rs"),
+    "\n}\n",
+);
+
+/// The cases `tests/agent_pages.rs` runs, each of which prints
+/// `case <name> ... ok` when it passes.
+const LIVE_AGENT_CASES: [&str; 20] = [
+    "agent_017_live_migrator_creates_the_plugins_tables_and_the_email_index",
+    "agent_017_live_serves_the_endpoint_and_both_plugins",
+    "agent_017_live_forms_hint_the_name_and_email_bounds",
+    "agent_017_live_login_ignores_a_foreign_return_to",
+    "agent_017_live_login_returns_to_a_same_origin_address",
+    "agent_017_live_registration_continues_to_the_intended_address",
+    "agent_008_live_registration_lowercases_and_refuses_a_mixed_case_duplicate",
+    "kit_live_registration_refuses_a_name_over_255_and_an_email_over_254",
+    "agent_017_live_approval_round_trip",
+    "agent_017_live_claim_round_trip",
+    "agent_017_live_connected_agents_lists_and_revokes_only_the_users_own",
+    "agent_017_live_consent_forms_need_the_csrf_token",
+    "agent_017_live_consent_pages_refuse_framing_caching_and_referrers",
+    "agent_017_live_consent_headers_hold_on_every_refusal",
+    "agent_017_live_consent_pages_escape_what_the_client_chose",
+    "agent_017_live_consent_pages_act_for_their_own_user_only",
+    "agent_014_live_notes_page_offers_the_notes_tools",
+    "agent_001_live_notes_search_is_matched_before_a_note_id",
+    "agent_001_live_notes_search_reads_its_input_from_the_query",
+    "agent_002_live_notes_tools_act_for_the_caller_only",
+];
+
+/// AGENT-017: a fresh `--frontend live` scaffold serves the MCP endpoint,
+/// both plugins and its own approval, claim and connected-agents pages.
+/// The scaffold's own `tests/documents.rs` and the fixture
+/// `fixtures/scaffold/live_agent_pages.rs` run in it, on the build
+/// directory `live_kit_compiles_and_renders` uses, so the framework builds
+/// once for both. The fixture drives the pages' native forms and the kit's
+/// Live sign-in and registration forms through the test client: the
+/// approval and claim round trips, the connected agents of two users,
+/// CSRF, the consent headers on every answer, what another user or a guest
+/// can do, escaping, the scripts the pages load, `return_to` and the
+/// intended address across sign-in and registration, the forms' bounds, the
+/// migrator on SQLite, and the two notes tools the notes page offers.
+#[test]
+#[ignore = "compile check - builds a Live kit scaffold and drives its agent pages; slow"]
+fn agent_017_a_generated_live_application_serves_the_agent_pages() {
+    let tmp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("tempdir");
+    let name = "live_agents";
+    // What the fixture needs beside the framework: PKCE's SHA-256 and
+    // base64url, and URL parsing. The workspace's lock resolves each.
+    let project = live_scaffold(
+        &tmp,
+        name,
+        &[r#"sha2 = "0.10""#, r#"base64 = "0.22""#, r#"url = "2""#],
+    );
+    std::fs::write(
+        project.join("tests/agent_pages.rs"),
+        LIVE_AGENT_PAGES.replace("__PACKAGE__", name),
+    )
+    .expect("write the fixture into the scaffold");
+
+    // The registration flows mail a verification link, which needs a sender.
+    let printed = run_cargo_shared_with(
+        &project,
+        &[
+            "test",
+            "--no-fail-fast",
+            "--test",
+            "documents",
+            "--test",
+            "agent_pages",
+            "--",
+            "--nocapture",
+            "--test-threads=1",
+        ],
+        &[("MAIL_FROM", "ops@example.test")],
+    );
+    // Each binary runs its one test; its log lines can sit between the
+    // test's name and its `ok`.
+    for test in [
+        "test every_document_renders_for_its_visitor ...",
+        "test agent_pages_serve_their_flows ...",
+    ] {
+        assert!(printed.contains(test), "`{test}` did not run:\n{printed}");
+    }
+    assert_eq!(
+        printed.matches("test result: ok. 1 passed;").count(),
+        2,
+        "both tests must pass:\n{printed}"
+    );
+    let missing: Vec<&str> = LIVE_AGENT_CASES
+        .iter()
+        .copied()
+        .filter(|case| !printed.contains(&format!("case {case} ... ok")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these cases did not run and pass: {missing:#?}\n{printed}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The API kit's agents (AGENT-017): compiled, and driven in-process.
+// ---------------------------------------------------------------------------
+
+/// The test written into the API scaffold as `tests/api_agents.rs`.
+/// `__PACKAGE__` is the generated crate's name.
+const API_AGENTS_TEST: &str = include_str!("fixtures/scaffold/api_agents.rs");
+
+/// Every case of the in-scaffold test. Each must run and pass.
+const API_AGENTS_CASES: &[&str] = &[
+    "agent_017_api_session_sign_in_answers_the_default_pages",
+    "agent_017_api_serves_the_endpoint_and_both_plugins",
+    "agent_017_api_default_approval_and_claim_pages_complete",
+    "agent_017_api_login_return_to_stays_on_this_origin",
+    "agent_017_api_sign_in_continues_to_the_intended_address_once",
+    "agent_017_api_migrator_creates_the_plugins_tables_on_sqlite",
+    "agent_017_api_sign_in_refuses_an_account_with_a_second_factor",
+    "agent_017_api_sign_in_refuses_wrong_credentials_with_one_message",
+    "agent_017_api_sign_in_page_refuses_framing_and_needs_the_csrf_token",
+    "agent_017_api_lists_and_revokes_client_grants_and_agent_accounts",
+    "agent_017_api_connected_agents_refuse_a_guest_and_an_mcp_token",
+    "agent_017_api_revoke_needs_delete",
+    "agent_008_api_registration_stores_the_address_lowercased",
+    "kit_api_registration_refuses_an_email_over_254",
+    "kit_api_registration_refuses_a_password_under_8_characters",
+    "agent_017_api_only_the_consent_pages_start_a_session",
+    "agent_017_api_auth_user_reads_the_session_and_the_bearer_caller",
+    "agent_017_api_existing_json_routes_behave_as_before",
+    "agent_017_api_registration_mails_a_verification_link",
+    "agent_017_api_verification_link_verifies_the_address_once",
+    "agent_017_api_claim_needs_a_verified_address",
+    "agent_017_api_consent_session_cookie_ends_with_the_browser",
+    "agent_017_api_consent_session_ends_after_fifteen_idle_minutes",
+    "agent_017_api_sign_out_ends_the_consent_session",
+    "agent_017_api_registration_is_limited_per_address",
+    "agent_017_api_session_allow_list_matches_whole_paths",
+    "agent_017_api_consent_forms_need_the_csrf_token",
+    "agent_017_api_verification_resend_is_limited",
+    "agent_017_api_registration_answers_202_when_the_mail_cannot_go",
+];
+
+/// The version the workspace lockfile resolves `name` to, among those
+/// starting with `series` (`"0.11"`), so the scaffold builds what this
+/// workspace builds.
+fn locked_version(name: &str, series: &str) -> String {
+    let lock = std::fs::read_to_string(
+        workspace_framework_dir()
+            .parent()
+            .expect("framework sits in the workspace")
+            .join("Cargo.lock"),
+    )
+    .expect("read Cargo.lock");
+    let header = format!("name = \"{name}\"\nversion = \"");
+    let versions: Vec<&str> = lock
+        .split("[[package]]")
+        .filter_map(|package| package.trim_start().strip_prefix(&header))
+        .filter_map(|rest| rest.split_once('"'))
+        .map(|(version, _)| version)
+        .filter(|version| version.starts_with(&format!("{series}.")))
+        .collect();
+    match versions.as_slice() {
+        [only] => (*only).to_owned(),
+        other => panic!("Cargo.lock resolves `{name}` {series} to {other:?}"),
+    }
+}
+
+/// The settings the scaffold wrote into `.env`, as `KEY=VALUE` pairs. The
+/// in-scaffold test loads no `.env`; the harness hands the file's settings
+/// over through the environment, then overrides the few a test run
+/// controls, so the test runs under the configuration a new project starts
+/// with, its agent auth signing key included.
+fn scaffolded_env(project: &Path) -> Vec<(String, String)> {
+    std::fs::read_to_string(project.join(".env"))
+        .expect("read the scaffolded .env")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.to_owned(), value.trim_matches('"').to_owned()))
+        .collect()
+}
+
+/// AGENT-017: a fresh `--api` scaffold compiles against the in-tree
+/// framework and serves agents: the MCP endpoint, the OAuth server and
+/// agent auth with the framework's default approval, claim and
+/// connected-agents pages, the browser sign-in those pages send a guest to,
+/// and connected agents over JSON. `tests/fixtures/scaffold/api_agents.rs`
+/// drives the generated application in-process, one case per behaviour,
+/// with the scaffold's own `.env` and a fresh SQLite database. Its output
+/// is kept in `api_agents.log` under this package's temporary target
+/// directory.
+#[test]
+#[ignore = "compile check - builds an API kit scaffold and runs its agents test; slow"]
+fn agent_017_a_generated_api_application_serves_agents() {
+    let tmp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("tempdir");
+    let name = "api_agents";
+    scaffold(&tmp, name, &["--api"]);
+    let project = tmp.path().join(name);
+
+    // The crates the in-scaffold test reads URLs and builds PKCE challenges
+    // with, at the versions the workspace builds.
+    let manifest = project.join("Cargo.toml");
+    let original = std::fs::read_to_string(&manifest).expect("read the scaffolded Cargo.toml");
+    let dev_dependencies = format!(
+        "[dev-dependencies]\nbase64 = \"={}\"\nsha2 = \"={}\"\nurl = \"={}\"\n",
+        locked_version("base64", "0.22"),
+        locked_version("sha2", "0.11"),
+        locked_version("url", "2.5"),
+    );
+    assert_eq!(original.matches("[dev-dependencies]\n").count(), 1);
+    std::fs::write(
+        &manifest,
+        original.replace("[dev-dependencies]\n", &dev_dependencies),
+    )
+    .expect("write the scaffolded Cargo.toml");
+    patch_local_suprnova(&project);
+    let workspace_lock = workspace_framework_dir()
+        .parent()
+        .expect("framework sits in the workspace")
+        .join("Cargo.lock");
+    std::fs::copy(&workspace_lock, project.join("Cargo.lock")).expect("copy Cargo.lock");
+    std::fs::create_dir_all(project.join("tests")).expect("create tests/");
+    std::fs::write(
+        project.join("tests/api_agents.rs"),
+        API_AGENTS_TEST.replace("__PACKAGE__", name),
+    )
+    .expect("write the in-scaffold test");
+
+    let database = tmp.path().join("api_agents.sqlite");
+    let output = Command::new(env!("CARGO"))
+        .args(["test", "--test", "api_agents", "--", "--test-threads=1"])
+        .current_dir(&project)
+        .envs(scaffolded_env(&project))
+        .env("CARGO_TARGET_DIR", shared_target_dir())
+        .env("APP_ENV", "test")
+        .env("APP_URL", "http://localhost")
+        .env(
+            "DATABASE_URL",
+            format!("sqlite://{}?mode=rwc", database.display()),
+        )
+        .env("SESSION_SECURE", "false")
+        .env("SESSION_COOKIE_PREFIX", "")
+        .env("MAIL_DRIVER", "log")
+        .output()
+        .expect("cargo test in the generated project");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let log = Path::new(env!("CARGO_TARGET_TMPDIR")).join("api_agents.log");
+    std::fs::write(&log, format!("stdout:\n{stdout}\nstderr:\n{stderr}"))
+        .expect("keep the in-scaffold test's output");
+    assert!(
+        output.status.success(),
+        "the generated API application's agents test failed (output in {}):\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        log.display()
+    );
+    let missing: Vec<&str> = API_AGENTS_CASES
+        .iter()
+        .copied()
+        .filter(|case| !stdout.contains(&format!("test {case} ... ok")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these cases did not run and pass: {missing:#?}\nstdout:\n{stdout}"
+    );
+}

@@ -1,0 +1,13 @@
+{
+  "name": "suprnova.date-picker",
+  "version": 1,
+  "root": "suprnova-ui/date-picker",
+  "files": [
+    "date-picker.html",
+    "date-picker.css",
+    "date-picker.js"
+  ],
+  "elements": [
+    "sn-date-picker"
+  ]
+}
