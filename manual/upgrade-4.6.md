@@ -24,12 +24,12 @@ the new default CloudFront feature.
 1. Point application dependencies and the CLI at `v4.6.0`:
 
    ```toml
-   suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.6.1" }
+   suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.6.2" }
    ```
 
    ```bash
    cargo update -p suprnova
-   cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v4.6.1 suprnova-cli
+   cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v4.6.2 suprnova-cli
    cargo check --all-targets
    ```
 
