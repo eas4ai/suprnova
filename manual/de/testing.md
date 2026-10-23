@@ -399,7 +399,7 @@ Default-Set, sodass konsumierende Testsuiten sie kostenlos bekommen:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.5.1" }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.6.0" }
 
 [dev-dependencies]
 # `testing` ist über die Abhängigkeit oben transitiv aktiv - nichts weiter nötig.
@@ -421,10 +421,10 @@ was Sie ausliefern:
 
 ```toml
 [dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.5.1", default-features = false, features = ["..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.6.0", default-features = false, features = ["..."] }
 
 [dev-dependencies]
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.5.1", features = ["testing", "..."] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.6.0", features = ["testing", "..."] }
 ```
 
 Das ist eine Verschärfung, kein Fix - die Boot-Validierung schließt den
