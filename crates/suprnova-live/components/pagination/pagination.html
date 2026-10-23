@@ -1,0 +1,27 @@
+{#
+  suprnova.pagination - two explicit modes (NAV-003). Route mode: every
+  page is an anchor with its canonical URL, so reload, sharing and history
+  are the browser's. Live mode: previous and next are buttons on
+  registered actions whose result reflects the new query into the current
+  history entry through the runtime (history.replaceState, no entry per
+  page); the current position is text.
+#}
+{% macro pagination(id, label="Pages") %}
+<nav class="sn-pagination" id="{{ id }}" aria-label="{{ label }}">{{ caller() }}</nav>
+{% endmacro %}
+
+{% macro page_link(href, number, current=false) %}
+<a class="sn-page" href="{{ href }}"{% if current %} aria-current="page"{% endif %}>{{ number }}</a>
+{% endmacro %}
+
+{% macro page_edge_link(href, text, disabled=false) %}
+{% if disabled %}<span class="sn-page" aria-disabled="true">{{ text }}</span>{% else %}<a class="sn-page" href="{{ href }}">{{ text }}</a>{% endif %}
+{% endmacro %}
+
+{% macro page_action(action, text, disabled=false) %}
+<button class="sn-page" type="button" live:click="{{ action }}" live:loading.disabled="{{ action }}" live:loading.busy="{{ action }}"{% if disabled %} disabled{% endif %}>{{ text }}</button>
+{% endmacro %}
+
+{% macro page_position(page, pages) %}
+<span class="sn-page-position">Page {{ page }} of {{ pages }}</span>
+{% endmacro %}

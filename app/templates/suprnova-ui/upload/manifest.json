@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.upload",
+  "version": 1,
+  "root": "suprnova-ui/upload",
+  "files": [
+    "upload.html",
+    "upload.css"
+  ],
+  "elements": []
+}
