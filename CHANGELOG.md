@@ -46,8 +46,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   zone, created on the first switch and corrected on every later one: two URL
   rewrites that serve `/about` and `/about/` from the mirrored
   `about/index.html`, a response header rule that carries the published
-  headers, and a cache rule that makes HTML and JSON cacheable with the
-  origin's TTLs. It purges by URL in batches of 100 or by prefix, and removes
+  headers, and a cache rule that caches a response only when its own
+  `Cache-Control` allows a shared cache, as the published objects' does. It
+  purges by URL in batches of 100 or by prefix, and removes
   its rules on a first-publication rollback. `CloudflareDriver::for_origin`
   covers a hostname that mixes dynamic pages: the proxied application serves
   the published objects itself and the driver keeps the cache rule and the

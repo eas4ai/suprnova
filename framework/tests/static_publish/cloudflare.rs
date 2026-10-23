@@ -202,12 +202,12 @@ fn headers_rule() -> Value {
 fn cache_rule() -> Value {
     json!({
         "ref": "suprnova-static-publication-cache",
-        "description": "Suprnova static publication: pages are cacheable with the origin's TTLs",
+        "description": "Suprnova static publication: responses that say they are cacheable are cached for the time they say",
         "expression": "(http.host eq \"www.example.com\")",
         "action": "set_cache_settings",
         "action_parameters": {
             "cache": true,
-            "edge_ttl": {"mode": "respect_origin"},
+            "edge_ttl": {"mode": "bypass_by_default"},
             "browser_ttl": {"mode": "respect_origin"},
         },
     })

@@ -80,8 +80,9 @@ enum Mode {
 /// to `/about/index.html` and leave paths with an extension or under `/_pub/` alone,
 /// one response header rule that sets the headers the publisher validated (R2 serves
 /// `Content-Type`, `Cache-Control` and the other object headers itself), and one cache
-/// rule that makes every response on the host eligible for the cache with the
-/// origin's TTLs. The rules are created on the first switch and corrected on later
+/// rule that makes a response on the host eligible for the cache only when its own
+/// `Cache-Control` allows a shared cache, as every published object's does, and for
+/// the time it names. The rules are created on the first switch and corrected on later
 /// ones through the Rulesets API (phase entrypoints, `PUT` to create one, `POST`,
 /// `PATCH` and `DELETE` on single rules); a first-publication rollback deletes them.
 ///
@@ -321,12 +322,16 @@ impl CloudflareDriver {
             phase: CACHE_PHASE,
             rule: json!({
                 "ref": format!("{REF_PREFIX}cache"),
-                "description": "Suprnova static publication: pages are cacheable with the origin's TTLs",
+                "description": "Suprnova static publication: responses that say they are cacheable are cached for the time they say",
                 "expression": format!("({host})"),
                 "action": "set_cache_settings",
                 "action_parameters": {
                     "cache": true,
-                    "edge_ttl": {"mode": "respect_origin"},
+                    // Bypass unless the response's own Cache-Control allows a shared
+                    // cache: the published pages say `public, s-maxage`, and a dynamic
+                    // page on the same host that says nothing is never cached, so no
+                    // visitor's page reaches another visitor.
+                    "edge_ttl": {"mode": "bypass_by_default"},
                     "browser_ttl": {"mode": "respect_origin"},
                 },
             }),

@@ -324,11 +324,14 @@ on the same zone are never touched:
   headers the publisher validated, such as `Content-Security-Policy`; R2 serves
   `Content-Type`, `Cache-Control` and the other object headers itself, so the
   rule does not repeat them.
-- One cache rule in `http_request_cache_settings` that makes every response on
-  the host eligible for the cache with the origin's TTLs, because Cloudflare
-  does not cache HTML or JSON by default. The edge keeps each page for its
-  `s-maxage`, so set `PublishConfig::s_maxage` to hours or a day: changed pages
-  are purged after every publication.
+- One cache rule in `http_request_cache_settings` that makes a response on
+  the host eligible for the cache only when its own `Cache-Control` allows a
+  shared cache, as every published object's does (Cloudflare caches no HTML
+  or JSON by default), and for the time it names. A dynamic page on the same
+  host that sends no such header is never cached, so one visitor's page never
+  reaches another. The edge keeps each page for its `s-maxage`, so set
+  `PublishConfig::s_maxage` to hours or a day: changed pages are purged after
+  every publication.
 
 A rollback of the first publication deletes those rules; a later rollback has
 nothing to move. The constructor refuses the same ambiguous root segments as
