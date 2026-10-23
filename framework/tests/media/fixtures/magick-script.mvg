@@ -1,0 +1,4 @@
+push graphic-context
+viewbox 0 0 1 1
+fill 'url(http://127.0.0.1:9/hardening.png)'
+pop graphic-context
