@@ -1,0 +1,32 @@
+.sn-drawer-host {
+  display: block;
+}
+
+.sn-drawer-host:focus {
+  outline: none;
+}
+
+.sn-drawer {
+  position: fixed;
+  inset: 0 auto 0 0;
+  inline-size: min(100%, 24rem);
+  max-inline-size: none;
+  block-size: 100%;
+  max-block-size: none;
+  margin: 0;
+  border-radius: var(--sn-radius-none);
+}
+
+.sn-drawer[data-sn-side="end"] {
+  inset: 0 0 0 auto;
+}
+
+.sn-drawer-title {
+  margin: 0 0 var(--sn-space-4);
+  font-size: var(--sn-font-size-lg);
+  line-height: var(--sn-font-leading-tight);
+}
+
+.sn-drawer-body > :last-child {
+  margin-block-end: 0;
+}

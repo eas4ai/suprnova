@@ -1,0 +1,2 @@
+.evil-widget { color: red; }
+.a { background-image: image-set(var(--remote) 1x); } /* refused: css-url */

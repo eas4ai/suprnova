@@ -1,0 +1,5 @@
+error: live binding topic `counts` names unknown prop `post_count`; expected one of `postCount`
+ --> tests/ui/inertia-props/fail/live_binding_rust_field_name.rs:7:42
+  |
+7 | #[inertia(live(topic = "counts", only = ["post_count"]))]
+  |                                          ^^^^^^^^^^^^
