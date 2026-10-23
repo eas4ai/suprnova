@@ -1351,6 +1351,28 @@ impl Inbound {
     }
 }
 
+/// Builds the static origin lookup in its own frame and returns it boxed.
+///
+/// In a debug build the lookup future is about 65 KB. Built inline, even
+/// behind `Box::pin`, it takes a slot that size in the request's frame,
+/// which sits under every handler, Live actions included, and pushes them
+/// past the budget `tests/live/stack_budget.rs` holds them to. This frame
+/// returns before the request awaits the lookup.
+#[cfg(feature = "filesystem")]
+#[inline(never)]
+fn static_origin_lookup<'a>(
+    runtime: &'a crate::static_publish::StaticPublication,
+    path: &'a str,
+    headers: &'a hyper::HeaderMap,
+    query: Option<&'a str>,
+) -> std::pin::Pin<
+    Box<
+        impl std::future::Future<Output = Result<Option<HttpResponse>, crate::FrameworkError>> + 'a,
+    >,
+> {
+    Box::pin(runtime.respond(path, headers, query))
+}
+
 async fn handle_request_inner(
     router: Arc<Router>,
     middleware_registry: Arc<MiddlewareRegistry>,
@@ -1377,7 +1399,7 @@ async fn handle_request_inner(
             Inbound::Internal(request) => (request.uri(), request.headers(), request.query()),
         };
         let secure = Request::head_is_secure(uri, headers, trusted);
-        match runtime.respond(path, headers, query).await {
+        match static_origin_lookup(&runtime, path, headers, query).await {
             Ok(Some(response)) => {
                 let response = if secure {
                     response

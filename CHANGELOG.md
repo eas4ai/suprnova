@@ -215,6 +215,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   budget test on lines rustfmt rewrites; the templates now carry rustfmt's
   layout, and the test's layout no longer depends on the application name.
   These fixes landed after the `v4.6.0` tag.
+- **A Live action's framework frames fit their stack budget again in a debug
+  build.** The static publication lookup that 4.6.0 added to every `GET`
+  request built its 65 KB future in the request's own frame, so the frames
+  below a Live action grew past the 1 MiB budget that leaves the action room
+  on Tokio's default 2 MiB stack, and a deep action in a debug build could
+  overflow it. The lookup now builds in a frame of its own that returns first.
+  This fix landed after the `v4.6.0` tag.
 
 ## 4.5.1 - 2026-10-21
 

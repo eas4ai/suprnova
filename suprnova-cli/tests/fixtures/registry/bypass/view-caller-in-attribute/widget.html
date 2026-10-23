@@ -1,0 +1,2 @@
+{% macro tip() %}<a title="{{ caller() }}" href="/">x</a>{% endmacro %} {# refused: view-markup #}
+{% call tip() %}" onmouseover="alert(1){% endcall %}
