@@ -551,9 +551,13 @@ fn extract_vector_index_distance(ddl: &str) -> Option<String> {
         }
         let options = line.replace('`', "").replace(" =", "=").replace("= ", "=");
         let distance = options.split_whitespace().find_map(|token| {
-            token
-                .strip_prefix("distance=")
-                .map(|value| value.trim_end_matches([',', ')']).to_owned())
+            token.strip_prefix("distance=").map(|value| {
+                // MariaDB 12.3.3 quotes the value (`DISTANCE`='cosine').
+                value
+                    .trim_end_matches([',', ')'])
+                    .trim_matches(['\'', '"'])
+                    .to_owned()
+            })
         });
         return Some(distance.unwrap_or_else(|| "euclidean".to_owned()));
     }
@@ -970,6 +974,28 @@ mod distance_extract_tests {
         assert_eq!(
             extract_vector_index_distance(ddl).as_deref(),
             Some("euclidean")
+        );
+    }
+
+    #[test]
+    fn mariadb_12_3_3_quotes_the_option_name_and_value() {
+        // MariaDB 12.3.3 renders `DISTANCE`='cosine' where 12.3.1 rendered
+        // DISTANCE=cosine (issue #216).
+        let ddl = "CREATE TABLE `a` (\n  `id` int(11) NOT NULL,\n  `v` vector(3) NOT NULL,\n  \
+                   PRIMARY KEY (`id`),\n  VECTOR KEY `v` (`v`) `DISTANCE`='cosine'\n) ENGINE=InnoDB";
+        assert_eq!(
+            extract_vector_index_distance(ddl).as_deref(),
+            Some("cosine")
+        );
+        let ddl = "...\n  VECTOR KEY `v` (`v`) `M`=8 `DISTANCE`='euclidean',\n";
+        assert_eq!(
+            extract_vector_index_distance(ddl).as_deref(),
+            Some("euclidean")
+        );
+        let ddl = "...\n  VECTOR KEY `v` (`v`) DISTANCE=\"cosine\")\n";
+        assert_eq!(
+            extract_vector_index_distance(ddl).as_deref(),
+            Some("cosine")
         );
     }
 
