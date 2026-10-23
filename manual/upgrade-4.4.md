@@ -27,12 +27,12 @@ that entry if your code stores the intended URL itself.
    upgrading to, `v4.4.0` or later. The examples pin the current release:
 
    ```toml
-   suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.6.0" }
+   suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.6.1" }
    ```
 
    ```bash
    cargo update -p suprnova
-   cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v4.6.0 suprnova-cli
+   cargo install --force --git https://github.com/eas4ai/suprnova.git --tag v4.6.1 suprnova-cli
    cargo check --all-targets
    ```
 
@@ -546,7 +546,7 @@ the tag, so add both to it to match a new project. Without `"agents"`,
 `"search-media"`, search cannot prepare uploaded media:
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.6.0", default-features = false, features = [
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.6.1", default-features = false, features = [
     # ...the features already listed...
     "search-media",
     "agents",

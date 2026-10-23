@@ -664,7 +664,7 @@ current process. For multi-replica deployments, enable the
 `Cargo.toml`:
 
 ```toml
-suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.6.0", features = ["broadcasting-fanout"] }
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.6.1", features = ["broadcasting-fanout"] }
 ```
 
 `src/bootstrap.rs`:
