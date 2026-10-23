@@ -1,0 +1,11 @@
+{
+  "name": "suprnova.dialog",
+  "files": [
+    "dialog.html",
+    "dialog.css",
+    "dialog.js"
+  ],
+  "elements": [
+    "sn-dialog"
+  ]
+}

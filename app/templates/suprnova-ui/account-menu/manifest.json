@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.account-menu",
+  "version": 1,
+  "root": "suprnova-ui/account-menu",
+  "files": [
+    "account-menu.html",
+    "account-menu.css"
+  ],
+  "elements": []
+}

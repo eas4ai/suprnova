@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-reflect-apply",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
