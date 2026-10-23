@@ -1,5 +1,0 @@
-error: tool `add_to_counter` describes argument `typo`, which this action does not take
- --> tests/agents/compile_fail/live/agent_001_unknown_argument_description.rs:9:106
-  |
-9 |     #[suprnova::tool(name = "add_to_counter", description = "Add.", callers = [public], arguments(typo = "How much to add."))]
-  |                                                                                                          ^^^^^^^^^^^^^^^^^^
