@@ -1,0 +1,5 @@
+error: model debounce must be 100, 250, or 500 milliseconds, the durations the Live directive grammar lists
+ --> tests/ui/live/fail/unlisted_model_debounce.rs:6:24
+  |
+6 |     #[model(debounce = 300)]
+  |                        ^^^
