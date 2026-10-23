@@ -696,6 +696,27 @@ status with no error detail or frames. Your Inertia visits keep your app
 error page, and your JSON requests keep their JSON body. The rules are in
 [Error Model](error-model.md#the-development-error-page).
 
+That minimal view also replaces a 5xx page you build on purpose, such as a
+503 with a status link and your own `Content-Security-Policy`. To send
+that page as you built it, mark it with `error_view()`:
+
+```rust
+use suprnova::{HttpResponse, Request, Response};
+
+pub async fn maintenance(_req: Request) -> Response {
+    Err(HttpResponse::html(include_str!("../views/maintenance.html"))
+        .status(503)
+        .header("retry-after", "120")
+        .header("content-security-policy", "default-src 'none'; frame-ancestors 'none'")
+        .error_view())
+}
+```
+
+The framework takes the mark at its word, so mark only a response you
+built yourself with no detail of any error in it. With debug on, the
+development error page still replaces a marked response that carries an
+error report.
+
 ### Why Suprnova diverges
 
 Laravel's exception page also shows the request body and runs a script
