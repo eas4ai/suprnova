@@ -192,6 +192,72 @@ async fn pending_count() -> i64 {
 }
 
 #[tokio::test]
+async fn lazy_embedder_generation_pins_the_resolved_artifact_revision() {
+    use suprnova::{Embedder, FakeEmbedder, LazyEmbedder, SearchEmbedder};
+
+    let _db = database().await;
+    SearchConfig::scope(
+        SearchConfig {
+            embedder: SearchEmbedder::Fastembed,
+            ..Default::default()
+        },
+        SearchRegistry::isolated(async {
+            let mut shipped = FakeEmbedder::new(8).unwrap().profile().clone();
+            shipped.revision = None;
+            let mut resolved = shipped.clone();
+            resolved.revision = Some("resolved-artifact".into());
+            let model: Arc<dyn Embedder> = Arc::new(FakeEmbedder::with_profile(resolved).unwrap());
+            let lazy = Arc::new(
+                LazyEmbedder::new(shipped, move || {
+                    let model = model.clone();
+                    async move { Ok(model) }
+                })
+                .unwrap(),
+            );
+            SearchRegistry::register_embedder("fastembed", lazy.clone()).unwrap();
+            SearchRegistry::register_engine("database", Arc::new(DatabaseSearchEngine::new()))
+                .unwrap();
+            assert!(lazy.loaded().is_none());
+
+            generations::create_index("search_command_notes")
+                .await
+                .unwrap();
+            assert!(lazy.loaded().is_some());
+            assert_eq!(
+                DB::scalar::<String>(
+                    "SELECT model FROM search_generations WHERE index_name=? AND state='current'",
+                    vec!["search_command_notes".into()],
+                )
+                .await
+                .unwrap(),
+                "fake-hash@resolved-artifact"
+            );
+            assert_eq!(DB::scalar::<i64>(
+                "SELECT dimensions FROM search_generations WHERE index_name=? AND state='current'",
+                vec!["search_command_notes".into()],
+            ).await.unwrap(), 8);
+            let engine = SearchRegistry::engine_for("search_command_notes").unwrap();
+            let generation = engine
+                .current_generation("search_command_notes")
+                .await
+                .unwrap()
+                .unwrap();
+            let settings = engine
+                .read_settings(CommandNote::descriptor(), &generation)
+                .await
+                .unwrap();
+            assert_eq!(
+                settings.index_time.model.as_deref(),
+                Some("fake-hash@resolved-artifact")
+            );
+            assert_eq!(settings.index_time.dimensions, Some(8));
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn live_update_and_delete_during_hidden_import_survive_publication() {
     let _db = database().await;
     SearchConfig::scope(

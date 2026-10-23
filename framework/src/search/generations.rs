@@ -374,14 +374,15 @@ async fn effective_settings(index: &str) -> Result<IndexSettings, FrameworkError
             .is_some_and(|name| name != "none")
     {
         let embedder = SearchRegistry::embedder_for(index)?;
+        let profile = embedder.resolve_profile().await?;
         if settings.index_time.model.is_none() {
-            settings.index_time.model = Some(match &embedder.profile().revision {
-                Some(revision) => format!("{}@{revision}", embedder.profile().id),
-                None => embedder.profile().id.clone(),
+            settings.index_time.model = Some(match &profile.revision {
+                Some(revision) => format!("{}@{revision}", profile.id),
+                None => profile.id.clone(),
             });
         }
         if settings.index_time.dimensions.is_none() {
-            settings.index_time.dimensions = Some(embedder.profile().dimensions);
+            settings.index_time.dimensions = Some(profile.dimensions);
         }
     }
     settings.validate()?;

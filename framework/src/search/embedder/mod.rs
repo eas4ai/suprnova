@@ -15,6 +15,8 @@ pub mod fastembed;
 mod fastembed_rerank;
 /// Deployment-owned OpenAI-compatible inference keeps credentials off request-controlled URLs.
 pub mod http;
+/// Shipped profiles let applications register models before loading their weights.
+pub mod lazy;
 /// Media tensors remain usable without the inference runtime.
 #[cfg(feature = "search-media")]
 pub mod media;

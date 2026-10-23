@@ -46,6 +46,7 @@ pub use embedder::fastembed::{
 pub use embedder::http::{
     EmbeddingTransport, HttpEmbedder, HttpEmbedderConfig, TransportRequest, TransportResponse,
 };
+pub use embedder::lazy::LazyEmbedder;
 pub use embedder::profiles::{
     default_profile, names as embedding_profile_names, profile as embedding_profile,
 };

@@ -428,6 +428,29 @@ build script download the ONNX Runtime library at compile time. Your build
 machine needs network access for that feature. The default build downloads
 nothing.
 
+Register a `LazyEmbedder` with a shipped profile and a loader to start services
+and run tests without downloading weights. Registration and `profile()` use the
+shipped metadata. The first embedding call or `resolve_profile()` loads the model
+once; a failed load can be retried. Before creating a generation, the coordinator
+resolves the profile and records the loaded model's `id@revision` and dimensions.
+The loaded id and dimensions must match the shipped profile.
+
+This example runs without a model download; replace the fake loader with your
+local inference loader in application bootstrap:
+
+```rust
+use std::sync::Arc;
+use suprnova::{Embedder, FakeEmbedder, FrameworkError, LazyEmbedder, SearchRegistry};
+
+fn register_local_model() -> Result<(), FrameworkError> {
+    let shipped = FakeEmbedder::new(16)?.profile().clone();
+    let lazy = LazyEmbedder::new(shipped, || async {
+        Ok(Arc::new(FakeEmbedder::new(16)?) as Arc<dyn Embedder>)
+    })?;
+    SearchRegistry::register_embedder("local", Arc::new(lazy))
+}
+```
+
 The default local model is `hf:onnx-community/embeddinggemma-2-ONNX`,
 EmbeddingGemma 2 text, fp32, 768 dimensions, mean pooling, L2 normalization,
 and an 8192-token context. Its model artifacts total about 1.04 GiB
