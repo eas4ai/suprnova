@@ -1,6 +1,9 @@
 //! A deployment-owned destination keeps semantic requests and credentials on one host.
 
-use super::{EmbedInput, Embedder, Embedding, ModelProfile, Pooling, profiles, validate_embedding};
+use super::{
+    EmbedInput, Embedder, Embedding, EmbeddingOperation, EmbeddingUsage, EmbeddingUsageReported,
+    Metered, ModelProfile, Pooling, profiles, validate_embedding,
+};
 use crate::{FrameworkError, config::Config};
 use async_trait::async_trait;
 use reqwest::{
@@ -201,6 +204,19 @@ struct WireRequest<'a> {
 #[derive(Deserialize)]
 struct WireResponse {
     data: Vec<WireVector>,
+    #[serde(default, deserialize_with = "deserialize_usage")]
+    usage: Option<EmbeddingUsage>,
+}
+// Invalid optional accounting must not discard otherwise usable embeddings.
+fn deserialize_usage<'de, D>(deserializer: D) -> Result<Option<EmbeddingUsage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if !value.is_object() {
+        return Ok(None);
+    }
+    Ok(serde_json::from_value(value).ok())
 }
 #[derive(Deserialize)]
 struct WireVector {
@@ -283,7 +299,7 @@ impl HttpEmbedder {
             provider.profile.validate()?;
             if provider.config.dimensions.is_none() {
                 let data = provider.request(&["probe".into()]).await?;
-                let vector = data.into_iter().next().ok_or_else(|| {
+                let vector = data.value.into_iter().next().ok_or_else(|| {
                     FrameworkError::param("SEARCH_EMBED_MODEL dimension probe returned no vector")
                 })?;
                 provider.profile.dimensions = vector.len();
@@ -477,7 +493,7 @@ impl HttpEmbedder {
             self.endpoint.host_str().unwrap_or("configured host")
         ))
     }
-    async fn request(&self, input: &[String]) -> Result<Vec<Vec<f32>>, FrameworkError> {
+    async fn request(&self, input: &[String]) -> Result<Metered<Vec<Vec<f32>>>, FrameworkError> {
         let timeout = Duration::from_secs(self.config.timeout_secs);
         for attempt in 0..=self.config.retries {
             let mut request = self
@@ -524,9 +540,8 @@ impl HttpEmbedder {
                 }
                 return Err(self.diagnostic(status, &body));
             }
-            let mut data = serde_json::from_slice::<WireResponse>(&body)
-                .map_err(|_| self.diagnostic(status, &body))?
-                .data;
+            let WireResponse { mut data, usage } = serde_json::from_slice::<WireResponse>(&body)
+                .map_err(|_| self.diagnostic(status, &body))?;
             data.sort_by_key(|vector| vector.index);
             if data.len() != input.len()
                 || data
@@ -539,14 +554,44 @@ impl HttpEmbedder {
                     input.len()
                 )));
             }
-            return Ok(data.into_iter().map(|vector| vector.embedding).collect());
+            return Ok(Metered {
+                value: data.into_iter().map(|vector| vector.embedding).collect(),
+                usage,
+            });
         }
         Err(FrameworkError::internal("SEARCH_EMBED_RETRIES exhausted"))
     }
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>, FrameworkError> {
+    async fn embed(
+        &self,
+        texts: &[String],
+        operation: EmbeddingOperation,
+    ) -> Result<Metered<Vec<Embedding>>, FrameworkError> {
         let mut out = Vec::with_capacity(texts.len());
+        let mut usage: Option<EmbeddingUsage> = None;
         for batch in texts.chunks(self.config.batch) {
-            for vector in self.request(batch).await? {
+            let response = self.request(batch).await?;
+            if let Some(reported) = response.usage {
+                let event = EmbeddingUsageReported {
+                    model: self.config.model.clone(),
+                    operation,
+                    inputs: batch.len(),
+                    usage: reported.clone(),
+                };
+                if crate::events::EventFacade::dispatch_best_effort(event)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        model = %self.config.model,
+                        "embedding usage event delivery was incomplete"
+                    );
+                }
+                match &mut usage {
+                    Some(total) => total.add(&reported),
+                    None => usage = Some(reported),
+                }
+            }
+            for vector in response.value {
                 if let Some(dimensions) = self.config.dimensions
                     && vector.len() != dimensions
                 {
@@ -562,7 +607,7 @@ impl HttpEmbedder {
                 )?);
             }
         }
-        Ok(out)
+        Ok(Metered { value: out, usage })
     }
 }
 /// Room for the special tokens a model adds around its input when no tokenizer says how many.
@@ -608,6 +653,12 @@ impl Embedder for HttpEmbedder {
         &self,
         inputs: &[EmbedInput],
     ) -> Result<Vec<Embedding>, FrameworkError> {
+        Ok(self.embed_documents_metered(inputs).await?.value)
+    }
+    async fn embed_documents_metered(
+        &self,
+        inputs: &[EmbedInput],
+    ) -> Result<Metered<Vec<Embedding>>, FrameworkError> {
         let mut texts = Vec::with_capacity(inputs.len());
         for input in inputs {
             texts.push(
@@ -615,15 +666,24 @@ impl Embedder for HttpEmbedder {
                     .await?,
             );
         }
-        self.embed(&texts).await
+        self.embed(&texts, EmbeddingOperation::Documents).await
     }
     async fn embed_query(&self, text: &str) -> Result<Embedding, FrameworkError> {
-        self.embed(&[self.within_context(self.profile.query_input(text)?).await?])
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                FrameworkError::internal("SEARCH_EMBED_MODEL query returned no embedding")
-            })
+        Ok(self.embed_query_metered(text).await?.value)
+    }
+    async fn embed_query_metered(&self, text: &str) -> Result<Metered<Embedding>, FrameworkError> {
+        let result = self
+            .embed(
+                &[self.within_context(self.profile.query_input(text)?).await?],
+                EmbeddingOperation::Query,
+            )
+            .await?;
+        let value = result.value.into_iter().next().ok_or_else(|| {
+            FrameworkError::internal("SEARCH_EMBED_MODEL query returned no embedding")
+        })?;
+        Ok(Metered {
+            value,
+            usage: result.usage,
+        })
     }
 }

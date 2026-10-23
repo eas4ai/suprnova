@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 use suprnova::search::{
-    EmbedInput, Embedder,
+    EmbedInput, Embedder, EmbeddingOperation, EmbeddingUsage, EmbeddingUsageReported,
     embedder::http::{HttpEmbedder, HttpEmbedderConfig},
 };
 
@@ -33,6 +33,12 @@ impl Reply {
     }
     fn vectors(vectors: Vec<Vec<f32>>) -> Self {
         Self::status(200, &json!({"data": vectors.into_iter().enumerate().rev().map(|(index, embedding)| json!({"index":index,"embedding":embedding,"extra":"ignored"})).collect::<Vec<_>>(), "usage":{"ignored":true}, "provider":"extra"}).to_string())
+    }
+    fn usage(mut self, usage: Value) -> Self {
+        let mut body: Value = serde_json::from_str(&self.body).unwrap();
+        body["usage"] = usage;
+        self.body = body.to_string();
+        self
     }
 }
 #[derive(Debug)]
@@ -141,6 +147,179 @@ async fn shape_batches_dimensions_and_response_order() {
         json!({"model":"test-custom","input":["one","two"],"dimensions":2,"encoding_format":"float"})
     );
     assert_eq!(seen[1].body["input"], json!(["three"]));
+}
+
+#[tokio::test]
+async fn metered_documents_and_queries_keep_the_provider_usage() {
+    let _events = suprnova::events::EventFacade::fake();
+    let server = server(vec![
+        Reply::vectors(vec![vec![1., 0.], vec![0., 1.]])
+            .usage(json!({"prompt_tokens": 7, "total_tokens": 9, "extra": true})),
+        Reply::vectors(vec![vec![1., 0.]]).usage(json!({"total_tokens": 3})),
+    ])
+    .await;
+    let embedder = HttpEmbedder::new(config(&server.url)).await.unwrap();
+    let documents = embedder
+        .embed_documents_metered(&[doc("one"), doc("two")])
+        .await
+        .unwrap();
+    let query = embedder.embed_query_metered("rust").await.unwrap();
+    assert_eq!(documents.value.len(), 2);
+    assert_eq!(documents.value[0].dense, [1., 0.]);
+    assert_eq!(documents.value[1].dense, [0., 1.]);
+    assert_eq!(
+        documents.usage,
+        Some(EmbeddingUsage {
+            prompt_tokens: Some(7),
+            total_tokens: Some(9),
+        })
+    );
+    assert_eq!(query.value.dense, [1., 0.]);
+    assert_eq!(
+        query.usage,
+        Some(EmbeddingUsage {
+            prompt_tokens: None,
+            total_tokens: Some(3),
+        })
+    );
+    let events = suprnova::events::dispatched::<EmbeddingUsageReported>(|_| true);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].model, "test-custom");
+    assert_eq!(events[0].operation, EmbeddingOperation::Documents);
+    assert_eq!(events[0].inputs, 2);
+    assert_eq!(Some(&events[0].usage), documents.usage.as_ref());
+    assert_eq!(events[1].model, "test-custom");
+    assert_eq!(events[1].operation, EmbeddingOperation::Query);
+    assert_eq!(events[1].inputs, 1);
+    assert_eq!(Some(&events[1].usage), query.usage.as_ref());
+}
+
+#[tokio::test]
+async fn metered_batches_sum_usage_and_report_each_request() {
+    let _events = suprnova::events::EventFacade::fake();
+    let server = server(vec![
+        Reply::vectors(vec![vec![1., 0.], vec![0., 1.]])
+            .usage(json!({"prompt_tokens": 7, "total_tokens": 9})),
+        Reply::vectors(vec![vec![1., 0.]]).usage(json!({"prompt_tokens": 2, "total_tokens": 4})),
+    ])
+    .await;
+    let embedder = HttpEmbedder::new(config(&server.url)).await.unwrap();
+    let result = embedder
+        .embed_documents_metered(&[doc("one"), doc("two"), doc("three")])
+        .await
+        .unwrap();
+    assert_eq!(result.value.len(), 3);
+    assert_eq!(
+        result.usage,
+        Some(EmbeddingUsage {
+            prompt_tokens: Some(9),
+            total_tokens: Some(13),
+        })
+    );
+    let events = suprnova::events::dispatched::<EmbeddingUsageReported>(|_| true);
+    assert_eq!(events.len(), 2);
+    for event in &events {
+        assert_eq!(event.model, "test-custom");
+        assert_eq!(event.operation, EmbeddingOperation::Documents);
+    }
+    assert_eq!(events[0].inputs, 2);
+    assert_eq!(events[0].usage.total_tokens, Some(9));
+    assert_eq!(events[1].inputs, 1);
+    assert_eq!(events[1].usage.total_tokens, Some(4));
+}
+
+#[tokio::test]
+async fn absent_or_malformed_usage_keeps_vectors_without_events() {
+    let _events = suprnova::events::EventFacade::fake();
+    for usage in [
+        None,
+        Some(Value::Null),
+        Some(json!("invalid")),
+        Some(json!([])),
+        Some(json!([7, 9])),
+        Some(json!([null, null])),
+        Some(json!({"prompt_tokens": "7", "total_tokens": 9})),
+        Some(json!({"prompt_tokens": 7, "total_tokens": false})),
+        Some(json!({"total_tokens": -1})),
+    ] {
+        let mut body = json!({"data": [{"index": 0, "embedding": [1., 0.]}]});
+        if let Some(usage) = usage {
+            body["usage"] = usage;
+        }
+        let server = server(vec![Reply::status(200, &body.to_string()); 2]).await;
+        let embedder = HttpEmbedder::new(config(&server.url)).await.unwrap();
+        let query = embedder.embed_query_metered("rust").await.unwrap();
+        assert_eq!(query.value.dense, [1., 0.]);
+        assert_eq!(query.usage, None);
+        let documents = embedder
+            .embed_documents_metered(&[doc("rust")])
+            .await
+            .unwrap();
+        assert_eq!(documents.value[0].dense, [1., 0.]);
+        assert_eq!(documents.usage, None);
+    }
+    assert!(suprnova::events::dispatched::<EmbeddingUsageReported>(|_| true).is_empty());
+}
+
+#[tokio::test]
+async fn vector_only_calls_report_usage_and_ignore_batches_without_it() {
+    let _events = suprnova::events::EventFacade::fake();
+    let server = server(vec![
+        Reply::vectors(vec![vec![1., 0.], vec![0., 1.]]).usage(json!({"total_tokens": 9})),
+        Reply::status(200, r#"{"data":[{"index":0,"embedding":[1,0]}]}"#),
+        Reply::vectors(vec![vec![1., 0.]]).usage(json!({"total_tokens": 3})),
+    ])
+    .await;
+    let embedder = HttpEmbedder::new(config(&server.url)).await.unwrap();
+    assert_eq!(
+        embedder
+            .embed_documents(&[doc("one"), doc("two"), doc("three")])
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(embedder.embed_query("rust").await.unwrap().dense, [1., 0.]);
+    let events = suprnova::events::dispatched::<EmbeddingUsageReported>(|_| true);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].operation, EmbeddingOperation::Documents);
+    assert_eq!(events[0].inputs, 2);
+    assert_eq!(events[0].usage.total_tokens, Some(9));
+    assert_eq!(events[1].operation, EmbeddingOperation::Query);
+    assert_eq!(events[1].usage.total_tokens, Some(3));
+}
+
+#[tokio::test]
+async fn partial_batch_usage_is_kept_and_empty_calls_report_none() {
+    let _events = suprnova::events::EventFacade::fake();
+    let server = server(vec![
+        Reply::status(
+            200,
+            r#"{"data":[{"index":0,"embedding":[1,0]},{"index":1,"embedding":[0,1]}]}"#,
+        ),
+        Reply::vectors(vec![vec![1., 0.]]).usage(json!({"total_tokens": 4})),
+    ])
+    .await;
+    let embedder = HttpEmbedder::new(config(&server.url)).await.unwrap();
+    let empty = embedder.embed_documents_metered(&[]).await.unwrap();
+    assert!(empty.value.is_empty());
+    assert_eq!(empty.usage, None);
+    assert!(server.seen.lock().unwrap().is_empty());
+    let result = embedder
+        .embed_documents_metered(&[doc("one"), doc("two"), doc("three")])
+        .await
+        .unwrap();
+    assert_eq!(
+        result.usage,
+        Some(EmbeddingUsage {
+            prompt_tokens: None,
+            total_tokens: Some(4)
+        })
+    );
+    assert_eq!(
+        suprnova::events::dispatched::<EmbeddingUsageReported>(|_| true).len(),
+        1
+    );
 }
 #[tokio::test]
 async fn prefix_and_template_apply_once() {

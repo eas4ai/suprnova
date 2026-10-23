@@ -580,6 +580,55 @@ document template. `SEARCH_EMBED_QUERY_PREFIX` and
 Known models use their shipped profile. You can supply an explicit profile
 through `HttpEmbedder::with_profile`.
 
+Call `embed_documents_metered` or `embed_query_metered` to receive the vectors
+in `.value` and the provider's optional `prompt_tokens` and `total_tokens` in
+`.usage`. Missing or malformed usage is `None`. Document calls sum the usage
+reported across their batches, keeping fields the provider sends on only some
+batches. No reported usage means `None`, never an estimate.
+
+```rust
+use suprnova::{Embedder, FrameworkError, HttpEmbedder};
+
+#[tokio::main]
+async fn main() -> Result<(), FrameworkError> {
+    let embedder = HttpEmbedder::from_env().await?;
+    let result = embedder.embed_query_metered("rust search").await?;
+    println!("Provider usage: {:?}", result.usage);
+    Ok(())
+}
+```
+
+`EmbeddingUsageReported` carries the model, operation, input count and usage
+for each embedding request that reports it. Vector-only calls emit it too,
+so a listener can bill the framework's own indexing and search calls. Register
+your ledger function during bootstrap; listener failures log a warning and
+leave the embedding successful.
+
+```rust
+use std::sync::Arc;
+use suprnova::{EmbeddingUsageReported, EventFacade, FrameworkError, Listener};
+
+struct BillEmbeddings {
+    settle: fn(&EmbeddingUsageReported, u64) -> Result<(), FrameworkError>,
+}
+
+#[suprnova::async_trait]
+impl Listener<EmbeddingUsageReported> for BillEmbeddings {
+    async fn handle(&self, event: &EmbeddingUsageReported) -> Result<(), FrameworkError> {
+        if let Some(tokens) = event.usage.total_tokens {
+            (self.settle)(event, tokens)?;
+        }
+        Ok(())
+    }
+}
+
+async fn register_embedding_billing(
+    settle: fn(&EmbeddingUsageReported, u64) -> Result<(), FrameworkError>,
+) {
+    EventFacade::listen::<EmbeddingUsageReported, _>(Arc::new(BillEmbeddings { settle })).await;
+}
+```
+
 The destination comes from deployment configuration, never a request or
 tenant. HTTPS is required except for `localhost`, `127.0.0.1`, and `::1`.
 URLs with credentials, query strings, or fragments are rejected. No redirects
