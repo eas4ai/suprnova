@@ -1,0 +1,10 @@
+{
+  "name": "suprnova.list-group",
+  "version": 1,
+  "root": "suprnova-ui/list-group",
+  "files": [
+    "list-group.html",
+    "list-group.css"
+  ],
+  "elements": []
+}
