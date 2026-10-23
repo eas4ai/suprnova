@@ -3,7 +3,22 @@
 use std::process::Command;
 use std::sync::Arc;
 use suprnova::testing::{PageBudget, TestClient, TestDatabase};
-use suprnova::{App, Auth, AuthConfig, AuthManager, EloquentUserProvider, MiddlewareRegistry};
+use suprnova::{
+    App, Auth, AuthConfig, AuthManager, CacheStore, EloquentUserProvider, InMemoryCache,
+    MiddlewareRegistry,
+};
+
+use {crate}::models::user::User;
+use {crate}::{agents, bootstrap, live, migrations, routes};
+
+/// The pages a visitor reaches without signing in.
+const PUBLIC_PAGES: [&str; 5] = [
+    "/",
+    "/login",
+    "/register",
+    "/forgot-password",
+    "/reset-password",
+];
 
 #[test]
 fn budget_public_pages() -> Result<(), Box<dyn std::error::Error>> {
@@ -16,21 +31,39 @@ fn budget_public_pages() -> Result<(), Box<dyn std::error::Error>> {
             .env("APP_URL", "http://localhost")
             .env("SESSION_DRIVER", "database")
             .status()?;
-        if !status.success() { return Err("page budget test child failed".into()); }
+        if !status.success() {
+            return Err("page budget test child failed".into());
+        }
         return Ok(());
     }
-    tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
-        suprnova::testing::install_test_encryption_key();
-        suprnova::testing::install_test_agent_auth_key();
-        let _db = TestDatabase::fresh::<{crate}::migrations::Migrator>().await?;
-        App::singleton(AuthManager::new(AuthConfig::from_env()));
-        Auth::register_provider("users", Arc::new(EloquentUserProvider::<{crate}::models::user::User>::new()))?;
-        {crate}::bootstrap::try_register_http_stack()?;
-        let client = TestClient::new({crate}::routes::register(), MiddlewareRegistry::from_global());
-        for page in ["/", "/login", "/register", "/forgot-password", "/reset-password"] {
-            client.audit_page(page, &PageBudget::default()).await?.ensure_passes()?;
-        }
-        Ok::<(), suprnova::FrameworkError>(())
-    })?;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(audit_public_pages())?;
+    Ok(())
+}
+
+/// Builds the router `cmd/main.rs` serves, Live routes and RenderCache
+/// included: every page loads the Live async script from `/__live/assets`.
+async fn audit_public_pages() -> Result<(), Box<dyn std::error::Error>> {
+    suprnova::testing::install_test_encryption_key();
+    suprnova::testing::install_test_agent_auth_key();
+    let _db = TestDatabase::fresh::<migrations::Migrator>().await?;
+    App::singleton(AuthManager::new(AuthConfig::from_env()));
+    Auth::register_provider("users", Arc::new(EloquentUserProvider::<User>::new()))?;
+    App::bind_if_absent::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+    App::singleton(live::registry()?);
+    live::authorize();
+    bootstrap::try_register_http_stack()?;
+    let router = live::routes_with_render_cache(agents::serve(routes::register())?).await?;
+    let prepared = suprnova::live::testing::prepare_live_router_for_test(&router)?;
+    App::singleton(prepared);
+    let client = TestClient::new(router, MiddlewareRegistry::from_global());
+    for page in PUBLIC_PAGES {
+        client
+            .audit_page(page, &PageBudget::default())
+            .await?
+            .ensure_passes()?;
+    }
     Ok(())
 }

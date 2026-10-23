@@ -3,7 +3,22 @@
 use std::process::Command;
 use std::sync::Arc;
 use suprnova::testing::{PageBudget, TestClient, TestDatabase};
-use suprnova::{App, AppConfig, Auth, AuthConfig, AuthManager, CacheStore, Config, EloquentUserProvider, InMemoryCache, MiddlewareRegistry};
+use suprnova::{
+    App, AppConfig, Auth, AuthConfig, AuthManager, CacheStore, Config, EloquentUserProvider,
+    InMemoryCache, MiddlewareRegistry,
+};
+
+use {package_name}::models::user::User;
+use {package_name}::{agents, bootstrap, live, migrations, routes};
+
+/// The pages a visitor reaches without signing in.
+const PUBLIC_PAGES: [&str; 5] = [
+    "/",
+    "/login",
+    "/register",
+    "/forgot-password",
+    "/reset-password",
+];
 
 #[test]
 fn budget_public_pages() -> Result<(), Box<dyn std::error::Error>> {
@@ -16,29 +31,38 @@ fn budget_public_pages() -> Result<(), Box<dyn std::error::Error>> {
             .env("APP_URL", "http://localhost")
             .env("SESSION_DRIVER", "database")
             .status()?;
-        if !status.success() { return Err("page budget test child failed".into()); }
+        if !status.success() {
+            return Err("page budget test child failed".into());
+        }
         return Ok(());
     }
-    tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
-        suprnova::testing::install_test_encryption_key();
-        suprnova::testing::install_test_agent_auth_key();
-        Config::register(AppConfig::builder().url("http://localhost").build());
-        let _db = TestDatabase::fresh::<{package_name}::migrations::Migrator>().await?;
-        App::singleton(AuthManager::new(AuthConfig::from_env()));
-        Auth::register_provider("users", Arc::new(EloquentUserProvider::<{package_name}::models::user::User>::new()))?;
-        App::bind_if_absent::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
-        App::singleton({package_name}::live::registry()?);
-        {package_name}::live::authorize();
-        {package_name}::bootstrap::try_register_http_stack()?;
-        let router = {package_name}::live::routes_with_render_cache(
-            {package_name}::agents::serve({package_name}::routes::register())?
-        ).await?;
-        App::singleton(suprnova::live::testing::prepare_live_router_for_test(&router)?);
-        let client = TestClient::new(router, MiddlewareRegistry::from_global());
-        for page in ["/", "/login", "/register", "/forgot-password", "/reset-password"] {
-            client.audit_page(page, &PageBudget::default()).await?.ensure_passes()?;
-        }
-        Ok::<(), Box<dyn std::error::Error>>(())
-    })?;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(audit_public_pages())?;
+    Ok(())
+}
+
+async fn audit_public_pages() -> Result<(), Box<dyn std::error::Error>> {
+    suprnova::testing::install_test_encryption_key();
+    suprnova::testing::install_test_agent_auth_key();
+    Config::register(AppConfig::builder().url("http://localhost").build());
+    let _db = TestDatabase::fresh::<migrations::Migrator>().await?;
+    App::singleton(AuthManager::new(AuthConfig::from_env()));
+    Auth::register_provider("users", Arc::new(EloquentUserProvider::<User>::new()))?;
+    App::bind_if_absent::<dyn CacheStore>(Arc::new(InMemoryCache::new()));
+    App::singleton(live::registry()?);
+    live::authorize();
+    bootstrap::try_register_http_stack()?;
+    let router = live::routes_with_render_cache(agents::serve(routes::register())?).await?;
+    let prepared = suprnova::live::testing::prepare_live_router_for_test(&router)?;
+    App::singleton(prepared);
+    let client = TestClient::new(router, MiddlewareRegistry::from_global());
+    for page in PUBLIC_PAGES {
+        client
+            .audit_page(page, &PageBudget::default())
+            .await?
+            .ensure_passes()?;
+    }
     Ok(())
 }

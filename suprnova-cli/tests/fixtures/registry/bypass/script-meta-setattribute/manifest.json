@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-meta-setattribute",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

@@ -1,0 +1,10 @@
+pub mod comments;
+pub mod posts;
+pub mod profiles;
+pub mod role_user;
+pub mod roles;
+pub mod taggables;
+pub mod tags;
+pub mod todos;
+pub mod users;
+pub mod videos;

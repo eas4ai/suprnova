@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-cookie-write",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

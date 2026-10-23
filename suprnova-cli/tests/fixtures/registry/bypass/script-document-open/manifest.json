@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-document-open",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

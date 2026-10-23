@@ -1,0 +1,17 @@
+error[E0425]: cannot find value `POSTS_PURGE` in module `scope`
+  --> tests/agents/compile_fail/agent_002_undeclared_scope.rs:14:22
+   |
+14 |     scopes = [scope::POSTS_PURGE]
+   |                      ^^^^^^^^^^^ not found in `scope`
+
+error[E0080]: evaluation panicked: invalid scope name `posts read`: a scope name is one or more visible ASCII characters other than space, `"` and `\`
+  --> tests/agents/compile_fail/agent_002_undeclared_scope.rs:21:1
+   |
+21 | / suprnova::tool_scopes! {
+22 | |     pub mod bad {
+23 | |         SPACED = "posts read" => "A space is not allowed in a scope name";
+24 | |     }
+25 | | }
+   | |_^ evaluation of `bad::_` failed here
+   |
+   = note: this error originates in the macro `$crate::panic::panic_2021` which comes from the expansion of the macro `suprnova::tool_scopes` (in Nightly builds, run with -Z macro-backtrace for more info)
