@@ -79,13 +79,20 @@ pub async fn register() {
     Auth::register_provider("users", Arc::new(EloquentUserProvider::<User>::new()))
         .expect("register users provider");
 
-    // Live components: one immutable registry shared by the server, the
-    // workers, and the `suprnova live:*` commands. `suprnova live:make`
-    // registers new components in `src/live/mod.rs`.
-    suprnova::Gate::define::<String, String>("live:topic.notes", |principal, instance| instance == &format!("notes.{principal}"));
+    // Live components: the gate rules for their private topics, and one
+    // immutable registry shared by the server, the workers, and the
+    // `suprnova live:*` commands. `suprnova live:make` registers new
+    // components in `src/live/mod.rs`.
+    crate::live::authorize();
     App::singleton(crate::live::registry().expect("Live component registry"));
     suprnova::live::LiveTopics::resolve()
-        .and_then(|topics| topics.on_model_scoped::<crate::models::note::Note>("notes", |note| note.user_id.to_string(), &["stats"]))
+        .and_then(|topics| {
+            topics.on_model_scoped::<crate::models::note::Note>(
+                "notes",
+                |note| note.user_id.to_string(),
+                &["stats"],
+            )
+        })
         .expect("Live note topic publication");
 
     // Example: Register a trait binding with runtime config
@@ -125,8 +132,15 @@ pub fn try_register_http_stack() -> Result<(), FrameworkError> {
     let catalog = suprnova::live::assets::live_asset_catalog()
         .map_err(|error| FrameworkError::internal(format!("Live async assets: {error}")))?;
     let artifact = catalog.artifact(suprnova::live::assets::ArtifactRole::AsyncEsm);
-    suprnova::View::share("live_async_url", format!("{}/{}/{}",
-        suprnova::live::assets::LIVE_ASSET_PATH_PREFIX, catalog.identity(), artifact.file()));
+    suprnova::View::share(
+        "live_async_url",
+        format!(
+            "{}/{}/{}",
+            suprnova::live::assets::LIVE_ASSET_PATH_PREFIX,
+            catalog.identity(),
+            artifact.file()
+        ),
+    );
     suprnova::View::share("live_async_sri", artifact.sri().to_owned());
     // Outside the error pages and RenderCache so every response is protected.
     global_middleware!(SecurityHeaders::from_env()?);

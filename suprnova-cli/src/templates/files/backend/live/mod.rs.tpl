@@ -17,14 +17,26 @@ use suprnova::live::{LiveRegistry, LiveTenantMiddleware, LiveTenantResolver};
 use suprnova::rate_limit::memory::InMemoryRateLimiter;
 use suprnova::render_cache::{RenderCache, RenderCacheConfig};
 use suprnova::{
-    AuthMiddleware, FrameworkError, RateLimitMiddleware, Request, Router, SlidingWindowConfig,
-    async_trait,
+    AuthMiddleware, FrameworkError, Gate, RateLimitMiddleware, Request, Router,
+    SlidingWindowConfig, async_trait,
 };
 
 /// Builds the registry of every Live component in this application.
 pub fn registry() -> Result<LiveRegistry, FrameworkError> {
     let registry = LiveRegistry::builder().topic_family("notes")?.build();
     Ok(registry)
+}
+
+/// Defines the abilities Live asks the gate for.
+///
+/// A signed-in user may follow the private `notes` topic only for their own
+/// notes: the notes page subscribes to the instance `notes.<user id>`, and
+/// the route guard has already required the user. The Live routes refuse to
+/// install while a private topic has no rule, so call this before them.
+pub fn authorize() {
+    Gate::define::<String, String>("live:topic.notes", |principal, instance| {
+        instance == &format!("notes.{principal}")
+    });
 }
 
 /// Installs the reserved Live routes and every Live document mount.

@@ -52,9 +52,10 @@ async fn budget_every_page_kit_ships_the_public_page_test_and_origin_policy() {
                 );
             }
             for required in [
-                "budget_app::live::registry()",
-                "budget_app::migrations::Migrator",
-                "budget_app::models::user::User",
+                "use budget_app::models::user::User;",
+                "use budget_app::{agents, bootstrap, live, migrations, routes};",
+                "live::registry()",
+                "migrations::Migrator",
                 "prepare_live_router_for_test",
                 "routes_with_render_cache",
             ] {
@@ -62,8 +63,8 @@ async fn budget_every_page_kit_ships_the_public_page_test_and_origin_policy() {
             }
         }
         for required in [
-            "budget_app::routes::register()",
-            "budget_app::bootstrap::try_register_http_stack()",
+            "routes::register()",
+            "bootstrap::try_register_http_stack()",
             "PageBudget::default()",
             "audit_page",
             "/login",
@@ -133,10 +134,78 @@ async fn budget_every_page_kit_ships_the_public_page_test_and_origin_policy() {
     }
 }
 
+/// Each page kit's own `tests/page_budget.rs` builds and passes on a fresh
+/// scaffold. The test above only reads that file; this one runs it, against
+/// the in-tree framework and this workspace's lock, in the build directory
+/// this package already uses, so the framework is not compiled again.
+#[test]
+#[ignore = "scaffolds and compiles four applications; slow"]
+fn budget_every_page_kit_passes_its_own_budget_test() {
+    let framework = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the CLI sits in the workspace")
+        .join("framework");
+    let lock = framework
+        .parent()
+        .expect("the framework sits in the workspace")
+        .join("Cargo.lock");
+    let target = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .parent()
+        .expect("CARGO_TARGET_TMPDIR has a parent")
+        .to_path_buf();
+    for kit in ["react", "vue", "svelte", "live"] {
+        let dir = tempfile::tempdir().unwrap();
+        let output = Command::new(BIN)
+            .args([
+                "new",
+                "budget_app",
+                "--no-interaction",
+                "--no-git",
+                "--frontend",
+                kit,
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{kit}: `suprnova new` failed");
+        let root = dir.path().join("budget_app");
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        let mut patched = String::new();
+        for line in manifest.lines() {
+            if line.trim_start().starts_with("suprnova = ") {
+                patched.push_str(&format!(
+                    "suprnova = {{ path = \"{}\" }}\n",
+                    framework.display()
+                ));
+            } else {
+                patched.push_str(line);
+                patched.push('\n');
+            }
+        }
+        if !manifest.lines().any(|line| line.trim() == "[workspace]") {
+            patched.push_str("\n[workspace]\n");
+        }
+        std::fs::write(root.join("Cargo.toml"), patched).unwrap();
+        std::fs::copy(&lock, root.join("Cargo.lock")).unwrap();
+        let run = Command::new(env!("CARGO"))
+            .args(["test", "--test", "page_budget"])
+            .current_dir(&root)
+            .env("CARGO_TARGET_DIR", &target)
+            .output()
+            .unwrap();
+        assert!(
+            run.status.success(),
+            "{kit}: the generated page budget test failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+}
+
 #[test]
 fn budget_hyphenated_project_names_use_the_rust_crate_name() {
     let test = suprnova_cli::templates::page_budget_test("example_app");
-    assert!(test.contains("example_app::routes::register()"));
+    assert!(test.contains("use example_app::{agents, bootstrap, live, migrations, routes};"));
     syn::parse_file(&test).unwrap();
 }
 

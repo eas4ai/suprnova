@@ -205,6 +205,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   for every such field, and strict clients reject the schema. The bounds carry
   the same information. The WebMCP browser schemas and the `tool-schemas.ts`
   file that `suprnova generate-types` writes follow the same rule.
+- **A fresh scaffold passes its own page budget test and `cargo fmt --check`.**
+  The React, Vue and Svelte kits' `tests/page_budget.rs` audited
+  `routes::register()` alone, so the Live script every page loads from
+  `/__live/assets` returned 404 and the test failed on a new application. It
+  now audits the router `cmd/main.rs` serves, and the notes topic's gate rule
+  moved from `bootstrap::register` into `live::authorize()` so both can call
+  it. The kits also wrote the Live topic setup, the asset share and the page
+  budget test on lines rustfmt rewrites; the templates now carry rustfmt's
+  layout, and the test's layout no longer depends on the application name.
+  These fixes landed after the `v4.6.0` tag.
 
 ## 4.5.1 - 2026-10-21
 

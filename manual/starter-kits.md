@@ -166,15 +166,21 @@ pub async fn index(req: Request) -> Response {
 
 The Inertia kits also keep the dashboard's `stats` current when a note is
 saved or deleted. Their Live registry declares a private topic family,
-bootstrap defines its audience and connects model hooks, and the dashboard
-props bind `stats` to it:
+`live::authorize()` defines its audience, bootstrap calls it and connects
+model hooks, and the dashboard props bind `stats` to it:
 
 ```rust
 // src/live/mod.rs
 let registry = LiveRegistry::builder().topic_family("notes")?.build();
 
+pub fn authorize() {
+    Gate::define::<String, String>("live:topic.notes", |principal, instance| {
+        instance == &format!("notes.{principal}")
+    });
+}
+
 // src/bootstrap.rs
-Gate::define::<String, String>("live:topic.notes", |principal, instance| instance == &format!("notes.{principal}"));
+crate::live::authorize();
 App::singleton(registry);
 LiveTopics::resolve()?
     .on_model_scoped::<Note>("notes", |note| note.user_id.to_string(), &["stats"])?;
@@ -845,7 +851,8 @@ The React, Vue, Svelte and Live scaffolds also ship `tests/page_budget.rs`. It a
 `/`, `/login`, `/register`, `/forgot-password` and `/reset-password` through the
 application router and middleware. It creates an isolated test database and
 sets the test environment in a child process before runtime threads start.
-The Inertia tests follow built assets when a Vite manifest exists and run
+The Inertia tests audit the router `cmd/main.rs` serves, Live routes and
+RenderCache included, follow built assets when a Vite manifest exists and run
 before the frontend build on a fresh scaffold. The Live test boots its
 component registry and runtime and audits its served styles and scripts. See [Page Budget](page-budget.md).
 
@@ -854,7 +861,8 @@ cargo test --test page_budget
 ```
 
 The repository checks the generated tests and origin asset policy in
-`suprnova-cli/tests/kit_budget.rs`. The dogfood application has its own
+`suprnova-cli/tests/kit_budget.rs`; an ignored test there scaffolds each kit
+and runs its page budget test. The dogfood application has its own
 `app/tests/page_budget.rs` test over its public entry pages.
 
 Every kit is held to the browser suite in `suprnova-cli/tests/kit_browser/`.

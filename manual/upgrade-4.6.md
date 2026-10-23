@@ -155,6 +155,13 @@ savepoint and check that the callback only describes committed work.
   because the boot check refused it; the failure moves to the link step, where
   the duplicate symbol names the tool. A crate that forbids unsafe code still
   builds. Nothing to change.
+- **A fresh scaffold passes its own page budget test and `cargo fmt --check`.**
+  In a React, Vue or Svelte application scaffolded from 4.6.0, make
+  `tests/page_budget.rs` audit the router `cmd/main.rs` serves: register
+  `live::registry()` and the notes gate rule, then audit
+  `live::routes_with_render_cache(agents::serve(routes::register())?)`
+  prepared with `suprnova::live::testing::prepare_live_router_for_test`. Run
+  `cargo fmt` once. Nothing else changes.
 
 ## Next
 
