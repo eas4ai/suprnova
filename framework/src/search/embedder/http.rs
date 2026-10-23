@@ -6,9 +6,10 @@ use super::{
 };
 use crate::{FrameworkError, config::Config};
 use async_trait::async_trait;
+use http::HeaderMap;
 use reqwest::{
-    Client, Url,
-    header::{AUTHORIZATION, HeaderValue},
+    Method, Url,
+    header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -17,6 +18,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokenizers::Tokenizer;
+
+mod transport;
+use transport::ReqwestTransport;
+pub use transport::{EmbeddingTransport, TransportRequest, TransportResponse};
 
 /// Resolve deployment settings once, before any request or tenant can supply a destination.
 /// This type deliberately has no Debug implementation because it contains a credential.
@@ -178,10 +183,10 @@ pub(in crate::search) fn parse<T: std::str::FromStr>(
     })
 }
 
-/// Cloning the provider shares a connection pool and an immutable model contract.
+/// Cloning the provider shares its transport and an immutable model contract.
 #[derive(Clone)]
 pub struct HttpEmbedder {
-    client: Client,
+    transport: Arc<dyn EmbeddingTransport>,
     endpoint: Url,
     authorization: Option<HeaderValue>,
     config: HttpEmbedderConfig,
@@ -239,6 +244,17 @@ impl HttpEmbedder {
         config: HttpEmbedderConfig,
         profile: Option<ModelProfile>,
     ) -> Result<Self, FrameworkError> {
+        Self::with_transport(config, profile, Arc::new(ReqwestTransport::new()?)).await
+    }
+    /// Use application HTTP policy while keeping embedding preparation and validation here.
+    /// The transport receives only URLs derived from the validated, pinned endpoint;
+    /// HTTPS except loopback and the ban on URL credentials still apply. The application
+    /// decides credentials, with a sensitive bearer header already set when configured.
+    pub async fn with_transport(
+        config: HttpEmbedderConfig,
+        profile: Option<ModelProfile>,
+        transport: Arc<dyn EmbeddingTransport>,
+    ) -> Result<Self, FrameworkError> {
         let endpoint = config.validate()?;
         let mut authorization = config
             .api_key
@@ -252,7 +268,6 @@ impl HttpEmbedder {
         if let Some(value) = &mut authorization {
             value.set_sensitive(true);
         }
-        let client = crate::http_client::client_for(true, Some(Duration::from_secs(10)))?;
         let (tokenizer, special_tokens) = match &config.tokenizer {
             Some(path) => {
                 let (tokenizer, special_tokens) = load_tokenizer(path)?;
@@ -273,7 +288,7 @@ impl HttpEmbedder {
             )
         });
         let mut provider = Self {
-            client,
+            transport,
             endpoint,
             authorization,
             native_profile: profile.clone(),
@@ -401,22 +416,9 @@ impl HttpEmbedder {
         for list in ["embeddings/models", "models"] {
             let mut url = self.endpoint.clone();
             url.set_path(&format!("{base}/{list}"));
-            let mut request = self
-                .client
-                .get(url)
-                .timeout(Duration::from_secs(self.config.timeout_secs));
-            if let Some(value) = &self.authorization {
-                request = request.header(AUTHORIZATION, value);
-            }
-            let response = request.send().await.map_err(|error| {
-                FrameworkError::internal(format!(
-                    "SEARCH_EMBED_BASE_URL host {} model list request failed: {}",
-                    self.endpoint.host_str().unwrap_or("configured host"),
-                    error.without_url()
-                ))
-            })?;
-            let status = response.status().as_u16();
-            let body = self.read_body(response, status).await?;
+            let response = self.send(Method::GET, url, None).await?;
+            let status = response.status;
+            let body = response.body;
             // A server without this list answers 404 or 405; any other failure is the
             // service's, reported as it is rather than as a missing setting.
             if status == 404 || status == 405 {
@@ -449,37 +451,38 @@ impl HttpEmbedder {
         }
         Ok(None)
     }
-    /// The body is capped while streaming, before anything parses it.
-    async fn read_body(
+    /// Recheck application transports before either protocol path can parse a response.
+    async fn send(
         &self,
-        mut response: reqwest::Response,
-        status: u16,
-    ) -> Result<Vec<u8>, FrameworkError> {
-        if response
-            .content_length()
-            .is_some_and(|len| len > self.config.max_response_bytes as u64)
-        {
+        method: Method,
+        url: Url,
+        body: Option<Vec<u8>>,
+    ) -> Result<TransportResponse, FrameworkError> {
+        let mut headers = HeaderMap::new();
+        if let Some(value) = &self.authorization {
+            headers.insert(AUTHORIZATION, value.clone());
+        }
+        if body.is_some() {
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        }
+        let response = self
+            .transport
+            .send(TransportRequest {
+                method,
+                url,
+                headers,
+                body,
+                timeout: Duration::from_secs(self.config.timeout_secs),
+                max_response_bytes: self.config.max_response_bytes,
+            })
+            .await?;
+        if response.body.len() > self.config.max_response_bytes {
             return Err(FrameworkError::param(format!(
-                "SEARCH_EMBED_MAX_RESPONSE_BYTES exceeded by host {} status {status}",
-                self.endpoint.host_str().unwrap_or("configured host")
+                "SEARCH_EMBED_MAX_RESPONSE_BYTES exceeded at status {}",
+                response.status
             )));
         }
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|error| {
-            FrameworkError::internal(format!(
-                "SEARCH_EMBED_TIMEOUT_SECS or response from host {} status {status}: {}",
-                self.endpoint.host_str().unwrap_or("configured host"),
-                error.without_url()
-            ))
-        })? {
-            if chunk.len() > self.config.max_response_bytes.saturating_sub(body.len()) {
-                return Err(FrameworkError::param(format!(
-                    "SEARCH_EMBED_MAX_RESPONSE_BYTES exceeded at status {status}"
-                )));
-            }
-            body.extend_from_slice(&chunk);
-        }
-        Ok(body)
+        Ok(response)
     }
     fn diagnostic(&self, status: u16, body: &[u8]) -> FrameworkError {
         let text = String::from_utf8_lossy(body);
@@ -496,33 +499,27 @@ impl HttpEmbedder {
     async fn request(&self, input: &[String]) -> Result<Metered<Vec<Vec<f32>>>, FrameworkError> {
         let timeout = Duration::from_secs(self.config.timeout_secs);
         for attempt in 0..=self.config.retries {
-            let mut request = self
-                .client
-                .post(self.endpoint.clone())
-                .timeout(timeout)
-                .json(&WireRequest {
-                    model: &self.config.model,
-                    input,
-                    dimensions: self.config.dimensions,
-                    encoding_format: "float",
-                });
-            if let Some(value) = &self.authorization {
-                request = request.header(AUTHORIZATION, value);
-            }
-            let response = request.send().await.map_err(|error| {
+            let body = serde_json::to_vec(&WireRequest {
+                model: &self.config.model,
+                input,
+                dimensions: self.config.dimensions,
+                encoding_format: "float",
+            })
+            .map_err(|error| {
                 FrameworkError::internal(format!(
-                    "SEARCH_EMBED_BASE_URL host {} request failed: {}",
-                    self.endpoint.host_str().unwrap_or("configured host"),
-                    error.without_url()
+                    "embedding request JSON serialization failed: {error}"
                 ))
             })?;
-            let status = response.status().as_u16();
+            let response = self
+                .send(Method::POST, self.endpoint.clone(), Some(body))
+                .await?;
+            let status = response.status;
             let retry_after = response
-                .headers()
+                .headers
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(retry_after);
-            let body = self.read_body(response, status).await?;
+            let body = response.body;
             if !(200..300).contains(&status) {
                 if (status == 429 || (500..600).contains(&status)) && attempt < self.config.retries
                 {

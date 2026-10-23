@@ -1,3 +1,7 @@
+use http::{
+    HeaderMap, Method,
+    header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue},
+};
 use http_body_util::{BodyExt, Full};
 use hyper::{
     Request, Response,
@@ -16,6 +20,7 @@ use suprnova::search::{
     EmbedInput, Embedder, EmbeddingOperation, EmbeddingUsage, EmbeddingUsageReported,
     embedder::http::{HttpEmbedder, HttpEmbedderConfig},
 };
+use suprnova::{EmbeddingTransport, FrameworkError, TransportRequest, TransportResponse};
 
 #[derive(Clone)]
 struct Reply {
@@ -39,6 +44,20 @@ impl Reply {
         body["usage"] = usage;
         self.body = body.to_string();
         self
+    }
+    fn transport(self) -> TransportResponse {
+        let mut headers = HeaderMap::new();
+        for (name, value) in self.headers {
+            headers.insert(
+                http::header::HeaderName::from_static(name),
+                value.parse().unwrap(),
+            );
+        }
+        TransportResponse {
+            status: self.status,
+            headers,
+            body: self.body.into_bytes(),
+        }
     }
 }
 #[derive(Debug)]
@@ -105,6 +124,41 @@ async fn server(replies: Vec<Reply>) -> Server {
         }
     });
     Server { url, seen, task }
+}
+
+struct RecordingTransport {
+    requests: Arc<Mutex<Vec<TransportRequest>>>,
+    replies: Mutex<VecDeque<TransportResponse>>,
+    authorization: Option<HeaderValue>,
+}
+
+impl RecordingTransport {
+    fn new(replies: Vec<Reply>) -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(vec![])),
+            replies: Mutex::new(replies.into_iter().map(Reply::transport).collect()),
+            authorization: None,
+        }
+    }
+}
+
+#[suprnova::async_trait]
+impl EmbeddingTransport for RecordingTransport {
+    async fn send(
+        &self,
+        mut request: TransportRequest,
+    ) -> Result<TransportResponse, FrameworkError> {
+        if let Some(value) = &self.authorization {
+            assert!(!request.headers.contains_key(AUTHORIZATION));
+            request.headers.insert(AUTHORIZATION, value.clone());
+        }
+        self.requests.lock().unwrap().push(request);
+        self.replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| FrameworkError::internal("recording transport has no reply"))
+    }
 }
 fn config(url: &str) -> HttpEmbedderConfig {
     HttpEmbedderConfig {
@@ -760,4 +814,217 @@ async fn published_hosted_models_need_no_model_list() {
         assert_eq!(embedder.profile().max_tokens, max_tokens, "{model}");
     }
     assert!(server.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn application_transport_receives_model_lists_and_embedding_protocol() {
+    let transport = Arc::new(RecordingTransport::new(vec![
+        Reply::status(404, "no embeddings model list"),
+        Reply::status(
+            200,
+            &json!({"data": [{"id": "test-custom", "max_model_len": 512}]}).to_string(),
+        ),
+        Reply::vectors(vec![vec![1., 0.]]).usage(json!({"total_tokens": 5})),
+    ]));
+    let mut options = config("https://inference.example/v1");
+    options.max_tokens = None;
+    let embedder = HttpEmbedder::with_transport(options, None, transport.clone())
+        .await
+        .unwrap();
+    assert!(transport.requests.lock().unwrap().is_empty());
+    let result = embedder.embed_query_metered("rust").await.unwrap();
+    assert_eq!(result.value.dense, [1., 0.]);
+    assert_eq!(result.usage.unwrap().total_tokens, Some(5));
+    assert_eq!(embedder.context_tokens().await.unwrap(), 512);
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    for request in &requests[..2] {
+        assert_eq!(request.method, Method::GET);
+        assert!(request.body.is_none());
+        assert!(!request.headers.contains_key(CONTENT_TYPE));
+    }
+    assert_eq!(
+        requests[0].url.as_str(),
+        "https://inference.example/v1/embeddings/models"
+    );
+    assert_eq!(
+        requests[1].url.as_str(),
+        "https://inference.example/v1/models"
+    );
+    let post = &requests[2];
+    assert_eq!(post.method, Method::POST);
+    assert_eq!(post.url.as_str(), "https://inference.example/v1/embeddings");
+    assert_eq!(post.headers[CONTENT_TYPE], "application/json");
+    assert_eq!(
+        serde_json::from_slice::<Value>(post.body.as_ref().unwrap()).unwrap(),
+        json!({"model":"test-custom","input":["rust"],"dimensions":2,"encoding_format":"float"})
+    );
+    for request in requests.iter() {
+        assert_eq!(request.headers[AUTHORIZATION], "Bearer test-secret");
+        assert!(request.headers[AUTHORIZATION].is_sensitive());
+        assert!(!format!("{request:?}").contains("test-secret"));
+        assert_eq!(request.timeout, Duration::from_secs(30));
+        assert_eq!(request.max_response_bytes, 16 * 1024 * 1024);
+    }
+}
+
+#[tokio::test]
+async fn application_transport_retries_statuses_using_response_headers() {
+    let _events = suprnova::events::EventFacade::fake();
+    let mut limited = Reply::status(429, "slow down");
+    limited.headers.push(("retry-after", "1".into()));
+    let transport = Arc::new(RecordingTransport::new(vec![
+        limited,
+        Reply::vectors(vec![vec![1., 0.]]).usage(json!({"total_tokens": 2})),
+    ]));
+    let embedder = HttpEmbedder::with_transport(
+        config("https://inference.example/v1"),
+        None,
+        transport.clone(),
+    )
+    .await
+    .unwrap();
+    let start = std::time::Instant::now();
+    assert_eq!(embedder.embed_query("rust").await.unwrap().dense, [1., 0.]);
+    assert!(start.elapsed() >= Duration::from_secs(1));
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].url, requests[1].url);
+    assert_eq!(requests[0].body, requests[1].body);
+    let events = suprnova::events::dispatched::<EmbeddingUsageReported>(|_| true);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].usage.total_tokens, Some(2));
+}
+
+#[tokio::test]
+async fn application_transport_cannot_bypass_the_embedding_body_cap() {
+    let transport = Arc::new(RecordingTransport::new(vec![Reply::status(
+        200,
+        &"x".repeat(101),
+    )]));
+    let mut options = config("https://inference.example/v1");
+    options.max_response_bytes = 100;
+    let embedder = HttpEmbedder::with_transport(options, None, transport.clone())
+        .await
+        .unwrap();
+    let error = embedder.embed_query("rust").await.unwrap_err().to_string();
+    assert!(error.contains("SEARCH_EMBED_MAX_RESPONSE_BYTES"));
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].max_response_bytes, 100);
+}
+
+#[tokio::test]
+async fn application_transport_cannot_bypass_the_model_list_body_cap() {
+    let oversized =
+        json!({"data": [{"id": "test-custom", "context_length": 16}], "padding": "x".repeat(200)});
+    let transport = Arc::new(RecordingTransport::new(vec![
+        Reply::status(200, &oversized.to_string()),
+        Reply::status(
+            200,
+            &json!({"data": [{"id": "test-custom", "context_length": 32}]}).to_string(),
+        ),
+    ]));
+    let mut options = config("https://inference.example/v1");
+    options.max_tokens = None;
+    options.max_response_bytes = 100;
+    let embedder = HttpEmbedder::with_transport(options, None, transport.clone())
+        .await
+        .unwrap();
+    assert_eq!(embedder.context_tokens().await.unwrap(), 8192);
+    assert_eq!(embedder.context_tokens().await.unwrap(), 32);
+    assert_eq!(transport.requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn application_transport_supplies_its_own_credentials() {
+    let mut transport = RecordingTransport::new(vec![Reply::vectors(vec![vec![1., 0.]])]);
+    let mut authorization = HeaderValue::from_static("Bearer application-test-key");
+    authorization.set_sensitive(true);
+    transport.authorization = Some(authorization);
+    let transport = Arc::new(transport);
+    let mut options = config("https://inference.example/v1");
+    options.api_key = None;
+    let embedder = HttpEmbedder::with_transport(options, None, transport.clone())
+        .await
+        .unwrap();
+    assert_eq!(embedder.embed_query("rust").await.unwrap().dense, [1., 0.]);
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(
+        requests[0].headers[AUTHORIZATION],
+        "Bearer application-test-key"
+    );
+    assert!(requests[0].headers[AUTHORIZATION].is_sensitive());
+}
+
+#[tokio::test]
+async fn application_transport_handles_dimension_probes_and_explicit_profiles() {
+    let transport = Arc::new(RecordingTransport::new(vec![
+        Reply::vectors(vec![vec![1., 0., 0.]]),
+        Reply::vectors(vec![vec![0., 1., 0.]]),
+        Reply::vectors(vec![vec![1., 0.]]),
+    ]));
+    let mut options = config("https://inference.example/v1");
+    options.dimensions = None;
+    let embedder = HttpEmbedder::with_transport(options, None, transport.clone())
+        .await
+        .unwrap();
+    assert_eq!(embedder.profile().dimensions, 3);
+    assert_eq!(
+        embedder.embed_query("rust").await.unwrap().dense,
+        [0., 1., 0.]
+    );
+    let profile = suprnova::search::FakeEmbedder::new(2)
+        .unwrap()
+        .profile()
+        .clone();
+    let embedder = HttpEmbedder::with_transport(
+        config("https://inference.example/v1"),
+        Some(profile),
+        transport.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(embedder.embed_query("rust").await.unwrap().dense, [1., 0.]);
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        serde_json::from_slice::<Value>(requests[0].body.as_ref().unwrap()).unwrap()["input"],
+        json!(["probe"])
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.method == Method::POST)
+    );
+}
+
+#[tokio::test]
+async fn application_transport_keeps_endpoint_validation_and_propagates_errors() {
+    let transport = Arc::new(RecordingTransport::new(vec![]));
+    for url in [
+        "http://example.com/v1",
+        "https://user:secret@example.com/v1",
+        "https://example.com/v1?key=secret",
+        "https://example.com/v1#secret",
+    ] {
+        let error = HttpEmbedder::with_transport(config(url), None, transport.clone())
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("SEARCH_EMBED_BASE_URL"));
+        assert!(!error.contains("secret"));
+    }
+    assert!(transport.requests.lock().unwrap().is_empty());
+    let embedder = HttpEmbedder::with_transport(
+        config("https://inference.example/v1"),
+        None,
+        transport.clone(),
+    )
+    .await
+    .unwrap();
+    let error = embedder.embed_query("rust").await.unwrap_err().to_string();
+    assert!(error.contains("recording transport has no reply"));
+    assert_eq!(transport.requests.lock().unwrap().len(), 1);
 }

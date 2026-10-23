@@ -629,11 +629,38 @@ async fn register_embedding_billing(
 }
 ```
 
+Use `HttpEmbedder::with_transport(config, profile, transport)` when the
+application owns HTTP admission, credentials, deadlines or kill switches.
+The transport is an `Arc<dyn EmbeddingTransport>`. Its `send` method receives
+a `TransportRequest` with the method, pinned URL, headers, optional JSON body,
+timeout and `max_response_bytes`, and returns a `TransportResponse` with the
+status, headers and body bytes. Configured bearer headers are marked sensitive;
+with no `SEARCH_EMBED_API_KEY`, the transport can resolve its own credentials.
+Endpoint validation still applies. For example, pass your transport at boot:
+
+```rust
+use std::sync::Arc;
+use suprnova::{EmbeddingTransport, FrameworkError, HttpEmbedder, HttpEmbedderConfig};
+
+async fn application_embedder(
+    config: HttpEmbedderConfig,
+    transport: Arc<dyn EmbeddingTransport>,
+) -> Result<HttpEmbedder, FrameworkError> {
+    HttpEmbedder::with_transport(config, None, transport).await
+}
+```
+
+Preparation, retries, `Retry-After`, status checks, JSON parsing, index validation
+and dimension probing stay in the framework. The transport must enforce the
+deadline and cap the body while streaming. The embedder checks the returned
+body size again before parsing, even when an application transport ignores the
+cap. The existing constructors use the default reqwest transport.
+
 The destination comes from deployment configuration, never a request or
 tenant. HTTPS is required except for `localhost`, `127.0.0.1`, and `::1`.
-URLs with credentials, query strings, or fragments are rejected. No redirects
-are followed. `SEARCH_EMBED_API_KEY` is a bearer key sent only to the pinned
-destination. Defaults are 64 inputs per batch, a 30-second timeout including
+URLs with credentials, query strings, or fragments are rejected. The default
+transport follows no redirects. `SEARCH_EMBED_API_KEY` is a bearer key sent only
+to the pinned destination. Defaults are 64 inputs per batch, a 30-second timeout including
 the response body, 16 MiB per response, and three additional attempts for 429
 or 5xx only. Retries are capped at 16; `Retry-After` is bounded. HTTP uses no
 provider-specific fields. Hosted models with published limits are built in:

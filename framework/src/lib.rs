@@ -670,7 +670,7 @@ pub use search::testing::conformance;
 pub use search::{
     AttributeDecl, AttributeType, AttributeValue, CollectionEngine, DocumentBatchLoader,
     DocumentLoader, EmbedInput, EmbedSource, Embedder, Embedding, EmbeddingOperation,
-    EmbeddingUsage, EmbeddingUsageReported, EngineCandidate,
+    EmbeddingTransport, EmbeddingUsage, EmbeddingUsageReported, EngineCandidate,
     EngineCapabilities, EngineQuery, EngineResult, ExpandedQuery, ExpandedTerm, FacetDistribution,
     FacetOrder, FacetRange, FacetStats, FacetValue, FakeEmbedder, FederatedBuilder, FederatedHit,
     FederatedRank, FederatedResults, Filter, GenerationId, GeoPoint, GroupBy, Hit, HttpEmbedder,
@@ -681,11 +681,12 @@ pub use search::{
     SearchDocument, SearchDriver, SearchEmbedder, SearchEngine, SearchFilter, SearchIndexJob,
     SearchPagination, SearchQuery, SearchRegistry, SearchResults, Searchable, SearchableDecl,
     SearchableEntry, SettingsChange, Sort, SortDirection, SparseEmbedding, Synonym, Total,
-    TypoTolerance, VectorDiscover, VectorRecommend, Viewer, Vocabulary, WeightedAttribute,
-    WriteKind, WriteOutcome, after_model_write, apply_scope, default_profile, embedding_profile,
-    embedding_profile_names, evaluate_scope, expand, federated_rrf, highlight, make_all_searchable,
-    normalize, paginate, remove_all_from_search, searchable, tokenize, unsearchable,
-    validate_embedding, validate_tags, weighted_rrf, without_syncing_to_search,
+    TransportRequest, TransportResponse, TypoTolerance, VectorDiscover, VectorRecommend, Viewer,
+    Vocabulary, WeightedAttribute, WriteKind, WriteOutcome, after_model_write, apply_scope,
+    default_profile, embedding_profile, embedding_profile_names, evaluate_scope, expand,
+    federated_rrf, highlight, make_all_searchable, normalize, paginate, remove_all_from_search,
+    searchable, tokenize, unsearchable, validate_embedding, validate_tags, weighted_rrf,
+    without_syncing_to_search,
 };
 #[cfg(feature = "search-fastembed")]
 pub use search::{
