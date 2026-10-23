@@ -4,6 +4,60 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 4.6.2 - 2026-10-23
+
+### Added
+
+- **`HttpEmbedder` reports the usage its provider sends.** `Embedder` gains
+  `embed_documents_metered` and `embed_query_metered`, which return the vectors
+  with the provider's own `usage` (`prompt_tokens`, `total_tokens`) as a
+  `Metered<T>`; the HTTP provider reads it from the OpenAI-compatible response
+  and sums it across batches, and every other provider reports `None`, so an
+  application that pays per token settles the bill from the provider's count
+  instead of an estimate (#212).
+- **`HttpEmbedder` runs over an application-owned transport.**
+  `HttpEmbedder::with_transport` takes an `EmbeddingTransport`: the application
+  sends each `TransportRequest` (the pinned endpoint, headers, JSON body,
+  timeout and response cap) through its own HTTP client, credential resolver
+  and admission rules and returns a `TransportResponse` with the status,
+  headers and body. The embedding protocol, retries, `Retry-After`, parsing and
+  vector validation stay in the framework, which also refuses a body over the
+  cap whatever the transport did (#213).
+- **`LazyEmbedder` registers a shipped profile and loads the model on first
+  use.** `SearchRegistry::register_embedder` can take a `LazyEmbedder` built
+  from a shipped `ModelProfile` and a loader; the service starts and tests run
+  without downloading weights. The generation coordinator calls the new
+  `Embedder::resolve_profile` before it pins a generation, so the generation
+  still records the loaded model's revision, and a loaded model whose id or
+  dimensions differ from the shipped profile is refused by name (#214).
+- **A search generation an interrupted build left behind can be reclaimed.**
+  `generations::reclaim_generation(index, generation)` and `search:reclaim`
+  release the creation lease of a `creating` generation so the next create
+  call resumes at once instead of waiting the 60-second lease out, publish a
+  `building` generation that was never switched to, and report one that is
+  already current. The caller vouches for exclusive ownership, such as its own
+  migration lock; `SearchEngine::release_creation_lease` is the driver hook,
+  a no-op for drivers without leases (#215).
+- **A Cloudflare CDN driver for static publication.** `CloudflareDriver`
+  (feature `cdn-cloudflare`, on by default and free of new dependencies)
+  serves published pages from an R2 bucket, which is the publication disk
+  through `S3Config` with the R2 endpoint, behind a Worker whose source ships
+  as `CLOUDFLARE_WORKER`: the Worker reads the live version from the
+  publication manifest, maps a page path and its `index.json` to the live
+  objects, restores the published headers from the object's metadata, and
+  passes every unpublished path to the application, so the hostname keeps
+  answering as PUB-006 requires. The driver purges the Cloudflare cache by URL
+  in batches of 100 (or by prefix) and waits the
+  Worker's manifest interval before the purge that follows a switch.
+- **An application's own 5xx page is sent as built.** With debug off, the
+  framework answered every browser 5xx with its minimal status-only view,
+  which also replaced a 503 page the application built on purpose, with its
+  recovery link and `Content-Security-Policy`. `HttpResponse::error_view()`
+  marks such a response as the application's own error view, and the
+  production view leaves it alone, body and headers. Unmarked 5xx responses
+  keep the minimal view; with debug on the development error page still
+  replaces a marked response that carries an error report (#217).
+
 ## 4.6.1 - 2026-10-23
 
 ### Fixed

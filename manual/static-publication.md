@@ -228,7 +228,7 @@ references it; the live version and retired versions inside grace retain theirs.
 
 `CdnDriver` is the single publish-side interface. It switches a version,
 advertises purge capabilities and purges tags, URLs or a prefix. The in-memory
-driver records operations for tests. CloudFront and Cloudflare drivers ship with
+driver records operations for tests. Cloudflare and CloudFront drivers ship with
 the framework. An application can add another provider by implementing this trait.
 
 ```rust
@@ -241,100 +241,19 @@ let publisher = Publisher::new("pages", "build-42", PublishConfig::default())?
     .with_cdn(driver);
 ```
 
-CloudFront uses AWS signed requests with the same credential provider chain
-as the S3 disk. It reads the complete distribution configuration and its ETag,
-changes the selected origin's path, sends `If-Match`, waits for deployment and
-creates invalidations. Static keys can be passed from `S3Config`; otherwise
-the AWS profile or instance role supplies credentials.
+### Enable a CDN driver
 
-The default `cdn-cloudfront` and `cdn-cloudflare` features supply their drivers independently of SQS.
-Register the publication disk and construct the driver from its configuration:
+Both drivers are on by default: `cdn-cloudflare`, which adds no dependency,
+and `cdn-cloudfront`, which shares the AWS signing stack with the S3 disk and
+adds `quick-xml`. Cloudflare with R2 is the recommended setup; R2 charges no
+egress. An application built with `default-features = false` lists the
+feature for the driver it constructs, or
+`suprnova::static_publish::cdn::CloudflareDriver` or `CloudFrontDriver` does
+not exist and the build names the missing item.
 
-```rust
-use std::{sync::Arc, time::Duration};
-use suprnova::{FrameworkError, S3Config, Storage};
-use suprnova::static_publish::{PublishConfig, Publisher};
-use suprnova::static_publish::cdn::CloudFrontDriver;
-
-fn cloudfront(s3: S3Config) -> Result<Publisher, FrameworkError> {
-    Storage::register_s3("pages", s3.clone())?;
-    let driver = CloudFrontDriver::new("E123EXAMPLE", "public-pages", &s3)?
-        .with_response_headers_function(
-            "arn:aws:cloudfront::123456789012:function/suprnova-public-headers",
-        )?;
-    let policy = PublishConfig {
-        timeout: Duration::from_secs(900),
-        ..PublishConfig::default()
-    };
-    Ok(Publisher::new("pages", "build-42", policy)?.with_cdn(Arc::new(driver)))
-}
-```
-
-`public-pages` is the distribution's origin ID. An S3 root of `pages` selects
-`/pages/_pub/<version>`; the constructor refuses ambiguous root segments. The driver preserves other
-origins and configuration fields. A failed switch or manifest write restores
-the previous origin version, including the original distribution configuration
-when the first publication fails. Rollback failures appear in the publication
-error. A custom driver implements `rollback_version` to restore its initial
-configuration as well.
-
-Configure the distribution to map `/about` to `/about.html` and
-`/about/index.json` to `/about.json`. Send fingerprinted asset paths and `/_pub/*` asset paths to the
-asset origin without the page version prefix, retaining the S3 root prefix. An origin-path switch changes
-the prefix; it does not create these viewer-request rewrite rules.
-
-S3 returns custom headers as `x-amz-meta-*`. Those names do not enforce CSP.
-Publish the supplied viewer-response function once. Write its source with:
-
-```rust
-use suprnova::static_publish::cdn::RESPONSE_HEADERS_FUNCTION;
-
-fn main() -> std::io::Result<()> {
-    std::fs::write("public-headers.js", RESPONSE_HEADERS_FUNCTION)
-}
-```
-
-Create and publish the function with the AWS CLI:
-
-```sh
-aws cloudfront create-function --name suprnova-public-headers \
-  --function-config 'Comment=PublicHeaders,Runtime=cloudfront-js-2.0' \
-  --function-code fileb://public-headers.js
-aws cloudfront publish-function --name suprnova-public-headers \
-  --if-match ETAG_FROM_CREATE
-```
-
-Associate its ARN with the `viewer-response` event on each cache behavior
-that uses the public page origin. Pass that ARN to
-`with_response_headers_function`. The driver refuses a switch if any matching
-behavior lacks the function. The function replays every validated recorded header, including Content-Disposition,
-Reporting-Endpoints and HSTS, then removes the metadata headers. Headers the
-viewer-response function cannot carry refuse publication before switching.
-The origin applies HSTS only for trusted HTTPS delivery. It blocks scripts in an HTML object
-that has lost its CSP metadata. This follows the
-[CloudFront response event format](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/functions-event-structure.html).
-
-Storage writes delivery policy headers as metadata: Cache-Control, CSP, Vary,
-HSTS, reporting, content type protection, referrer and permissions policies,
-cross-origin policies and validated application headers. Content-Type is native
-storage metadata. Content-Length, ETag and Content-Encoding belong to the served
-representation; the CloudFront function preserves them after compression.
-
-A local static server or another CDN must likewise serve the manifest's
-`headers` as HTTP headers. A plain S3 website exposes custom headers only as
-metadata; place a header bridge in front of it before serving public documents.
-The Suprnova origin fallback already serves the headers directly. Header restrictions
-follow the [AWS edge function contract](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/edge-function-restrictions-all.html).
-
-Fingerprint classification uses the same default file-stem pattern as StaticFiles:
-a hyphen followed by eight base64url characters with a digit, uppercase letter,
-underscore or hyphen. Names such as `brand-background.svg` remain mutable.
-Select another build convention explicitly:
-
-```rust
-use suprnova::static_publish::{Publisher, PublishConfig};
-let publisher = Publisher::new("pages", "build-42", PublishConfig::default())?
-    .fingerprint(r"\.release$")?;
+```toml
+[dependencies]
+suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.6.2", default-features = false, features = ["filesystem", "cdn-cloudflare"] }
 ```
 
 ### Cloudflare and R2
@@ -445,20 +364,120 @@ manifest selections. Include both waits in the publication timeout; recovery
 realignment can add another switch wait before rendering. Rollback
 has no provider configuration to restore; the durable manifest remains authoritative.
 
-URL purges send full HTTPS URLs in conservative batches of 30. Cloudflare's
-current limits are 100 URLs per request on Free, Pro and Business, and 500 on
-Enterprise, rather than a 30-URL API limit. Single-file rate limits are 800 URLs
-per second on Free, 1500 on Pro and Business, and 3000 on Enterprise.
-Prefix and tag purges are available on all current plans. Enable them explicitly
-with `with_enterprise_purge()?`; the method retains the Enterprise naming convention
-but does not check the account plan. Their request limits are 5 per minute on
-Free, 5 per second on Pro, 10 per second on Business and 50 per second on Enterprise,
-with at most 100 operations per request. Tags are batched accordingly.
+The driver advertises URL and prefix purges, so the publisher purges each
+republished page by URL: full HTTPS URLs in batches of 100, the per-request
+limit on Free, Pro and Business (Enterprise allows 500). Single-file rate
+limits are 800 URLs per second on Free, 1500 on Pro and Business, and 3000 on
+Enterprise. Cloudflare also purges by tag on every plan, but a tag purge clears
+only responses that carried a `Cache-Tag` header, which the shipped Worker does
+not set; an application whose Worker adds the header can call
+`purge(Purge::Tags(...))` itself. Prefix and tag purge requests are limited to
+5 per minute on Free, 5 per second on Pro, 10 per second on Business and 50
+per second on Enterprise, with at most 100 operations per request; tags are
+batched to that.
 Prefix values contain a host and path without a scheme, query or fragment.
 Provider refusals include the HTTP status and first error code and message,
 with the token redacted. See the [purge API](https://developers.cloudflare.com/api/resources/cache/methods/purge/),
 [single-file guide](https://developers.cloudflare.com/cache/how-to/purge-cache/purge-by-single-file/)
 and [current plan limits](https://developers.cloudflare.com/cache/how-to/purge-cache/#availability-and-limits).
+
+### CloudFront
+
+CloudFront uses AWS signed requests with the same credential provider chain
+as the S3 disk. It reads the complete distribution configuration and its ETag,
+changes the selected origin's path, sends `If-Match`, waits for deployment and
+creates invalidations. Static keys can be passed from `S3Config`; otherwise
+the AWS profile or instance role supplies credentials.
+
+The default `cdn-cloudfront` feature supplies the driver independently of SQS.
+Register the publication disk and construct the driver from its configuration:
+
+```rust
+use std::{sync::Arc, time::Duration};
+use suprnova::{FrameworkError, S3Config, Storage};
+use suprnova::static_publish::{PublishConfig, Publisher};
+use suprnova::static_publish::cdn::CloudFrontDriver;
+
+fn cloudfront(s3: S3Config) -> Result<Publisher, FrameworkError> {
+    Storage::register_s3("pages", s3.clone())?;
+    let driver = CloudFrontDriver::new("E123EXAMPLE", "public-pages", &s3)?
+        .with_response_headers_function(
+            "arn:aws:cloudfront::123456789012:function/suprnova-public-headers",
+        )?;
+    let policy = PublishConfig {
+        timeout: Duration::from_secs(900),
+        ..PublishConfig::default()
+    };
+    Ok(Publisher::new("pages", "build-42", policy)?.with_cdn(Arc::new(driver)))
+}
+```
+
+`public-pages` is the distribution's origin ID. An S3 root of `pages` selects
+`/pages/_pub/<version>`; the constructor refuses ambiguous root segments. The driver preserves other
+origins and configuration fields. A failed switch or manifest write restores
+the previous origin version, including the original distribution configuration
+when the first publication fails. Rollback failures appear in the publication
+error. A custom driver implements `rollback_version` to restore its initial
+configuration as well.
+
+Configure the distribution to map `/about` to `/about.html` and
+`/about/index.json` to `/about.json`. Send fingerprinted asset paths and `/_pub/*` asset paths to the
+asset origin without the page version prefix, retaining the S3 root prefix. An origin-path switch changes
+the prefix; it does not create these viewer-request rewrite rules.
+
+S3 returns custom headers as `x-amz-meta-*`. Those names do not enforce CSP.
+Publish the supplied viewer-response function once. Write its source with:
+
+```rust
+use suprnova::static_publish::cdn::RESPONSE_HEADERS_FUNCTION;
+
+fn main() -> std::io::Result<()> {
+    std::fs::write("public-headers.js", RESPONSE_HEADERS_FUNCTION)
+}
+```
+
+Create and publish the function with the AWS CLI:
+
+```sh
+aws cloudfront create-function --name suprnova-public-headers \
+  --function-config 'Comment=PublicHeaders,Runtime=cloudfront-js-2.0' \
+  --function-code fileb://public-headers.js
+aws cloudfront publish-function --name suprnova-public-headers \
+  --if-match ETAG_FROM_CREATE
+```
+
+Associate its ARN with the `viewer-response` event on each cache behavior
+that uses the public page origin. Pass that ARN to
+`with_response_headers_function`. The driver refuses a switch if any matching
+behavior lacks the function. The function replays every validated recorded header, including Content-Disposition,
+Reporting-Endpoints and HSTS, then removes the metadata headers. Headers the
+viewer-response function cannot carry refuse publication before switching.
+The origin applies HSTS only for trusted HTTPS delivery. It blocks scripts in an HTML object
+that has lost its CSP metadata. This follows the
+[CloudFront response event format](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/functions-event-structure.html).
+
+Storage writes delivery policy headers as metadata: Cache-Control, CSP, Vary,
+HSTS, reporting, content type protection, referrer and permissions policies,
+cross-origin policies and validated application headers. Content-Type is native
+storage metadata. Content-Length, ETag and Content-Encoding belong to the served
+representation; the CloudFront function preserves them after compression.
+
+A local static server or another CDN must likewise serve the manifest's
+`headers` as HTTP headers. A plain S3 website exposes custom headers only as
+metadata; place a header bridge in front of it before serving public documents.
+The Suprnova origin fallback already serves the headers directly. Header restrictions
+follow the [AWS edge function contract](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/edge-function-restrictions-all.html).
+
+Fingerprint classification uses the same default file-stem pattern as StaticFiles:
+a hyphen followed by eight base64url characters with a digit, uppercase letter,
+underscore or hyphen. Names such as `brand-background.svg` remain mutable.
+Select another build convention explicitly:
+
+```rust
+use suprnova::static_publish::{Publisher, PublishConfig};
+let publisher = Publisher::new("pages", "build-42", PublishConfig::default())?
+    .fingerprint(r"\.release$")?;
+```
 
 ## CSP and private requests
 

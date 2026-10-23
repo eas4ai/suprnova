@@ -169,6 +169,22 @@ savepoint and check that the callback only describes committed work.
   A URL audit of a page that serves gzip now reports smaller transfer sizes,
   matching a HAR capture of the same visit. Recheck any budget you raised to
   get a URL audit to pass. (after 4.6.1)
+- **4.6.2 adds to the search and error surfaces; nothing to change.** The
+  `Embedder` trait gains `embed_documents_metered`, `embed_query_metered` and
+  `resolve_profile`, and `SearchEngine` gains `release_creation_lease`, all
+  with defaults, so a provider or driver you wrote keeps building. Use
+  `HttpEmbedder::with_transport` to send embedding requests through your own
+  HTTP client, `LazyEmbedder` to register a local model that loads on first
+  use, `generations::reclaim_generation` or `search:reclaim` to resume a
+  generation an interrupted build left behind, `CloudflareDriver` to publish
+  public pages to an R2 bucket behind a Cloudflare custom domain, and
+  `HttpResponse::error_view()` on a 5xx page you build yourself so the
+  production error view sends it as built. (4.6.2)
+- **`cdn-cloudflare` is a default feature.** The Cloudflare driver is on by
+  default beside CloudFront and adds no dependency; Cloudflare with R2 is the
+  recommended CDN. Nothing to change; an application built with
+  `default-features = false` adds `cdn-cloudflare` when it constructs
+  `CloudflareDriver`. (4.6.2)
 
 ## Next
 
