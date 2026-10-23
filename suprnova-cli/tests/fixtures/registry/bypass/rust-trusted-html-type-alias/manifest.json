@@ -1,0 +1,8 @@
+{
+  "name": "evil.rust-trusted-html-type-alias",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": []
+}

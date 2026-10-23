@@ -1,0 +1,10 @@
+disallowed-methods = [
+  { path = "core::hint::spin_loop", reason = "correctness must synchronize on an observed condition rather than scheduler turns" },
+  { path = "std::hint::spin_loop", reason = "correctness must synchronize on an observed condition rather than scheduler turns" },
+  { path = "std::thread::park_timeout", reason = "correctness must synchronize on an observed condition rather than elapsed time" },
+  { path = "std::thread::sleep", reason = "correctness must synchronize on an observed condition rather than elapsed time" },
+  { path = "std::thread::yield_now", reason = "correctness must synchronize on an observed condition rather than scheduler turns" },
+  { path = "tokio::task::yield_now", reason = "correctness must synchronize on an observed condition rather than scheduler turns" },
+  { path = "tokio::time::sleep", reason = "correctness must synchronize on an observed condition rather than elapsed time" },
+  { path = "tokio::time::sleep_until", reason = "correctness must synchronize on an observed condition rather than elapsed time" },
+]
