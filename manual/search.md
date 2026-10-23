@@ -902,6 +902,26 @@ resume. Status recovers interrupted dispatches. SQL and external Qdrant/vector
 services do not share an atomic transaction; retained job identities and
 authoritative reloads support retries after interrupted acknowledgements.
 
+An application with a single migrator can recover an interrupted generation
+while holding its own exclusive migration lock. Call
+`suprnova::search::generations::reclaim_generation(index, &generation).await?`,
+or run `search:reclaim <index> <generation>` under that same ownership.
+The caller vouches that the previous creator has stopped. The framework cannot
+see or acquire the application's lock.
+
+`Reclaimed::LeaseReleased` clears a creating generation's lease immediately;
+call the existing create path with the same generation and settings to resume.
+`Reclaimed::Published` publishes a building generation through the normal fence,
+which still refuses pending jobs. `Reclaimed::AlreadyCurrent` means readers
+already use the generation. Unknown generations and other states fail by name.
+
+With exclusive migration ownership held, recover a known generation through
+your application's console binary:
+
+```sh
+cargo run --bin console -- search:reclaim products catalog_v2
+```
+
 ## Scopes and the viewer
 
 An index scope returns a `Filter` over the filterable fields its
@@ -1240,13 +1260,14 @@ Run commands through your application's console binary, such as
 | `search:delete-index` | `<index>` | Drain pending references and remove index storage. |
 | `search:sync-index-settings` | `[index]` | Sync one or all declared indexes; report classes and build as needed. |
 | `search:reindex` | `<Model\|index>` | Build or resume a generation and publish it after draining. |
+| `search:reclaim` | `<index> <generation>` | Release an abandoned creation lease or publish a built generation under the caller's migration lock. |
 | `search:status` | `[index] [--prune]` | Report generations and server token limits; optionally prune. |
 | `search:analytics` | `[--index name] [--days N]` | Report retained demand, misses, and click positions; default 30 days, bounded by retention. |
 | `search:analytics-prune` | None | Delete expired analytics and prune tombstones. |
 | `search:baseline` | `calibrate` or `run [--engine collection\|sqlite\|postgres\|mysql\|qdrant]` | Replace calibration or measure engines; run defaults to collection and SQLite. |
 
 Model names can be unambiguous short names or fully qualified names.
-`search:index`, `search:delete-index`, settings sync, and status take index names.
+`search:index`, `search:delete-index`, `search:reclaim`, settings sync, and status take index names.
 The full [environment reference](env-vars.md#search) covers queue, embedding,
 Qdrant, analytics, and calibration controls.
 

@@ -102,6 +102,33 @@ async fn delete(args: Vec<String>) -> Result<(), FrameworkError> {
 }
 
 #[command(
+    name = "search:reclaim",
+    description = "Reclaim an interrupted generation while holding exclusive migration ownership"
+)]
+async fn reclaim(args: Vec<String>) -> Result<(), FrameworkError> {
+    if args.len() != 2 {
+        return Err(FrameworkError::bad_request(
+            "search:reclaim requires an index and generation",
+        ));
+    }
+    let (index, _) = parse_args("search:reclaim", &args[..1], true, false, false)?;
+    let generation = super::GenerationId::new(&args[1])?;
+    if let Some(index) = index {
+        let outcome = generations::reclaim_generation(index, &generation).await?;
+        let message = match outcome {
+            generations::Reclaimed::LeaseReleased => "creation lease released; resume the build",
+            generations::Reclaimed::Published => "built generation published",
+            generations::Reclaimed::AlreadyCurrent => "generation already current",
+        };
+        crate::console::line(format!(
+            "search:reclaim {index} {}: {message}",
+            generation.as_str()
+        ));
+    }
+    Ok(())
+}
+
+#[command(
     name = "search:sync-index-settings",
     description = "Apply code-declared search settings"
 )]

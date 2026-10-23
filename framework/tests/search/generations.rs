@@ -182,6 +182,226 @@ use suprnova::{
     },
 };
 
+#[tokio::test]
+async fn reclaim_releases_a_live_creation_lease_and_resumes_partial_storage_immediately() {
+    let _db = database().await;
+    SearchRegistry::isolated(async {
+        let engine = Arc::new(DatabaseSearchEngine::new());
+        SearchRegistry::register_engine("database", engine.clone()).unwrap();
+        let index = "search_command_notes";
+        let descriptor = CommandNote::descriptor();
+        let settings = descriptor.index_settings();
+        let generation = GenerationId::new("reclaimed_creation").unwrap();
+        engine.create_generation(descriptor, &settings, &generation).await.unwrap();
+        DB::connection().unwrap().inner().execute_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "UPDATE search_generations SET state='creating',creation_owner='stopped-creator',creation_expires_at=? WHERE index_name=? AND generation=?",
+            vec![(chrono::Utc::now().timestamp()+3600).into(), index.into(), generation.as_str().into()],
+        )).await.unwrap();
+        DB::unprepared("DROP TABLE search_search_command_notes_reclaimed_creation_vocab").await.unwrap();
+        let error = engine.create_generation(descriptor, &settings, &generation).await.unwrap_err();
+        assert!(error.to_string().contains("creation lease is still active"), "{error}");
+
+        assert_eq!(
+            generations::reclaim_generation(index, &generation).await.unwrap(),
+            generations::Reclaimed::LeaseReleased,
+        );
+        assert_eq!(DB::scalar::<i64>(
+            "SELECT COUNT(*) FROM search_generations WHERE index_name=? AND generation=? AND state='creating' AND creation_owner IS NULL AND creation_expires_at IS NULL",
+            vec![index.into(), generation.as_str().into()],
+        ).await.unwrap(), 1);
+        let run = console::test(["search:reclaim", index, generation.as_str()]).run().await;
+        run.assert_successful();
+        assert!(run.output().contains("creation lease released"));
+
+        engine.create_generation(descriptor, &settings, &generation).await.unwrap();
+        assert_eq!(DB::scalar::<i64>(
+            "SELECT COUNT(*) FROM search_generations WHERE index_name=? AND generation=? AND state='building' AND creation_owner IS NULL AND creation_expires_at IS NULL",
+            vec![index.into(), generation.as_str().into()],
+        ).await.unwrap(), 1);
+        assert_eq!(engine.current_generation(index).await.unwrap(), None);
+        engine.release_creation_lease(descriptor, &generation).await.unwrap();
+        assert!(engine.generation_states(index).await.unwrap().contains(&(generation, "building".into())));
+    }).await;
+}
+
+#[tokio::test]
+async fn reclaim_publishes_a_built_generation_through_the_pending_fence_and_readers_switch() {
+    let _db = database().await;
+    SearchConfig::scope(
+        SearchConfig {
+            queue: false,
+            ..Default::default()
+        },
+        SearchRegistry::isolated(async {
+            let engine = Arc::new(DatabaseSearchEngine::new());
+            SearchRegistry::register_engine("database", engine.clone()).unwrap();
+            let index = "search_command_notes";
+            let descriptor = CommandNote::descriptor();
+            generations::create_index(index).await.unwrap();
+            let old = SearchRegistry::generation_for(index).await.unwrap();
+            let generation = GenerationId::new("reclaimed_build").unwrap();
+            engine
+                .create_generation(descriptor, &descriptor.index_settings(), &generation)
+                .await
+                .unwrap();
+            let mut document = super::database_support::document(
+                descriptor,
+                "1",
+                "Recovered publication",
+                "unused",
+            );
+            document
+                .document
+                .attributes
+                .retain(|name, _| name == "title");
+            engine
+                .index(descriptor, &generation, &[document])
+                .await
+                .unwrap();
+            assert_eq!(
+                CommandNote::search("Recovered")
+                    .get()
+                    .await
+                    .unwrap()
+                    .total
+                    .value(),
+                0
+            );
+            let keys = [("1".into(), 1)];
+            generations::reserve(index, &keys, Some(&generation))
+                .await
+                .unwrap();
+            let error = generations::reclaim_generation(index, &generation)
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("pending jobs prevent generation publication"),
+                "{error}"
+            );
+            assert_eq!(SearchRegistry::generation_for(index).await.unwrap(), old);
+            generations::complete(index, &generation, &keys)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                generations::reclaim_generation(index, &generation)
+                    .await
+                    .unwrap(),
+                generations::Reclaimed::Published,
+            );
+            assert_eq!(
+                SearchRegistry::generation_for(index).await.unwrap(),
+                generation
+            );
+            assert_eq!(
+                CommandNote::search("Recovered")
+                    .get()
+                    .await
+                    .unwrap()
+                    .total
+                    .value(),
+                1
+            );
+            assert_eq!(
+                generations::reclaim_generation(index, &generation)
+                    .await
+                    .unwrap(),
+                generations::Reclaimed::AlreadyCurrent,
+            );
+            engine
+                .release_creation_lease(descriptor, &generation)
+                .await
+                .unwrap();
+            let run = console::test(["search:reclaim", index, generation.as_str()])
+                .run()
+                .await;
+            run.assert_successful();
+            assert!(run.output().contains("generation already current"));
+
+            let error = generations::reclaim_generation(index, &old)
+                .await
+                .unwrap_err()
+                .to_string();
+            for context in [index, old.as_str(), "retired"] {
+                assert!(error.contains(context), "{error}");
+            }
+            DB::connection().unwrap().inner().execute_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "UPDATE search_generations SET state='active' WHERE index_name=? AND generation=?",
+            vec![index.into(), generation.as_str().into()],
+        )).await.unwrap();
+            assert_eq!(
+                generations::reclaim_generation(index, &generation)
+                    .await
+                    .unwrap(),
+                generations::Reclaimed::AlreadyCurrent,
+            );
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn reclaim_command_publishes_an_initial_build_and_unknown_generations_fail_by_name() {
+    let _db = database().await;
+    SearchRegistry::isolated(async {
+        let engine = Arc::new(DatabaseSearchEngine::new());
+        SearchRegistry::register_engine("database", engine.clone()).unwrap();
+        let index = "search_command_notes";
+        let descriptor = CommandNote::descriptor();
+        let generation = GenerationId::new("initial_build").unwrap();
+        engine
+            .create_generation(descriptor, &descriptor.index_settings(), &generation)
+            .await
+            .unwrap();
+        let run = console::test(["search:reclaim", index, generation.as_str()])
+            .run()
+            .await;
+        run.assert_successful();
+        assert!(run.output().contains("built generation published"));
+        assert_eq!(
+            engine.current_generation(index).await.unwrap(),
+            Some(generation)
+        );
+
+        let missing = GenerationId::new("missing_generation").unwrap();
+        let error = generations::reclaim_generation(index, &missing)
+            .await
+            .unwrap_err()
+            .to_string();
+        for context in [index, missing.as_str(), "unknown"] {
+            assert!(error.contains(context), "{error}");
+        }
+        let error = engine
+            .release_creation_lease(descriptor, &missing)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(index), "{error}");
+        assert!(error.contains(missing.as_str()), "{error}");
+
+        for args in [
+            vec!["search:reclaim"],
+            vec!["search:reclaim", index],
+            vec!["search:reclaim", index, "one", "two"],
+        ] {
+            let run = console::test(args).run().await;
+            run.assert_failed()
+                .assert_errors_contain("requires an index and generation");
+        }
+        let run = console::test(["search:reclaim", index, "invalid-name"])
+            .run()
+            .await;
+        run.assert_failed()
+            .assert_errors_contain("search generation invalid-name");
+    })
+    .await;
+}
+
 async fn pending_count() -> i64 {
     DB::scalar::<i64>(
         "SELECT COUNT(*) FROM search_jobs_pending WHERE index_name = ? AND completed = FALSE",

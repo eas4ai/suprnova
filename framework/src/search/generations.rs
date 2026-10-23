@@ -1,5 +1,7 @@
 //! Publication and pending references share a database fence across queue drivers.
-use super::{GenerationId, IndexSettings, SearchConfig, SearchRegistry, SettingsChange};
+use super::{
+    GenerationId, IndexSettings, SearchConfig, SearchEngine, SearchRegistry, SettingsChange,
+};
 use crate::{DB, FrameworkError, console};
 use sea_orm::{
     ConnectionTrait, DatabaseTransaction, DbBackend, QueryResult, Statement, TransactionTrait,
@@ -473,6 +475,71 @@ async fn publish(
         })).await
     }
 }
+/// Recovery reports the next step without exposing coordinator internals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reclaimed {
+    /// The abandoned creator is fenced out so the existing create path can resume now.
+    LeaseReleased,
+    /// The built generation was published so readers can use it.
+    Published,
+    /// The generation already serves readers so recovery needs no further work.
+    AlreadyCurrent,
+}
+
+/// Reclaim an interrupted generation while the caller holds exclusive ownership.
+///
+/// The caller vouches that its own migration lock excludes other creators. The
+/// framework cannot see that lock and takes the caller at its word. A creating
+/// generation has its lease released for the existing create path to resume;
+/// a building generation is published through the normal publication fence.
+pub async fn reclaim_generation(
+    index: &str,
+    generation: &GenerationId,
+) -> Result<Reclaimed, FrameworkError> {
+    super::registry::in_index_connection(index, reclaim_generation_inner(index, generation)).await
+}
+
+async fn reclaim_generation_inner(
+    index: &str,
+    generation: &GenerationId,
+) -> Result<Reclaimed, FrameworkError> {
+    let engine = SearchRegistry::engine_for(index)?;
+    let state = engine
+        .generation_states(index)
+        .await?
+        .into_iter()
+        .find(|(id, _)| id == generation)
+        .map(|(_, state)| state)
+        .unwrap_or_else(|| "unknown".into());
+    match state.as_str() {
+        "creating" => {
+            let descriptor = (SearchRegistry::by_index(index)?.descriptor)();
+            if engine.name() == "database" {
+                // Registry handles do not forward creation leases. The outer index
+                // connection scope routes this metadata-only database operation.
+                super::DatabaseSearchEngine::new()
+                    .release_creation_lease(descriptor, generation)
+                    .await?;
+            } else {
+                engine
+                    .release_creation_lease(descriptor, generation)
+                    .await?;
+            }
+            Ok(Reclaimed::LeaseReleased)
+        }
+        "building" => {
+            let current = engine.current_generation(index).await?;
+            publish(index, current, generation.clone()).await?;
+            Ok(Reclaimed::Published)
+        }
+        "current" | "active" => Ok(Reclaimed::AlreadyCurrent),
+        _ => Err(FrameworkError::param(format!(
+            "search index '{index}' generation '{}': state '{state}' cannot be reclaimed",
+            generation.as_str()
+        ))),
+    }
+}
+
 /// Initialize settings explicitly so a normal model write never performs hidden DDL.
 pub async fn create_index(index: &str) -> Result<(), FrameworkError> {
     super::registry::in_index_connection(index, create_index_inner(index)).await
