@@ -868,6 +868,74 @@
     "If the sealed successor would make even the smallest follow-up request exceed the endpoint's `max_body_bytes`, the outcome is `too_large` with `isError: true`.": {
       "class": "noise",
       "evidence": "Not a claim about the code's state in time: the marker is ordinary English ('lands in', 'follow-up request', 'currently tracked', 'not yet exist'), a protocol or AAD version name (v1/v2), or a claim about Laravel or the reader's own timeline."
+    },
+    "PAGE_BUDGET_ASSET_BYTES": {
+      "class": "verified",
+      "evidence": "Read by PageBudget::from_env (framework/src/page_budget/mod.rs:346-360) through its field! macro, which the env scan does not recognise as an env read; budget:audit applies it."
+    },
+    "PAGE_BUDGET_FINGERPRINT_PATTERN": {
+      "class": "verified",
+      "evidence": "Read by PageBudget::from_env (framework/src/page_budget/mod.rs:346-360) through its field! macro, which the env scan does not recognise as an env read; budget:audit applies it."
+    },
+    "PAGE_BUDGET_FONT_BYTES": {
+      "class": "verified",
+      "evidence": "Read by PageBudget::from_env (framework/src/page_budget/mod.rs:346-360) through its field! macro, which the env scan does not recognise as an env read; budget:audit applies it."
+    },
+    "PAGE_BUDGET_FORBID_ASSET_REQUEST_COOKIE": {
+      "class": "verified",
+      "evidence": "Read by PageBudget::from_env (framework/src/page_budget/mod.rs:346-360) through its field! macro, which the env scan does not recognise as an env read; budget:audit applies it."
+    },
+    "PAGE_BUDGET_FORBID_ASSET_SET_COOKIE": {
+      "class": "verified",
+      "evidence": "Read by PageBudget::from_env (framework/src/page_budget/mod.rs:346-360) through its field! macro, which the env scan does not recognise as an env read; budget:audit applies it."
+    },
+    "PAGE_BUDGET_FORBID_FIRST_REDIRECT": {
+      "class": "verified",
+      "evidence": "Read by PageBudget::from_env (framework/src/page_budget/mod.rs:346-360) through its field! macro, which the env scan does not recognise as an env read; budget:audit applies it."
+    },
+    "PAGE_BUDGET_MAX_DISCOVERY_TOKENS": {
+      "class": "verified",
+      "evidence": "Read by PageBudget::from_env (framework/src/page_budget/mod.rs:346-360) through its field! macro, which the env scan does not recognise as an env read; budget:audit applies it."
+    },
+    "PAGE_BUDGET_MAX_RESOURCES": {
+      "class": "verified",
+      "evidence": "Read by PageBudget::from_env (framework/src/page_budget/mod.rs:346-360) through its field! macro, which the env scan does not recognise as an env read; budget:audit applies it."
+    },
+    "PAGE_BUDGET_MAX_RESPONSE_BYTES": {
+      "class": "verified",
+      "evidence": "Read by PageBudget::from_env (framework/src/page_budget/mod.rs:346-360) through its field! macro, which the env scan does not recognise as an env read; budget:audit applies it."
+    },
+    "PAGE_BUDGET_PNG_MARGIN_PERCENT": {
+      "class": "verified",
+      "evidence": "Read by PageBudget::from_env (framework/src/page_budget/mod.rs:346-360) through its field! macro, which the env scan does not recognise as an env read; budget:audit applies it."
+    },
+    "PAGE_BUDGET_RASTER_THRESHOLD_BYTES": {
+      "class": "verified",
+      "evidence": "Read by PageBudget::from_env (framework/src/page_budget/mod.rs:346-360) through its field! macro, which the env scan does not recognise as an env read; budget:audit applies it."
+    },
+    "PAGE_BUDGET_REQUIRE_COOKIE_INDEPENDENT": {
+      "class": "verified",
+      "evidence": "Read by PageBudget::from_env (framework/src/page_budget/mod.rs:346-360) through its field! macro, which the env scan does not recognise as an env read; budget:audit applies it."
+    },
+    "PAGE_BUDGET_REQUIRE_IMMUTABLE": {
+      "class": "verified",
+      "evidence": "Read by PageBudget::from_env (framework/src/page_budget/mod.rs:346-360) through its field! macro, which the env scan does not recognise as an env read; budget:audit applies it."
+    },
+    "PAGE_BUDGET_TOTAL_BYTES": {
+      "class": "verified",
+      "evidence": "Read by PageBudget::from_env (framework/src/page_budget/mod.rs:346-360) through its field! macro, which the env scan does not recognise as an env read; budget:audit applies it."
+    },
+    "console event-sourcing:replay --from": {
+      "class": "verified",
+      "evidence": "A real event-sourcing:replay argument: framework/src/event_sourcing/commands.rs:15-20 parses `--projector` and `--from` from the raw argument list, which the clap flag scan cannot see."
+    },
+    "console event-sourcing:replay --projector": {
+      "class": "verified",
+      "evidence": "A real event-sourcing:replay argument: framework/src/event_sourcing/commands.rs:15-20 parses `--projector` and `--from` from the raw argument list, which the clap flag scan cannot see."
+    },
+    "The extra revision keeps regeneration from overwriting the currently live page.": {
+      "class": "noise",
+      "evidence": "Not a claim about the code's state in time: 'currently live page' names the publication that is live at regeneration time, ordinary English for the live manifest's revision."
     }
   }
 }

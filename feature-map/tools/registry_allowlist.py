@@ -257,6 +257,10 @@ ITEMS = {
     "suprnova::clear_middleware_alias": REFUSE,
     "suprnova::clear_middleware_group": REFUSE,
     "suprnova::middleware::clear_middleware_priority_for_test": REFUSE,
+    # Test hooks that move a broadcast hub's topic clock or pause its pending
+    # flush change signal delivery for every page on the hub.
+    "suprnova::InMemoryBroadcastHub::set_live_topic_clock_for_test": REFUSE,
+    "suprnova::broadcasting::fanout::SeaStreamerBroadcastHub::pause_live_topic_flush_for_test": REFUSE,
     "suprnova::append_middleware_priority": REFUSE,
     "suprnova::prepend_middleware_priority": REFUSE,
     "suprnova::register_terminable": REFUSE,
