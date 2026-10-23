@@ -479,7 +479,7 @@ impl PageBudget {
                     "2xx without cookies",
                 );
             }
-            if false && self.forbid_asset_set_cookie && resource.header("set-cookie").is_some() {
+            if self.forbid_asset_set_cookie && resource.header("set-cookie").is_some() {
                 audit.fail(
                     url,
                     "asset-set-cookie",
