@@ -459,7 +459,11 @@ An opaque one is therefore written lossy.
 
 Static publication prepares relative images, absolute images on the application's
 public origin and raster data URLs. Third-party images are neither transcoded nor
-published. See [Static publication](static-publication.md#prepare-images) for preparation
+published. Linked stylesheets are build outputs published byte for byte; their images
+belong to the build, including small images Vite inlines below `assetsInlineLimit`.
+Raster data URLs and same-origin raster `url(...)` references in document style
+attributes or `<style>` elements refuse publication; move the image into an
+`<img>`, a `<picture>` or a stylesheet file. See [Static publication](static-publication.md#prepare-images) for preparation
 and refusal behavior.
 
 ### Lossless PNG recompression

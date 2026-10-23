@@ -429,6 +429,11 @@ Raster data URLs are decoded and published as metadata-stripped objects, with
 modern variants and a rewritten fallback just like local images. An invalid
 raster data URL refuses publication with the route and cause; the origin keeps
 serving the page. Third-party images are neither transcoded nor published.
+Linked stylesheets are build outputs published byte for byte; their images belong
+to the build, including small images Vite inlines below `assetsInlineLimit`.
+Raster data URLs and same-origin raster `url(...)` references in document style
+attributes or `<style>` elements refuse publication with the route and element;
+move the image into an `<img>`, a `<picture>` or a stylesheet file.
 Non-raster data URLs stay unchanged. SVG and ICO files
 keep their existing representation. See [Images](images.md).
 

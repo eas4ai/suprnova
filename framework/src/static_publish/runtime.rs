@@ -338,6 +338,8 @@ impl StaticPublication {
     }
     async fn prepare(&self, page: &mut PageObject) -> Result<(), FrameworkError> {
         let source = crate::lock::read(&self.source, "publication asset source")?.clone();
+        super::assets::validate_document_css(&page.html, &page.path)
+            .map_err(|failure| error(format!("route {}: {failure}", page.path)))?;
         let html_inventory = super::assets::referenced_assets(&page.html, &page.path)?;
         let vite_inventory = if let Some(source) = &source {
             super::assets::vite_assets(source, "assets/.vite/manifest.json", &html_inventory)

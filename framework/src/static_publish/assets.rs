@@ -147,6 +147,92 @@ pub(crate) fn referenced_assets(
     Ok(paths)
 }
 
+// Document CSS cannot safely share the HTML image rewrite pipeline.
+pub(super) fn validate_document_css(html: &[u8], document: &str) -> Result<(), FrameworkError> {
+    let html = std::str::from_utf8(html).map_err(|error| {
+        FrameworkError::param(format!("publication HTML is not UTF-8: {error}"))
+    })?;
+    let mut style_start = None;
+    for (start, end, tag) in tags(html) {
+        if tag.kind == TagKind::StartTag {
+            if let Some(css) = attribute(&tag, "style") {
+                validate_css(css, document, &format!("<{}> style attribute", tag.name))?;
+            }
+            if tag.name == "style" {
+                style_start = Some(end);
+            }
+        } else if tag.name == "style"
+            && let Some(body) = style_start.take()
+        {
+            validate_css(&html[body..start], document, "<style> element")?;
+        }
+    }
+    if let Some(body) = style_start {
+        validate_css(&html[body..], document, "<style> element")?;
+    }
+    Ok(())
+}
+
+fn validate_css(css: &str, document: &str, element: &str) -> Result<(), FrameworkError> {
+    let raster = css_has_raster(&mut cssparser::Parser::new(css), document, false, 0)
+        .map_err(|failure| FrameworkError::param(format!("{element}: {failure}")))?;
+    if raster {
+        return Err(FrameworkError::param(format!(
+            "{element} contains a raster image in document CSS; move the image into an <img>, a <picture> or a stylesheet file"
+        )));
+    }
+    Ok(())
+}
+
+fn css_raster_url(value: &str, document: &str) -> Result<bool, FrameworkError> {
+    if raster_data_mime(value).is_some() {
+        return Ok(true);
+    }
+    Ok(local_path(value, document)?.is_some_and(|path| is_raster(&path)))
+}
+
+fn css_has_raster(
+    parser: &mut cssparser::Parser<'_>,
+    document: &str,
+    url_argument: bool,
+    depth: usize,
+) -> Result<bool, FrameworkError> {
+    use cssparser::{ParseError, ParseErrorKind, Token};
+    if depth > 64 {
+        return Err(FrameworkError::param(
+            "document CSS nesting exceeds 64 levels",
+        ));
+    }
+    let mut raster = false;
+    while let Ok(token) = parser.next_including_whitespace_and_comments().cloned() {
+        let nested_url = match token {
+            Token::UnquotedUrl(value) => {
+                raster |= css_raster_url(&value, document)?;
+                continue;
+            }
+            Token::QuotedString(value) if url_argument => {
+                raster |= css_raster_url(&value, document)?;
+                continue;
+            }
+            Token::Function(name) => {
+                name.eq_ignore_ascii_case("url")
+                    || name.eq_ignore_ascii_case("image-set")
+                    || name.eq_ignore_ascii_case("-webkit-image-set")
+            }
+            Token::CurlyBracketBlock | Token::ParenthesisBlock | Token::SquareBracketBlock => false,
+            _ => continue,
+        };
+        let nested: Result<bool, ParseError<FrameworkError>> = parser.parse_nested_block(|child| {
+            css_has_raster(child, document, nested_url, depth + 1).map_err(ParseError::custom)
+        });
+        raster |= nested.map_err(|error| match error.kind {
+            ParseErrorKind::Custom(failure) => failure,
+            _ => FrameworkError::param("document CSS nested block could not be parsed"),
+        })?;
+    }
+    Ok(raster)
+}
+
 pub(super) fn has_raster_data(html: &[u8]) -> Result<bool, FrameworkError> {
     let html = std::str::from_utf8(html).map_err(|error| {
         FrameworkError::param(format!("publication HTML is not UTF-8: {error}"))
