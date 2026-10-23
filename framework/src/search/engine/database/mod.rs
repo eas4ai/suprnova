@@ -1392,6 +1392,29 @@ impl SearchEngine for DatabaseSearchEngine {
         Ok(())
         })).await
     }
+    async fn release_creation_lease(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+    ) -> Result<(), FrameworkError> {
+        let dialect = self.dialect().await?;
+        let conn = DB::connection()?;
+        crate::render_cache::write_side_open(false).await?;
+        let tx = conn.inner().begin().await.map_err(db_error)?;
+        Self::lock(&tx, dialect, index.name, "__control").await?;
+        Self::metadata(&tx, dialect, index.name, generation.as_str()).await?;
+        let mut sql = Sql::new(dialect);
+        let i = sql.bind(index.name.to_owned());
+        let g = sql.bind(generation.as_str().to_owned());
+        execute(
+            &tx,
+            format!("UPDATE search_generations SET creation_owner=NULL,creation_expires_at=NULL WHERE index_name={i} AND generation={g} AND state='creating'"),
+            sql,
+        )
+        .await?;
+        tx.commit().await.map_err(db_error)
+    }
+
     async fn switch_generation(
         &self,
         index: &IndexDescriptor,

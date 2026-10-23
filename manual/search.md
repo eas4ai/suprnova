@@ -428,6 +428,29 @@ build script download the ONNX Runtime library at compile time. Your build
 machine needs network access for that feature. The default build downloads
 nothing.
 
+Register a `LazyEmbedder` with a shipped profile and a loader to start services
+and run tests without downloading weights. Registration and `profile()` use the
+shipped metadata. The first embedding call or `resolve_profile()` loads the model
+once; a failed load can be retried. Before creating a generation, the coordinator
+resolves the profile and records the loaded model's `id@revision` and dimensions.
+The loaded id and dimensions must match the shipped profile.
+
+This example runs without a model download; replace the fake loader with your
+local inference loader in application bootstrap:
+
+```rust
+use std::sync::Arc;
+use suprnova::{Embedder, FakeEmbedder, FrameworkError, LazyEmbedder, SearchRegistry};
+
+fn register_local_model() -> Result<(), FrameworkError> {
+    let shipped = FakeEmbedder::new(16)?.profile().clone();
+    let lazy = LazyEmbedder::new(shipped, || async {
+        Ok(Arc::new(FakeEmbedder::new(16)?) as Arc<dyn Embedder>)
+    })?;
+    SearchRegistry::register_embedder("local", Arc::new(lazy))
+}
+```
+
 The default local model is `hf:onnx-community/embeddinggemma-2-ONNX`,
 EmbeddingGemma 2 text, fp32, 768 dimensions, mean pooling, L2 normalization,
 and an 8192-token context. Its model artifacts total about 1.04 GiB
@@ -580,11 +603,87 @@ document template. `SEARCH_EMBED_QUERY_PREFIX` and
 Known models use their shipped profile. You can supply an explicit profile
 through `HttpEmbedder::with_profile`.
 
+Call `embed_documents_metered` or `embed_query_metered` to receive the vectors
+in `.value` and the provider's optional `prompt_tokens` and `total_tokens` in
+`.usage`. Missing or malformed usage is `None`. Document calls sum the usage
+reported across their batches, keeping fields the provider sends on only some
+batches. No reported usage means `None`, never an estimate.
+
+```rust
+use suprnova::{Embedder, FrameworkError, HttpEmbedder};
+
+#[tokio::main]
+async fn main() -> Result<(), FrameworkError> {
+    let embedder = HttpEmbedder::from_env().await?;
+    let result = embedder.embed_query_metered("rust search").await?;
+    println!("Provider usage: {:?}", result.usage);
+    Ok(())
+}
+```
+
+`EmbeddingUsageReported` carries the model, operation, input count and usage
+for each embedding request that reports it. Vector-only calls emit it too,
+so a listener can bill the framework's own indexing and search calls. Register
+your ledger function during bootstrap; listener failures log a warning and
+leave the embedding successful.
+
+```rust
+use std::sync::Arc;
+use suprnova::{EmbeddingUsageReported, EventFacade, FrameworkError, Listener};
+
+struct BillEmbeddings {
+    settle: fn(&EmbeddingUsageReported, u64) -> Result<(), FrameworkError>,
+}
+
+#[suprnova::async_trait]
+impl Listener<EmbeddingUsageReported> for BillEmbeddings {
+    async fn handle(&self, event: &EmbeddingUsageReported) -> Result<(), FrameworkError> {
+        if let Some(tokens) = event.usage.total_tokens {
+            (self.settle)(event, tokens)?;
+        }
+        Ok(())
+    }
+}
+
+async fn register_embedding_billing(
+    settle: fn(&EmbeddingUsageReported, u64) -> Result<(), FrameworkError>,
+) {
+    EventFacade::listen::<EmbeddingUsageReported, _>(Arc::new(BillEmbeddings { settle })).await;
+}
+```
+
+Use `HttpEmbedder::with_transport(config, profile, transport)` when the
+application owns HTTP admission, credentials, deadlines or kill switches.
+The transport is an `Arc<dyn EmbeddingTransport>`. Its `send` method receives
+a `TransportRequest` with the method, pinned URL, headers, optional JSON body,
+timeout and `max_response_bytes`, and returns a `TransportResponse` with the
+status, headers and body bytes. Configured bearer headers are marked sensitive;
+with no `SEARCH_EMBED_API_KEY`, the transport can resolve its own credentials.
+Endpoint validation still applies. For example, pass your transport at boot:
+
+```rust
+use std::sync::Arc;
+use suprnova::{EmbeddingTransport, FrameworkError, HttpEmbedder, HttpEmbedderConfig};
+
+async fn application_embedder(
+    config: HttpEmbedderConfig,
+    transport: Arc<dyn EmbeddingTransport>,
+) -> Result<HttpEmbedder, FrameworkError> {
+    HttpEmbedder::with_transport(config, None, transport).await
+}
+```
+
+Preparation, retries, `Retry-After`, status checks, JSON parsing, index validation
+and dimension probing stay in the framework. The transport must enforce the
+deadline and cap the body while streaming. The embedder checks the returned
+body size again before parsing, even when an application transport ignores the
+cap. The existing constructors use the default reqwest transport.
+
 The destination comes from deployment configuration, never a request or
 tenant. HTTPS is required except for `localhost`, `127.0.0.1`, and `::1`.
-URLs with credentials, query strings, or fragments are rejected. No redirects
-are followed. `SEARCH_EMBED_API_KEY` is a bearer key sent only to the pinned
-destination. Defaults are 64 inputs per batch, a 30-second timeout including
+URLs with credentials, query strings, or fragments are rejected. The default
+transport follows no redirects. `SEARCH_EMBED_API_KEY` is a bearer key sent only
+to the pinned destination. Defaults are 64 inputs per batch, a 30-second timeout including
 the response body, 16 MiB per response, and three additional attempts for 429
 or 5xx only. Retries are capped at 16; `Retry-After` is bounded. HTTP uses no
 provider-specific fields. Hosted models with published limits are built in:
@@ -802,6 +901,26 @@ can time out a build while the current generation remains readable; rerun to
 resume. Status recovers interrupted dispatches. SQL and external Qdrant/vector
 services do not share an atomic transaction; retained job identities and
 authoritative reloads support retries after interrupted acknowledgements.
+
+An application with a single migrator can recover an interrupted generation
+while holding its own exclusive migration lock. Call
+`suprnova::search::generations::reclaim_generation(index, &generation).await?`,
+or run `search:reclaim <index> <generation>` under that same ownership.
+The caller vouches that the previous creator has stopped. The framework cannot
+see or acquire the application's lock.
+
+`Reclaimed::LeaseReleased` clears a creating generation's lease immediately;
+call the existing create path with the same generation and settings to resume.
+`Reclaimed::Published` publishes a building generation through the normal fence,
+which still refuses pending jobs. `Reclaimed::AlreadyCurrent` means readers
+already use the generation. Unknown generations and other states fail by name.
+
+With exclusive migration ownership held, recover a known generation through
+your application's console binary:
+
+```sh
+cargo run --bin console -- search:reclaim products catalog_v2
+```
 
 ## Scopes and the viewer
 
@@ -1141,13 +1260,14 @@ Run commands through your application's console binary, such as
 | `search:delete-index` | `<index>` | Drain pending references and remove index storage. |
 | `search:sync-index-settings` | `[index]` | Sync one or all declared indexes; report classes and build as needed. |
 | `search:reindex` | `<Model\|index>` | Build or resume a generation and publish it after draining. |
+| `search:reclaim` | `<index> <generation>` | Release an abandoned creation lease or publish a built generation under the caller's migration lock. |
 | `search:status` | `[index] [--prune]` | Report generations and server token limits; optionally prune. |
 | `search:analytics` | `[--index name] [--days N]` | Report retained demand, misses, and click positions; default 30 days, bounded by retention. |
 | `search:analytics-prune` | None | Delete expired analytics and prune tombstones. |
 | `search:baseline` | `calibrate` or `run [--engine collection\|sqlite\|postgres\|mysql\|qdrant]` | Replace calibration or measure engines; run defaults to collection and SQLite. |
 
 Model names can be unambiguous short names or fully qualified names.
-`search:index`, `search:delete-index`, settings sync, and status take index names.
+`search:index`, `search:delete-index`, `search:reclaim`, settings sync, and status take index names.
 The full [environment reference](env-vars.md#search) covers queue, embedding,
 Qdrant, analytics, and calibration controls.
 

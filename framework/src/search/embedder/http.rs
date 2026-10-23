@@ -1,11 +1,15 @@
 //! A deployment-owned destination keeps semantic requests and credentials on one host.
 
-use super::{EmbedInput, Embedder, Embedding, ModelProfile, Pooling, profiles, validate_embedding};
+use super::{
+    EmbedInput, Embedder, Embedding, EmbeddingOperation, EmbeddingUsage, EmbeddingUsageReported,
+    Metered, ModelProfile, Pooling, profiles, validate_embedding,
+};
 use crate::{FrameworkError, config::Config};
 use async_trait::async_trait;
+use http::HeaderMap;
 use reqwest::{
-    Client, Url,
-    header::{AUTHORIZATION, HeaderValue},
+    Method, Url,
+    header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -14,6 +18,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokenizers::Tokenizer;
+
+mod transport;
+use transport::ReqwestTransport;
+pub use transport::{EmbeddingTransport, TransportRequest, TransportResponse};
 
 /// Resolve deployment settings once, before any request or tenant can supply a destination.
 /// This type deliberately has no Debug implementation because it contains a credential.
@@ -175,10 +183,10 @@ pub(in crate::search) fn parse<T: std::str::FromStr>(
     })
 }
 
-/// Cloning the provider shares a connection pool and an immutable model contract.
+/// Cloning the provider shares its transport and an immutable model contract.
 #[derive(Clone)]
 pub struct HttpEmbedder {
-    client: Client,
+    transport: Arc<dyn EmbeddingTransport>,
     endpoint: Url,
     authorization: Option<HeaderValue>,
     config: HttpEmbedderConfig,
@@ -201,6 +209,19 @@ struct WireRequest<'a> {
 #[derive(Deserialize)]
 struct WireResponse {
     data: Vec<WireVector>,
+    #[serde(default, deserialize_with = "deserialize_usage")]
+    usage: Option<EmbeddingUsage>,
+}
+// Invalid optional accounting must not discard otherwise usable embeddings.
+fn deserialize_usage<'de, D>(deserializer: D) -> Result<Option<EmbeddingUsage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if !value.is_object() {
+        return Ok(None);
+    }
+    Ok(serde_json::from_value(value).ok())
 }
 #[derive(Deserialize)]
 struct WireVector {
@@ -223,6 +244,17 @@ impl HttpEmbedder {
         config: HttpEmbedderConfig,
         profile: Option<ModelProfile>,
     ) -> Result<Self, FrameworkError> {
+        Self::with_transport(config, profile, Arc::new(ReqwestTransport::new()?)).await
+    }
+    /// Use application HTTP policy while keeping embedding preparation and validation here.
+    /// The transport receives only URLs derived from the validated, pinned endpoint;
+    /// HTTPS except loopback and the ban on URL credentials still apply. The application
+    /// decides credentials, with a sensitive bearer header already set when configured.
+    pub async fn with_transport(
+        config: HttpEmbedderConfig,
+        profile: Option<ModelProfile>,
+        transport: Arc<dyn EmbeddingTransport>,
+    ) -> Result<Self, FrameworkError> {
         let endpoint = config.validate()?;
         let mut authorization = config
             .api_key
@@ -236,7 +268,6 @@ impl HttpEmbedder {
         if let Some(value) = &mut authorization {
             value.set_sensitive(true);
         }
-        let client = crate::http_client::client_for(true, Some(Duration::from_secs(10)))?;
         let (tokenizer, special_tokens) = match &config.tokenizer {
             Some(path) => {
                 let (tokenizer, special_tokens) = load_tokenizer(path)?;
@@ -257,7 +288,7 @@ impl HttpEmbedder {
             )
         });
         let mut provider = Self {
-            client,
+            transport,
             endpoint,
             authorization,
             native_profile: profile.clone(),
@@ -283,7 +314,7 @@ impl HttpEmbedder {
             provider.profile.validate()?;
             if provider.config.dimensions.is_none() {
                 let data = provider.request(&["probe".into()]).await?;
-                let vector = data.into_iter().next().ok_or_else(|| {
+                let vector = data.value.into_iter().next().ok_or_else(|| {
                     FrameworkError::param("SEARCH_EMBED_MODEL dimension probe returned no vector")
                 })?;
                 provider.profile.dimensions = vector.len();
@@ -385,22 +416,9 @@ impl HttpEmbedder {
         for list in ["embeddings/models", "models"] {
             let mut url = self.endpoint.clone();
             url.set_path(&format!("{base}/{list}"));
-            let mut request = self
-                .client
-                .get(url)
-                .timeout(Duration::from_secs(self.config.timeout_secs));
-            if let Some(value) = &self.authorization {
-                request = request.header(AUTHORIZATION, value);
-            }
-            let response = request.send().await.map_err(|error| {
-                FrameworkError::internal(format!(
-                    "SEARCH_EMBED_BASE_URL host {} model list request failed: {}",
-                    self.endpoint.host_str().unwrap_or("configured host"),
-                    error.without_url()
-                ))
-            })?;
-            let status = response.status().as_u16();
-            let body = self.read_body(response, status).await?;
+            let response = self.send(Method::GET, url, None).await?;
+            let status = response.status;
+            let body = response.body;
             // A server without this list answers 404 or 405; any other failure is the
             // service's, reported as it is rather than as a missing setting.
             if status == 404 || status == 405 {
@@ -433,37 +451,38 @@ impl HttpEmbedder {
         }
         Ok(None)
     }
-    /// The body is capped while streaming, before anything parses it.
-    async fn read_body(
+    /// Recheck application transports before either protocol path can parse a response.
+    async fn send(
         &self,
-        mut response: reqwest::Response,
-        status: u16,
-    ) -> Result<Vec<u8>, FrameworkError> {
-        if response
-            .content_length()
-            .is_some_and(|len| len > self.config.max_response_bytes as u64)
-        {
+        method: Method,
+        url: Url,
+        body: Option<Vec<u8>>,
+    ) -> Result<TransportResponse, FrameworkError> {
+        let mut headers = HeaderMap::new();
+        if let Some(value) = &self.authorization {
+            headers.insert(AUTHORIZATION, value.clone());
+        }
+        if body.is_some() {
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        }
+        let response = self
+            .transport
+            .send(TransportRequest {
+                method,
+                url,
+                headers,
+                body,
+                timeout: Duration::from_secs(self.config.timeout_secs),
+                max_response_bytes: self.config.max_response_bytes,
+            })
+            .await?;
+        if response.body.len() > self.config.max_response_bytes {
             return Err(FrameworkError::param(format!(
-                "SEARCH_EMBED_MAX_RESPONSE_BYTES exceeded by host {} status {status}",
-                self.endpoint.host_str().unwrap_or("configured host")
+                "SEARCH_EMBED_MAX_RESPONSE_BYTES exceeded at status {}",
+                response.status
             )));
         }
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|error| {
-            FrameworkError::internal(format!(
-                "SEARCH_EMBED_TIMEOUT_SECS or response from host {} status {status}: {}",
-                self.endpoint.host_str().unwrap_or("configured host"),
-                error.without_url()
-            ))
-        })? {
-            if chunk.len() > self.config.max_response_bytes.saturating_sub(body.len()) {
-                return Err(FrameworkError::param(format!(
-                    "SEARCH_EMBED_MAX_RESPONSE_BYTES exceeded at status {status}"
-                )));
-            }
-            body.extend_from_slice(&chunk);
-        }
-        Ok(body)
+        Ok(response)
     }
     fn diagnostic(&self, status: u16, body: &[u8]) -> FrameworkError {
         let text = String::from_utf8_lossy(body);
@@ -477,36 +496,30 @@ impl HttpEmbedder {
             self.endpoint.host_str().unwrap_or("configured host")
         ))
     }
-    async fn request(&self, input: &[String]) -> Result<Vec<Vec<f32>>, FrameworkError> {
+    async fn request(&self, input: &[String]) -> Result<Metered<Vec<Vec<f32>>>, FrameworkError> {
         let timeout = Duration::from_secs(self.config.timeout_secs);
         for attempt in 0..=self.config.retries {
-            let mut request = self
-                .client
-                .post(self.endpoint.clone())
-                .timeout(timeout)
-                .json(&WireRequest {
-                    model: &self.config.model,
-                    input,
-                    dimensions: self.config.dimensions,
-                    encoding_format: "float",
-                });
-            if let Some(value) = &self.authorization {
-                request = request.header(AUTHORIZATION, value);
-            }
-            let response = request.send().await.map_err(|error| {
+            let body = serde_json::to_vec(&WireRequest {
+                model: &self.config.model,
+                input,
+                dimensions: self.config.dimensions,
+                encoding_format: "float",
+            })
+            .map_err(|error| {
                 FrameworkError::internal(format!(
-                    "SEARCH_EMBED_BASE_URL host {} request failed: {}",
-                    self.endpoint.host_str().unwrap_or("configured host"),
-                    error.without_url()
+                    "embedding request JSON serialization failed: {error}"
                 ))
             })?;
-            let status = response.status().as_u16();
+            let response = self
+                .send(Method::POST, self.endpoint.clone(), Some(body))
+                .await?;
+            let status = response.status;
             let retry_after = response
-                .headers()
+                .headers
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(retry_after);
-            let body = self.read_body(response, status).await?;
+            let body = response.body;
             if !(200..300).contains(&status) {
                 if (status == 429 || (500..600).contains(&status)) && attempt < self.config.retries
                 {
@@ -524,9 +537,8 @@ impl HttpEmbedder {
                 }
                 return Err(self.diagnostic(status, &body));
             }
-            let mut data = serde_json::from_slice::<WireResponse>(&body)
-                .map_err(|_| self.diagnostic(status, &body))?
-                .data;
+            let WireResponse { mut data, usage } = serde_json::from_slice::<WireResponse>(&body)
+                .map_err(|_| self.diagnostic(status, &body))?;
             data.sort_by_key(|vector| vector.index);
             if data.len() != input.len()
                 || data
@@ -539,14 +551,44 @@ impl HttpEmbedder {
                     input.len()
                 )));
             }
-            return Ok(data.into_iter().map(|vector| vector.embedding).collect());
+            return Ok(Metered {
+                value: data.into_iter().map(|vector| vector.embedding).collect(),
+                usage,
+            });
         }
         Err(FrameworkError::internal("SEARCH_EMBED_RETRIES exhausted"))
     }
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>, FrameworkError> {
+    async fn embed(
+        &self,
+        texts: &[String],
+        operation: EmbeddingOperation,
+    ) -> Result<Metered<Vec<Embedding>>, FrameworkError> {
         let mut out = Vec::with_capacity(texts.len());
+        let mut usage: Option<EmbeddingUsage> = None;
         for batch in texts.chunks(self.config.batch) {
-            for vector in self.request(batch).await? {
+            let response = self.request(batch).await?;
+            if let Some(reported) = response.usage {
+                let event = EmbeddingUsageReported {
+                    model: self.config.model.clone(),
+                    operation,
+                    inputs: batch.len(),
+                    usage: reported.clone(),
+                };
+                if crate::events::EventFacade::dispatch_best_effort(event)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        model = %self.config.model,
+                        "embedding usage event delivery was incomplete"
+                    );
+                }
+                match &mut usage {
+                    Some(total) => total.add(&reported),
+                    None => usage = Some(reported),
+                }
+            }
+            for vector in response.value {
                 if let Some(dimensions) = self.config.dimensions
                     && vector.len() != dimensions
                 {
@@ -562,7 +604,7 @@ impl HttpEmbedder {
                 )?);
             }
         }
-        Ok(out)
+        Ok(Metered { value: out, usage })
     }
 }
 /// Room for the special tokens a model adds around its input when no tokenizer says how many.
@@ -608,6 +650,12 @@ impl Embedder for HttpEmbedder {
         &self,
         inputs: &[EmbedInput],
     ) -> Result<Vec<Embedding>, FrameworkError> {
+        Ok(self.embed_documents_metered(inputs).await?.value)
+    }
+    async fn embed_documents_metered(
+        &self,
+        inputs: &[EmbedInput],
+    ) -> Result<Metered<Vec<Embedding>>, FrameworkError> {
         let mut texts = Vec::with_capacity(inputs.len());
         for input in inputs {
             texts.push(
@@ -615,15 +663,24 @@ impl Embedder for HttpEmbedder {
                     .await?,
             );
         }
-        self.embed(&texts).await
+        self.embed(&texts, EmbeddingOperation::Documents).await
     }
     async fn embed_query(&self, text: &str) -> Result<Embedding, FrameworkError> {
-        self.embed(&[self.within_context(self.profile.query_input(text)?).await?])
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                FrameworkError::internal("SEARCH_EMBED_MODEL query returned no embedding")
-            })
+        Ok(self.embed_query_metered(text).await?.value)
+    }
+    async fn embed_query_metered(&self, text: &str) -> Result<Metered<Embedding>, FrameworkError> {
+        let result = self
+            .embed(
+                &[self.within_context(self.profile.query_input(text)?).await?],
+                EmbeddingOperation::Query,
+            )
+            .await?;
+        let value = result.value.into_iter().next().ok_or_else(|| {
+            FrameworkError::internal("SEARCH_EMBED_MODEL query returned no embedding")
+        })?;
+        Ok(Metered {
+            value,
+            usage: result.usage,
+        })
     }
 }

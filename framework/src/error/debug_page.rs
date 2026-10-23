@@ -156,8 +156,15 @@ pub(crate) fn production_browser<B>(request: &hyper::Request<B>) -> bool {
 }
 
 /// Replace a production browser's 5xx body with a minimal view that reveals only status.
+/// A response the application marked as its own error view (`HttpResponse::error_view`)
+/// is sent as built: the application vouched that it shows no error detail.
 pub(crate) fn production_page(response: hyper::Response<Body>) -> hyper::Response<Body> {
-    if response.status().as_u16() < 500 {
+    if response.status().as_u16() < 500
+        || response
+            .extensions()
+            .get::<crate::http::ApplicationErrorView>()
+            .is_some()
+    {
         return response;
     }
     let status = response.status();

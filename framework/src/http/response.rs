@@ -54,9 +54,21 @@ pub struct HttpResponse {
     /// development error page leaves such a response alone, as an outer
     /// error-response middleware and the server's decision do.
     error_decided: bool,
+    /// Whether the application marked this response as its own error view
+    /// ([`Self::error_view`]). In process only: [`Self::into_hyper`] turns
+    /// it into an `ApplicationErrorView` extension, and with debug off the
+    /// server's minimal 5xx view leaves such a response as the application
+    /// built it, body and headers.
+    error_view: bool,
     // Only the static handler sets this mark. Request headers cannot forge it.
     static_asset: bool,
 }
+
+/// The in-process mark of a response the application declared its own
+/// error view. It rides in the hyper response's extensions, where the
+/// server's production 5xx view reads it; a request header cannot forge it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ApplicationErrorView;
 
 /// The in-process mark of a response the Inertia error-response
 /// decision decided. It rides in the hyper response's extensions so the
@@ -106,6 +118,7 @@ impl HttpResponse {
             headers: Vec::new(),
             error_report: None,
             error_decided: false,
+            error_view: false,
             static_asset: false,
         }
     }
@@ -118,6 +131,7 @@ impl HttpResponse {
             headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
             error_report: None,
             error_decided: false,
+            error_view: false,
             static_asset: false,
         }
     }
@@ -135,6 +149,7 @@ impl HttpResponse {
             headers: vec![("Content-Type".to_string(), "application/json".to_string())],
             error_report: None,
             error_decided: false,
+            error_view: false,
             static_asset: false,
         }
     }
@@ -156,6 +171,7 @@ impl HttpResponse {
             headers: vec![("Content-Type".to_string(), content_type.into())],
             error_report: None,
             error_decided: false,
+            error_view: false,
             static_asset: false,
         }
     }
@@ -220,6 +236,7 @@ impl HttpResponse {
             )],
             error_report: None,
             error_decided: false,
+            error_view: false,
             static_asset: false,
         }
     }
@@ -313,6 +330,7 @@ impl HttpResponse {
             headers: Vec::new(),
             error_report: None,
             error_decided: false,
+            error_view: false,
             static_asset: false,
         }
     }
@@ -383,6 +401,7 @@ impl HttpResponse {
             headers: vec![("Content-Type".to_string(), content_type.into())],
             error_report: None,
             error_decided: false,
+            error_view: false,
             static_asset: false,
         }
     }
@@ -554,6 +573,21 @@ impl HttpResponse {
     /// response.
     pub(crate) fn is_error_decided(&self) -> bool {
         self.error_decided
+    }
+
+    /// Mark this response as the application's own error view. With debug
+    /// off, the framework answers a browser's 5xx with a minimal view that
+    /// shows only the status, so a response built from an error never
+    /// reveals its detail; that view would also replace a page the
+    /// application built on purpose, with its recovery link and its
+    /// `Content-Security-Policy`. A marked response is sent as built, body
+    /// and headers. Mark only a response you built yourself with no detail
+    /// of any error in it: the framework takes the mark at its word. With
+    /// debug on, the development error page still replaces a marked
+    /// response that carries an error report.
+    pub fn error_view(mut self) -> Self {
+        self.error_view = true;
+        self
     }
 
     /// Add a header to the response
@@ -828,6 +862,9 @@ impl HttpResponse {
         }
         if self.error_decided {
             response.extensions_mut().insert(ErrorResponseDecided);
+        }
+        if self.error_view {
+            response.extensions_mut().insert(ApplicationErrorView);
         }
         response
     }

@@ -137,6 +137,17 @@ impl SearchEngine for ConnectionEngine {
         })
         .await
     }
+    async fn release_creation_lease(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+    ) -> Result<(), FrameworkError> {
+        self.write(async {
+            self.routed(self.inner.release_creation_lease(index, generation))
+                .await
+        })
+        .await
+    }
     async fn write_settings(
         &self,
         index: &IndexDescriptor,

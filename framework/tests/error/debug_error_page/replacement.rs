@@ -27,6 +27,14 @@ const UPSTREAM_BODY: &str = "the upstream ledger timed out";
 /// The page component the Inertia error page middleware renders.
 const ERROR_PAGE: &str = "Error";
 
+/// The 503 page `/upstream-owned` builds itself and marks as its own error view.
+const OWNED_BODY: &str =
+    "<!doctype html><html><body><h1>Back soon</h1><a href=\"/status\">Status</a></body></html>";
+
+/// The policy that page carries; the minimal view would replace it.
+const OWNED_CSP: &str =
+    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+
 fn routes() -> Router {
     Router::new()
         .get("/invoice", post_invoice)
@@ -46,6 +54,15 @@ fn routes() -> Router {
             // A 5xx the handler built itself: no error became it, so it
             // carries no error report.
             let response: Response = Err(HttpResponse::text(UPSTREAM_BODY).status(504));
+            response
+        })
+        .get("/upstream-owned", |_req: Request| async {
+            // The application's own 503 page, safe to show, so it asks the
+            // production view to leave it alone.
+            let response: Response = Err(HttpResponse::html(OWNED_BODY)
+                .status(503)
+                .header("content-security-policy", OWNED_CSP)
+                .error_view());
             response
         })
         .into()
@@ -259,6 +276,25 @@ async fn with_debug_off_a_browser_request_gets_a_minimal_html_error_view() {
     assert_minimal_page(&reply, 504);
 }
 
+#[tokio::test]
+#[serial]
+async fn with_debug_off_the_apps_own_error_view_is_sent_as_built() {
+    let _debug = debug_mode(false, &[]).await;
+
+    let reply = get(routes(), "/upstream-owned", BROWSER).await;
+    assert_eq!(reply.status, 503);
+    assert_eq!(reply.body, OWNED_BODY);
+    assert_eq!(reply.header("content-security-policy"), Some(OWNED_CSP));
+    assert!(
+        reply.content_type().starts_with("text/html"),
+        "{}",
+        reply.body
+    );
+    // The same page without the mark is the minimal view: `/upstream` above.
+    let reply = get(routes(), "/upstream", BROWSER).await;
+    assert_minimal_page(&reply, 504);
+}
+
 fn assert_minimal_page(reply: &Reply, status: u16) {
     assert_eq!(reply.status, status);
     assert!(
@@ -275,6 +311,7 @@ fn assert_minimal_page(reply: &Reply, status: u16) {
         PANIC_MESSAGE,
         MAINTENANCE_ERROR,
         UPSTREAM_BODY,
+        OWNED_BODY,
         "Stack frames",
         "data-page=",
         "debug_error_page",

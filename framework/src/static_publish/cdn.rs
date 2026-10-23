@@ -9,6 +9,15 @@ mod cloudfront;
 #[cfg(feature = "cdn-cloudfront")]
 pub use cloudfront::{CloudFrontDriver, RESPONSE_HEADERS_FUNCTION};
 
+#[cfg(feature = "cdn-cloudflare")]
+mod cloudflare;
+#[cfg(feature = "cdn-cloudflare")]
+pub use cloudflare::CloudflareDriver;
+
+/// Deploy this Worker on the application hostname to serve R2 hits and preserve origin fallback.
+#[cfg(feature = "cdn-cloudflare")]
+pub const CLOUDFLARE_WORKER: &str = include_str!("cdn/cloudflare_worker.js");
+
 /// Purge operations a driver implements without silently discarding a request.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CdnCapabilities {
