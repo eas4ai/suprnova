@@ -86,8 +86,8 @@ Uploads have a configured concurrency limit. An upload failure leaves the live
 manifest in place and logs an error.
 
 ```bash
-suprnova static:publish
-suprnova static:status
+cargo run --bin console -- static:publish
+cargo run --bin console -- static:status
 ```
 
 The publish command runs the same pipeline as boot. Status reports the live
@@ -182,18 +182,18 @@ Rollback verifies ownership first. If ownership changes or the holder's usable
 window expires, it leaves the CDN to the new owner and records the failure.
 
 ```bash
-STATIC_PUBLISH_CLOCK_SKEW=10 suprnova static:publish
+STATIC_PUBLISH_CLOCK_SKEW=10 cargo run --bin console -- static:publish
 ```
 
 Mirror writes, prune deletions and prune manifest commits verify ownership
 before each operation; a lost lease stops maintenance and reports the current
 owner.
 
-Run the same command from the server deployment or a console process:
+Run the same commands with the application's `console` binary, from the server deployment or a console process:
 
 ```bash
-suprnova static:publish
-suprnova static:status
+cargo run --bin console -- static:publish
+cargo run --bin console -- static:status
 ```
 
 The publisher releases its lease before bounded status persistence, so a slow
@@ -456,8 +456,8 @@ within the publication deadline. Other objects with no reliable age stay
 protected. A prune failure does not remove the live version or undo its switch.
 
 ```bash
-suprnova static:prune
-suprnova static:status
+cargo run --bin console -- static:prune
+cargo run --bin console -- static:status
 ```
 
 ### Why Suprnova diverges
