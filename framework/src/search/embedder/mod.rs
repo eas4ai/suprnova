@@ -386,11 +386,104 @@ pub fn validate_embedding(
     Ok(Embedding { dense: vector })
 }
 
+/// What a provider reported about the work one call cost. An application that pays
+/// per token settles the bill from these numbers, not from an estimate.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddingUsage {
+    /// Tokens the provider counted in the inputs (`usage.prompt_tokens`).
+    pub prompt_tokens: Option<u64>,
+    /// Tokens the provider billed for the call (`usage.total_tokens`).
+    pub total_tokens: Option<u64>,
+}
+
+impl EmbeddingUsage {
+    /// Add the usage of one more call. A count only one side reports is kept as it
+    /// is, so a provider that reports a field on some calls still sums what it sent.
+    pub fn add(&mut self, other: &EmbeddingUsage) {
+        fn sum(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+            match (a, b) {
+                (None, None) => None,
+                (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
+            }
+        }
+        self.prompt_tokens = sum(self.prompt_tokens, other.prompt_tokens);
+        self.total_tokens = sum(self.total_tokens, other.total_tokens);
+    }
+}
+
+/// Which call a provider's usage count belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingOperation {
+    /// Documents embedded for an index, by the framework's indexing or by the application.
+    Documents,
+    /// A query embedded for a search.
+    Query,
+}
+
+/// Fires after a provider answered an embedding request with a usage count: one event
+/// per request the provider answered, whether the application called the embedder or
+/// the framework did while indexing or searching. An application that pays per token
+/// settles its bill from these events, so the calls it never sees count too.
+#[derive(Clone, Debug)]
+pub struct EmbeddingUsageReported {
+    /// The model id the request named.
+    pub model: String,
+    /// What the request embedded.
+    pub operation: EmbeddingOperation,
+    /// How many inputs the request carried.
+    pub inputs: usize,
+    /// The provider's count for that request.
+    pub usage: EmbeddingUsage,
+}
+
+impl crate::events::Event for EmbeddingUsageReported {
+    fn event_name() -> &'static str {
+        "Search\\EmbeddingUsageReported"
+    }
+}
+
+/// A result with the usage the provider reported for producing it. `usage` is
+/// `None` when the provider reports none, as local inference does.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Metered<T> {
+    /// The embeddings themselves, as the vector-only methods return them.
+    pub value: T,
+    /// The provider's own count, when its protocol carries one.
+    pub usage: Option<EmbeddingUsage>,
+}
+
 /// Providers remain object-safe so an index can choose its own inference implementation.
 #[async_trait]
 pub trait Embedder: Send + Sync {
     /// The profile identifies the embedding space stored in an index generation.
     fn profile(&self) -> &ModelProfile;
+    /// `embed_documents` with the usage the provider reported. The default reports
+    /// none; a provider whose protocol carries usage overrides this method and keeps
+    /// `embed_documents` as its vector-only form.
+    async fn embed_documents_metered(
+        &self,
+        inputs: &[EmbedInput],
+    ) -> Result<Metered<Vec<Embedding>>, FrameworkError> {
+        Ok(Metered {
+            value: self.embed_documents(inputs).await?,
+            usage: None,
+        })
+    }
+    /// `embed_query` with the usage the provider reported; the default reports none.
+    async fn embed_query_metered(&self, text: &str) -> Result<Metered<Embedding>, FrameworkError> {
+        Ok(Metered {
+            value: self.embed_query(text).await?,
+            usage: None,
+        })
+    }
+    /// The profile a generation pins, after whatever resolving it takes. A provider
+    /// that defers loading its model returns the loaded model's profile, with its
+    /// revision, so the generation records the artifacts that embed its documents.
+    /// The default is `profile()`.
+    async fn resolve_profile(&self) -> Result<ModelProfile, FrameworkError> {
+        Ok(self.profile().clone())
+    }
     /// Providers apply the profile template and tokenize within the context limit.
     async fn embed_documents(
         &self,

@@ -236,6 +236,19 @@ pub trait SearchEngine: Send + Sync {
         settings: &IndexSettings,
         generation: &GenerationId,
     ) -> Result<(), FrameworkError>;
+    /// Release the creation lease of a generation whose creator stopped, so the next
+    /// `create_generation` resumes it at once instead of waiting the lease out. The
+    /// caller vouches that no creator is running; the framework cannot see an
+    /// application's own lock. A driver without creation leases has nothing to
+    /// release and returns `Ok`.
+    async fn release_creation_lease(
+        &self,
+        index: &IndexDescriptor,
+        generation: &GenerationId,
+    ) -> Result<(), FrameworkError> {
+        let _ = (index, generation);
+        Ok(())
+    }
     /// Compare the current generation before switching to prevent lost updates.
     async fn switch_generation(
         &self,

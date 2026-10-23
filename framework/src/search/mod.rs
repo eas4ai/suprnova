@@ -48,8 +48,9 @@ pub use embedder::profiles::{
     default_profile, names as embedding_profile_names, profile as embedding_profile,
 };
 pub use embedder::{
-    EmbedInput, Embedder, Embedding, InputKinds, MediaPart, ModelFiles, ModelProfile,
-    ModelProvenance, Pooling, Precision, SparseEmbedding, validate_embedding,
+    EmbedInput, Embedder, Embedding, EmbeddingOperation, EmbeddingUsage, EmbeddingUsageReported,
+    InputKinds, MediaPart, Metered, ModelFiles, ModelProfile, ModelProvenance, Pooling, Precision,
+    SparseEmbedding, validate_embedding,
 };
 pub use engine::collection::CollectionEngine;
 pub use engine::database::DatabaseSearchEngine;

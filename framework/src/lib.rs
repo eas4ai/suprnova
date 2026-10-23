@@ -669,12 +669,13 @@ pub use recommendations::{
 pub use search::testing::conformance;
 pub use search::{
     AttributeDecl, AttributeType, AttributeValue, CollectionEngine, DocumentBatchLoader,
-    DocumentLoader, EmbedInput, EmbedSource, Embedder, Embedding, EngineCandidate,
+    DocumentLoader, EmbedInput, EmbedSource, Embedder, Embedding, EmbeddingOperation,
+    EmbeddingUsage, EmbeddingUsageReported, EngineCandidate,
     EngineCapabilities, EngineQuery, EngineResult, ExpandedQuery, ExpandedTerm, FacetDistribution,
     FacetOrder, FacetRange, FacetStats, FacetValue, FakeEmbedder, FederatedBuilder, FederatedHit,
     FederatedRank, FederatedResults, Filter, GenerationId, GeoPoint, GroupBy, Hit, HttpEmbedder,
     HttpEmbedderConfig, IndexDescriptor, IndexOperation, IndexSearchBuilder, IndexSettings,
-    IndexTimeSettings, IndexedDocument, InputKinds, LanguageConfig, MediaPart, ModelFiles,
+    IndexTimeSettings, IndexedDocument, InputKinds, LanguageConfig, MediaPart, Metered, ModelFiles,
     ModelProfile, ModelProvenance, NullEngine, Pooling, Precision, QdrantSearchEngine,
     QuerySettings, QueryText, RawHit, Rerank, Reranker, Search, SearchBuilder, SearchConfig,
     SearchDocument, SearchDriver, SearchEmbedder, SearchEngine, SearchFilter, SearchIndexJob,
