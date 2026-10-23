@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-container-binding",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}

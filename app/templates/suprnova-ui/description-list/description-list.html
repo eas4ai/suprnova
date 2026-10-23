@@ -1,0 +1,12 @@
+{#
+  suprnova.description-list - terms and their values (DATA-001).
+  A dl keeps each term associated with its value; the row wrapper is the
+  div the dl content model allows.
+#}
+{% macro description_list(id, label) %}
+<dl class="sn-description-list" id="{{ id }}" aria-label="{{ label }}">{{ caller() }}</dl>
+{% endmacro %}
+
+{% macro description(term, value) %}
+<div class="sn-description"><dt class="sn-description-term">{{ term }}</dt><dd class="sn-description-value">{{ value }}</dd></div>
+{% endmacro %}
