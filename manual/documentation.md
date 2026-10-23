@@ -2,6 +2,7 @@
 
 - ## Prologue
     - [Changelog](../CHANGELOG.md)
+    - [Upgrading to 4.6](upgrade-4.6.md)
     - [Upgrading to 4.5](upgrade-4.5.md)
     - [Upgrading to 4.4](upgrade-4.4.md)
     - [Upgrading to 4.3](upgrade-4.3.md)
