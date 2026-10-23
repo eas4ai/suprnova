@@ -1,5 +1,0 @@
-error: a tool name has 1 to 64 characters; `` has 0
- --> tests/agents/compile_fail/live/agent_001_name_empty.rs:9:19
-  |
-9 |     #[tool(name = "", description = "A tool.", callers = [public])]
-  |                   ^^
