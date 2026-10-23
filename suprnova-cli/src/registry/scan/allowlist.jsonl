@@ -13297,6 +13297,7 @@
 {"path":"suprnova::static_publish::cdn::CdnDriver::purge","kind":"fn","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[],"returns":"core::pin::Pin<alloc::boxed::Box<_>>"}
 {"path":"suprnova::static_publish::cdn::CdnDriver::rollback_version","kind":"fn","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[],"returns":"core::pin::Pin<alloc::boxed::Box<_>>"}
 {"path":"suprnova::static_publish::cdn::CdnDriver::selected_version","kind":"fn","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[],"returns":"core::pin::Pin<alloc::boxed::Box<_>>"}
+{"path":"suprnova::static_publish::cdn::CdnDriver::serves_mirror","kind":"fn","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[],"returns":"bool"}
 {"path":"suprnova::static_publish::cdn::CdnDriver::switch_version","kind":"fn","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[],"returns":"core::pin::Pin<alloc::boxed::Box<_>>"}
 {"path":"suprnova::static_publish::cdn::CdnDriver::validate_headers","kind":"fn","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":[],"returns":"core::result::Result<(),suprnova::FrameworkError>"}
 {"path":"suprnova::static_publish::cdn::CloudFrontDriver","kind":"struct","capability":null,"hidden":false,"prefix":false,"refused":true,"aliases":[],"implements":["suprnova::static_publish::cdn::CdnDriver"]}
