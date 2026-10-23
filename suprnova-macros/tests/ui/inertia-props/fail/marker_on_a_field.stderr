@@ -1,5 +1,0 @@
-error: `#[inertia_props(..)]` goes on the struct, not on a field; expected `#[inertia_props(shared)]` or `#[inertia_props(flash)]`
- --> tests/ui/inertia-props/fail/marker_on_a_field.rs:7:5
-  |
-7 |     #[inertia_props(shared)]
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^
