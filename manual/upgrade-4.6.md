@@ -161,10 +161,10 @@ savepoint and check that the callback only describes committed work.
   `live::registry()` and the notes gate rule, then audit
   `live::routes_with_render_cache(agents::serve(routes::register())?)`
   prepared with `suprnova::live::testing::prepare_live_router_for_test`. Run
-  `cargo fmt` once. Nothing else changes.
+  `cargo fmt` once. Nothing else changes. (4.6.1)
 - **A Live action's framework frames fit their stack budget again in a debug
   build.** A debug build of a 4.6.0 application could overflow Tokio's 2 MiB
-  stack in a deep Live action. Nothing to change once you update.
+  stack in a deep Live action. Nothing to change once you update. (4.6.1)
 
 ## Next
 
