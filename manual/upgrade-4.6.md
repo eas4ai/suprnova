@@ -165,6 +165,10 @@ savepoint and check that the callback only describes committed work.
 - **A Live action's framework frames fit their stack budget again in a debug
   build.** A debug build of a 4.6.0 application could overflow Tokio's 2 MiB
   stack in a deep Live action. Nothing to change once you update. (4.6.1)
+- **The page budget audit's URL mode counts the bytes that cross the wire.**
+  A URL audit of a page that serves gzip now reports smaller transfer sizes,
+  matching a HAR capture of the same visit. Recheck any budget you raised to
+  get a URL audit to pass. (after 4.6.1)
 
 ## Next
 

@@ -358,6 +358,10 @@ dhat = { version = "0.3", optional = true }
 # copy.
 mongodb = { version = "3.9", optional = true, default-features = false, features = ["compat-3-3-0", "bson-3", "rustls-tls", "dns-resolver"] }
 bson = { version = "3.1", optional = true, features = ["serde"] }
+# The page budget audit's URL mode asks for gzip, counts the bytes that cross
+# the wire and reads the decoded body. `png` already brings this version, so
+# the tree gains no crate.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [target.'cfg(unix)'.dependencies]
 # Signals for the Process facade: a kill reaches the process group a

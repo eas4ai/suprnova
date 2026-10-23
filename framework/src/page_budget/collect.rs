@@ -90,6 +90,44 @@ impl Capture {
     }
 }
 
+/// The decoded body of a URL-mode response. The audit asks for gzip only,
+/// as a browser would ask for compression, so a size rule judges the bytes
+/// that crossed the wire while the format and PNG rules read the content.
+/// Decoding stops at `limit` bytes, the same bound the raw body has, so a
+/// small compressed body cannot expand without limit.
+fn decode(
+    url: &Url,
+    encoding: Option<&str>,
+    wire: Vec<u8>,
+    limit: usize,
+) -> Result<Vec<u8>, FrameworkError> {
+    use std::io::Read;
+    let encoding = encoding.map(|value| value.trim().to_ascii_lowercase());
+    match encoding.as_deref() {
+        None | Some("") | Some("identity") => Ok(wire),
+        Some("gzip") | Some("x-gzip") => {
+            let mut decoded = Vec::new();
+            flate2::read::GzDecoder::new(wire.as_slice())
+                .take(limit as u64 + 1)
+                .read_to_end(&mut decoded)
+                .map_err(|e| {
+                    FrameworkError::bad_request(format!(
+                        "page budget {url}: invalid gzip body: {e}"
+                    ))
+                })?;
+            if decoded.len() > limit {
+                return Err(FrameworkError::bad_request(format!(
+                    "page budget {url}: decoded body exceeds {limit} bytes"
+                )));
+            }
+            Ok(decoded)
+        }
+        Some(other) => Err(FrameworkError::bad_request(format!(
+            "page budget {url}: answered with Content-Encoding `{other}`, which the audit did not request"
+        ))),
+    }
+}
+
 pub(super) async fn audit_http(
     budget: &PageBudget,
     page: Url,
@@ -101,9 +139,10 @@ pub(super) async fn audit_http(
                 .timeout(budget.request_timeout)
                 .connect_timeout(budget.request_timeout)
                 .max_response_bytes(budget.max_response_bytes)
-                .header("Accept-Encoding", "identity")
+                .header("Accept-Encoding", "gzip")
                 .send()
                 .await?;
+            let encoding = response.header("Content-Encoding");
             let status = response.status();
             let headers = [
                 "Content-Type",
@@ -120,12 +159,14 @@ pub(super) async fn audit_http(
                     .map(move |value| (name.into(), value))
             })
             .collect();
-            let body = response.bytes().await?.to_vec();
+            let wire = response.bytes().await?.to_vec();
+            let transfer = wire.len() as u64;
+            let body = decode(&url, encoding.as_deref(), wire, budget.max_response_bytes)?;
             Ok(Resource {
                 url,
                 status,
                 headers,
-                transfer: body.len() as u64,
+                transfer,
                 decoded: body.len() as u64,
                 body: Some(body),
                 request_cookie: false,
