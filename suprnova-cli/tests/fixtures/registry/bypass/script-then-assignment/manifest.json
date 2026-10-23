@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-then-assignment",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

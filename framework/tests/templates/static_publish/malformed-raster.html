@@ -1,0 +1,1 @@
+<!doctype html><html><head>{{ head }}</head><body>{% if let Some(image) = view.get("image") %}{% if view.get("srcset").is_some() %}<img srcset="{{ image }} 1x">{% else %}<img src="{{ image }}">{% endif %}{% endif %}{{ body }}</body></html>
