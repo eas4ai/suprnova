@@ -1,0 +1,1315 @@
+#![cfg(feature = "broadcasting-fanout")]
+
+//! Integration tests for SeaStreamerBroadcastHub.
+//!
+//! ## Test strategy
+//!
+//! The sea-streamer stdio backend uses process-global stdin/stdout threads.
+//! True two-process integration (where hub A in process X and hub B in
+//! process Y exchange messages) is not practical in a cargo test suite
+//! without spawning child processes.
+//!
+//! Instead we test:
+//!
+//! 1. **Local fanout** - `publish` delivers to local subscribers via the
+//!    in-memory hub immediately.
+//! 2. **Duplicate-delivery guard** - the consumer pump skips messages whose
+//!    `instance_id` matches the hub's own ID; we verify this by confirming
+//!    that a subscriber that was already served by local fanout does NOT
+//!    receive a second copy from the loopback path.
+//! 3. **BroadcastHub trait delegation** - `subscriber_count`, `track_member`,
+//!    `untrack_member`, `list_members` all delegate correctly.
+//! 4. **Serialization round-trip** - `TaggedEnvelope` is not pub, but we
+//!    indirectly verify that the JSON serialized by `publish()` is accepted
+//!    by the consumer pump by checking that no extra messages arrive.
+//!
+//! The loopback tests use `SeaStreamerBroadcastHub::new_loopback` so that
+//! published messages are fed back through the stdio thread and processed by
+//! the consumer pump - exercising the full codepath.
+
+use serde_json::json;
+use std::time::Duration;
+use suprnova::broadcasting::fanout::SeaStreamerBroadcastHub;
+use suprnova::broadcasting::{BroadcastEnvelope, BroadcastHub};
+
+/// Poll until `hub.list_members(channel).await.len() == expected`.
+///
+/// Returns when the count matches. Panics with a clear message if `timeout`
+/// elapses before the count reaches the expected value.
+/// Use this instead of fixed `tokio::time::sleep` calls to avoid CI flake.
+async fn wait_for_member_count(
+    hub: &SeaStreamerBroadcastHub,
+    channel: &str,
+    expected: usize,
+    timeout: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let count = hub.list_members(channel).await.len();
+        if count == expected {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "timeout waiting for member count to reach {expected} on '{channel}'; \
+                 last seen: {count}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Convenience: build a test envelope.
+fn envelope(channel: &str, event: &str, data: serde_json::Value) -> BroadcastEnvelope {
+    BroadcastEnvelope::new(channel, event, data)
+}
+
+// ── local-fanout tests ───────────────────────────────────────────────────────
+
+/// `publish` delivers the envelope to local subscribers immediately (no
+/// round-trip through sea-streamer required).
+#[tokio::test]
+async fn local_fanout_delivers_to_subscriber() {
+    let hub = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-local")
+        .await
+        .expect("hub connect");
+
+    let mut rx = hub.subscribe("chat.1");
+
+    hub.publish(envelope(
+        "chat.1",
+        "MessagePosted",
+        json!({ "text": "hello" }),
+    ))
+    .await
+    .unwrap();
+
+    let received = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("message delivered within 1s")
+        .expect("recv ok");
+
+    assert_eq!(received.channel, "chat.1");
+    assert_eq!(received.event, "MessagePosted");
+    assert_eq!(received.data["text"], "hello");
+}
+
+/// Multiple channels are isolated: a subscriber on channel A does not
+/// receive events published to channel B.
+#[tokio::test]
+async fn publish_with_no_subscriber_is_silent() {
+    let hub = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-silent")
+        .await
+        .expect("hub connect");
+
+    // No subscriber - publish should not panic.
+    hub.publish(envelope("lonely", "Tick", json!({})))
+        .await
+        .unwrap();
+}
+
+/// The error a failed connect returns, rendered both ways a caller can
+/// log it.
+async fn connect_error_text(streamer_uri: &str) -> String {
+    match SeaStreamerBroadcastHub::new(streamer_uri, "suprnova-test-credentials").await {
+        Ok(_) => panic!("a malformed streamer URI must not connect"),
+        Err(error) => format!("{error} / {error:?}"),
+    }
+}
+
+/// IDENTITY-030: a Redis fanout URI carries its password in the userinfo.
+/// When the URI does not parse, the connect error is logged and reported
+/// like any other, so it must not repeat the URI - neither the password
+/// nor the user.
+#[tokio::test]
+async fn invalid_streamer_uri_error_does_not_echo_credentials() {
+    // The authority does not parse: the port is not a number.
+    let text = connect_error_text("redis://app-user:s3cr3t-pass@redis.internal:notaport/0").await;
+    assert!(
+        text.contains("invalid redis URL"),
+        "the error must still name the problem: {text}"
+    );
+    assert!(!text.contains("s3cr3t-pass"), "password leaked: {text}");
+    assert!(!text.contains("app-user"), "user leaked: {text}");
+
+    // Every node parses, but the database path does not: the path of a
+    // multi-node URI runs into the next node's userinfo.
+    let text = connect_error_text(
+        "redis://app-user:first-pass@a.internal:6379/3,app-user:s3cr3t-pass@b.internal:6379/3",
+    )
+    .await;
+    assert!(
+        text.contains("invalid redis URL"),
+        "the error must still name the problem: {text}"
+    );
+    assert!(!text.contains("s3cr3t-pass"), "password leaked: {text}");
+    assert!(!text.contains("first-pass"), "password leaked: {text}");
+    assert!(!text.contains("app-user"), "user leaked: {text}");
+}
+
+/// Publishing to the reserved `__presence__` meta-channel (or any
+/// `__`-prefixed name) must be rejected at the publish boundary. The
+/// vulnerability the guard closes: a TaggedEnvelope serialised to the
+/// stream on `__presence__` is routed by every peer's consumer pump
+/// straight into `apply_presence_event`, injecting phantom presence
+/// records into every process's `cross_process_view`. The hub itself
+/// produces legitimate presence traffic via a dedicated path that
+/// never crosses `publish`, so the guard is total.
+#[tokio::test]
+async fn publish_rejects_reserved_presence_channel() {
+    let hub = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-reserved")
+        .await
+        .expect("hub connect");
+
+    let err = hub
+        .publish(envelope(
+            "__presence__",
+            "member_added",
+            json!({ "spoof": true }),
+        ))
+        .await
+        .expect_err("publish to __presence__ must be rejected at the boundary");
+    assert!(
+        err.to_string().contains("reserved prefix '__'"),
+        "error must name the reserved prefix; got: {err}"
+    );
+
+    // Any other __-prefixed name is equally reserved - the registry
+    // forbids registration of the family, not just the one literal.
+    let err2 = hub
+        .publish(envelope("__rpc__", "ping", json!({})))
+        .await
+        .expect_err("any __-prefixed channel must be rejected");
+    assert!(err2.to_string().contains("reserved prefix '__'"));
+
+    // A regular channel still publishes successfully through the same hub.
+    hub.publish(envelope("chat.42", "Tick", json!({})))
+        .await
+        .expect("non-reserved channel still publishes");
+}
+
+/// `subscriber_count` reflects the live receivers.
+#[tokio::test]
+async fn subscriber_count_reflects_receivers() {
+    let hub = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-count")
+        .await
+        .expect("hub connect");
+
+    assert_eq!(hub.subscriber_count("presence.room"), 0);
+
+    let _rx1 = hub.subscribe("presence.room");
+    assert_eq!(hub.subscriber_count("presence.room"), 1);
+
+    let _rx2 = hub.subscribe("presence.room");
+    assert_eq!(hub.subscriber_count("presence.room"), 2);
+}
+
+// ── duplicate-delivery guard ─────────────────────────────────────────────────
+
+/// After a hub publishes an envelope with loopback enabled, the consumer
+/// pump receives the message back from the stdio loopback. Because the
+/// `instance_id` matches, the pump must NOT re-publish to local, so the
+/// local subscriber should NOT receive a second copy.
+///
+/// We verify: exactly ONE message is delivered within a short window; a
+/// second recv attempt times out.
+#[tokio::test]
+async fn no_duplicate_delivery_via_loopback() {
+    let hub = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-dedup")
+        .await
+        .expect("hub connect");
+
+    let mut rx = hub.subscribe("dedup.42");
+
+    hub.publish(envelope("dedup.42", "Ping", json!({ "n": 1 })))
+        .await
+        .unwrap();
+
+    // First delivery - from local fanout (immediate).
+    let first = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+        .await
+        .expect("first message within 200ms")
+        .expect("recv ok");
+    assert_eq!(first.data["n"], 1);
+
+    // Wait long enough for loopback to arrive and be processed.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Second recv attempt should time out - duplicate guard dropped it.
+    let second = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+    assert!(
+        second.is_err(),
+        "no duplicate delivery expected; got second message: {second:?}"
+    );
+}
+
+// ── presence / member tracking ───────────────────────────────────────────────
+
+/// `track_member` + `list_members` round-trip through the local hub.
+#[tokio::test]
+async fn track_and_list_members() {
+    let hub = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-members")
+        .await
+        .expect("hub connect");
+
+    assert!(hub.list_members("presence.lobby").await.is_empty());
+
+    hub.track_member("presence.lobby", "user-1", json!({ "name": "Alice" }))
+        .await
+        .expect("track user-1");
+    hub.track_member("presence.lobby", "user-2", json!({ "name": "Bob" }))
+        .await
+        .expect("track user-2");
+
+    let members = hub.list_members("presence.lobby").await;
+    assert_eq!(members.len(), 2);
+    let names: Vec<&str> = members
+        .iter()
+        .map(|v| v["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"Alice"));
+    assert!(names.contains(&"Bob"));
+
+    hub.untrack_member("presence.lobby", "user-1")
+        .await
+        .expect("untrack user-1");
+
+    let members = hub.list_members("presence.lobby").await;
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0]["name"], "Bob");
+}
+
+// ── cross-hub delivery ───────────────────────────────────────────────────────
+
+/// Two hub instances sharing the same stream_key (loopback): a message
+/// published on hub1 reaches hub2's subscriber.
+///
+/// This exercises the deliver branch of the consumer pump - the path that
+/// calls `local.publish(tagged.envelope)` when the inbound message's
+/// `instance_id` does NOT match the receiving hub's own ID.
+///
+/// Both hubs share the process-global stdio consumer table keyed by stream
+/// name. With loopback enabled, hub1's producer write is dispatched to all
+/// registered consumers on the same stream_key, including hub2's consumer.
+#[tokio::test]
+async fn cross_hub_delivery() {
+    let hub1 = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-cross")
+        .await
+        .expect("hub1 connect");
+    let hub2 = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-cross")
+        .await
+        .expect("hub2 connect");
+
+    // Subscribe on hub2 before hub1 publishes.
+    let mut rx = hub2.subscribe("chat.shared");
+
+    hub1.publish(envelope("chat.shared", "Posted", json!({ "from": "hub1" })))
+        .await
+        .unwrap();
+
+    // hub2's subscriber must receive the message (via the consumer pump's
+    // deliver branch, NOT local fanout - hub2 didn't call publish locally).
+    let msg = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("hub2 received hub1's message within 1s")
+        .expect("recv ok");
+
+    assert_eq!(msg.channel, "chat.shared");
+    assert_eq!(msg.event, "Posted");
+    assert_eq!(msg.data["from"], "hub1");
+}
+
+// ── multi-channel isolation ──────────────────────────────────────────────────
+
+/// Subscribers on different channels don't bleed messages.
+#[tokio::test]
+async fn channel_isolation() {
+    let hub = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-isolation")
+        .await
+        .expect("hub connect");
+
+    let mut rx_a = hub.subscribe("ch.a");
+    let mut rx_b = hub.subscribe("ch.b");
+
+    hub.publish(envelope("ch.a", "EventA", json!({ "src": "a" })))
+        .await
+        .unwrap();
+    hub.publish(envelope("ch.b", "EventB", json!({ "src": "b" })))
+        .await
+        .unwrap();
+
+    let msg_a = tokio::time::timeout(Duration::from_millis(200), rx_a.recv())
+        .await
+        .expect("ch.a got message")
+        .expect("recv ok");
+    assert_eq!(msg_a.channel, "ch.a");
+    assert_eq!(msg_a.data["src"], "a");
+
+    let msg_b = tokio::time::timeout(Duration::from_millis(200), rx_b.recv())
+        .await
+        .expect("ch.b got message")
+        .expect("recv ok");
+    assert_eq!(msg_b.channel, "ch.b");
+    assert_eq!(msg_b.data["src"], "b");
+
+    // rx_a should not have received ch.b's event.
+    let bleed = tokio::time::timeout(Duration::from_millis(50), rx_a.recv()).await;
+    assert!(bleed.is_err(), "ch.a should not receive ch.b events");
+}
+
+// ── cross-process presence ───────────────────────────────────────────────────
+
+/// Two hub instances sharing the same stream in loopback mode simulate two
+/// different processes. Each hub tracks a different member; after a brief
+/// propagation window both hubs must be able to list both members via
+/// `list_members`.
+///
+/// This exercises the presence-replication path:
+///   track_member → publish PresenceEvent to __presence__ meta-channel →
+///   consumer pump → apply_presence_event → cross_process_view
+///
+/// Note: `track_member` updates `cross_process_view` directly for the local
+/// instance (immediate consistency), so hub_a sees its own member right away.
+/// The remote member arrives via the stream round-trip within the 500ms window.
+#[tokio::test]
+async fn cross_process_member_visibility() {
+    let hub_a = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-presence-vis")
+        .await
+        .expect("hub_a connect");
+    let hub_b = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-presence-vis")
+        .await
+        .expect("hub_b connect");
+
+    // Allow consumer pumps to start.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    hub_a
+        .track_member("presence.lobby", "alice", json!({ "user_id": 1 }))
+        .await
+        .expect("track alice");
+    hub_b
+        .track_member("presence.lobby", "bob", json!({ "user_id": 2 }))
+        .await
+        .expect("track bob");
+
+    // Poll until both hubs see both members (stream round-trip complete).
+    wait_for_member_count(&hub_a, "presence.lobby", 2, Duration::from_secs(2)).await;
+    wait_for_member_count(&hub_b, "presence.lobby", 2, Duration::from_secs(2)).await;
+
+    let members_a = hub_a.list_members("presence.lobby").await;
+    let members_b = hub_b.list_members("presence.lobby").await;
+
+    assert_eq!(
+        members_a.len(),
+        2,
+        "hub_a should see both alice and bob; got {members_a:?}"
+    );
+    assert_eq!(
+        members_b.len(),
+        2,
+        "hub_b should see both alice and bob; got {members_b:?}"
+    );
+
+    // Verify the actual member data is present, not just the count.
+    let user_ids_a: Vec<i64> = members_a
+        .iter()
+        .filter_map(|v| v["user_id"].as_i64())
+        .collect();
+    assert!(
+        user_ids_a.contains(&1),
+        "hub_a missing alice; {members_a:?}"
+    );
+    assert!(user_ids_a.contains(&2), "hub_a missing bob; {members_a:?}");
+}
+
+/// `untrack_member` removes a member from the cross-process view. After the
+/// removal propagates, the other hub must no longer include that member in
+/// `list_members`.
+#[tokio::test]
+async fn untrack_propagates_across_processes() {
+    let hub_a = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-presence-untrack")
+        .await
+        .expect("hub_a connect");
+    let hub_b = SeaStreamerBroadcastHub::new_loopback("stdio://", "suprnova-test-presence-untrack")
+        .await
+        .expect("hub_b connect");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    hub_a
+        .track_member("presence.lobby", "alice", json!({ "user_id": 1 }))
+        .await
+        .expect("track alice");
+    hub_b
+        .track_member("presence.lobby", "bob", json!({ "user_id": 2 }))
+        .await
+        .expect("track bob");
+
+    // Poll until hub_b sees both members before removing one.
+    wait_for_member_count(&hub_b, "presence.lobby", 2, Duration::from_secs(2)).await;
+    assert_eq!(
+        hub_b.list_members("presence.lobby").await.len(),
+        2,
+        "setup: hub_b should see both members before untrack"
+    );
+
+    // Remove alice from hub_a.
+    hub_a
+        .untrack_member("presence.lobby", "alice")
+        .await
+        .expect("untrack alice");
+
+    // Poll until hub_b sees alice has been removed.
+    wait_for_member_count(&hub_b, "presence.lobby", 1, Duration::from_secs(2)).await;
+
+    let members = hub_b.list_members("presence.lobby").await;
+    assert_eq!(
+        members.len(),
+        1,
+        "hub_b should only see bob after alice is untracked; got {members:?}"
+    );
+    assert_eq!(
+        members[0]["user_id"], 2,
+        "remaining member should be bob; got {members:?}"
+    );
+}
+
+// ── TTL / crash-recovery ─────────────────────────────────────────────────────
+
+/// Simulate a hub crash: hub_a is dropped (all its background tasks abort),
+/// which stops its heartbeat. hub_b should prune hub_a's member (alice) once
+/// her `last_seen` passes the configured TTL.
+///
+/// Uses `new_loopback_with_presence_ttl` with a 600 ms TTL (100 ms heartbeat,
+/// 300 ms prune scan) so the full crash-recovery path executes within seconds
+/// rather than the production 60 s default.
+#[tokio::test]
+async fn crashed_hub_members_pruned_via_ttl() {
+    let ttl = Duration::from_millis(600); // heartbeat = 100ms, prune = 300ms
+
+    let hub_b = SeaStreamerBroadcastHub::new_loopback_with_presence_ttl(
+        "stdio://",
+        "suprnova-test-ttl-prune",
+        ttl,
+    )
+    .await
+    .expect("hub_b connect");
+
+    // Allow hub_b's consumer pump to start.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    {
+        // hub_a is scoped so its Drop aborts the heartbeat task, simulating a crash.
+        let hub_a = SeaStreamerBroadcastHub::new_loopback_with_presence_ttl(
+            "stdio://",
+            "suprnova-test-ttl-prune",
+            ttl,
+        )
+        .await
+        .expect("hub_a connect");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        hub_a
+            .track_member("presence.lobby", "alice", json!({ "user_id": 1 }))
+            .await
+            .expect("track alice");
+
+        // Wait until hub_b sees alice (presence event propagated).
+        wait_for_member_count(&hub_b, "presence.lobby", 1, Duration::from_secs(2)).await;
+    } // hub_a dropped here - heartbeat task aborted, alice's last_seen goes stale
+
+    // Wait until hub_b prunes alice (TTL expired + prune scan fired).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    loop {
+        let count = hub_b.list_members("presence.lobby").await.len();
+        if count == 0 {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("alice not pruned after TTL expired; still {count} members visible on hub_b");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+// ── env-gated Redis backend integration ──────────────────────────────────────
+
+/// Two independent `SeaStreamerBroadcastHub` instances pointed at the same
+/// Redis stream MUST exchange envelopes cross-process - this is the whole
+/// point of HIGH #208 (the socket-adapter refactor). Subscribers on hub_b
+/// receive events published on hub_a.
+///
+/// Skipped unless `REDIS_BROADCAST_URL` is set, e.g.
+///
+/// ```sh
+/// REDIS_BROADCAST_URL=redis://127.0.0.1:6379 \
+///     cargo test -p suprnova --features broadcasting-fanout \
+///     --test broadcasting -- --ignored fanout::redis_
+/// ```
+///
+/// `scripts/check-redis.sh` runs exactly that against a disposable
+/// container, so the three tests below are gate-covered rather than
+/// developer-only.
+///
+/// Uses a per-run UUID stream key so concurrent test runs and prior failed
+/// runs do not see each other's events.
+#[tokio::test]
+#[ignore = "requires REDIS_BROADCAST_URL pointing at a running Redis"]
+async fn redis_backend_cross_hub_fanout() {
+    let url = match std::env::var("REDIS_BROADCAST_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => return, // explicit ignore covers this, but belt+braces
+    };
+
+    let stream_key = format!("suprnova-test-{}", uuid::Uuid::new_v4());
+
+    let hub_a = SeaStreamerBroadcastHub::new(&url, &stream_key)
+        .await
+        .expect("hub_a Redis connect");
+    let hub_b = SeaStreamerBroadcastHub::new(&url, &stream_key)
+        .await
+        .expect("hub_b Redis connect");
+
+    // Subscribe on hub_b so the stream consumer is live before hub_a publishes.
+    let mut rx = hub_b.subscribe("chat.cross");
+
+    // Give the Redis consumer pump a beat to come up; without this, Redis
+    // Streams' XADD before XREAD-from-tail can be lost.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    hub_a
+        .publish(envelope(
+            "chat.cross",
+            "MessagePosted",
+            json!({ "from": "hub_a" }),
+        ))
+        .await
+        .unwrap();
+
+    let envelope = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("cross-hub event arrives within 5 s")
+        .expect("recv");
+    assert_eq!(envelope.channel, "chat.cross");
+    assert_eq!(envelope.event, "MessagePosted");
+    assert_eq!(envelope.data["from"], "hub_a");
+}
+
+#[tokio::test]
+#[ignore = "requires REDIS_BROADCAST_URL pointing at a running Redis"]
+async fn signal_005_redis_live_topics_share_cursor_and_coalescing() {
+    let url = match std::env::var("REDIS_BROADCAST_URL") {
+        Ok(url) if !url.is_empty() => url,
+        _ => return,
+    };
+    let stream_key = format!("suprnova-test-live-{}", uuid::Uuid::new_v4());
+    let hub_a = SeaStreamerBroadcastHub::new(&url, &stream_key)
+        .await
+        .expect("hub a Redis connect");
+    let hub_b = SeaStreamerBroadcastHub::new(&url, &stream_key)
+        .await
+        .expect("hub b Redis connect");
+    let mut receiver = hub_b
+        .subscribe_live_topic("dashboard")
+        .expect("Redis fanout hub supports live topics");
+    let interval = Duration::from_millis(120);
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    hub_a
+        .publish_live_topic("dashboard", &["seed".to_owned()], None, interval)
+        .await
+        .expect("first signal publishes atomically");
+    receiver.recv().await.expect("first signal arrives");
+
+    hub_a
+        .publish_live_topic(
+            "dashboard",
+            &["stats".to_owned()],
+            Some(suprnova::broadcasting::LiveTopicExclusion {
+                socket: "socket-a".to_owned(),
+                sender: suprnova::broadcasting::LiveTopicSender::Principal("alice".to_owned()),
+            }),
+            interval,
+        )
+        .await
+        .expect("first pending signal is accepted");
+    hub_b
+        .publish_live_topic(
+            "dashboard",
+            &["activity".to_owned()],
+            Some(suprnova::broadcasting::LiveTopicExclusion {
+                socket: "socket-b".to_owned(),
+                sender: suprnova::broadcasting::LiveTopicSender::Principal("alice".to_owned()),
+            }),
+            interval,
+        )
+        .await
+        .expect("second pending signal is accepted");
+
+    let envelope = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+        .await
+        .expect("coalesced Redis signal arrives")
+        .expect("signal channel remains open");
+    assert_eq!(envelope.except, None);
+    assert_eq!(
+        envelope.data,
+        json!({
+            "topic": "dashboard",
+            "generation": hub_b.live_topic_positions(&["dashboard".into()]).await.unwrap()[0].generation,
+            "cursor": 3,
+            "props": ["activity", "stats"]
+        })
+    );
+    assert_eq!(hub_a.live_topic_cursor("dashboard").await.unwrap(), 3);
+    assert_eq!(hub_b.live_topic_cursor("dashboard").await.unwrap(), 3);
+
+    let mut immediate_empty = hub_b
+        .subscribe_live_topic("empty.immediate")
+        .expect("Redis fanout hub supports an empty immediate signal");
+    hub_a
+        .publish_live_topic("empty.immediate", &[], None, interval)
+        .await
+        .expect("empty immediate signal is accepted");
+    let envelope = tokio::time::timeout(Duration::from_secs(5), immediate_empty.recv())
+        .await
+        .expect("empty immediate Redis signal arrives")
+        .expect("empty immediate signal channel remains open");
+    assert_eq!(
+        envelope.data,
+        json!({"topic": "empty.immediate", "generation": hub_b.live_topic_positions(&["empty.immediate".into()]).await.unwrap()[0].generation, "cursor": 1, "props": []})
+    );
+
+    let mut coalesced_empty = hub_b
+        .subscribe_live_topic("empty.coalesced")
+        .expect("Redis fanout hub supports an empty coalesced signal");
+    let bounded_interval = Duration::from_millis(500);
+    hub_a
+        .publish_live_topic(
+            "empty.coalesced",
+            &["seed".to_owned()],
+            None,
+            bounded_interval,
+        )
+        .await
+        .expect("coalesced-empty seed is accepted");
+    hub_a
+        .publish_live_topic(
+            "empty.coalesced",
+            &["stats".to_owned()],
+            None,
+            bounded_interval,
+        )
+        .await
+        .expect("named pending signal is accepted");
+    hub_a
+        .publish_live_topic("empty.coalesced", &[], None, bounded_interval)
+        .await
+        .expect("empty pending signal is accepted");
+    coalesced_empty
+        .recv()
+        .await
+        .expect("coalesced-empty seed arrives");
+    let envelope = tokio::time::timeout(Duration::from_secs(5), coalesced_empty.recv())
+        .await
+        .expect("empty coalesced Redis signal arrives")
+        .expect("empty coalesced signal channel remains open");
+    assert_eq!(
+        envelope.data,
+        json!({"topic": "empty.coalesced", "generation": hub_b.live_topic_positions(&["empty.coalesced".into()]).await.unwrap()[0].generation, "cursor": 3, "props": []})
+    );
+
+    let mut overflow = hub_b
+        .subscribe_live_topic("props.overflow")
+        .expect("Redis fanout hub supports bounded prop coalescing");
+    hub_a
+        .publish_live_topic(
+            "props.overflow",
+            &["seed".to_owned()],
+            None,
+            bounded_interval,
+        )
+        .await
+        .expect("overflow seed is accepted");
+    let first_props = (0..200)
+        .map(|index| format!("prop_{index:03}"))
+        .collect::<Vec<_>>();
+    let second_props = (200..300)
+        .map(|index| format!("prop_{index:03}"))
+        .collect::<Vec<_>>();
+    hub_a
+        .publish_live_topic("props.overflow", &first_props, None, bounded_interval)
+        .await
+        .expect("first bounded pending signal is accepted");
+    hub_a
+        .publish_live_topic("props.overflow", &second_props, None, bounded_interval)
+        .await
+        .expect("pending union beyond the bound is accepted as a full reload");
+    overflow.recv().await.expect("overflow seed arrives");
+    let envelope = tokio::time::timeout(Duration::from_secs(5), overflow.recv())
+        .await
+        .expect("bounded coalesced Redis signal arrives")
+        .expect("bounded coalesced signal channel remains open");
+    assert_eq!(
+        envelope.data,
+        json!({"topic": "props.overflow", "generation": hub_b.live_topic_positions(&["props.overflow".into()]).await.unwrap()[0].generation, "cursor": 3, "props": []})
+    );
+}
+
+/// Redis command failures are reported by the send receipt, after
+/// `SeaProducer::send` has accepted the message. Publishing must wait for
+/// that receipt instead of returning success for a failed `XADD`.
+#[tokio::test]
+#[ignore = "requires REDIS_BROADCAST_URL pointing at a running Redis"]
+async fn redis_publish_reports_stream_write_failure() {
+    let url = match std::env::var("REDIS_BROADCAST_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => return,
+    };
+    let stream_key = format!("suprnova-test-wrong-type-{}", uuid::Uuid::new_v4());
+    let hub = SeaStreamerBroadcastHub::new(&url, &stream_key)
+        .await
+        .expect("Redis hub connect");
+
+    let client = redis::Client::open(url).expect("valid Redis URL");
+    let mut conn = redis::aio::ConnectionManager::new(client)
+        .await
+        .expect("direct Redis connection");
+    redis::cmd("SET")
+        .arg(&stream_key)
+        .arg("not-a-stream")
+        .query_async::<()>(&mut conn)
+        .await
+        .expect("poison stream key with a string value");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        hub.publish(envelope("chat.receipt", "MessagePosted", json!({}))),
+    )
+    .await
+    .expect("publish must finish within the caller-visible bound");
+
+    redis::cmd("DEL")
+        .arg(&stream_key)
+        .query_async::<()>(&mut conn)
+        .await
+        .expect("remove poisoned stream key");
+
+    let error = result.expect_err("a failed Redis XADD must not be reported as success");
+    let message = error.to_string();
+    assert!(message.contains("broadcast publish delivery receipt failed"));
+    assert!(!message.contains("chat.receipt"));
+    assert!(!message.contains(&stream_key));
+}
+
+/// Presence writes use the same backend receipt contract as ordinary
+/// publishes and must surface a failed Redis `XADD` to the caller.
+#[tokio::test]
+#[ignore = "requires REDIS_BROADCAST_URL pointing at a running Redis"]
+async fn redis_presence_reports_stream_write_failure() {
+    let url = match std::env::var("REDIS_BROADCAST_URL") {
+        Ok(u) if !u.is_empty() => u,
+        _ => return,
+    };
+    let stream_key = format!("suprnova-test-wrong-type-{}", uuid::Uuid::new_v4());
+    let hub = SeaStreamerBroadcastHub::new(&url, &stream_key)
+        .await
+        .expect("Redis hub connect");
+
+    let client = redis::Client::open(url).expect("valid Redis URL");
+    let mut conn = redis::aio::ConnectionManager::new(client)
+        .await
+        .expect("direct Redis connection");
+    redis::cmd("SET")
+        .arg(&stream_key)
+        .arg("not-a-stream")
+        .query_async::<()>(&mut conn)
+        .await
+        .expect("poison stream key with a string value");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        hub.track_member("presence.receipt", "member-1", json!({ "user_id": 1 })),
+    )
+    .await
+    .expect("presence write must finish within the caller-visible bound");
+
+    redis::cmd("DEL")
+        .arg(&stream_key)
+        .query_async::<()>(&mut conn)
+        .await
+        .expect("remove poisoned stream key");
+
+    let error = result.expect_err("a failed presence XADD must not be reported as success");
+    let message = error.to_string();
+    assert!(message.contains("presence update delivery receipt failed"));
+    assert!(!message.contains("presence.receipt"));
+    assert!(!message.contains("member-1"));
+    assert!(!message.contains(&stream_key));
+}
+
+/// The credentials of a `redis://user:password@host/db` URL authenticate the
+/// hub's Redis connections. A server that requires a password refuses a
+/// connection that drops them, so without them nothing crosses between hubs.
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn redis_backend_authenticates_with_the_url_credentials() {
+    let server = crate::redis_server::PasswordRedis::start("fanout-secret");
+    for url in [
+        format!("redis://:fanout-secret@127.0.0.1:{}", server.port),
+        format!("redis://default:fanout-secret@127.0.0.1:{}/3", server.port),
+    ] {
+        let stream_key = format!("suprnova-test-auth-{}", uuid::Uuid::new_v4());
+        let hub_a = SeaStreamerBroadcastHub::new(&url, &stream_key)
+            .await
+            .expect("hub_a Redis connect");
+        let hub_b = SeaStreamerBroadcastHub::new(&url, &stream_key)
+            .await
+            .expect("hub_b Redis connect");
+        let mut rx = hub_b.subscribe("chat.auth");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        hub_a
+            .publish(envelope(
+                "chat.auth",
+                "MessagePosted",
+                json!({ "from": "a" }),
+            ))
+            .await
+            .expect("an authenticated publish lands");
+        let received = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the event crosses hubs within 5 s")
+            .expect("recv");
+        assert_eq!(received.data["from"], "a");
+    }
+}
+
+/// Two hubs exchange an event over `url`, the round trip every connection of
+/// the hub takes part in: the publish goes out on the writer, the delivery
+/// comes in on the reader.
+async fn cross_hub_round_trip(url: &str) {
+    let stream_key = format!("suprnova-test-{}", uuid::Uuid::new_v4());
+    let hub_a = SeaStreamerBroadcastHub::new(url, &stream_key)
+        .await
+        .expect("hub_a Redis connect");
+    let hub_b = SeaStreamerBroadcastHub::new(url, &stream_key)
+        .await
+        .expect("hub_b Redis connect");
+    let mut rx = hub_b.subscribe("chat.round");
+    hub_a
+        .publish(envelope(
+            "chat.round",
+            "MessagePosted",
+            json!({ "from": "a" }),
+        ))
+        .await
+        .expect("the publish lands");
+    let received = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("the event crosses hubs within 5 s")
+        .expect("recv");
+    assert_eq!(received.data["from"], "a");
+}
+
+/// A `rediss://` URL works for every connection of the hub. The test CA is
+/// trusted through `SSL_CERT_FILE`, which the native certificate store reads,
+/// so the child runs in a process of its own.
+#[test]
+#[ignore = "runs redis-server and openssl"]
+fn redis_backend_reaches_a_tls_server() {
+    crate::own_process::run_alone("fanout::redis_backend_reaches_a_tls_server_child");
+}
+
+#[tokio::test]
+async fn redis_backend_reaches_a_tls_server_child() {
+    if !crate::own_process::is_child() {
+        return;
+    }
+    let _env = crate::env_lock::lock_env_async().await;
+    let _restore = crate::env_snapshot::EnvSnapshot::capture(&["SSL_CERT_FILE"]);
+    let server = crate::redis_server::TlsRedis::start();
+    crate::env_snapshot::set_env("SSL_CERT_FILE", Some(&server.ca.display().to_string()));
+    cross_hub_round_trip(&format!("rediss://127.0.0.1:{}/0", server.port)).await;
+}
+
+#[tokio::test]
+async fn signal_fix_003_memory_fanout_preserves_owned_exclusions() {
+    let first = SeaStreamerBroadcastHub::new("memory://", "signal-owned-fanout")
+        .await
+        .unwrap();
+    let second = SeaStreamerBroadcastHub::new("memory://", "signal-owned-fanout")
+        .await
+        .unwrap();
+    owned_signal_fanout(&first, &second).await;
+}
+
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn signal_fix_003_redis_fanout_preserves_owned_exclusions() {
+    let server = crate::redis_server::PasswordRedis::start("signal-owned-test");
+    let url = format!("redis://:signal-owned-test@127.0.0.1:{}", server.port);
+    let stream = format!("signal-owned-{}", uuid::Uuid::new_v4());
+    let first = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    let second = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    owned_signal_fanout(&first, &second).await;
+}
+
+async fn owned_signal_fanout(first: &SeaStreamerBroadcastHub, second: &SeaStreamerBroadcastHub) {
+    use suprnova::broadcasting::{LiveTopicExclusion, LiveTopicSender, LiveTopicSignal};
+    let mut receiver = second.subscribe_live_topic("owned.42").unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let interval = Duration::from_millis(100);
+    for cursor in 1..=2 {
+        let owner = LiveTopicExclusion {
+            socket: "owned-document".into(),
+            sender: LiveTopicSender::Session("owned-session".into()),
+        };
+        first
+            .publish_live_topic("owned.42", &["stats".into()], Some(owner.clone()), interval)
+            .await
+            .unwrap();
+        let envelope = tokio::time::timeout(Duration::from_secs(3), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(envelope.except.as_deref(), Some("owned-document"));
+        let signal: LiveTopicSignal = serde_json::from_value(envelope.data).unwrap();
+        assert_eq!(signal.exclusion, Some(owner));
+        assert_eq!(signal.cursor, cursor);
+        let names = ["owned.42".into()];
+        let first_position = first.live_topic_positions(&names).await.unwrap()[0];
+        let second_position = second.live_topic_positions(&names).await.unwrap()[0];
+        assert_eq!(first_position, second_position);
+        assert_eq!(signal.generation, first_position.generation);
+        assert_eq!(
+            second
+                .live_topic_cursors(&["owned.42".into(), "owned.99".into()])
+                .await
+                .unwrap(),
+            [cursor, 0]
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn signal_fix2_001_redis_instance_ttl_is_refreshed_and_static_topics_do_not_expire() {
+    let server = crate::redis_server::PasswordRedis::start("signal-retention-test");
+    let url = format!("redis://:signal-retention-test@127.0.0.1:{}", server.port);
+    let stream = format!("signal-retention-{}", uuid::Uuid::new_v4());
+    let hub = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    hub.configure_live_topic_family("notes", Duration::from_secs(2))
+        .unwrap();
+    let mut connection = redis::Client::open(url)
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let identity = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("{stream}\0notes.42").as_bytes(),
+    );
+    let meta = format!("{stream}:__live:topic:{identity}");
+    let original_position = hub
+        .live_topic_positions(&["notes.42".into()])
+        .await
+        .unwrap()[0];
+    assert_eq!(original_position.cursor, 0);
+    let initial: i64 = redis::cmd("PTTL")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!((1500..=2000).contains(&initial), "baseline TTL: {initial}");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let older: i64 = redis::cmd("PTTL")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    hub.publish_live_topic(
+        "notes.42",
+        &["stats".into()],
+        None,
+        Duration::from_millis(10),
+    )
+    .await
+    .unwrap();
+    let published: i64 = redis::cmd("PTTL")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        published > older + 300 && published <= 2000,
+        "publication TTL: {older} -> {published}"
+    );
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        hub.live_topic_cursors(&["notes.42".into()]).await.unwrap(),
+        [1]
+    );
+    let baseline: i64 = redis::cmd("PTTL")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!(baseline > 1700, "bulk baseline TTL: {baseline}");
+    hub.publish_live_topic("static", &[], None, Duration::from_millis(1))
+        .await
+        .unwrap();
+    let static_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("{stream}\0static").as_bytes(),
+    );
+    let ttl: i64 = redis::cmd("PTTL")
+        .arg(format!("{stream}:__live:topic:{static_id}"))
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(ttl, -1);
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    let exists: bool = redis::cmd("EXISTS")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!(!exists, "Redis did not retire the instance hash");
+    let recreated = hub
+        .live_topic_positions(&["notes.42".into()])
+        .await
+        .unwrap()[0];
+    assert_eq!(recreated.cursor, 0);
+    assert!(recreated.generation > original_position.generation);
+    hub.publish_live_topic(
+        "notes.42",
+        &["stats".into()],
+        None,
+        Duration::from_millis(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(hub.live_topic_cursor("notes.42").await.unwrap(), 1);
+}
+
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn signal_fix3_002_pending_work_survives_a_worker_outage_past_retention() {
+    pending_outage(false).await;
+}
+
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn signal_fix3_002_missing_pending_hash_recovers_with_a_full_invalidation() {
+    pending_outage(true).await;
+}
+
+async fn pending_outage(remove_pending: bool) {
+    let server = crate::redis_server::PasswordRedis::start("signal-pending-test");
+    let url = format!("redis://:signal-pending-test@127.0.0.1:{}", server.port);
+    let stream = format!("signal-pending-{}", uuid::Uuid::new_v4());
+    let first = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    first
+        .configure_live_topic_family("notes", Duration::from_millis(200))
+        .unwrap();
+    first.pause_live_topic_flush_for_test().unwrap();
+    let mut receiver = first.subscribe_live_topic("notes.42").unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    first
+        .publish_live_topic(
+            "notes.42",
+            &["first".into()],
+            None,
+            Duration::from_millis(500),
+        )
+        .await
+        .unwrap();
+    first
+        .publish_live_topic(
+            "notes.42",
+            &["pending".into()],
+            None,
+            Duration::from_millis(500),
+        )
+        .await
+        .unwrap();
+    let mut connection = redis::Client::open(url.clone())
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let identity = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("{stream}\0notes.42").as_bytes(),
+    );
+    let meta = format!("{stream}:__live:topic:{identity}");
+    for key in [
+        &meta,
+        &format!("{meta}:pending"),
+        &format!("{meta}:props"),
+        &format!("{stream}:__live:schedule"),
+    ] {
+        let ttl: i64 = redis::cmd("PTTL")
+            .arg(key)
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(ttl, -1, "pending activity must not expire: {key}");
+    }
+    if remove_pending {
+        let _: i64 = redis::cmd("PERSIST")
+            .arg(&meta)
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+        let _: i64 = redis::cmd("PERSIST")
+            .arg(format!("{meta}:props"))
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+        let _: i64 = redis::cmd("DEL")
+            .arg(format!("{meta}:pending"))
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let _returning_worker = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    let signal = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let envelope = receiver.recv().await.unwrap();
+            if envelope.data["cursor"] == 2 {
+                break envelope.data;
+            }
+        }
+    })
+    .await
+    .expect("accepted pending signal vanished while workers were absent");
+    assert_eq!(
+        signal["props"],
+        if remove_pending {
+            json!([])
+        } else {
+            json!(["pending"])
+        }
+    );
+    assert!(
+        signal["generation"]
+            .as_u64()
+            .is_some_and(|generation| generation > 0)
+    );
+    let idle_ttl: i64 = redis::cmd("PTTL")
+        .arg(&meta)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        (0..=200).contains(&idle_ttl),
+        "flush must restore idle expiry: {idle_ttl}"
+    );
+    let pending_ttl: i64 = redis::cmd("PTTL")
+        .arg(format!("{meta}:pending"))
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(pending_ttl, -2, "successful flush removes its durable work");
+}
+
+#[tokio::test]
+#[ignore = "runs redis-server"]
+async fn signal_fix4_001_redis_allocates_distinct_generations_from_one_time_read() {
+    let server = crate::redis_server::PasswordRedis::start("signal-allocation-test");
+    let url = format!("redis://:signal-allocation-test@127.0.0.1:{}", server.port);
+    let stream = format!("signal-allocation-{}", uuid::Uuid::new_v4());
+    let first = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    let second = SeaStreamerBroadcastHub::new(&url, &stream).await.unwrap();
+    for hub in [&first, &second] {
+        hub.configure_live_topic_family("allocation", Duration::from_secs(60))
+            .unwrap();
+    }
+    let names = [
+        "allocation.first".into(),
+        "allocation.second".into(),
+        "static.first".into(),
+        "static.second".into(),
+    ];
+    let positions = first.live_topic_positions(&names).await.unwrap();
+    for pair in positions.windows(2) {
+        assert!(
+            pair[1].generation > pair[0].generation,
+            "one Redis TIME read must allocate unique lifetimes: {positions:?}"
+        );
+    }
+    assert_eq!(
+        second.live_topic_positions(&names).await.unwrap(),
+        positions
+    );
+    let mut connection = redis::Client::open(url)
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let key = format!("{stream}:__live:generation");
+    let last: u64 = redis::cmd("GET")
+        .arg(&key)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(last, positions[3].generation);
+    let ttl: i64 = redis::cmd("PTTL")
+        .arg(&key)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        ttl, -1,
+        "the authority allocation counter must survive instance retirement"
+    );
+    let future = suprnova_live::canonical::MAX_SAFE_INTEGER - 8;
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(future)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    let after_rollback = second
+        .live_topic_positions(&["allocation.rollback".into()])
+        .await
+        .unwrap()[0];
+    assert!(
+        after_rollback.generation > future,
+        "a clock below the persisted allocation must still advance it"
+    );
+    let mut signals = first.subscribe_live_topic("allocation.wire").unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for prop in ["immediate", "pending"] {
+        second
+            .publish_live_topic(
+                "allocation.wire",
+                &[prop.into()],
+                None,
+                Duration::from_millis(500),
+            )
+            .await
+            .unwrap();
+    }
+    let position = second
+        .live_topic_positions(&["allocation.wire".into()])
+        .await
+        .unwrap()[0];
+    assert_eq!(position.generation, future + 2);
+    for cursor in 1..=2 {
+        let signal = tokio::time::timeout(Duration::from_secs(3), signals.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(signal.data["cursor"], cursor);
+        assert_eq!(
+            signal.data["generation"].as_u64(),
+            Some(position.generation),
+            "generation must survive JSON encoding exactly: {}",
+            signal.data
+        );
+    }
+}

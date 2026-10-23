@@ -1,0 +1,5 @@
+error: a tool name uses ASCII letters, digits, `_` only; `bad.dot` contains '.'
+ --> tests/agents/compile_fail/live/agent_001_name_dot.rs:9:19
+  |
+9 |     #[tool(name = "bad.dot", description = "A tool.", callers = [public])]
+  |                   ^^^^^^^^^

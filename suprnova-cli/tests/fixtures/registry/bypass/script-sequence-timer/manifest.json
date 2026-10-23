@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-sequence-timer",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
