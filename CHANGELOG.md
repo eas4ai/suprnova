@@ -23,6 +23,13 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   it. The kits also wrote the Live topic setup, the asset share and the page
   budget test on lines rustfmt rewrites; the templates now carry rustfmt's
   layout, and the test's layout no longer depends on the application name.
+- **The page budget audit's URL mode counts the bytes that cross the wire.**
+  `budget:audit <url>` and `PageBudget::audit_url` asked for uncompressed
+  responses and counted decoded bytes as transfer, while a HAR capture of the
+  same visit counted the compressed bytes, so the two modes disagreed on a
+  page that serves gzip. A URL audit now asks for gzip, counts the compressed
+  bytes for the transfer, asset and font rules, and reads the decoded body for
+  the rest. This fix landed after the `v4.6.1` tag.
 
 ## 4.6.0 - 2026-10-22
 

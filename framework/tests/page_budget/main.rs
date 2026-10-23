@@ -375,6 +375,83 @@ async fn budget_001_http_runner_records_redirects_and_never_fetches_external_hos
 }
 
 #[tokio::test]
+async fn budget_001_url_mode_counts_compressed_transfer_and_reads_decoded_bodies() {
+    use std::io::Write;
+    use suprnova::http_client::{FakeResponse, Http, assert_sent};
+    let html = "<script src='/main-ABcd1234.js'></script>";
+    let script = "export const answer = 42;\n".repeat(400);
+    let gzip = |text: &str| {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(text.as_bytes()).unwrap();
+        encoder.finish().unwrap()
+    };
+    let gzipped = gzip(&script);
+    let page = gzip(html);
+    assert!(gzipped.len() * 4 < script.len(), "the fixture compresses");
+    Http::fake(|| async {
+        Http::prevent_stray_requests(true);
+        Http::fake_url(
+            "https://audit.test/",
+            FakeResponse::new(200)
+                .body(page.clone())
+                .header("Content-Type", "text/html")
+                .header("Content-Encoding", "gzip"),
+        );
+        Http::fake_url(
+            "https://audit.test/main-ABcd1234.js",
+            FakeResponse::new(200)
+                .body(gzipped.clone())
+                .header("Content-Type", "text/javascript")
+                .header("Content-Encoding", "gzip")
+                .header("Cache-Control", "public, max-age=31536000, immutable"),
+        );
+        // The decoded script is larger than the per-asset limit; what crosses
+        // the wire is not, and the size rules judge the wire.
+        let budget = PageBudget {
+            asset_bytes: (gzipped.len() + 64) as u64,
+            ..PageBudget::default()
+        };
+        assert!(script.len() as u64 > budget.asset_bytes);
+        let audit = budget.audit_url("https://audit.test/").await.unwrap();
+        // The script is found only by reading the decoded document.
+        assert_eq!(audit.requests, 2, "{audit}");
+        assert_eq!(
+            audit.total_transfer_bytes,
+            (page.len() + gzipped.len()) as u64,
+            "{audit}"
+        );
+        audit.ensure_passes().unwrap();
+        assert_sent(|r| {
+            r.url == "https://audit.test/main-ABcd1234.js"
+                && r.header("Accept-Encoding")
+                    .is_some_and(|v| v.contains("gzip"))
+        });
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn budget_001_url_mode_refuses_an_encoding_it_did_not_ask_for() {
+    use suprnova::http_client::{FakeResponse, Http};
+    Http::fake(|| async {
+        Http::prevent_stray_requests(true);
+        Http::fake_url(
+            "https://audit.test/",
+            FakeResponse::new(200)
+                .body("not brotli")
+                .header("Content-Type", "text/html")
+                .header("Content-Encoding", "br"),
+        );
+        let error = PageBudget::default()
+            .audit_url("https://audit.test/")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("br"), "{error}");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn budget_001_collection_bounds_and_redirect_cycles_return_errors() {
     let router = Router::new()
         .get("/", |_req: Request| async {

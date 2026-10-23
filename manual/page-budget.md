@@ -127,8 +127,15 @@ cargo run --bin console -- budget:audit capture.har
 cargo run --bin console -- budget:audit https://example.com/
 ```
 
+A URL audit asks for gzip, as a browser asks for compression. The transfer,
+asset and font rules count the bytes that cross the wire, so the result
+matches a HAR capture of the same visit, and the format and PNG rules read the
+decoded body. A response in an encoding the audit did not ask for, such as
+Brotli, fails the audit with the encoding named.
+
 HTTP requests have a ten-second timeout. The whole collection has a thirty-second
-timeout, a limit of 256 resources and a 16 MiB response limit.
+timeout, a limit of 256 resources and a 16 MiB response limit, which also bounds
+a decoded body.
 `budget:audit` reads these collection limits through `PageBudget::from_env()`.
 The resource limit counts normalized HTTP and HTTPS URLs after deduplication.
 Data URLs and fragment-only references count zero. A separate limit of 65,536
