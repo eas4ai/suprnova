@@ -41,7 +41,9 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `budget:audit <url | file.har>` console command applies the same rules to a
   live URL or a HAR capture. Every budget is configurable on `PageBudget` and,
   for the command, through `PAGE_BUDGET_*` environment variables
-  (`manual/page-budget.md`). The React, Vue, Svelte and Live starter kits ship
+  (`manual/page-budget.md`). All three modes measure the application's own
+  resources and list every third-party host, which the allowed-host rule
+  governs, so a HAR capture and the in-process audit of one page agree. The React, Vue, Svelte and Live starter kits ship
   `tests/page_budget.rs` over their public pages; the dogfood application runs
   the same audit.
 
@@ -67,7 +69,12 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   origin sends `Strict-Transport-Security` only on HTTPS it can trust.
   Images are published as WebP at quality 85 or higher, AVIF when ImageMagick
   is configured, with the metadata-stripped original as the fallback, and kept
-  PNGs go through `recompress_png` at the maximum preset. `static:publish`,
+  PNGs go through `recompress_png` at the maximum preset. Same-origin absolute
+  image URLs and inline raster `data:` images go through the same preparation
+  and are published as objects; a page whose own CSS (a `style` attribute or a
+  `<style>` element) carries a raster image refuses publication, naming the
+  route, and the origin keeps serving it. Third-party images and linked
+  stylesheets are published unchanged. `static:publish`,
   `static:status` and `static:prune` are the console commands; prune keeps the
   live publication and retired versions inside their grace period. The React,
   Vue and Svelte kits ship a client that fetches the published JSON for public
@@ -147,8 +154,10 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   props by name instead. Middleware boxed through the public `into_boxed`
   keeps its type identity, so ordering and boot checks see it.
 - **Static files get a cache policy by file name.** `StaticFiles` serves a
-  fingerprinted file (Vite's `name-<hash>` convention; `fingerprint(pattern)`
-  changes the convention) with `public, max-age=31536000, immutable`, and every
+  fingerprinted file (Vite's `name-<hash>` convention, confirmed by the build
+  manifest when one is configured, so an all-lowercase hash counts;
+  `fingerprint(pattern)` changes the convention for other files) with
+  `public, max-age=31536000, immutable`, and every
   other file with `public, max-age=3600` unless `cache_control(...)` sets
   another value. Before, `cache_control` applied to every file and nothing was
   sent when it was unset. A static file response no longer sets the session or
@@ -166,6 +175,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   configured publisher.
 
 ### Fixed
+
+- **A savepoint rollback discards the callbacks of the work it rolls back.**
+  Nested transactions and named savepoints in `DB::transaction` now record
+  their after-commit and rollback callbacks under one lock with the savepoint
+  they belong to, and each savepoint statement and its bookkeeping complete
+  together even when the caller is cancelled. Before, a nested transaction
+  rolled back to an enclosing savepoint could still run its after-commit
+  callbacks when the outer transaction committed. A panicking callback no
+  longer stops the callbacks after it.
 
 - **The built-in driver honours the JPEG quality setting.** The OxideAV
   registry encoder ignored the quality option and wrote every JPEG at 75. The
