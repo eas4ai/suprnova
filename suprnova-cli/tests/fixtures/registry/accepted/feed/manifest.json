@@ -1,0 +1,5 @@
+{
+  "name": "acme.feed",
+  "files": ["feed.html", "feed.rs"],
+  "register": ["feed::Feed"]
+}
