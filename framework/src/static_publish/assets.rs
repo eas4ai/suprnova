@@ -128,13 +128,7 @@ pub(crate) fn referenced_assets(
         if tag.kind != TagKind::StartTag {
             continue;
         }
-        let fields: &[&str] = match tag.name.as_str() {
-            "img" | "source" => &["src", "srcset"],
-            "script" | "video" | "audio" | "track" | "embed" => &["src", "poster"],
-            "link" => &["href", "imagesrcset"],
-            "object" => &["data"],
-            _ => &[],
-        };
+        let fields = reference_fields(&tag);
         for field in fields {
             if let Some(value) = attribute(&tag, field) {
                 let urls = if field.ends_with("srcset") {
@@ -153,28 +147,142 @@ pub(crate) fn referenced_assets(
     Ok(paths)
 }
 
+// Document CSS cannot safely share the HTML image rewrite pipeline.
+pub(super) fn validate_document_css(html: &[u8], document: &str) -> Result<(), FrameworkError> {
+    let html = std::str::from_utf8(html).map_err(|error| {
+        FrameworkError::param(format!("publication HTML is not UTF-8: {error}"))
+    })?;
+    let mut style_start = None;
+    for (start, end, tag) in tags(html) {
+        if tag.kind == TagKind::StartTag {
+            if let Some(css) = attribute(&tag, "style") {
+                validate_css(css, document, &format!("<{}> style attribute", tag.name))?;
+            }
+            if tag.name == "style" {
+                style_start = Some(end);
+            }
+        } else if tag.name == "style"
+            && let Some(body) = style_start.take()
+        {
+            validate_css(&html[body..start], document, "<style> element")?;
+        }
+    }
+    if let Some(body) = style_start {
+        validate_css(&html[body..], document, "<style> element")?;
+    }
+    Ok(())
+}
+
+fn validate_css(css: &str, document: &str, element: &str) -> Result<(), FrameworkError> {
+    let raster = css_has_raster(&mut cssparser::Parser::new(css), document, false, 0)
+        .map_err(|failure| FrameworkError::param(format!("{element}: {failure}")))?;
+    if raster {
+        return Err(FrameworkError::param(format!(
+            "{element} contains a raster image in document CSS; move the image into an <img>, a <picture> or a stylesheet file"
+        )));
+    }
+    Ok(())
+}
+
+fn css_raster_url(value: &str, document: &str) -> Result<bool, FrameworkError> {
+    if raster_data_mime(value).is_some() {
+        return Ok(true);
+    }
+    Ok(local_path(value, document)?.is_some_and(|path| is_raster(&path)))
+}
+
+fn css_has_raster(
+    parser: &mut cssparser::Parser<'_>,
+    document: &str,
+    url_argument: bool,
+    depth: usize,
+) -> Result<bool, FrameworkError> {
+    use cssparser::{ParseError, ParseErrorKind, Token};
+    if depth > 64 {
+        return Err(FrameworkError::param(
+            "document CSS nesting exceeds 64 levels",
+        ));
+    }
+    let mut raster = false;
+    while let Ok(token) = parser.next_including_whitespace_and_comments().cloned() {
+        let nested_url = match token {
+            Token::UnquotedUrl(value) => {
+                raster |= css_raster_url(&value, document)?;
+                continue;
+            }
+            Token::QuotedString(value) if url_argument => {
+                raster |= css_raster_url(&value, document)?;
+                continue;
+            }
+            Token::Function(name) => {
+                name.eq_ignore_ascii_case("url")
+                    || name.eq_ignore_ascii_case("image-set")
+                    || name.eq_ignore_ascii_case("-webkit-image-set")
+            }
+            Token::CurlyBracketBlock | Token::ParenthesisBlock | Token::SquareBracketBlock => false,
+            _ => continue,
+        };
+        let nested: Result<bool, ParseError<FrameworkError>> = parser.parse_nested_block(|child| {
+            css_has_raster(child, document, nested_url, depth + 1).map_err(ParseError::custom)
+        });
+        raster |= nested.map_err(|error| match error.kind {
+            ParseErrorKind::Custom(failure) => failure,
+            _ => FrameworkError::param("document CSS nested block could not be parsed"),
+        })?;
+    }
+    Ok(raster)
+}
+
+pub(super) fn has_raster_data(html: &[u8]) -> Result<bool, FrameworkError> {
+    let html = std::str::from_utf8(html).map_err(|error| {
+        FrameworkError::param(format!("publication HTML is not UTF-8: {error}"))
+    })?;
+    Ok(tags(html).iter().any(|(_, _, tag)| {
+        tag.kind == TagKind::StartTag
+            && reference_fields(tag).iter().any(|field| {
+                attribute(tag, field).is_some_and(|value| {
+                    if field.ends_with("srcset") {
+                        parse_srcset(value)
+                            .iter()
+                            .any(|(url, _)| raster_data_mime(url).is_some())
+                    } else {
+                        raster_data_mime(value).is_some()
+                    }
+                })
+            })
+    }))
+}
+
+fn reference_fields(tag: &HtmlTag) -> &'static [&'static str] {
+    match tag.name.as_str() {
+        "img" | "source" => &["src", "srcset"],
+        "script" | "video" | "audio" | "track" | "embed" => &["src", "poster"],
+        "link" if crate::page_budget::asset_link(attribute(tag, "rel").unwrap_or_default()) => {
+            &["href", "imagesrcset"]
+        }
+        "object" => &["data"],
+        _ => &[],
+    }
+}
+
 pub(super) fn local_path(
     reference: &str,
     document_path: &str,
 ) -> Result<Option<String>, FrameworkError> {
     let reference = reference.trim();
-    if reference.is_empty()
-        || reference.starts_with('#')
-        || reference.starts_with("//")
-        || url::Url::parse(reference).is_ok()
-    {
+    if reference.is_empty() || reference.starts_with('#') {
         return Ok(None);
     }
-    let base = url::Url::parse(&format!(
-        "https://publication.invalid/{}",
-        document_path.trim_start_matches('/')
-    ))
-    .map_err(|error| {
-        FrameworkError::param(format!("invalid publication document path: {error}"))
+    let mut base = url::Url::parse(&crate::routing::url::app_url()).map_err(|error| {
+        FrameworkError::param(format!("invalid publication application URL: {error}"))
     })?;
+    base.set_path(&format!("/{}", document_path.trim_start_matches('/')));
     let resolved = base.join(reference).map_err(|error| {
         FrameworkError::param(format!("invalid publication asset URL: {error}"))
     })?;
+    if resolved.origin() != base.origin() {
+        return Ok(None);
+    }
     let decoded = percent_encoding::percent_decode_str(resolved.path())
         .decode_utf8()
         .map_err(|error| {
@@ -187,6 +295,25 @@ pub(super) fn local_path(
         ));
     }
     Ok((!path.is_empty()).then(|| path.to_string()))
+}
+
+// Only raster data URLs cross the image preparation boundary.
+pub(super) fn raster_data_mime(reference: &str) -> Option<&str> {
+    let (scheme, data) = reference.trim().split_once(':')?;
+    if !scheme.eq_ignore_ascii_case("data") {
+        return None;
+    }
+    let mime = data.split([';', ',']).next()?;
+    [
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "image/bmp",
+    ]
+    .iter()
+    .any(|expected| mime.eq_ignore_ascii_case(expected))
+    .then_some(mime)
 }
 
 pub(super) fn is_raster(path: &str) -> bool {
@@ -418,13 +545,7 @@ pub(crate) fn version_assets(
         if tag.kind != TagKind::StartTag {
             continue;
         }
-        let fields: &[&str] = match tag.name.as_str() {
-            "img" | "source" => &["src", "srcset"],
-            "script" | "video" | "audio" | "track" | "embed" => &["src", "poster"],
-            "link" => &["href", "imagesrcset"],
-            "object" => &["data"],
-            _ => &[],
-        };
+        let fields = reference_fields(&tag);
         let mut changed = false;
         for field in fields {
             if let Some(value) = attribute(&tag, field) {
@@ -462,7 +583,7 @@ mod tests {
 
     #[test]
     fn pub_007_asset_parser_ignores_fake_markup_and_decodes_real_attributes() {
-        let paths = referenced_assets(br#"<script>const x = '<img src="/fake.png">';</script><!-- <img src='/fake.png'> --><link href='/app.123.css'><img src='../images/a&amp;b.png' srcset='/small.png 1x, /large.png 2x'><script src='/app.123.js'></script>"#, "/nested/page").expect("parsed assets");
+        let paths = referenced_assets(br#"<script>const x = '<img src="/fake.png">';</script><!-- <img src='/fake.png'> --><link rel='stylesheet' href='/app.123.css'><img src='../images/a&amp;b.png' srcset='/small.png 1x, /large.png 2x'><script src='/app.123.js'></script>"#, "/nested/page").expect("parsed assets");
         assert_eq!(
             paths.into_iter().collect::<Vec<_>>(),
             [

@@ -105,3 +105,70 @@ async fn pub_007_round2_6_without_media_refuses_vite_only_rasters() {
         "{cause}"
     );
 }
+
+#[suprnova::inertia_root(path = "static_publish/metadata-links.html")]
+struct MetadataRoot;
+
+#[tokio::test]
+async fn pub_002_metadata_links_are_not_read_or_rewritten_as_assets() {
+    let _container = suprnova::testing::TestContainer::fake();
+    let source = opendal::Operator::new(opendal::services::Memory::default()).unwrap();
+    // These are the only source bytes. Reading either route as a file would fail.
+    source
+        .write("theme.css", b"body{}".as_slice())
+        .await
+        .unwrap();
+    let router: Router = Router::new()
+        .get("/metadata", |request: Request| async move {
+            InertiaResponse::new("Public")
+                .with_config(
+                    InertiaConfig::new()
+                        .version("v1")
+                        .development(true)
+                        .ssr_disabled()
+                        .vite_dev_server("http://localhost:5173")
+                        .root_template(suprnova::InertiaRootTemplate::of::<MetadataRoot>()),
+                )
+                .cacheable(Props {
+                    title: "Article".into(),
+                })
+                .unwrap()
+                .resolve(&request)
+                .await
+                .map_err(Into::into)
+        })
+        .into();
+    let router = router.public_page::<Props>("/metadata", "Public").unwrap();
+    let disk = opendal::Operator::new(opendal::services::Memory::default()).unwrap();
+    let runtime = StaticPublication::install(
+        &router,
+        Publisher::from_operator(disk.clone(), "v1", PublishConfig::default()).unwrap(),
+    )
+    .unwrap();
+    runtime.assets(source).unwrap();
+    runtime.publish().await.unwrap();
+    let manifest: suprnova::static_publish::Manifest =
+        serde_json::from_slice(&disk.read("_pub/manifest.json").await.unwrap().to_bytes()).unwrap();
+    let objects = &manifest.versions[&manifest.live].objects;
+    let page = objects
+        .iter()
+        .find(|object| object.path.ends_with(".html"))
+        .unwrap();
+    let bytes = disk.read(&page.path).await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(
+        html.contains(r#"<link rel="canonical" href="/article">"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<link rel="alternate" hreflang="fr" href="/fr/article">"#),
+        "{html}"
+    );
+    let style = objects
+        .iter()
+        .find(|object| object.url == "/theme.css")
+        .unwrap();
+    assert_ne!(style.path, "theme.css");
+    assert!(html.contains(&format!("/{}", style.path)), "{html}");
+    assert!(objects.iter().all(|object| !object.url.contains("article")));
+}

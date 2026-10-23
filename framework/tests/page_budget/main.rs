@@ -23,7 +23,7 @@ fn budget_001_shipped_har_reports_the_baseline() {
     let audit = PageBudget::default()
         .audit_har(include_str!("fixtures/suprnova.har.json"))
         .unwrap();
-    assert_eq!(audit.requests, 21);
+    assert_eq!(audit.requests, 11);
     for rule in [
         "total-transfer",
         "asset-size",
@@ -829,3 +829,402 @@ mod review_manifest;
 
 mod css_work;
 mod re_review;
+
+#[tokio::test]
+async fn budget_001_cross_origin_scope_agrees_in_all_modes() {
+    if std::env::var_os("BUDGET_SCOPE_CHILD").is_none() {
+        for hosts in ["fonts.example", ""] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "budget_001_cross_origin_scope_agrees_in_all_modes",
+                    "--nocapture",
+                ])
+                .env("BUDGET_SCOPE_CHILD", "1")
+                .env("PAGE_BUDGET_ALLOWED_THIRD_PARTY_HOSTS", hosts)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    }
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let html = "<link rel=preload as=font href='https://fonts.example/font-ABcd1234.woff2'><script src='/app-ABcd1234.js'></script>";
+    let router = Router::new()
+        .get("/", move |_: Request| async move {
+            Ok(HttpResponse::html(html))
+        })
+        .get("/app-ABcd1234.js", |_: Request| async {
+            Ok(HttpResponse::text("ok")
+                .header("Cache-Control", "public, max-age=31536000, immutable"))
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let count = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..count]);
+            let (body, mime) = if request.starts_with("GET / ") {
+                (html, "text/html")
+            } else {
+                ("ok", "text/javascript")
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: public, max-age=31536000, immutable\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    let url = format!("http://{address}/");
+    let mut entries = vec![
+        entry("/", 200, "text/html", html, html.len() as u64, &[]),
+        entry(
+            "/app-ABcd1234.js",
+            200,
+            "text/javascript",
+            "ok",
+            2,
+            &[("Cache-Control", "public, max-age=31536000, immutable")],
+        ),
+        entry(
+            "/font-ABcd1234.woff2",
+            403,
+            "font/woff2",
+            "",
+            2_000_000,
+            &[("Set-Cookie", "external=1")],
+        ),
+    ];
+    entries[0]["request"]["url"] = serde_json::json!(url);
+    entries[1]["request"]["url"] = serde_json::json!(format!("{url}app-ABcd1234.js"));
+    entries[2]["request"]["url"] = serde_json::json!("https://fonts.example/font-ABcd1234.woff2");
+    entries[2]["request"]["cookies"] = serde_json::json!([{"name":"external","value":"1"}]);
+    let budget = PageBudget::from_env().unwrap();
+    let helper = TestClient::new(router, MiddlewareRegistry::new())
+        .audit_page(&url, &budget)
+        .await
+        .unwrap();
+    let live = budget.audit_url(&url).await.unwrap();
+    let captured = budget.audit_har(&har(entries)).unwrap();
+    assert_eq!(helper, live);
+    assert_eq!(helper, captured);
+    assert_eq!(helper.third_party_hosts, ["fonts.example"]);
+    assert_eq!(helper.requests, 2);
+    let allowed = budget
+        .allowed_third_party_hosts
+        .as_ref()
+        .unwrap()
+        .contains("fonts.example");
+    if allowed {
+        helper.ensure_passes().unwrap();
+    } else {
+        assert_eq!(helper.findings.len(), 1);
+        assert_eq!(helper.findings[0].rule, "third-party-host");
+    }
+    let command = suprnova::console::test(["budget:audit", &url]).run().await;
+    command.assert_exit_code(if allowed { 0 } else { 1 });
+    assert!(
+        command.output().contains(&helper.to_string()),
+        "{}",
+        command.output()
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn budget_001_manifest_output_files_require_immutable_in_all_modes() {
+    if std::env::var_os("BUDGET_MANIFEST_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "budget_001_manifest_output_files_require_immutable_in_all_modes",
+                "--nocapture",
+            ])
+            .env("BUDGET_MANIFEST_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    use suprnova::http_client::{FakeResponse, Http};
+    let _container = suprnova::testing::TestContainer::fake();
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("custom-manifest.json");
+    std::fs::write(&manifest, include_str!("fixtures/build-manifest.json")).unwrap();
+    suprnova::Inertia::install(
+        &suprnova::InertiaConfig::new()
+            .development(true)
+            .manifest_path(&manifest)
+            .assets_base_url("/build"),
+    )
+    .unwrap();
+    let html = "<script src='/build/app-deadbeef.js'></script><link rel=stylesheet href='/build/app-abcdefgh.css'><link rel=preload as=font href='/build/font-abcdefgh.woff2'><link rel=modulepreload href='/build/lazy-abcdefgh.js'><link rel=manifest href='/build/site-manifest.json'>";
+    let resources = [
+        ("/build/app-deadbeef.js", "text/javascript", "ok"),
+        ("/build/app-abcdefgh.css", "text/css", "body{}"),
+        ("/build/font-abcdefgh.woff2", "font/woff2", "font"),
+        ("/build/lazy-abcdefgh.js", "text/javascript", "ok"),
+        (
+            "/build/site-manifest.json",
+            "application/manifest+json",
+            "{}",
+        ),
+    ];
+    let mut router = Router::new().get("/", move |_: Request| async move {
+        Ok(HttpResponse::html(html))
+    });
+    for (path, mime, body) in resources {
+        router =
+            router.get(path, move |_: Request| async move {
+                Ok(HttpResponse::bytes_body(body, mime)
+                    .header("Cache-Control", "public, max-age=3600"))
+            });
+    }
+    let helper = TestClient::new(router, MiddlewareRegistry::new())
+        .audit_page("/", &PageBudget::default())
+        .await
+        .unwrap();
+    let mut entries = vec![entry("/", 200, "text/html", html, html.len() as u64, &[])];
+    for (path, mime, body) in resources {
+        entries.push(entry(
+            path,
+            200,
+            mime,
+            body,
+            body.len() as u64,
+            &[("Cache-Control", "public, max-age=3600")],
+        ));
+    }
+    let capture = har(entries);
+    let captured = PageBudget::default().audit_har(&capture).unwrap();
+    assert_eq!(helper, captured);
+    let har_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(har_file.path(), &capture).unwrap();
+    let command = suprnova::console::test(["budget:audit", har_file.path().to_str().unwrap()])
+        .run()
+        .await;
+    command.assert_exit_code(1);
+    assert!(
+        command.output().contains(&helper.to_string()),
+        "{}",
+        command.output()
+    );
+    assert_eq!(helper.findings.len(), 4, "{helper}");
+    assert!(
+        helper
+            .findings
+            .iter()
+            .all(|finding| finding.rule == "fingerprint-cache")
+    );
+    Http::fake(|| async {
+        Http::prevent_stray_requests(true);
+        Http::fake_url(
+            "http://localhost/",
+            FakeResponse::new(200)
+                .body(html)
+                .header("Content-Type", "text/html"),
+        );
+        for (path, mime, body) in resources {
+            Http::fake_url(
+                &format!("http://localhost{path}"),
+                FakeResponse::new(200)
+                    .body(body)
+                    .header("Content-Type", mime)
+                    .header("Cache-Control", "public, max-age=3600"),
+            );
+        }
+        let live = PageBudget::default()
+            .audit_url("http://localhost/")
+            .await
+            .unwrap();
+        assert_eq!(helper, live);
+        let command = suprnova::console::test(["budget:audit", "http://localhost/"])
+            .run()
+            .await;
+        command.assert_exit_code(1);
+        assert!(
+            command.output().contains(&helper.to_string()),
+            "{}",
+            command.output()
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn budget_001_cross_origin_redirect_port_keeps_the_same_scope() {
+    if std::env::var_os("BUDGET_PORT_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "budget_001_cross_origin_redirect_port_keeps_the_same_scope",
+                "--nocapture",
+            ])
+            .env("BUDGET_PORT_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    use suprnova::http_client::{FakeResponse, Http};
+    let client = TestClient::new(
+        Router::new().get("/", |_: Request| async {
+            Ok(HttpResponse::text("")
+                .status(302)
+                .header("Location", "http://audit.test:8080/"))
+        }),
+        MiddlewareRegistry::new(),
+    );
+    let helper = client
+        .audit_page("http://audit.test/", &PageBudget::default())
+        .await
+        .unwrap();
+    let mut first = entry(
+        "/",
+        302,
+        "text/html",
+        "",
+        0,
+        &[("Location", "http://audit.test:8080/")],
+    );
+    first["request"]["url"] = serde_json::json!("http://audit.test/");
+    let mut external = entry("/", 200, "text/html", "", 2_000_000, &[]);
+    external["request"]["url"] = serde_json::json!("http://audit.test:8080/");
+    let captured = PageBudget::default()
+        .audit_har(&har(vec![first, external]))
+        .unwrap();
+    assert_eq!(helper, captured);
+    assert_eq!(helper.third_party_hosts, ["audit.test"]);
+    assert_eq!(helper.findings.len(), 1);
+    assert_eq!(helper.findings[0].rule, "first-redirect");
+    Http::fake(|| async {
+        Http::prevent_stray_requests(true);
+        Http::fake_url(
+            "http://audit.test/",
+            FakeResponse::new(302).header("Location", "http://audit.test:8080/"),
+        );
+        assert_eq!(
+            helper,
+            PageBudget::default()
+                .audit_url("http://audit.test/")
+                .await
+                .unwrap()
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn budget_001_review_manifest_mutable_names_keep_revalidation() {
+    if std::env::var_os("REVIEW_MANIFEST_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "budget_001_review_manifest_mutable_names_keep_revalidation",
+                "--nocapture",
+            ])
+            .env("REVIEW_MANIFEST_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let _container = suprnova::testing::TestContainer::fake();
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("review-manifest.json");
+    std::fs::write(&manifest, include_str!("fixtures/review-manifest.json")).unwrap();
+    suprnova::Inertia::install(
+        &suprnova::InertiaConfig::new()
+            .development(true)
+            .manifest_path(&manifest)
+            .assets_base_url("/build"),
+    )
+    .unwrap();
+    let files = [
+        "index.html",
+        "app.js",
+        "theme.css",
+        "logo.svg",
+        "app-deadbeef.js",
+        "escape-abcdefgh.js",
+        "abs-abcdefgh.js",
+        "site-manifest.json",
+    ];
+    let mut entries = vec![entry("/", 200, "text/html", "", 0, &[])];
+    for file in files {
+        entries.push(entry(
+            &format!("/build/{file}"),
+            200,
+            "text/javascript",
+            "asset",
+            5,
+            &[("Cache-Control", "public, max-age=3600")],
+        ));
+    }
+    let audit = PageBudget::default().audit_har(&har(entries)).unwrap();
+    assert_eq!(audit.findings.len(), 1, "{audit}");
+    assert_eq!(audit.findings[0].rule, "fingerprint-cache");
+    assert!(audit.findings[0].asset.ends_with("/build/app-deadbeef.js"));
+    std::fs::write(&manifest, r#"{"entry":{"file":"app.deadbeef.js","css":["app-abcdefghijkl.css"],"assets":["short-abcdefg.js","noextension-deadbeef"]}}"#).unwrap();
+    suprnova::Inertia::install(
+        &suprnova::InertiaConfig::new()
+            .development(true)
+            .manifest_path(&manifest)
+            .assets_base_url("/build"),
+    )
+    .unwrap();
+    let mut entries = vec![entry("/", 200, "text/html", "", 0, &[])];
+    for file in [
+        "app.deadbeef.js",
+        "app-abcdefghijkl.css",
+        "short-abcdefg.js",
+        "noextension-deadbeef",
+    ] {
+        entries.push(entry(
+            &format!("/build/{file}"),
+            200,
+            "text/javascript",
+            "asset",
+            5,
+            &[("Cache-Control", "public, max-age=3600")],
+        ));
+    }
+    let audit = PageBudget::default().audit_har(&har(entries)).unwrap();
+    assert_eq!(audit.findings.len(), 1, "{audit}");
+    assert!(
+        audit
+            .findings
+            .iter()
+            .any(|finding| finding.asset.ends_with("/app.deadbeef.js"))
+    );
+    assert!(
+        !audit
+            .findings
+            .iter()
+            .any(|finding| finding.asset.ends_with("/app-abcdefghijkl.css")),
+        "a twelve-letter segment is not Vite's default hash"
+    );
+}

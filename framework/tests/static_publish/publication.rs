@@ -1835,3 +1835,141 @@ mod sets;
 
 #[path = "maintenance.rs"]
 mod maintenance;
+
+#[tokio::test]
+async fn pub_002_manifest_output_files_are_immutable() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "pub_002_manifest_output_files_are_immutable",
+    )
+    .await
+    {
+        return;
+    }
+
+    let _container = suprnova::testing::TestContainer::fake();
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("custom-manifest.json");
+    std::fs::write(
+        &manifest,
+        include_str!("../page_budget/fixtures/build-manifest.json"),
+    )
+    .unwrap();
+    suprnova::Inertia::install(
+        &suprnova::InertiaConfig::new()
+            .development(true)
+            .manifest_path(&manifest)
+            .assets_base_url("/build"),
+    )
+    .unwrap();
+    let (publisher, _) = publisher("v1");
+    let mut page = page("manifest authority");
+    for file in [
+        "app-deadbeef.js",
+        "app-abcdefgh.css",
+        "font-abcdefgh.woff2",
+        "lazy-abcdefgh.js",
+        "site-manifest.json",
+        "outside-deadbeef.js",
+    ] {
+        page.assets.insert(
+            format!("build/{file}"),
+            (
+                Bytes::from_static(b"asset"),
+                "application/octet-stream".into(),
+            ),
+        );
+    }
+    publisher.publish(vec![page]).await.unwrap();
+    let manifest = publisher.manifest().await.unwrap();
+    let objects = &manifest.versions[&manifest.live].objects;
+    for file in [
+        "app-deadbeef.js",
+        "app-abcdefgh.css",
+        "font-abcdefgh.woff2",
+        "lazy-abcdefgh.js",
+        "site-manifest.json",
+        "outside-deadbeef.js",
+    ] {
+        let url = format!("/build/{file}");
+        let asset = objects.iter().find(|object| object.url == url).unwrap();
+        if matches!(file, "site-manifest.json" | "outside-deadbeef.js") {
+            assert!(!asset.headers["cache-control"].contains("immutable"));
+        } else {
+            assert_eq!(
+                asset.headers["cache-control"], "public, max-age=31536000, immutable",
+                "{file}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn pub_002_review_manifest_mutable_names_keep_revalidation() {
+    if crate::own_process_async::delegate(
+        module_path!(),
+        "pub_002_review_manifest_mutable_names_keep_revalidation",
+    )
+    .await
+    {
+        return;
+    }
+    let _container = suprnova::testing::TestContainer::fake();
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("review-manifest.json");
+    std::fs::write(
+        &manifest,
+        include_str!("../page_budget/fixtures/review-manifest.json"),
+    )
+    .unwrap();
+    suprnova::Inertia::install(
+        &suprnova::InertiaConfig::new()
+            .development(true)
+            .manifest_path(&manifest)
+            .assets_base_url("/build"),
+    )
+    .unwrap();
+    let (publisher, disk) = publisher("v1");
+    let mut page = page("mutable build outputs");
+    let files = [
+        "index.html",
+        "app.js",
+        "theme.css",
+        "logo.svg",
+        "app-deadbeef.js",
+        "escape-abcdefgh.js",
+        "abs-abcdefgh.js",
+        "site-manifest.json",
+    ];
+    for file in files {
+        page.assets.insert(
+            format!("build/{file}"),
+            (
+                Bytes::from_static(b"asset"),
+                "application/octet-stream".into(),
+            ),
+        );
+    }
+    publisher.publish(vec![page]).await.unwrap();
+    let manifest = publisher.manifest().await.unwrap();
+    let objects = &manifest.versions[&manifest.live].objects;
+    for file in files {
+        let asset = objects
+            .iter()
+            .find(|object| object.url == format!("/build/{file}"))
+            .unwrap();
+        if file == "app-deadbeef.js" {
+            assert_eq!(
+                asset.headers["cache-control"],
+                "public, max-age=31536000, immutable"
+            );
+        } else {
+            assert!(
+                !asset.headers["cache-control"].contains("immutable"),
+                "{file}"
+            );
+            assert_ne!(asset.path, format!("build/{file}"));
+        }
+        assert!(disk.exists(&asset.path).await.unwrap());
+    }
+}

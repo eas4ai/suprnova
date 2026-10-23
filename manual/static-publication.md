@@ -424,7 +424,17 @@ publication.images(images)?;
 
 `data-static-keep-png`, configured `keep_png` paths, linked PNG icons and web
 manifest PNG icons use oxipng Maximum with Zopfli. Metadata is stripped from
-every prepared raster. External and data URLs stay external. SVG and ICO files
+every prepared raster. Absolute URLs on the application's public origin use the local source disk.
+Raster data URLs are decoded and published as metadata-stripped objects, with
+modern variants and a rewritten fallback just like local images. An invalid
+raster data URL refuses publication with the route and cause; the origin keeps
+serving the page. Third-party images are neither transcoded nor published.
+Linked stylesheets are build outputs published byte for byte; their images belong
+to the build, including small images Vite inlines below `assetsInlineLimit`.
+Raster data URLs and same-origin raster `url(...)` references in document style
+attributes or `<style>` elements refuse publication with the route and element;
+move the image into an `<img>`, a `<picture>` or a stylesheet file.
+Non-raster data URLs stay unchanged. SVG and ICO files
 keep their existing representation. See [Images](images.md).
 
 The collector reads the complete Vite inventory before image preparation.

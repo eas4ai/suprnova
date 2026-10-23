@@ -240,10 +240,7 @@ impl Publisher {
         Ok(self)
     }
     fn fingerprinted(&self, path: &str) -> bool {
-        std::path::Path::new(path)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .is_some_and(|stem| self.fingerprint.is_match(stem))
+        crate::page_budget::fingerprinted_path(path, &self.fingerprint)
     }
     /// Reads the durable truth rather than a process-local manifest copy.
     pub async fn manifest(&self) -> Result<Manifest, FrameworkError> {
@@ -347,9 +344,15 @@ impl Publisher {
                 .timeout
                 .div_f64(4.0)
                 .min(Duration::from_secs(10));
-        let serial = tokio::time::timeout_at(forward, self.serial.clone().lock_owned())
-            .await
-            .map_err(|_| error("publication serialization timed out"))?;
+        let serial = match tokio::time::timeout_at(forward, self.serial.clone().lock_owned()).await
+        {
+            Ok(serial) => serial,
+            Err(_) => {
+                let result = Err(error("publication serialization timed out"));
+                self.record_result(&result, deadline).await;
+                return result;
+            }
+        };
         let acquired = tokio::time::timeout_at(
             forward,
             super::lease::StorageLease::acquire(

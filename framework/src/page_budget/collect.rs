@@ -8,6 +8,7 @@ use url::Url;
 
 pub(super) struct Capture {
     pub page: Url,
+    pub inertia: Option<crate::InertiaConfig>,
     pub resources: Vec<Resource>,
     pub hosts: BTreeSet<String>,
     pub alternatives: BTreeSet<String>,
@@ -24,6 +25,7 @@ impl Capture {
             work_limit,
             work_used: 0,
             page,
+            inertia: crate::App::inertia_registry().installed_config(),
             resources: Vec::new(),
             hosts: BTreeSet::new(),
             alternatives: BTreeSet::new(),

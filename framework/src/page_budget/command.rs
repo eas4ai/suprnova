@@ -42,9 +42,14 @@ async fn audit(args: Vec<String>) -> Result<(), FrameworkError> {
                 "page budget HAR exceeds {limit} bytes"
             )));
         }
-        tokio::task::spawn_blocking(move || budget.audit_har(&json))
-            .await
-            .map_err(|e| FrameworkError::internal(format!("page budget HAR evaluator: {e}")))??
+        let inertia = crate::App::inertia_registry().installed_config();
+        tokio::task::spawn_blocking(move || {
+            let mut capture = super::har::read(&json, &budget)?;
+            capture.inertia = inertia;
+            budget.evaluate(capture)
+        })
+        .await
+        .map_err(|e| FrameworkError::internal(format!("page budget HAR evaluator: {e}")))??
     };
     console::line(&audit);
     if audit.findings.is_empty() {

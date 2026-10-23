@@ -3,7 +3,12 @@
 A page budget checks the document and the assets it fetches. The test helper
 uses the application's in-process HTTP path. It needs no browser, port or
 network. The console command reads a HAR capture or fetches a live URL.
-Both runners use `PageBudget` and the same evaluator.
+All three modes use `PageBudget` and the same evaluator. Budgets measure the
+application's own resources: the document and same-origin assets. Third-party
+hosts are listed and governed by the configured allowed host list because the
+application controls neither their bytes nor their headers. HAR entries from
+other origins do not count toward transfer, asset, raster, font, cache or cookie
+rules.
 
 ## Test a page
 
@@ -68,10 +73,20 @@ and measure changes in review. PNG recompression is lossless and preserves
 the media pipeline's colour and metadata policy. Lossy media output keeps
 the framework's default quality of 85.
 
-Fingerprint detection uses a configurable regular expression against the file
-name without its extension. The default matches Vite's eight-character hash when it contains a digit,
+The configured Vite build manifest identifies build outputs in each entry's
+`file`, `css` and `assets`. A listed file receives immutable caching only when
+its filename has a hyphen or dot followed by at least eight base64url characters
+(`A-Z`, `a-z`, `0-9`, `_` or `-`) before the extension. This includes
+`app-deadbeef.js`; mutable names such as `index.html` and `app.js` retain the
+revalidating policy. Empty outputs, absolute URLs or paths, and outputs containing
+`..` or a backslash are ignored. The static handler, publisher and all audit modes
+share this classification and read the installed `InertiaConfig` and its `manifest_path`.
+For files outside that manifest, fingerprint detection uses a configurable
+regular expression against the file name without its extension. The fallback
+matches Vite's eight-character hash when it contains a digit,
 uppercase letter, underscore or hyphen, in names such as
-`main-BjmpJyAU.js`. Fingerprinted assets require
+`main-BjmpJyAU.js`. An all-lowercase hash outside the manifest is not
+recognized by the fallback; configure the pattern for it. Fingerprinted assets require
 `public, max-age=31536000, immutable`. Other static files default to
 `public, max-age=3600`, or the handler's configured cache policy. Static file
 responses skip session persistence and cookie issuance only when the handler

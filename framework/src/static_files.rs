@@ -107,9 +107,8 @@ impl StaticFiles {
                 crate::FrameworkError::internal(format!("static file fingerprint pattern: {error}"))
             })?;
         let fingerprinted = relative_path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .is_some_and(|stem| pattern.is_match(stem));
+            .to_str()
+            .is_some_and(|path| crate::page_budget::fingerprinted_path(path, pattern));
         let root = self.root.clone();
         let Ok(Some(OpenedFile {
             file,
