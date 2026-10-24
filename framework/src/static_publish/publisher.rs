@@ -568,6 +568,24 @@ impl Publisher {
             self.reconcile_commit(previous, &next, failure, lease, deadline)
                 .await?;
         }
+        if self
+            .driver
+            .as_ref()
+            .is_some_and(|driver| driver.serves_mirror())
+        {
+            // The provider serves the mirror, so it must hold the new version
+            // before the purge, or an edge refetches the old copy and keeps it
+            // for the page's whole shared lifetime.
+            if let Err(failure) = tokio::time::timeout_at(deadline, self.mirror(&next, lease))
+                .await
+                .map_err(|_| {
+                    error("static publication mirror deadline exceeded; manifest remains live")
+                })
+                .and_then(|result| result)
+            {
+                tracing::error!(%failure, "static publication committed; the mirror converges on the next publication");
+            }
+        }
         if let Some(driver) = &self.driver {
             let capabilities = driver.capabilities();
             let tags: Vec<String> = uploads
@@ -647,7 +665,10 @@ impl Publisher {
                 ..Default::default()
             };
         }
-        if self.driver.is_none()
+        if self
+            .driver
+            .as_ref()
+            .is_none_or(|driver| driver.serves_mirror())
             && let Err(failure) = tokio::time::timeout_at(deadline, self.mirror(manifest, lease))
                 .await
                 .map_err(|_| {

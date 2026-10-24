@@ -258,16 +258,18 @@ suprnova = { git = "https://github.com/eas4ai/suprnova.git", tag = "v4.6.2", def
 
 ### Cloudflare and R2
 
-Use an R2 bucket as the publication disk and a Worker on the site's hostname.
-Keep that hostname's DNS record pointed at the application and enable Cloudflare's
-proxy. A Worker route intercepts requests before they reach the application.
-An R2 custom domain alone cannot send unpublished paths to the application.
+An R2 bucket with a custom domain is the whole setup: the bucket is the
+publication disk, the custom domain serves it, Cloudflare's cache sits in
+front, and the driver owns a few rules on the zone and the purges. Nothing
+runs at the edge. R2 charges no egress.
 
-Register the bucket through `S3Config`. R2 uses its account endpoint and the
-`auto` region. Supply static access and secret keys from an R2 API token with
-read and write access to the bucket. The separate zone API token needs Cache
-Purge permission. Read these credentials from the application's configuration
-and pass them to the driver; the driver reads no environment variables.
+Register the bucket through `S3Config`: the account's R2 endpoint, the `auto`
+region, and static keys from an R2 API token with read and write access to the
+bucket. In the Cloudflare dashboard, connect a custom domain to the bucket
+(R2 Object Storage, the bucket, Settings, Custom Domains); that is the `host`
+the driver takes. Create a zone API token with Cache Purge, Transform Rules
+edit and Cache Rules edit. Read the keys and the token from the application's
+configuration and pass them in; the driver reads no environment variable.
 
 ```rust
 use std::{sync::Arc, time::Duration};
@@ -280,7 +282,7 @@ fn cloudflare(
     access_key: &str,
     secret_key: &str,
     zone_id: &str,
-    purge_token: &str,
+    zone_token: &str,
 ) -> Result<Publisher, FrameworkError> {
     let s3 = S3Config {
         bucket: "public-pages".into(),
@@ -288,98 +290,79 @@ fn cloudflare(
         region: Some("auto".into()),
         access_key_id: Some(access_key.into()),
         secret_access_key: Some(secret_key.into()),
-        root: Some("pages".into()),
+        root: None,
     };
     Storage::register_s3("pages", s3.clone())?;
-    let driver = CloudflareDriver::new(zone_id, "www.example.com", purge_token, &s3)?
-        .with_manifest_ttl(Duration::from_secs(5))?;
-    Ok(Publisher::new("pages", "build-42", PublishConfig::default())?
-        .with_cdn(Arc::new(driver)))
+    let driver = CloudflareDriver::new(zone_id, "docs.example.com", zone_token, &s3)?;
+    let policy = PublishConfig {
+        // Every changed page is purged after its publication, so a long shared
+        // lifetime is safe; the default of a minute would refetch each page from
+        // the bucket every minute per data center.
+        s_maxage: Duration::from_secs(86_400),
+        ..PublishConfig::default()
+    };
+    Ok(Publisher::new("pages", "build-42", policy)?.with_cdn(Arc::new(driver)))
 }
 ```
 
-Write the shipped Worker to the deployment directory with a small binary:
+The custom domain serves the bucket's keys as paths, and after every manifest
+commit the publisher mirrors the live version to stable keys, `about/index.html`
+and `about/index.json`, so the mirror is the switch and the driver has no origin
+path to move; `selected_version` reports unknown and the publisher realigns with
+its manifest. The driver creates its rules on the first switch and corrects them
+on every later one, each on `http.host eq "<host>"` and identified by a `ref`
+that starts with `suprnova-static-publication-`, so rules the application wrote
+on the same zone are never touched:
 
-```rust
-use suprnova::static_publish::cdn::CLOUDFLARE_WORKER;
+- Two URL rewrites in the `http_request_transform` phase: a path that ends in
+  `/` gets `index.html` appended, and a path without an extension and not under
+  `/_pub/` gets `/index.html` appended, so `/about` and `/about/` both serve
+  `about/index.html` while `/about/index.json` and fingerprinted assets pass
+  through. With a disk root, every path is prefixed with it, through one more
+  rewrite for the paths that already name an object.
+- One response header rule in `http_response_headers_transform` that sets the
+  headers the publisher validated, such as `Content-Security-Policy`; R2 serves
+  `Content-Type`, `Cache-Control` and the other object headers itself, so the
+  rule does not repeat them.
+- One cache rule in `http_request_cache_settings` that makes a response on
+  the host eligible for the cache only when its own `Cache-Control` allows a
+  shared cache, as every published object's does (Cloudflare caches no HTML
+  or JSON by default), and for the time it names. A dynamic page on the same
+  host that sends no such header is never cached, so one visitor's page never
+  reaches another. The edge keeps each page for its `s-maxage`, so set
+  `PublishConfig::s_maxage` to hours or a day: changed pages are purged after
+  every publication.
 
-fn main() -> std::io::Result<()> {
-    std::fs::write("cloudflare_worker.js", CLOUDFLARE_WORKER)
-}
-```
+A rollback of the first publication deletes those rules; a later rollback has
+nothing to move. The constructor refuses the same ambiguous root segments as
+CloudFront. The public dashboard setting named Local Uploads speeds uploads
+into the bucket and plays no part in serving.
 
-Create `wrangler.toml` beside that file, then run `wrangler deploy`:
-
-```toml
-name = "suprnova-publication"
-main = "cloudflare_worker.js"
-compatibility_date = "2026-10-23"
-routes = [{ pattern = "www.example.com/*", zone_name = "example.com" }]
-
-[[r2_buckets]]
-binding = "BUCKET"
-bucket_name = "public-pages"
-
-[vars]
-ROOT_PREFIX = "pages"
-MANIFEST_TTL_SECONDS = "5"
-```
-
-`ROOT_PREFIX` must match `S3Config.root`; use an empty string when the disk has
-no root. The constructor refuses the same ambiguous root segments as CloudFront.
-The Worker reads `<root>/_pub/manifest.json` and selects its `live` revision.
-It serves GET and HEAD from R2, returns ETag-based 304 responses and restores
-native HTTP metadata and validated public headers. It preserves CSP metadata
-and applies the same restrictive default CSP as the CloudFront function when
-HTML has none. Other methods, missing objects and missing or unreadable manifests
-go to the application with `fetch(request)`. The manifest and status objects
-are never served from R2.
-
-The Worker maps page paths to versioned HTML, `/index.json` paths to versioned
-JSON, and asset paths directly to their bucket keys. When the manifest includes
-a page inventory, its recorded keys take precedence. This supports the current
-publisher's flat page stems as well as directory-style `index.html` keys.
-Fingerprint names and `/_pub/<version>/_assets/...` paths retain the disk root.
-The Worker uses Cloudflare's Cache API to cache R2 responses under their unchanged
-public URLs. Requests with query strings read R2 directly because the publisher's
-purge URLs have no query dimension. This avoids Worker-defined custom cache keys,
-which [single-file purge cannot clear](https://developers.cloudflare.com/workers/reference/how-the-cache-works/#purge-assets-stored-with-the-cache-api).
-Each cached entry records its object key internally, so a manifest change cannot
-reuse a previous revision's page. That internal header is removed before delivery.
-The Worker attaches dependency Cache-Tag headers to cached entries for tag purges.
-It never caches application fallback responses. Cache writes run through
-`waitUntil` when the runtime provides a request context. This follows the
-[R2 Cache API example](https://developers.cloudflare.com/r2/examples/cache-api/).
-The Cache API honors the shared cache lifetime but does not implement
-`stale-while-revalidate` or `stale-if-error`; see its
-[runtime contract](https://developers.cloudflare.com/workers/runtime-apis/cache/).
-
-The manifest cache defaults to five seconds per Worker isolate. Set
-`with_manifest_ttl` to the same duration as `MANIFEST_TTL_SECONDS`.
-`selected_version` returns unknown because the manifest selects the version.
-Switching waits one TTL without changing Cloudflare configuration. The current
-publisher calls the switch before committing its manifest, so the driver also
-waits one TTL at purge time, after commit. This keeps the purge behind cached
-manifest selections. Include both waits in the publication timeout; recovery
-realignment can add another switch wait before rendering. Rollback
-has no provider configuration to restore; the durable manifest remains authoritative.
+For a hostname that also serves dynamic pages, keep its DNS at the application
+behind Cloudflare's proxy and use `CloudflareDriver::for_origin(zone_id, host,
+zone_token)`: the application serves the published objects and their headers
+itself, as it does for every published path, the driver writes only the cache
+rule and purges, and unpublished paths reach the application as usual. A cache miss is
+then a request to the application, so the `s_maxage` advice above matters most
+there.
 
 The driver advertises URL and prefix purges, so the publisher purges each
 republished page by URL: full HTTPS URLs in batches of 100, the per-request
 limit on Free, Pro and Business (Enterprise allows 500). Single-file rate
 limits are 800 URLs per second on Free, 1500 on Pro and Business, and 3000 on
 Enterprise. Cloudflare also purges by tag on every plan, but a tag purge clears
-only responses that carried a `Cache-Tag` header, which the shipped Worker does
-not set; an application whose Worker adds the header can call
+only responses that carried a `Cache-Tag` header, which the publication does
+not set; an application that sets the header through its own rule can call
 `purge(Purge::Tags(...))` itself. Prefix and tag purge requests are limited to
 5 per minute on Free, 5 per second on Pro, 10 per second on Business and 50
 per second on Enterprise, with at most 100 operations per request; tags are
-batched to that.
-Prefix values contain a host and path without a scheme, query or fragment.
-Provider refusals include the HTTP status and first error code and message,
-with the token redacted. See the [purge API](https://developers.cloudflare.com/api/resources/cache/methods/purge/),
-[single-file guide](https://developers.cloudflare.com/cache/how-to/purge-cache/purge-by-single-file/)
-and [current plan limits](https://developers.cloudflare.com/cache/how-to/purge-cache/#availability-and-limits).
+batched to that. Prefix values contain a host and path without a scheme, query
+or fragment. Provider refusals include the HTTP status and first error code and
+message, with the token redacted. See the
+[purge API](https://developers.cloudflare.com/api/resources/cache/methods/purge/),
+the [single-file guide](https://developers.cloudflare.com/cache/how-to/purge-cache/purge-by-single-file/),
+the [plan limits](https://developers.cloudflare.com/cache/how-to/purge-cache/#availability-and-limits)
+and the [Rulesets API](https://developers.cloudflare.com/ruleset-engine/rulesets-api/).
 
 ### CloudFront
 
