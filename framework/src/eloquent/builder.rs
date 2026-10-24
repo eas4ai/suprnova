@@ -4617,7 +4617,10 @@ impl<M> Builder<M> {
 
     /// Render `orders` as an ORDER BY list, the shared body of
     /// [`Self::render_orders`] and of the first query of a union, which
-    /// keeps its own list in [`UnionHead`].
+    /// keeps its own list in [`UnionHead`]. The rendering context is the
+    /// caller's: the term list, the dialect, the coordinate table for a
+    /// distance order, the row alias, the binding sink and the join.
+    #[allow(clippy::too_many_arguments)]
     fn render_order_terms(
         &self,
         orders: &[OrderTerm],

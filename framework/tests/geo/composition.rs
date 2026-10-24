@@ -324,9 +324,11 @@ fn geo_001_eager_window_binds_distance_before_projection_and_radius() {
 #[test]
 #[should_panic(expected = "expected 0, got 0.00075")]
 fn geo_001_reference_tolerance_rejects_more_than_half_a_metre() {
-    let mut row = super::Place::default();
-    row.latitude = ORIGIN.0;
-    row.longitude = ORIGIN.1;
+    let mut row = super::Place {
+        latitude: ORIGIN.0,
+        longitude: ORIGIN.1,
+        ..Default::default()
+    };
     row.__set_geo_distance(0.00075);
     super::assert_distances(&[row], false);
 }
