@@ -198,6 +198,7 @@ dependencies = [
  "serial_test",
  "sha2 0.11.0",
  "suprnova",
+ "suprnova-docs",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -9053,6 +9054,22 @@ dependencies = [
  "toml_edit",
  "validator",
  "walkdir",
+]
+
+[[package]]
+name = "suprnova-docs"
+version = "4.6.2"
+dependencies = [
+ "bytes",
+ "comrak",
+ "mime_guess",
+ "serde",
+ "serde_json",
+ "suprnova",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "validator",
 ]
 
 [[package]]

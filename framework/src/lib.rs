@@ -60,6 +60,7 @@ pub(crate) mod confined_walk;
 pub mod console;
 pub mod container;
 pub mod content;
+pub use content::{Heading, MarkdownOptions, MarkdownRenderer, RenderedMarkdown};
 pub mod context;
 pub mod cors;
 pub mod crypto;

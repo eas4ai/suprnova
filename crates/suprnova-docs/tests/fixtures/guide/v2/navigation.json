@@ -1,0 +1,25 @@
+[
+  {
+    "title": "Start here",
+    "path": "index"
+  },
+  {
+    "title": "Guides",
+    "children": [
+      {
+        "title": "Setup",
+        "path": "nested/setup"
+      }
+    ]
+  },
+  {
+    "title": "Private operations",
+    "private": true,
+    "children": [
+      {
+        "title": "Launch codes",
+        "path": "secret"
+      }
+    ]
+  }
+]
