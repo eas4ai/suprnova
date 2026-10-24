@@ -2,6 +2,7 @@
 
 use sea_orm::{DbBackend, QueryResult, Value};
 
+use super::builder::OrderTerm;
 use super::{Builder, EloquentModel};
 use crate::FrameworkError;
 use crate::database::{clauses::quote_identifier, placeholder::placeholder, validate_identifier};
@@ -9,18 +10,19 @@ use crate::database::{clauses::quote_identifier, placeholder::placeholder, valid
 const EARTH_RADIUS_KM: f64 = 6371.0;
 const KM_PER_MILE: f64 = 1.609344;
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct GeoQuery {
     origin: Option<Origin>,
     radius: Option<f64>,
     miles: bool,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct Origin {
     lat: f64,
     lng: f64,
     columns: (&'static str, &'static str),
+    table: &'static str,
 }
 
 impl<M: EloquentModel> Builder<M> {
@@ -46,7 +48,12 @@ impl<M: EloquentModel> Builder<M> {
         for column in [columns.0, columns.1] {
             validate_identifier(column)?;
         }
-        self.geo.origin = Some(Origin { lat, lng, columns });
+        self.geo.origin = Some(Origin {
+            lat,
+            lng,
+            columns,
+            table: M::TABLE,
+        });
         Ok(self)
     }
 
@@ -72,13 +79,14 @@ impl<M: EloquentModel> Builder<M> {
     ///
     /// Returns an error before database access unless [`Self::nearby`] precedes
     /// this call. Add a primary-key order afterwards to break distance ties.
-    pub fn order_by_distance(self) -> Result<Self, FrameworkError> {
+    pub fn order_by_distance(mut self) -> Result<Self, FrameworkError> {
         if !self.geo.has_origin() {
             return Err(FrameworkError::param(
                 "order_by_distance requires a preceding nearby",
             ));
         }
-        Ok(self.order_by_raw("distance ASC"))
+        self.orders.push(OrderTerm::Distance);
+        Ok(self)
     }
 
     /// Use miles for both the distance projection and every radius on this query.
@@ -92,6 +100,19 @@ impl<M: EloquentModel> Builder<M> {
 }
 
 impl GeoQuery {
+    /// A typed morph predicate cannot use one model's coordinates on another table.
+    pub(super) fn validate_table(&self, table: &str) -> Result<(), FrameworkError> {
+        if let Some(origin) = &self.origin
+            && origin.table != table
+        {
+            return Err(FrameworkError::param(format!(
+                "geo existence predicate for {} cannot target {table}",
+                origin.table
+            )));
+        }
+        Ok(())
+    }
+
     pub(super) fn has_origin(&self) -> bool {
         self.origin.is_some()
     }

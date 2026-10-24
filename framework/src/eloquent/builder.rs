@@ -366,9 +366,8 @@ pub(crate) struct ExistsSpec {
     pub count_op: Option<String>,
     pub count_value: Option<i64>,
     /// Optional inner WHERE constraint contributed by `where_has`'s
-    /// closure. The inner builder's `where_terms` are merged into the
-    /// subquery body so users can refine the EXISTS arm.
-    pub inner_terms: Vec<WhereTerm>,
+    /// closure. Boolean terms and geo radii both constrain the subquery.
+    inner: ExistenceConstraints,
     /// Phase 10D - Laravel `whereRelation("posts", "col", "val")`
     /// shortcut. Renders the same EXISTS shape but adds the col/op/val
     /// constraint inline; equivalent to `whereHas` with a tiny closure.
@@ -383,6 +382,13 @@ pub(crate) struct ExistsSpec {
     /// has-one or has-many. The two fill the same slots, so only the
     /// relation's kind tells them apart.
     pub belongs_to: bool,
+}
+
+/// Predicates carried together when a related builder becomes an existence query.
+#[derive(Debug, Clone, Default)]
+struct ExistenceConstraints {
+    terms: Vec<WhereTerm>,
+    geo: Vec<super::geo::GeoQuery>,
 }
 
 /// Which rows an existence clause keeps. Stands in for a bare `bool` so
@@ -431,6 +437,7 @@ pub(crate) enum DatePart {
 #[derive(Debug, Clone)]
 pub(crate) enum OrderTerm {
     Col(String, Direction),
+    Distance,
     Raw(String),
     Random(Option<u64>),
     BoundRaw(String, Vec<SeaValue>),
@@ -1141,7 +1148,7 @@ pub(crate) fn validate_where_term(term: &WhereTerm) -> Result<(), FrameworkError
             if let Some(op) = &spec.relation_op {
                 validate_sql_operator(op)?;
             }
-            for t in &spec.inner_terms {
+            for t in &spec.inner.terms {
                 validate_where_term(t)?;
             }
         }
@@ -1174,7 +1181,7 @@ fn where_term_tables(term: &WhereTerm, out: &mut ReadSet) {
                     out.tables.push(table.clone());
                 }
             }
-            for t in &spec.inner_terms {
+            for t in &spec.inner.terms {
                 where_term_tables(t, out);
             }
         }
@@ -1198,6 +1205,20 @@ fn where_term_tables(term: &WhereTerm, out: &mut ReadSet) {
 }
 
 impl<M> Builder<M> {
+    fn into_existence_constraints(self) -> Result<ExistenceConstraints, String> {
+        if let Some(error) = self.relationship_error {
+            return Err(error);
+        }
+        Ok(ExistenceConstraints {
+            terms: self.where_terms,
+            geo: if self.geo.has_origin() {
+                vec![self.geo]
+            } else {
+                Vec::new()
+            },
+        })
+    }
+
     /// This builder as it runs: itself when it carries no scope resolver,
     /// and otherwise a copy with the soft-delete filter and the global
     /// scopes folded in. Every renderer starts here, so no path reaches
@@ -1301,7 +1322,7 @@ impl<M> Builder<M> {
                 OrderTerm::BoundRaw(sql, bindings) => {
                     validate_raw_placeholders(sql, bindings.len())?
                 }
-                OrderTerm::Raw(_) | OrderTerm::Random(_) => {
+                OrderTerm::Raw(_) | OrderTerm::Random(_) | OrderTerm::Distance => {
                     // Explicit escape hatch / framework literal.
                 }
             }
@@ -3660,6 +3681,9 @@ fn render_exists(
     n: &mut usize,
     outer: Option<ProbeOuter<'_>>,
 ) -> Result<String, FrameworkError> {
+    for geo in &spec.inner.geo {
+        geo.validate_table(&spec.target_table)?;
+    }
     let mut where_parts: Vec<String> = Vec::new();
     let parent = outer
         .filter(|table| table.table == spec.parent_table)
@@ -3811,9 +3835,9 @@ fn render_exists(
         sql: &target,
         depth: depth + 1,
     };
-    if !spec.inner_terms.is_empty() {
+    if !spec.inner.terms.is_empty() {
         let predicate = crate::database::clauses::render_boolean_list(
-            &spec.inner_terms,
+            &spec.inner.terms,
             |term| matches!(term, WhereTerm::OrNext(_)),
             |t| {
                 render_probe_term(
@@ -3828,6 +3852,11 @@ fn render_exists(
             },
         )?;
         where_parts.push(format!("({predicate})"));
+    }
+    for geo in &spec.inner.geo {
+        if let Some(predicate) = geo.predicate(backend, &target, values, n)? {
+            where_parts.push(format!("({predicate})"));
+        }
     }
 
     // `where_relation` shortcut: col op val constraint inline.
@@ -4564,6 +4593,8 @@ impl<M> Builder<M> {
     /// `row` is the row's SQLite rowid written as this ORDER BY can
     /// reach it, which a seeded SQLite order reads: see
     /// [`Self::own_row`].
+    /// `table` names the coordinate source for a distance expression. `None`
+    /// means a derived table already projects the distance alias.
     ///
     /// `joined` is the model's table when the ORDER BY sits in a query
     /// that joins another, and `None` otherwise, as for a WHERE term: a
@@ -4575,12 +4606,13 @@ impl<M> Builder<M> {
     fn render_orders(
         &self,
         backend: DbBackend,
+        table: Option<&str>,
         row: &str,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
         joined: Option<JoinedTable<'_>>,
     ) -> Result<String, FrameworkError> {
-        self.render_order_terms(&self.orders, backend, row, values, n, joined)
+        self.render_order_terms(&self.orders, backend, table, row, values, n, joined)
     }
 
     /// Render `orders` as an ORDER BY list, the shared body of
@@ -4590,6 +4622,7 @@ impl<M> Builder<M> {
         &self,
         orders: &[OrderTerm],
         backend: DbBackend,
+        table: Option<&str>,
         row: &str,
         values: &mut Vec<SeaValue>,
         n: &mut usize,
@@ -4605,6 +4638,19 @@ impl<M> Builder<M> {
                     format!("{} {}", joined_column(backend, joined, col), dir.sql())
                 }
                 OrderTerm::Raw(sql) => sql.clone(),
+                OrderTerm::Distance => {
+                    let distance = match table {
+                        Some(table) => {
+                            self.geo
+                                .distance(backend, table, values, n)?
+                                .ok_or_else(|| {
+                                    FrameworkError::internal("distance order lost its origin")
+                                })?
+                        }
+                        None => "distance".to_owned(),
+                    };
+                    format!("{distance} ASC")
+                }
                 // MySQL has no `RANDOM()`; its random function is `RAND()`.
                 OrderTerm::Random(seed) => random_order(backend, *seed, row),
                 OrderTerm::BoundRaw(sql, bindings) => {
@@ -4934,7 +4980,7 @@ impl<M> Builder<M> {
         let from = this.own_table(backend, table);
         let joined = this.joined_table(table, &from);
         if this.unions.is_empty() {
-            sql.push_str(&this.render_orders(backend, &own_row, values, n, joined)?);
+            sql.push_str(&this.render_orders(backend, Some(table), &own_row, values, n, joined)?);
             sql.push_str(&render_limit_offset(backend, this.limit, this.offset));
             return Ok(sql);
         }
@@ -4944,6 +4990,7 @@ impl<M> Builder<M> {
             sql.push_str(&this.render_order_terms(
                 &head.orders,
                 backend,
+                Some(table),
                 &own_row,
                 values,
                 n,
@@ -4992,7 +5039,18 @@ impl<M> Builder<M> {
             whole.push_str(" WHERE ");
             whole.push_str(&parts.join(" AND "));
         }
-        whole.push_str(&this.render_orders(backend, UNION_ROW_ALIAS, values, n, None)?);
+        whole.push_str(&this.render_orders(
+            backend,
+            if column_expr == "*" {
+                None
+            } else {
+                Some(UNION_ALIAS)
+            },
+            UNION_ROW_ALIAS,
+            values,
+            n,
+            None,
+        )?);
         whole.push_str(&render_limit_offset(backend, this.limit, this.offset));
         Ok(whole)
     }
@@ -5033,7 +5091,17 @@ impl<M> Builder<M> {
         } else {
             None
         };
-        let orders = self.render_orders(backend, &window_row, values, n, joined)?;
+        let window_table = if self.unions.is_empty() {
+            table
+        } else {
+            table.rsplit('.').next().unwrap_or(table)
+        };
+        let distance_table = if !self.unions.is_empty() && column_expr == "*" {
+            None
+        } else {
+            Some(window_table)
+        };
+        let orders = self.render_orders(backend, distance_table, &window_row, values, n, joined)?;
         let mut inner = self.clone();
         inner.eager_partition = None;
         inner.limit = None;
@@ -5050,11 +5118,6 @@ impl<M> Builder<M> {
                     column_expr.to_owned()
                 }
             });
-        let window_table = if inner.unions.is_empty() {
-            table
-        } else {
-            table.rsplit('.').next().unwrap_or(table)
-        };
         let partition = if partition.contains('.') {
             quote_identifier(backend, partition)
         } else {
@@ -5336,7 +5399,7 @@ where
         relation: &str,
         existence: Existence,
         count: Option<CountConstraint<'_>>,
-        inner_terms: Vec<WhereTerm>,
+        inner: ExistenceConstraints,
         predicate: Option<RelationPredicate>,
     ) -> ExistsSpec {
         let positive = match existence {
@@ -5373,7 +5436,7 @@ where
                 positive,
                 count_op,
                 count_value,
-                inner_terms,
+                inner,
                 relation_column,
                 relation_op,
                 relation_value,
@@ -5396,7 +5459,7 @@ where
                 positive,
                 count_op,
                 count_value,
-                inner_terms,
+                inner,
                 relation_column,
                 relation_op,
                 relation_value,
@@ -5515,16 +5578,19 @@ where
         let mut branches = Vec::new();
         for entry in entries {
             let inner = predicate(Builder::<R>::new(), entry.morph_type());
-            if let Some(error) = inner.relationship_error {
-                self.relationship_error = Some(error);
-                return self;
-            }
+            let inner = match inner.into_existence_constraints() {
+                Ok(inner) => inner,
+                Err(error) => {
+                    self.relationship_error = Some(error);
+                    return self;
+                }
+            };
             branches.push(self.morph_owner_branch(
                 relation,
                 &type_column,
                 &entry,
                 existence,
-                inner.where_terms,
+                inner,
             ));
         }
         if wildcard && !positive {
@@ -5553,14 +5619,21 @@ where
         type_column: &str,
         owner: &MorphToTarget,
         existence: Existence,
-        inner: Vec<WhereTerm>,
+        inner: ExistenceConstraints,
     ) -> WhereTerm {
         let constraints = (owner.query_constraints)();
         let mut terms = constraints.where_terms;
-        if !inner.is_empty() {
-            terms.push(WhereTerm::Group(inner));
+        if !inner.terms.is_empty() {
+            terms.push(WhereTerm::Group(inner.terms));
         }
-        let mut spec = self.build_exists_spec_for(relation, existence, None, terms, None);
+        let mut inner = ExistenceConstraints {
+            terms,
+            geo: inner.geo,
+        };
+        if constraints.geo.has_origin() {
+            inner.geo.push(constraints.geo);
+        }
+        let mut spec = self.build_exists_spec_for(relation, existence, None, inner, None);
         spec.target_table = owner.table.to_owned();
         spec.parent_key = owner.primary_key.to_owned();
         spec.belongs_to = true;
@@ -5590,7 +5663,7 @@ where
         relation_entry: &RelationEntry,
         owners: &[MorphToTarget],
         existence: Existence,
-        inner: Vec<WhereTerm>,
+        inner: ExistenceConstraints,
     ) -> WhereTerm {
         if owners.is_empty() {
             return match existence {
@@ -5657,15 +5730,19 @@ where
         };
         let owners = relation_entry.morph_targets;
         Ok(match (zero, one) {
-            (false, true) => {
-                self.morph_presence(relation, relation_entry, owners, Existence::Has, Vec::new())
-            }
+            (false, true) => self.morph_presence(
+                relation,
+                relation_entry,
+                owners,
+                Existence::Has,
+                ExistenceConstraints::default(),
+            ),
             (true, false) => self.morph_presence(
                 relation,
                 relation_entry,
                 owners,
                 Existence::DoesntHave,
-                Vec::new(),
+                ExistenceConstraints::default(),
             ),
             (true, true) => WhereTerm::NotIn(M::PRIMARY_KEY.to_owned(), Vec::new()),
             (false, false) => WhereTerm::In(M::PRIMARY_KEY.to_owned(), Vec::new()),
@@ -5709,13 +5786,13 @@ where
                 relation_entry,
                 relation_entry.morph_targets,
                 existence,
-                Vec::new(),
+                ExistenceConstraints::default(),
             ),
             None => WhereTerm::Exists(Box::new(self.build_exists_spec_for(
                 relation,
                 existence,
                 None,
-                Vec::new(),
+                ExistenceConstraints::default(),
                 None,
             ))),
         }
@@ -5733,22 +5810,13 @@ where
         existence: Existence,
         inner: Builder<R>,
     ) -> Result<WhereTerm, String> {
+        let inner = inner.into_existence_constraints()?;
         let Some(relation_entry) = Self::morph_to_relation(relation) else {
-            let spec =
-                self.build_exists_spec_for(relation, existence, None, inner.where_terms, None);
+            let spec = self.build_exists_spec_for(relation, existence, None, inner, None);
             return Ok(WhereTerm::Exists(Box::new(spec)));
         };
-        if let Some(error) = inner.relationship_error {
-            return Err(error);
-        }
         let owner = Self::morph_owner_of::<R>(relation, relation_entry)?;
-        Ok(self.morph_presence(
-            relation,
-            relation_entry,
-            &[owner],
-            existence,
-            inner.where_terms,
-        ))
+        Ok(self.morph_presence(relation, relation_entry, &[owner], existence, inner))
     }
 
     /// The clause `where_relation` and its kin add for `relation`. On a
@@ -5766,14 +5834,17 @@ where
                     relation_entry,
                     relation_entry.morph_targets,
                     Existence::Has,
-                    vec![WhereTerm::Op(column, op, value)],
+                    ExistenceConstraints {
+                        terms: vec![WhereTerm::Op(column, op, value)],
+                        ..Default::default()
+                    },
                 )
             }
             None => WhereTerm::Exists(Box::new(self.build_exists_spec_for(
                 relation,
                 Existence::Has,
                 None,
-                Vec::new(),
+                ExistenceConstraints::default(),
                 Some(predicate),
             ))),
         }
@@ -5796,6 +5867,7 @@ where
         let scoped = Self::__scoped().apply_scopes();
         let mut erased = Builder::new();
         erased.where_terms = scoped.where_terms;
+        erased.geo = scoped.geo;
         erased.binder = M::bind_column;
         erased
     }
@@ -5844,7 +5916,7 @@ where
             relation,
             Existence::Has,
             Some(CountConstraint { op, value: count }),
-            Vec::new(),
+            ExistenceConstraints::default(),
             None,
         );
         self.where_terms.push(WhereTerm::Exists(Box::new(spec)));

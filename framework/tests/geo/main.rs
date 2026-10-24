@@ -1,5 +1,6 @@
 //! Geo contract proofs share one fixture across SQLite and disposable server engines.
 
+mod composition;
 mod engines;
 mod sql;
 
@@ -147,8 +148,9 @@ fn assert_distances(rows: &[Place], miles: bool) {
         let actual = row.distance().expect("distance projected");
         let actual_km = if miles { actual * KM_PER_MILE } else { actual };
         assert!(actual.is_finite() && actual >= 0.0);
+        // Half a metre from the reference keeps any two engines within one metre.
         assert!(
-            (actual_km - expected).abs() <= 0.001,
+            (actual_km - expected).abs() <= 0.0005,
             "place {}: expected {expected}, got {actual_km}",
             row.id
         );

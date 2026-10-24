@@ -1775,6 +1775,16 @@ the page query keeps the distance column. This operates on Eloquent rows;
 [search index geo filters and sorting](search.md#sorting-and-geo-distance)
 use the search engine instead.
 
+A `where_has::<Place, _>("places", |q| q.nearby(lat, lng).unwrap().within(10.0).unwrap())`
+keeps only parents with a related place within 10 km; the radius applies to
+the related table, including self relations. Inside a limited eager load,
+`order_by_distance()` ranks each parent's related rows before its limit, so
+`.with_where(("places", |q: Builder<Place>| q.nearby(lat, lng).unwrap().order_by_distance().unwrap().limit(1)))`
+loads that parent's nearest place. Distance ordering also works with scalar
+reads such as `pluck::<i64>("id")` and joined mass writes.
+For a `MorphTo`, select the owner type whose model declares those coordinates;
+using a geo predicate for another owner table returns an error before SQL runs.
+
 ### Why Suprnova diverges
 
 Laravel itself has no nearest-location query scopes. Laraversine adds them

@@ -30,13 +30,18 @@ fn assert_sql(backend: DbBackend) {
         "{sql}"
     );
     assert!(sql.contains("AS distance"));
-    assert!(sql.ends_with("ORDER BY distance ASC"));
+    assert!(sql.split(" ORDER BY ").nth(1).unwrap().contains("ASIN"));
+    assert!(sql.ends_with(" ASC"));
     assert!(sql.contains("POWER(SIN(RADIANS("));
-    assert_eq!(values.len(), 12);
+    assert_eq!(values.len(), 15);
     assert_eq!(values[0], ORIGIN.0.into());
     assert_eq!(values[2], ORIGIN.1.into());
     assert_eq!(values[3], "kept".into());
-    assert_eq!(values.last(), Some(&10.0.into()));
+    assert_eq!(values[11], 10.0.into());
+    assert_eq!(
+        &values[12..],
+        &[ORIGIN.0.into(), ORIGIN.0.into(), ORIGIN.1.into()]
+    );
     if backend == DbBackend::Postgres {
         assert!(sql.contains("LEAST(1.0, GREATEST(0.0,"));
         assert!(!sql.contains('?'));
