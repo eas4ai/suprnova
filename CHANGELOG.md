@@ -30,6 +30,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   `live:model` binds it. It takes the library's tokens and density, passes
   the checker contract, and ships in the dogfood gallery with its browser
   cases on the three qualified engines (`manual/live.md`).
+- **Neo4j and HydraDB graph stores.** The recommender's graph store runs on
+  Neo4j (`graph-neo4j`, over the Bolt transport the Memgraph driver uses,
+  with Neo4j's own index DDL) and on HydraDB (`graph-hydradb`, over its
+  HTTPS JSON API, because HydraDB speaks Bolt 5 and `neo4rs` 0.8 speaks
+  Bolt 4), selected with `RECOMMEND_GRAPH_STORE=neo4j` or `hydradb` and the
+  same URL, user and password variables as Memgraph; boot refuses an
+  unknown store and names the feature a selected store needs. Every
+  statement the Memgraph driver issues is checked per dialect, and each
+  driver's conformance runs as engine-named tests against a standing
+  service (`manual/recommendations.md`, `manual/env-vars.md`).
 
 ## 4.6.2 - 2026-10-23
 
