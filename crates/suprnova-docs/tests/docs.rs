@@ -292,6 +292,106 @@ async fn docs_001_private_page_requires_gate_and_single_version_has_no_switch() 
 }
 
 #[tokio::test]
+async fn docs_001_private_only_assets_require_the_gate_and_shared_assets_stay_public() {
+    let temp = tempfile::tempdir().unwrap();
+    copy_tree(&fixture("guide"), temp.path());
+    std::fs::write(
+        temp.path().join("v2/_assets/private.svg"),
+        "private diagram",
+    )
+    .unwrap();
+    for language in ["en", "fr"] {
+        std::fs::write(
+            temp.path().join(format!("v2/{language}/secret.md")),
+            "# Secret\n\n![Private](./_assets/private.svg?download=1#diagram)\n\n[Shared](/guide/v2/_assets/orbit.svg#diagram)\n",
+        )
+        .unwrap();
+    }
+    let allowed = Arc::new(AtomicBool::new(false));
+    let client = client(temp.path(), allowed.clone());
+    let private = "/guide/v2/_assets/private.svg";
+    assert_eq!(client.get(private).send().await.status(), 404);
+    assert_eq!(
+        client
+            .get("/guide/v2/_assets/orbit.svg")
+            .send()
+            .await
+            .status(),
+        200,
+        "a public reference keeps the asset public"
+    );
+    allowed.store(true, Ordering::SeqCst);
+    let response = client.get(private).send().await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.body_text(), "private diagram");
+    assert_eq!(response.header("cache-control"), Some("private, no-store"));
+    allowed.store(false, Ordering::SeqCst);
+    assert_eq!(client.get(private).send().await.status(), 404);
+}
+
+#[tokio::test]
+async fn docs_001_asset_privacy_combines_references_across_languages() {
+    let temp = tempfile::tempdir().unwrap();
+    copy_tree(&fixture("guide"), temp.path());
+    for (page, markdown) in [
+        ("en/secret", "# Secret\n\n[Diagram](_assets/orbit.svg)\n"),
+        ("en/index", "# Welcome\n"),
+        ("fr/index", "# Bienvenue\n\n![Orbite](_assets/orbit.svg)\n"),
+    ] {
+        std::fs::write(temp.path().join(format!("v2/{page}.md")), markdown).unwrap();
+    }
+    let client = client(temp.path(), Arc::new(AtomicBool::new(false)));
+    assert_eq!(
+        client
+            .get("/guide/v2/_assets/orbit.svg")
+            .send()
+            .await
+            .status(),
+        200,
+        "a public translation keeps a version-shared asset public"
+    );
+}
+
+#[tokio::test]
+async fn docs_001_private_markdown_assets_keep_their_extension_and_require_the_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    copy_tree(&fixture("guide"), temp.path());
+    std::fs::write(temp.path().join("v2/_assets/notes.md"), "private notes").unwrap();
+    std::fs::write(
+        temp.path().join("v2/en/secret.md"),
+        "# Secret\n\n[Notes][_notes]\n\n[_notes]: _assets/notes.md\n",
+    )
+    .unwrap();
+    let allowed = Arc::new(AtomicBool::new(false));
+    let client = client(temp.path(), allowed.clone());
+    assert_eq!(
+        client
+            .get("/guide/v2/_assets/notes.md")
+            .send()
+            .await
+            .status(),
+        404
+    );
+    allowed.store(true, Ordering::SeqCst);
+    assert!(
+        client
+            .get("/guide/v2/en/secret")
+            .send()
+            .await
+            .body_text()
+            .contains("href=\"/guide/v2/_assets/notes.md\"")
+    );
+    assert_eq!(
+        client
+            .get("/guide/v2/_assets/notes.md")
+            .send()
+            .await
+            .body_text(),
+        "private notes"
+    );
+}
+
+#[tokio::test]
 async fn docs_002_twins_accept_and_discovery_preserve_the_source() {
     let client = guest();
     let source = std::fs::read_to_string(fixture("guide/v2/en/index.md")).unwrap();

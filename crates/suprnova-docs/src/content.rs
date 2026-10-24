@@ -37,6 +37,7 @@ pub(super) fn load(config: DocsConfig) -> Result<Site, FrameworkError> {
         if entries.is_empty() {
             return Err(invalid(format!("{} has no navigation pages", version.id)));
         }
+        let mut asset_privacy = HashMap::new();
         for language in &site.manifest.languages {
             let folder = if site.manifest.languages.len() == 1 {
                 directory.clone()
@@ -55,7 +56,8 @@ pub(super) fn load(config: DocsConfig) -> Result<Site, FrameworkError> {
                     &format!("{}/{}", site.config.prefix, version.id),
                     "",
                 )?;
-                let rendered = renderer.render(&linked).map_err(invalid)?;
+                record_asset_privacy(linked.assets, *private, &mut asset_privacy);
+                let rendered = renderer.render(&linked.markdown).map_err(invalid)?;
                 site.pages.push(Page {
                     access: DocsAccess {
                         version: version.id.clone(),
@@ -74,6 +76,7 @@ pub(super) fn load(config: DocsConfig) -> Result<Site, FrameworkError> {
             version: &version.id,
             private: site.manifest.private || version.private,
             prefix: &site.config.prefix,
+            page_privacy: &asset_privacy,
         };
         load_assets(
             &directory,
@@ -196,6 +199,7 @@ struct AssetScope<'a> {
     version: &'a str,
     private: bool,
     prefix: &'a str,
+    page_privacy: &'a HashMap<String, bool>,
 }
 
 fn load_assets(
@@ -232,14 +236,17 @@ fn load_assets(
                 .to_str()
                 .ok_or_else(|| invalid("asset paths must be UTF-8"))?;
             validate_path(relative)?;
+            let address = format!("{}/{}/{relative}", scope.prefix, scope.version);
+            let private =
+                scope.private || scope.page_privacy.get(&address).copied().unwrap_or(false);
             out.push(Asset {
                 version: scope.version.to_owned(),
-                address: format!("{}/{}/{relative}", scope.prefix, scope.version),
+                address,
                 bytes: fs::read(&path).map_err(invalid)?.into(),
                 mime: mime_guess::from_path(&path)
                     .first_or_octet_stream()
                     .to_string(),
-                private: scope.private,
+                private,
             });
         }
     }
@@ -262,9 +269,28 @@ pub(super) fn render_html(site: &Site, page: &Page) -> Result<String, FrameworkE
         &public_root,
     )?;
     MarkdownRenderer::new(MarkdownOptions::default())
-        .render(&linked)
+        .render(&linked.markdown)
         .map(|rendered| rendered.html)
         .map_err(invalid)
+}
+
+struct LinkedMarkdown {
+    markdown: String,
+    assets: HashSet<String>,
+}
+
+fn record_asset_privacy(
+    assets: HashSet<String>,
+    private: bool,
+    privacy: &mut HashMap<String, bool>,
+) {
+    // One public reference keeps a version-shared asset public.
+    for asset in assets {
+        privacy
+            .entry(asset)
+            .and_modify(|asset_private| *asset_private &= private)
+            .or_insert(private);
+    }
 }
 
 fn resolve_links(
@@ -273,7 +299,7 @@ fn resolve_links(
     page: &str,
     version_base: &str,
     public_root: &str,
-) -> Result<String, FrameworkError> {
+) -> Result<LinkedMarkdown, FrameworkError> {
     let arena = Arena::new();
     let mut options = Options::default();
     options.extension.strikethrough = true;
@@ -284,15 +310,24 @@ fn resolve_links(
     options.extension.math_code = true;
     options.extension.math_dollars = true;
     let root = parse_document(&arena, markdown, &options);
+    let asset_prefix = format!("{public_root}{version_base}/_assets/");
+    let mut assets = HashSet::new();
     for node in root.descendants() {
         let mut data = node.data.borrow_mut();
         if let NodeValue::Link(link) | NodeValue::Image(link) = &mut data.value {
             link.url = resolve_url(&link.url, base, page, version_base, public_root)?;
+            let address = link.url.split(['#', '?']).next().unwrap_or_default();
+            if address.starts_with(&asset_prefix) {
+                assets.insert(address.to_owned());
+            }
         }
     }
     let mut output = String::new();
     format_commonmark(root, &options, &mut output).map_err(invalid)?;
-    Ok(output)
+    Ok(LinkedMarkdown {
+        markdown: output,
+        assets,
+    })
 }
 
 fn resolve_url(
@@ -318,7 +353,6 @@ fn resolve_url(
     let (target, canonical) = target
         .strip_prefix(&format!("{version_base}/"))
         .map_or((target, false), |target| (target, true));
-    let target = target.strip_suffix(".md").unwrap_or(target);
     let mut parts: Vec<&str> = if canonical || target.starts_with('/') {
         Vec::new()
     } else {
@@ -335,8 +369,13 @@ fn resolve_url(
         }
     }
     let path = parts.join("/");
+    let path = if path.starts_with("_assets/") {
+        path.as_str()
+    } else {
+        path.strip_suffix(".md").unwrap_or(&path)
+    };
     if !path.is_empty() {
-        validate_path(&path)?;
+        validate_path(path)?;
     }
     let base = if canonical || path.starts_with("_assets/") {
         version_base
