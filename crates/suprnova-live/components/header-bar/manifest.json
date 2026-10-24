@@ -1,0 +1,8 @@
+{
+  "name": "suprnova.header-bar",
+  "files": [
+    "header-bar.html",
+    "header-bar.css"
+  ],
+  "elements": []
+}
