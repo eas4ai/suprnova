@@ -319,3 +319,50 @@ async fn dbg_002_error_pages_and_report_only_policies_allow_the_toolbar_nonce() 
         Some("default-src 'self' 'unsafe-inline'")
     );
 }
+
+#[tokio::test]
+async fn dbg_002_toolbar_markup_claims_no_live_region() {
+    let _mode = debug_mode(true, &[]).await;
+    let app = Harness::with_middleware(
+        Router::new()
+            .get("/", |_request: Request| async move {
+                Ok(HttpResponse::html(
+                    "<html><body><p role=\"status\">Saved.</p></body></html>",
+                ))
+            })
+            .into(),
+        MiddlewareRegistry::new().append(SecurityHeaders::strict()),
+    );
+    let reply = app.get("/", &[("accept", "text/html")]).await;
+    assert_eq!(reply.status, 200);
+    let start = reply
+        .body
+        .find("id=\"suprnova-debugbar\"")
+        .expect("the toolbar");
+    let toolbar = &reply.body[start..];
+    // The toolbar adds no landmark, heading, live region or role to the page
+    // it rides on: a reader or a test asking for the page's navigation or its
+    // status region must reach the page's own elements only.
+    let markup = &toolbar[..toolbar.find("<script").unwrap_or(toolbar.len())];
+    for forbidden in [
+        "<aside",
+        "<nav",
+        "<section",
+        "<header",
+        "<footer",
+        "<main",
+        "<h1",
+        "<h2",
+        "<h3",
+        "<output",
+        "aria-live",
+        "aria-label",
+        "role=",
+    ] {
+        assert!(
+            !markup.contains(forbidden),
+            "{forbidden} in the toolbar: {markup}"
+        );
+    }
+    assert_eq!(reply.body.matches("role=\"status\"").count(), 1);
+}

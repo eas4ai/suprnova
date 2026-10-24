@@ -4,11 +4,11 @@
   const initial = document.getElementById('suprnova-debugbar-record');
   if (!bar || !initial || bar.dataset.ready) return;
   bar.dataset.ready = 'true';
-  const nav = bar.querySelector('nav');
-  const section = bar.querySelector('section');
-  const title = section.querySelector('h2');
+  const nav = bar.querySelector('[data-panels]');
+  const section = bar.querySelector('[data-panel]');
+  const title = section.querySelector('[data-title]');
   const text = section.querySelector('pre');
-  const status = bar.querySelector('output');
+  const status = bar.querySelector('[data-readout]');
   const keep = Math.max(1, Number(bar.dataset.keep) || 100);
   const records = new Map();
   const pending = new Set();

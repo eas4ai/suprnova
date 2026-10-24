@@ -87,7 +87,7 @@ pub(super) fn inject(
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029");
     let markup = format!(
-        "<aside id=\"suprnova-debugbar\" data-keep=\"{keep}\" aria-label=\"Suprnova request diagnostics\"><nav aria-label=\"Diagnostic panels\"></nav><section hidden><h2></h2><pre></pre></section><output aria-live=\"polite\"></output></aside>\
+        "<div id=\"suprnova-debugbar\" data-keep=\"{keep}\"><div data-panels></div><div data-panel hidden><p data-title></p><pre></pre></div><span data-readout></span></div>\
          <style{nonce}>{}</style><script{nonce} type=\"application/json\" id=\"suprnova-debugbar-record\" data-endpoint=\"{}\">{data}</script><script{nonce}>{}</script>",
         include_str!("toolbar.css"),
         escape(&record.endpoint),
