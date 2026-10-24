@@ -1,0 +1,15 @@
+{
+  "title": "Suprnova flight manual",
+  "versions": [
+    {
+      "id": "v2"
+    },
+    {
+      "id": "v1"
+    }
+  ],
+  "default_version": "v2",
+  "languages": [
+    "en"
+  ]
+}

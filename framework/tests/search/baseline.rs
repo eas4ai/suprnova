@@ -103,6 +103,24 @@ fn baseline_rival_budgets_hand_computed() -> Result<(), FrameworkError> {
         *edited.p95_budgets_ms.get_mut("collection").unwrap() = expected * (1.0 + 1e-10);
         edited.write(&path)?;
         BaselineFloors::load(&path)?;
+        // A budget set apart from the derivation loads only with the developer's
+        // words recorded for that engine; an empty ruling is no ruling.
+        let mut ruled = floors.clone();
+        *ruled.p95_budgets_ms.get_mut("collection").unwrap() = expected * 4.0;
+        ruled
+            .budget_rulings
+            .insert("collection".to_owned(), String::new());
+        std::fs::write(&path, serde_json::to_vec(&ruled).unwrap()).unwrap();
+        assert!(BaselineFloors::load(&path).is_err());
+        ruled.budget_rulings.insert(
+            "collection".to_owned(),
+            "the difference is negligible (test ruling)".to_owned(),
+        );
+        ruled.write(&path)?;
+        assert_eq!(
+            BaselineFloors::load(&path)?.p95_budgets_ms["collection"],
+            expected * 4.0
+        );
     }
     Ok(())
 }

@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-set-html-unsafe",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
