@@ -1,0 +1,11 @@
+{% import "tests/macros.html" as ui %}
+<section>
+<form live:submit="save">
+{% call ui::toggle("One", action="save") %}{% endcall %}
+{% call ui::toggle("Two", pressed=true) %}{% endcall %}
+{% call ui::toggle("Three", kind="submit", action="save") %}{% endcall %}
+{% call ui::toggle("Four") %}{% endcall %}
+{% call ui::toggle("Five", pressed=true, action="save") %}{% endcall %}
+{% call ui::toggle("Six") %}{% endcall %}
+</form>
+</section>

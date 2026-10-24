@@ -1,0 +1,23 @@
+<section>
+<form live:submit="save">
+<input live:model.blur="query">
+<span live:error="query"></span>
+<button type="submit" live:loading="save">Search</button>
+</form>
+{% if show_child %}
+<article live:component="tests.child" live:key="child-result">
+<button live:click="select">Select</button>
+</article>
+{% else %}
+<p live:key="empty-result">No results</p>
+{% endif %}
+<output live:url.reflect="page"></output>
+<output live:on="profile-saved" live:effect="focus-search"></output>
+<ul>
+{% for item in items %}
+<li live:key="{{ item.id|live_key }}">{{ item.name }}</li>
+{% else %}
+<li>No rows</li>
+{% endfor %}
+</ul>
+</section>
