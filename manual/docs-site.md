@@ -56,6 +56,15 @@ names belong to that set. Conflicting routes fail mounting instead of replacing
 another handler. Malformed JSON, missing pages, duplicate or reserved paths,
 invalid versions and symlinks outside the content folder fail at boot.
 
+The prefix is relative to the application. Every generated address includes the
+request's public root from `suprnova::url::root()`. With
+`APP_URL=https://example.org/billing`, a set mounted at `/docs` serves public
+links under `/billing/docs`. A trusted proxy's `X-Forwarded-Prefix` replaces
+that root for its request; outside a request, the path in `APP_URL` supplies it.
+Navigation, version and language switches, HTML content links, assets, Markdown
+discovery, corpus index links, search and tool addresses all follow this rule.
+The examples below assume the application is served at the host root.
+
 ## Folder layout
 
 A single-language set looks like this:

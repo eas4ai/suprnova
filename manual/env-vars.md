@@ -565,7 +565,7 @@ Booleans accept `true` or `false`; invalid values fail with the variable name.
 | `RECOMMEND_EVENT_TYPES` | `{}` | JSON object | Map from event name to `{"class":"positive\|negative\|seen","score":N}`. Base scores are bounded to -1000000 through 1000000; weight adds integer basis points divided by 20. |
 | `RECOMMEND_ENGINE` | `starter` | `String` | `starter`, or `graph` for the knowledge-graph engine, which falls back to the starter's rows when its evidence is thin. |
 | `RECOMMEND_GRAPH_STORE` | `database` | `String` | `database` (the application database), `memgraph`, `neo4j` or `hydradb`. Each external store needs its matching `graph-memgraph`, `graph-neo4j` or `graph-hydradb` feature. |
-| `RECOMMEND_GRAPH_URL` | unset | `Option<String>` | Memgraph or Neo4j Bolt address (`bolt://` or `bolt+s://`), or HydraDB HTTPS `/v1/graphs/<graph>/query` URL with optional `?cell_id=<cell>` (default `cell-0`). HTTP is allowed only on loopback. No URL credentials. |
+| `RECOMMEND_GRAPH_URL` | unset | `Option<String>` | Memgraph or Neo4j Bolt address (`bolt://` or `bolt+s://`), or HydraDB HTTPS `/v1/graphs/<graph>/query` URL with optional `?cell_id=<cell>` (default `cell-0`). HTTP is allowed only on loopback in `local`, `development` or `testing` environments; production, including an unset `APP_ENV`, requires HTTPS. No URL credentials. |
 | `RECOMMEND_GRAPH_USERNAME` | unset | `String` | Bolt user, or the HydraDB HTTPS namespace (`default` when unset). Read only when connecting. |
 | `RECOMMEND_GRAPH_PASSWORD` | unset | `String` | Bolt password, or the HydraDB HTTPS bearer token. Read only when connecting; never logged or stored in configuration. |
 | `RECOMMEND_GRAPH_DEPTH` | `2` | `usize` | Most hops in a graph path. 1 to 4. |

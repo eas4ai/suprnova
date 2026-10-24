@@ -292,11 +292,11 @@ async fn index_response(
     let pages = site.visible(req, version, language).await?;
     let response = match kind {
         "search.json" => HttpResponse::json(serde_json::Value::Array(pages.iter().map(|p| serde_json::json!({
-            "title": p.title, "address": p.address, "markdown_address": format!("{}.md", p.address),
+            "title": p.title, "address": public_url(&p.address), "markdown_address": format!("{}.md", public_url(&p.address)),
             "headings": p.rendered.headings, "text": p.rendered.plain_text,
         })).collect())),
         "llms-full.txt" => HttpResponse::markdown(pages.iter().map(|p| p.markdown.as_str()).collect::<String>()),
-        _ => HttpResponse::markdown(format!("# {}\n\n{}", site.manifest.title, pages.iter().map(|p| format!("- [{}]({}.md)\n", p.title, p.address)).collect::<String>())),
+        _ => HttpResponse::markdown(format!("# {}\n\n{}", site.manifest.title, pages.iter().map(|p| format!("- [{}]({}.md)\n", p.title, public_url(&p.address))).collect::<String>())),
     };
     Ok(secure(response))
 }
@@ -383,6 +383,10 @@ impl Site {
         }
         Ok(pages)
     }
+}
+
+fn public_url(path: &str) -> String {
+    format!("{}{path}", suprnova::url::root())
 }
 
 fn secure(response: HttpResponse) -> HttpResponse {
