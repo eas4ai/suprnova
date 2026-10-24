@@ -24,6 +24,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   middleware passes through, no record is kept and the route is 404;
   `DEBUGBAR=false` turns it off with debug on. The scaffolds install it and
   the dogfood application runs it (`manual/debugbar.md`).
+- **Nearest-location queries.** A model declares its coordinate columns
+  with `geo(lat = "latitude", lng = "longitude")` and its builder gains
+  `nearby(lat, lng)`, which selects a `distance` column computed by the
+  haversine formula in SQL and readable on each result through
+  `distance()`; `within(radius)`, which keeps rows inside the radius after
+  a bounding-box prefilter on the coordinate columns, so an index bounds
+  the rows the formula visits; `order_by_distance()`, nearest first; and
+  `in_miles()`, kilometres otherwise. The SQL renders per dialect for
+  SQLite, Postgres, MySQL and MariaDB with no spatial extension; on a
+  SQLite build without math functions the framework registers them on each
+  connection. The three compose with the builder's other clauses,
+  existence queries (`where_has` keeps the radius), eager loads and limited
+  eager loads, scalar reads, joined writes and pagination. Invalid input is
+  refused before any SQL runs: a latitude outside -90..90, a longitude
+  outside -180..180, a non-finite or negative radius, or `within` and
+  `order_by_distance()` without a preceding `nearby` (`manual/eloquent.md`).
 - **A documentation site plugin.** `crates/suprnova-docs` mounts a docs
   site from a `docs/` folder: a `docs.json` set manifest with versions,
   the default version and languages, a `navigation.json` per version,
