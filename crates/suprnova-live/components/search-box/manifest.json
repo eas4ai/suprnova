@@ -1,0 +1,6 @@
+{
+  "name": "suprnova.search-box",
+  "files": ["search-box.html", "island.html", "search-box.css", "search-box.js"],
+  "elements": ["sn-search-box"],
+  "dependencies": ["search-input"]
+}
