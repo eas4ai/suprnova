@@ -59,7 +59,34 @@ async fn dbg_001_samples_peak_rss_while_the_request_owns_memory() {
     );
     let reply = app.get("/memory", &[]).await;
     let record = app.record(&reply).await;
-    assert!(record["peak_memory_bytes"].as_u64().expect("RSS on Linux") >= 16 * 1024 * 1024);
+    assert!(
+        record["peak_rss_growth_bytes"]
+            .as_u64()
+            .expect("RSS on Linux")
+            >= 16 * 1024 * 1024
+    );
+    assert!(record.get("peak_memory_bytes").is_none());
+}
+
+#[tokio::test]
+async fn dbg_001_memory_panel_names_the_sampled_process_wide_rss_measurement() {
+    let _mode = debug_mode(true, &[]).await;
+    let app = Harness::new(Router::new().get("/", page).into());
+    let reply = app.get("/", &[("accept", "text/html")]).await;
+    let record = app.record(&reply).await;
+    assert!(record.get("peak_rss_growth_bytes").is_some());
+    assert!(record.get("peak_memory_bytes").is_none());
+    assert_eq!(
+        record["memory_measurement"],
+        "Peak RSS growth, process-wide, sampled every 10 ms"
+    );
+    assert!(
+        reply
+            .body
+            .contains("Peak RSS growth, process-wide, sampled every 10 ms")
+    );
+    assert!(reply.body.contains("current.peak_rss_growth_bytes"));
+    assert!(!reply.body.contains("peak_memory_bytes"));
 }
 
 #[tokio::test]

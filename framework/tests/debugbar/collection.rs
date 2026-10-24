@@ -144,7 +144,7 @@ async fn dbg_001_collects_queries_transactions_cache_events_mail_notifications_a
     assert_eq!(record["request"]["request_id"], "\"debugbar-request-42\"");
     assert_eq!(record["request"]["route_pattern"], "\"/activity\"");
     assert_eq!(record["status"], 200);
-    assert!(record["peak_memory_bytes"].is_u64());
+    assert!(record["peak_rss_growth_bytes"].is_u64());
     assert!(
         record["timings"]
             .as_array()
@@ -152,6 +152,58 @@ async fn dbg_001_collects_queries_transactions_cache_events_mail_notifications_a
             .iter()
             .any(|span| span["name"] == "handler")
     );
+}
+
+#[tokio::test]
+async fn dbg_001_observes_bootstrap_cache_handles_in_each_request() {
+    let _mode = debug_mode(true, &[]).await;
+    App::bind::<dyn suprnova::CacheStore>(Arc::new(InMemoryCache::new()));
+    Cache::register_store("debugbar-bootstrap", Arc::new(InMemoryCache::new())).unwrap();
+    let stores = Arc::new([
+        Cache::store().expect("default store before the request"),
+        Cache::store_named("debugbar-bootstrap").expect("named store before the request"),
+    ]);
+    for store in stores.iter() {
+        store
+            .put_raw("bootstrap-only", "outside request", None)
+            .await
+            .unwrap();
+    }
+    let app = Harness::new(
+        Router::new()
+            .get("/{entry}", move |request: Request| {
+                let stores = Arc::clone(&stores);
+                async move {
+                    let key = request.param("entry").expect("cache key");
+                    for store in stores.iter() {
+                        assert_eq!(store.get_raw(key).await?, None);
+                        store.put_raw(key, "42", None).await?;
+                        assert_eq!(store.get_raw(key).await?.as_deref(), Some("42"));
+                    }
+                    page(request).await
+                }
+            })
+            .into(),
+    );
+    for key in ["first", "second"] {
+        let reply = app.get(&format!("/{key}"), &[]).await;
+        assert_eq!(reply.status, 200);
+        let record = app.record(&reply).await;
+        let entries = record["panels"]["cache"].as_array().expect("cache panel");
+        assert_eq!(entries.len(), 6);
+        for operation in ["miss", "write", "hit"] {
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry["name"] == operation)
+                    .count(),
+                2
+            );
+        }
+        for entry in entries {
+            assert!(entry["value"].as_str().unwrap().contains(key));
+        }
+    }
 }
 
 #[tokio::test]

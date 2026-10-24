@@ -31,9 +31,9 @@
     if (!current) return;
     section.hidden = !open;
     buttons.forEach((button, index) => button.setAttribute('aria-expanded', String(panels[index] === open)));
-    title.textContent = open || '';
+    title.textContent = open === 'memory' ? current.memory_measurement : open || '';
     const value = open === 'memory'
-      ? { peak_memory_bytes: current.peak_memory_bytes, measurement: current.memory_measurement }
+      ? { peak_rss_growth_bytes: current.peak_rss_growth_bytes, measurement: current.memory_measurement }
       : current[open] === undefined ? current.panels[open] : current[open];
     text.textContent = JSON.stringify(value, null, 2) || '';
     status.textContent = `${current.status} | ${current.duration_ms.toFixed(1)} ms`;

@@ -53,11 +53,8 @@ its own records; a lookup must reach the process that handled the request.
   A cached named guard's principal is prefixed with its guard name.
 - Timings: each middleware's own elapsed time, its inclusive time through
   `Next`, and the handler's elapsed time. A short-circuit has no handler span.
-- Memory: the peak sampled process RSS growth above the request's starting
-  RSS, in bytes. Linux RSS is sampled every 10 ms while the request runs and
-  at completion. It includes concurrent process activity, and can miss shorter
-  allocation spikes. On a platform without `/proc/self/status`, the value is
-  `null` rather than a guessed allocation count.
+- Memory: `peak_rss_growth_bytes`, labeled "Peak RSS growth, process-wide,
+  sampled every 10 ms".
 - Queries and transactions: SQL, bindings, duration, connection and outcome
   from `QueryExecuted`, plus transaction begin, commit and rollback events.
 - Cache: reads with hit or miss, writes, tagged writes, conditional writes,
@@ -69,6 +66,14 @@ its own records; a lookup must reach the process that handled the request.
 - Live: generated component renders, action names and arguments, and execution
   phases. Nested component renders use the same observation point.
 - Error: the response's error report, including a recovered panic.
+
+The memory measure is the peak sampled process resident set size (RSS) above
+the request's starting RSS, in bytes. It is sampled every 10 ms while the
+request runs and at completion. It has three limits: allocations from concurrent
+requests can increase this record's value; allocations freed between samples,
+including within one poll, can leave it at zero; and hosts without
+`/proc/self/status` report `null`. It does not count allocations owned by the
+request.
 
 Values use Rust's `Debug` output. Cache and queue interfaces do not require a
 `Debug` bound on application types, so those panels show the stored value or

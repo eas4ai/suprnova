@@ -21,7 +21,7 @@ pub(super) struct Record {
     request: BTreeMap<String, Value>,
     status: u16,
     duration_ms: f64,
-    peak_memory_bytes: Option<u64>,
+    peak_rss_growth_bytes: Option<u64>,
     memory_measurement: &'static str,
     timings: Vec<Value>,
     panels: BTreeMap<String, Vec<Value>>,
@@ -97,8 +97,8 @@ impl Collector {
                 request,
                 status: 0,
                 duration_ms: 0.0,
-                peak_memory_bytes: None,
-                memory_measurement: "sampled process RSS growth",
+                peak_rss_growth_bytes: None,
+                memory_measurement: "Peak RSS growth, process-wide, sampled every 10 ms",
                 timings: Vec::new(),
                 panels: [
                     "queries",
@@ -134,7 +134,7 @@ impl Collector {
         self.sample();
         self.record.status = response.status().as_u16();
         self.record.duration_ms = self.started.elapsed().as_secs_f64() * 1000.0;
-        self.record.peak_memory_bytes = self
+        self.record.peak_rss_growth_bytes = self
             .rss_start
             .zip(self.rss_peak)
             .map(|(start, peak)| peak.saturating_sub(start));

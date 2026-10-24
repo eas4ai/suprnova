@@ -213,11 +213,9 @@ impl DebugBarMiddleware {
 }
 
 pub(crate) fn cache_store(store: Arc<dyn crate::CacheStore>) -> Arc<dyn crate::CacheStore> {
-    if active() {
-        Arc::new(cache::ObservedCache(store))
-    } else {
-        store
-    }
+    // Handles can be retained from bootstrap or a previous request. The observer
+    // checks the current collector per operation and skips formatting when absent.
+    Arc::new(cache::ObservedCache(store))
 }
 
 /// Observe successful pushes without requiring a Debug bound on application jobs.
