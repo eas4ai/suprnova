@@ -5,11 +5,17 @@ use super::task::{Task, TaskResult};
 use crate::error::FrameworkError;
 use crate::process::{Process, ProcessError, ProcessResult};
 use async_trait::async_trait;
+use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::RwLock;
 use std::time::Duration;
+
+/// One shared limit across concurrent calls of the process driver.
+const MAX_CONCURRENT_PROCESSES: usize = 8;
+static PROCESS_SLOTS: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(MAX_CONCURRENT_PROCESSES);
 
 /// The hidden console command that runs one task in a console process.
 pub(crate) const RUN_COMMAND: &str = "concurrency:run";
@@ -57,9 +63,10 @@ static CONSOLE_COMMAND: RwLock<Option<Vec<String>>> = RwLock::new(None);
 /// run in `SUPRNOVA_CONCURRENCY_TOKEN`. The hidden command finds the task
 /// in that binary's registry, runs it, and writes the outcome, with the
 /// token, on its standard output, which this driver reads back. The tasks
-/// run side by side, each with the isolation of a process: its own memory,
-/// its own runtime, and a timeout that kills it and every process it
-/// started.
+/// run in separate address spaces and runtimes, with at most eight children
+/// across all calls. Each child has a 60-second default deadline. The Process
+/// facade kills its process tree on timeout or output over 8 MiB per stream
+/// or 12 MiB combined. An explicit nonzero timeout replaces the default.
 ///
 /// The binary is the one
 /// [`Concurrency::console_command`](super::Concurrency::console_command)
@@ -68,7 +75,8 @@ static CONSOLE_COMMAND: RwLock<Option<Vec<String>>> = RwLock::new(None);
 /// a Suprnova project builds them side by side; otherwise the running
 /// executable itself, which is right when the console binary is the one
 /// that runs the tasks. Starting a process costs far more than a Tokio
-/// task, so this driver pays off for heavy or untrusted work.
+/// task. This driver does not sandbox filesystem, network or credential access;
+/// use it for work that needs a separate address space.
 ///
 /// The outcome shares standard output with the application's own logging,
 /// which can write a line that reads as an outcome, before the outcome line
@@ -91,11 +99,18 @@ impl ConcurrencyDriver for ProcessConcurrencyDriver {
             Ok(command) => command,
             Err(error) => return tasks.iter().map(|_| Err(error.clone())).collect(),
         };
-        futures::future::join_all(
-            tasks
-                .into_iter()
-                .map(|task| run_one(&command, task, timeout)),
-        )
+        stream::iter(tasks.into_iter().map(|task| {
+            let command = &command;
+            async move {
+                let _slot = PROCESS_SLOTS
+                    .acquire()
+                    .await
+                    .expect("process semaphore stays open");
+                run_one(command, task, timeout).await
+            }
+        }))
+        .buffered(MAX_CONCURRENT_PROCESSES)
+        .collect()
         .await
     }
 }
@@ -122,12 +137,11 @@ async fn run_one(
     let pending = Process::command(arguments)
         .env(TOKEN_ENV, token.as_str())
         .input(input);
-    // The facade's "no timeout" is no timeout here too, not the Process
-    // facade's default of 60 seconds.
-    let pending = match timeout {
-        Some(timeout) => pending.timeout(timeout),
-        None => pending.forever(),
-    };
+    let pending = pending.timeout(
+        timeout
+            .filter(|value| !value.is_zero())
+            .unwrap_or(crate::process::DEFAULT_TIMEOUT),
+    );
     match pending.run().await {
         Ok(result) => read_outcome(&name, &token, &result),
         Err(ProcessError::TimedOut { timeout, .. }) => Err(timed_out(&name, timeout)),

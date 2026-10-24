@@ -44,7 +44,7 @@ impl Tracker {
             !cookie.is_empty(),
             "Rustrak login did not issue a session cookie"
         );
-        let project: Value = client
+        let response = client
             .post(format!("{base}/api/projects"))
             .header("cookie", &cookie)
             .json(
@@ -54,10 +54,11 @@ impl Tracker {
             .await
             .expect("create Rustrak project")
             .error_for_status()
-            .expect("Rustrak project creation status")
-            .json()
+            .expect("Rustrak project creation status");
+        let bytes = suprnova::http_client::read_capped(response, 25 * 1024 * 1024)
             .await
             .expect("project response");
+        let project: Value = serde_json::from_slice(&bytes).expect("project JSON");
         assert!(
             project["dsn"].is_string(),
             "Rustrak project response has no DSN"
@@ -76,7 +77,8 @@ impl Tracker {
             .to_owned()
     }
     async fn get(&self, path: &str) -> Value {
-        self.client
+        let response = self
+            .client
             .get(format!(
                 "{}/api/projects/{}/{}",
                 self.base,
@@ -88,10 +90,11 @@ impl Tracker {
             .await
             .expect("Rustrak API read")
             .error_for_status()
-            .expect("Rustrak API status")
-            .json()
+            .expect("Rustrak API status");
+        let bytes = suprnova::http_client::read_capped(response, 25 * 1024 * 1024)
             .await
-            .expect("Rustrak JSON")
+            .expect("Rustrak response");
+        serde_json::from_slice(&bytes).expect("Rustrak JSON")
     }
     async fn event(&self, marker: &str) -> Value {
         let deadline = Instant::now() + Duration::from_secs(15);

@@ -15,9 +15,9 @@
 //! # Cleanup
 //!
 //! A kill reaches everything the program started: on a timeout, an idle
-//! timeout, a `stop`, and when a started process or the future of `run` is
-//! dropped before it completes. On Unix each process gets a process group
-//! of its own, and the group is killed. A [`tty`](PendingProcess::tty)
+//! timeout, an output limit, a `stop`, and when a started process or the
+//! future of `run` is dropped before it completes. On Unix each process gets
+//! a process group of its own, and the group is killed. A [`tty`](PendingProcess::tty)
 //! process stays in the terminal's group, which it must share to read the
 //! terminal, so its descendants are found in the process table and killed
 //! one by one; on Windows `taskkill /T` ends the tree. A process that exits
@@ -62,6 +62,11 @@ use std::time::Duration;
 /// The timeout a process gets unless it sets another: 60 seconds, as in
 /// Laravel.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Maximum bytes read from either stdout or stderr before killing the process tree.
+pub const MAX_STREAM_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum bytes read from stdout and stderr together before killing the process tree.
+pub const MAX_COMBINED_OUTPUT_BYTES: usize = 12 * 1024 * 1024;
 
 /// The grace before a stopped process is killed, so it can finish cleanup.
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(10);
@@ -420,8 +425,10 @@ impl PendingProcess {
     /// [`ProcessError::Unsupported`] for a [`tty`](Self::tty) process with an
     /// idle timeout, [`ProcessError::TimedOut`] and
     /// [`ProcessError::IdleTimedOut`] when it is killed for running too long
-    /// or going quiet, and, under a fake, [`ProcessError::Stray`] and
-    /// [`ProcessError::FakeExhausted`]. A nonzero exit is not an error.
+    /// or going quiet, [`ProcessError::OutputLimitExceeded`] when output
+    /// exceeds 8 MiB per stream or 12 MiB combined, and, under a fake,
+    /// [`ProcessError::Stray`] and [`ProcessError::FakeExhausted`].
+    /// A nonzero exit is not an error.
     pub async fn run(self) -> Result<ProcessResult, ProcessError> {
         self.start()?.wait().await
     }
@@ -643,6 +650,18 @@ pub enum ProcessError {
         /// The idle timeout.
         timeout: Duration,
         /// What the process wrote before the kill.
+        result: Box<ProcessResult>,
+    },
+    /// An output byte ceiling was exceeded and the process tree was killed.
+    #[error("the process \"{command}\" exceeded the {stream} output limit of {limit} bytes")]
+    OutputLimitExceeded {
+        /// The quoted command line.
+        command: String,
+        /// `stdout`, `stderr`, or `combined`.
+        stream: &'static str,
+        /// The byte ceiling.
+        limit: usize,
+        /// The bounded output captured before the kill.
         result: Box<ProcessResult>,
     },
     /// [`ProcessResult::throw`] on a failed result.

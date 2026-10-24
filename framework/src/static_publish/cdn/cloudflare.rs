@@ -482,7 +482,10 @@ impl CloudflareDriver {
             .await
             .map_err(|_| failure(format!("{operation}: send API request failed")))?;
         let status = response.status().as_u16();
-        let envelope = response.json::<Envelope>().await.map_err(|_| {
+        let bytes = crate::http_client::read_capped(response, 2 * 1024 * 1024)
+            .await
+            .map_err(|error| failure(format!("{operation}: HTTP {status}; {error}")))?;
+        let envelope = serde_json::from_slice::<Envelope>(&bytes).map_err(|_| {
             failure(format!(
                 "{operation}: HTTP {status}; unreadable Cloudflare envelope"
             ))

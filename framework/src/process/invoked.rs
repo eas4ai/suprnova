@@ -22,6 +22,8 @@ const READER_GRACE: Duration = Duration::from_secs(2);
 /// watchdog kills it, with everything it started, when one passes, and
 /// [`wait`](Self::wait) then returns the timeout error. Dropping it before
 /// it is waited on kills it with everything it started.
+/// Output over 8 MiB per stream or 12 MiB combined also kills the process
+/// tree and makes `wait` return [`ProcessError::OutputLimitExceeded`].
 pub struct InvokedProcess {
     command: String,
     inner: Inner,
@@ -139,6 +141,8 @@ struct Program {
 struct CapturedState {
     out: Vec<u8>,
     err: Vec<u8>,
+    out_bytes: usize,
+    err_bytes: usize,
     out_read: usize,
     err_read: usize,
     last_output: Instant,
@@ -147,11 +151,50 @@ struct CapturedState {
     started: Instant,
     timeout: Option<Duration>,
     idle_timeout: Option<Duration>,
-    /// Set when the watchdog, or a check, killed the process for a timeout.
+    /// Set when a timeout or output limit killed the process.
     expired: Option<Expiry>,
 }
 
 impl CapturedState {
+    /// Account for both streams before retaining a chunk. A rejected chunk
+    /// sets the terminal error and is never appended or sent to a callback.
+    fn record_output(&mut self, kind: OutputKind, bytes: &[u8]) -> bool {
+        if self.expired.is_some() {
+            return false;
+        }
+        let (used, stream) = match kind {
+            OutputKind::Out => (self.out_bytes, "stdout"),
+            OutputKind::Err => (self.err_bytes, "stderr"),
+        };
+        let exceeded = if bytes.len() > super::MAX_STREAM_OUTPUT_BYTES - used {
+            Some(Expiry::Output {
+                stream,
+                limit: super::MAX_STREAM_OUTPUT_BYTES,
+            })
+        } else if bytes.len() > super::MAX_COMBINED_OUTPUT_BYTES - self.out_bytes - self.err_bytes {
+            Some(Expiry::Output {
+                stream: "combined",
+                limit: super::MAX_COMBINED_OUTPUT_BYTES,
+            })
+        } else {
+            None
+        };
+        if let Some(expiry) = exceeded {
+            self.expired = Some(expiry);
+            return false;
+        }
+        self.last_output = Instant::now();
+        let (count, buffer) = match kind {
+            OutputKind::Out => (&mut self.out_bytes, &mut self.out),
+            OutputKind::Err => (&mut self.err_bytes, &mut self.err),
+        };
+        *count += bytes.len();
+        if !self.quiet {
+            buffer.extend_from_slice(bytes);
+        }
+        true
+    }
+
     /// The next moment a timeout can pass; `None` when there is none, or it
     /// lies past what the clock can hold.
     fn deadline(&self) -> Option<Instant> {
@@ -202,6 +245,18 @@ impl Captured {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    fn signal_all(&self, target: Target, signal: Signal) {
+        let mut program = self.program();
+        if !program.released {
+            target.send_all(signal);
+            if signal == Signal::Kill
+                && let Some(child) = program.child.as_mut()
+            {
+                let _ = child.start_kill();
+            }
+        }
+    }
+
     /// Call the output callback with `text`. A callback that panics is
     /// dropped, so the output keeps being read and the process can end.
     fn emit(&self, kind: OutputKind, text: &str) {
@@ -225,16 +280,23 @@ impl Captured {
     }
 }
 
-/// Which of the two timeouts passed.
+/// The timeout or output limit that killed the process.
 #[derive(Debug, Clone, Copy)]
 enum Expiry {
     Timeout(Duration),
     Idle(Duration),
+    Output { stream: &'static str, limit: usize },
 }
 
 impl Expiry {
     fn error(self, command: &str, result: ProcessResult) -> ProcessError {
         match self {
+            Expiry::Output { stream, limit } => ProcessError::OutputLimitExceeded {
+                command: command.to_owned(),
+                stream,
+                limit,
+                result: Box::new(result),
+            },
             Expiry::Timeout(timeout) => ProcessError::TimedOut {
                 command: command.to_owned(),
                 timeout,
@@ -413,6 +475,8 @@ impl InvokedProcess {
             state: Mutex::new(CapturedState {
                 out: Vec::new(),
                 err: Vec::new(),
+                out_bytes: 0,
+                err_bytes: 0,
                 out_read: 0,
                 err_read: 0,
                 last_output: now,
@@ -439,6 +503,7 @@ impl InvokedProcess {
                 stdout,
                 OutputKind::Out,
                 Arc::clone(&captured),
+                target,
             )));
         }
         if let Some(stderr) = stderr {
@@ -447,6 +512,7 @@ impl InvokedProcess {
                 stderr,
                 OutputKind::Err,
                 Arc::clone(&captured),
+                target,
             )));
         }
         if let (Some(mut stdin), Some(input)) = (stdin, pending.input) {
@@ -614,7 +680,8 @@ impl InvokedProcess {
     ///
     /// # Errors
     ///
-    /// [`ProcessError::TimedOut`] or [`ProcessError::IdleTimedOut`].
+    /// [`ProcessError::TimedOut`], [`ProcessError::IdleTimedOut`], or
+    /// [`ProcessError::OutputLimitExceeded`] when an output limit killed it.
     pub async fn ensure_not_timed_out(&mut self) -> Result<(), ProcessError> {
         let command = self.command.clone();
         let real = match &mut self.inner {
@@ -633,8 +700,9 @@ impl InvokedProcess {
     /// # Errors
     ///
     /// [`ProcessError::TimedOut`] or [`ProcessError::IdleTimedOut`] when a
-    /// timeout passed and the process was killed, [`ProcessError::Io`] when
-    /// waiting fails.
+    /// timeout passed and the process was killed,
+    /// [`ProcessError::OutputLimitExceeded`] when an output limit killed it,
+    /// or [`ProcessError::Io`] when waiting fails.
     pub async fn wait(mut self) -> Result<ProcessResult, ProcessError> {
         let command = self.command.clone();
         match &mut self.inner {
@@ -800,15 +868,7 @@ impl Real {
     fn signal_all(&mut self, signal: Signal) {
         #[cfg(test)]
         reap_race::owner_waiting(self.target.pid);
-        let mut program = self.captured.program();
-        if !program.released {
-            self.target.send_all(signal);
-            if signal == Signal::Kill
-                && let Some(child) = program.child.as_mut()
-            {
-                let _ = child.start_kill();
-            }
-        }
+        self.captured.signal_all(self.target, signal);
     }
 
     /// Record and act on a timeout that has passed and the watchdog has not
@@ -1077,7 +1137,7 @@ async fn watchdog(captured: Arc<Captured>, target: Target) {
         tokio::time::sleep_until(deadline).await;
         let expired = {
             let mut state = captured.lock();
-            let due = state.due(Instant::now());
+            let due = state.expired.or_else(|| state.due(Instant::now()));
             if due.is_some() {
                 state.expired = due;
             }
@@ -1144,7 +1204,7 @@ impl Drop for StreamClosed {
 }
 
 /// Read one stream to its end into `captured`.
-async fn read_stream<R>(mut stream: R, kind: OutputKind, captured: Arc<Captured>)
+async fn read_stream<R>(mut stream: R, kind: OutputKind, captured: Arc<Captured>, target: Target)
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -1156,17 +1216,24 @@ where
             Ok(0) | Err(_) => break,
             Ok(read) => read,
         };
-        let quiet = {
+        let (quiet, exceeded) = {
             let mut state = captured.lock();
-            state.last_output = Instant::now();
-            if !state.quiet {
-                match kind {
-                    OutputKind::Out => state.out.extend_from_slice(&buffer[..read]),
-                    OutputKind::Err => state.err.extend_from_slice(&buffer[..read]),
-                }
-            }
-            state.quiet
+            let accepted = state.record_output(kind, &buffer[..read]);
+            (state.quiet, !accepted)
         };
+        if exceeded {
+            // Use the same lock as reaping, so a reused pid is never signalled.
+            captured.signal_all(target, Signal::Kill);
+            captured.changed.notify_one();
+            #[cfg(unix)]
+            tokio::spawn({
+                let captured = Arc::clone(&captured);
+                async move {
+                    reap_killed(&captured).await;
+                }
+            });
+            break;
+        }
         if !quiet {
             captured.emit(kind, &text.push(&buffer[..read]));
         }

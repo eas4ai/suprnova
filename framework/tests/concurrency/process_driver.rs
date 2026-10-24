@@ -446,3 +446,64 @@ async fn the_console_command_writes_the_token_it_is_given_and_a_plain_line_witho
         "{output}"
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn process_driver_bounds_children_across_concurrent_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = format!(
+        r#"mkdir '{0}/active-'"$3"; while [ ! -f '{0}/release' ]; do sleep 0.02; done; echo "suprnova-concurrency-result:$SUPRNOVA_CONCURRENCY_TOKEN:{{\"ok\":42}}""#,
+        dir.path().display()
+    );
+    Concurrency::console_command(["sh", "-c", &script, "sh"]).unwrap();
+    let first =
+        Concurrency::driver("process").run((0..6).map(|i| Task::named(format!("job-{i}"), ())));
+    let second =
+        Concurrency::driver("process").run((6..12).map(|i| Task::named(format!("job-{i}"), ())));
+    let runs = tokio::spawn(async move { tokio::join!(first, second) });
+    let count = || {
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("active-"))
+            .count()
+    };
+    assert!(wait_until(Duration::from_secs(5), || count() >= 8).await);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let started = count();
+    std::fs::write(dir.path().join("release"), "go").unwrap();
+    let (first, second) = runs.await.unwrap();
+    assert_eq!(
+        started, 8,
+        "at most eight children may start before a slot is released"
+    );
+    assert_eq!(first.unwrap().len() + second.unwrap().len(), 12);
+}
+
+#[tokio::test(start_paused = true)]
+#[serial]
+async fn process_driver_has_a_default_deadline() {
+    use_this_binary();
+    let result = Concurrency::driver("process")
+        .run([Task::new::<NapThenEcho>(Nap::new(65_000, "finished"))])
+        .await;
+    let error = result
+        .map(|_| ())
+        .expect_err("the default deadline must stop a task after 60 seconds");
+    assert!(error.is_timeout(), "{error}");
+    assert!(error.to_string().contains("60"), "{error}");
+    assert!(error.to_string().contains("nap_then_echo"), "{error}");
+}
+
+#[tokio::test]
+#[serial]
+async fn process_driver_output_limit_error_names_the_task() {
+    Concurrency::console_command(["sh", "-c", "head -c 8388609 /dev/zero", "sh"]).unwrap();
+    let error = Concurrency::driver("process")
+        .run([Task::named("noisy-task", ())])
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("output limit"), "{error}");
+    assert!(error.to_string().contains("noisy-task"), "{error}");
+}

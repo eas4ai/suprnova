@@ -134,6 +134,11 @@ const OVERFLOW_ROOT: &str = "sqs-payloads";
 /// Laravel's `SqsQueue` writes.
 const POINTER_KEY: &str = "@pointer";
 
+// One 1 MiB message, JSON escaping and receipt metadata fit within this budget.
+const MAX_ACTION_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CREDENTIAL_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_OVERFLOW_BYTES: usize = 25 * 1024 * 1024;
+
 /// The keys the driver signs with, in place of the default credential chain
 /// of AWS.
 #[derive(Clone)]
@@ -208,10 +213,11 @@ impl SqsOverflow {
         Ok(())
     }
 
-    async fn read(&self, path: &str) -> Result<Vec<u8>, FrameworkError> {
+    async fn read(&self, path: &str, queue_key: &str) -> Result<Vec<u8>, FrameworkError> {
+        validate_pointer(path, queue_key)?;
         if let Some(store) = self.cache()? {
             return store
-                .get_raw(path)
+                .get_raw_capped(path, MAX_OVERFLOW_BYTES)
                 .await?
                 .map(String::into_bytes)
                 .ok_or_else(|| {
@@ -220,18 +226,38 @@ impl SqsOverflow {
                     ))
                 });
         }
-        self.operator()?
-            .read(path)
+        use futures::StreamExt;
+        let disk = self.operator()?;
+        let fail = |error| {
+            FrameworkError::internal(format!("SQS: could not read overflow payload: {error}"))
+        };
+        if disk.stat(path).await.map_err(fail)?.content_length() > MAX_OVERFLOW_BYTES as u64 {
+            return Err(overflow_size_error());
+        }
+        let reader = disk
+            .reader_with(path)
+            .chunk(64 * 1024)
             .await
-            .map(|buffer| buffer.to_bytes().to_vec())
-            .map_err(|error| {
-                FrameworkError::internal(format!(
-                    "SQS: could not read the overflow payload '{path}': {error}"
-                ))
-            })
+            .map_err(fail)?;
+        // Check actual bytes too, including an object changed after stat.
+        let mut stream = reader.into_bytes_stream(..).await.map_err(fail)?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| {
+                FrameworkError::internal(format!("SQS: could not stream overflow payload: {error}"))
+            })?;
+            if chunk.len() > MAX_OVERFLOW_BYTES - bytes.len() {
+                return Err(overflow_size_error());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
     }
 
     async fn write(&self, path: &str, bytes: Vec<u8>) -> Result<(), FrameworkError> {
+        if bytes.len() > MAX_OVERFLOW_BYTES {
+            return Err(overflow_size_error());
+        }
         if let Some(store) = self.cache()? {
             let text = String::from_utf8(bytes).map_err(|error| {
                 FrameworkError::internal(format!("SQS: overflow payload is not text: {error}"))
@@ -252,7 +278,8 @@ impl SqsOverflow {
             })
     }
 
-    async fn delete(&self, path: &str) -> Result<(), FrameworkError> {
+    async fn delete(&self, path: &str, queue_key: &str) -> Result<(), FrameworkError> {
+        validate_pointer(path, queue_key)?;
         if let Some(store) = self.cache()? {
             return store.forget(path).await.map(|_| ());
         }
@@ -577,9 +604,12 @@ impl reqsign_core::HttpSend for ReqwestSend {
             })?;
         let status = response.status();
         let headers = response.headers().clone();
-        let bytes = response.bytes().await.map_err(|error| {
-            reqsign_core::Error::unexpected("read an AWS credential response").with_source(error)
-        })?;
+        let bytes = crate::http_client::read_capped(response, MAX_CREDENTIAL_RESPONSE_BYTES)
+            .await
+            .map_err(|error| {
+                reqsign_core::Error::unexpected("read an AWS credential response")
+                    .with_source(error)
+            })?;
         let mut out = http::Response::new(bytes);
         *out.status_mut() = status;
         *out.headers_mut() = headers;
@@ -866,9 +896,11 @@ impl SqsQueueDriver {
                 }
             })?;
         let status = response.status();
-        let bytes = response.bytes().await.map_err(|error| {
-            Failure::Unknown(FrameworkError::internal(format!("SQS {action}: {error}")))
-        })?;
+        let bytes = crate::http_client::read_capped(response, MAX_ACTION_RESPONSE_BYTES)
+            .await
+            .map_err(|error| {
+                Failure::Unknown(FrameworkError::internal(format!("SQS {action}: {error}")))
+            })?;
         let reply: Option<Value> = if bytes.is_empty() {
             Some(Value::Null)
         } else {
@@ -939,7 +971,7 @@ impl SqsQueueDriver {
             return Ok(());
         }
         if deleted && current {
-            self.delete_payload(path).await;
+            self.delete_payload(&held.queue_url, path).await;
         } else {
             tracing::warn!(
                 path,
@@ -989,7 +1021,7 @@ impl SqsQueueDriver {
         match outcome {
             Ok(()) => Ok(()),
             Err(failure) => {
-                self.discard(&message, &failure, attempted.maybe_acted)
+                self.discard(queue_url, &message, &failure, attempted.maybe_acted)
                     .await;
                 Err(failure.into_error("SendMessage"))
             }
@@ -1000,12 +1032,18 @@ impl SqsQueueDriver {
     /// not to have taken it: the last try was refused and no try may have
     /// been carried out. A refusal after a try that had no answer does not
     /// say the earlier try left no message.
-    async fn discard(&self, message: &Outgoing, failure: &Failure, maybe_acted: bool) {
+    async fn discard(
+        &self,
+        queue_url: &str,
+        message: &Outgoing,
+        failure: &Failure,
+        maybe_acted: bool,
+    ) {
         let Some(path) = &message.pointer else {
             return;
         };
         if failure.is_definite() && !maybe_acted {
-            self.delete_payload(path).await;
+            self.delete_payload(queue_url, path).await;
         } else {
             tracing::warn!(
                 path,
@@ -1028,7 +1066,7 @@ impl SqsQueueDriver {
                 "SQS: a message without an overflow payload has nothing to copy",
             ));
         };
-        let bytes = overflow.read(path).await?;
+        let bytes = overflow.read(path, &self.queue_key(queue_url)).await?;
         let copy = overflow_path(&self.queue_key(queue_url));
         overflow.write(&copy, bytes).await?;
         tracing::warn!(
@@ -1208,7 +1246,7 @@ impl SqsQueueDriver {
             let later = chunks.iter().skip(number + 1).flatten();
             for message in unsent.into_iter().chain(later) {
                 if let Some(path) = &message.pointer {
-                    self.delete_payload(path).await;
+                    self.delete_payload(queue_url, path).await;
                 }
             }
             return Err(failure.into_error("SendMessageBatch"));
@@ -1224,7 +1262,11 @@ impl SqsQueueDriver {
     /// parsed again to look for an overflow pointer, which a pointer body
     /// cannot be mistaken for: it has none of an envelope's required
     /// fields. Every error reads as it always has.
-    async fn decode(&self, body: &str) -> Result<(Envelope, Option<String>), FrameworkError> {
+    async fn decode(
+        &self,
+        body: &str,
+        queue_url: &str,
+    ) -> Result<(Envelope, Option<String>), FrameworkError> {
         let envelope_error = match Envelope::from_json(body) {
             Ok(envelope) => return Ok((envelope, None)),
             Err(error) => error,
@@ -1241,7 +1283,7 @@ impl SqsQueueDriver {
                  SQS_OVERFLOW_ENABLED is off"
             ))
         })?;
-        let bytes = overflow.read(path).await?;
+        let bytes = overflow.read(path, &self.queue_key(queue_url)).await?;
         let text = std::str::from_utf8(&bytes).map_err(|error| {
             FrameworkError::internal(format!(
                 "SQS: the overflow payload '{path}' is not text: {error}"
@@ -1254,11 +1296,11 @@ impl SqsQueueDriver {
 
     /// Delete an overflow payload, logging a failure: the message that
     /// pointed at it is settled either way.
-    async fn delete_payload(&self, path: &str) {
+    async fn delete_payload(&self, queue_url: &str, path: &str) {
         let Some(overflow) = &self.overflow else {
             return;
         };
-        let result = overflow.delete(path).await;
+        let result = overflow.delete(path, &self.queue_key(queue_url)).await;
         if let Err(error) = result {
             tracing::warn!(path, %error, "could not delete an SQS overflow payload");
         }
@@ -1306,7 +1348,7 @@ impl SqsQueueDriver {
             .as_str()
             .and_then(|count| count.parse().ok())
             .unwrap_or(1);
-        let (mut envelope, pointer) = self.decode(&body).await?;
+        let (mut envelope, pointer) = self.decode(&body, queue_url).await?;
         envelope.attempts = envelope.attempts.saturating_add(receives.saturating_sub(1));
         let held = Held {
             queue_url: queue_url.to_owned(),
@@ -1406,7 +1448,7 @@ impl QueueDriver for SqsQueueDriver {
                     Err(error) => {
                         for message in &messages {
                             if let Some(path) = &message.pointer {
-                                self.delete_payload(path).await;
+                                self.delete_payload(&url, path).await;
                             }
                         }
                         return Err(error);
@@ -1479,7 +1521,7 @@ impl QueueDriver for SqsQueueDriver {
         if wait > left {
             // Longer than SQS can still hide this message: send a copy that
             // counts the attempt and waits out the delay, and drop this one.
-            let (mut copy, _) = self.decode(&held.body).await?;
+            let (mut copy, _) = self.decode(&held.body, &held.queue_url).await?;
             copy.attempts = held.attempts.saturating_add(1);
             copy.available_at = available_at;
             self.send(&held.queue_url, &copy, Some(&held.receipt))
@@ -1587,8 +1629,29 @@ fn delay_secs(available_at: DateTime<Utc>) -> u64 {
     }
 }
 
-/// A new, unique path for an overflow payload of the queue whose directory
-/// name is `queue_key`.
+fn overflow_size_error() -> FrameworkError {
+    FrameworkError::internal(format!(
+        "SQS: overflow payload exceeds the {MAX_OVERFLOW_BYTES}-byte cap"
+    ))
+}
+
+/// Accept only a canonical UUID filename in this endpoint, region and queue's directory.
+fn validate_pointer(path: &str, queue_key: &str) -> Result<(), FrameworkError> {
+    let prefix = format!("{OVERFLOW_ROOT}/{queue_key}/");
+    let uuid = path
+        .strip_prefix(&prefix)
+        .and_then(|name| name.strip_suffix(".json"));
+    if uuid.is_some_and(|text| {
+        Uuid::parse_str(text).is_ok_and(|uuid| uuid.hyphenated().to_string() == text)
+    }) {
+        return Ok(());
+    }
+    Err(FrameworkError::internal(
+        "SQS: invalid overflow pointer for this queue",
+    ))
+}
+
+/// A new, unique path for an overflow payload in this queue's directory.
 fn overflow_path(queue_key: &str) -> String {
     format!("{OVERFLOW_ROOT}/{queue_key}/{}.json", Uuid::new_v4())
 }

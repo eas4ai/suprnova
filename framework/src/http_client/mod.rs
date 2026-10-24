@@ -1643,7 +1643,12 @@ impl ClientResponse {
 /// bytes. A declared `Content-Length` over the cap is rejected before any
 /// body is read; the streaming loop then enforces the cap against the
 /// actual bytes (Content-Length can be absent or lie).
-async fn read_capped(resp: reqwest::Response, max: usize) -> Result<Bytes, FrameworkError> {
+///
+/// # Errors
+///
+/// Returns an error when the declared or actual length exceeds `max`, or
+/// reading fails. Transport errors omit the URL, which can carry credentials.
+pub async fn read_capped(resp: reqwest::Response, max: usize) -> Result<Bytes, FrameworkError> {
     if let Some(len) = resp.content_length()
         && len > max as u64
     {
@@ -1653,12 +1658,10 @@ async fn read_capped(resp: reqwest::Response, max: usize) -> Result<Bytes, Frame
     }
     let mut resp = resp;
     let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| FrameworkError::internal(format!("Http body read failed: {e}")))?
-    {
-        if buf.len() + chunk.len() > max {
+    while let Some(chunk) = resp.chunk().await.map_err(|e| {
+        FrameworkError::internal(format!("Http body read failed: {}", e.without_url()))
+    })? {
+        if chunk.len() > max.saturating_sub(buf.len()) {
             return Err(FrameworkError::internal(format!(
                 "Http response body exceeds the {max}-byte cap"
             )));

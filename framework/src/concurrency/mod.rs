@@ -29,11 +29,11 @@
 //!
 //! A [`ConcurrencyDriver`] runs the tasks. `tokio`, the default, runs each
 //! as a Tokio task; `process` runs each in a console process of its own
-//! for the isolation a Tokio task lacks; `sync` awaits them one after
+//! for a separate address space, bounded output and a deadline; `sync` awaits them one after
 //! another, for tests. `CONCURRENCY_DRIVER` names the default,
 //! [`Concurrency::driver`] picks one for a call, and
 //! [`Concurrency::extend`] adds a driver of your own. Laravel's `fork`
-//! driver has no counterpart: the process driver is the isolating one.
+//! driver has no counterpart: the process driver provides separate memory.
 //!
 //! Why tasks are named functions rather than closures: the process driver
 //! sends each task to another process, and a Rust closure cannot cross a
@@ -132,8 +132,8 @@ impl Concurrency {
     }
 
     /// End a task that runs longer than `timeout` with an error naming it,
-    /// for one call. Zero means no timeout. Without one a task runs until
-    /// it finishes, on every driver.
+    /// for one call. Zero means no timeout on the Tokio and sync drivers;
+    /// the process driver uses its 60-second default when no timeout is set.
     pub fn with_timeout(timeout: Duration) -> PendingConcurrency {
         PendingConcurrency::default().with_timeout(timeout)
     }
@@ -227,7 +227,7 @@ impl PendingConcurrency {
     }
 
     /// End a task that runs longer than `timeout` with an error naming it.
-    /// Zero means no timeout.
+    /// Zero means no timeout on Tokio and sync; process uses its 60-second default.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = (!timeout.is_zero()).then_some(timeout);
         self

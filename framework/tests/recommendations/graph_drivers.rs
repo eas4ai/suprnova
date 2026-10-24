@@ -839,3 +839,159 @@ async fn extra_operations(store: &dyn suprnova::GraphStore) {
     store.publish(&next).await.unwrap();
     assert!(store.publish(&generation).await.is_err());
 }
+
+#[cfg(feature = "graph-hydradb")]
+#[test]
+fn rec_010_hydradb_security_limits() {
+    crate::own_process::run_alone("graph_drivers::rec_010_hydradb_security_limits_child");
+}
+
+#[cfg(feature = "graph-hydradb")]
+#[tokio::test]
+async fn rec_010_hydradb_security_limits_child() {
+    use serde_json::json;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    if !crate::own_process::is_child() {
+        return;
+    }
+    suprnova::Config::register(
+        suprnova::AppConfig::builder()
+            .environment(suprnova::Environment::Testing)
+            .build(),
+    );
+    for (label, body, expected) in [
+        (
+            "page",
+            format!(
+                "{}{}",
+                json!({"columns":[],"rows":[],"next_cursor":null}),
+                " ".repeat(2 * 1024 * 1024)
+            ),
+            "byte cap",
+        ),
+        (
+            "rows",
+            json!({"columns":[],"rows":vec![Vec::<u8>::new();25_001],"next_cursor":null})
+                .to_string(),
+            "row cap",
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+        let error = suprnova::HydraDbGraphStore::connect(
+            &format!("{}/v1/graphs/default/query", server.uri()),
+            "default",
+            "test-token",
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("HydraDB accepted an oversized {label}"));
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+    for (label, padding, rows, expected) in [
+        ("pages", 0, 0, "page cap"),
+        ("bytes", 1024 * 1024, 0, "byte cap"),
+        ("rows", 0, 500, "row cap"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(move |request: &wiremock::Request| {
+                let request: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let cursor = request["cursor"].as_u64().unwrap_or(0);
+                // Finish eventually so the unfixed driver fails without waiting for its deadline.
+                let next = (cursor < 65).then_some(cursor + 1);
+                ResponseTemplate::new(200).set_body_string(format!(
+                    "{}{}",
+                    json!({"columns":[],"rows":vec![Vec::<u8>::new();rows],"next_cursor":next}),
+                    " ".repeat(padding)
+                ))
+            })
+            .mount(&server)
+            .await;
+        let error = suprnova::HydraDbGraphStore::connect(
+            &format!("{}/v1/graphs/default/query", server.uri()),
+            "default",
+            "test-token",
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("HydraDB accepted cumulative {label}"));
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[cfg(feature = "graph-hydradb")]
+#[test]
+fn rec_010_hydradb_loopback_bypasses_environment_proxy() {
+    crate::own_process::run_alone(
+        "graph_drivers::rec_010_hydradb_loopback_bypasses_environment_proxy_child",
+    );
+}
+
+#[cfg(feature = "graph-hydradb")]
+#[tokio::test]
+async fn rec_010_hydradb_loopback_bypasses_environment_proxy_child() {
+    use serde_json::json;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    if !crate::own_process::is_child() {
+        return;
+    }
+    suprnova::Config::register(
+        suprnova::AppConfig::builder()
+            .environment(suprnova::Environment::Testing)
+            .build(),
+    );
+    let proxy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"columns":[],"rows":[],"next_cursor":null})),
+        )
+        .mount(&proxy)
+        .await;
+    for (index, exclusion) in [None, Some("example.com"), Some("127.0.0.1")]
+        .into_iter()
+        .enumerate()
+    {
+        for name in ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
+            unsafe {
+                std::env::set_var(name, proxy.uri());
+            }
+        }
+        for name in ["NO_PROXY", "no_proxy"] {
+            unsafe {
+                match exclusion {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"columns":[],"rows":[],"next_cursor":null})),
+            )
+            .mount(&server)
+            .await;
+        suprnova::HydraDbGraphStore::connect(
+            &format!("{}/v1/graphs/proxy-{index}/query", server.uri()),
+            "default",
+            "test-token",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "loopback request must reach its origin with NO_PROXY={exclusion:?}"
+        );
+        assert!(
+            proxy.received_requests().await.unwrap().is_empty(),
+            "proxy received the bearer credential"
+        );
+    }
+}

@@ -1163,3 +1163,58 @@ async fn retry_when_sees_transport_error_outcome() {
     assert_eq!(*outcome.lock().unwrap(), Some(RetryOutcome::TransportError));
     assert_eq!(*method.lock().unwrap(), Some("GET"));
 }
+
+#[tokio::test]
+async fn capped_reader_checks_declared_and_streamed_lengths() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _net = NETWORK_LOCK.lock().await;
+    for (label, headers, body) in [
+        ("missing", "", "x".repeat(65)),
+        (
+            "oversized declared",
+            "Content-Length: 1000000\r\n",
+            String::new(),
+        ),
+        (
+            "chunked",
+            "Transfer-Encoding: chunked\r\n",
+            format!("41\r\n{}\r\n0\r\n\r\n", "x".repeat(65)),
+        ),
+        (
+            "false length with chunking",
+            "Content-Length: 1\r\nTransfer-Encoding: chunked\r\n",
+            format!("41\r\n{}\r\n0\r\n\r\n", "x".repeat(65)),
+        ),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                if socket.read_exact(&mut byte).await.is_err() {
+                    return;
+                }
+                request.push(byte[0]);
+            }
+            let _ = socket
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nConnection: close\r\n{headers}\r\n{body}")
+                        .as_bytes(),
+                )
+                .await;
+        });
+        let error = Http::get(format!("http://{addr}/"))
+            .max_response_bytes(64)
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("accepted {label}"));
+        assert!(error.to_string().contains("byte cap"), "{label}: {error}");
+        server.await.unwrap();
+    }
+}
