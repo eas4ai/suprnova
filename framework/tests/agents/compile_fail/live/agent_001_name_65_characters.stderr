@@ -1,0 +1,5 @@
+error: a tool name has 1 to 64 characters; `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` has 65
+ --> tests/agents/compile_fail/live/agent_001_name_65_characters.rs:9:19
+  |
+9 |     #[tool(name = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", description = "A tool.", callers = [public])]
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,209 @@
+{
+  "engine": "sqlite",
+  "model_profile": {
+    "id": "onnx-community/embeddinggemma-2-ONNX",
+    "revision": "daa72c51243991dfcaf9f9137d2c573d8f7790c0",
+    "dimensions": 768,
+    "max_tokens": 8192,
+    "query_prefix": "task: search result | query: ",
+    "document_template": "title: {title} | text: {text}",
+    "pooling": "mean",
+    "normalize": true,
+    "truncation_dims": [
+      512,
+      256,
+      128
+    ],
+    "inputs": {
+      "text": true,
+      "image": false,
+      "audio": false,
+      "video": false
+    },
+    "precision": "fp32",
+    "output_key": null,
+    "files": {
+      "graph": "onnx/model.onnx.text-only.onnx",
+      "external_data": "onnx/model.onnx_data",
+      "tokenizer": "tokenizer.json",
+      "config": "config.json",
+      "tokenizer_config": "tokenizer_config.json",
+      "special_tokens_map": "special_tokens_map.json",
+      "sha256": {
+        "config.json": "8d011bfe08b5e345bbe0b81e5c6fd02c381920b345b986047bc2a33ce7b90d1d",
+        "onnx/model.onnx": "bc47de15f81208a5c99e5ab10f746d5e33b51ea228b7dc0bef9c133a94f1c1c3",
+        "onnx/model.onnx.text-only.onnx": "fccd746d49d69d5aaea305517563b152a9d0be6dbd68f1b56e40d10b69825fc9",
+        "onnx/model.onnx_data": "9fd452bfc6916e5a92f080f8dada35598ca4512b21c65897d4c5974d5f9630a2",
+        "special_tokens_map.json": "99952af67c24d0390617ab8051691832fe710382c173287e68045db6296bb1f8",
+        "tokenizer.json": "4d777ef5bdc1aa36227abdfb77c3e49e7b9c892d16e1b6bda41c393504828be4",
+        "tokenizer_config.json": "17bd5d6e9364ca49a534e1502076593317c298d4a663623091ed45388f004874"
+      },
+      "manifest_sha256": "2f95c3686b01f8e5a92892c5ecaef4fb236afb1d958b0bf4324c57b23763ec45"
+    }
+  },
+  "model_provenance": {
+    "id": "onnx-community/embeddinggemma-2-ONNX",
+    "revision": "daa72c51243991dfcaf9f9137d2c573d8f7790c0",
+    "manifest_sha256": "2f95c3686b01f8e5a92892c5ecaef4fb236afb1d958b0bf4324c57b23763ec45",
+    "files": {
+      "config.json": "8d011bfe08b5e345bbe0b81e5c6fd02c381920b345b986047bc2a33ce7b90d1d",
+      "onnx/model.onnx": "bc47de15f81208a5c99e5ab10f746d5e33b51ea228b7dc0bef9c133a94f1c1c3",
+      "onnx/model.onnx.text-only.onnx": "fccd746d49d69d5aaea305517563b152a9d0be6dbd68f1b56e40d10b69825fc9",
+      "onnx/model.onnx_data": "9fd452bfc6916e5a92f080f8dada35598ca4512b21c65897d4c5974d5f9630a2",
+      "special_tokens_map.json": "99952af67c24d0390617ab8051691832fe710382c173287e68045db6296bb1f8",
+      "tokenizer.json": "4d777ef5bdc1aa36227abdfb77c3e49e7b9c892d16e1b6bda41c393504828be4",
+      "tokenizer_config.json": "17bd5d6e9364ca49a534e1502076593317c298d4a663623091ed45388f004874"
+    }
+  },
+  "rivals": {
+    "meilisearch": {
+      "version": "1.55.0",
+      "lexical": {
+        "ndcg_at_10": 0.46654319787180965,
+        "latency": {
+          "p50_ms": 1.234169,
+          "p95_ms": 2.232596,
+          "p99_ms": 3.8516340000000002
+        },
+        "queries": 300
+      },
+      "settings": {
+        "matchingStrategy": "frequency",
+        "limit": 10,
+        "attributesToRetrieve": [
+          "id"
+        ]
+      },
+      "grid": [
+        {
+          "settings": {
+            "matchingStrategy": "last",
+            "limit": 10,
+            "attributesToRetrieve": [
+              "id"
+            ]
+          },
+          "ndcg_at_10": 0.37745906023030584,
+          "p95_ms": 2.5131609999999998
+        },
+        {
+          "settings": {
+            "matchingStrategy": "frequency",
+            "limit": 10,
+            "attributesToRetrieve": [
+              "id"
+            ]
+          },
+          "ndcg_at_10": 0.46654319787180965,
+          "p95_ms": 2.232596
+        },
+        {
+          "settings": {
+            "matchingStrategy": "all",
+            "limit": 10,
+            "attributesToRetrieve": [
+              "id"
+            ]
+          },
+          "ndcg_at_10": 0.052864831938353965,
+          "p95_ms": 1.1311360000000001
+        }
+      ]
+    },
+    "typesense": {
+      "version": "30.2",
+      "lexical": {
+        "ndcg_at_10": 0.42744851235872916,
+        "latency": {
+          "p50_ms": 16.335175,
+          "p95_ms": 52.005666,
+          "p99_ms": 82.055243
+        },
+        "queries": 300
+      },
+      "settings": {
+        "drop_tokens_threshold": 10,
+        "text_match_type": "max_score",
+        "query_by": "title,text",
+        "per_page": 10,
+        "include_fields": "id"
+      },
+      "grid": [
+        {
+          "settings": {
+            "drop_tokens_threshold": 1,
+            "text_match_type": "max_score",
+            "query_by": "title,text",
+            "per_page": 10,
+            "include_fields": "id"
+          },
+          "ndcg_at_10": 0.33484450668421656,
+          "p95_ms": 50.427569
+        },
+        {
+          "settings": {
+            "drop_tokens_threshold": 1,
+            "text_match_type": "sum_score",
+            "query_by": "title,text",
+            "per_page": 10,
+            "include_fields": "id"
+          },
+          "ndcg_at_10": 0.32509068791212203,
+          "p95_ms": 52.154316
+        },
+        {
+          "settings": {
+            "drop_tokens_threshold": 10,
+            "text_match_type": "max_score",
+            "query_by": "title,text",
+            "per_page": 10,
+            "include_fields": "id"
+          },
+          "ndcg_at_10": 0.42744851235872916,
+          "p95_ms": 52.005666
+        },
+        {
+          "settings": {
+            "drop_tokens_threshold": 10,
+            "text_match_type": "sum_score",
+            "query_by": "title,text",
+            "per_page": 10,
+            "include_fields": "id"
+          },
+          "ndcg_at_10": 0.38510574065199116,
+          "p95_ms": 51.727452
+        }
+      ]
+    }
+  },
+  "calibrated": true,
+  "tree_hash": "d0d342cc234f208ff7bf75f3e78aa38ac5cd412a",
+  "fixture_sha256": "dfcd40669cd0f82678814fcc9af2751f086ec0ce9d63d3b8054770991b0cc5f7",
+  "measured_at": "2026-10-24T05:57:03.144836315+00:00",
+  "latency_scope": "warm engine query: first page of 10 hits at the builder's depth; parsing, expansion, retrieval and fusion; query inference timed separately; fixed vocabulary; no hydration",
+  "vocabulary_prepare_ms": 54.395392,
+  "lexical": {
+    "ndcg_at_10": 0.6114768149352591,
+    "latency": {
+      "p50_ms": 11.736345,
+      "p95_ms": 24.10474,
+      "p99_ms": 29.461442
+    },
+    "queries": 300
+  },
+  "hybrid": {
+    "ndcg_at_10": 0.7534452022242312,
+    "latency": {
+      "p50_ms": 28.002477000000003,
+      "p95_ms": 39.842862,
+      "p99_ms": 46.140195
+    },
+    "queries": 300
+  },
+  "query_inference": {
+    "p50_ms": 31.906073,
+    "p95_ms": 42.606615,
+    "p99_ms": 48.895638
+  },
+  "hybrid_ratio": 0.5
+}

@@ -1,0 +1,7 @@
+error: #[tool] works only on a `#[handler]` function: add `#[handler]` to it
+ --> tests/agents/compile_fail/agent_001_tool_without_handler.rs:5:1
+  |
+5 | #[tool(name = "lonely", description = "No handler under it.", callers = [public])]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `tool` (in Nightly builds, run with -Z macro-backtrace for more info)
