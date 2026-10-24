@@ -20,6 +20,16 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   run; and three read tools, `search_docs`, `read_page` and `list_pages`,
   join the application's agents endpoint, gated the same way. The dogfood
   application serves its own set through it (`manual/docs-site.md`).
+- **The segmented date picker joins the Live component library.**
+  `suprnova.segmented-date-picker` is a form-associated custom element
+  beside the date picker: three focusable numeric segments in the order the
+  attribute names (`ymd`, `dmy` or `mdy`), `min`, `max` and `required`, a
+  horizontal value scroller for the focused segment with momentum and a
+  rubber band at the ends, and a keyboard edit buffer; typing and scrolling
+  write one date state, the form sees one `YYYY-MM-DD` value, and
+  `live:model` binds it. It takes the library's tokens and density, passes
+  the checker contract, and ships in the dogfood gallery with its browser
+  cases on the three qualified engines (`manual/live.md`).
 
 ## 4.6.2 - 2026-10-23
 
