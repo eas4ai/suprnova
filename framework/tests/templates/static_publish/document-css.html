@@ -1,1 +1,0 @@
-<!doctype html><html><head>{{ head }}{% if let Some(css) = view.get("style") %}<style>{{ css|safe }}</style>{% endif %}{% if let Some(href) = view.get("stylesheet") %}<link rel="stylesheet" href="{{ href }}">{% endif %}</head><body><div{% if let Some(css) = view.get("attribute") %} style="{{ css }}"{% endif %}>CSS</div>{{ body }}</body></html>
