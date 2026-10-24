@@ -1753,13 +1753,18 @@ must be finite and within -90 to 90, longitude finite and within -180 to
 `order_by_distance` require a preceding `nearby`. These errors are returned
 before any SQL runs. Zero radius is valid. The coordinate column names must
 name distinct fields, and `distance` is reserved for the computed projection.
-Store valid, non-null coordinates in those fields.
+A row whose latitude or longitude is NULL is not nearby: `nearby` adds `IS
+NOT NULL` predicates on both columns, so the row never appears in the query's
+results, count or existence checks, on any engine.
 
 A radius query first adds latitude and longitude range predicates, then
 compares the distance expression with the radius. An ordinary index on the
 coordinate columns can narrow the candidate rows. The bounding box wraps
 across longitude -180/180 and covers all longitudes when the circle reaches
-a pole. The final distance comparison removes the box's corners.
+a pole. The final distance comparison removes the box's corners and allows
+one micrometre beyond the radius, so a row at exactly the radius, or two
+coordinates that name the same point at a pole, count as inside despite
+floating-point rounding.
 
 The SQL supports SQLite, Postgres, MySQL and MariaDB without a spatial
 extension. SQLite uses its native math functions when available; Suprnova

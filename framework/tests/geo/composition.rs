@@ -1,7 +1,7 @@
 use sea_orm::DbBackend;
 use suprnova::{Builder, Direction, EloquentModel, Model, attrs, model};
 
-use super::{CustomPlace, ORIGIN, destination, execute, sqlite};
+use super::{CustomPlace, ORIGIN, Place, destination, execute, sqlite};
 
 #[model(table = "geo_groups", timestamps = false, relations = {
     places: HasMany<ScopedPlace> { fk = "group_id" },
@@ -331,4 +331,69 @@ fn geo_001_reference_tolerance_rejects_more_than_half_a_metre() {
     };
     row.__set_geo_distance(0.00075);
     super::assert_distances(&[row], false);
+}
+
+#[model(
+    table = "geo_optional_places",
+    timestamps = false,
+    geo(lat = "latitude", lng = "longitude")
+)]
+pub struct OptionalPlace {
+    pub id: i64,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+}
+
+#[tokio::test]
+async fn geo_001_rows_without_both_coordinates_are_not_nearby() {
+    let db = sqlite().await;
+    for sql in [
+        "CREATE TABLE geo_optional_places (id BIGINT PRIMARY KEY, latitude DOUBLE PRECISION, longitude DOUBLE PRECISION)",
+        "INSERT INTO geo_optional_places VALUES (1, 37.01, -122.0)",
+        "INSERT INTO geo_optional_places VALUES (2, NULL, -122.0)",
+        "INSERT INTO geo_optional_places VALUES (3, 37.0, NULL)",
+    ] {
+        execute(db.conn(), sql).await;
+    }
+    let query = || {
+        OptionalPlace::query()
+            .nearby(ORIGIN.0, ORIGIN.1)
+            .expect("valid origin")
+    };
+    let rows = query()
+        .order_by_distance()
+        .expect("origin set")
+        .get()
+        .await
+        .expect("nearby query");
+    assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![1]);
+    assert_eq!(query().count().await.expect("count"), 1);
+    assert_eq!(
+        query()
+            .within(5000.0)
+            .expect("radius")
+            .count()
+            .await
+            .expect("count within"),
+        1
+    );
+}
+
+#[tokio::test]
+async fn geo_001_same_point_at_a_pole_is_inside_a_zero_radius() {
+    let db = sqlite().await;
+    execute(
+        db.conn(),
+        "INSERT INTO geo_places (id, name, latitude, longitude, kind) VALUES (900, 'north pole', 90.0, 180.0, 'kept')",
+    )
+    .await;
+    let rows = Place::query()
+        .nearby(90.0, 0.0)
+        .expect("valid origin")
+        .within(0.0)
+        .expect("radius")
+        .get()
+        .await
+        .expect("zero radius query");
+    assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![900]);
 }

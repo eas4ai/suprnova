@@ -30,6 +30,10 @@ fn assert_sql(backend: DbBackend) {
         "{sql}"
     );
     assert!(sql.contains("AS distance"));
+    assert!(
+        sql.contains(" IS NOT NULL AND "),
+        "rows without both coordinates are excluded"
+    );
     assert!(sql.split(" ORDER BY ").nth(1).unwrap().contains("ASIN"));
     assert!(sql.ends_with(" ASC"));
     assert!(sql.contains("POWER(SIN(RADIANS("));
@@ -37,7 +41,9 @@ fn assert_sql(backend: DbBackend) {
     assert_eq!(values[0], ORIGIN.0.into());
     assert_eq!(values[2], ORIGIN.1.into());
     assert_eq!(values[3], "kept".into());
-    assert_eq!(values[11], 10.0.into());
+    // The radius carries the micrometre tolerance that keeps rounding from
+    // dropping a row at the radius.
+    assert_eq!(values[11], (10.0 + 1e-9).into());
     assert_eq!(
         &values[12..],
         &[ORIGIN.0.into(), ORIGIN.0.into(), ORIGIN.1.into()]
