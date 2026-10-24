@@ -1,0 +1,109 @@
+error[E0277]: `Writer` and `Post` cannot relate: the key `suprnova::bson::oid::ObjectId` cannot match `std::string::String`
+ --> tests/mongodb/compile_fail/relation_key_mismatch.rs:7:60
+  |
+7 | #[suprnova::document(collection = "writers", relations = { posts: HasMany<Post> })]
+  |                                                            ^^^^^ this relation compares `suprnova::bson::oid::ObjectId` in `Writer` with `std::string::String` in `Post`
+  |
+  = help: the trait `RelationKey<std::string::String, Writer, Post>` is not implemented for `suprnova::bson::oid::ObjectId`
+  = note: give the field the type of the key it holds: `suprnova::bson::oid::ObjectId`, `Option<suprnova::bson::oid::ObjectId>`, or `Vec<suprnova::bson::oid::ObjectId>` for an array of keys
+help: the trait `RelationKey<K, Left, Right>` is implemented for `std::option::Option<K>`
+ --> src/mongodb/relations.rs
+  |
+  | impl<K, Left, Right> RelationKey<K, Left, Right> for Option<K> {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `suprnova::mongodb::relations::__relation_keys`
+ --> src/mongodb/relations.rs
+  |
+  | pub fn __relation_keys<Left, Right, A, B, FL, FR>(left: FL, right: FR)
+  |        --------------- required by a bound in this function
+...
+  |     A: RelationKey<B, Left, Right>,
+  |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `__relation_keys`
+
+error[E0277]: `Writer` and `Post` cannot relate: the key `suprnova::bson::oid::ObjectId` cannot match `std::string::String`
+  --> tests/mongodb/compile_fail/relation_key_mismatch.rs:12:58
+   |
+12 | #[suprnova::document(collection = "posts", relations = { writer: BelongsTo<Writer> })]
+   |                                                          ^^^^^^ this relation compares `suprnova::bson::oid::ObjectId` in `Writer` with `std::string::String` in `Post`
+   |
+   = help: the trait `RelationKey<std::string::String, Writer, Post>` is not implemented for `suprnova::bson::oid::ObjectId`
+   = note: give the field the type of the key it holds: `suprnova::bson::oid::ObjectId`, `Option<suprnova::bson::oid::ObjectId>`, or `Vec<suprnova::bson::oid::ObjectId>` for an array of keys
+help: the trait `RelationKey<K, Left, Right>` is implemented for `std::option::Option<K>`
+  --> src/mongodb/relations.rs
+   |
+   | impl<K, Left, Right> RelationKey<K, Left, Right> for Option<K> {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `suprnova::mongodb::relations::__relation_keys`
+  --> src/mongodb/relations.rs
+   |
+   | pub fn __relation_keys<Left, Right, A, B, FL, FR>(left: FL, right: FR)
+   |        --------------- required by a bound in this function
+...
+   |     A: RelationKey<B, Left, Right>,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `__relation_keys`
+
+error[E0277]: `Group` and `Member` cannot relate: the key `suprnova::bson::oid::ObjectId` cannot match `Vec<std::string::String>`
+  --> tests/mongodb/compile_fail/relation_key_mismatch.rs:18:59
+   |
+18 | #[suprnova::document(collection = "groups", relations = { members: BelongsToMany<Member> })]
+   |                                                           ^^^^^^^ this relation compares `suprnova::bson::oid::ObjectId` in `Group` with `Vec<std::string::String>` in `Member`
+   |
+   = help: the trait `RelationKey<Vec<std::string::String>, Group, Member>` is not implemented for `suprnova::bson::oid::ObjectId`
+   = note: give the field the type of the key it holds: `suprnova::bson::oid::ObjectId`, `Option<suprnova::bson::oid::ObjectId>`, or `Vec<suprnova::bson::oid::ObjectId>` for an array of keys
+help: the trait `RelationKey<K, Left, Right>` is implemented for `std::option::Option<K>`
+  --> src/mongodb/relations.rs
+   |
+   | impl<K, Left, Right> RelationKey<K, Left, Right> for Option<K> {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `suprnova::mongodb::relations::__relation_keys`
+  --> src/mongodb/relations.rs
+   |
+   | pub fn __relation_keys<Left, Right, A, B, FL, FR>(left: FL, right: FR)
+   |        --------------- required by a bound in this function
+...
+   |     A: RelationKey<B, Left, Right>,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `__relation_keys`
+
+error[E0277]: `Account` and `Note` cannot relate: the key `i64` cannot match `suprnova::bson::oid::ObjectId`
+  --> tests/mongodb/compile_fail/relation_key_mismatch.rs:29:53
+   |
+29 | #[suprnova::model(table = "accounts", relations = { notes: HasManyDocuments<Note> })]
+   |                                                     ^^^^^ this relation compares `i64` in `Account` with `suprnova::bson::oid::ObjectId` in `Note`
+   |
+   = help: the trait `RelationKey<suprnova::bson::oid::ObjectId, Account, Note>` is not implemented for `i64`
+   = note: give the field the type of the key it holds: `i64`, `Option<i64>`, or `Vec<i64>` for an array of keys
+help: the trait `RelationKey<K, Left, Right>` is implemented for `std::option::Option<K>`
+  --> src/mongodb/relations.rs
+   |
+   | impl<K, Left, Right> RelationKey<K, Left, Right> for Option<K> {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `suprnova::mongodb::relations::__relation_keys`
+  --> src/mongodb/relations.rs
+   |
+   | pub fn __relation_keys<Left, Right, A, B, FL, FR>(left: FL, right: FR)
+   |        --------------- required by a bound in this function
+...
+   |     A: RelationKey<B, Left, Right>,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `__relation_keys`
+
+error[E0277]: `Account` and `Note` cannot relate: the key `i64` cannot match `suprnova::bson::oid::ObjectId`
+  --> tests/mongodb/compile_fail/relation_key_mismatch.rs:34:82
+   |
+34 | #[suprnova::document(collection = "notes", relations = { account: BelongsToModel<Account> })]
+   |                                                                                  ^^^^^^^ this relation compares `i64` in `Account` with `suprnova::bson::oid::ObjectId` in `Note`
+   |
+   = help: the trait `RelationKey<suprnova::bson::oid::ObjectId, Account, Note>` is not implemented for `i64`
+   = note: give the field the type of the key it holds: `i64`, `Option<i64>`, or `Vec<i64>` for an array of keys
+help: the trait `RelationKey<K, Left, Right>` is implemented for `std::option::Option<K>`
+  --> src/mongodb/relations.rs
+   |
+   | impl<K, Left, Right> RelationKey<K, Left, Right> for Option<K> {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `suprnova::mongodb::relations::__relation_model_key`
+  --> src/mongodb/relations.rs
+   |
+   | pub fn __relation_model_key<M, Right, B, FR>(right: FR)
+   |        -------------------- required by a bound in this function
+...
+   |     M::Key: RelationKey<B, M, Right>,
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `__relation_model_key`
