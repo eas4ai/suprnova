@@ -318,10 +318,44 @@ selects:
   holds the graph in memory, so after its data is lost, run
   `recommendations:graph-rebuild` to restore it from the stream.
 
+- `neo4j` keeps it in Neo4j 5. Enable `graph-neo4j` and use the same Bolt
+  URL, username and password variables. The driver uses Neo4j range indexes
+  for nodes and relationships, with `IF NOT EXISTS` so reconnects are safe.
+- `hydradb` keeps it in HydraDB's object-store-backed graph. Enable
+  `graph-hydradb`. Current HydraDB accepts Bolt 5.1 to 5.4, while the shared
+  `neo4rs` 0.8 client supports Bolt 4.x, so use the HTTPS query endpoint:
+  `https://graph.example.com:8443/v1/graphs/default/query`. Set the username
+  to the namespace (default `default`) and the password to the server's bearer
+  token. Append `?cell_id=cell-1` for a cell other than `cell-0`. Plain HTTP is
+  accepted only on loopback for development. HydraDB maintains label and
+  property indexes on writes and rejects `CREATE INDEX`; the driver sends no
+  unsupported DDL. It uses numeric identities, scalar property projections
+  and auto-commit statements instead of Memgraph's transaction and Cypher
+  extensions. The driver also accepts Bolt URLs for endpoints compatible with
+  `neo4rs`; this path cannot connect to current HydraDB releases.
+
+For example, with `graph-neo4j` enabled and credentials supplied through your
+process environment:
+
+```bash
+RECOMMEND_ENGINE=graph RECOMMEND_GRAPH_STORE=neo4j \
+  RECOMMEND_GRAPH_URL=bolt://127.0.0.1:7687 \
+  cargo run -p app --bin console --features suprnova/graph-neo4j -- recommendations:graph-rebuild
+```
+
+Use one application per graph database or HydraDB graph and namespace. Rebuilds
+publish a complete generation with one pointer update; the previous generation
+stays available until the next publication. HydraDB performs writes in bounded
+batches because it does not support explicit transactions. A failed write may
+leave an unpublished generation to discard; retry its job or rebuild. Its
+one-source-at-a-time hop queries preserve the per-source limit without the
+unsupported `collect` and list slicing syntax. The framework's rebuild lock
+serializes publication, as it does for the other stores.
+
 A store only persists facts and answers bounded hops; the framework applies
-the viewer's scope at every hop and computes every score, so both stores rank
+the viewer's scope at every hop and computes every score, so all stores rank
 the same graph the same way. Bind your own `GraphStore` in the container to
-replace both.
+replace the configured driver.
 
 ### How the graph ranks
 
@@ -501,10 +535,10 @@ them when you select it.
 | `RECOMMEND_LOCK_TTL_SECS` | `3600` | Renewable generation lock lifetime. |
 | `RECOMMEND_EVENT_TYPES` | `{}` | JSON class and base-score overrides. |
 | `RECOMMEND_ENGINE` | `starter` | `starter` or `graph`. |
-| `RECOMMEND_GRAPH_STORE` | `database` | `database` or `memgraph`. |
-| `RECOMMEND_GRAPH_URL` | unset | The Memgraph Bolt address, without credentials. |
-| `RECOMMEND_GRAPH_USERNAME` | unset | The Memgraph user, read when the store connects. |
-| `RECOMMEND_GRAPH_PASSWORD` | unset | The Memgraph password, read when the store connects. |
+| `RECOMMEND_GRAPH_STORE` | `database` | `database`, `memgraph`, `neo4j` or `hydradb`. External stores need their matching `graph-*` feature. |
+| `RECOMMEND_GRAPH_URL` | unset | Bolt address for Memgraph or Neo4j; HTTPS query URL for current HydraDB. No URL credentials. |
+| `RECOMMEND_GRAPH_USERNAME` | unset | Bolt user, or HydraDB HTTPS namespace (`default` when unset). Read when connecting. |
+| `RECOMMEND_GRAPH_PASSWORD` | unset | Bolt password, or HydraDB HTTPS bearer token. Read only when connecting. |
 | `RECOMMEND_GRAPH_DEPTH` | `2` | Most hops in a graph path, 1 to 4. |
 | `RECOMMEND_GRAPH_FANOUT` | `50` | Most edges followed out of one node per hop. |
 | `RECOMMEND_GRAPH_MAX_NODES` | `2000` | Most nodes one walk reaches. |
