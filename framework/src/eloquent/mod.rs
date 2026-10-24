@@ -17,6 +17,7 @@ pub mod collection;
 pub mod console;
 pub mod events;
 pub mod fillable;
+mod geo;
 pub mod lazy;
 pub mod lazy_loading;
 pub mod model;
@@ -136,6 +137,13 @@ pub trait EloquentModel: Sized {
     /// EXISTS subqueries (a parent with only soft-deleted children
     /// must NOT match `has("children")`).
     const SOFT_DELETES_COLUMN: &'static str = "";
+
+    /// Coordinate columns let generic builders calculate distance for a geo model.
+    const GEO_COLUMNS: Option<(&'static str, &'static str)> = None;
+
+    /// Attach the computed projection without making it a stored model column.
+    #[doc(hidden)]
+    fn __set_geo_distance(&mut self, _distance: f64) {}
 
     /// What a mass soft delete writes for "now", each value in its
     /// column's own storage form: the tombstone for

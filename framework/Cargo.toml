@@ -223,6 +223,7 @@ totp-rs = { version = "5", features = ["gen_secret", "otpauth", "qr"] }
 featureflag = { version = "0.0.3", features = ["feature-registry", "futures"] }
 async-stream = "0.3.6"
 qdrant-client = "1.19.0"
+libsqlite3-sys = { version = "=0.30.1", optional = true }
 sqlx = { version = "0.9", optional = true, default-features = false, features = ["runtime-tokio", "tls-rustls", "json"] }
 iso_currency = { version = "0.5.3", features = ["with-serde"] }
 percent-encoding = "2.3.2"
@@ -504,6 +505,7 @@ media = [
 ]
 # Database drivers are shared by SeaORM, migrations, and Magnetar.
 database-sqlite = [
+    "dep:libsqlite3-sys",
     "sea-orm/sqlx-sqlite",
     "sea-orm-migration/sqlx-sqlite",
     "suprnova-magnetar/seaorm-sqlite",
@@ -744,3 +746,8 @@ required-features = ["testing", "database-sqlite"]
 [[test]]
 name = "debugbar"
 path = "tests/debugbar/main.rs"
+
+[[test]]
+name = "geo"
+path = "tests/geo/main.rs"
+required-features = ["testing", "database-sqlite"]

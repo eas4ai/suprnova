@@ -134,6 +134,8 @@ pub mod __macro_support {
 pub mod query_builder;
 pub mod route_binding;
 pub mod schema_dump;
+#[cfg(feature = "database-sqlite")]
+mod sqlite_math;
 pub mod testing;
 pub mod transaction;
 

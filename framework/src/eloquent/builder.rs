@@ -648,6 +648,7 @@ pub struct Builder<M> {
     pub(crate) select_cols: Option<Vec<String>>,
     pub(crate) select_raw: Option<String>,
     select_bindings: Vec<SeaValue>,
+    pub(super) geo: super::geo::GeoQuery,
     /// Hydration-only metadata, projected by every union operand with its row.
     kept_version_index: Option<(&'static str, &'static str)>,
     maximum_expression: Option<QueryExpression>,
@@ -764,6 +765,7 @@ impl<M> Clone for Builder<M> {
             select_cols: self.select_cols.clone(),
             select_raw: self.select_raw.clone(),
             select_bindings: self.select_bindings.clone(),
+            geo: self.geo.clone(),
             kept_version_index: self.kept_version_index,
             maximum_expression: self.maximum_expression.clone(),
             group_by: self.group_by.clone(),
@@ -1323,6 +1325,7 @@ impl<M> Builder<M> {
             select_cols: None,
             select_raw: None,
             select_bindings: Vec::new(),
+            geo: super::geo::GeoQuery::default(),
             kept_version_index: None,
             maximum_expression: None,
             group_by: Vec::new(),
@@ -4837,15 +4840,7 @@ impl<M> Builder<M> {
         let joined = this.joined_table(table, &from);
         sql.push_str(&from);
         sql.push_str(&this.render_joins(backend, values, n)?);
-        if !this.where_terms.is_empty() {
-            sql.push_str(" WHERE ");
-            let predicate = crate::database::clauses::render_boolean_list(
-                &this.where_terms,
-                |term| matches!(term, WhereTerm::OrNext(_)),
-                |t| Self::render_where_term(backend, t, values, n, self.binder, joined),
-            )?;
-            sql.push_str(&predicate);
-        }
+        sql.push_str(&this.render_predicates(backend, table, values, n, joined)?);
 
         if !this.group_by.is_empty() {
             sql.push_str(" GROUP BY ");
@@ -4861,6 +4856,38 @@ impl<M> Builder<M> {
 
         sql.push_str(&this.render_having(backend, values, n, joined)?);
         Ok(())
+    }
+
+    // Radius restrictions wrap the caller's boolean list so an OR cannot bypass them.
+    fn render_predicates(
+        &self,
+        backend: DbBackend,
+        table: &str,
+        values: &mut Vec<SeaValue>,
+        n: &mut usize,
+        joined: Option<JoinedTable<'_>>,
+    ) -> Result<String, FrameworkError> {
+        let mut predicate = if self.where_terms.is_empty() {
+            String::new()
+        } else {
+            crate::database::clauses::render_boolean_list(
+                &self.where_terms,
+                |term| matches!(term, WhereTerm::OrNext(_)),
+                |term| Self::render_where_term(backend, term, values, n, self.binder, joined),
+            )?
+        };
+        if let Some(bounds) = self.geo.predicate(backend, table, values, n)? {
+            predicate = if predicate.is_empty() {
+                bounds
+            } else {
+                format!("({predicate}) AND {bounds}")
+            };
+        }
+        Ok(if predicate.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {predicate}")
+        })
     }
 
     /// Internal - render this Builder's SELECT body into a shared
@@ -5139,6 +5166,11 @@ impl<M> Builder<M> {
         } else {
             sql.push_str(column_expr);
         }
+        if column_expr == "*"
+            && let Some(distance) = self.geo.distance(backend, table, values, n)?
+        {
+            sql.push_str(&format!(", {distance} AS distance"));
+        }
         if project_row {
             sql.push_str(&format!(
                 ", {} AS {UNION_ROW_ALIAS}",
@@ -5168,15 +5200,7 @@ impl<M> Builder<M> {
         // arrives with its scope resolver still set, and its soft-delete
         // filter and global scopes exist only on the resolved copy, which
         // is what `render_select_into` hands in here.
-        if !self.where_terms.is_empty() {
-            sql.push_str(" WHERE ");
-            let predicate = crate::database::clauses::render_boolean_list(
-                &self.where_terms,
-                |term| matches!(term, WhereTerm::OrNext(_)),
-                |t| Self::render_where_term(backend, t, values, n, self.binder, joined),
-            )?;
-            sql.push_str(&predicate);
-        }
+        sql.push_str(&self.render_predicates(backend, table, values, n, joined)?);
 
         if !self.group_by.is_empty() {
             sql.push_str(" GROUP BY ");
@@ -6376,17 +6400,9 @@ where
             }
             return Ok(format!(" WHERE {identity} IN ({select})"));
         }
-        if self.where_terms.is_empty() {
-            return Ok(String::new());
-        }
         let from = self.own_table(backend, M::TABLE);
         let joined = self.joined_table(M::TABLE, &from);
-        let predicate = crate::database::clauses::render_boolean_list(
-            &self.where_terms,
-            |term| matches!(term, WhereTerm::OrNext(_)),
-            |t| Self::render_where_term(backend, t, values, n, self.binder, joined),
-        )?;
-        Ok(format!(" WHERE {predicate}"))
+        self.render_predicates(backend, M::TABLE, values, n, joined)
     }
 
     fn render_model_delete_sql_with_bindings(
@@ -6633,6 +6649,7 @@ where
         } else {
             crate::search::indexing::attach_kept_versions(&out, &raw_rows, kept_index)?;
         }
+        this.geo.hydrate(&mut out, &raw_rows)?;
         drop(raw_rows);
         // Lazy-loading prevention reads this mark. Every paginator, chunk
         // walk and eager load hydrates through here, so they all set it.
@@ -8404,24 +8421,7 @@ where
                     })
                     .collect::<Result<Vec<_>, FrameworkError>>()?;
                 sql.push_str(&set_parts.join(", "));
-                if !this.where_terms.is_empty() {
-                    sql.push_str(" WHERE ");
-                    let predicate = crate::database::clauses::render_boolean_list(
-                        &this.where_terms,
-                        |term| matches!(term, WhereTerm::OrNext(_)),
-                        |t| {
-                            Self::render_where_term(
-                                backend,
-                                t,
-                                &mut values,
-                                &mut n,
-                                this.binder,
-                                None,
-                            )
-                        },
-                    )?;
-                    sql.push_str(&predicate);
-                }
+                sql.push_str(&this.render_write_where(backend, &mut values, &mut n)?);
                 let stmt = Statement::from_sql_and_values(backend, &sql, values);
                 let result = exec
                     .run(stmt)
