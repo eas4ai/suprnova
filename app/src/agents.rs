@@ -3,7 +3,8 @@
 //! the claim page and the connected-agents page are this application's own
 //! (`controllers::agents`), as the Svelte Inertia kit's are.
 //!
-//! Three tools: `list_posts` for anyone and `create_post` for a signed-in
+//! The documentation plugin adds `search_docs`, `read_page` and `list_pages`.
+//! Three other tools: `list_posts` for anyone and `create_post` for a signed-in
 //! user (`controllers::posts`), and `add_to_tally`, a Live action an MCP client
 //! runs with no browser (`live::components::tally`). A guest who opens the
 //! approval or the claim page signs in at `/login` and comes back.
@@ -48,5 +49,5 @@ pub fn config() -> AgentsConfig {
 /// documents. A missing signing key or database fails here, at boot, rather
 /// than on an agent's first request.
 pub fn serve(router: Router) -> Result<Router, FrameworkError> {
-    router.try_agents(config())
+    crate::docs::mount(router)?.try_agents(config())
 }

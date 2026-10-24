@@ -319,7 +319,14 @@ async fn agent_dogfood_lists_every_tool_without_a_token() {
     names.sort();
     assert_eq!(
         names,
-        vec!["add_to_tally", "create_post", "list_posts"],
+        vec![
+            "add_to_tally",
+            "create_post",
+            "list_pages",
+            "list_posts",
+            "read_page",
+            "search_docs"
+        ],
         "a client without a token sees every tool, so calling one that needs a token sends it to sign in"
     );
 }
