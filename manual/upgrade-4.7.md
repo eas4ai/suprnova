@@ -190,7 +190,33 @@ admission; an asset any public page references stays public.
 **Do:** nothing. If a private page shares an asset with a public page, the
 asset is public by design; give the private page its own copy to hide it.
 
+### Process tasks report progress and may be watched for hangs.
+
+**Before:** a child process ran until it exited or hit the deadline you set,
+and the driver knew nothing about its progress.
+
+**Now:** the driver samples each child's progress (CPU time on Linux and the
+bytes it writes) and reports the last progress instant and the idle
+duration. `hang_after(duration)` kills a child whose progress stopped for
+that long, with `ProcessError::Hung` naming the idle time. No deadline, hang
+window, concurrency ceiling or output ceiling applies unless you set it.
+
+**Do:** nothing. To detect hung tasks, call `.hang_after(...)` with a window
+measured for your workload, as [Processes](processes.md) shows; a long task
+that keeps working is never killed by it.
+
 ## Security entries
+
+### SQS overflow pointers are checked before use.
+
+**Before:** a received message beginning with `@` named any cache or disk key,
+which was read whole and deleted on acknowledgement.
+
+**Now:** the pointer must carry the current queue's prefix and a canonical
+UUID; anything else is refused before any read or delete.
+
+**Do:** nothing, unless something other than the framework writes overflow
+pointers to your queue; those pointers must carry the queue prefix and a UUID.
 
 ### Payment adapters refuse malformed signature timestamps and provider IDs.
 
@@ -240,5 +266,6 @@ When a `FormRequest` consumes the request first, install
   included.
 - [Recommendations](recommendations.md) documents the graph stores.
 - [Authentication](authentication.md) documents the login attempt budget.
+- [Processes](processes.md) documents progress and `hang_after`.
 - [Validation](validation.md) documents old input and `dont_flash`.
 - [Upgrading to 4.6](upgrade-4.6.md) covers the preceding release.

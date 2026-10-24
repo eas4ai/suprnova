@@ -99,6 +99,15 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 - **Documentation plugin assets inherit page privacy.** An asset referenced
   only by private pages is served only to a request the gate admits; an asset
   any public page references stays public (`manual/docs-site.md`).
+- **Process tasks report progress and may be watched for hangs.** The
+  process concurrency driver and the `Process` facade sample each child's
+  progress, its CPU time on Linux and the bytes it writes, and expose the
+  last progress instant and the idle duration. `hang_after(duration)` kills a
+  child whose progress has stopped for that long with `ProcessError::Hung`
+  naming the idle time. Nothing is killed and nothing is capped unless the
+  caller sets a deadline, a hang window, a concurrency ceiling or an output
+  ceiling; the defaults are unchanged (`manual/processes.md`,
+  `manual/concurrency.md`).
 
 ### Security
 
@@ -110,6 +119,11 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   must be one path segment; a slash, a query or a dot segment is refused as a
   validation error before any request. NowPayments already validated its
   IDs (`manual/payments-stripe.md`, `manual/payments-paddle.md`).
+- **SQS overflow pointers are checked before use.** A received message that
+  points at an overflow object is read or deleted only when the pointer
+  carries the current queue's prefix and a canonical UUID; any other pointer
+  is refused, so a foreign message cannot name another cache or disk key
+  (`manual/queues.md`).
 - **A login attempt budget for session sign-in.** `LoginThrottle` counts
   failed attempts per lower-cased email and client IP, five per sixty
   seconds as Laravel's starters do, reports the seconds to wait, clears on
