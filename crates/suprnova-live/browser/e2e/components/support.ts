@@ -1,3 +1,5 @@
+import { buildSync } from "esbuild";
+
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -87,7 +89,17 @@ export async function mountComponents(page: Page, document: ComponentDocument): 
     if (existsSync(stylesheet)) await page.addStyleTag({ path: stylesheet });
     if (document.scripts === false) continue;
     const script = join(componentsRoot, component, `${component}.js`);
-    if (existsSync(script)) await page.addScriptTag({ path: script });
+    if (existsSync(script)) {
+      const bundled = buildSync({
+        entryPoints: [script],
+        bundle: true,
+        write: false,
+        format: "iife",
+      });
+      const output = bundled.outputFiles[0];
+      if (output === undefined) throw new Error(`component_script_missing:${component}`);
+      await page.addScriptTag({ content: output.text });
+    }
   }
 }
 
