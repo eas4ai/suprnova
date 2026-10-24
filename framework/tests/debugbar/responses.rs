@@ -366,3 +366,40 @@ async fn dbg_002_toolbar_markup_claims_no_live_region() {
     }
     assert_eq!(reply.body.matches("role=\"status\"").count(), 1);
 }
+
+#[tokio::test]
+async fn dbg_002_responses_without_the_toolbar_keep_their_cache_control() {
+    let _mode = debug_mode(true, &[]).await;
+    let app = Harness::with_middleware(
+        Router::new()
+            .get("/html", page)
+            .get("/asset", |_: Request| async {
+                Ok(HttpResponse::text("export const live = true;")
+                    .header("content-type", "text/javascript")
+                    .header("cache-control", "public, max-age=31536000, immutable"))
+            })
+            .get("/api", |_: Request| async {
+                Ok(HttpResponse::json(json!({"ok": true}))
+                    .header("cache-control", "private, max-age=60"))
+            })
+            .into(),
+        MiddlewareRegistry::new().append(SecurityHeaders::strict()),
+    );
+    // Only the rewritten page carries per-request markup, so only it goes
+    // out no-store; an immutable asset or a cacheable API answer keeps the
+    // headers the application set, with the debug bar on as with it off.
+    let html = app.get("/html", &[("accept", "text/html")]).await;
+    assert!(html.body.contains("id=\"suprnova-debugbar\""));
+    assert_eq!(html.header("cache-control"), Some("no-store"));
+    let asset = app.get("/asset", &[("accept", "text/html")]).await;
+    assert_eq!(asset.status, 200);
+    assert!(asset.header("x-debugbar-id").is_some());
+    assert!(!asset.body.contains("suprnova-debugbar"));
+    assert_eq!(
+        asset.header("cache-control"),
+        Some("public, max-age=31536000, immutable")
+    );
+    let api = app.get("/api", &[("accept", "text/html")]).await;
+    assert!(api.header("x-debugbar-id").is_some());
+    assert_eq!(api.header("cache-control"), Some("private, max-age=60"));
+}

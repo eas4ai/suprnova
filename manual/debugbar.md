@@ -95,9 +95,11 @@ The toolbar uses the response's CSP nonce for its style and script elements.
 When a policy has no nonce and forbids inline elements, the bar adds a nonce
 source for its elements while preserving the policy's other sources. The
 isolated development error page also permits same-origin diagnostic lookups.
-Responses carrying records use `Cache-Control: no-store`. Rewriting an HTML
-body removes its old length and validators. Injection happens after RenderCache,
-so a shared representation never stores a request's diagnostic markup.
+A rewritten HTML response goes out `Cache-Control: no-store`; every other
+response keeps the cache headers the application set, so an immutable asset
+stays cacheable with the debug bar on. Rewriting an HTML body removes its old
+length and validators. Injection happens after RenderCache, so a shared
+representation never stores a request's diagnostic markup.
 
 Every response has an `X-Debugbar-Id` while the gate is open. Read its JSON
 record with a GET, using the same application path prefix:
