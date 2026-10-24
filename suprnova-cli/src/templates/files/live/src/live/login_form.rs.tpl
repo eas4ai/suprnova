@@ -65,8 +65,9 @@ impl LoginForm {
         // `Auth::attempt` verifies the password through the registered user
         // provider, logs the user into the session on success, and issues a
         // remember-me token when asked.
-        let throttle = LoginThrottle::for_current_request(&input.email, LOGIN_ATTEMPTS, LOGIN_WINDOW)
-            .map_err(|error| failed("signing in", error))?;
+        let throttle =
+            LoginThrottle::for_current_request(&input.email, LOGIN_ATTEMPTS, LOGIN_WINDOW)
+                .map_err(|error| failed("signing in", error))?;
         let user = match throttle
             .attempt(
                 &Credentials::password(&input.email, &input.password),
