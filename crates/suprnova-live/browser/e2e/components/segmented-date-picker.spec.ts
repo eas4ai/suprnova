@@ -171,6 +171,40 @@ for (const theme of ["light", "dark"] as const) {
       await page.keyboard.type("09");
       await expect(segment(page, "month")).toBeFocused();
     });
+    test("beforeinput and native input apply each edit once", async ({ page }) => {
+      for (const cancelable of [false, true]) {
+        await mount(page, theme, { value: "2026-09-23" });
+        await segment(page, "month").focus();
+        const prevented = await segment(page, "month").evaluate((month, cancelable) => {
+          const before = new InputEvent("beforeinput", {
+            bubbles: true,
+            cancelable,
+            inputType: "insertText",
+            data: "1",
+          });
+          month.dispatchEvent(before);
+          month.dispatchEvent(
+            new InputEvent("input", { bubbles: true, inputType: "insertText", data: "1" }),
+          );
+          return before.defaultPrevented;
+        }, cancelable);
+        expect(prevented).toBe(cancelable);
+        await expect(segment(page, "month")).toHaveText("1_");
+        await expect(segment(page, "month")).toBeFocused();
+        expect(await value(page)).toBe("2026-09-23");
+        expect(await entries(page)).toEqual([["start", "2026-09-23"]]);
+        expect(
+          await page.evaluate(() => window.dateEvents.filter(([kind]) => kind === "input")),
+        ).toEqual([]);
+        await page.keyboard.type("2");
+        expect(await value(page)).toBe("2026-12-23");
+        await expect(segment(page, "day")).toBeFocused();
+        expect(await entries(page)).toEqual([["start", "2026-12-23"]]);
+        expect(
+          await page.evaluate(() => window.dateEvents.filter(([kind]) => kind === "input").length),
+        ).toBe(1);
+      }
+    });
     test("AC4: reject invalid digits; incomplete buffers revert", async ({ page }) => {
       await mount(page, theme, { value: "2026-09-23" });
       await segment(page, "month").focus();
