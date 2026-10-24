@@ -936,6 +936,10 @@
     "The extra revision keeps regeneration from overwriting the currently live page.": {
       "class": "noise",
       "evidence": "Not a claim about the code's state in time: 'currently live page' names the publication that is live at regeneration time, ordinary English for the live manifest's revision."
+    },
+    "RECORD_ID": {
+      "class": "noise",
+      "evidence": "A placeholder in debugbar.md's curl example for the X-Debugbar-Id header value, which the next sentence says to replace; not an identifier."
     }
   }
 }
