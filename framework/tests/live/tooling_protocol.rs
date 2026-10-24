@@ -78,6 +78,10 @@ fn fixture() -> TestContainerGuard {
             .expect("counter registers")
             .register::<ToolingBroken>()
             .expect("broken component registers")
+            .public_topic("tests.updates")
+            .expect("topic registers")
+            .public_topic_family("tests.rooms")
+            .expect("topic family registers")
             .build(),
     );
     guard
@@ -228,6 +232,47 @@ fn check_reports_every_component_and_only_bounded_diagnostics() {
         .position(|e| matches!(e.body, Body::Summary(_)))
         .expect("summary");
     assert_eq!(summary_index, envelopes.len() - 2);
+}
+
+#[test]
+fn tooling_checks_and_counts_only_renderable_components_when_topics_are_registered() {
+    let _guard = fixture();
+    let registry = LiveRegistry::builder()
+        .register::<ToolingCounter>()
+        .expect("counter registers")
+        .public_topic("tests.updates")
+        .expect("topic registers")
+        .build();
+    assert_eq!(registry.len(), 2, "the topic remains registered");
+    TestContainer::singleton(registry);
+    let request = ToolRequest::new(PROTOCOL_VERSION, Operation::Check, vec![template_root()]);
+    let mut out = Vec::new();
+    execute(&request, &mut out).expect("tooling succeeds");
+    let envelopes: Vec<Envelope> = String::from_utf8(out)
+        .expect("stdout is UTF-8")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("valid envelope"))
+        .collect();
+    assert_well_formed(&envelopes, Operation::Check);
+    assert_eq!(end(&envelopes), (Outcome::Ok, None));
+    assert!(
+        !envelopes.iter().any(|envelope| matches!(
+            &envelope.body,
+            Body::Diagnostic(report) if report.code == "missing_view"
+        )),
+        "subscriptions do not need templates"
+    );
+    let summary = envelopes
+        .iter()
+        .find_map(|envelope| match &envelope.body {
+            Body::Summary(summary) => Some(summary),
+            _ => None,
+        })
+        .expect("check summary");
+    assert_eq!(summary.components, 1);
+    assert_eq!(summary.proved, 1);
+    assert_eq!(summary.errors, 0);
+    assert_eq!(summary.unproved, 0);
 }
 
 #[test]

@@ -286,7 +286,8 @@ pub fn execute(request: &ToolRequest, sink: &mut dyn Write) -> Result<(), Toolin
 }
 
 fn sorted_names(registry: &LiveRegistry) -> Result<Vec<ComponentName>, ToolingError> {
-    let names = registry.component_names();
+    let mut names = registry.component_names();
+    names.retain(|name| registry.topic_for_component(name).is_none());
     if names.len() > MAX_COMPONENTS {
         return Err(ToolingError::new(ToolingErrorKind::ComponentLimitExceeded));
     }
