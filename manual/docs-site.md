@@ -224,9 +224,9 @@ when the set declares multiple languages. For example, `/docs/v1/llms.txt` and
 ## Browser search
 
 Each slice serves `search.json`, containing title, HTML and Markdown addresses,
-headings and plain text per admitted page. The small dependency-free script in
-`DocsPage::search_html` loads this index and matches all entered words against
-titles, headings and text. It displays up to twenty links using DOM text nodes.
+headings and plain text per admitted page. The small dependency-free script the
+plugin places in each page's `search_html` field of `DocsPage` loads this index
+and matches all entered words against titles, headings and text. It displays up to twenty links using DOM text nodes.
 No search process, JavaScript package or external request is needed.
 
 Register [security headers](security-headers.md) so the script shares the
