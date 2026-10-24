@@ -542,7 +542,7 @@ pub(crate) fn spawn_owned<T: Send + 'static>(
     // The callbacks belong to the unit of work that registered them, so they
     // carry its container scope: they resolve the scoped values it resolved,
     // and the scope ends when the last of the two ends.
-    let future = crate::container::App::in_current_scope(future);
+    let future = crate::debugbar::in_current_scope(crate::container::App::in_current_scope(future));
     tokio::spawn(async move {
         match task_container {
             Some(container) => {

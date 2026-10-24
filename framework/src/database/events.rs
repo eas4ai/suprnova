@@ -368,12 +368,14 @@ pub(crate) fn reached_observations() -> Vec<Arc<QueryObservation>> {
 
 /// True when at least one source of [`QueryExecuted`] observation is
 /// active: a direct `DB::listen` callback or the query log in a scope a
-/// query run here reaches, or an `EventFacade::listen` listener. The
+/// query run here reaches, an `EventFacade::listen` listener, or the active
+/// request's debug bar collector. The
 /// executor helpers consult this on every call - when nobody is
 /// listening the entire emission path short-circuits and pays zero
 /// overhead.
 pub(crate) fn query_observation_active() -> bool {
-    application_observation().observing()
+    crate::debugbar::active()
+        || application_observation().observing()
         || crate::container::test_query_observation().is_some_and(|scope| scope.observing())
         || crate::EventFacade::has_listeners::<QueryExecuted>()
 }

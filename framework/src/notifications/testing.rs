@@ -83,6 +83,9 @@ pub(crate) fn record_notification<N: Notification, R: Notifiable + ?Sized>(
             payload,
             routes,
         });
+        for record in &records {
+            crate::debugbar::record("notifications", &record.notification, record);
+        }
         store.records.extend(records);
     }
     Ok(())

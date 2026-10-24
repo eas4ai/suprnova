@@ -720,7 +720,7 @@ impl Queue {
         // nothing: the window still names the last dispatch that reached the
         // queue, and there is nothing to hand back.
         let target = connections::target(&connection)?;
-        target.driver.push(env).await?;
+        crate::debugbar::push_job(target.driver.as_ref(), env).await?;
         if let Some(armed) = armed {
             armed.claim(J::job_name()).await;
         }
@@ -924,7 +924,7 @@ impl Queue {
                     env.idempotency_key = Some(id);
                     env.unique_lock_owner = owner_token;
                     let drv = driver_for_job::<J>()?;
-                    drv.push(env).await
+                    crate::debugbar::push_job(drv.as_ref(), env).await
                 }
             })
             .await?;
@@ -1004,7 +1004,7 @@ impl Queue {
                     env.idempotency_key = Some(unique_id);
                     env.unique_lock_owner = owner.clone();
                     let drv = driver_for_job::<J>()?;
-                    drv.push(env).await
+                    crate::debugbar::push_job(drv.as_ref(), env).await
                 }
                 .await;
                 if let Err(e) = result {
@@ -1112,7 +1112,7 @@ impl Queue {
             envs.push(env);
         }
         let drv = driver_for_job::<J>()?;
-        drv.bulk_push(envs).await?;
+        crate::debugbar::push_jobs(drv.as_ref(), envs).await?;
         for armed in claims.values() {
             armed.claim(J::job_name()).await;
         }
@@ -1160,6 +1160,7 @@ impl Queue {
         let mut env = Envelope::from_json(payload)
             .map_err(|e| FrameworkError::internal(format!("Queue::push_raw: {e}")))?;
         if testing::is_active() {
+            crate::debugbar::record("queue", &env.job_name, &env);
             testing::record_raw(payload, queue);
             return Ok(());
         }
@@ -1167,7 +1168,7 @@ impl Queue {
         if let Some(queue) = queue {
             env.queue = routing::forwarded_queue(Some(queue), &target.label);
         }
-        target.driver.push(env).await
+        crate::debugbar::push_job(target.driver.as_ref(), env).await
     }
 
     /// Begin a queued batch builder. Mirrors `Bus::batch([...])`.
@@ -1434,7 +1435,7 @@ impl Queue {
             // Back to the connection the job failed on, which is the label
             // of the worker that logged the record.
             let target = connections::target(&record.connection)?;
-            target.driver.push(env).await?;
+            crate::debugbar::push_job(target.driver.as_ref(), env).await?;
         }
         store.forget(id).await?;
         Ok(true)
@@ -1501,7 +1502,7 @@ impl Queue {
                         continue;
                     }
                 };
-                target.driver.push(env).await?;
+                crate::debugbar::push_job(target.driver.as_ref(), env).await?;
             }
             store.forget(record.id).await?;
             count += 1;

@@ -318,6 +318,12 @@ impl EventDispatcher {
             }
         };
 
+        if crate::debugbar::active() {
+            crate::debugbar::event(
+                &event,
+                listeners.iter().map(|listener| listener.name()).collect(),
+            );
+        }
         debug!(
             event = E::event_name(),
             listeners = listeners.len(),
@@ -435,6 +441,12 @@ impl EventDispatcher {
             }
         };
 
+        if crate::debugbar::active() {
+            crate::debugbar::event(
+                &event,
+                listeners.iter().map(|listener| listener.name()).collect(),
+            );
+        }
         debug!(
             event = E::event_name(),
             listeners = listeners.len(),
@@ -909,6 +921,9 @@ impl Event {
     /// listeners); otherwise delegates to the global `EventDispatcher`.
     pub async fn dispatch<E: super::Event>(event: E) -> Result<(), FrameworkError> {
         if super::testing::is_active::<E>() {
+            if crate::debugbar::active() {
+                crate::debugbar::event(&event, Vec::new());
+            }
             super::testing::record(event);
             return Ok(());
         }
@@ -919,7 +934,8 @@ impl Event {
     /// fake recording it, or a deferral scope buffering it. A caller whose
     /// event is costly to build skips building one nothing would see.
     pub(crate) fn is_observed<E: super::Event>() -> bool {
-        super::testing::is_active::<E>()
+        crate::debugbar::active()
+            || super::testing::is_active::<E>()
             || DEFER_BUFFER
                 .try_with(|s| s.innermost_for(global().identity()).is_some())
                 .unwrap_or(false)
@@ -930,6 +946,9 @@ impl Event {
     /// synchronous listener even if some fail, returning the first error.
     pub async fn dispatch_best_effort<E: super::Event>(event: E) -> Result<(), FrameworkError> {
         if super::testing::is_active::<E>() {
+            if crate::debugbar::active() {
+                crate::debugbar::event(&event, Vec::new());
+            }
             super::testing::record(event);
             return Ok(());
         }
@@ -945,6 +964,9 @@ impl Event {
         event: E,
     ) -> Result<(), FrameworkError> {
         if super::testing::is_active::<E>() {
+            if crate::debugbar::active() {
+                crate::debugbar::event(&event, Vec::new());
+            }
             super::testing::record(event);
             return Ok(());
         }

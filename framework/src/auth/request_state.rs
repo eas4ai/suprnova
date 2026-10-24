@@ -986,6 +986,37 @@ pub async fn request_state_scope_for_test<F: std::future::Future>(fut: F) -> F::
     scope(fut).await
 }
 
+/// Diagnostics observe the cached principal without making an application identity read.
+pub(crate) fn debugbar_principal() -> Option<String> {
+    AUTH_STATE
+        .try_with(|state| {
+            let state = state.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(guard) = state.route_guard.as_ref().or(state.used_guard.as_ref()) {
+                let user = state
+                    .guard_users
+                    .get(guard)
+                    .or_else(|| state.bearer_users.get(guard))
+                    .or_else(|| {
+                        state
+                            .request_guard_users
+                            .get(guard)
+                            .and_then(Option::as_ref)
+                    });
+                return user
+                    .map(|user| user.get_auth_identifier())
+                    .or_else(|| state.guard_user_ids.get(guard).cloned())
+                    .map(|id| format!("{guard}:{id}"));
+            }
+            state
+                .current_user
+                .as_ref()
+                .map(|user| user.get_auth_identifier())
+                .or_else(|| state.current_user_id.clone())
+        })
+        .ok()
+        .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

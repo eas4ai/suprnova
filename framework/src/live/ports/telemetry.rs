@@ -6,6 +6,7 @@ pub(crate) struct SuprnovaExecutionTrace;
 
 impl ExecutionTracePort for SuprnovaExecutionTrace {
     fn record(&self, phase: ExecutionPhase) {
+        crate::debugbar::record("live", "phase", &phase);
         tracing::trace!(phase = ?phase, "Live execution phase");
     }
 }

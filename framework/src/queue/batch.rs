@@ -1632,7 +1632,7 @@ impl PendingBatch {
                 continue;
             };
             let undispatched = env.id;
-            if let Err(e) = driver.push(env).await {
+            if let Err(e) = crate::debugbar::push_job(driver.as_ref(), env).await {
                 // Everything from here on never reached the queue, starting
                 // with the one that just failed.
                 let orphans: Vec<Uuid> = std::iter::once(undispatched)

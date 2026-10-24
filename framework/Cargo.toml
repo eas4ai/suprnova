@@ -740,3 +740,7 @@ required-features = ["testing", "database-sqlite"]
 name = "event_sourcing_startup"
 path = "tests/event_sourcing_startup/main.rs"
 required-features = ["testing", "database-sqlite"]
+
+[[test]]
+name = "debugbar"
+path = "tests/debugbar/main.rs"

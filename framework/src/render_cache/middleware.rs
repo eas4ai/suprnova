@@ -791,6 +791,7 @@ impl LookupOutcome {
     }
 
     pub(crate) fn record(self) {
+        crate::debugbar::record("render_cache", self.as_str(), &self);
         let reason = self.reason();
         match reason {
             Some(reason) => Metrics::counter(render_cache_telemetry::LOOKUPS).inc_with(&[
@@ -3993,6 +3994,7 @@ async fn store_entry(
         }
     };
     if let Ok(PublishOutcome::Published) = outcome {
+        crate::debugbar::record("render_cache", "store", &outcome);
         Metrics::counter(render_cache_telemetry::PUBLICATIONS).inc();
     }
     if policy.layers().l1()

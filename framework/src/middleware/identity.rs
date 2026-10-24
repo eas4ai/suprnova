@@ -48,6 +48,8 @@ use std::sync::{Arc, OnceLock, RwLock, Weak};
 type Boxed = dyn Fn(Request, Next) -> MiddlewareFuture + Send + Sync;
 
 struct Known {
+    name: &'static str,
+    debugbar: Option<crate::debugbar::WeakDebugBar>,
     middleware: Weak<Boxed>,
     /// The middleware type, when the box was made by [`boxed_as`].
     type_id: Option<TypeId>,
@@ -85,6 +87,9 @@ fn key(boxed: &BoxedMiddleware) -> usize {
 /// Box `middleware` and remember its type, so the priority list can order
 /// it. Every registration point boxes through this.
 pub(crate) fn boxed_as<M: Middleware + 'static>(middleware: M) -> BoxedMiddleware {
+    let debugbar = (&middleware as &dyn std::any::Any)
+        .downcast_ref::<crate::DebugBarMiddleware>()
+        .map(crate::DebugBarMiddleware::downgrade);
     let security_headers = (&middleware as &dyn std::any::Any)
         .downcast_ref::<crate::SecurityHeaders>()
         .cloned();
@@ -110,6 +115,8 @@ pub(crate) fn boxed_as<M: Middleware + 'static>(middleware: M) -> BoxedMiddlewar
     table.known.insert(
         key(&boxed),
         Known {
+            name: std::any::type_name::<M>(),
+            debugbar,
             middleware: Arc::downgrade(&boxed),
             type_id: Some(TypeId::of::<M>()),
             alias: None,
@@ -138,6 +145,8 @@ pub(crate) fn name_as(boxed: &BoxedMiddleware, identity: String) {
             table.known.insert(
                 key(boxed),
                 Known {
+                    name: "boxed middleware",
+                    debugbar: None,
                     middleware: Arc::downgrade(boxed),
                     type_id: None,
                     alias: Some(identity),
@@ -160,6 +169,8 @@ pub(crate) fn inherit_identity(source: &BoxedMiddleware, wrapper: &BoxedMiddlewa
         .get(&key(source))
         .filter(|known| is_entry_of(known, source))
         .map(|known| Known {
+            name: known.name,
+            debugbar: known.debugbar.clone(),
             middleware: Arc::downgrade(wrapper),
             type_id: known.type_id,
             alias: known.alias.clone(),
@@ -400,6 +411,32 @@ fn sort_order(order: &mut Vec<usize>, ranks: &[Option<usize>]) {
             return;
         }
     }
+}
+
+/// The registration's name makes timed spans useful after type erasure.
+pub(crate) fn diagnostic_name(boxed: &BoxedMiddleware) -> String {
+    let table = table().read().unwrap_or_else(|p| p.into_inner());
+    table
+        .known
+        .get(&key(boxed))
+        .filter(|known| is_entry_of(known, boxed))
+        .map(|known| known.alias.clone().unwrap_or_else(|| known.name.to_owned()))
+        .unwrap_or_else(|| "boxed middleware".into())
+}
+
+/// The server reads the installed diagnostic policy before running any middleware.
+pub(crate) fn debugbar_of(boxed: &BoxedMiddleware) -> Option<crate::DebugBarMiddleware> {
+    let table = table().read().unwrap_or_else(|p| p.into_inner());
+    table
+        .known
+        .get(&key(boxed))
+        .filter(|known| is_entry_of(known, boxed))
+        .and_then(|known| {
+            known
+                .debugbar
+                .as_ref()
+                .and_then(crate::debugbar::WeakDebugBar::upgrade)
+        })
 }
 
 #[cfg(test)]

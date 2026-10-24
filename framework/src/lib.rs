@@ -68,6 +68,7 @@ pub mod csrf;
 pub mod data;
 pub mod database;
 pub mod date;
+pub mod debugbar;
 pub mod eloquent;
 pub mod error;
 pub mod event_sourcing;
@@ -208,6 +209,7 @@ pub use database::{
 pub use database::{
     FullTextMode, FullTextOptions, QueryExpression, RawExpression, UpdateAttrs, UpdateValue,
 };
+pub use debugbar::{DebugBar, DebugBarMiddleware};
 // BSON, the documents MongoDB stores (`suprnova::bson::doc!`,
 // `suprnova::bson::Document`, `suprnova::bson::oid::ObjectId`), at the
 // version the driver links, so an application needs no dependency of its own.
