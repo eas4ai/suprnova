@@ -453,6 +453,37 @@ impl CacheStore for RedisCache {
         Ok(value)
     }
 
+    async fn get_raw_capped(
+        &self,
+        key: &str,
+        max: usize,
+    ) -> Result<Option<String>, FrameworkError> {
+        let target = self.target()?;
+        let key = target.prefixed_key(key);
+        // One server-side operation prevents a replacement between length and GET.
+        let value: Option<String> = crate::redis_retry::retry_read("cache capped GET", || {
+            let mut conn = target.conn.clone();
+            let key = key.clone();
+            async move {
+                redis::Script::new(
+                    r#"
+                    if redis.call('STRLEN', KEYS[1]) > tonumber(ARGV[1]) then
+                        return redis.error_reply('cache value exceeds byte cap')
+                    end
+                    return redis.call('GET', KEYS[1])
+                "#,
+                )
+                .key(key)
+                .arg(max)
+                .invoke_async(&mut conn)
+                .await
+            }
+        })
+        .await
+        .map_err(|error| FrameworkError::internal(format!("Cache capped get error: {error}")))?;
+        Ok(value)
+    }
+
     async fn put_raw(
         &self,
         key: &str,

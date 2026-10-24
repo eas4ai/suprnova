@@ -139,8 +139,8 @@ let results = Concurrency::with_timeout(Duration::from_secs(30))
     .await?;
 ```
 
-A zero duration means no timeout. Without a timeout, a task runs until it
-finishes, on every driver.
+A zero duration means no timeout on the Tokio and sync drivers. The process
+driver uses a 60-second default when no nonzero timeout is set.
 
 ## Drivers
 
@@ -149,7 +149,7 @@ A driver decides where the tasks run. Three drivers are built in:
 | Driver | Runs each task | Use it for |
 |---|---|---|
 | `tokio` (default) | as a Tokio task in this process | most work: it's the cheapest |
-| `process` | in a console process of its own | work that needs isolation: its own memory, and a timeout that kills it |
+| `process` | in a console process of its own, at most eight at once | work that needs a separate address space, with a deadline and output limits |
 | `sync` | one after another, in the caller's task | tests that want concurrency out of the way |
 
 `CONCURRENCY_DRIVER` names the default driver, and `tokio` is the default
@@ -209,12 +209,19 @@ Concurrency::console_binary("/srv/app/bin/console")?;
 Concurrency::console_command(["cargo", "run", "--quiet", "--bin", "console", "--"])?;
 ```
 
+The driver runs at most eight children across all calls and starts each
+child's deadline when it launches. The default deadline is 60 seconds; a
+nonzero `with_timeout` replaces it. The Process facade kills the process
+tree when stdout or stderr exceeds 8 MiB, or their combined output exceeds
+12 MiB, and the error names the task. A separate process does not restrict
+filesystem, network or credential access.
+
 A timeout kills the console process and every process it started. Both
 binaries must register the task under the same name, which they do when the
 task is in the application's library crate. A name that the console binary
 doesn't register is an error that names the task. Starting a process costs
-far more than spawning a Tokio task, so use this driver for heavy or risky
-work, not for small queries.
+far more than spawning a Tokio task, so use it when a separate address space
+is needed.
 
 ### Your own driver
 

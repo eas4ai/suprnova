@@ -7,6 +7,11 @@ use std::{collections::HashMap, time::Duration};
 
 pub(super) type Record = HashMap<String, Value>;
 
+const MAX_PAGE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_QUERY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_QUERY_PAGES: usize = 64;
+const MAX_QUERY_ROWS: usize = 25_000;
+
 pub(super) enum Transport {
     Bolt(Graph),
     Http(HttpTransport),
@@ -108,7 +113,12 @@ impl Transport {
             reqwest::header::HeaderValue::from_str(&format!("Bearer {password}"))
                 .map_err(|_| error("invalid bearer credential"))?;
         authorization.set_sensitive(true);
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder();
+        // The development HTTP exception must stay local even with a system proxy.
+        if endpoint.scheme() == "http" {
+            builder = builder.no_proxy();
+        }
+        let client = builder
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
@@ -225,8 +235,15 @@ impl HttpTransport {
     ) -> Result<Vec<Record>, FrameworkError> {
         let mut records = Vec::new();
         let mut request = json!({"cell_id":self.cell, "query":statement, "parameters":parameters, "page_size":500, "cursor":null, "query_id":uuid::Uuid::new_v4().to_string(), "consistency":"strong", "timeout_ms":25000});
-        loop {
-            let page = self.page(&request).await?;
+        let mut bytes = 0;
+        for _ in 0..MAX_QUERY_PAGES {
+            let (page, size) = self
+                .page(&request, (MAX_QUERY_BYTES - bytes).min(MAX_PAGE_BYTES))
+                .await?;
+            bytes += size;
+            if page.rows.len() > MAX_QUERY_ROWS - records.len() {
+                return Err(error(format!("query exceeds the {MAX_QUERY_ROWS}-row cap")));
+            }
             let cursor = page.next_cursor;
             records.extend(page.decode(columns)?);
             let Some(next) = cursor else {
@@ -237,9 +254,12 @@ impl HttpTransport {
             }
             request["cursor"] = json!(next);
         }
+        Err(error(format!(
+            "query exceeds the {MAX_QUERY_PAGES}-page cap"
+        )))
     }
 
-    async fn page(&self, request: &Value) -> Result<Page, FrameworkError> {
+    async fn page(&self, request: &Value, max: usize) -> Result<(Page, usize), FrameworkError> {
         let response = self
             .client
             .post(self.endpoint.clone())
@@ -256,9 +276,11 @@ impl HttpTransport {
                 request["query"].as_str().unwrap_or("native query")
             )));
         }
-        response
-            .json()
+        let bytes = crate::http_client::read_capped(response, max)
             .await
-            .map_err(|_| error("invalid JSON query response"))
+            .map_err(error)?;
+        let page =
+            serde_json::from_slice(&bytes).map_err(|_| error("invalid JSON query response"))?;
+        Ok((page, bytes.len()))
     }
 }

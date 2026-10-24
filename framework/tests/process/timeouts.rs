@@ -562,3 +562,83 @@ async fn dropping_a_process_kills_descendants_that_leave_the_process_group() {
         sleeps.0
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn process_output_is_bounded_on_each_stream_and_in_total() {
+    for (stream, script) in [
+        ("stdout", "head -c 8388609 /dev/zero"),
+        ("stderr", "head -c 8388609 /dev/zero >&2"),
+        (
+            "combined",
+            "head -c 7340032 /dev/zero & head -c 7340032 /dev/zero >&2 & wait",
+        ),
+    ] {
+        let error = Process::command(sh(script))
+            .run()
+            .await
+            .map(|_| ())
+            .expect_err("output limit must fail the process");
+        match error {
+            ProcessError::OutputLimitExceeded {
+                stream: actual,
+                result,
+                ..
+            } => {
+                assert_eq!(actual, stream);
+                assert!(result.output_bytes().len() <= 8 * 1024 * 1024);
+                assert!(result.error_output_bytes().len() <= 8 * 1024 * 1024);
+                assert!(
+                    result.output_bytes().len() + result.error_output_bytes().len()
+                        <= 12 * 1024 * 1024
+                );
+            }
+            other => panic!("wrong failure: {other}"),
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn output_limit_kills_the_process_tree_without_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("pids");
+    let script = format!(
+        "echo $$ > '{}'; sleep 30 & echo $! >> '{}'; head -c 8388609 /dev/zero; wait",
+        file.display(),
+        file.display()
+    );
+    let process = Process::command(sh(&script)).forever().start().unwrap();
+    let pids = pids_in(&file, 2).await;
+    assert!(
+        all_gone(&pids, Duration::from_secs(5)).await,
+        "output limit must kill and reap without a wait"
+    );
+    let error = process
+        .wait()
+        .await
+        .map(|_| ())
+        .expect_err("output limit must remain an error");
+    assert!(error.to_string().contains("output limit"), "{error}");
+}
+
+#[tokio::test]
+#[serial]
+async fn output_exactly_at_the_caps_succeeds_and_quiet_output_is_still_limited() {
+    let result = Process::command(sh(
+        "head -c 8388608 /dev/zero; head -c 4194304 /dev/zero >&2",
+    ))
+    .run()
+    .await
+    .unwrap();
+    assert!(result.successful());
+    assert_eq!(result.output_bytes().len(), 8 * 1024 * 1024);
+    assert_eq!(result.error_output_bytes().len(), 4 * 1024 * 1024);
+    let error = Process::command(sh("head -c 8388609 /dev/zero"))
+        .quietly()
+        .run()
+        .await
+        .map(|_| ())
+        .expect_err("quiet output still has a ceiling");
+    assert!(matches!(error, ProcessError::OutputLimitExceeded { .. }));
+}

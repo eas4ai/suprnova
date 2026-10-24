@@ -705,7 +705,8 @@ async fn call_through(
         };
         let response = request.send().await.unwrap();
         let status = response.status().as_u16();
-        let text = response.text().await.unwrap();
+        let bytes = suprnova::http_client::read_capped(response, 1024 * 1024).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
         tokio::time::timeout(Duration::from_secs(5), server)
             .await
             .expect("server timeout")

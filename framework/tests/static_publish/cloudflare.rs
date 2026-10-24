@@ -702,3 +702,19 @@ async fn cloudflare_publication_creates_the_rules_and_purges_the_page_urls() {
         "the purge follows the switch: {calls:?}"
     );
 }
+
+#[tokio::test]
+async fn cloudflare_rejects_oversized_api_envelope() {
+    let mock = Mock::start(Some(vec![Reply {
+        status: 200,
+        body: json!({"success":true,"errors":[],"padding":"x".repeat(2*1024*1024)}),
+    }]))
+    .await;
+    let error = mock
+        .driver()
+        .purge(Purge::Prefix("/".into()))
+        .await
+        .map(|_| ())
+        .expect_err("oversized envelope must fail");
+    assert!(error.to_string().contains("byte cap"), "{error}");
+}

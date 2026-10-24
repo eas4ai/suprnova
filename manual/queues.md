@@ -256,7 +256,12 @@ and the full queue URL. Two queues with one name in different accounts or
 regions, or one queue URL served by two endpoints (two ElasticMQ or
 LocalStack instances, or LocalStack's per-region queues), never share a
 directory, and `SQS_OVERFLOW_FLUSH_ON_CLEAR` deletes only the cleared
-queue's payloads. You register the selected cache store or disk before boot;
+queue's payloads. Reads and deletes accept only canonical UUID filenames
+in the current queue's directory. Overflow objects are capped at 25 MiB
+on both writes and reads. Cache stores must implement `get_raw_capped`;
+the built-in memory, Redis and MongoDB stores do. SQS action replies are
+capped at 4 MiB and credential replies at 64 KiB. You register the selected
+cache store or disk before boot;
 a missing store stops boot. Your cache store must support tags so clearing
 one queue keeps other queues and unrelated cache entries. An evicted cache
 payload returns an error when you receive its pointer. A payload is deleted

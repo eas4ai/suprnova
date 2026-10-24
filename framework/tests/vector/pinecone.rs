@@ -938,3 +938,20 @@ async fn a_redirect_to_another_origin_does_not_carry_the_api_key() {
     );
     assert!(result.is_err(), "a redirect is not an answer: {result:?}");
 }
+
+#[tokio::test]
+async fn pinecone_rejects_oversized_success_json() {
+    let server = MockServer::start().await;
+    let body = format!("{{\"matches\":[]}}{}", " ".repeat(16 * 1024 * 1024));
+    Mock::given(method("POST"))
+        .and(path("/query"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+    let error = driver_against(&server)
+        .similar(TEST_INDEX, vec![1.0, 0.0], 1)
+        .await
+        .map(|_| ())
+        .expect_err("oversized JSON must fail");
+    assert!(error.to_string().contains("byte cap"), "{error}");
+}

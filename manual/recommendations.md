@@ -328,7 +328,10 @@ selects:
   to the namespace (default `default`) and the password to the server's bearer
   token. Append `?cell_id=cell-1` for a cell other than `cell-0`. Plain HTTP is
   accepted only on loopback in `local`, `development` or `testing` environments;
-  production, including an unset `APP_ENV`, requires HTTPS. HydraDB maintains
+  production, including an unset `APP_ENV`, requires HTTPS. Loopback HTTP
+  bypasses environment proxies. HTTP replies are capped at 2 MiB per page;
+  one query allows at most 64 pages, 25,000 rows and 16 MiB of response bytes.
+  Exceeding a ceiling fails the query. HydraDB maintains
   label and property indexes on writes and rejects `CREATE INDEX`; the driver sends no
   unsupported DDL. It uses numeric identities, scalar property projections
   and auto-commit statements instead of Memgraph's transaction and Cypher

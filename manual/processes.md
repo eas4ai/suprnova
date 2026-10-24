@@ -68,7 +68,7 @@ let built = Process::command(["cargo", "build"]).run().await?.throw()?;
 
 `run` returns an error only when the program did not give a result: it
 could not be started (`ProcessError::NotStarted`, which names the
-program and command line), or it was killed for a timeout.
+program and command line), or it was killed for a timeout or an output limit.
 
 You see arguments quoted as a POSIX shell would quote them in results and
 errors. `Process::command(["printf", "a b"])` reports `printf 'a b'`.
@@ -110,6 +110,12 @@ A program that runs past its timeout is killed and `run` returns
 writes nothing for its idle timeout is killed the same way, with
 `ProcessError::IdleTimedOut`. Both errors carry the output written before
 the kill.
+
+Each captured process reads at most 8 MiB from either stdout or stderr,
+and 12 MiB combined. Exceeding either ceiling kills the process tree and
+returns `ProcessError::OutputLimitExceeded`, with the command, stream,
+limit and bounded output captured before the kill. These limits also apply
+to `forever()` and `quietly()`; terminal output under `tty()` is not captured.
 
 A kill reaches everything the program started: a script that started
 background jobs takes them with it. On Unix each program gets a process
@@ -195,7 +201,7 @@ if !results.successful() {
 ```
 
 `results.get(key)` returns that process's result, or its error when it
-could not run or was killed for its timeout. A failure stops nothing else.
+could not run or was killed for a timeout or output limit. A failure stops nothing else.
 A pushed process is keyed by its position, or the next free number when a
 key already holds it, and adding a key twice replaces the first process.
 With `concurrency(n)` at most `n` run at once and the rest wait for a
