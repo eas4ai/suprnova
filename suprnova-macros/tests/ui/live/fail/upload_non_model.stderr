@@ -1,0 +1,5 @@
+error: only model-backed state can declare an upload policy
+  --> tests/ui/live/fail/upload_non_model.rs:10:5
+   |
+10 |     #[upload(policy = policy)]
+   |     ^

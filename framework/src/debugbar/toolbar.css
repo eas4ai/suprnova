@@ -1,0 +1,11 @@
+#suprnova-debugbar{all:initial;position:fixed;inset:auto 0 0;z-index:2147483647;background:#181b20;color:#edf0f5;font:12px/1.5 ui-monospace,monospace;box-shadow:0 -1px 0 #555}
+#suprnova-debugbar *{box-sizing:border-box}
+#suprnova-debugbar [data-panels]{display:flex;flex-wrap:wrap;gap:1px;padding:4px}
+#suprnova-debugbar button,#suprnova-debugbar select{font:inherit;color:inherit;background:#272c34;border:1px solid #555;padding:5px 8px;cursor:pointer}
+#suprnova-debugbar button[aria-expanded=true]{background:#edf0f5;color:#181b20}
+#suprnova-debugbar button:focus-visible,#suprnova-debugbar select:focus-visible{outline:2px solid #82cfff;outline-offset:1px}
+#suprnova-debugbar [data-panel]{max-height:50vh;overflow:auto;padding:12px;border-top:1px solid #555}
+#suprnova-debugbar [hidden]{display:none}
+#suprnova-debugbar [data-title]{font:inherit;font-weight:bold;margin:0 0 8px}
+#suprnova-debugbar pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;margin:0}
+#suprnova-debugbar [data-readout]{display:block;padding:0 8px}
