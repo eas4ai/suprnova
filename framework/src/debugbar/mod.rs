@@ -193,9 +193,6 @@ impl DebugBarMiddleware {
         if let Ok(id) = HeaderValue::from_str(&id) {
             response.headers_mut().insert(ID_HEADER, id);
         }
-        response
-            .headers_mut()
-            .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
         if browser && !is_head && toolbar::injectable(&response) {
             let (mut parts, body) = response.into_parts();
             let bytes = match body.collect().await {
@@ -203,6 +200,13 @@ impl DebugBarMiddleware {
                 Err(never) => match never {},
             };
             let body = toolbar::inject(&bytes, &record, &mut parts.headers, self.keep);
+            // The rewritten body is this request's own diagnostics, which no
+            // shared or private cache may replay; every other response keeps
+            // the cache headers the application set, so an immutable asset
+            // stays cacheable with the debug bar on.
+            parts
+                .headers
+                .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
             response = hyper::Response::from_parts(
                 parts,
                 Full::new(body).map_err(|never| match never {}).boxed(),
