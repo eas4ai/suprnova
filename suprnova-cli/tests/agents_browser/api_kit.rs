@@ -144,11 +144,13 @@ fn prepare_account(host: &mut Host, url: &str, work: &Path) -> Result<String, St
             .await
             .map_err(|error| error.to_string())?;
         if registered.status().as_u16() != 202 {
-            return Err(format!(
-                "registration answered {}: {}",
-                registered.status(),
-                registered.text().await.unwrap_or_default()
-            ));
+            let status = registered.status();
+            // The reply comes from the scaffolded application this test runs
+            // locally, so the raw read the workspace otherwise disallows is
+            // bounded by construction.
+            #[allow(clippy::disallowed_methods)]
+            let body = registered.text().await.unwrap_or_default();
+            return Err(format!("registration answered {status}: {body}"));
         }
         // The log is written as the mail goes; give it a moment.
         let mailed = Instant::now();
