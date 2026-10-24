@@ -75,6 +75,16 @@ See [Security Headers](security-headers.md) for presets and nonce handling.
 | `SECURITY_HEADERS_CSP_REPORT_TO` | none | URL | Adds the CSP `report-to` directive and a `Reporting-Endpoints` destination for violation reports. |
 | `SECURITY_HEADERS_HSTS_PRELOAD` | `false` | `bool` | Adds `preload` to HSTS when opted in. HSTS is sent only on secure requests outside local development. |
 
+## Debug bar
+
+The globally installed `DebugBar::middleware()` uses these settings. Debug off
+always disables it, regardless of `DEBUGBAR`. See [Debug Bar](debugbar.md).
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `DEBUGBAR` | `true` when debug is on | bool | Disables the bar, its collector and JSON route when `false`, `0`, `off` or `no` (case-insensitive). Cannot override `Config::is_debug()`. |
+| `DEBUGBAR_KEEP` | `100` | positive `usize` | Maximum completed request records retained in memory per middleware registration. Invalid values and zero fail bootstrap. |
+
 ## Error reporting
 
 The `sentry` driver is inert without a DSN. All settings are optional. Logs

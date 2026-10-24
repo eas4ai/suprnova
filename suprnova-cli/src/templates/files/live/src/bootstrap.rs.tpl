@@ -97,6 +97,7 @@ pub fn register_http_stack() {
 pub fn try_register_http_stack() -> Result<(), FrameworkError> {
     // Outside the error pages and RenderCache so every response is protected.
     global_middleware!(SecurityHeaders::from_env()?);
+    global_middleware!(suprnova::DebugBar::middleware()?);
     // Global middleware (runs on every request in registration order)
     global_middleware!(middleware::LoggingMiddleware);
 

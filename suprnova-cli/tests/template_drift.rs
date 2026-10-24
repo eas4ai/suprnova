@@ -2716,3 +2716,19 @@ fn api_bootstrap_registers_fallible_security_headers_first() {
         Some("global_middleware!(SecurityHeaders::from_env()?);")
     );
 }
+
+/// Debug diagnostics must be installed by every rendered scaffold bootstrap.
+#[test]
+fn debugbar_is_installed_in_all_rendered_bootstraps() {
+    use suprnova_cli::templates::{self, Frontend};
+    let bootstraps = [
+        templates::bootstrap(Frontend::Svelte, "Debug Bar Fixture"),
+        templates::bootstrap(Frontend::Vue, "Debug Bar Fixture"),
+        templates::bootstrap(Frontend::React, "Debug Bar Fixture"),
+        templates::api::bootstrap_rs("debugbar_fixture"),
+        templates::live_kit::bootstrap().to_owned(),
+    ];
+    for bootstrap in bootstraps {
+        assert!(bootstrap.contains("global_middleware!(suprnova::DebugBar::middleware()?);"));
+    }
+}

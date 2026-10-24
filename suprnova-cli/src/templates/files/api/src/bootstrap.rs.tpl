@@ -74,6 +74,7 @@ pub fn register_http_stack() {
 /// Let embedders report invalid security configuration as a boot error.
 pub fn try_register_http_stack() -> Result<(), FrameworkError> {
     global_middleware!(SecurityHeaders::from_env()?);
+    global_middleware!(suprnova::DebugBar::middleware()?);
 
     // Request timeout - a 30-second ceiling on the time to a response, so a
     // slow handler or a hung query cannot hold a connection open
