@@ -905,3 +905,19 @@ mod cli {
         );
     }
 }
+
+#[test]
+fn kit_live_login_installs_the_login_attempt_budget() {
+    let app = Scaffold::new();
+    let login = app.read("src/live/login_form.rs");
+    assert!(login.contains("LoginThrottle::for_current_request(&input.email)"));
+    assert!(contains(
+        &login,
+        ".attempt(&Credentials::password(&input.email, &input.password), self.remember,)"
+    ));
+    assert!(login.contains("FrameworkError::Validation"));
+    assert!(
+        app.read("src/live/mod.rs")
+            .contains("LoginThrottle::request_context()")
+    );
+}

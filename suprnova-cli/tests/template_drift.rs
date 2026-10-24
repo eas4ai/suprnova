@@ -2732,3 +2732,28 @@ fn debugbar_is_installed_in_all_rendered_bootstraps() {
         assert!(bootstrap.contains("global_middleware!(suprnova::DebugBar::middleware()?);"));
     }
 }
+
+#[test]
+fn session_login_templates_install_the_login_attempt_budget() {
+    for path in [
+        "src/templates/files/backend/controllers/auth.rs.tpl",
+        "src/templates/files/live/src/live/login_form.rs.tpl",
+    ] {
+        let source = read(path);
+        let call = source
+            .find("LoginThrottle::for_")
+            .expect("login must use LoginThrottle");
+        let attempt = source[call..]
+            .find(".attempt(")
+            .expect("the helper must wrap the attempt");
+        assert!(attempt > 0);
+        assert!(
+            !source[call..].contains("Auth::attempt("),
+            "{path} bypasses the login budget"
+        );
+    }
+    let backend = read("src/templates/files/backend/routes.rs.tpl");
+    assert!(backend.contains("LoginThrottle::request_context()"));
+    let live = read("src/templates/files/live/src/live/mod.rs.tpl");
+    assert!(live.contains("LoginThrottle::request_context()"));
+}

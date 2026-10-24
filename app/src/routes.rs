@@ -168,7 +168,8 @@ routes! {
     // reason the `/auth` group below gives: a limiter outage is when
     // unbounded password guessing is most attractive.
     group!("/", {
-        post!("/login", controllers::auth::login),
+        post!("/login", controllers::auth::login)
+            .middleware(suprnova::LoginThrottle::request_context()),
         post!("/register", controllers::auth::register),
     }).middleware(RedirectIfAuthenticated).middleware(
         RateLimitMiddleware::new(

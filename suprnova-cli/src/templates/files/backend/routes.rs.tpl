@@ -13,7 +13,8 @@ routes! {
     // names a Laravel application does.
     group!("/", {
         get!("/login", controllers::auth::show_login).name("login"),
-        post!("/login", controllers::auth::login),
+        post!("/login", controllers::auth::login)
+            .middleware(suprnova::LoginThrottle::request_context()),
         get!("/register", controllers::auth::show_register).name("register"),
         post!("/register", controllers::auth::register),
         // Password reset: a link is mailed to a verified address and lands

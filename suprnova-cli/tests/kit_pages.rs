@@ -396,6 +396,22 @@ fn both_offer_more_before_cap_and_stop_at_exhaustion() {
         squash(haystack).contains(&squash(needle))
     }
 
+    #[test]
+    fn kit_login_installs_the_login_attempt_budget() {
+        each_kit(|app| {
+            let source = app.read("src/controllers/auth.rs");
+            assert!(source.contains("LoginThrottle::for_current_request(&form.email)?"));
+            assert!(contains(
+                &source,
+                ".attempt(&Credentials::password(&form.email, &form.password), form.remember,)"
+            ));
+            assert!(
+                app.read("src/routes.rs")
+                    .contains("LoginThrottle::request_context()")
+            );
+        });
+    }
+
     /// Run `check` on a fresh scaffold of every kit.
     fn each_kit(check: impl Fn(&Scaffold)) {
         for kit in KITS {

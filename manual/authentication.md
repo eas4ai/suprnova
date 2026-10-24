@@ -931,7 +931,11 @@ get a stream of duplicates on every authenticated request.
 ## The scaffolded login flow
 
 `suprnova new` generates an authentication controller that uses
-`Auth::attempt` against the registered provider. `FormRequest` and `Validate`
+`LoginThrottle` before `Auth::attempt` against the registered provider. The
+budget allows five failed attempts per sixty seconds for each
+`lowercase(email)|ip` key. It counts unknown accounts too, clears on success,
+and refuses even a correct password while the budget is exhausted.
+`FormRequest` and `Validate`
 produce the `{ message, errors }` validation envelope. For an Inertia request,
 the installed validation-redirect middleware turns that failure into an HTTP
 `303 See Other` redirect back and flashes the errors for the originating page.
@@ -942,7 +946,7 @@ envelope:
 use serde::Deserialize;
 use suprnova::{
     handler, inertia_response, redirect, Auth, Credentials, FormRequest,
-    InertiaProps, Request, Response, Validate, ValidationErrors,
+    InertiaProps, LoginThrottle, Request, Response, Validate, ValidationErrors,
 };
 
 // No `errors` prop: the framework seeds `errors` on every Inertia page
@@ -976,7 +980,7 @@ fn invalid_credentials() -> suprnova::FrameworkError {
 
 #[handler]
 pub async fn login(form: LoginRequest) -> Response {
-    match Auth::attempt(
+    match LoginThrottle::for_current_request(&form.email)?.attempt(
         &Credentials::password(&form.email, &form.password),
         form.remember,
     )
@@ -993,6 +997,47 @@ pub async fn logout(_req: Request) -> Response {
     redirect!("/").into()
 }
 ```
+
+The generated `POST /login` route installs
+`LoginThrottle::request_context()`. The Live starter installs it on its
+reserved action routes and shows the helper's validation error under
+`email`. An exhausted budget dispatches `auth::events::Lockout` with trusted
+request metadata (IP, method and path), then answers:
+`Too many login attempts. Please try again in N seconds.` The event omits
+bodies, headers and query strings.
+
+### Add a login budget to an existing application
+
+Replace the login's `Auth::attempt` call with:
+
+```rust
+let user = suprnova::LoginThrottle::for_request(&email, &request)
+    .attempt(&credentials, remember)
+    .await?;
+```
+
+When a `FormRequest` consumes the request before the handler runs, install
+`.middleware(suprnova::LoginThrottle::request_context())` on `POST /login`
+and use `LoginThrottle::for_current_request(&form.email)?` as above. Live
+actions use the same middleware on their reserved routes. A missing context
+returns a framework error.
+
+`LoginThrottle::new(email, client_ip)` supports custom login paths. Take
+`client_ip` from `Request::ip()`, which applies trusted-proxy policy, rather
+than from a raw forwarding header or a form field. `with_limits(5, 60)?`
+changes the failure count and decay in seconds; both must be positive.
+`DEFAULT_MAX_ATTEMPTS` and `DEFAULT_DECAY_SECONDS` define the defaults.
+`ensure_not_rate_limited`, `hit`, `clear` and `available_in` expose the
+individual steps and remaining seconds when a custom guard needs them.
+Check before authenticating, hit only on invalid credentials, and clear
+only on success. Cache errors propagate; an unavailable budget stops the password check.
+
+The helper uses the existing cache-backed `RateLimiter`. Use a shared
+cache such as Redis when multiple workers must share a budget. Its check
+and failure count follow Laravel's starter sequence; concurrent requests
+already admitted before a failure is counted can finish. The IP is part
+of the key, so another address has its own budget. `Auth::attempt` itself
+keeps its existing behavior and imposes no account lockout.
 
 Registration follows the same shape: validate the form, create the
 user, mail a verification link with `EmailVerification::send_link`, then

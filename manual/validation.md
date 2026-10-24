@@ -764,6 +764,33 @@ hit the database or an async policy belongs in one of these places, not in
   the parsed request body, run it in the async hook alongside your other
   async rules.
 
+## Old input after a validation redirect
+
+A classic HTML form that fails parsing or validation redirects back with
+errors and old input in the session. Before building that redirect, the
+framework removes `password`, `password_confirmation` and
+`current_password`. These names are also removed inside nested objects
+and arrays. Uploaded files are never flashed.
+
+Add sensitive field names through `FormRequest::dont_flash`. These are
+added to the defaults, so a hook cannot re-enable password flashing:
+
+```rust
+impl suprnova::FormRequest for PaymentRequest {
+    fn dont_flash() -> &'static [&'static str] {
+        &["card_number", "security_code"]
+    }
+}
+```
+
+Use a hand-written implementation with the usual `Deserialize` and
+`Validate` derives. When using `#[request]` or `FormRequestDerive`, add
+`#[form_request(custom_hooks)]` to suppress the generated implementation.
+The hook applies to parse failures as well as rule and cross-field hook
+failures. Ordinary fields remain available through `session.get_old_input`.
+Explicit calls to `Redirect::with_input` keep the fields the caller supplies;
+exclude sensitive values when building that bag yourself.
+
 ## Inertia form submissions
 
 A validation failure answers two audiences differently. A REST client

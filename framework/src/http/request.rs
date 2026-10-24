@@ -306,15 +306,46 @@ impl Request {
     pub fn validation_failure(
         errors: crate::ValidationErrors,
         target: Option<String>,
-        input: serde_json::Value,
+        mut input: serde_json::Value,
     ) -> FrameworkError {
         match target {
-            Some(location) => FrameworkError::ValidationRedirect {
-                location,
-                errors: Box::new(errors),
-                input: Box::new(input),
-            },
+            Some(location) => {
+                Self::exclude_old_input(
+                    &mut input,
+                    &["password", "password_confirmation", "current_password"],
+                );
+                FrameworkError::ValidationRedirect {
+                    location,
+                    errors: Box::new(errors),
+                    input: Box::new(input),
+                }
+            }
             None => FrameworkError::validation_errors(errors),
+        }
+    }
+
+    /// Remove excluded input names before building a validation redirect.
+    #[doc(hidden)]
+    pub(crate) fn exclude_old_input(input: &mut serde_json::Value, excluded: &[&str]) {
+        if excluded.is_empty() {
+            return;
+        }
+        match input {
+            serde_json::Value::Object(fields) => {
+                fields.retain(|key, value| {
+                    if excluded.contains(&key.as_str()) {
+                        return false;
+                    }
+                    Self::exclude_old_input(value, excluded);
+                    true
+                });
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    Self::exclude_old_input(value, excluded);
+                }
+            }
+            _ => {}
         }
     }
 

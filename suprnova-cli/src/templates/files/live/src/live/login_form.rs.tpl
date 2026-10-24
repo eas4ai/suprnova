@@ -9,7 +9,7 @@
 //! stores it (`crate::email_address`).
 
 use suprnova::live::{ActionResult, ComponentError, LiveComponent, live};
-use suprnova::{Auth, Credentials, Redirect, Validate};
+use suprnova::{Credentials, FrameworkError, LoginThrottle, Redirect, Validate};
 
 use super::{FieldErrors, failed, redirect};
 use crate::email_address;
@@ -60,12 +60,22 @@ impl LoginForm {
         // `Auth::attempt` verifies the password through the registered user
         // provider, logs the user into the session on success, and issues a
         // remember-me token when asked.
-        let user = Auth::attempt(
-            &Credentials::password(&input.email, &input.password),
-            self.remember,
-        )
-        .await
-        .map_err(|error| failed("signing in", error))?;
+        let throttle = LoginThrottle::for_current_request(&input.email)
+            .map_err(|error| failed("signing in", error))?;
+        let user = match throttle
+            .attempt(
+                &Credentials::password(&input.email, &input.password),
+                self.remember,
+            )
+            .await
+        {
+            Ok(user) => user,
+            Err(FrameworkError::Validation(errors)) => {
+                self.errors = FieldErrors::one("email", &errors.messages_for("email").join(" "));
+                return Ok(ActionResult::render());
+            }
+            Err(error) => return Err(failed("signing in", error)),
+        };
         if user.is_none() {
             self.errors = FieldErrors::one("email", "These credentials do not match our records.");
             return Ok(ActionResult::render());

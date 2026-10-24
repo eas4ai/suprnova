@@ -2992,6 +2992,7 @@ async fn classic_forms_redirect_back_with_errors_and_old_input() {
             "multipart/form-data; boundary=par043boundary",
             form(&[
                 text_part("title", "Trip"),
+                text_part("password", "never-flash-this"),
                 file_part("files[]", "bad.pdf", "application/pdf", &pdf()),
             ]),
             "files.0",
@@ -3016,6 +3017,7 @@ async fn classic_forms_redirect_back_with_errors_and_old_input() {
         session.age_flash_data();
         let errors: Value = session.get_flash("errors.default").expect("flashed errors");
         assert!(errors.get(field).is_some(), "{errors}");
+        assert!(session.get_old_input::<String>("password").is_none());
         let old_key = if path == "/signup" { "email" } else { "title" };
         assert_eq!(
             session.get_old_input::<String>(old_key).as_deref(),
@@ -3253,4 +3255,132 @@ async fn preparation_also_precedes_selected_live_validation() {
             Some("true")
         );
     }
+}
+
+#[derive(serde::Deserialize, suprnova::Validate)]
+struct LoginFlashRequest {
+    #[validate(email)]
+    email: String,
+    age: u32,
+}
+
+impl suprnova::FormRequest for LoginFlashRequest {
+    fn dont_flash() -> &'static [&'static str] {
+        &["api_key"]
+    }
+}
+
+#[suprnova::handler]
+async fn login_flash(form: LoginFlashRequest) -> Response {
+    Ok(HttpResponse::text(format!("{}:{}", form.email, form.age)))
+}
+
+#[tokio::test]
+async fn validation_redirect_never_flashes_passwords() {
+    for age in ["1", "invalid"] {
+        for content_type in [
+            "application/x-www-form-urlencoded",
+            "application/json",
+            "multipart/form-data; boundary=par043boundary",
+        ] {
+            let slot = suprnova::session::new_session_slot_for_test();
+            let app = App::with(
+                Router::new().post("/login", login_flash),
+                MiddlewareRegistry::new().append(SeededSessionScope(slot.clone())),
+            );
+            let body = match content_type {
+                "application/json" => serde_json::to_vec(&json!({
+                    "email": "bad", "age": if age == "1" { json!(1) } else { json!(age) },
+                    "password": "secret", "password_confirmation": "secret",
+                    "current_password": "old-secret", "api_key": "custom-secret",
+                    "profile": [{"password": "nested-secret", "api_key": "custom-secret", "name": "Ada"}],
+                })).unwrap(),
+                "application/x-www-form-urlencoded" => format!(
+                    "email=bad&age={age}&password=secret&password_confirmation=secret&current_password=old-secret&api_key=custom-secret"
+                ).into_bytes(),
+                _ => form(&[
+                    text_part("email", "bad"), text_part("age", age),
+                    text_part("password", "secret"),
+                    text_part("password_confirmation", "secret"),
+                    text_part("current_password", "old-secret"), text_part("api_key", "custom-secret"),
+                ]),
+            };
+            let reply = send(
+                &app,
+                Outgoing::post("/login", body)
+                    .content_type(content_type)
+                    .header("Accept", "text/html"),
+            )
+            .await;
+            assert_eq!(reply.status, 302, "{}", reply.text());
+            let mut session = slot.lock().expect("slot");
+            let session = session.as_mut().expect("session");
+            session.age_flash_data();
+            assert_eq!(
+                session.get_old_input::<String>("email").as_deref(),
+                Some("bad")
+            );
+            for key in [
+                "password",
+                "password_confirmation",
+                "current_password",
+                "api_key",
+            ] {
+                assert!(
+                    session.get_old_input::<Value>(key).is_none(),
+                    "flashed {key} for {content_type}"
+                );
+            }
+            assert!(
+                !serde_json::to_string(&session.data)
+                    .unwrap()
+                    .contains("secret")
+            );
+            if content_type == "application/json" {
+                assert_eq!(
+                    session.get_old_input::<Value>("profile"),
+                    Some(json!([{"name": "Ada"}]))
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn login_throttle_context_uses_trusted_http_metadata() {
+    TestContainer::scope(async {
+        TestContainer::bind::<dyn suprnova::CacheStore>(Arc::new(suprnova::InMemoryCache::new()));
+        let _fake = suprnova::EventFacade::fake();
+        let app = App::with(
+            Router::new().post("/login-budget", |_req: Request| async {
+                let throttle = suprnova::LoginThrottle::for_current_request("bad@example.test")?;
+                for _ in 0..5 {
+                    throttle.hit().await?;
+                }
+                throttle.ensure_not_rate_limited().await?;
+                Ok(HttpResponse::text("accepted"))
+            }),
+            MiddlewareRegistry::new().append(suprnova::LoginThrottle::request_context()),
+        );
+        let response = send(
+            &app,
+            Outgoing::post("/login-budget", vec![])
+                .content_type("application/json")
+                .header("X-Forwarded-For", "192.0.2.99"),
+        )
+        .await;
+        assert_eq!(response.status, 422, "{}", response.text());
+        let message = response.json()["errors"]["email"][0]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(message.starts_with("Too many login attempts. Please try again in "));
+        suprnova::events::testing::assert_dispatched::<suprnova::auth::events::Lockout>(|event| {
+            event.request.ip == "unknown"
+                && event.request.method == "POST"
+                && event.request.path == "/login-budget"
+        });
+        assert!(suprnova::LoginThrottle::for_current_request("bad@example.test").is_err());
+    })
+    .await;
 }

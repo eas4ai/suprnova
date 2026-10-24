@@ -26,9 +26,9 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use suprnova::{
-    Auth, Credentials, FormRequest, FrameworkError, Inertia, InertiaProps, Redirect, Request,
-    Response, Validate, ValidationErrors, auth_flows::EmailVerification, handler, inertia_response,
-    redirect,
+    Auth, Credentials, FormRequest, FrameworkError, Inertia, InertiaProps, LoginThrottle, Redirect,
+    Request, Response, Validate, ValidationErrors, auth_flows::EmailVerification, handler,
+    inertia_response, redirect,
 };
 
 use crate::email_address;
@@ -86,11 +86,12 @@ pub async fn login(form: LoginRequest) -> Response {
     // provider, logs the user into the session on success, and issues a
     // remember-me token when requested - all via the named-guard system
     // wired in bootstrap.rs.
-    match Auth::attempt(
-        &Credentials::password(&form.email, &form.password),
-        form.remember,
-    )
-    .await?
+    match LoginThrottle::for_current_request(&form.email)?
+        .attempt(
+            &Credentials::password(&form.email, &form.password),
+            form.remember,
+        )
+        .await?
     {
         Some(_user) => {
             Inertia::flash("toast", Toast::success("Signed in."))?;

@@ -1136,3 +1136,116 @@ fn facade_logout_clears_both_two_factor_pending_slots() {
         .await;
     });
 }
+
+#[test]
+fn login_throttle_blocks_sixth_attempt_and_correct_password_until_expiry() {
+    in_container(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+        TestContainer::bind::<dyn suprnova::CacheStore>(Arc::new(suprnova::InMemoryCache::new()));
+        run_in_request(async {
+            let throttle = suprnova::LoginThrottle::new("A@B.COM", "192.0.2.1")
+                .with_limits(5, 1)
+                .unwrap();
+            let wrong = Credentials::password("a@b.com", "wrong");
+            for _ in 0..5 {
+                assert!(throttle.attempt(&wrong, false).await.unwrap().is_none());
+            }
+            for credentials in [&wrong, &Credentials::password("a@b.com", "secret")] {
+                let error = match throttle.attempt(credentials, false).await {
+                    Err(FrameworkError::Validation(errors)) => errors,
+                    _ => panic!("exhausted budget must refuse before password verification"),
+                };
+                let message = error.messages_for("email").pop().expect("email error");
+                let seconds: u64 = message
+                    .strip_prefix("Too many login attempts. Please try again in ")
+                    .and_then(|message| message.strip_suffix(" seconds."))
+                    .expect("Laravel throttle message")
+                    .parse()
+                    .unwrap();
+                assert!(seconds <= 1);
+            }
+            suprnova::events::testing::assert_dispatched_times::<Attempting>(5);
+            suprnova::events::testing::assert_dispatched_times::<suprnova::auth::events::Lockout>(
+                2,
+            );
+            suprnova::events::testing::assert_dispatched::<suprnova::auth::events::Lockout>(
+                |event| event.request.ip == "192.0.2.1",
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+            assert!(
+                throttle
+                    .attempt(&Credentials::password("a@b.com", "secret"), false)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(throttle.available_in().await.unwrap(), 0);
+        })
+        .await;
+    });
+}
+
+#[test]
+fn login_throttle_defaults_normalize_email_isolate_ips_and_clear_success() {
+    in_container(async {
+        let _serial = TEST_LOCK.lock().await;
+        let _fake = EventFacade::fake();
+        TestContainer::bind::<dyn suprnova::CacheStore>(Arc::new(suprnova::InMemoryCache::new()));
+        run_in_request(async {
+            let throttle = suprnova::LoginThrottle::new("A@B.COM", "192.0.2.1");
+            let same = suprnova::LoginThrottle::new("a@b.com", "192.0.2.1");
+            let other = suprnova::LoginThrottle::new("a@b.com", "192.0.2.2");
+            let wrong = Credentials::password("a@b.com", "wrong");
+            let correct = Credentials::password("a@b.com", "secret");
+            for _ in 0..4 {
+                assert!(throttle.attempt(&wrong, false).await.unwrap().is_none());
+            }
+            assert!(same.attempt(&correct, false).await.unwrap().is_some());
+            assert_eq!(throttle.available_in().await.unwrap(), 0);
+            for _ in 0..5 {
+                assert!(throttle.attempt(&wrong, false).await.unwrap().is_none());
+            }
+            assert!((59..=60).contains(&throttle.available_in().await.unwrap()));
+            assert!(same.attempt(&correct, false).await.is_err());
+            assert!(other.attempt(&correct, false).await.unwrap().is_some());
+            // The guard remains opt-in: its original public entry point has no budget.
+            assert!(Auth::attempt(&correct, false).await.unwrap().is_some());
+            let unknown = suprnova::LoginThrottle::new("missing@b.com", "192.0.2.1");
+            for _ in 0..5 {
+                assert!(
+                    unknown
+                        .attempt(&Credentials::password("missing@b.com", "wrong"), false)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            assert!(matches!(
+                unknown.ensure_not_rate_limited().await,
+                Err(FrameworkError::Validation(_))
+            ));
+        })
+        .await;
+    });
+}
+
+#[test]
+fn login_throttle_validates_limits_and_requires_trusted_request_context() {
+    assert!(
+        suprnova::LoginThrottle::new("a@b.com", "192.0.2.1")
+            .with_limits(0, 60)
+            .is_err()
+    );
+    assert!(
+        suprnova::LoginThrottle::new("a@b.com", "192.0.2.1")
+            .with_limits(5, 0)
+            .is_err()
+    );
+    assert!(
+        suprnova::LoginThrottle::new("a@b.com", "192.0.2.1")
+            .with_limits(5, u64::MAX)
+            .is_err()
+    );
+    assert!(suprnova::LoginThrottle::for_current_request("a@b.com").is_err());
+}

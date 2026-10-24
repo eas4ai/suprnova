@@ -1058,3 +1058,34 @@ async fn agent_dogfood_an_existing_database_takes_the_agents_tables_on_the_next_
         assert!(index.is_some(), "one account per address, ignoring case");
     }
 }
+
+#[tokio::test]
+async fn agent_dogfood_login_attempt_budget_refuses_even_the_correct_password() {
+    let app = boot().await;
+    let email = "budget@example.test";
+    user("Ada", email).await;
+    for _ in 0..5 {
+        let wrong = sign_in_from(&app.client, "/login", email, "wrong-password").await;
+        assert!(matches!(wrong.status(), 302 | 303));
+    }
+    let refused = sign_in_from(&app.client, "/login", email, PASSWORD).await;
+    assert!(matches!(refused.status(), 302 | 303));
+    assert_eq!(path_of(&location(&refused)), "/login");
+    let page = app.client.get("/login").inertia().send().await;
+    let page = page.inertia_page();
+    let error = page["props"]["errors"]["email"]
+        .as_str()
+        .expect("email error");
+    assert!(
+        error.starts_with("Too many login attempts. Please try again in "),
+        "{error}"
+    );
+    assert!(error.ends_with(" seconds."), "{error}");
+    let guarded = app
+        .client
+        .get("/connected-agents")
+        .header("Accept", "text/html")
+        .send()
+        .await;
+    assert_eq!(path_of(&location(&guarded)), "/login");
+}

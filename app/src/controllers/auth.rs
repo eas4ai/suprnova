@@ -21,8 +21,9 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use suprnova::{
-    Auth, Credentials, FormRequest, FrameworkError, Inertia, InertiaProps, Model, Redirect,
-    Request, Response, Validate, ValidationErrors, attrs, handler, hashing, inertia_response,
+    Auth, Credentials, FormRequest, FrameworkError, Inertia, InertiaProps, LoginThrottle, Model,
+    Redirect, Request, Response, Validate, ValidationErrors, attrs, handler, hashing,
+    inertia_response,
 };
 
 use crate::middleware::authenticate::remember_return_to;
@@ -94,11 +95,12 @@ fn invalid_credentials() -> FrameworkError {
 /// `bootstrap::register` binds, start the session, and continue.
 #[handler]
 pub async fn login(form: LoginRequest) -> Response {
-    match Auth::attempt(
-        &Credentials::password(&form.email, &form.password),
-        form.remember,
-    )
-    .await?
+    match LoginThrottle::for_current_request(&form.email)?
+        .attempt(
+            &Credentials::password(&form.email, &form.password),
+            form.remember,
+        )
+        .await?
     {
         Some(_user) => continue_on(),
         None => Err(invalid_credentials().into()),
