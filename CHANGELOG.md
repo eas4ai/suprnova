@@ -8,6 +8,22 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
 
 ### Added
 
+- **A debug bar.** With debug on, `DebugBar::middleware()` records each
+  request: method, path, route pattern and parameters, request id, status,
+  the time spent in every middleware and in the handler, memory, session and
+  authenticated principal, locale; every query with its SQL, bindings and
+  duration, and every transaction; cache reads and writes with hit or miss;
+  events and their listeners; mail, notifications and queued jobs;
+  RenderCache's hit, miss or store; Live renders and actions; and the error
+  report when the response carries one, redacted as the development error
+  page redacts. A browser response carries a toolbar before `</body>` under
+  the response's CSP nonce; every response names its record in a header and
+  `/_debugbar/{id}` serves it as JSON, so the toolbar shows the Inertia
+  visits and XHR requests that follow. Records live in a bounded in-memory
+  store (`DEBUGBAR_KEEP`). With debug off nothing of it exists: the
+  middleware passes through, no record is kept and the route is 404;
+  `DEBUGBAR=false` turns it off with debug on. The scaffolds install it and
+  the dogfood application runs it (`manual/debugbar.md`).
 - **A documentation site plugin.** `crates/suprnova-docs` mounts a docs
   site from a `docs/` folder: a `docs.json` set manifest with versions,
   the default version and languages, a `navigation.json` per version,

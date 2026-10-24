@@ -46,6 +46,7 @@
     - [Error Handling](errors.md)
     - [Error Reporting](error-reporting.md)
     - [Logging](logging.md)
+    - [Debug Bar](debugbar.md)
     - [Context](context.md)
 - ## Digging Deeper
     - [Actions](actions.md)
