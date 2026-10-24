@@ -22,11 +22,15 @@ store on your machine**, with no sudo on Linux.
 
 ## Install portless
 
-portless is a Node tool:
+portless is a Node tool and needs Node 24 or later:
 
 ```bash
 npm install -g portless
 ```
+
+`suprnova dev:tls` follows portless 0.15: `portless.json` still takes `name`
+and `appPort`, `portless alias <name> <port> --force` still registers the
+route, and the CA still lives at `ca.pem` in portless's state directory.
 
 Then install its always-on 443 proxy once (this is a system-level,
 sudo-required step that belongs to portless, not Suprnova):
@@ -140,13 +144,21 @@ wasn't fully restarted. Browsers read their certificate store once at
 launch; a tab reload is not enough. Type `chrome://restart` (or fully
 quit and relaunch).
 
+**Not sure what is wrong.** Run `portless doctor`. It checks Node, the
+state directory, the proxy, the routes, hostname resolution and CA trust,
+and prints the fix for each failing check, without changing anything.
+
 **`502 Bad Gateway`.** The proxy is up but your backend isn't. Run
 `suprnova serve` in the project directory.
 
 **`portless trust` says "A terminal is required to authenticate".**
 That's portless's own command needing a real TTY for `sudo`.
 `suprnova dev:tls` sidesteps it entirely on Linux: it installs the CA
-straight into your browsers' NSS stores, which need no sudo.
+straight into your browsers' NSS stores, which need no sudo. portless 0.15
+also installs its CA into the Linux system store through `portless trust`
+(Debian and Ubuntu, Arch, Fedora and RHEL, openSUSE); that covers `curl`
+and other system clients, not Firefox or Chromium, which read their own
+NSS databases.
 
 **A Flatpak browser is still untrusted.** Flatpak browsers keep their NSS
 database under `~/.var/app/<id>/.pki/nssdb`. `dev:tls` covers those -
