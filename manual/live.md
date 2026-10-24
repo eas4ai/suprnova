@@ -1308,7 +1308,7 @@ CSRF token; it is a stitch slot under RenderCache, so an application mounts
 it as its own identity-bound island and the shared shell never holds the
 principal's name.
 
-The custom-element tier enhances native controls it never replaces. Each
+The date picker, input OTP and combobox enhance native controls. Each
 element is a light-DOM `HTMLElement` subclass defined only by its own
 vendored file, carries the `sn-` prefix, and holds no form value, because
 the native input inside it is the control: block the script and the form
@@ -1340,6 +1340,79 @@ text:
 {% call date::date_picker("when", "Renewal date", years, months, days, min="2026-01-01", max="2028-12-31") %}{% endcall %}
 {% call combo::combobox("country", "Country", countries, query=country_query, placeholder="Type a country", value=country) %}{% endcall %}
 ```
+
+The segmented date picker (`suprnova.segmented-date-picker`, FORM-013) is
+another date control beside the date picker. It requires its JavaScript
+module. It is a form-associated `sn-segmented-date` element with three
+numeric spinbuttons in light DOM and one contextual horizontal value
+scroller. Install and load it with its stylesheet:
+
+```bash
+suprnova live:add segmented-date-picker
+suprnova live:check
+```
+
+```html
+<link rel="stylesheet" href="{{ suprnova::url::root() }}/suprnova-ui/segmented-date-picker/segmented-date-picker.css">
+<script type="module" src="{{ suprnova::url::root() }}/suprnova-ui/segmented-date-picker/segmented-date-picker.js"></script>
+```
+
+In a Live view whose `#[model] when: String` holds the current date:
+
+```html
+{% import "suprnova-ui/segmented-date-picker/segmented-date-picker.html" as segmented %}
+{% call segmented::segmented_date_picker("when", "Start date", order="dmy", min="2026-01-01", max="2028-12-31", required=true, value=when) %}{% endcall %}
+```
+
+The macro takes `name`, `label`, `order` (`ymd`, `dmy`, or `mdy`, default
+`ymd`), `min` (default `1900-01-01`), `max` (default `2100-12-31`),
+`required` (default false), and `value` (default empty). It also takes
+`disabled`, `readonly`, `scroller=false`, `motion="none"`, and the same
+`authority` correction sequence as other value controls. The rendered
+label, help and Live error are associated with the control. Its stylesheet
+uses the library's color, typography, motion and density tokens. The
+scroller buttons keep at least 44px targets at every density.
+
+The form receives one named `YYYY-MM-DD` value, without a time or time zone.
+Display order never changes this value. `live:model` reads the same value
+through an unnamed native input; that input adds no second form entry.
+An empty or partial date contributes no form entry, and its Live value is
+`""`. Required emptiness fails `valueMissing`; partial entry fails `badInput`.
+Programmatic out-of-range dates clear the control and fail `rangeUnderflow`
+or `rangeOverflow` until corrected. Changing bounds clears invalid parts.
+Validate canonical format and bounds on the server too, because a client
+can propose a value directly. The native gallery demonstrates that rule.
+
+Type digits to replace a segment. Complete entries advance; separators
+commit single-digit month/day shorthand. A pending buffer previews the
+scroller without changing the committed date, and an incomplete year
+reverts when focus leaves. Up/Down step; Left/Right and Tab traverse;
+Home/End select bounds; Escape closes the scroller. Month and day wrap
+when at least seven values are available; year stops at its bounds.
+Changing a higher segment adjusts dependent parts and announces it. A
+preferred day is remembered for that focus session, so Jan 31 to February
+to March restores March 31. Paste accepts ISO or numeric display order.
+The scroller supports drag, touch, momentum, rubber-band ends, horizontal
+trackpad input, wheel notches, taps, and held previous/next buttons.
+Vertical gestures remain page scrolling. Reduced motion and
+`motion="none"` snap immediately. `scroller=false` keeps keyboard entry.
+
+User edits emit `input` when the canonical value changes, and `change`
+when focus leaves the control or Enter commits. Programmatic writes and
+form reset/restore emit neither. The element exposes `value`,
+`defaultValue`, `valueAsParts`, `focusSegment(name)`, `clear()`,
+`checkValidity()` and `reportValidity()`. Its additional attributes are
+`separator`, `locale`, `month-display="numeric|short|long"`,
+`auto-advance="false"`, and `default-today`. Without `order`, the element
+uses the locale's order; the macro sets an explicit order by default.
+`default-today` uses the browser's local calendar date on initial use and
+each reset, clamped into bounds. An explicit `value` attribute wins.
+
+The date picker (FORM-007) continues to offer a native `type="date"` input
+and script-free radio strips. The segmented control owns its form value
+through `ElementInternals`; its editor is preserved during Live morphs,
+while the native value bridge accepts server corrections. It varies with
+the containing island and creates no island of its own.
 
 ### Why Suprnova diverges
 

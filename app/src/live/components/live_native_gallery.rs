@@ -1,6 +1,6 @@
 //! The live-native gallery: the upload widget, the live feed and the
-//! notification bell, the input OTP, the date picker and the combobox on one
-//! stream-backed island (Cairn FORM-005 to FORM-008, FDB-005).
+//! notification bell, the input OTP, both date controls and the combobox on
+//! one stream-backed island (FORM-005 to FORM-008, FORM-013, FDB-005).
 //!
 //! The attachment is a real upload field finalized by `save_attachment`
 //! through the application's upload finalizer, so the widget's states come
@@ -9,9 +9,11 @@
 //! shows new server data. The one-time code is transient (FORM-004).
 
 use serde::{Deserialize, Serialize};
+use suprnova::Rule;
 use suprnova::live::{
     LiveComponent, UploadPolicy, UploadReplacement, UploadScan, UploadType, live,
 };
+use validator::Validate;
 
 use super::activity_feed::{ActivityPosted, record_post};
 
@@ -57,7 +59,9 @@ fn attachment_policy() -> UploadPolicy {
         .build()
 }
 
-#[derive(LiveComponent)]
+/// Exercises the form controls together so document tests and the checker
+/// cover their real Live bindings in one island.
+#[derive(LiveComponent, Validate)]
 #[live(
     name = "app.live-native-gallery",
     view = "live/live-native-gallery.html",
@@ -76,6 +80,10 @@ pub struct LiveNativeGallery {
     /// The renewal date, bound with the date picker.
     #[model]
     when: String,
+    /// The segmented control's canonical date, independently bound beside FORM-007.
+    #[model]
+    #[validate(custom(function = "validate_segmented_date"))]
+    segmented_when: String,
     /// The chosen country's code, the combobox's value.
     #[model]
     country: String,
@@ -120,6 +128,21 @@ const COUNTRIES: [(&str, &str); 6] = [
     ("us", "United States"),
 ];
 
+// The gallery's min/max match the macro invocation. DateFormat also rejects
+// noncanonical padding and impossible dates before comparing the bounds.
+fn validate_segmented_date(value: &str) -> Result<(), validator::ValidationError> {
+    if suprnova::rules::DateFormat(&["%Y-%m-%d"])
+        .passes(value)
+        .is_err()
+        || !("2026-01-01"..="2028-12-31").contains(&value)
+    {
+        let mut error = validator::ValidationError::new("segmented_date");
+        error.message = Some("Enter a date from 2026-01-01 to 2028-12-31.".into());
+        return Err(error);
+    }
+    Ok(())
+}
+
 impl LiveNativeGallery {
     fn filter_countries(&mut self) {
         let needle = self.country_query.trim().to_lowercase();
@@ -141,6 +164,7 @@ impl LiveNativeGallery {
             attachment: String::new(),
             code: String::new(),
             when: String::new(),
+            segmented_when: "2026-09-23".to_owned(),
             country: String::new(),
             country_query: String::new(),
             saved: 0,
@@ -178,8 +202,14 @@ impl LiveNativeGallery {
 
     /// Submits the renewal form; the country choices already answer the
     /// query, because every render filters them.
-    #[action]
+    #[action(validate = "whole")]
     pub fn search(&mut self) {}
+
+    /// Checks the canonical date on the server so a direct proposal cannot bypass bounds.
+    #[validate]
+    pub fn validate_component(&self) -> Result<(), validator::ValidationErrors> {
+        Validate::validate(self)
+    }
 
     /// Posts an activity item: a new keyed feed entry and one more unread
     /// notification, published so every subscribed feed refreshes.

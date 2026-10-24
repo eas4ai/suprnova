@@ -1717,3 +1717,183 @@ async fn search_box_accepts_hidden_string_model_proposals_and_emits_the_selected
         "clearing the selected filters restores the available result: {cleared}"
     );
 }
+
+/// FORM-013: the gallery compiles the macro beside FORM-007 and serves all
+/// of its modules from the installed tree.
+#[tokio::test]
+async fn form_013_macro_renders_segments_one_model_and_the_existing_date_picker() {
+    let app = setup_app(6).await;
+    let session = seed_session(&app).await;
+    let html = get(&app, "/live/live-native", Some(&session)).await.text();
+    for expected in [
+        "<sn-date-picker ",
+        "<sn-segmented-date class=\"sn-segmented-date\"",
+        "name=\"segmented_when\" order=\"ymd\" min=\"2026-01-01\" max=\"2028-12-31\" value=\"2026-09-23\"",
+        "aria-describedby=\"segmented_when-help segmented_when-error\" required",
+        "data-sn-value live:model=\"segmented_when\"",
+        "live:error.live.polite=\"segmented_when\"",
+        "data-segment=\"year\" role=\"spinbutton\"",
+        "data-segment=\"month\" role=\"spinbutton\"",
+        "data-segment=\"day\" role=\"spinbutton\"",
+        "/suprnova-ui/segmented-date-picker/segmented-date-picker.css",
+        "/suprnova-ui/segmented-date-picker/segmented-date-picker.js",
+    ] {
+        assert!(html.contains(expected), "missing {expected}");
+    }
+    assert!(!html.contains(" style="));
+    for file in [
+        "segmented-date-picker.js",
+        "date-core.js",
+        "value-scroller.js",
+        "segmented-date-picker.css",
+    ] {
+        let reply = get(
+            &app,
+            &format!("/suprnova-ui/segmented-date-picker/{file}"),
+            Some(&session),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "asset {file}");
+    }
+}
+
+/// FORM-013: one model proposal is independent of the interaction that
+/// produced it. Browser cases prove typed and scrolled form values agree;
+/// both canonical proposals take the same real server path here.
+#[tokio::test]
+async fn form_013_typed_and_scrolled_canonical_values_round_trip_through_live_model() {
+    let app = setup_app(6).await;
+    let session = seed_session(&app).await;
+    let html = get(&app, "/live/live-native", Some(&session)).await.text();
+    let mut snapshot = decoded_snapshot(island_tag(&html, "live-native-gallery"));
+    for sequence in 1..=2 {
+        let revision = snapshot_revision(&snapshot);
+        let key = idempotency(sequence);
+        let reply = send(
+            app.addr,
+            action_request(
+                &app,
+                ActionSpec {
+                    component: "app.live-native-gallery",
+                    document_key: "live-native-gallery",
+                    snapshot,
+                    seed: false,
+                    base_revision: &revision,
+                    operations: serde_json::json!([
+                        {"field":"segmented_when", "kind":"sync_model"},
+                        {"name":"search", "kind":"invoke_action", "arguments":{}}
+                    ]),
+                    model_proposals: serde_json::json!({"segmented_when":"2027-02-03"}),
+                    idempotency_key: &key,
+                },
+                Some(&session),
+                true,
+            ),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+        let accepted = reply.json();
+        assert_eq!(accepted["outcome"], "accepted", "{accepted}");
+        let rendered = accepted["render"]["html"].as_str().expect("rendered view");
+        assert!(tag_with_id(rendered, "segmented_when-canonical").contains("value=\"2027-02-03\""));
+        assert_eq!(rendered.matches("live:model=\"segmented_when\"").count(), 1);
+        snapshot = accepted["snapshot"].clone();
+    }
+}
+
+/// FORM-013: browser bounds cannot be bypassed by a direct Live proposal.
+#[tokio::test]
+async fn form_013_min_max_impossible_and_noncanonical_values_fail_server_validation() {
+    let app = setup_app(14).await;
+    let session = seed_session(&app).await;
+    for (index, value) in [
+        "2025-12-31",
+        "2029-01-01",
+        "2026-02-30",
+        "2026-9-23",
+        "23/09/2026",
+        "",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let html = get(&app, "/live/live-native", Some(&session)).await.text();
+        let snapshot = decoded_snapshot(island_tag(&html, "live-native-gallery"));
+        let revision = snapshot_revision(&snapshot);
+        let key = idempotency(index as u64 + 1);
+        let reply = send(
+            app.addr,
+            action_request(
+                &app,
+                ActionSpec {
+                    component: "app.live-native-gallery",
+                    document_key: "live-native-gallery",
+                    snapshot,
+                    seed: false,
+                    base_revision: &revision,
+                    operations: serde_json::json!([
+                        {"field":"segmented_when", "kind":"sync_model"},
+                        {"name":"search", "kind":"invoke_action", "arguments":{}}
+                    ]),
+                    model_proposals: serde_json::json!({"segmented_when":value}),
+                    idempotency_key: &key,
+                },
+                Some(&session),
+                true,
+            ),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+        let accepted = reply.json();
+        assert_eq!(accepted["outcome"], "accepted", "{accepted}");
+        assert!(
+            accepted
+                .to_string()
+                .contains("Enter a date from 2026-01-01 to 2028-12-31."),
+            "invalid {value}: {accepted}"
+        );
+    }
+}
+
+/// FORM-013: the CLI embeds the source directory automatically. The
+/// framework template root is a symlink to it; dogfood keeps an exact copy.
+#[test]
+fn form_013_manifest_and_installed_templates_match_the_shipped_component() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace");
+    let source = root.join("crates/suprnova-live/components/segmented-date-picker");
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(source.join("manifest.json")).expect("manifest"))
+            .expect("valid manifest");
+    assert_eq!(manifest["name"], "suprnova.segmented-date-picker");
+    assert_eq!(
+        manifest["elements"],
+        serde_json::json!(["sn-segmented-date"])
+    );
+    for file in std::iter::once("manifest.json").chain(
+        manifest["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .map(|value| value.as_str().expect("filename")),
+    ) {
+        let expected = std::fs::read(source.join(file)).expect("shipped file");
+        assert!(
+            !String::from_utf8_lossy(&expected)
+                .to_lowercase()
+                .contains("sudus")
+        );
+        for tree in [
+            "framework/templates/suprnova-ui",
+            "app/templates/suprnova-ui",
+        ] {
+            assert_eq!(
+                expected,
+                std::fs::read(root.join(tree).join("segmented-date-picker").join(file))
+                    .expect("installed file"),
+                "{tree}/{file}"
+            );
+        }
+    }
+}

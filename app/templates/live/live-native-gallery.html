@@ -3,6 +3,7 @@
 {% import "suprnova-ui/notification-bell/notification-bell.html" as bell %}
 {% import "suprnova-ui/input-otp/input-otp.html" as otp %}
 {% import "suprnova-ui/date-picker/date-picker.html" as date %}
+{% import "suprnova-ui/segmented-date-picker/segmented-date-picker.html" as segmented %}
 {% import "suprnova-ui/combobox/combobox.html" as combo %}
 <div class="sn-live-native-gallery">
 <form class="sn-form" id="attachment-form" live:submit.prevent="save_attachment">
@@ -17,6 +18,8 @@
 </form>
 <form class="sn-form" id="renewal-form" live:submit.prevent="search">
 {% call date::date_picker("when", "Renewal date", years, months, days, min="2026-01-01", max="2028-12-31", value=when) %}{% endcall %}
+{% call segmented::segmented_date_picker("segmented_when", "Segmented renewal date", order="ymd", min="2026-01-01", max="2028-12-31", required=true, value=segmented_when) %}{% endcall %}
+<p data-segmented-when="{{ segmented_when }}">Segmented renewal {{ segmented_when }}</p>
 <p data-when="{{ when }}">Renewal {{ when }}</p>
 {% call combo::combobox("country", "Country", countries, query=country_query, placeholder="Type a country", value=country) %}{% endcall %}
 <p class="sn-live-native-search-state"><span hidden live:queued.show="country_query">Search pending</span><span hidden live:loading.show="country_query">Searching</span></p>
