@@ -338,11 +338,11 @@ fn both_offer_more_before_cap_and_stop_at_exhaustion() {
             }
             let bootstrap = app.read("src/bootstrap.rs");
             assert!(bootstrap.contains("on_model_scoped::<crate::models::note::Note>"));
-            assert!(bootstrap.contains("instance == &format!(\"notes.{principal}\")"));
-            assert!(
-                app.read("src/live/mod.rs")
-                    .contains(".topic_family(\"notes\")?")
-            );
+            // The principal scope moved from bootstrap.rs into live/mod.rs when the
+            // scaffold became rustfmt-clean (93ba81560); the guard itself is unchanged.
+            let live = app.read("src/live/mod.rs");
+            assert!(live.contains("instance == &format!(\"notes.{principal}\")"));
+            assert!(live.contains(".topic_family(\"notes\")?"));
             let dashboard = match app.kit {
                 "react" => app.read("frontend/src/pages/Dashboard.tsx"),
                 "svelte" => app.read("frontend/src/pages/Dashboard.svelte"),
