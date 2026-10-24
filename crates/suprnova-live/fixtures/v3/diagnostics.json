@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "severities": ["error", "warning", "info"],
+  "phases": ["configuration", "discovery", "directive", "schedule", "transport", "response", "morph", "effect", "navigation", "lifecycle"],
+  "modes": ["off", "errors", "verbose"],
+  "redacted_classes": ["snapshot", "signature", "cookie", "token", "model_value", "transient_value", "html", "url", "instance_id", "correlation_id", "idempotency_key", "exception_message"],
+  "sequence": {"kind": "bounded_monotonic", "maximum": 4294967295}
+}

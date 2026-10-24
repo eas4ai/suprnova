@@ -1,0 +1,15 @@
+[
+  {
+    "title": "Flight manual",
+    "path": "index"
+  },
+  {
+    "title": "Launch checklist",
+    "path": "launch"
+  },
+  {
+    "title": "Crew operations",
+    "path": "crew",
+    "private": true
+  }
+]
