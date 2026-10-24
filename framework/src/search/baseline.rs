@@ -416,6 +416,11 @@ pub struct BaselineFloors {
     pub p95_budgets_ms: BTreeMap<String, f64>,
     /// Evidence and headroom explain how the budgets were chosen.
     pub budget_comment: String,
+    /// Engines whose budget the developer set apart from the rival-derived
+    /// value, each with his words. A budget that differs from the derivation
+    /// needs an entry here; without one the file is refused.
+    #[serde(default)]
+    pub budget_rulings: BTreeMap<String, String>,
     /// Calibration time is absent until real services have answered.
     pub calibrated_at: Option<String>,
     /// The checkout that performed calibration, when git is available.
@@ -452,13 +457,15 @@ impl BaselineFloors {
                 rival.validate_calibrated()?;
             }
             let derived = self.rival_budget()?;
-            if self
-                .p95_budgets_ms
-                .values()
-                .any(|budget| (*budget - derived).abs() / derived > 1e-9)
-            {
+            if self.p95_budgets_ms.iter().any(|(engine, budget)| {
+                (*budget - derived).abs() / derived > 1e-9
+                    && self
+                        .budget_rulings
+                        .get(engine)
+                        .is_none_or(|ruling| ruling.trim().is_empty())
+            }) {
                 return Err(FrameworkError::param(
-                    "search baseline.json: p95 budgets must be two times the slower rival's p95",
+                    "search baseline.json: p95 budgets must be two times the slower rival's p95 unless budget_rulings names the engine with the developer's words",
                 ));
             }
             if self

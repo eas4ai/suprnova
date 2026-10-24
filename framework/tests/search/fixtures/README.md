@@ -88,7 +88,10 @@ padding and memory. It is outside the query latency window. Query inference
 still receives one query per request, with the same fp32 model and profile.
 Local budgets use unoptimized dev/test builds and twice the largest observed
 p95, rounded up to whole seconds: collection 12,000 ms, SQLite 2,000 ms and
-Qdrant 2,000 ms. `budget_comment` records the observations. Postgres/MySQL
+Qdrant 2,000 ms. `budget_comment` records the observations. `budget_rulings`
+names an engine whose budget the developer set apart from the rival rule,
+with his words; without an entry the loader refuses a budget that differs
+from twice the slower rival's p95. Postgres/MySQL
 limits are unmeasured provisional estimates until their test URLs are available.
 The local default suite took 35 minutes; the three real-model engine tests
 took 133 minutes, including corpus inference and both query modes.
