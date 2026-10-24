@@ -6,9 +6,24 @@
 //! envelope instead of round-tripping the HTTP boundary.
 
 use std::collections::HashMap;
-use suprnova::{HttpResponse, Request, Response};
+use suprnova::config::Environment;
+use suprnova::{Config, HttpResponse, Request, Response};
+
+/// An unauthenticated endpoint that mails any address is a spam relay when
+/// the application is deployed with a delivering transport. The dogfood demo
+/// exists for local work and tests; in every other environment, a custom
+/// label included, the route does not exist.
+pub fn welcome_route_available(environment: &Environment) -> bool {
+    matches!(
+        environment,
+        Environment::Local | Environment::Development | Environment::Testing
+    )
+}
 
 pub async fn queue(req: Request) -> Response {
+    if !welcome_route_available(&Config::environment()) {
+        return Ok(HttpResponse::text("not found").status(404));
+    }
     // `Request::query` returns the raw query string (e.g. `email=a&name=b`).
     // Decode it the same way the framework decodes resource fieldsets and
     // include sets - `url::form_urlencoded::parse` URL-decodes pairs and
