@@ -469,15 +469,19 @@ dedicated server (addresses and keys from `SEARCH_BASELINE_MEILISEARCH_URL`,
 `SEARCH_BASELINE_TYPESENSE_URL` and their key variables), runs the same
 queries, and commits their nDCG@10 with their versions into the baseline
 file. The gate MUST then require, per engine, that lexical mode reaches
-the rivals' lexical nDCG@10 within the committed tolerance, that hybrid
-mode with the default model exceeds it, that a fixture query answers
-under the committed p95 budget on the gate's fixture size, and that no
-run falls under the committed numbers; every result MUST be recorded with
-the engine, the model profile, the rivals' versions and the tree hash.
-Falsifier: an engine's lexical nDCG@10 falls under the rivals' score minus the tolerance, or hybrid does not exceed it; a p95 exceeds its budget; the baseline file lacks the rivals' versions or the fixture's license; or the record omits the engine, profile or tree.
+the rivals' lexical nDCG@10 within the committed tolerance, that a
+fixture query answers under the committed p95 budget on the gate's
+fixture size, and that no run falls under the committed numbers. Hybrid
+mode with the default model MUST exceed the rivals' lexical nDCG@10, and
+that baseline runs by hand under `--features search-fastembed`, never in
+the gate, because the default model's runtime is fetched at compile
+time; its result MUST be recorded like the others. Every result MUST be
+recorded with the engine, the model profile, the rivals' versions and
+the tree hash.
+Falsifier: an engine's lexical nDCG@10 falls under the rivals' score minus the tolerance, or the recorded hybrid result does not exceed it, or the gate builds the default model; a p95 exceeds its budget; the baseline file lacks the rivals' versions or the fixture's license; or the record omits the engine, profile or tree.
 Mechanism: `search`.
 Rationale: "rival common search solutions" needs a measurement against those solutions on the same judged data, not a bar set by our own first run (the side note of 2026-10-14 06:03, accepted by the developer); the rivals run on his dedicated server ("I want to put them on the server", 06:13) so the gate here pulls nothing.
-Status: Agreed 2026-10-14
+Status: Agreed 2026-10-23
 
 [SEARCH-014] The manual MUST ship `manual/search.md`, linked from
 `documentation.md`, covering the derive and the two settings classes,

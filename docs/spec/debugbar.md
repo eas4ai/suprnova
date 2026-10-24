@@ -1,6 +1,6 @@
 # Debug bar
 
-Status: Draft
+Status: Agreed 2026-10-23
 Prefix: DBG
 
 Drafted 2026-10-23 from the developer's direction on
@@ -45,7 +45,7 @@ MUST redact what the development error page redacts.
 Falsifier: a request whose handler ran a query, read the cache, dispatched an event, sent a mail or pushed a job yields a record missing that entry; a record carries a credential header's value or a secret-named parameter in clear; or a middleware that took 50 ms shows no time.
 Mechanism: `debugbar`.
 Rationale: php-debugbar's collectors (`src/DataCollector/`: PDO, Messages, Exceptions, TimeData, Memory, RequestData, Config, Localization) and Laravel Debugbar's cache, events, mail, queue and views panels; the framework's events and fakes already observe each source.
-Status: Draft
+Status: Agreed 2026-10-23
 
 [DBG-002] With debug on, a response whose `Accept` lists `text/html` and
 that is not an Inertia visit MUST carry the toolbar before `</body>`, its
@@ -60,7 +60,7 @@ disk or to a database.
 Falsifier: a browser response with debug on has no toolbar, or the toolbar's script is refused by the page's CSP; an Inertia visit's record cannot be fetched by the id its response named; a JSON, file or redirect response carries toolbar markup; or the store grows past its configured size.
 Mechanism: `debugbar`.
 Rationale: php-debugbar renders into the page (`JavascriptRenderer`) and fetches Ajax requests' data through its open handler by request id; Laravel Debugbar keeps the same shape.
-Status: Draft
+Status: Agreed 2026-10-23
 
 [DBG-003] With debug off, nothing of the debug bar MUST reach a
 response or a route: the middleware MUST pass requests through
@@ -71,4 +71,4 @@ middleware in their bootstrap, and the dogfood application MUST run it.
 Falsifier: with debug off, a response carries the record header or toolbar markup, the debug route answers other than 404, or a request leaves a record; with debug on and `DEBUGBAR=false` a toolbar appears; or a fresh scaffold's bootstrap does not install the middleware.
 Mechanism: `debugbar`.
 Rationale: Laravel Debugbar is enabled by `APP_DEBUG` and `DEBUGBAR_ENABLED`; the production risk of a debug bar is the data it shows, so the gate is on the debug flag the framework already keys every other disclosure on (PAR-012).
-Status: Draft
+Status: Agreed 2026-10-23

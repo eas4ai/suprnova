@@ -112,3 +112,19 @@ Falsifier: a listbox rendered for the query "sao" whose only option is a name th
 Mechanism: `live-library-review-remediation`.
 Rationale: Evidence: `combobox.js` filters options by substring even when the listbox's `data-sn-query` equals the input, which hides the results of an accent-insensitive, synonym, code, or fuzzy server search. Refines: FORM-008. Agreed by promotion `the-review-of-live-and-the-component-library-is-remediated-in-one-commitment`.
 Status: Agreed 2026-09-17
+
+[FORM-013] The library MUST ship `suprnova.segmented-date-picker`, a
+form-associated custom element beside the date picker (FORM-007), which
+stays: three focusable numeric segments in the order the attribute names
+(`ymd`, `dmy` or `mdy`), `min`, `max` and `required`, a horizontal value
+scroller for the focused segment (a virtualised track that settles on a
+value, with momentum, a rubber band at the ends, and pointer, touch, wheel
+and button input), and a keyboard edit buffer; typing and scrolling MUST
+write one date state, the form MUST see one canonical `YYYY-MM-DD`
+value, and `live:model` MUST bind that value. It MUST take the library's
+tokens and density, pass the checker contract, and ship a dogfood
+gallery entry and a showcase example.
+Falsifier: the element is absent from the shipped set or replaces the date picker; a typed and a scrolled change produce different form values for the same date; a `min` or `max` violation validates; `live:model` receives anything but `YYYY-MM-DD`; or one of the three qualified engines fails a browser case of the acceptance criteria.
+Mechanism: `segmented-date-picker`.
+Rationale: the developer, 2026-10-13 18:49: bring his segmented date control (`/home/shawn/workspace2/segmented-date-picker`, spec "Segmented Date Control v0.1", acceptance criteria 1 to 20) into the library under the library's name and classes, next to the existing date picker ("don't replace the date picker you made").
+Status: Agreed 2026-10-23

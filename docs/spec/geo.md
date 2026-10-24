@@ -1,6 +1,6 @@
 # Nearest-location queries
 
-Status: Draft
+Status: Agreed 2026-10-23
 Prefix: GEO
 
 Drafted 2026-10-23 from the developer's direction on
@@ -35,7 +35,7 @@ those columns bounds the rows the formula visits.
 Falsifier: the same fixture on two engines orders two rows differently or reports distances that differ by more than one metre; `within(10)` returns a row 10.5 km away or omits one 9.5 km away; the rendered SQL of a `within` query has no latitude and longitude range predicates; or `nearby(...).paginate(10)` loses the distance column.
 Mechanism: `geo-scopes`.
 Rationale: Laraversine's `nearby`, `within` and distance attribute computed in SQL on MySQL, MariaDB, PostgreSQL and SQLite with no PostGIS; the bounding box is the standard way to let an ordinary index serve the query.
-Status: Draft
+Status: Agreed 2026-10-23
 
 [GEO-002] Invalid input MUST be refused before any SQL runs: a latitude
 outside -90 to 90, a longitude outside -180 to 180, a negative or
@@ -44,4 +44,4 @@ preceding `nearby`.
 Falsifier: `nearby(91.0, 0.0)` runs a query; `within(-1.0)` returns rows; or `order_by_distance()` on a builder without `nearby` succeeds silently.
 Mechanism: `geo-scopes`.
 Rationale: house rule 2, public surface returns `Result`; a coordinate outside its range is a caller bug the database would not report.
-Status: Draft
+Status: Agreed 2026-10-23

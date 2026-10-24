@@ -1,6 +1,6 @@
 # Documentation site plugin
 
-Status: Draft
+Status: Agreed 2026-10-23
 Prefix: DOCS
 
 Drafted 2026-10-23 from the developer's direction on
@@ -26,8 +26,8 @@ Status: Observed
 
 ## Requirements
 
-[DOCS-001] A plugin crate, `suprnova-docs`, distributed as
-`suprnova-markdown` is, MUST mount a documentation site at a configurable
+[DOCS-001] A plugin crate, `crates/suprnova-docs`, distributed as the
+payment adapters are, MUST mount a documentation site at a configurable
 prefix from a `docs/` folder at the application root: a set manifest
 (`docs/docs.json`: title, versions, the default version, languages), one
 folder per version holding Markdown pages and a navigation file, and an
@@ -40,7 +40,7 @@ request the application's gate admits.
 Falsifier: a page listed in a version's navigation renders 404 or outside the layout; a link to a sibling page leaves the version; a private page answers a request the gate refused; or a set with one version shows a version switch.
 Mechanism: `docs-plugin`.
 Rationale: LaRecipe 3's content model (`ARCHITECTURE.md` 4.1 to 4.6: the set manifest, `navigation.json` per version, page frontmatter, doc sets) and its versions, languages and private docs.
-Status: Draft
+Status: Agreed 2026-10-23
 
 [DOCS-002] Every page MUST also be served as Markdown, to a request
 whose `Accept` lists `text/markdown` and at the page's `.md` address,
@@ -50,7 +50,7 @@ for the default version and for each other version at its own address.
 Falsifier: a page's `.md` address answers HTML; `llms.txt` lists a private page to a request the gate refused; or `llms-full.txt` differs from the concatenation of the pages it lists.
 Mechanism: `docs-plugin`.
 Rationale: LaRecipe's "Every page as Markdown" and `llms.txt` / `llms-full.txt`; the llms.txt convention (llmstxt.org).
-Status: Draft
+Status: Agreed 2026-10-23
 
 [DOCS-003] The plugin MUST index the set at boot and serve search in the
 browser from that index with no service to run, and MUST register three
@@ -60,11 +60,13 @@ never HTML, and respect the same gate as the pages.
 Falsifier: a search for a heading's words returns no hit for its page; the agents endpoint lists no docs tool; `read_page` returns HTML; or a tool returns a private page to an unadmitted caller.
 Mechanism: `docs-plugin`.
 Rationale: LaRecipe's in-browser search, its MCP read tools (`search_docs`, `read_page`, `list_pages`) and the agents domain of its architecture; AGENT-001 to AGENT-004 give the endpoint.
-Status: Draft
+Status: Agreed 2026-10-23
 
-[DOCS-004] suprnova.app MUST serve the Suprnova manual through the
-plugin, and a manual chapter MUST document the plugin.
-Falsifier: the site renders the manual through its own pipeline instead of the plugin; or the manual has no chapter for the plugin.
+[DOCS-004] The dogfood application MUST serve a documentation set
+through the plugin, with at least two versions and one private page, and
+`manual/docs-site.md` MUST document the plugin; suprnova.app adopts it
+for the manual at the release.
+Falsifier: the dogfood application has no `docs/` set or serves it outside the plugin; its set has one version or no private page; or the manual has no chapter for the plugin.
 Mechanism: `docs-plugin`.
-Rationale: the site is the dogfood for every documentation feature; what it needs is what the plugin must have.
-Status: Draft
+Rationale: the dogfood application exercises every subsystem (overview); the site's adoption is release work on another repository, which no mechanism here can observe.
+Status: Agreed 2026-10-23

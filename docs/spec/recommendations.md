@@ -270,3 +270,18 @@ Falsifier: the graph engine needs a service beyond the application's database wh
 Mechanism: `recommendations`.
 Rationale: the developer, 2026-10-17 09:48: "I like memgraph but am open to other recommendations", then confirmed a database default beside the Memgraph driver, because design principle 3 forbids locking a feature to one backend.
 Status: Agreed 2026-10-17
+
+[REC-010] The graph store MUST be available on Neo4j and on HydraDB as
+it is on Memgraph: a driver for each behind the `GraphStore` trait,
+selected by `RECOMMEND_GRAPH_STORE` (`neo4j`, `hydradb`) under the
+features `graph-neo4j` and `graph-hydradb`, sharing the Bolt transport
+with the Memgraph driver, with each driver's own index DDL (Neo4j's
+`CREATE INDEX FOR ()-[r:...]-() ON (r.key)` in place of Memgraph's edge
+index; HydraDB over Bolt 5.x where it accepts the statements, its HTTPS
+API where it does not) and every Cypher statement the Memgraph driver
+issues checked against each dialect; the manual's recommendations
+chapter and environment reference MUST list both.
+Falsifier: a statement the Memgraph driver issues fails on Neo4j or HydraDB; `RECOMMEND_GRAPH_STORE=neo4j` or `hydradb` is refused or falls back to the application database; an index the recommender relies on is not created on one of them; or the manual lists one driver and not the other.
+Mechanism: `recommendations`.
+Rationale: the developer, 2026-10-22 09:09 to 09:11: add Neo4j and HydraDB; backlog item `neo4j-and-hydradb-graph-store-drivers`; principle 3, a new backend is a new driver behind the trait.
+Status: Agreed 2026-10-23

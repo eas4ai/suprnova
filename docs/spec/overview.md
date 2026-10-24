@@ -121,9 +121,9 @@ rather than duplicates.
 | Page budget audit (one rule set as a testing helper and a console command over a page, a live URL or a HAR file: weight, image formats, immutable caching, cookie-free assets, redirects, fonts; shipped in the kits) | BUDGET | page-budget.md | Agreed 2026-10-21; baseline `reference/har.json` |
 | Inertia live bindings (a topic bound to a page's props, data-free signals with a per-topic cursor, after-commit coalesced flush, sender exclusion, fail-closed private topics, one client core with three adapters, Live's topic layer shared) | SIGNAL | inertia-live.md | Agreed 2026-10-21; model: `reference/inertia-live-laravel-0.1.0` |
 | Event sourcing (aggregate roots with expected-version persistence, stored events, snapshots, projectors and reactors, replay, console commands, a dogfood aggregate) | ES | event-sourcing.md | Agreed 2026-10-21; model: `reference/laravel-event-sourcing-7.15.2` |
-| Debug bar (a per-request record of queries, cache, events, mail, queue, RenderCache, Live and timings, shown as a toolbar with debug on and absent with it off) | DBG | debugbar.md | Draft 2026-10-23 |
-| Documentation site plugin (`suprnova-docs`: a `docs/` folder served with versions, languages, private docs, search, every page as Markdown, `llms.txt`, MCP read tools) | DOCS | docs-site.md | Draft 2026-10-23 |
-| Nearest-location queries (`nearby`, `within`, `order_by_distance` by the haversine formula in SQL on four engines, no spatial extension) | GEO | geo.md | Draft 2026-10-23 |
+| Debug bar (a per-request record of queries, cache, events, mail, queue, RenderCache, Live and timings, shown as a toolbar with debug on and absent with it off) | DBG | debugbar.md | Agreed 2026-10-23 |
+| Documentation site plugin (`suprnova-docs`: a `docs/` folder served with versions, languages, private docs, search, every page as Markdown, `llms.txt`, MCP read tools) | DOCS | docs-site.md | Agreed 2026-10-23 |
+| Nearest-location queries (`nearby`, `within`, `order_by_distance` by the haversine formula in SQL on four engines, no spatial extension) | GEO | geo.md | Agreed 2026-10-23 |
 
 Domains with no spec file yet, and the manual chapters that are their
 published reference:
