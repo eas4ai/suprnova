@@ -1,0 +1,4 @@
+# The shipped Live component views, so a test can render one exactly as an
+# application that vendors it does (PFX-011).
+[general]
+dirs = ["../crates/suprnova-live/components"]
