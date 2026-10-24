@@ -1,3 +1,0 @@
-# Solo
-
-One release.
