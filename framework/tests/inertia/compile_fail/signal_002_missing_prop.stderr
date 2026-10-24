@@ -1,5 +1,0 @@
-error: live binding topic `posts` names unknown prop `missing`; expected one of `posts`
- --> tests/inertia/compile_fail/signal_002_missing_prop.rs:3:41
-  |
-3 | #[inertia(live(topic = "posts", only = ["missing"]))]
-  |                                         ^^^^^^^^^

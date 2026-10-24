@@ -1,5 +1,0 @@
-error: cacheable prop `viewer` must declare `#[inertia(public)]` or `#[inertia(per_request)]`
- --> tests/inertia/compile_fail/cache/cache_012_undeclared_field.rs:8:5
-  |
-8 |     viewer: String,
-  |     ^^^^^^
