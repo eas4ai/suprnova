@@ -694,7 +694,7 @@ impl SequenceMachine {
 ///
 /// This adapter accepts only already-typed positions. It grants no delivery,
 /// authorization, dispatch, or browser-input authority and delegates every
-/// state transition to the same [`SequenceMachine`] methods used in production.
+/// state transition to the same `SequenceMachine` methods used in production.
 #[doc(hidden)]
 #[derive(Debug, Eq, PartialEq)]
 pub struct SequenceConformanceMachine {

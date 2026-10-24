@@ -496,7 +496,7 @@ pub fn env_optional<T: std::str::FromStr>(key: &str) -> Option<T> {
     }
 }
 
-/// Test-only: clear the [`LOADED_KEYS`] tracker so a fresh
+/// Test-only: clear the `LOADED_KEYS` tracker so a fresh
 /// `load_dotenv` call behaves as if it were the first invocation
 /// for this process. Used by tests that exercise system-env-wins
 /// semantics with a value that happens to coincide with whatever

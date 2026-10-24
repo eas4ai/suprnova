@@ -2329,7 +2329,7 @@ impl Router {
     ///
     /// Panics on duplicate route registration or any matchit insert error.
     /// WebSocket routes share the same boot-time-fail-loud policy as HTTP
-    /// routes (see [`Router::insert_get`]).
+    /// routes (see `Router::insert_get`).
     ///
     /// [`WsConfig`]: crate::ws::WsConfig
     #[doc(hidden)]

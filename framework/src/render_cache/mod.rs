@@ -1005,8 +1005,8 @@ impl RenderCache {
     /// This is the "stored version" a [`Segment::Nested`](suprnova_live::render_cache::composite::Segment)
     /// names by reference: nothing in the engine's own entry types defines
     /// a stored entry's version, so a test naming an inner entry from a
-    /// nested segment reads the exact number [`super::stitch::fetch_decoded_entry`]
-    /// compares against at hit time, and [`rewrite_composite_for_test`]
+    /// nested segment reads the exact number `stitch::fetch_decoded_entry`
+    /// compares against at hit time, and `testing::rewrite_composite_for_test`
     /// (indirectly, through the fence it bumps on republish) is what moves
     /// it.
     #[doc(hidden)]
@@ -1099,7 +1099,7 @@ impl RenderCache {
     /// hot-hit builder produces for the entry stored under `key_text`, or
     /// `None` when that key has no hot entry.
     ///
-    /// This runs [`middleware::hot_response`] - the exact function a hot hit
+    /// This runs `middleware::hot_response` - the exact function a hot hit
     /// is served through - over a plain `GET` with no `If-None-Match`, at
     /// the entry's own publication instant. A test compares the result with
     /// [`Self::l0_body_ptr_for_test`]: equal addresses mean the served body
@@ -1148,7 +1148,7 @@ impl RenderCache {
     }
 
     /// Test-only: how many hot hits this runtime has served through
-    /// [`middleware::hot_response`], the one function a
+    /// `middleware::hot_response`, the one function a
     /// `FoundEntry::Hot` reaches the wire through.
     ///
     /// `renders()` staying flat proves a request was answered from storage;
@@ -1316,7 +1316,7 @@ impl RenderCache {
     /// never ran `install` does on a write.
     ///
     /// Leaves the runtime itself in place: the middleware reads
-    /// [`Self::runtime`], not the gate, so a test can keep dispatching
+    /// `Self::runtime`, not the gate, so a test can keep dispatching
     /// requests while this process is, for write purposes, a worker.
     /// `mark_installed` puts the gate back.
     #[cfg(any(test, feature = "testing"))]
@@ -1338,7 +1338,7 @@ impl RenderCache {
     /// Test-only: forces the configuration answer the write side's probe
     /// reads, and returns the probe to `Unknown` so the next write uses it.
     /// `None` restores the real answer. See
-    /// [`write_side::set_enabled_for_test`].
+    /// `write_side::set_enabled_for_test`.
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn set_write_side_enabled_for_test(enabled: Option<bool>) {

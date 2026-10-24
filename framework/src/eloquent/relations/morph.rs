@@ -726,7 +726,7 @@ where
 /// Built by the fetch helper the `#[suprnova::model]` macro emits for a
 /// `MorphTo` relation, from the target that the child's `<name>_type`
 /// column names, and read by
-/// [`Model::touch_owners`](crate::eloquent::Model::touch_owners). The
+/// [`Model::touch_owners`]. The
 /// owner is never loaded: the touch is one `UPDATE` by key, as it is
 /// for a `BelongsTo` owner.
 #[doc(hidden)]
