@@ -30,9 +30,9 @@ pub struct RecommendConfig {
     /// starter's rows when its confidence is low.
     pub engine: String,
     /// RECOMMEND_GRAPH_STORE picks where the graph lives: `database`, the application's
-    /// own database, or `memgraph` (feature `graph-memgraph`).
+    /// own database, or `memgraph`, `neo4j` or `hydradb` with its `graph-*` feature.
     pub graph_store: String,
-    /// RECOMMEND_GRAPH_URL is the Memgraph server's Bolt address. Its user and password
+    /// RECOMMEND_GRAPH_URL is an external graph server's Bolt or HTTPS query address. Credentials
     /// come from RECOMMEND_GRAPH_USERNAME and RECOMMEND_GRAPH_PASSWORD, read only when the
     /// store connects, so they never appear in this value.
     pub graph_url: Option<String>,
@@ -333,21 +333,10 @@ impl RecommendConfig {
                 "RECOMMEND_ENGINE: expected starter or graph",
             ));
         }
-        if !matches!(self.graph_store.as_str(), "database" | "memgraph") {
-            return Err(FrameworkError::param(
-                "RECOMMEND_GRAPH_STORE: expected database or memgraph",
-            ));
-        }
+        self.validate_graph_store()?;
         if !(1..=4).contains(&self.graph_depth) {
             return Err(FrameworkError::param(
                 "RECOMMEND_GRAPH_DEPTH: expected 1 to 4 hops",
-            ));
-        }
-        if let Some(url) = &self.graph_url
-            && (!(url.starts_with("bolt://") || url.starts_with("bolt+s://")) || url.contains('@'))
-        {
-            return Err(FrameworkError::param(
-                "RECOMMEND_GRAPH_URL: expected a bolt:// or bolt+s:// address without credentials",
             ));
         }
         for name in &self.public_event_types {
@@ -359,6 +348,49 @@ impl RecommendConfig {
         }
         Ok(())
     }
+    fn validate_graph_store(&self) -> Result<(), FrameworkError> {
+        if !matches!(
+            self.graph_store.as_str(),
+            "database" | "memgraph" | "neo4j" | "hydradb"
+        ) {
+            return Err(FrameworkError::param(
+                "RECOMMEND_GRAPH_STORE: expected database, memgraph, neo4j or hydradb",
+            ));
+        }
+        for (name, enabled) in [
+            ("memgraph", cfg!(feature = "graph-memgraph")),
+            ("neo4j", cfg!(feature = "graph-neo4j")),
+            ("hydradb", cfg!(feature = "graph-hydradb")),
+        ] {
+            if self.graph_store == name && !enabled {
+                return Err(FrameworkError::param(format!(
+                    "RECOMMEND_GRAPH_STORE={name} needs the graph-{name} feature"
+                )));
+            }
+        }
+        if let Some(address) = &self.graph_url {
+            let url = url::Url::parse(address).map_err(|_| {
+                FrameworkError::param(
+                    "RECOMMEND_GRAPH_URL: expected a valid address without credentials",
+                )
+            })?;
+            let hydra_http = self.graph_store == "hydradb"
+                && (url.scheme() == "https"
+                    || (url.scheme() == "http"
+                        && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))));
+            if url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || (!matches!(url.scheme(), "bolt" | "bolt+s") && !hydra_http)
+            {
+                return Err(FrameworkError::param(
+                    "RECOMMEND_GRAPH_URL: expected bolt:// or bolt+s:// without credentials; hydradb also accepts an HTTPS query URL (HTTP only on loopback)",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Task-local overrides let parallel tests and background jobs isolate their configuration.
     pub async fn scope<F: Future>(config: Self, future: F) -> Result<F::Output, FrameworkError> {
         config.validate()?;

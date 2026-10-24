@@ -266,6 +266,8 @@ impl Server {
     }
 
     fn prepare_config() -> Result<ServerConfig, crate::FrameworkError> {
+        // Validate graph driver selection on server boot, including embedders without a hook.
+        crate::RecommendConfig::current()?;
         // Initialize the App container
         App::init();
 

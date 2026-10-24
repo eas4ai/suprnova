@@ -2,11 +2,19 @@
 //! declared relations and shared engagement while every hop stays inside the viewer's
 //! scope. A store only persists facts and answers bounded hops; scoring stays here, so
 //! every store ranks the same graph the same way.
+#[cfg(any(feature = "graph-memgraph", feature = "graph-neo4j"))]
+mod bolt;
+#[cfg(any(feature = "graph-memgraph", feature = "graph-neo4j"))]
+mod cypher;
 mod database;
 mod derive;
+#[cfg(feature = "graph-hydradb")]
+pub mod hydradb;
 mod live;
 #[cfg(feature = "graph-memgraph")]
 pub mod memgraph;
+#[cfg(feature = "graph-neo4j")]
+pub mod neo4j;
 mod score;
 
 pub use database::DatabaseGraphStore;
@@ -48,11 +56,7 @@ pub async fn store() -> Result<Arc<dyn GraphStore>, FrameworkError> {
         "memgraph" => {
             #[cfg(feature = "graph-memgraph")]
             {
-                let url = config.graph_url.as_deref().ok_or_else(|| {
-                    FrameworkError::param("RECOMMEND_GRAPH_URL is required for memgraph")
-                })?;
-                let username = std::env::var("RECOMMEND_GRAPH_USERNAME").unwrap_or_default();
-                let password = std::env::var("RECOMMEND_GRAPH_PASSWORD").unwrap_or_default();
+                let (url, username, password) = connection_settings(&config)?;
                 Ok(Arc::new(
                     memgraph::MemgraphGraphStore::connect(url, &username, &password).await?,
                 ))
@@ -62,10 +66,57 @@ pub async fn store() -> Result<Arc<dyn GraphStore>, FrameworkError> {
                 "RECOMMEND_GRAPH_STORE=memgraph needs the graph-memgraph feature",
             ))
         }
+        "neo4j" => {
+            #[cfg(feature = "graph-neo4j")]
+            {
+                let (url, username, password) = connection_settings(&config)?;
+                Ok(Arc::new(
+                    neo4j::Neo4jGraphStore::connect(url, &username, &password).await?,
+                ))
+            }
+            #[cfg(not(feature = "graph-neo4j"))]
+            Err(FrameworkError::param(
+                "RECOMMEND_GRAPH_STORE=neo4j needs the graph-neo4j feature",
+            ))
+        }
+        "hydradb" => {
+            #[cfg(feature = "graph-hydradb")]
+            {
+                let (url, username, password) = connection_settings(&config)?;
+                Ok(Arc::new(
+                    hydradb::HydraDbGraphStore::connect(url, &username, &password).await?,
+                ))
+            }
+            #[cfg(not(feature = "graph-hydradb"))]
+            Err(FrameworkError::param(
+                "RECOMMEND_GRAPH_STORE=hydradb needs the graph-hydradb feature",
+            ))
+        }
         other => Err(FrameworkError::param(format!(
             "RECOMMEND_GRAPH_STORE: unknown store {other}"
         ))),
     }
+}
+
+#[cfg(any(
+    feature = "graph-memgraph",
+    feature = "graph-neo4j",
+    feature = "graph-hydradb"
+))]
+fn connection_settings(
+    config: &super::RecommendConfig,
+) -> Result<(&str, String, String), FrameworkError> {
+    let url = config.graph_url.as_deref().ok_or_else(|| {
+        FrameworkError::param(format!(
+            "RECOMMEND_GRAPH_URL is required for {}",
+            config.graph_store
+        ))
+    })?;
+    Ok((
+        url,
+        std::env::var("RECOMMEND_GRAPH_USERNAME").unwrap_or_default(),
+        std::env::var("RECOMMEND_GRAPH_PASSWORD").unwrap_or_default(),
+    ))
 }
 
 /// The visibility a fact carries: the scope-field values of the document it describes,

@@ -510,7 +510,7 @@ fn rec_009_graph_settings_are_validated_and_name_their_variable() {
         change(&mut config);
         config.validate().unwrap_err().to_string()
     };
-    assert!(config(|c| c.graph_store = "neo4j".into()).contains("RECOMMEND_GRAPH_STORE"));
+    assert!(config(|c| c.graph_store = "unknown".into()).contains("RECOMMEND_GRAPH_STORE"));
     assert!(config(|c| c.engine = "magic".into()).contains("RECOMMEND_ENGINE"));
     assert!(config(|c| c.graph_depth = 5).contains("RECOMMEND_GRAPH_DEPTH"));
     assert!(

@@ -380,6 +380,8 @@ xattr = { version = "1.6.1", optional = true }
 
 [features]
 graph-memgraph = ["dep:neo4rs"]
+graph-neo4j = ["dep:neo4rs"]
+graph-hydradb = ["dep:neo4rs"]
 default = [
     "search-media",
     "reporting-sentry",

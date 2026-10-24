@@ -654,8 +654,12 @@ pub use media::{
     PngEffort, Transformation, TransformationSettings, recompress_png, register_transformation,
     register_transformation_with,
 };
+#[cfg(feature = "graph-hydradb")]
+pub use recommendations::graph::hydradb::HydraDbGraphStore;
 #[cfg(feature = "graph-memgraph")]
 pub use recommendations::graph::memgraph::MemgraphGraphStore;
+#[cfg(feature = "graph-neo4j")]
+pub use recommendations::graph::neo4j::Neo4jGraphStore;
 pub use recommendations::{
     Actor, EventClass, EventProvenance, EventScoring, EventType, ExplanationEvidence, GenerateRun,
     GenerationOutcome, GraphSurface, ProvenanceState, Recommend, RecommendConfig, Recommendation,
