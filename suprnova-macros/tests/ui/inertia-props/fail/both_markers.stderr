@@ -1,0 +1,5 @@
+error: a props struct is the shared props or the flash data, not both; give it `#[inertia_props(shared)]` or `#[inertia_props(flash)]`
+ --> tests/ui/inertia-props/fail/both_markers.rs:7:17
+  |
+7 | #[inertia_props(flash)]
+  |                 ^^^^^

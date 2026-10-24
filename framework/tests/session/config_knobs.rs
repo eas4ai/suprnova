@@ -1,0 +1,185 @@
+//! Tests for the `SessionConfig` knobs added in the Laravel-13 parity
+//! sweep - `expire_on_close`, `cookie_domain`, `cookie_partitioned`,
+//! `connection`. Each knob is exercised by building a config, building
+//! the outbound session cookie via the public `Cookie` builder shape,
+//! and asserting the `Set-Cookie` header value emits / omits the right
+//! attributes.
+
+use std::time::Duration;
+use suprnova::Cookie;
+use suprnova::session::SessionConfig;
+
+/// Helper - build a session cookie the same way `SessionMiddleware`
+/// does, exercising every config flag.
+fn build_session_cookie(cfg: &SessionConfig, value: &str) -> Cookie {
+    let mut cookie = Cookie::new(&cfg.cookie_name, value)
+        .http_only(cfg.cookie_http_only)
+        .secure(cfg.cookie_secure)
+        .path(&cfg.cookie_path)
+        .partitioned(cfg.cookie_partitioned);
+    if !cfg.expire_on_close {
+        cookie = cookie.max_age(cfg.lifetime);
+    }
+    if let Some(ref domain) = cfg.cookie_domain {
+        cookie = cookie.domain(domain);
+    }
+    cookie = match cfg.cookie_same_site.to_lowercase().as_str() {
+        "strict" => cookie.same_site(suprnova::SameSite::Strict),
+        "none" => cookie.same_site(suprnova::SameSite::None),
+        _ => cookie.same_site(suprnova::SameSite::Lax),
+    };
+    cookie
+}
+
+#[test]
+fn default_emits_max_age_lax_secure() {
+    let cfg = SessionConfig::default();
+    let header = build_session_cookie(&cfg, "id1").to_header_value();
+    assert!(header.contains("Max-Age=7200"), "{header}");
+    assert!(header.contains("Secure"), "{header}");
+    assert!(header.contains("SameSite=Lax"), "{header}");
+    assert!(header.contains("HttpOnly"), "{header}");
+    assert!(!header.contains("Partitioned"), "{header}");
+    assert!(!header.contains("Domain="), "{header}");
+}
+
+#[test]
+fn expire_on_close_omits_max_age() {
+    let cfg = SessionConfig::default().expire_on_close(true);
+    let header = build_session_cookie(&cfg, "id1").to_header_value();
+    assert!(!header.contains("Max-Age"), "{header}");
+}
+
+#[test]
+fn domain_is_emitted_when_set() {
+    let cfg = SessionConfig::default().domain(".example.com");
+    let header = build_session_cookie(&cfg, "id1").to_header_value();
+    assert!(header.contains("Domain=.example.com"), "{header}");
+}
+
+#[test]
+fn partitioned_is_emitted_when_set() {
+    let cfg = SessionConfig::default().partitioned(true);
+    let header = build_session_cookie(&cfg, "id1").to_header_value();
+    assert!(header.contains("Partitioned"), "{header}");
+}
+
+#[test]
+fn connection_round_trips() {
+    let cfg = SessionConfig::default().connection("logs");
+    assert_eq!(cfg.connection.as_deref(), Some("logs"));
+}
+
+#[test]
+fn fluent_setters_chain() {
+    let cfg = SessionConfig::new()
+        .lifetime(Duration::from_secs(60))
+        .touch_interval(Duration::from_secs(10))
+        .gc_interval(Duration::from_secs(600))
+        .cookie_name("foo")
+        .secure(false)
+        .remember_lifetime(Duration::from_secs(86_400))
+        .domain("example.test")
+        .partitioned(true)
+        .expire_on_close(true)
+        .connection("sessions_db");
+
+    assert_eq!(cfg.lifetime, Duration::from_secs(60));
+    assert_eq!(cfg.touch_interval, Duration::from_secs(10));
+    assert_eq!(cfg.gc_interval, Duration::from_secs(600));
+    assert_eq!(cfg.cookie_name, "foo");
+    assert!(!cfg.cookie_secure);
+    assert_eq!(cfg.remember_lifetime, Duration::from_secs(86_400));
+    assert_eq!(cfg.cookie_domain.as_deref(), Some("example.test"));
+    assert!(cfg.cookie_partitioned);
+    assert!(cfg.expire_on_close);
+    assert_eq!(cfg.connection.as_deref(), Some("sessions_db"));
+}
+
+/// Save/restore process env around `from_env` probes. `#[serial]` keeps
+/// the mutation from racing other tests in the same binary.
+struct EnvGuard {
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvGuard {
+    fn set(pairs: &[(&'static str, String)]) -> Self {
+        let saved = pairs
+            .iter()
+            .map(|(k, _)| (*k, std::env::var(k).ok()))
+            .collect();
+        for (k, v) in pairs {
+            // SAFETY: serial test - no other thread reads or writes these
+            // process-global vars concurrently.
+            unsafe {
+                std::env::set_var(k, v);
+            }
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (k, v) in &self.saved {
+            // SAFETY: same as above.
+            unsafe {
+                match v {
+                    Some(value) => std::env::set_var(k, value),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+}
+
+/// P4-09: `SESSION_LIFETIME=u64::MAX` must clamp to the arithmetic-safe
+/// maximum, not wrap the minutes-to-seconds multiplication (panic in
+/// debug, silent wrap in release) into a deadline that mass-expires
+/// every session.
+#[test]
+#[serial_test::serial]
+fn oversized_session_lifetime_clamps_instead_of_overflowing() {
+    let _env_lock = crate::env_lock::lock_env();
+    let _env = EnvGuard::set(&[("SESSION_LIFETIME", u64::MAX.to_string())]);
+    let cfg = SessionConfig::from_env();
+    // Minute-granularity clamp: the minute bound times sixty (the lost
+    // remainder seconds are irrelevant next to ~8,000 years).
+    let expected = suprnova::session::MAX_SESSION_LIFETIME_MINUTES.saturating_mul(60);
+    assert_eq!(
+        cfg.lifetime,
+        Duration::from_secs(expected),
+        "oversized SESSION_LIFETIME must clamp to the safe maximum"
+    );
+    assert!(
+        expected <= suprnova::session::MAX_SESSION_LIFETIME_SECS,
+        "the clamp itself must stay within the arithmetic-safe bound"
+    );
+}
+
+/// P4-09: same clamp for the remember-me knob, which feeds the same
+/// `i64` deadline arithmetic.
+#[test]
+#[serial_test::serial]
+fn oversized_remember_lifetime_clamps_instead_of_overflowing() {
+    let _env_lock = crate::env_lock::lock_env();
+    let _env = EnvGuard::set(&[("REMEMBER_LIFETIME", u64::MAX.to_string())]);
+    let cfg = SessionConfig::from_env();
+    let expected = suprnova::session::MAX_SESSION_LIFETIME_MINUTES.saturating_mul(60);
+    assert_eq!(
+        cfg.remember_lifetime,
+        Duration::from_secs(expected),
+        "oversized REMEMBER_LIFETIME must clamp to the safe maximum"
+    );
+}
+
+#[test]
+fn default_keeps_partitioned_off_and_no_domain() {
+    let cfg = SessionConfig::default();
+    assert!(!cfg.cookie_partitioned);
+    assert!(cfg.cookie_domain.is_none());
+    assert!(!cfg.expire_on_close);
+    assert!(cfg.connection.is_none());
+    assert_eq!(cfg.touch_interval, Duration::from_secs(300));
+    assert_eq!(cfg.gc_interval, Duration::from_secs(3_600));
+}
