@@ -292,6 +292,8 @@ impl DebugRequest {
         // something about the request or the client's next step:
         // `Set-Cookie`, `X-Request-Id`, `Vary`, `Retry-After`.
         let (mut parts, _replaced_body) = response.into_parts();
+        // This is now a buffered error document, even if the failed response streamed.
+        parts.extensions.remove::<crate::debugbar::SkipInjection>();
         let dropped: Vec<HeaderName> = parts
             .headers
             .keys()

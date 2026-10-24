@@ -179,6 +179,10 @@ impl DbConnection {
                 pool.after_connect(move |connection, _metadata| semantics.apply(connection))
             });
         }
+        #[cfg(feature = "database-sqlite")]
+        opt.map_sqlx_sqlite_pool_opts(|pool| {
+            pool.after_connect(|connection, _| Box::pin(super::sqlite_math::ensure(connection)))
+        });
         customize(&mut opt);
 
         let conn = Database::connect(opt)

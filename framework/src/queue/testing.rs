@@ -229,6 +229,7 @@ pub(crate) fn record_with_overrides<J: Job>(
         .clone()
         .or_else(|| J::queue().map(str::to_owned));
     let envelope = fake_envelope::<J>(job, id, queue.clone(), available_at, &overrides)?;
+    crate::debugbar::record("queue", &envelope.job_name, &envelope);
     let payload = envelope.payload.clone();
     let mut g = lock_fake();
     if let Some(store) = g.as_mut() {
@@ -289,6 +290,7 @@ pub(crate) fn record_envelope(env: &Envelope) {
 
 /// [`record_envelope`] on a store the caller already holds.
 fn record_envelope_in(store: &mut FakeStore, env: &Envelope) {
+    crate::debugbar::record("queue", &env.job_name, env);
     store
         .pushed
         .entry(env.job_name.clone())

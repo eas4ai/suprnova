@@ -126,6 +126,8 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = ()>,
 {
+    // Reject unknown or unavailable graph drivers before application code can use them.
+    crate::RecommendConfig::current()?;
     // Application hooks can provision a first generation, which resolves its embedder.
     crate::search::boot::boot().await?;
     crate::error::catch_panic(async move { hook().await })

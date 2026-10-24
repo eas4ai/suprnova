@@ -23,6 +23,7 @@ doesn't cover (see the [SeaORM escape hatches](#dropping-to-seaorm)).
 - [Row locking](#row-locking)
 - [Transactions](#transactions)
 - [Scopes](#scopes)
+- [Nearest-location queries](#nearest-location-queries)
 - [Relationships](#relationships)
 - [Eager loading](#eager-loading)
 - [Preventing lazy loading](#preventing-lazy-loading)
@@ -1695,6 +1696,103 @@ through the typed scope registry. Both layers compose:
   soft-delete filter. Every registered scope still runs, so a tenant
   scope keeps trashed reads inside the tenant, as Laravel's
   `withTrashed()` does.
+
+## Nearest-location queries
+
+Declare the coordinate columns on a model to query distances with ordinary
+floating-point columns. Coordinates are latitude then longitude, in degrees.
+
+```rust
+use suprnova::{FrameworkError, Model, model};
+
+#[model(table = "places", timestamps = false,
+    geo(lat = "latitude", lng = "longitude"))]
+pub struct Place {
+    pub id: i64,
+    pub name: String,
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+async fn nearest_places() -> Result<(), FrameworkError> {
+    let places = Place::query()
+        .nearby(37.7749, -122.4194)?
+        .within(10.0)?
+        .order_by_distance()?
+        .paginate(10)
+        .await?;
+
+    for place in places.data {
+        if let Some(km) = place.distance() {
+            println!("{}: {km:.3} km", place.name);
+        }
+    }
+    Ok(())
+}
+```
+
+`nearby(lat, lng)` adds a SQL `distance` projection using the haversine
+formula on a sphere of radius 6371 kilometres. It selects all matching rows;
+add `within(radius)` to keep rows at or inside a radius, and
+`order_by_distance()` to append nearest-first ordering. Add an `id` order
+for stable ordering when distances tie. Earlier ordering clauses keep their
+priority. `distance()` returns `Some(f64)` on results from a nearby query
+and `None` on models loaded without it. The projection is query metadata,
+so it is neither saved as a column nor included automatically in model JSON.
+Read the accessor when constructing an API response.
+
+The default unit is kilometres. Calling `in_miles()?` anywhere in the chain
+sets both the projected distance and every radius to miles; one mile is
+exactly 1.609344 kilometres. Repeating it has no further effect. Repeated
+`within` calls keep the smallest radius. Repeating `nearby` changes the
+origin while keeping the radius, unit and other clauses.
+
+All four methods return `Result`, so use `?` as in the example. Latitude
+must be finite and within -90 to 90, longitude finite and within -180 to
+180, and the radius finite and non-negative. `within` and
+`order_by_distance` require a preceding `nearby`. These errors are returned
+before any SQL runs. Zero radius is valid. The coordinate column names must
+name distinct fields, and `distance` is reserved for the computed projection.
+Store valid, non-null coordinates in those fields.
+
+A radius query first adds latitude and longitude range predicates, then
+compares the distance expression with the radius. An ordinary index on the
+coordinate columns can narrow the candidate rows. The bounding box wraps
+across longitude -180/180 and covers all longitudes when the circle reaches
+a pole. The final distance comparison removes the box's corners.
+
+The SQL supports SQLite, Postgres, MySQL and MariaDB without a spatial
+extension. SQLite uses its native math functions when available; Suprnova
+registers missing functions on each connection it opens. A custom SQLite
+pool must supply the same math functions. MySQL and MariaDB share a SQL
+dialect. The calculation clamps floating-point roundoff before the inverse
+sine so coincident and antipodal points remain finite.
+
+Filters, joins, scopes, eager loads and pagination compose with these
+methods. For example, add `.with(["reviews"])` for a declared reviews relation
+before `.paginate(10)`. The count query keeps the radius restriction and
+the page query keeps the distance column. This operates on Eloquent rows;
+[search index geo filters and sorting](search.md#sorting-and-geo-distance)
+use the search engine instead.
+
+A `where_has::<Place, _>("places", |q| q.nearby(lat, lng).unwrap().within(10.0).unwrap())`
+keeps only parents with a related place within 10 km; the radius applies to
+the related table, including self relations. Inside a limited eager load,
+`order_by_distance()` ranks each parent's related rows before its limit, so
+`.with_where(("places", |q: Builder<Place>| q.nearby(lat, lng).unwrap().order_by_distance().unwrap().limit(1)))`
+loads that parent's nearest place. Distance ordering also works with scalar
+reads such as `pluck::<i64>("id")` and joined mass writes.
+For a `MorphTo`, select the owner type whose model declares those coordinates;
+using a geo predicate for another owner table returns an error before SQL runs.
+
+### Why Suprnova diverges
+
+Laravel itself has no nearest-location query scopes. Laraversine adds them
+through a base model and configuration; Suprnova declares the coordinate
+columns on each model and keeps origin and units on the query builder.
+Suprnova uses the haversine form for short-distance precision and adds a
+bounding-box prefilter for ordinary indexes. No spatial extension is
+required. PostGIS could later be a dialect behind the same methods.
 
 ## Relationships
 

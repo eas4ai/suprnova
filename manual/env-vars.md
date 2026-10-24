@@ -75,6 +75,16 @@ See [Security Headers](security-headers.md) for presets and nonce handling.
 | `SECURITY_HEADERS_CSP_REPORT_TO` | none | URL | Adds the CSP `report-to` directive and a `Reporting-Endpoints` destination for violation reports. |
 | `SECURITY_HEADERS_HSTS_PRELOAD` | `false` | `bool` | Adds `preload` to HSTS when opted in. HSTS is sent only on secure requests outside local development. |
 
+## Debug bar
+
+The globally installed `DebugBar::middleware()` uses these settings. Debug off
+always disables it, regardless of `DEBUGBAR`. See [Debug Bar](debugbar.md).
+
+| Var | Default | Type | Purpose |
+|---|---|---|---|
+| `DEBUGBAR` | `true` when debug is on | bool | Disables the bar, its collector and JSON route when `false`, `0`, `off` or `no` (case-insensitive). Cannot override `Config::is_debug()`. |
+| `DEBUGBAR_KEEP` | `100` | positive `usize` | Maximum completed request records retained in memory per middleware registration. Invalid values and zero fail bootstrap. |
+
 ## Error reporting
 
 The `sentry` driver is inert without a DSN. All settings are optional. Logs
@@ -554,10 +564,10 @@ Booleans accept `true` or `false`; invalid values fail with the variable name.
 | `RECOMMEND_LOCK_TTL_SECS` | `3600` | `u64` | Renewable generation cache-lock lifetime in seconds. |
 | `RECOMMEND_EVENT_TYPES` | `{}` | JSON object | Map from event name to `{"class":"positive\|negative\|seen","score":N}`. Base scores are bounded to -1000000 through 1000000; weight adds integer basis points divided by 20. |
 | `RECOMMEND_ENGINE` | `starter` | `String` | `starter`, or `graph` for the knowledge-graph engine, which falls back to the starter's rows when its evidence is thin. |
-| `RECOMMEND_GRAPH_STORE` | `database` | `String` | `database` (the application database) or `memgraph` (needs the `graph-memgraph` feature). |
-| `RECOMMEND_GRAPH_URL` | unset | `Option<String>` | Memgraph Bolt address, `bolt://` or `bolt+s://`, without credentials. |
-| `RECOMMEND_GRAPH_USERNAME` | unset | `String` | Memgraph user, read only when the store connects. |
-| `RECOMMEND_GRAPH_PASSWORD` | unset | `String` | Memgraph password, read only when the store connects; never logged or stored in configuration. |
+| `RECOMMEND_GRAPH_STORE` | `database` | `String` | `database` (the application database), `memgraph`, `neo4j` or `hydradb`. Each external store needs its matching `graph-memgraph`, `graph-neo4j` or `graph-hydradb` feature. |
+| `RECOMMEND_GRAPH_URL` | unset | `Option<String>` | Memgraph or Neo4j Bolt address (`bolt://` or `bolt+s://`), or HydraDB HTTPS `/v1/graphs/<graph>/query` URL with optional `?cell_id=<cell>` (default `cell-0`). HTTP is allowed only on loopback. No URL credentials. |
+| `RECOMMEND_GRAPH_USERNAME` | unset | `String` | Bolt user, or the HydraDB HTTPS namespace (`default` when unset). Read only when connecting. |
+| `RECOMMEND_GRAPH_PASSWORD` | unset | `String` | Bolt password, or the HydraDB HTTPS bearer token. Read only when connecting; never logged or stored in configuration. |
 | `RECOMMEND_GRAPH_DEPTH` | `2` | `usize` | Most hops in a graph path. 1 to 4. |
 | `RECOMMEND_GRAPH_FANOUT` | `50` | `usize` | Most edges followed out of one node per hop, and the most recent positives per actor that pair into shared engagement. Positive. |
 | `RECOMMEND_GRAPH_MAX_NODES` | `2000` | `usize` | Most nodes one graph walk reaches. Positive. |

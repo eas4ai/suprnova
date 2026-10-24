@@ -900,6 +900,18 @@ impl InertiaSharedData for LocaleShare {
     }
 }
 
+/// Read the active locale without changing render-cache classification.
+pub(crate) fn debugbar_locale() -> (bool, Locale) {
+    match CURRENT_LOCALE.try_with(|locale| locale.read().unwrap_or_else(|p| p.into_inner()).clone())
+    {
+        Ok(locale) => (true, locale),
+        Err(_) => (
+            false,
+            global_locale().unwrap_or_else(|| resolved_config().default_locale),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -806,6 +806,7 @@ impl HttpResponse {
             );
             hyper::StatusCode::INTERNAL_SERVER_ERROR
         };
+        let skip_debugbar = crate::debugbar::active() && (self.static_asset || self.is_streaming());
         let mut builder = hyper::Response::builder().status(status);
 
         let mut root: Option<std::sync::Arc<str>> = None;
@@ -856,6 +857,11 @@ impl HttpResponse {
         let mut response = builder
             .body(body)
             .expect("hyper builder body must succeed after pre-validated headers + status");
+        if skip_debugbar {
+            response
+                .extensions_mut()
+                .insert(crate::debugbar::SkipInjection);
+        }
         // In-process only: extensions never reach the wire.
         if let Some(report) = self.error_report {
             response.extensions_mut().insert(*report);

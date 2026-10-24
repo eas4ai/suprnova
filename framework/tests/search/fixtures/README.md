@@ -124,6 +124,13 @@ Remove the uncalibrated override after calibration. Records are written to
 `target/search-baseline/` before applying floors so failures retain evidence.
 Every engine writes `<engine>.json`; hybrid tests also preserve
 `<engine>-hybrid.json`.
+
+The hybrid baseline runs by hand, never in the gate (SEARCH-013). Its records
+are committed under `records/`: `collection-hybrid.json` and
+`sqlite-hybrid.json` exactly as the tests wrote them, with the engine, the
+model profile and provenance, the rivals' versions and the tree hash. Rerun
+the two hybrid tests and replace both files when the model profile, the
+fixture or the ranking code changes.
 Postgres/MySQL tests require disposable `PG_TEST_URL` / `MYSQL_TEST_URL`.
 The Qdrant test uses `QDRANT_TEST_URL`, with SQLite for metadata.
 The console accepts collection, sqlite, postgres, mysql and qdrant; no engine

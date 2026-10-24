@@ -254,6 +254,8 @@ pub struct ModelInput {
     /// `Some("__primary__")` is legal but unusual - it pins reads to
     /// the primary pool even when a `__read_replica__` is registered.
     pub connection: Option<String>,
+    /// Coordinate columns selected by the geo query methods.
+    pub geo: Option<(String, String)>,
     pub fillable: Option<Vec<String>>,
     pub guarded: Option<Vec<String>>,
     pub casts: Vec<(Ident, Type)>,
@@ -702,6 +704,8 @@ impl ModelInput {
             }
         }
 
+        validate_geo_columns(attrs.geo.as_ref(), &item)?;
+
         // BIND-005: the route key must be one of the model's columns. The
         // injected `__eager` / `__pivot` fields are not columns.
         let route_key = match attrs.route_key {
@@ -740,6 +744,7 @@ impl ModelInput {
             key_type_check,
             auto_increment,
             connection,
+            geo: attrs.geo,
             fillable: attrs.fillable,
             guarded: attrs.guarded,
             casts,
@@ -1042,6 +1047,72 @@ pub(crate) fn pluralize_snake(struct_name: &str) -> String {
     }
 }
 
+/// Validate coordinate names without adding geo rules to the main model parser.
+fn validate_geo_columns(columns: Option<&(String, String)>, item: &ItemStruct) -> Result<()> {
+    let Some((lat, lng)) = columns else {
+        return Ok(());
+    };
+    if lat == lng {
+        return Err(syn::Error::new_spanned(
+            &item.ident,
+            "geo latitude and longitude must name different columns",
+        ));
+    }
+    for column in [lat, lng] {
+        let field = item.fields.iter().find(|field| {
+            field
+                .ident
+                .as_ref()
+                .is_some_and(|name| name == column.as_str())
+        });
+        if matches!(column.as_str(), "__eager" | "__pivot" | "distance") || field.is_none() {
+            return Err(syn::Error::new_spanned(
+                &item.ident,
+                format!("geo names no coordinate column `{column}`"),
+            ));
+        }
+    }
+    if item
+        .fields
+        .iter()
+        .any(|field| field.ident.as_ref().is_some_and(|name| name == "distance"))
+    {
+        return Err(syn::Error::new_spanned(
+            &item.ident,
+            "geo reserves `distance` for the computed projection",
+        ));
+    }
+    Ok(())
+}
+
+/// Parse both coordinate names so an incomplete geo declaration fails at its source.
+fn parse_geo_columns(input: ParseStream) -> Result<(String, String)> {
+    let content;
+    syn::parenthesized!(content in input);
+    let mut lat = None;
+    let mut lng = None;
+    while !content.is_empty() {
+        let key: Ident = content.parse()?;
+        content.parse::<Token![=]>()?;
+        let value: LitStr = content.parse()?;
+        let slot = match key.to_string().as_str() {
+            "lat" => &mut lat,
+            "lng" => &mut lng,
+            _ => return Err(syn::Error::new(key.span(), "geo expects `lat` and `lng`")),
+        };
+        if slot.replace(value.value()).is_some() {
+            return Err(syn::Error::new(key.span(), "duplicate geo coordinate"));
+        }
+        if !content.is_empty() {
+            content.parse::<Token![,]>()?;
+        }
+    }
+    match (lat, lng) {
+        (Some(lat), Some(lng)) => Ok((lat, lng)),
+        _ => Err(input.error("geo requires both `lat` and `lng` columns")),
+    }
+}
+
 /// Internal parser for the comma-separated `name = value` attribute body.
 #[derive(Default)]
 struct ModelAttrs {
@@ -1050,6 +1121,7 @@ struct ModelAttrs {
     key_type: Option<(Type, Span)>,
     auto_increment: Option<bool>,
     connection: Option<String>,
+    geo: Option<(String, String)>,
     fillable: Option<Vec<String>>,
     guarded: Option<Vec<String>>,
     casts: Option<Vec<(Ident, Type)>>,
@@ -1083,8 +1155,16 @@ impl Parse for ModelAttrs {
         }
         loop {
             let key: Ident = input.parse()?;
+            if key == "geo" {
+                if out.geo.is_some() {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        "geo is declared more than once",
+                    ));
+                }
+                out.geo = Some(parse_geo_columns(input)?);
             // Defaults use a parenthesized list of field expressions.
-            if key == "defaults" {
+            } else if key == "defaults" {
                 if out.defaults.is_some() {
                     return Err(syn::Error::new(
                         key.span(),
@@ -3048,5 +3128,45 @@ mod tests {
         assert_eq!(relations[0].name.to_string(), "profile");
         assert_eq!(relations[1].name.to_string(), "posts");
         assert_eq!(relations[2].name.to_string(), "role");
+    }
+}
+
+#[cfg(test)]
+mod geo_tests {
+    use super::ModelInput;
+    use quote::quote;
+
+    #[test]
+    fn geo_columns_parse_in_either_order() {
+        let input = ModelInput::parse(
+            quote! { geo(lng = "east", lat = "north",) },
+            quote! { pub struct Place { pub id: i64, pub north: f64, pub east: f64 } },
+        )
+        .unwrap();
+        assert_eq!(input.geo, Some(("north".into(), "east".into())));
+    }
+
+    #[test]
+    fn geo_columns_reject_missing_duplicate_unknown_and_reserved_names() {
+        for declaration in [
+            quote! { geo(lat = "north") },
+            quote! { geo(lat = "north", lat = "east", lng = "east") },
+            quote! { geo(lat = "north", longitude = "east") },
+            quote! { geo(lat = "missing", lng = "east") },
+            quote! { geo(lat = "north", lng = "north") },
+            quote! { geo(lat = "north", lng = "east"), geo(lat = "north", lng = "east") },
+            quote! { geo(lat = "__eager", lng = "east") },
+            quote! { geo(lat = "north; DROP TABLE places", lng = "east") },
+        ] {
+            assert!(
+                ModelInput::parse(
+                    declaration,
+                    quote! { pub struct Place { pub id: i64, pub north: f64, pub east: f64 } }
+                )
+                .is_err()
+            );
+        }
+        assert!(ModelInput::parse(quote! { geo(lat = "north", lng = "east") },
+            quote! { pub struct Place { pub id: i64, pub north: f64, pub east: f64, pub distance: f64 } }).is_err());
     }
 }

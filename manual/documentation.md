@@ -2,6 +2,7 @@
 
 - ## Prologue
     - [Changelog](../CHANGELOG.md)
+    - [Upgrading to 4.7](upgrade-4.7.md)
     - [Upgrading to 4.6](upgrade-4.6.md)
     - [Upgrading to 4.5](upgrade-4.5.md)
     - [Upgrading to 4.4](upgrade-4.4.md)
@@ -46,6 +47,7 @@
     - [Error Handling](errors.md)
     - [Error Reporting](error-reporting.md)
     - [Logging](logging.md)
+    - [Debug Bar](debugbar.md)
     - [Context](context.md)
 - ## Digging Deeper
     - [Actions](actions.md)
@@ -79,6 +81,7 @@
     - [Installing Live Components](live-add.md)
     - [Live Component Libraries](live-libraries.md)
     - [Static Publication](static-publication.md)
+    - [Documentation Site](docs-site.md)
     - [RenderCache](render-cache.md)
     - [RenderCache Representations](render-cache-representations.md)
     - [RenderCache Generations](render-cache-generations.md)

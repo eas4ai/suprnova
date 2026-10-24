@@ -872,7 +872,9 @@ fn hold_one_transaction(options: &mut ConnectOptions, state: &Arc<TransactionSta
     {
         let state = Arc::clone(state);
         options.map_sqlx_sqlite_pool_opts(move |pool| {
-            begin_on_connect(pool, Arc::clone(&state), nothing_to_set_up)
+            begin_on_connect(pool, Arc::clone(&state), |connection| {
+                Box::pin(super::sqlite_math::ensure(connection))
+            })
         });
     }
     #[cfg(feature = "database-postgres")]

@@ -132,11 +132,33 @@ impl MiddlewareChain {
         // This creates the correct execution order: first middleware runs first
         for middleware in middleware.into_iter().rev() {
             let current_next = next;
+            let name =
+                crate::debugbar::active().then(|| super::identity::diagnostic_name(&middleware));
             let mw = middleware;
             next = Arc::new(move |req| {
                 let n = current_next.clone();
                 let m = mw.clone();
-                Box::pin(async move { m(req, n).await }) as MiddlewareFuture
+                if !crate::debugbar::active() {
+                    return m(req, n);
+                }
+                let name = name.clone().unwrap_or_else(|| "boxed middleware".into());
+                Box::pin(async move {
+                    crate::debugbar::note_request(&req);
+                    let children = Arc::new(std::sync::Mutex::new(std::time::Duration::ZERO));
+                    let child_time = Arc::clone(&children);
+                    let wrapped: Next = Arc::new(move |request| {
+                        let next = Arc::clone(&n);
+                        let time = Arc::clone(&child_time);
+                        Box::pin(async move {
+                            let _time = crate::debugbar::next_span(time);
+                            let response = next(request).await;
+                            crate::debugbar::note_context();
+                            response
+                        })
+                    });
+                    let _span = crate::debugbar::span(&name, Some(children));
+                    m(req, wrapped).await
+                }) as MiddlewareFuture
             });
         }
 
@@ -146,6 +168,20 @@ impl MiddlewareChain {
 }
 
 fn dispatch(request: Request, handler: &Arc<BoxedHandler>) -> MiddlewareFuture {
+    crate::debugbar::note_request(&request);
+    let span = crate::debugbar::span("handler", None);
+    let future = dispatch_inner(request, handler);
+    if let Some(span) = span {
+        Box::pin(async move {
+            let _span = span;
+            future.await
+        })
+    } else {
+        future
+    }
+}
+
+fn dispatch_inner(request: Request, handler: &Arc<BoxedHandler>) -> MiddlewareFuture {
     // Closures and plain functions have only a Request argument. Typed
     // handlers stop after extraction in the handler macro instead.
     if request.is_precognitive()

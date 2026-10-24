@@ -4,6 +4,75 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 4.7.0 - 2026-10-24
+
+### Added
+
+- **A debug bar.** With debug on, `DebugBar::middleware()` records each
+  request: method, path, route pattern and parameters, request id, status,
+  the time spent in every middleware and in the handler, memory, session and
+  authenticated principal, locale; every query with its SQL, bindings and
+  duration, and every transaction; cache reads and writes with hit or miss;
+  events and their listeners; mail, notifications and queued jobs;
+  RenderCache's hit, miss or store; Live renders and actions; and the error
+  report when the response carries one, redacted as the development error
+  page redacts. A browser response carries a toolbar before `</body>` under
+  the response's CSP nonce; every response names its record in a header and
+  `/_debugbar/{id}` serves it as JSON, so the toolbar shows the Inertia
+  visits and XHR requests that follow. Records live in a bounded in-memory
+  store (`DEBUGBAR_KEEP`). With debug off nothing of it exists: the
+  middleware passes through, no record is kept and the route is 404;
+  `DEBUGBAR=false` turns it off with debug on. The scaffolds install it and
+  the dogfood application runs it (`manual/debugbar.md`).
+- **Nearest-location queries.** A model declares its coordinate columns
+  with `geo(lat = "latitude", lng = "longitude")` and its builder gains
+  `nearby(lat, lng)`, which selects a `distance` column computed by the
+  haversine formula in SQL and readable on each result through
+  `distance()`; `within(radius)`, which keeps rows inside the radius after
+  a bounding-box prefilter on the coordinate columns, so an index bounds
+  the rows the formula visits; `order_by_distance()`, nearest first; and
+  `in_miles()`, kilometres otherwise. The SQL renders per dialect for
+  SQLite, Postgres, MySQL and MariaDB with no spatial extension; on a
+  SQLite build without math functions the framework registers them on each
+  connection. The three compose with the builder's other clauses,
+  existence queries (`where_has` keeps the radius), eager loads and limited
+  eager loads, scalar reads, joined writes and pagination. Invalid input is
+  refused before any SQL runs: a latitude outside -90..90, a longitude
+  outside -180..180, a non-finite or negative radius, or `within` and
+  `order_by_distance()` without a preceding `nearby` (`manual/eloquent.md`).
+- **A documentation site plugin.** `crates/suprnova-docs` mounts a docs
+  site from a `docs/` folder: a `docs.json` set manifest with versions,
+  the default version and languages, a `navigation.json` per version,
+  Markdown pages rendered through the framework's Markdown pipeline inside a
+  layout the application supplies, assets per version, and pages, versions
+  or sets marked private behind a gate the application supplies. Every page
+  is also served as Markdown at its `.md` address and to `Accept:
+  text/markdown`; each version serves `llms.txt` and `llms-full.txt`; a
+  search index built at boot serves an in-page search with no service to
+  run; and three read tools, `search_docs`, `read_page` and `list_pages`,
+  join the application's agents endpoint, gated the same way. The dogfood
+  application serves its own set through it (`manual/docs-site.md`).
+- **The segmented date picker joins the Live component library.**
+  `suprnova.segmented-date-picker` is a form-associated custom element
+  beside the date picker: three focusable numeric segments in the order the
+  attribute names (`ymd`, `dmy` or `mdy`), `min`, `max` and `required`, a
+  horizontal value scroller for the focused segment with momentum and a
+  rubber band at the ends, and a keyboard edit buffer; typing and scrolling
+  write one date state, the form sees one `YYYY-MM-DD` value, and
+  `live:model` binds it. It takes the library's tokens and density, passes
+  the checker contract, and ships in the dogfood gallery with its browser
+  cases on the three qualified engines (`manual/live.md`).
+- **Neo4j and HydraDB graph stores.** The recommender's graph store runs on
+  Neo4j (`graph-neo4j`, over the Bolt transport the Memgraph driver uses,
+  with Neo4j's own index DDL) and on HydraDB (`graph-hydradb`, over its
+  HTTPS JSON API, because HydraDB speaks Bolt 5 and `neo4rs` 0.8 speaks
+  Bolt 4), selected with `RECOMMEND_GRAPH_STORE=neo4j` or `hydradb` and the
+  same URL, user and password variables as Memgraph; boot refuses an
+  unknown store and names the feature a selected store needs. Every
+  statement the Memgraph driver issues is checked per dialect, and each
+  driver's conformance runs as engine-named tests against the real engine
+  (`manual/recommendations.md`, `manual/env-vars.md`).
+
 ## 4.6.2 - 2026-10-23
 
 ### Added

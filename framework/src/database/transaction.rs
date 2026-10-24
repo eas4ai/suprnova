@@ -2598,7 +2598,9 @@ pub(crate) async fn emit_query_executed(event: super::events::QueryExecuted) {
         }
         // (3) EventFacade dispatch. Best-effort - a logging listener
         // returning Err must not fail the query.
-        if crate::EventFacade::has_listeners::<super::events::QueryExecuted>() {
+        if crate::debugbar::active()
+            || crate::EventFacade::has_listeners::<super::events::QueryExecuted>()
+        {
             let _ = crate::EventFacade::dispatch_best_effort(event).await;
         }
     })
@@ -2607,9 +2609,9 @@ pub(crate) async fn emit_query_executed(event: super::events::QueryExecuted) {
 
 /// Fire a transaction-lifecycle event through `EventFacade`. Best-effort
 /// dispatch - a failing listener does not abort the transaction. The
-/// no-listeners short-circuit makes this a no-op in the common case.
+/// absence of listeners and a request collector makes this a no-op.
 async fn emit_tx_event<E: crate::Event>(event: E) {
-    if crate::EventFacade::has_listeners::<E>() {
+    if crate::debugbar::active() || crate::EventFacade::has_listeners::<E>() {
         let _ = crate::EventFacade::dispatch_best_effort(event).await;
     }
 }

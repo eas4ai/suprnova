@@ -266,6 +266,8 @@ impl Server {
     }
 
     fn prepare_config() -> Result<ServerConfig, crate::FrameworkError> {
+        // Validate graph driver selection on server boot, including embedders without a hook.
+        crate::RecommendConfig::current()?;
         // Initialize the App container
         App::init();
 
@@ -997,6 +999,50 @@ pub(crate) fn request_root(
 /// `crate::error::debug_page`. This is the one place every request passes
 /// after the panic boundary, which no middleware can see past.
 async fn serve_request(
+    router: Arc<Router>,
+    middleware_registry: Arc<MiddlewareRegistry>,
+    req: hyper::Request<hyper::body::Incoming>,
+    peer_ip: Option<std::net::IpAddr>,
+) -> hyper::Response<ServerBody> {
+    let debugbar = middleware_registry
+        .global_middleware()
+        .iter()
+        .find_map(crate::middleware::debugbar_of);
+    if let Some(debugbar) = debugbar {
+        let root = request_root(&req, peer_ip);
+        if debugbar.enabled() {
+            return debugbar
+                .serve(req, |req| {
+                    Box::pin(async {
+                        if let Some(response) = debugbar.lookup(&req, &root) {
+                            return response;
+                        }
+                        serve_request_inner(router, middleware_registry, req, peer_ip).await
+                    })
+                })
+                .await;
+        }
+        let path = req
+            .uri()
+            .path()
+            .strip_prefix(root.as_ref())
+            .unwrap_or(req.uri().path());
+        if path.starts_with("/_debugbar/") {
+            return HttpResponse::text(crate::http::NOT_FOUND_BODY)
+                .status(404)
+                .into_hyper();
+        }
+    }
+    // Erase both branches here so downstream HTTP services do not have to
+    // prove Send through the whole storage and routing future again.
+    let response: futures::future::BoxFuture<'_, hyper::Response<ServerBody>> = Box::pin(
+        serve_request_inner(router, middleware_registry, req, peer_ip),
+    );
+    response.await
+}
+
+// Keep error-page replacement inside the installed debug bar's observation scope.
+async fn serve_request_inner(
     router: Arc<Router>,
     middleware_registry: Arc<MiddlewareRegistry>,
     req: hyper::Request<hyper::body::Incoming>,

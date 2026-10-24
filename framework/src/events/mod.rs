@@ -130,6 +130,7 @@ pub trait Subscriber: Send + Sync + 'static {
 /// dispatcher's `Vec<Arc<dyn ErasedListener>>` storage.
 #[async_trait]
 pub(crate) trait ErasedListener: Send + Sync {
+    fn name(&self) -> &'static str;
     async fn dispatch(&self, event: &(dyn Any + Send + Sync)) -> Result<(), FrameworkError>;
 }
 
@@ -153,6 +154,10 @@ where
     E: Event,
     L: Listener<E>,
 {
+    fn name(&self) -> &'static str {
+        std::any::type_name::<L>()
+    }
+
     async fn dispatch(&self, event: &(dyn Any + Send + Sync)) -> Result<(), FrameworkError> {
         match event.downcast_ref::<E>() {
             Some(typed) => self.listener.handle(typed).await,

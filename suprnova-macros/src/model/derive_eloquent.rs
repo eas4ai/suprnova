@@ -71,6 +71,27 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         }
     };
 
+    let (geo_impl, geo_accessor) = match &input.geo {
+        Some((lat, lng)) => (
+            quote! {
+                const GEO_COLUMNS: ::core::option::Option<(&'static str, &'static str)> = ::core::option::Option::Some((#lat, #lng));
+                fn __set_geo_distance(&mut self, distance: f64) {
+                    self.__eager.set_aggregate("__suprnova_geo_distance", distance);
+                }
+            },
+            quote! {
+                impl #struct_ident {
+                    /// Read the distance selected by `nearby`, in the query's unit.
+                    /// Returns `None` when this instance was loaded without `nearby`.
+                    pub fn distance(&self) -> ::core::option::Option<f64> {
+                        self.__eager.get_aggregate::<f64>("__suprnova_geo_distance").copied()
+                    }
+                }
+            },
+        ),
+        None => (quote! {}, quote! {}),
+    };
+
     // `touches` names relations, and both attributes are parsed from
     // the same `#[model(...)]` invocation - so a name that doesn't
     // resolve, or resolves to a kind the cascade can't write, is a
@@ -1364,6 +1385,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
             // model's PK and soft-delete column are baked into each
             // relation's inventory entry at link time.
             const SOFT_DELETES_COLUMN: &'static str = #soft_deletes_column_const;
+            #geo_impl
             #soft_delete_stamp
 
             // Read by `Model::touch_owners`, which is a trait default -
@@ -1603,6 +1625,7 @@ pub fn emit(input: &ModelInput) -> Result<TokenStream> {
         }
 
         #touchable_impl
+        #geo_accessor
         #soft_deletes_impl
         #unique_id_impl
 

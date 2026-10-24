@@ -171,7 +171,7 @@ impl Cache {
 
     /// Get the underlying cache store
     pub fn store() -> Result<Arc<dyn CacheStore>, FrameworkError> {
-        App::resolve_make::<dyn CacheStore>()
+        App::resolve_make::<dyn CacheStore>().map(crate::debugbar::cache_store)
     }
 
     /// Register a named store so subsystems can keep their data in a separate cache.
@@ -195,6 +195,7 @@ impl Cache {
         crate::lock::read(&NAMED_STORES, "named cache stores")?
             .get(name)
             .cloned()
+            .map(crate::debugbar::cache_store)
             .ok_or_else(|| {
                 FrameworkError::internal(format!("cache store '{name}' is not registered"))
             })

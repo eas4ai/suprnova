@@ -98,8 +98,25 @@ pub mod component {
         pub use suprnova_live::component::generated::{
             GeneratedComponentRuntime, GeneratedComponentState, IntoComponentHookResult,
             IntoComponentResult, component_hooks, decode_field, decode_json_field,
-            decode_model_field, encode_field, render_component_view,
+            decode_model_field, encode_field,
         };
+
+        /// Observe each generated component render, including nested islands.
+        pub fn render_component_view<T: suprnova_live::view::ViewTemplate + ?Sized>(
+            context: &suprnova_live::component::RenderContext<'_>,
+            metadata: &suprnova_live::metadata::ComponentMetadata,
+            template: &T,
+        ) -> Result<suprnova_live::view::IslandRender, suprnova_live::component::ComponentError>
+        {
+            if crate::debugbar::active() {
+                crate::debugbar::record(
+                    "live",
+                    "render",
+                    &(metadata.identity().as_str(), metadata.view().as_str()),
+                );
+            }
+            suprnova_live::component::generated::render_component_view(context, metadata, template)
+        }
     }
 
     #[doc(hidden)]

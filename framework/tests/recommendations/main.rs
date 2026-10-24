@@ -2,6 +2,7 @@
 mod budget;
 mod events;
 mod graph;
+mod graph_drivers;
 mod graph_ranking;
 mod graph_reads;
 mod publication;

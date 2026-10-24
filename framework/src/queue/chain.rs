@@ -355,7 +355,7 @@ impl PendingChain {
         // snapshot to each link after it.
         env.context = crate::context::Context::dehydrate();
         match driver {
-            Some(driver) => driver.push(env).await,
+            Some(driver) => crate::debugbar::push_job(driver.as_ref(), env).await,
             None => {
                 crate::queue::testing::record_chain(&env);
                 Ok(())

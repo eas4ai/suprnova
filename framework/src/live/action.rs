@@ -649,6 +649,16 @@ impl SuprnovaEndpointKernel {
         {
             return Err(EndpointKernelError::context_inconsistent());
         }
+        if let RequestedOperation::Action {
+            name, arguments, ..
+        } = &operation
+        {
+            crate::debugbar::record(
+                "live",
+                "action",
+                &(request.component().as_str(), name.as_str(), arguments),
+            );
+        }
         let result = match request.snapshot() {
             VerifiedEndpointSnapshot::Instance(snapshot) => {
                 let digest =

@@ -242,6 +242,15 @@ pub async fn dispatch_with_telemetry(
     async move {
         let start = std::time::Instant::now();
         let result = transport.send(msg).await;
+        if result.is_ok() && crate::debugbar::active() {
+            let mut shown = msg.clone();
+            for (name, value) in &mut shown.headers {
+                if crate::error::redaction::header_value_is_secret(name) {
+                    *value = crate::error::redaction::REDACTED.into();
+                }
+            }
+            crate::debugbar::record("mail", transport.name(), &shown);
+        }
         let duration_ms = start.elapsed().as_millis() as u64;
         match &result {
             Ok(()) => tracing::info!(duration_ms, "mail sent"),

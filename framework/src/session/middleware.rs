@@ -3609,6 +3609,18 @@ pub fn clear_two_factor_pending_remember() {
     });
 }
 
+/// Snapshot identifiers without registering a render-cache dependency or cloning session data.
+pub(crate) fn debugbar_identity() -> (Option<String>, Option<String>) {
+    SESSION_CONTEXT
+        .try_with(|slot| {
+            let slot = slot.lock().unwrap_or_else(|p| p.into_inner());
+            slot.as_ref()
+                .map(|session| (Some(session.id.clone()), session.user_id.clone()))
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

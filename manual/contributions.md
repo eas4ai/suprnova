@@ -74,14 +74,16 @@ API that forces `unwrap()` is always report-worthy):
   lands with the regression test that pins it.
 - **Public-surface code returns `Result`, doesn't panic.** Where a
   Laravel-style infallible name ships, a `try_*` sibling ships with it.
-- **No `unsafe` outside environment bootstrap.** The framework has exactly
-  two `unsafe` blocks in non-test code, both in
-  `config/env.rs::load_dotenv`, both wrapping `std::env::set_var` /
-  `remove_var` - which became `unsafe` in edition 2024 - and both carrying
-  a SAFETY note for the boot-time single-thread invariant they rely on.
-  Everything else is test-only. New `unsafe` anywhere else needs a written
-  justification in review, and `unsafe` in a driver, handler, or macro
-  expansion will not be accepted.
+- **No `unsafe` outside environment bootstrap and the SQLite math shim.**
+  Every `unsafe` block in the framework's non-test code is one of two
+  things: a `std::env::set_var` / `remove_var` call - which became `unsafe`
+  in edition 2024 - carrying a SAFETY note for the boot-time single-thread
+  invariant it relies on; or the FFI in `database/sqlite_math.rs`, which
+  registers `sin`, `cos`, `asin`, `sqrt`, `radians` and `power` on a SQLite
+  connection whose build lacks them, because the bundled SQLite ships no
+  math functions and SQLx has no safe function-registration API. New
+  `unsafe` anywhere else needs a written justification in review, and
+  `unsafe` in a driver, handler, or macro expansion will not be accepted.
 - **`cargo fmt` and plain clippy are canonical; review and fix warnings without blanket denial.**
 
 See [Error Model](error-model.md) for the full error contract.

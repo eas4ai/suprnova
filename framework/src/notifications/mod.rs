@@ -367,6 +367,11 @@ impl NotificationDispatcher {
 
                 match channel.deliver(&route, notification).await {
                     Ok(()) => {
+                        crate::debugbar::record(
+                            "notifications",
+                            &payload_name,
+                            &(&channel_str, &route_owned, &data),
+                        );
                         // Delivery succeeded - emit Sent before running the
                         // post-send hook, so a failing after_sending can't
                         // suppress the event for a notification that was in
