@@ -1,0 +1,5 @@
+error: component validation selection requires a bare #[validate] hook
+  --> tests/ui/live/fail/validation_selection_without_hook.rs:12:12
+   |
+12 |     pub fn save(&mut self) {}
+   |            ^^^^

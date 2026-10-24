@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-fetch-computed",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

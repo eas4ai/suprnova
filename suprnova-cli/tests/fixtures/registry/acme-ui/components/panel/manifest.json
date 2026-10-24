@@ -1,0 +1,7 @@
+{
+  "name": "acme.panel",
+  "root": "acme-ui/panel",
+  "title": "Panel",
+  "files": ["panel.html"],
+  "dependencies": ["./widget"]
+}

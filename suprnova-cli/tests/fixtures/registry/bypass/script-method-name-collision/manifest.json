@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-method-name-collision",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

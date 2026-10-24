@@ -1,0 +1,52 @@
+//! SeaORM entity for the framework-owned `two_factor_credentials` table.
+//!
+//! Holds per-user TOTP secrets and recovery codes - encrypted at rest
+//! via [`crate::crypto::Crypt`]. The `user_id` is opaque (any stringy
+//! identifier the application uses, typically `UserId::to_string()`)
+//! and intentionally has no FK constraint so the schema is decoupled
+//! from whichever user-storage backend the consuming app picks.
+
+use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
+
+/// SeaORM model for a single row in `two_factor_credentials`.
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+#[sea_orm(table_name = "two_factor_credentials")]
+pub struct Model {
+    /// Opaque per-user identifier (e.g. `UserId::to_string()`).
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub user_id: String,
+    /// `Crypt::encrypt_string`-encoded base32 TOTP secret bound to
+    /// [`crate::crypto::CryptPurpose::TwoFactorSecret`].
+    #[sea_orm(column_type = "Text")]
+    pub secret: String,
+    /// Set once the user proves possession of the authenticator
+    /// device by submitting a valid TOTP code via
+    /// [`crate::auth_flows::TwoFactor::confirm`]. Until non-NULL,
+    /// [`crate::auth_flows::TwoFactor::is_enabled`] reports false and
+    /// [`crate::auth_flows::TwoFactor::verify`] short-circuits to
+    /// `Ok(false)`.
+    pub confirmed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// `Crypt::encrypt_string` of newline-joined plaintext recovery
+    /// codes bound to
+    /// [`crate::crypto::CryptPurpose::TwoFactorRecovery`]. `None` once
+    /// every code has been consumed.
+    #[sea_orm(column_type = "Text", nullable)]
+    pub recovery_codes: Option<String>,
+    /// Last TOTP timestep (`unix_seconds / step`) successfully accepted
+    /// by [`crate::auth_flows::TwoFactor::verify`]. Rejecting codes
+    /// whose timestep equals this value prevents replay within the
+    /// 30-second window where a TOTP remains valid.
+    pub last_used_timestep: Option<i64>,
+    /// Row insert time.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Row last-update time; refreshed by [`crate::auth_flows::TwoFactor::verify`] when it advances `last_used_timestep`.
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// SeaORM relation enum - `two_factor_credentials` is a leaf table with
+/// no declared foreign-key relations.
+#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+pub enum Relation {}
+
+impl ActiveModelBehavior for ActiveModel {}

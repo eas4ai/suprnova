@@ -1,0 +1,5 @@
+error: unknown upload helper
+  --> tests/ui/live/fail/upload_unknown_helper.rs:11:14
+   |
+11 |     #[upload(unknown = policy)]
+   |              ^^^^^^^
