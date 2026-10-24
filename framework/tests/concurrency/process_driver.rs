@@ -9,7 +9,7 @@ use crate::tasks::{
 };
 use serial_test::serial;
 use std::time::{Duration, Instant};
-use suprnova::concurrency::Task;
+use suprnova::concurrency::{ProcessDriverOptions, Task};
 use suprnova::{Concurrency, ConcurrentTask, Process};
 
 /// Whether a process with this id is alive, by `kill -0`.
@@ -43,6 +43,11 @@ async fn process_runs_two_one_second_tasks_side_by_side_and_answers_in_order() {
     assert!(
         elapsed >= Duration::from_secs(1),
         "each one sleeps: {elapsed:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|result| result.last_progress().is_some() && result.idle_duration().is_some())
     );
     let values: Vec<String> = results
         .iter()
@@ -449,17 +454,20 @@ async fn the_console_command_writes_the_token_it_is_given_and_a_plain_line_witho
 
 #[tokio::test]
 #[serial]
-async fn process_driver_bounds_children_across_concurrent_batches() {
+async fn process_driver_honors_a_shared_caller_concurrency_ceiling() {
     let dir = tempfile::tempdir().unwrap();
     let script = format!(
         r#"mkdir '{0}/active-'"$3"; while [ ! -f '{0}/release' ]; do sleep 0.02; done; echo "suprnova-concurrency-result:$SUPRNOVA_CONCURRENCY_TOKEN:{{\"ok\":42}}""#,
         dir.path().display()
     );
     Concurrency::console_command(["sh", "-c", &script, "sh"]).unwrap();
-    let first =
-        Concurrency::driver("process").run((0..6).map(|i| Task::named(format!("job-{i}"), ())));
-    let second =
-        Concurrency::driver("process").run((6..12).map(|i| Task::named(format!("job-{i}"), ())));
+    let options = ProcessDriverOptions::default().max_concurrency(3);
+    let first = Concurrency::driver("process")
+        .process_options(options.clone())
+        .run((0..6).map(|i| Task::named(format!("job-{i}"), ())));
+    let second = Concurrency::driver("process")
+        .process_options(options)
+        .run((6..12).map(|i| Task::named(format!("job-{i}"), ())));
     let runs = tokio::spawn(async move { tokio::join!(first, second) });
     let count = || {
         std::fs::read_dir(dir.path())
@@ -468,31 +476,36 @@ async fn process_driver_bounds_children_across_concurrent_batches() {
             .filter(|entry| entry.file_name().to_string_lossy().starts_with("active-"))
             .count()
     };
-    assert!(wait_until(Duration::from_secs(5), || count() >= 8).await);
+    assert!(wait_until(Duration::from_secs(5), || count() >= 3).await);
     tokio::time::sleep(Duration::from_millis(200)).await;
     let started = count();
     std::fs::write(dir.path().join("release"), "go").unwrap();
     let (first, second) = runs.await.unwrap();
     assert_eq!(
-        started, 8,
-        "at most eight children may start before a slot is released"
+        started, 3,
+        "the caller selected three children across both calls"
     );
     assert_eq!(first.unwrap().len() + second.unwrap().len(), 12);
 }
 
 #[tokio::test(start_paused = true)]
 #[serial]
-async fn process_driver_has_a_default_deadline() {
-    use_this_binary();
-    let result = Concurrency::driver("process")
-        .run([Task::new::<NapThenEcho>(Nap::new(65_000, "finished"))])
-        .await;
-    let error = result
-        .map(|_| ())
-        .expect_err("the default deadline must stop a task after 60 seconds");
-    assert!(error.is_timeout(), "{error}");
-    assert!(error.to_string().contains("60"), "{error}");
-    assert!(error.to_string().contains("nap_then_echo"), "{error}");
+async fn process_driver_has_no_default_deadline() {
+    Concurrency::console_command([
+        "sh",
+        "-c",
+        r#"sleep 0.2; echo "suprnova-concurrency-result:$SUPRNOVA_CONCURRENCY_TOKEN:{\"ok\":42}""#,
+        "sh",
+    ])
+    .unwrap();
+    let run = tokio::spawn(async {
+        Concurrency::driver("process")
+            .run([Task::named("slow-task", ())])
+            .await
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(61)).await;
+    assert_eq!(run.await.unwrap().unwrap()[0].get::<u64>().unwrap(), 42);
 }
 
 #[tokio::test]
@@ -500,10 +513,68 @@ async fn process_driver_has_a_default_deadline() {
 async fn process_driver_output_limit_error_names_the_task() {
     Concurrency::console_command(["sh", "-c", "head -c 8388609 /dev/zero", "sh"]).unwrap();
     let error = Concurrency::driver("process")
+        .process_options(ProcessDriverOptions::default().max_stream_output_bytes(1024))
         .run([Task::named("noisy-task", ())])
         .await
         .err()
         .unwrap();
     assert!(error.to_string().contains("output limit"), "{error}");
     assert!(error.to_string().contains("noisy-task"), "{error}");
+}
+
+#[tokio::test]
+#[serial]
+async fn process_driver_hang_window_names_the_task_and_idle_time() {
+    Concurrency::console_command(["sh", "-c", "sleep 30", "sh"]).unwrap();
+    let error = Concurrency::driver("process")
+        .hang_after(Duration::from_millis(500))
+        .run([Task::named("hung-task", ())])
+        .await
+        .expect_err("no progress within the caller's hang window");
+    let text = error.to_string();
+    assert!(
+        text.contains("hung-task") && text.contains("hung") && text.contains("idle for"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn process_driver_has_no_default_concurrency_ceiling() {
+    let dir = tempfile::tempdir().unwrap();
+    Concurrency::console_command([
+        "sh".to_owned(), "-c".to_owned(),
+        format!(r#"touch '{0}/'"$3"; while [ ! -f '{0}/release' ]; do sleep 0.02; done; echo "suprnova-concurrency-result:$SUPRNOVA_CONCURRENCY_TOKEN:{{\"ok\":42}}""#, dir.path().display()),
+        "sh".to_owned(),
+    ]).unwrap();
+    let run = tokio::spawn(async {
+        Concurrency::driver("process")
+            .run((0..12).map(|i| Task::named(format!("job-{i}"), ())))
+            .await
+    });
+    let all_started = wait_until(Duration::from_secs(5), || {
+        std::fs::read_dir(dir.path()).unwrap().count() == 12
+    })
+    .await;
+    std::fs::write(dir.path().join("release"), "go").unwrap();
+    assert_eq!(run.await.unwrap().unwrap().len(), 12);
+    assert!(all_started, "all twelve children start before any exits");
+}
+
+#[tokio::test]
+#[serial]
+async fn process_driver_output_progress_survives_the_hang_window() {
+    Concurrency::console_command([
+        "sh", "-c",
+        r#"i=0; while [ $i -lt 20 ]; do echo working; sleep 0.1; i=$((i+1)); done; echo "suprnova-concurrency-result:$SUPRNOVA_CONCURRENCY_TOKEN:{\"ok\":42}""#,
+        "sh",
+    ]).unwrap();
+    let results = Concurrency::driver("process")
+        .process_options(ProcessDriverOptions::default().hang_after(Duration::from_millis(500)))
+        .run([Task::named("working-task", ())])
+        .await
+        .unwrap();
+    assert_eq!(results[0].get::<u64>().unwrap(), 42);
+    assert!(results[0].last_progress().is_some());
+    assert!(results[0].idle_duration().unwrap() < Duration::from_millis(500));
 }

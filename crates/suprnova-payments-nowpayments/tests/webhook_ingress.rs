@@ -154,11 +154,7 @@ async fn real_ingress_rejects_forgery_deduplicates_reordered_events_and_recovers
             .await
             .unwrap();
         assert_eq!(response.status().as_u16(), 200, "{status}");
-        // The reply comes from this test's own in-process server, so the raw
-        // read the workspace otherwise disallows is bounded by construction.
-        #[allow(clippy::disallowed_methods)]
-        let body = response.text().await.unwrap();
-        assert_eq!(body, response_body, "{status}");
+        assert_eq!(response.text().await.unwrap(), response_body, "{status}");
     }
     let rows = webhook_event::Entity::find().all(&*conn).await.unwrap();
     assert_eq!(rows.len(), 4);

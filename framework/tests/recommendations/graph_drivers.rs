@@ -842,89 +842,6 @@ async fn extra_operations(store: &dyn suprnova::GraphStore) {
 
 #[cfg(feature = "graph-hydradb")]
 #[test]
-fn rec_010_hydradb_security_limits() {
-    crate::own_process::run_alone("graph_drivers::rec_010_hydradb_security_limits_child");
-}
-
-#[cfg(feature = "graph-hydradb")]
-#[tokio::test]
-async fn rec_010_hydradb_security_limits_child() {
-    use serde_json::json;
-    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
-    if !crate::own_process::is_child() {
-        return;
-    }
-    suprnova::Config::register(
-        suprnova::AppConfig::builder()
-            .environment(suprnova::Environment::Testing)
-            .build(),
-    );
-    for (label, body, expected) in [
-        (
-            "page",
-            format!(
-                "{}{}",
-                json!({"columns":[],"rows":[],"next_cursor":null}),
-                " ".repeat(2 * 1024 * 1024)
-            ),
-            "byte cap",
-        ),
-        (
-            "rows",
-            json!({"columns":[],"rows":vec![Vec::<u8>::new();25_001],"next_cursor":null})
-                .to_string(),
-            "row cap",
-        ),
-    ] {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(body))
-            .mount(&server)
-            .await;
-        let error = suprnova::HydraDbGraphStore::connect(
-            &format!("{}/v1/graphs/default/query", server.uri()),
-            "default",
-            "test-token",
-        )
-        .await
-        .err()
-        .unwrap_or_else(|| panic!("HydraDB accepted an oversized {label}"));
-        assert!(error.to_string().contains(expected), "{error}");
-    }
-    for (label, padding, rows, expected) in [
-        ("pages", 0, 0, "page cap"),
-        ("bytes", 1024 * 1024, 0, "byte cap"),
-        ("rows", 0, 500, "row cap"),
-    ] {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(move |request: &wiremock::Request| {
-                let request: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-                let cursor = request["cursor"].as_u64().unwrap_or(0);
-                // Finish eventually so the unfixed driver fails without waiting for its deadline.
-                let next = (cursor < 65).then_some(cursor + 1);
-                ResponseTemplate::new(200).set_body_string(format!(
-                    "{}{}",
-                    json!({"columns":[],"rows":vec![Vec::<u8>::new();rows],"next_cursor":next}),
-                    " ".repeat(padding)
-                ))
-            })
-            .mount(&server)
-            .await;
-        let error = suprnova::HydraDbGraphStore::connect(
-            &format!("{}/v1/graphs/default/query", server.uri()),
-            "default",
-            "test-token",
-        )
-        .await
-        .err()
-        .unwrap_or_else(|| panic!("HydraDB accepted cumulative {label}"));
-        assert!(error.to_string().contains(expected), "{error}");
-    }
-}
-
-#[cfg(feature = "graph-hydradb")]
-#[test]
 fn rec_010_hydradb_loopback_bypasses_environment_proxy() {
     crate::own_process::run_alone(
         "graph_drivers::rec_010_hydradb_loopback_bypasses_environment_proxy_child",
@@ -994,4 +911,50 @@ async fn rec_010_hydradb_loopback_bypasses_environment_proxy_child() {
             "proxy received the bearer credential"
         );
     }
+}
+
+#[cfg(feature = "graph-hydradb")]
+#[test]
+fn rec_010_hydradb_reads_complete_pages_and_queries_without_driver_ceilings() {
+    crate::own_process::run_alone(
+        "graph_drivers::rec_010_hydradb_reads_complete_pages_and_queries_without_driver_ceilings_child",
+    );
+}
+
+#[cfg(feature = "graph-hydradb")]
+#[tokio::test]
+async fn rec_010_hydradb_reads_complete_pages_and_queries_without_driver_ceilings_child() {
+    use serde_json::json;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    if !crate::own_process::is_child() {
+        return;
+    }
+    suprnova::Config::register(
+        suprnova::AppConfig::builder()
+            .environment(suprnova::Environment::Testing)
+            .build(),
+    );
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(|request: &wiremock::Request| {
+            let request: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(request["page_size"], 500);
+            let cursor = request["cursor"].as_u64().unwrap_or(0);
+            // Each page respects the requested row count. The full query exceeds
+            // every former byte, page and row ceiling.
+            let padding = if cursor == 0 { 2 * 1024 * 1024 } else { 256 * 1024 };
+            ResponseTemplate::new(200).set_body_string(format!(
+                "{}{}",
+                json!({"columns":[],"rows":vec![Vec::<u8>::new();500],"next_cursor":(cursor < 65).then_some(cursor+1)}),
+                " ".repeat(padding),
+            ))
+        }).mount(&server).await;
+    suprnova::HydraDbGraphStore::connect(
+        &format!("{}/v1/graphs/default/query", server.uri()),
+        "default",
+        "test-token",
+    )
+    .await
+    .expect("complete pages and advancing cursors have no driver ceiling");
+    assert!(server.received_requests().await.unwrap().len() > 64);
 }

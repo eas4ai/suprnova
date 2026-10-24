@@ -751,6 +751,3 @@ path = "tests/debugbar/main.rs"
 name = "geo"
 path = "tests/geo/main.rs"
 required-features = ["testing", "database-sqlite"]
-
-[lints.clippy]
-disallowed_methods = "deny"

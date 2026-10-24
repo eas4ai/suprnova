@@ -139,8 +139,8 @@ let results = Concurrency::with_timeout(Duration::from_secs(30))
     .await?;
 ```
 
-A zero duration means no timeout on the Tokio and sync drivers. The process
-driver uses a 60-second default when no nonzero timeout is set.
+A zero duration means no timeout. Without a timeout, a task runs until it
+finishes, on every driver.
 
 ## Drivers
 
@@ -149,7 +149,7 @@ A driver decides where the tasks run. Three drivers are built in:
 | Driver | Runs each task | Use it for |
 |---|---|---|
 | `tokio` (default) | as a Tokio task in this process | most work: it's the cheapest |
-| `process` | in a console process of its own, at most eight at once | work that needs a separate address space, with a deadline and output limits |
+| `process` | in a console process of its own | work that needs a separate address space, with caller-configured limits |
 | `sync` | one after another, in the caller's task | tests that want concurrency out of the way |
 
 `CONCURRENCY_DRIVER` names the default driver, and `tokio` is the default
@@ -209,12 +209,44 @@ Concurrency::console_binary("/srv/app/bin/console")?;
 Concurrency::console_command(["cargo", "run", "--quiet", "--bin", "console", "--"])?;
 ```
 
-The driver runs at most eight children across all calls and starts each
-child's deadline when it launches. The default deadline is 60 seconds; a
-nonzero `with_timeout` replaces it. The Process facade kills the process
-tree when stdout or stderr exceeds 8 MiB, or their combined output exceeds
-12 MiB, and the error names the task. A separate process does not restrict
+The process driver has no default deadline, concurrency ceiling, output
+ceiling or hang window. Without configured limits each child runs until it
+exits, and its output stays in memory. Separate processes do not restrict
 filesystem, network or credential access.
+
+Use `ProcessDriverOptions` through `process_options` to set a deadline with
+`with_timeout`, a concurrency ceiling with `max_concurrency`, output ceilings
+with `max_stream_output_bytes` and `max_combined_output_bytes`, or a hang
+window with `hang_after`. Clones of the options share the concurrency ceiling
+across calls. A call's nonzero `with_timeout` overrides the options' deadline.
+Zero disables a deadline, concurrency ceiling or hang window. An output
+ceiling of zero permits no output. Custom drivers keep their own settings.
+A configured driver can also be registered with
+`Concurrency::extend(name, ProcessConcurrencyDriver::with_options(options))`.
+
+```rust
+use std::time::Duration;
+use suprnova::concurrency::{Concurrency, ProcessDriverOptions};
+
+let options = ProcessDriverOptions::default().hang_after(Duration::from_secs(5));
+let results = Concurrency::driver("process")
+    .process_options(options)
+    .run(tasks)
+    .await?;
+```
+
+The caller chooses the hang window. `Concurrency::driver("process")` also
+accepts `hang_after(duration)` directly. Each child has a monitor that samples
+progress every 100 ms. On Linux it observes the child's own CPU time
+(`/proc/<pid>/stat` utime plus stime) and bytes read from stdout and stderr.
+Elsewhere it observes output alone. Descendant CPU activity is not counted.
+A child without progress for the configured window is killed with its process
+tree; the error names the task as hung and reports its idle time. Without
+`hang_after` the monitor never kills for inactivity.
+
+Process-driver results expose `last_progress()` and `idle_duration()` as
+optional snapshots; other drivers return `None`. They report the last
+observation and the idle duration when the result was captured.
 
 A timeout kills the console process and every process it started. Both
 binaries must register the task under the same name, which they do when the
@@ -353,8 +385,7 @@ Most tests don't need the fake: the `sync` driver runs the task itself.
   one process, so `process` is the driver you pick for isolation.
 - **There is no `fork` driver.** The `process` driver is the isolating one.
 - **A timeout applies on every driver, and there is none by default.**
-  Laravel's timeout applies only to the `process` driver, and a process
-  there gets the Process facade's 60-second default when you set none.
+  Set the timeout explicitly when the caller needs a deadline.
 - **Named results come from `run_named`.** Laravel's `run` returns keys
   when you pass an associative array. Rust has no such array, so keyed
   tasks go through their own method, and a repeated key is an error.

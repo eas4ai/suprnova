@@ -42,9 +42,6 @@ pub struct CloudFrontDriver {
 #[derive(Debug, Clone)]
 struct CredentialHttp(reqwest::Client);
 
-const MAX_CREDENTIAL_RESPONSE_BYTES: usize = 64 * 1024;
-const MAX_API_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-
 impl reqsign_core::HttpSend for CredentialHttp {
     async fn http_send(
         &self,
@@ -64,12 +61,10 @@ impl reqsign_core::HttpSend for CredentialHttp {
             })?;
         let status = response.status();
         let headers = response.headers().clone();
-        let body = crate::http_client::read_capped(response, MAX_CREDENTIAL_RESPONSE_BYTES)
-            .await
-            .map_err(|error| {
-                reqsign_core::Error::unexpected("read a CloudFront credential response")
-                    .with_source(error)
-            })?;
+        let body = response.bytes().await.map_err(|error| {
+            reqsign_core::Error::unexpected("read a CloudFront credential response")
+                .with_source(error)
+        })?;
         let mut response = http::Response::new(body);
         *response.status_mut() = status;
         *response.headers_mut() = headers;
@@ -269,11 +264,10 @@ impl CloudFrontDriver {
             )));
         }
         let headers = response.headers().clone();
-        let body = crate::http_client::read_capped(response, MAX_API_RESPONSE_BYTES)
+        let body = response
+            .text()
             .await
             .map_err(|error| failure(format!("read API response: {error}")))?;
-        let body =
-            String::from_utf8(body.to_vec()).map_err(|_| failure("API response is not UTF-8"))?;
         Ok((headers, body))
     }
 

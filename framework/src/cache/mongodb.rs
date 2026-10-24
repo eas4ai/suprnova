@@ -524,44 +524,6 @@ impl CacheStore for MongoCache {
             .transpose()
     }
 
-    async fn get_raw_capped(
-        &self,
-        key: &str,
-        max: usize,
-    ) -> Result<Option<String>, FrameworkError> {
-        use futures::TryStreamExt;
-        self.ready().await?;
-        let mut filter = doc! { "_id": self.key(key) };
-        filter.extend(live(crate::clock::now()));
-        let max = i64::try_from(max).unwrap_or(i64::MAX);
-        let pipeline = vec![
-            doc! { "$match": filter },
-            doc! { "$project": { "value": { "$toString": "$value" } } },
-            doc! { "$project": {
-                "oversized": { "$gt": [ { "$strLenBytes": "$value" }, max ] },
-                "value": { "$cond": [ { "$lte": [ { "$strLenBytes": "$value" }, max ] }, "$value", "$$REMOVE" ] }
-            } },
-        ];
-        let mut cursor = self
-            .entries
-            .aggregate(pipeline)
-            .await
-            .map_err(|error| store_error(STORE, "capped get", error))?;
-        let Some(entry) = cursor
-            .try_next()
-            .await
-            .map_err(|error| store_error(STORE, "capped get", error))?
-        else {
-            return Ok(None);
-        };
-        if entry.get_bool("oversized").unwrap_or(true) {
-            return Err(FrameworkError::internal(format!(
-                "Cache value exceeds the {max}-byte cap"
-            )));
-        }
-        raw_value(entry.get("value")).map(Some)
-    }
-
     async fn put_raw(
         &self,
         key: &str,

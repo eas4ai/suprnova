@@ -18,9 +18,6 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MAX_JSON_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-const MAX_ERROR_RESPONSE_BYTES: usize = 8 * 1024;
-
 /// A client for the HTTP API of a Pusher-protocol service: Pusher
 /// Channels, Soketi or Laravel Reverb. Mirrors the configured Pusher
 /// client Laravel's `Broadcast::pusher($config)` returns.
@@ -336,9 +333,12 @@ impl PusherClient {
             .await?;
         // The body read needs no scrubbing of the signature: an error here
         // carries no URL, and the secret is never sent.
-        let answer = crate::http_client::read_capped(response, MAX_JSON_RESPONSE_BYTES)
-            .await
-            .map_err(|error| FrameworkError::internal(format!("{what}: {error}")))?;
+        let answer = response.bytes().await.map_err(|e| {
+            FrameworkError::internal(format!(
+                "{what} failed reading the answer: {}",
+                describe_transport_error(e, &[self.config.secret()])
+            ))
+        })?;
         serde_json::from_slice(&answer).map_err(|_| {
             FrameworkError::internal(format!("{what} answered with a body that is not JSON"))
         })
@@ -397,10 +397,9 @@ impl PusherClient {
         if status.is_success() {
             return Ok(response);
         }
-        let answer = match crate::http_client::read_capped(response, MAX_ERROR_RESPONSE_BYTES).await
-        {
+        let answer = match response.bytes().await {
             Ok(bytes) => excerpt(&String::from_utf8_lossy(&bytes), &scrub),
-            Err(error) => format!("(the response body could not be read: {error})"),
+            Err(_) => "(the response body could not be read)".to_string(),
         };
         Err(FrameworkError::internal(format!(
             "{what} failed with HTTP {}: {answer}",

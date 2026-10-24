@@ -43,21 +43,6 @@ impl CacheStore for ObservedCache {
         result
     }
 
-    async fn get_raw_capped(
-        &self,
-        key: &str,
-        max: usize,
-    ) -> Result<Option<String>, FrameworkError> {
-        let result = self.0.get_raw_capped(key, max).await;
-        let outcome = match &result {
-            Ok(Some(_)) => "hit",
-            Ok(None) => "miss",
-            Err(_) => "error",
-        };
-        self.observe(key, outcome, &result);
-        result
-    }
-
     async fn put_raw(
         &self,
         key: &str,

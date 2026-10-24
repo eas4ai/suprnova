@@ -29,7 +29,7 @@
 //!
 //! A [`ConcurrencyDriver`] runs the tasks. `tokio`, the default, runs each
 //! as a Tokio task; `process` runs each in a console process of its own
-//! for a separate address space, bounded output and a deadline; `sync` awaits them one after
+//! for a separate address space; `sync` awaits them one after
 //! another, for tests. `CONCURRENCY_DRIVER` names the default,
 //! [`Concurrency::driver`] picks one for a call, and
 //! [`Concurrency::extend`] adds a driver of your own. Laravel's `fork`
@@ -48,7 +48,7 @@ mod task;
 mod tokio;
 
 pub use driver::{ConcurrencyDriver, timed_out};
-pub use process::ProcessConcurrencyDriver;
+pub use process::{ProcessConcurrencyDriver, ProcessDriverOptions};
 pub use sync::SyncConcurrencyDriver;
 pub use task::{
     ConcurrentTask, ConcurrentTaskEntry, Task, TaskFuture, TaskResult, find, registered,
@@ -132,8 +132,7 @@ impl Concurrency {
     }
 
     /// End a task that runs longer than `timeout` with an error naming it,
-    /// for one call. Zero means no timeout on the Tokio and sync drivers;
-    /// the process driver uses its 60-second default when no timeout is set.
+    /// for one call. No deadline applies unless set; zero means none.
     pub fn with_timeout(timeout: Duration) -> PendingConcurrency {
         PendingConcurrency::default().with_timeout(timeout)
     }
@@ -217,6 +216,7 @@ impl Concurrency {
 pub struct PendingConcurrency {
     driver: Option<String>,
     timeout: Option<Duration>,
+    process_options: ProcessDriverOptions,
 }
 
 impl PendingConcurrency {
@@ -227,9 +227,24 @@ impl PendingConcurrency {
     }
 
     /// End a task that runs longer than `timeout` with an error naming it.
-    /// Zero means no timeout on Tokio and sync; process uses its 60-second default.
+    /// No deadline applies unless set; zero means none.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = (!timeout.is_zero()).then_some(timeout);
+        self.process_options = self.process_options.with_timeout(timeout);
+        self
+    }
+
+    /// Configure the built-in process driver's caller-selected limits.
+    /// A custom driver registered under the same name keeps its own settings.
+    pub fn process_options(mut self, options: ProcessDriverOptions) -> Self {
+        self.process_options = options;
+        self
+    }
+
+    /// Kill a built-in process child after this long without CPU or output progress.
+    /// No hang window applies unless set. Zero disables it.
+    pub fn hang_after(mut self, duration: Duration) -> Self {
+        self.process_options = self.process_options.hang_after(duration);
         self
     }
 
@@ -339,14 +354,17 @@ impl PendingConcurrency {
     /// The driver's name and the driver.
     fn resolve(&self) -> Result<(String, Arc<dyn ConcurrencyDriver>), FrameworkError> {
         let name = self.driver_name();
-        let driver = driver_named(&name)?;
+        let driver = driver_named(&name, &self.process_options)?;
         Ok((name, driver))
     }
 }
 
 /// The driver named `name`: one added with [`Concurrency::extend`], or a
 /// built-in one.
-fn driver_named(name: &str) -> Result<Arc<dyn ConcurrencyDriver>, FrameworkError> {
+fn driver_named(
+    name: &str,
+    options: &ProcessDriverOptions,
+) -> Result<Arc<dyn ConcurrencyDriver>, FrameworkError> {
     if let Some(driver) = crate::lock::read(&EXTENDED, "concurrency drivers")?
         .iter()
         .find(|(held, _)| held == name)
@@ -356,7 +374,9 @@ fn driver_named(name: &str) -> Result<Arc<dyn ConcurrencyDriver>, FrameworkError
     }
     match name {
         "tokio" => Ok(Arc::new(TokioConcurrencyDriver)),
-        "process" => Ok(Arc::new(ProcessConcurrencyDriver)),
+        "process" => Ok(Arc::new(ProcessConcurrencyDriver::with_options(
+            options.clone(),
+        ))),
         "sync" => Ok(Arc::new(SyncConcurrencyDriver)),
         other => Err(FrameworkError::internal(format!(
             "no concurrency driver is named `{other}`; the drivers are tokio, process and \

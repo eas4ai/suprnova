@@ -1,8 +1,8 @@
 # Processes
 
 The `Process` facade runs other programs: a build tool, `git`, an image
-converter, a script. It captures what the program writes, ends it when it
-runs too long, cleans up everything it started, runs several side by side,
+converter, a script. It captures what the program writes, enforces caller-set
+limits, cleans up everything it started, runs several side by side,
 and fakes them all in tests. It is Laravel's `Process` facade with the
 command and the shell line kept apart.
 
@@ -57,6 +57,8 @@ whatever the line holds. Use `Process::command` for that.
 | `output_bytes()` / `error_output_bytes()` | the same, byte for byte, for output that is not text |
 | `see_in_output(text)` / `see_in_error_output(text)` | whether the output contains `text` |
 | `command()` | the command line that ran |
+| `last_progress()` | the last observed CPU or output progress instant, or the start when none was seen |
+| `idle_duration()` | the idle duration when this result was captured; it does not grow afterward |
 
 A nonzero exit is a result that reports failure, not an error. Call
 `throw()` to turn a failed result into a `ProcessError::Failed` that
@@ -68,7 +70,8 @@ let built = Process::command(["cargo", "build"]).run().await?.throw()?;
 
 `run` returns an error only when the program did not give a result: it
 could not be started (`ProcessError::NotStarted`, which names the
-program and command line), or it was killed for a timeout or an output limit.
+program and command line), or a caller-set deadline, idle timeout, hang
+window or output ceiling killed it.
 
 You see arguments quoted as a POSIX shell would quote them in results and
 errors. `Process::command(["printf", "a b"])` reports `printf 'a b'`.
@@ -83,9 +86,12 @@ Every option takes the builder and returns it:
 | `path(dir)` | the working directory |
 | `env(key, value)` | adds a variable to the inherited environment; `env("HOME", None)` removes it |
 | `input(bytes)` | writes to standard input, then closes it; without it, standard input is empty |
-| `timeout(duration)` | the longest it may run; 60 seconds unless set, and zero means none, as in Laravel |
+| `timeout(duration)` | the longest it may run; no deadline unless set, and zero means none |
 | `forever()` | no timeout |
-| `idle_timeout(duration)` | the longest it may go without writing output |
+| `idle_timeout(duration)` | the longest it may go without writing output; no default, and zero means none |
+| `hang_after(duration)` | the longest it may go without CPU or output progress; no default, and zero means none |
+| `max_stream_output_bytes(bytes)` | an optional ceiling on either output stream; zero permits no output |
+| `max_combined_output_bytes(bytes)` | an optional ceiling on stdout and stderr together; zero permits no output |
 | `quietly()` | keeps no output: it is read and thrown away, and no output callback is called |
 | `tty()` | hands the program this terminal, for a program that talks to the user; nothing is captured, and an idle timeout is refused, since nothing can watch the terminal. Redirected standard input or standard output returns an error naming that stream. `Process::supports_tty()` says whether there is a terminal |
 
@@ -105,17 +111,31 @@ Process::command(["npm", "run", "build"])
 
 ## Timeouts and cleanup
 
+No deadline, output ceiling or hang window applies unless the caller sets
+one. Without limits a child runs until it exits and its output stays in
+memory. `quietly()` discards captured output; `tty()` sends it to the terminal.
+
+Each child has a monitor that samples progress every 100 ms. On Linux it
+tracks the child's own CPU time (`/proc/<pid>/stat` utime plus stime) and bytes
+read from stdout and stderr. Elsewhere it tracks output alone. CPU activity
+in descendants is not counted, and terminal output cannot be observed.
+`hang_after(duration)` kills a child and its descendants only when that caller-set
+window passes without observed progress. `ProcessError::Hung` names the
+command as hung and reports its actual idle time, and carries the result
+with its liveness snapshot. Without `hang_after` inactivity never kills a child.
+Fake results use their creation instant and a zero idle duration.
+
+`max_stream_output_bytes` and `max_combined_output_bytes` enforce only the
+ceilings the caller sets. Exceeding one kills the process tree and returns
+`ProcessError::OutputLimitExceeded` with the command, stream, ceiling and
+output captured before the rejected chunk. Configured ceilings count bytes
+also under `quietly()` and `forever()`; terminal output is not captured.
+
 A program that runs past its timeout is killed and `run` returns
 `ProcessError::TimedOut`, naming the command and the timeout. One that
 writes nothing for its idle timeout is killed the same way, with
 `ProcessError::IdleTimedOut`. Both errors carry the output written before
 the kill.
-
-Each captured process reads at most 8 MiB from either stdout or stderr,
-and 12 MiB combined. Exceeding either ceiling kills the process tree and
-returns `ProcessError::OutputLimitExceeded`, with the command, stream,
-limit and bounded output captured before the kill. These limits also apply
-to `forever()` and `quietly()`; terminal output under `tty()` is not captured.
 
 A kill reaches everything the program started: a script that started
 background jobs takes them with it. On Unix each program gets a process
@@ -201,7 +221,7 @@ if !results.successful() {
 ```
 
 `results.get(key)` returns that process's result, or its error when it
-could not run or was killed for a timeout or output limit. A failure stops nothing else.
+could not run or a caller-set limit killed it. A failure stops nothing else.
 A pushed process is keyed by its position, or the next free number when a
 key already holds it, and adding a key twice replaces the first process.
 With `concurrency(n)` at most `n` run at once and the rest wait for a

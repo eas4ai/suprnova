@@ -311,10 +311,18 @@ pub(crate) fn panicked(name: &str) -> FrameworkError {
 
 /// What one task answered: its output as JSON, decoded on demand to the
 /// task's output type.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct TaskResult {
     name: String,
     value: Value,
+    process_liveness: Option<(std::time::Instant, std::time::Duration)>,
+}
+
+// Liveness is telemetry; task outcomes retain their value equality.
+impl PartialEq for TaskResult {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.value == other.value
+    }
 }
 
 impl TaskResult {
@@ -324,7 +332,25 @@ impl TaskResult {
         Self {
             name: name.into(),
             value,
+            process_liveness: None,
         }
+    }
+
+    pub(crate) fn with_process_liveness(mut self, result: &crate::process::ProcessResult) -> Self {
+        self.process_liveness = Some((result.last_progress(), result.idle_duration()));
+        self
+    }
+
+    /// The last observed CPU or output progress for a process-driver task.
+    /// Other drivers return `None`.
+    pub fn last_progress(&self) -> Option<std::time::Instant> {
+        self.process_liveness.map(|(last, _)| last)
+    }
+
+    /// The idle duration when the process driver's result was captured.
+    /// Other drivers return `None`. The snapshot does not grow afterward.
+    pub fn idle_duration(&self) -> Option<std::time::Duration> {
+        self.process_liveness.map(|(_, idle)| idle)
     }
 
     /// The registered name of the task that answered.

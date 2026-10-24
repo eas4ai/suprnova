@@ -1,6 +1,0 @@
-# Buffered outbound responses must enforce declared and actual byte limits.
-disallowed-methods = [
-    { path = "reqwest::Response::json", reason = "Unbounded response collection; use crate::http_client::read_capped, then serde_json::from_slice" },
-    { path = "reqwest::Response::bytes", reason = "Unbounded response collection; use crate::http_client::read_capped" },
-    { path = "reqwest::Response::text", reason = "Unbounded response collection; use crate::http_client::read_capped, then decode UTF-8" },
-]

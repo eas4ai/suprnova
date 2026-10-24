@@ -704,17 +704,14 @@ async fn cloudflare_publication_creates_the_rules_and_purges_the_page_urls() {
 }
 
 #[tokio::test]
-async fn cloudflare_rejects_oversized_api_envelope() {
+async fn cloudflare_reads_a_complete_api_envelope_without_a_driver_size_ceiling() {
     let mock = Mock::start(Some(vec![Reply {
         status: 200,
         body: json!({"success":true,"errors":[],"padding":"x".repeat(2*1024*1024)}),
     }]))
     .await;
-    let error = mock
-        .driver()
+    mock.driver()
         .purge(Purge::Prefix("/".into()))
         .await
-        .map(|_| ())
-        .expect_err("oversized envelope must fail");
-    assert!(error.to_string().contains("byte cap"), "{error}");
+        .unwrap();
 }

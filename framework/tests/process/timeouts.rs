@@ -565,7 +565,7 @@ async fn dropping_a_process_kills_descendants_that_leave_the_process_group() {
 
 #[tokio::test]
 #[serial]
-async fn process_output_is_bounded_on_each_stream_and_in_total() {
+async fn configured_output_ceilings_apply_to_each_stream_and_in_total() {
     for (stream, script) in [
         ("stdout", "head -c 8388609 /dev/zero"),
         ("stderr", "head -c 8388609 /dev/zero >&2"),
@@ -575,6 +575,8 @@ async fn process_output_is_bounded_on_each_stream_and_in_total() {
         ),
     ] {
         let error = Process::command(sh(script))
+            .max_stream_output_bytes(8 * 1024 * 1024)
+            .max_combined_output_bytes(12 * 1024 * 1024)
             .run()
             .await
             .map(|_| ())
@@ -608,7 +610,10 @@ async fn output_limit_kills_the_process_tree_without_waiting() {
         file.display(),
         file.display()
     );
-    let process = Process::command(sh(&script)).forever().start().unwrap();
+    let process = Process::command(sh(&script))
+        .max_stream_output_bytes(8 * 1024 * 1024)
+        .start()
+        .unwrap();
     let pids = pids_in(&file, 2).await;
     assert!(
         all_gone(&pids, Duration::from_secs(5)).await,
@@ -624,10 +629,12 @@ async fn output_limit_kills_the_process_tree_without_waiting() {
 
 #[tokio::test]
 #[serial]
-async fn output_exactly_at_the_caps_succeeds_and_quiet_output_is_still_limited() {
+async fn output_exactly_at_configured_ceilings_succeeds_and_quiet_output_counts() {
     let result = Process::command(sh(
         "head -c 8388608 /dev/zero; head -c 4194304 /dev/zero >&2",
     ))
+    .max_stream_output_bytes(8 * 1024 * 1024)
+    .max_combined_output_bytes(12 * 1024 * 1024)
     .run()
     .await
     .unwrap();
@@ -635,10 +642,91 @@ async fn output_exactly_at_the_caps_succeeds_and_quiet_output_is_still_limited()
     assert_eq!(result.output_bytes().len(), 8 * 1024 * 1024);
     assert_eq!(result.error_output_bytes().len(), 4 * 1024 * 1024);
     let error = Process::command(sh("head -c 8388609 /dev/zero"))
+        .max_stream_output_bytes(8 * 1024 * 1024)
         .quietly()
         .run()
         .await
         .map(|_| ())
         .expect_err("quiet output still has a ceiling");
     assert!(matches!(error, ProcessError::OutputLimitExceeded { .. }));
+}
+
+#[tokio::test]
+async fn output_progress_keeps_a_child_alive_past_its_hang_window() {
+    let started = Instant::now();
+    let result = Process::shell(
+        "i=0; while [ $i -lt 20 ]; do printf .; printf . >&2; sleep 0.1; i=$((i+1)); done",
+    )
+    .hang_after(Duration::from_millis(500))
+    .run()
+    .await
+    .expect("output every 100 ms keeps the child alive for two seconds");
+    assert!(result.successful());
+    assert!(started.elapsed() >= Duration::from_secs(2));
+    assert_eq!(result.output(), ".".repeat(20));
+    assert_eq!(result.error_output(), ".".repeat(20));
+    assert!(result.last_progress() > started);
+    assert!(result.idle_duration() < Duration::from_millis(500));
+}
+
+#[tokio::test]
+async fn a_hung_child_is_killed_without_waiting_and_reports_its_idle_time() {
+    let started = Instant::now();
+    let child = Process::command(["sleep", "30"])
+        .hang_after(Duration::from_millis(500))
+        .start()
+        .unwrap();
+    let pid = child.id().unwrap();
+    assert!(all_gone(&[pid], Duration::from_secs(5)).await);
+    let error = child
+        .wait()
+        .await
+        .expect_err("a sleeping child makes no progress");
+    let text = error.to_string();
+    match error {
+        ProcessError::Hung { idle, result, .. } => {
+            assert!(idle >= Duration::from_millis(500));
+            assert!(result.idle_duration() >= idle);
+            assert!(result.last_progress() >= started);
+            assert!(text.contains("hung") && text.contains("idle for"), "{text}");
+            assert!(
+                text.contains(&format!("{} milliseconds", idle.as_millis())),
+                "{text}"
+            );
+            assert!(text.contains("sleep 30"), "{text}");
+        }
+        other => panic!("wrong failure: {other}"),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_default_deadline_or_hang_window_kills_a_child() {
+    let mut child = Process::command(["sleep", "30"]).start().unwrap();
+    tokio::time::advance(Duration::from_secs(61)).await;
+    assert!(child.running(), "no default deadline or hang window");
+    child.stop(Duration::ZERO, None).await.unwrap();
+}
+
+#[tokio::test]
+async fn output_has_no_ceiling_unless_the_caller_sets_one() {
+    let result = Process::shell("head -c 9437184 /dev/zero; head -c 9437184 /dev/zero >&2")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(result.output_bytes().len(), 9 * 1024 * 1024);
+    assert_eq!(result.error_output_bytes().len(), 9 * 1024 * 1024);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn cpu_progress_keeps_a_silent_child_alive() {
+    let mut child = Process::shell("exec sh -c 'while :; do :; done'")
+        .hang_after(Duration::from_millis(500))
+        .start()
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(child.running(), "the child is busy without output");
+    let result = child.stop(Duration::ZERO, None).await.unwrap();
+    assert!(result.idle_duration() < Duration::from_millis(500));
+    assert!(result.output().is_empty());
 }

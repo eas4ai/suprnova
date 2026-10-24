@@ -110,8 +110,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use zeroize::Zeroizing;
 
-const MAX_JSON_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-
 /// Pinecone's default control-plane base URL.
 pub const DEFAULT_CONTROL_PLANE: &str = "https://api.pinecone.io";
 
@@ -468,12 +466,7 @@ impl PineconeVectorDriver {
             )));
         }
 
-        let body = crate::http_client::read_capped(response, MAX_JSON_RESPONSE_BYTES)
-            .await
-            .map_err(|error| {
-                FrameworkError::internal(format!("pinecone {method} {url}: {error}"))
-            })?;
-        serde_json::from_slice::<R>(&body).map_err(|e| {
+        response.json::<R>().await.map_err(|e| {
             FrameworkError::internal(format!(
                 "pinecone {method} {url} returned undecodable JSON: {e}"
             ))

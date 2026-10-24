@@ -397,7 +397,7 @@ fn a_client_refuses_an_invalid_config_without_quoting_the_secret() {
 }
 
 #[tokio::test]
-async fn pusher_rejects_oversized_success_and_error_bodies() {
+async fn pusher_reads_complete_success_and_error_bodies_without_driver_size_ceilings() {
     for status in [200, 400] {
         let server = MockServer::start().await;
         let body = format!("{{}}{}", " ".repeat(2 * 1024 * 1024));
@@ -406,12 +406,14 @@ async fn pusher_rejects_oversized_success_and_error_bodies() {
             .mount(&server)
             .await;
         let client = PusherClient::new(config_for(&server), registry()).unwrap();
-        let error = client
-            .get("/channels", &[])
-            .await
-            .map(|_| ())
-            .expect_err("oversized body must fail");
-        assert!(error.to_string().contains("byte cap"), "{error}");
-        assert!(!error.to_string().contains(SECRET));
+        let result = client.get("/channels", &[]).await;
+        if status == 200 {
+            assert_eq!(result.unwrap(), json!({}));
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("400"), "{error}");
+            assert!(!error.contains("byte cap"), "{error}");
+            assert!(!error.contains(SECRET));
+        }
     }
 }

@@ -59,15 +59,6 @@ use crate::error::FrameworkError;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The timeout a process gets unless it sets another: 60 seconds, as in
-/// Laravel.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Maximum bytes read from either stdout or stderr before killing the process tree.
-pub const MAX_STREAM_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
-/// Maximum bytes read from stdout and stderr together before killing the process tree.
-pub const MAX_COMBINED_OUTPUT_BYTES: usize = 12 * 1024 * 1024;
-
 /// The grace before a stopped process is killed, so it can finish cleanup.
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(10);
 
@@ -301,6 +292,9 @@ const SHELL: &str = "/bin/sh";
 
 /// A process to run, with its settings. Every setter takes and returns the
 /// builder, so a process reads as one chain.
+/// Only caller-configured deadlines, output ceilings and hang windows are
+/// enforced. Without them a child runs until it exits and its output stays
+/// in memory, unless capture is disabled with `quietly` or `tty`.
 #[derive(Debug, Clone)]
 pub struct PendingProcess {
     pub(crate) command: Command,
@@ -309,6 +303,9 @@ pub struct PendingProcess {
     pub(crate) input: Option<Vec<u8>>,
     pub(crate) timeout: Option<Duration>,
     pub(crate) idle_timeout: Option<Duration>,
+    pub(crate) hang_after: Option<Duration>,
+    pub(crate) max_stream_output_bytes: Option<usize>,
+    pub(crate) max_combined_output_bytes: Option<usize>,
     pub(crate) quietly: bool,
     pub(crate) tty: bool,
 }
@@ -320,8 +317,11 @@ impl PendingProcess {
             path: None,
             env: Vec::new(),
             input: None,
-            timeout: Some(DEFAULT_TIMEOUT),
+            timeout: None,
             idle_timeout: None,
+            hang_after: None,
+            max_stream_output_bytes: None,
+            max_combined_output_bytes: None,
             quietly: false,
             tty: false,
         }
@@ -374,8 +374,7 @@ impl PendingProcess {
     }
 
     /// Kill the process, with every process it started, when it runs
-    /// longer than this. The default is [`DEFAULT_TIMEOUT`]; zero means no
-    /// timeout, as in Laravel.
+    /// longer than this. There is no default deadline; zero means none.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = (!timeout.is_zero()).then_some(timeout);
         self
@@ -387,6 +386,30 @@ impl PendingProcess {
     /// watch it, and [`run`](Self::run) refuses the pair.
     pub fn idle_timeout(mut self, timeout: Duration) -> Self {
         self.idle_timeout = (!timeout.is_zero()).then_some(timeout);
+        self
+    }
+
+    /// Kill the child and its descendants after this long without progress.
+    /// Progress is CPU time (`utime + stime` in Linux procfs) or bytes read
+    /// from stdout or stderr. Other platforms track output alone. There is
+    /// no default hang window; zero disables it. CPU activity in descendants
+    /// is not counted. Terminal output cannot be observed.
+    pub fn hang_after(mut self, duration: Duration) -> Self {
+        self.hang_after = (!duration.is_zero()).then_some(duration);
+        self
+    }
+
+    /// Kill the process tree if either output stream exceeds this many bytes.
+    /// No ceiling applies unless set, including when output is discarded.
+    pub fn max_stream_output_bytes(mut self, bytes: usize) -> Self {
+        self.max_stream_output_bytes = Some(bytes);
+        self
+    }
+
+    /// Kill the process tree if stdout and stderr together exceed this many bytes.
+    /// No ceiling applies unless set, including when output is discarded.
+    pub fn max_combined_output_bytes(mut self, bytes: usize) -> Self {
+        self.max_combined_output_bytes = Some(bytes);
         self
     }
 
@@ -425,8 +448,9 @@ impl PendingProcess {
     /// [`ProcessError::Unsupported`] for a [`tty`](Self::tty) process with an
     /// idle timeout, [`ProcessError::TimedOut`] and
     /// [`ProcessError::IdleTimedOut`] when it is killed for running too long
-    /// or going quiet, [`ProcessError::OutputLimitExceeded`] when output
-    /// exceeds 8 MiB per stream or 12 MiB combined, and, under a fake,
+    /// or going quiet, [`ProcessError::Hung`] when a configured hang window
+    /// passes, [`ProcessError::OutputLimitExceeded`] when output exceeds a
+    /// caller-set ceiling, and, under a fake,
     /// [`ProcessError::Stray`] and [`ProcessError::FakeExhausted`].
     /// A nonzero exit is not an error.
     pub async fn run(self) -> Result<ProcessResult, ProcessError> {
@@ -474,13 +498,27 @@ impl PendingProcess {
 }
 
 /// What a process did: its exit code and the output it wrote.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ProcessResult {
     pub(crate) command: String,
     pub(crate) exit_code: Option<i32>,
     output: Captured,
     error_output: Captured,
+    last_progress: std::time::Instant,
+    idle_duration: Duration,
 }
+
+// Observation times do not change the command's outcome or its equality.
+impl PartialEq for ProcessResult {
+    fn eq(&self, other: &Self) -> bool {
+        self.command == other.command
+            && self.exit_code == other.exit_code
+            && self.output == other.output
+            && self.error_output == other.error_output
+    }
+}
+
+impl Eq for ProcessResult {}
 
 /// One stream a process wrote, held once.
 ///
@@ -534,7 +572,31 @@ impl ProcessResult {
             exit_code,
             output: Captured::new(output),
             error_output: Captured::new(error_output),
+            last_progress: std::time::Instant::now(),
+            idle_duration: Duration::ZERO,
         }
+    }
+
+    pub(crate) fn with_liveness(
+        mut self,
+        last_progress: std::time::Instant,
+        idle_duration: Duration,
+    ) -> Self {
+        self.last_progress = last_progress;
+        self.idle_duration = idle_duration;
+        self
+    }
+
+    /// The last observed CPU or output progress, or the start if none was seen.
+    /// Fake results use their creation instant.
+    pub fn last_progress(&self) -> std::time::Instant {
+        self.last_progress
+    }
+
+    /// Time since the last observed progress when this result was captured.
+    /// This snapshot does not grow after the process ends.
+    pub fn idle_duration(&self) -> Duration {
+        self.idle_duration
     }
 
     /// The command line that ran.
@@ -650,6 +712,16 @@ pub enum ProcessError {
         /// The idle timeout.
         timeout: Duration,
         /// What the process wrote before the kill.
+        result: Box<ProcessResult>,
+    },
+    /// The caller's hang window passed without CPU or output progress.
+    #[error("the process \"{command}\" hung after being idle for {}", describe_duration(*idle))]
+    Hung {
+        /// The command line.
+        command: String,
+        /// How long no progress was observed before the kill.
+        idle: Duration,
+        /// What the process wrote before the kill, including liveness.
         result: Box<ProcessResult>,
     },
     /// An output byte ceiling was exceeded and the process tree was killed.

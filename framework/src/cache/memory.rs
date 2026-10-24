@@ -394,14 +394,6 @@ impl CacheStore for InMemoryCache {
     }
 
     async fn get_raw(&self, key: &str) -> Result<Option<String>, FrameworkError> {
-        self.get_raw_capped(key, usize::MAX).await
-    }
-
-    async fn get_raw_capped(
-        &self,
-        key: &str,
-        max: usize,
-    ) -> Result<Option<String>, FrameworkError> {
         let key = self.prefixed_key(key);
 
         // Hold the read lock for the common (hit / clean miss) path. If
@@ -414,14 +406,7 @@ impl CacheStore for InMemoryCache {
                 .read()
                 .map_err(|_| FrameworkError::internal("Cache lock poisoned"))?;
             match store.get(&key) {
-                Some(entry) if !entry.is_expired() => {
-                    if entry.value.len() > max {
-                        return Err(FrameworkError::internal(format!(
-                            "Cache value exceeds the {max}-byte cap"
-                        )));
-                    }
-                    return Ok(Some(entry.value.clone()));
-                }
+                Some(entry) if !entry.is_expired() => return Ok(Some(entry.value.clone())),
                 Some(_) => true,
                 None => false,
             }
