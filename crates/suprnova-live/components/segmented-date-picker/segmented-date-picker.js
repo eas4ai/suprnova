@@ -87,6 +87,7 @@ export class SegmentedDatePicker extends HTMLElement {
   #formDisabled = false;
   #swallowSeparator = false;
   #composing = false;
+  #beforeInputHandled = false;
   #monthLabelsCache = new Map();
   #rejectTimers = new Map();
   #adjustTimers = new Map();
@@ -987,14 +988,21 @@ export class SegmentedDatePicker extends HTMLElement {
   }
 
   /**
-   * All character entry arrives here (desktop keys, mobile keyboards, IME
-   * commits) and is cancelled so the input only ever shows rendered state.
+   * Cancel character entry when possible; native input handles uncancelable edits.
    */
   #onBeforeInput(e, segment) {
     e.stopPropagation();
+    this.#beforeInputHandled = false;
     if ((e.inputType ?? "").includes("Composition")) return; // not cancelable; see compositionend
+    if (!e.cancelable) return;
     e.preventDefault();
-    if (!this.#editable) return;
+    if (!e.defaultPrevented || !this.#editable) return;
+    this.#beforeInputHandled = true;
+    // A canceled edit normally emits no input. Expire the guard so a later
+    // native-only edit can still run.
+    queueMicrotask(() => {
+      this.#beforeInputHandled = false;
+    });
     const type = e.inputType ?? "";
     if (type.startsWith("delete")) {
       this.#erase(segment);
@@ -1008,6 +1016,8 @@ export class SegmentedDatePicker extends HTMLElement {
   /** Fallback for platforms where beforeinput is not cancelable (some Android IMEs). */
   #onNativeInput(e, segment) {
     e.stopPropagation();
+    const handled = this.#beforeInputHandled;
+    this.#beforeInputHandled = false;
     // Composition text is handled once, on compositionend.
     if (
       this.#composing ||
@@ -1015,7 +1025,7 @@ export class SegmentedDatePicker extends HTMLElement {
       (e.inputType ?? "").includes("Composition")
     )
       return;
-    if (this.#editable) {
+    if (!handled && this.#editable) {
       const type = e.inputType ?? "";
       if (type.startsWith("delete")) this.#erase(segment);
       else if (e.data) this.#typeText(e.data);
