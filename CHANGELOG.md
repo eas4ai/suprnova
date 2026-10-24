@@ -4,6 +4,23 @@ A readable, per-version log of what changed in Suprnova. Each version
 section is that version's release record. A version is released when its
 version commit and matching `v<version>` tag are pushed atomically. Newest first.
 
+## 4.7.0 - 2026-10-24
+
+### Added
+
+- **A documentation site plugin.** `crates/suprnova-docs` mounts a docs
+  site from a `docs/` folder: a `docs.json` set manifest with versions,
+  the default version and languages, a `navigation.json` per version,
+  Markdown pages rendered through the framework's Markdown pipeline inside a
+  layout the application supplies, assets per version, and pages, versions
+  or sets marked private behind a gate the application supplies. Every page
+  is also served as Markdown at its `.md` address and to `Accept:
+  text/markdown`; each version serves `llms.txt` and `llms-full.txt`; a
+  search index built at boot serves an in-page search with no service to
+  run; and three read tools, `search_docs`, `read_page` and `list_pages`,
+  join the application's agents endpoint, gated the same way. The dogfood
+  application serves its own set through it (`manual/docs-site.md`).
+
 ## 4.6.2 - 2026-10-23
 
 ### Added

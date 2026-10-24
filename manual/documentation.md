@@ -79,6 +79,7 @@
     - [Installing Live Components](live-add.md)
     - [Live Component Libraries](live-libraries.md)
     - [Static Publication](static-publication.md)
+    - [Documentation Site](docs-site.md)
     - [RenderCache](render-cache.md)
     - [RenderCache Representations](render-cache-representations.md)
     - [RenderCache Generations](render-cache-generations.md)
