@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "v1",
+      "protocol": 1,
+      "runtime": 1,
+      "snapshot": 1,
+      "expected": "compatible"
+    },
+    {
+      "id": "protocol-v2",
+      "protocol": 2,
+      "runtime": 1,
+      "snapshot": 1,
+      "expected": "refresh_document"
+    },
+    {
+      "id": "runtime-v2",
+      "protocol": 1,
+      "runtime": 2,
+      "snapshot": 1,
+      "expected": "refresh_document"
+    },
+    {
+      "id": "snapshot-v2",
+      "protocol": 1,
+      "runtime": 1,
+      "snapshot": 2,
+      "expected": "refresh_document"
+    }
+  ]
+}

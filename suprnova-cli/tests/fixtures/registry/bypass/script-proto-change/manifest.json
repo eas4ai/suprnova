@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-proto-change",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
