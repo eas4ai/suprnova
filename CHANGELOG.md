@@ -70,8 +70,8 @@ version commit and matching `v<version>` tag are pushed atomically. Newest first
   same URL, user and password variables as Memgraph; boot refuses an
   unknown store and names the feature a selected store needs. Every
   statement the Memgraph driver issues is checked per dialect, and each
-  driver's conformance runs as engine-named tests against a standing
-  service (`manual/recommendations.md`, `manual/env-vars.md`).
+  driver's conformance runs as engine-named tests against the real engine
+  (`manual/recommendations.md`, `manual/env-vars.md`).
 
 ## 4.6.2 - 2026-10-23
 
