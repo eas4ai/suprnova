@@ -1,0 +1,5 @@
+error: live binding lists prop `posts` more than once
+ --> tests/ui/inertia-props/fail/live_binding_duplicate_prop.rs:6:50
+  |
+6 | #[inertia(live(topic = "posts", only = ["posts", "posts"]))]
+  |                                                  ^^^^^^^

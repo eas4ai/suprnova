@@ -1,0 +1,1038 @@
+//! URL generation helpers.
+//!
+//! Laravel's `URL` facade (`Illuminate/Routing/UrlGenerator.php`) backs
+//! `url()`, `url()->to()`, `url()->current()`, `url()->previous()`,
+//! `url()->signedRoute()`. Suprnova ships a deliberately smaller surface -
+//! the heavy `asset()`/`secureAsset()` family is handled by Vite +
+//! the filesystem disks, and the controller-action `action()` helper
+//! has no Rust analogue because handlers are functions, not controller
+//! strings.
+//!
+//! What does land here is the user-facing shape consumers reach for:
+//!
+//! - [`to`] / [`secure`] / [`secure_with`] - build an absolute URL from a
+//!   path against the configured `APP_URL`.
+//! - [`current`] / [`full`] / [`previous`] / [`previous_path`] - read the
+//!   current request's URL without and with its query, and the previous
+//!   URL recorded in the session, whole or as a path.
+//! - [`signed_route`] / [`temporary_signed_route`] - sign a named route
+//!   for HMAC-verified delivery.
+//! - [`has_valid_signature`] / [`has_valid_signature_ignoring`] /
+//!   [`signature_verdict`] - verify a signed URL coming in on a request;
+//!   the last tells `Expired` from `Invalid`.
+//!
+//! All helpers are free functions in the `crate::routing::url` namespace,
+//! re-exported under `suprnova::url::*` so consumers write:
+//!
+//! ```rust,no_run
+//! use suprnova::url;
+//! # use suprnova::Request;
+//! # fn req() -> Request { unimplemented!() }
+//! # fn ex() -> Result<(), Box<dyn std::error::Error>> {
+//! # let t = "reset-token";
+//! # let request = req();
+//! let absolute = url::to("/dashboard");
+//! let signed = url::signed_route("password.reset", &[("token", t)])?;
+//! let verdict = url::has_valid_signature(&request);
+//! # let _ = (absolute, signed, verdict);
+//! # Ok(()) }
+//! ```
+
+use crate::FrameworkError;
+use crate::http::Request;
+use crate::routing::signed::{
+    SignatureVerdict, sign_route as do_sign_route, sign_url as do_sign_url,
+    verify_signature_ignoring,
+};
+use percent_encoding::utf8_percent_encode;
+
+/// Build an absolute URL by joining `path` to the configured
+/// `APP_URL` under the public root.
+///
+/// Mirrors Laravel's `url()->to($path)` /
+/// `Illuminate/Routing/UrlGenerator.php::to()`. The scheme, host and
+/// port come from `APP_URL`. The path that follows them is the public
+/// root ([`root`]): the trusted `X-Forwarded-Prefix` of the request
+/// being handled, or else the path in `APP_URL`. A trusted prefix
+/// replaces the `APP_URL` path rather than adding to it, and a `path`
+/// that already starts with the root keeps it once (PFX-010), so
+/// `url::to(&route(...))` never doubles it. An already-absolute `path`
+/// (one that starts with `http://`, `https://`, or `//`) is returned
+/// unchanged.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// // SAFETY: single-threaded doctest; `set_var` is `unsafe` in edition 2024.
+/// unsafe { std::env::set_var("APP_URL", "https://example.com"); }
+/// assert_eq!(suprnova::url::to("/about"), "https://example.com/about");
+/// assert_eq!(
+///     suprnova::url::to("https://other.example/x"),
+///     "https://other.example/x",
+/// );
+/// ```
+pub fn to(path: &str) -> String {
+    if is_absolute(path) {
+        return path.to_string();
+    }
+    let app_url = app_url();
+    let (origin, _) = super::root::split_app_url(&app_url);
+    let root = super::root::current();
+    if path.starts_with('/') {
+        let rooted = super::root::rooted_with(&root, path);
+        return format!("{origin}{rooted}");
+    }
+    join_base_path(&format!("{origin}{root}"), path)
+}
+
+/// Build an absolute `https://` URL even if `APP_URL` is `http://`.
+/// Mirrors Laravel's `url()->secure($path)`.
+pub fn secure(path: &str) -> String {
+    let absolute = to(path);
+    if let Some(rest) = absolute.strip_prefix("http://") {
+        format!("https://{rest}")
+    } else {
+        absolute
+    }
+}
+
+/// [`secure`] with `segments` appended to the path, each one
+/// percent-encoded as one path segment.
+///
+/// Mirrors Laravel's `url()->secure($path, $parameters)`. A value taken
+/// from user input, such as a name with a space or a slash, stays one
+/// segment: it is encoded with the set [`crate::route`] uses for a route
+/// parameter, so `secure_with("users", &["a b", "7"])` gives
+/// `https://<APP_URL host>/users/a%20b/7`. The segments go in front of a
+/// query or a fragment that `path` carries. The `APP_URL` origin, the
+/// public root and the `https` upgrade are those of [`secure`].
+///
+/// An absolute `path` gets the segments too. Laravel returns an absolute
+/// path unchanged and drops them, which loses the caller's values without
+/// a word.
+pub fn secure_with(path: &str, segments: &[&str]) -> String {
+    secure(&append_segments(path, segments))
+}
+
+/// `path` with every segment of `segments` encoded and appended, before
+/// any query or fragment, with one `/` between each part.
+fn append_segments(path: &str, segments: &[&str]) -> String {
+    if segments.is_empty() {
+        return path.to_string();
+    }
+    let split = path.find(['?', '#']).unwrap_or(path.len());
+    let (head, tail) = path.split_at(split);
+    let mut out = head.trim_end_matches('/').to_string();
+    for segment in segments {
+        out.push('/');
+        out.extend(utf8_percent_encode(
+            segment,
+            super::router::PATH_SEGMENT_ENCODE,
+        ));
+    }
+    out.push_str(tail);
+    out
+}
+
+/// The absolute URL of the current request without its query: the
+/// `APP_URL` origin, the public root and the path.
+///
+/// Mirrors Laravel's `url()->current()`, which builds the URL from the path
+/// alone. Use [`full`] when you need the query too. Behind a proxy that
+/// strips a path prefix the request arrives without it, so the root is put
+/// back in front: a request for `/invoices` behind a trusted
+/// `X-Forwarded-Prefix: /billing` gives `https://example.com/billing/invoices`
+/// (PFX-002). The origin comes from `APP_URL`, never from the `Host`
+/// header, so a forged host cannot change it. Use [`Request::path`] directly
+/// when you need the path the application matched its routes on.
+///
+/// The path is what the client sent. A request-target such as
+/// `//evil.example/x` stays a path on the `APP_URL` origin, as it does in
+/// [`full`].
+pub fn current(request: &Request) -> String {
+    current_at(&request.public_root(), request.path())
+}
+
+/// [`current`] from a request's public root and path, for code that kept
+/// those two facts after the request itself was handed on, such as the
+/// visit a handler runs in.
+pub(crate) fn current_at(root: &str, path: &str) -> String {
+    on_app_origin(&format!("{root}{path}"))
+}
+
+/// The current request's public root, path and query string: the URL the
+/// browser asked for, relative to its host.
+///
+/// The framework sends a request back to this URL and records it in the
+/// session, so it keeps the query, which [`current`] leaves out: the
+/// session's previous URL, [`crate::Redirect::guest`] and
+/// [`crate::Redirect::refresh_for`], the Inertia and form validation
+/// redirects, and signature verification, which reads the query.
+///
+/// The value is what the client sent; the session and Inertia middleware
+/// normalise its query before they record it as the previous URL, as
+/// Laravel stores `$request->fullUrl()`. At the host root a request-target
+/// such as `//evil.example/x` gives a network-path reference, which a
+/// browser reads as another host, so the framework's redirects and the
+/// intended URL check it with [`root_relative_or_none`] before they use it.
+pub(crate) fn current_path_and_query(request: &Request) -> String {
+    let root = request.public_root();
+    let path = request.path();
+    match request.uri().query() {
+        Some(q) if !q.is_empty() => format!("{root}{path}?{q}"),
+        _ => format!("{root}{path}"),
+    }
+}
+
+/// Full absolute URL of the current request, query included: the
+/// `APP_URL` origin, the public root, the path and the query. Mirrors
+/// Laravel's `url()->full()`, which is `$request->fullUrl()`: the query is
+/// normalised as [`Request::full_url`] normalises it, its pairs sorted by
+/// key and re-encoded per RFC 3986 (PAR-056), and a query that normalises
+/// to nothing leaves no `?`.
+pub fn full(request: &Request) -> String {
+    on_app_origin(&crate::http::query_string::normalize_path_and_query(
+        current_path_and_query(request),
+    ))
+}
+
+/// `target`, a request's root and path, on the `APP_URL` origin.
+///
+/// The origin is joined here rather than through [`to`], which returns a
+/// target that starts with `//` unchanged: a request for `//evil.example/x`
+/// is a path on this host, and its URL stays on `APP_URL`'s origin.
+fn on_app_origin(target: &str) -> String {
+    if !target.starts_with('/') {
+        return to(target);
+    }
+    let app_url = app_url();
+    let (origin, _) = super::root::split_app_url(&app_url);
+    format!("{origin}{target}")
+}
+
+/// The public root of the request being handled, without a trailing
+/// slash: `/billing` behind a trusted `X-Forwarded-Prefix: /billing`, the
+/// path in `APP_URL` when no trusted prefix arrives and outside a request,
+/// and the empty string at the host root.
+///
+/// The root followed by a root-relative path is a link that works at every
+/// root, so this is how a template writes a root-relative link that
+/// [`crate::route`] does not build, such as a component stylesheet:
+///
+/// ```text
+/// <link rel="stylesheet" href="{{ suprnova::url::root() }}/suprnova-ui/button/button.css">
+/// ```
+///
+/// It reads no request data a client controls unchecked: a prefix counts
+/// only from a trusted proxy and only when it passes the value rule, so
+/// the value is safe in a URL and in an attribute. Mirrors the path part of
+/// Laravel's `Request::root()`, which also drops the trailing slash.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// // At the host root, outside a request, with `APP_URL` carrying no path:
+/// assert_eq!(suprnova::url::root(), "");
+/// ```
+pub fn root() -> String {
+    super::root::current().to_string()
+}
+
+/// The previous URL recorded by [`crate::session::SessionMiddleware`] on
+/// the prior GET request. Returns `fallback` when no previous URL is
+/// recorded (fresh session, or the session middleware isn't active).
+///
+/// Mirrors Laravel's `url()->previous($fallback = '/')`. Powers
+/// [`crate::Redirect::back`].
+pub fn previous(fallback: &str) -> String {
+    crate::session::session()
+        .and_then(|s| s.previous_url())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// The path of [`previous`]: no query, no fragment, no public root and no
+/// trailing slash, and `/` when nothing is left.
+///
+/// Mirrors Laravel's `url()->previousPath($fallback)`. A handler compares
+/// it with a route's path to ask where the user came from, and a route's
+/// path carries neither the root nor the query. A previous URL of
+/// `/billing/invoices/?page=2` under the root `/billing` gives
+/// `/invoices`. With no previous URL recorded, the same is done to
+/// `fallback`, and an absolute fallback such as `https://example.com/home`
+/// gives `/home`.
+///
+/// The path is returned as the browser sent it, still percent-encoded.
+pub fn previous_path(fallback: &str) -> String {
+    path_under_root(&previous(fallback), &root())
+}
+
+/// The path part of `url` with `root` and the trailing slashes removed,
+/// or `/` when nothing is left.
+fn path_under_root(url: &str, root: &str) -> String {
+    // An absolute URL or a network-path reference: the path starts after
+    // the authority.
+    let after_authority = if is_absolute(url) {
+        let authority_start = url.find("//").map_or(0, |at| at + 2);
+        let rest = &url[authority_start..];
+        rest.find(['/', '?', '#']).map_or("", |at| &rest[at..])
+    } else {
+        url
+    };
+    let path = after_authority.split(['?', '#']).next().unwrap_or_default();
+    let path = if !root.is_empty() && super::root::is_under(root, path) {
+        &path[root.len()..]
+    } else {
+        path
+    };
+    let path = path.trim_end_matches('/');
+    if path.is_empty() {
+        "/".to_string()
+    } else if path.starts_with('/') {
+        path.to_string()
+    } else {
+        // A relative fallback such as `home`, which `to` would put under
+        // the root.
+        format!("/{path}")
+    }
+}
+
+/// Sign a named route. Convenience wrapper over
+/// [`crate::routing::signed::sign_route`].
+///
+/// Mirrors Laravel's `URL::signedRoute($name, $parameters, $expiration)`
+/// without an `$expiration` argument - for the timed variant use
+/// [`temporary_signed_route`].
+pub fn signed_route(name: &str, params: &[(&str, &str)]) -> Result<String, FrameworkError> {
+    do_sign_route(name, params, None)
+}
+
+/// Sign a named route with an expiration. Convenience wrapper over
+/// [`crate::routing::signed::sign_route`] with an `expires` clock.
+///
+/// `expires_at_epoch_seconds` is interpreted in absolute terms (a UNIX
+/// timestamp). To express "now + duration", compute
+/// `suprnova::clock::now().timestamp() + duration.as_secs() as i64` at the
+/// call site.
+///
+/// Mirrors Laravel's `URL::temporarySignedRoute($name, $expiration,
+/// $parameters)`.
+pub fn temporary_signed_route(
+    name: &str,
+    params: &[(&str, &str)],
+    expires_at_epoch_seconds: i64,
+) -> Result<String, FrameworkError> {
+    do_sign_route(name, params, Some(expires_at_epoch_seconds))
+}
+
+/// Sign an arbitrary URL with the framework signing key. Use this
+/// when the URL doesn't come from a registered named route (e.g.
+/// callbacks, third-party redirects). Wrapper over
+/// [`crate::routing::signed::sign_url`].
+pub fn signed_url(
+    url: &str,
+    expires_at_epoch_seconds: Option<i64>,
+) -> Result<String, FrameworkError> {
+    do_sign_url(url, expires_at_epoch_seconds)
+}
+
+/// Verify the signature on the inbound `request`.
+///
+/// Returns `true` only when the HMAC matches and the URL has not
+/// expired. Use [`signature_has_not_expired`] when you want the
+/// expired-vs-invalid distinction.
+///
+/// Mirrors Laravel's `URL::hasValidSignature($request)`. The verifier
+/// reads the current epoch second from [`crate::clock::now`].
+///
+/// # Errors
+///
+/// Returns `FrameworkError` when the encryption key is not installed.
+pub fn has_valid_signature(request: &Request) -> Result<bool, FrameworkError> {
+    Ok(verdict_for_request(request, &[])?.is_valid())
+}
+
+/// [`has_valid_signature`], leaving the query parameters named in
+/// `names` out of the verified text.
+///
+/// For a parameter added to a signed link after it was minted, such as the
+/// `utm_source` a mail client or a campaign tool appends: the link still
+/// verifies, and the parameter is not covered by the signature, so treat
+/// its value as untrusted. Every other parameter, the path and the root
+/// stay covered. `signature` and `expires` cannot be ignored. Mirrors the
+/// `$ignoreQuery` argument of Laravel's `URL::hasValidSignature`, and is
+/// what [`crate::routing::ValidateSignature`] checks.
+///
+/// # Errors
+///
+/// Returns `FrameworkError` when the encryption key is not installed.
+pub fn has_valid_signature_ignoring(
+    request: &Request,
+    names: &[&str],
+) -> Result<bool, FrameworkError> {
+    Ok(verdict_for_request(request, names)?.is_valid())
+}
+
+/// `true` only when the signature is valid **and** the URL has not expired.
+///
+/// # Why this requires a valid signature (SEC-04)
+///
+/// It used to be `!verdict.is_expired()`, which answered `true` for
+/// [`SignatureVerdict::Invalid`] as well as [`SignatureVerdict::Valid`]: a
+/// forged signature is not expired, because it never had an expiry to miss.
+/// That mirrored Laravel's `URL::signatureHasNotExpired($request)` exactly,
+/// and it made a function whose name reads like a guard let every forged URL
+/// through. `expires` is attacker-supplied until the HMAC says otherwise, so
+/// no answer derived from it means anything before the signature checks out.
+///
+/// Requiring validity is what closes that, and it collapses this function
+/// into [`has_valid_signature`] - necessarily so. Under a three-state verdict
+/// there is no "not expired" a boolean can report honestly except `Valid`;
+/// the old function was only distinct *because* it trusted unauthenticated
+/// input. The genuine three-way distinction lives in [`signature_verdict`],
+/// which can say `Expired` and `Invalid` separately instead of encoding three
+/// states in a `bool`:
+///
+/// ```rust,ignore
+/// match url::signature_verdict(&req)? {
+///     SignatureVerdict::Valid   => grant_access(),
+///     SignatureVerdict::Expired => render("this link has expired - request a new one"),
+///     SignatureVerdict::Invalid => render("this link is not valid"),
+/// }
+/// ```
+///
+/// A missing `expires` value still counts as "not expired", as in Laravel -
+/// an unexpiring signed URL is a valid one.
+#[deprecated(
+    since = "0.7.4",
+    note = "now identical to `has_valid_signature`; match on `signature_verdict` \
+            to tell Expired from Invalid"
+)]
+pub fn signature_has_not_expired(request: &Request) -> Result<bool, FrameworkError> {
+    Ok(verdict_for_request(request, &[])?.is_valid())
+}
+
+/// Return the full [`SignatureVerdict`] for the inbound request. Lets
+/// callers branch on `Valid`/`Expired`/`Invalid` to render distinct UX
+/// (e.g. "this link has expired - request a new one").
+pub fn signature_verdict(request: &Request) -> Result<SignatureVerdict, FrameworkError> {
+    verdict_for_request(request, &[])
+}
+
+/// Verify the root, path and query the request arrived with, leaving the
+/// parameters in `ignore` out.
+fn verdict_for_request(
+    request: &Request,
+    ignore: &[&str],
+) -> Result<SignatureVerdict, FrameworkError> {
+    let url = current_path_and_query(request);
+    let now = crate::clock::now().timestamp();
+    verify_signature_ignoring(&url, now, ignore)
+}
+
+/// Whether `path` is already absolute (`http://`, `https://`, or `//`).
+fn is_absolute(path: &str) -> bool {
+    path.starts_with("http://") || path.starts_with("https://") || path.starts_with("//")
+}
+
+/// Accept a same-origin, root-relative target, or reject it.
+///
+/// Shared by every place in the framework that stores or redirects to a
+/// URL a client influenced without a full authority check: the
+/// `InertiaValidationRedirectMiddleware` `Referer`/current-URL guard
+/// (`crate::inertia::validation_redirect_middleware`) and
+/// [`crate::session::SessionMiddleware`]'s `_previous.url` write, which
+/// backs [`crate::Redirect::back`], [`crate::Redirect::refresh`], and
+/// [`previous`].
+///
+/// The `_previous.url` path enforces this in two layers, not one: guarded
+/// here at write time so a hostile value never lands in the session in
+/// the first place, and re-checked again on every read by
+/// [`SessionData::previous_url`](crate::session::SessionData::previous_url)
+/// via this same function. A write-time guard alone would leave any
+/// session cookie that predates it - or one written by a future bug -
+/// trusted forever once stored; the read-time re-check makes such a
+/// session self-heal instead: a stored value that now fails the check
+/// reads back as `None`, so the caller's own fallback takes over instead
+/// of resolving an off-origin `Location`, and the next successful GET
+/// records a fresh, safe value over it.
+///
+/// Rejects exactly the shapes a browser can be tricked into parsing as a
+/// different origin from what a byte-for-byte check on the original
+/// string sees:
+///
+/// - A leading `//` - protocol-relative, read as absolute.
+/// - A leading `/\` - the same bypass in disguise: the WHATWG URL
+///   parser treats `\` as `/` for special schemes, so `/\evil.test`
+///   becomes `//evil.test` once the browser normalizes it.
+/// - Any ASCII control byte anywhere in the string, not only right
+///   after the leading slash. The URL parser strips ASCII tab and
+///   newline from its *entire* input before it ever compares origins
+///   (`https://url.spec.whatwg.org/#url-parsing`), so `/<TAB>/evil.test`
+///   is `//evil.test` by the time a browser navigates it, even though a
+///   byte-for-byte check on the original string sees a single leading
+///   `/`. Rejecting on *any* C0 control or DEL, rather than enumerating
+///   tab/newline/CR specifically, is deliberate: this guard has already
+///   needed widening twice (from bare `//`, to `/\` too, to any control
+///   byte), and chasing the URL Standard's exact normalization steps one
+///   character class at a time is a fight that keeps recurring. A
+///   reject-on-any-control-byte rule is simpler to keep correct than a
+///   strip-and-reprocess rule that has to track those steps forever.
+pub(crate) fn root_relative_or_none(candidate: &str) -> Option<String> {
+    if candidate.is_empty() || has_control_byte(candidate) {
+        return None;
+    }
+    let rest = candidate.strip_prefix('/')?;
+    if rest.starts_with('/') || rest.starts_with('\\') {
+        None
+    } else {
+        Some(candidate.to_string())
+    }
+}
+
+/// `candidate` when it is a path on this application, or `None` when a
+/// browser could read it as an address on another host.
+///
+/// A sign-in page that takes a `return_to` address from its query, and
+/// stores it with [`crate::Redirect::set_intended_url`], checks it here
+/// first: `set_intended_url` stores any address, and an unchecked one is an
+/// open redirect that sends the user, freshly signed in, wherever a link
+/// chose. The check is the one the framework holds its own redirects to.
+/// A path is accepted only when it starts with a single `/` and holds no
+/// control byte, so these are all refused:
+///
+/// - `//evil.example/x`, which a browser reads as another host;
+/// - `/\evil.example`, the same once a browser reads `\` as `/`;
+/// - `/<TAB>/evil.example`, the same once a browser strips the tab;
+/// - `https://evil.example/x`, `javascript:...` and anything else that
+///   does not start with `/`.
+///
+/// The path keeps its query. It is relative to the host, so it carries the
+/// application's public root when the page received one.
+///
+/// ```rust
+/// use suprnova::url;
+///
+/// assert_eq!(
+///     url::same_origin_path("/oauth/authorize?client_id=a").as_deref(),
+///     Some("/oauth/authorize?client_id=a")
+/// );
+/// assert_eq!(url::same_origin_path("//evil.example/x"), None);
+/// assert_eq!(url::same_origin_path("https://evil.example/x"), None);
+/// ```
+pub fn same_origin_path(candidate: &str) -> Option<String> {
+    root_relative_or_none(candidate)
+}
+
+/// Accept a redirect destination read back from the session, or reject
+/// one a browser would read differently from how it reads here.
+///
+/// The intended URL is written by [`crate::Redirect::guest`] from the
+/// request, and by [`crate::Redirect::set_intended_url`] from the
+/// application, and it outlives the code that wrote it: a session written by
+/// an earlier release, or by a handler that stored an unchecked
+/// `return_to`, can hold anything. So it is checked when it is read, and
+/// only three kinds of value pass:
+///
+/// - a path on this application, as [`same_origin_path`] accepts it, so a
+///   value such as `//evil.example/x`, `/\evil.example` or
+///   `/<TAB>/evil.example` is not followed;
+/// - an absolute `http` or `https` URL, on any origin: an application may
+///   send a user to another site after sign-in, as Laravel's `intended`
+///   does;
+/// - a relative reference with no scheme, such as `?tab=2`, `#top` or
+///   `page?x=1`, which a browser resolves against the page it is on, so it
+///   never leaves the origin, and which Laravel follows too.
+///
+/// The last two take no surrounding whitespace, control byte or backslash,
+/// which a browser would trim, strip or read as `/` before it resolves the
+/// value. Anything else, an empty value, another scheme such as `javascript:`, `data:` or
+/// `mailto:`, or a network-path reference with or without leading
+/// whitespace (`//host`, ` //host`), is `None`, and the caller's fallback
+/// applies.
+pub(crate) fn stored_destination_or_none(candidate: &str) -> Option<String> {
+    if candidate.starts_with('/') {
+        return same_origin_path(candidate);
+    }
+    // A browser trims whitespace, strips tab and newline, and reads `\` as
+    // `/` before it resolves a URL; a value that needs any of that is not
+    // one the application wrote, and could be read as another address.
+    if candidate.is_empty()
+        || candidate.trim() != candidate
+        || has_control_byte(candidate)
+        || candidate.contains('\\')
+    {
+        return None;
+    }
+    match url::Url::parse(candidate) {
+        Ok(url) => matches!(url.scheme(), "http" | "https").then(|| candidate.to_string()),
+        // No scheme: it resolves against the page it is followed from.
+        Err(url::ParseError::RelativeUrlWithoutBase) => Some(candidate.to_string()),
+        Err(_) => None,
+    }
+}
+
+/// True when `s` contains an ASCII control byte: C0 (`0x00..=0x1F`) or
+/// DEL (`0x7F`). Covers tab and newline - the two the URL parser strips
+/// before comparing origins - without having to name them individually.
+pub(crate) fn has_control_byte(s: &str) -> bool {
+    s.bytes().any(|b| b.is_ascii_control())
+}
+
+/// Resolve the framework's `APP_URL`. Reads from
+/// [`crate::config::ConfigRegistry`] when a config provider is
+/// registered, otherwise falls back to the `APP_URL` env var or
+/// `http://localhost`.
+pub(crate) fn app_url() -> String {
+    app_url_of(crate::config::Config::get::<crate::config::AppConfig>().as_ref())
+}
+
+/// [`app_url`] for a configuration the caller already read.
+pub(crate) fn app_url_of(config: Option<&crate::config::AppConfig>) -> String {
+    // Try the typed `AppConfig` first.
+    if let Some(cfg) = config {
+        let trimmed = cfg.url.trim_end_matches('/').to_string();
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
+    // Fall back to env, mirroring `AppConfig::from_env()`.
+    std::env::var("APP_URL")
+        .ok()
+        .map(|s| s.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| "http://localhost".to_string())
+}
+
+/// Concatenate `base` + `path` ensuring exactly one `/` separator.
+fn join_base_path(base: &str, path: &str) -> String {
+    if path.is_empty() {
+        return base.to_string();
+    }
+    if path.starts_with('/') {
+        format!("{base}{path}")
+    } else {
+        format!("{base}/{path}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::{Crypt, EncryptionKey};
+
+    fn ensure_key() {
+        if !Crypt::is_initialized() {
+            Crypt::init(EncryptionKey::generate());
+        }
+    }
+
+    // ---- SEC-04: the expiry helper requires a valid signature -----------
+
+    /// The attack the old helper allowed: forge any URL, and because a forged
+    /// signature has no expiry to miss, `!is_expired()` answered `true`. Any
+    /// handler that guarded on the function whose name reads "has not
+    /// expired" let it straight through.
+    #[cfg(feature = "testing")]
+    #[test]
+    #[serial_test::serial(crypt_install)]
+    fn a_forged_signature_has_not_expired_is_false() {
+        ensure_key();
+        let signed = crate::routing::signed::sign_url("/promote?user=victim", None).expect("sign");
+        let forged = signed.replace("user=victim", "user=attacker");
+        let req = Request::for_test("GET", &forged);
+
+        assert_eq!(
+            signature_verdict(&req).expect("verdict"),
+            SignatureVerdict::Invalid,
+            "tampering with a signed parameter invalidates the signature"
+        );
+        #[allow(deprecated)]
+        let not_expired = signature_has_not_expired(&req).expect("expiry helper");
+        assert!(
+            !not_expired,
+            "an unverifiable URL must not report 'has not expired' - `expires` \
+             is attacker-supplied until the HMAC says otherwise"
+        );
+    }
+
+    /// `has_valid_signature` is the guard handlers are told to reach for, and
+    /// until this existed nothing drove it with a tampered request - the whole
+    /// framework suite passed with its body replaced by `!is_expired()`, the
+    /// exact defect SEC-04 describes. A guard with no adversarial test is a
+    /// guard nobody has checked.
+    #[cfg(feature = "testing")]
+    #[test]
+    #[serial_test::serial(crypt_install)]
+    fn has_valid_signature_rejects_a_tampered_url_and_accepts_an_intact_one() {
+        ensure_key();
+        let signed = crate::routing::signed::sign_url("/promote?user=victim", None).expect("sign");
+
+        let intact = Request::for_test("GET", &signed);
+        assert!(
+            has_valid_signature(&intact).expect("verify"),
+            "an untouched signed URL verifies"
+        );
+
+        let forged = signed.replace("user=victim", "user=attacker");
+        let tampered = Request::for_test("GET", &forged);
+        assert!(
+            !has_valid_signature(&tampered).expect("verify"),
+            "changing a signed parameter must fail the guard"
+        );
+
+        // And the SEC-04 shape specifically: prepending a duplicate rather
+        // than editing in place, which the pre-fix canonical form missed
+        // because it hashed only the last value per key.
+        let prepended = signed.replace("/promote?", "/promote?user=attacker&");
+        let duplicated = Request::for_test("GET", &prepended);
+        assert!(
+            !has_valid_signature(&duplicated).expect("verify"),
+            "a prepended duplicate parameter must fail the guard too"
+        );
+    }
+
+    /// The control, so the fix is not just "return false always": a genuinely
+    /// valid, unexpiring signed URL still answers `true`.
+    #[cfg(feature = "testing")]
+    #[test]
+    #[serial_test::serial(crypt_install)]
+    fn a_valid_signature_with_no_expiry_has_not_expired() {
+        ensure_key();
+        let signed = crate::routing::signed::sign_url("/promote?user=victim", None).expect("sign");
+        let req = Request::for_test("GET", &signed);
+
+        assert_eq!(
+            signature_verdict(&req).expect("verdict"),
+            SignatureVerdict::Valid
+        );
+        #[allow(deprecated)]
+        let not_expired = signature_has_not_expired(&req).expect("expiry helper");
+        assert!(not_expired, "an unexpiring valid link has not expired");
+    }
+
+    /// And a correctly-signed link that HAS expired answers `false`, which is
+    /// the one case the helper was ever really asked about.
+    #[cfg(feature = "testing")]
+    #[test]
+    #[serial_test::serial(crypt_install)]
+    fn a_valid_but_expired_signature_has_expired() {
+        ensure_key();
+        let long_ago = crate::clock::now().timestamp() - 3600;
+        let signed =
+            crate::routing::signed::sign_url("/promote?user=victim", Some(long_ago)).expect("sign");
+        let req = Request::for_test("GET", &signed);
+
+        assert_eq!(
+            signature_verdict(&req).expect("verdict"),
+            SignatureVerdict::Expired,
+            "the verdict still distinguishes expired from invalid - that is \
+             where the three-way answer lives now"
+        );
+        #[allow(deprecated)]
+        let not_expired = signature_has_not_expired(&req).expect("expiry helper");
+        assert!(!not_expired);
+    }
+
+    #[test]
+    fn to_prepends_app_url_for_relative_path() {
+        // SAFETY: tests in this crate single-thread env mutation via
+        // `serial_test::serial(env_app_url)` - see the test below.
+        unsafe {
+            std::env::set_var("APP_URL", "https://example.test");
+        }
+        let url = to("/dashboard");
+        assert!(
+            url == "https://example.test/dashboard" || url.ends_with("/dashboard"),
+            "URL should incorporate APP_URL + path; got {url}",
+        );
+    }
+
+    #[test]
+    fn to_returns_absolute_unchanged() {
+        assert_eq!(
+            to("https://elsewhere.example/page"),
+            "https://elsewhere.example/page",
+        );
+        assert_eq!(
+            to("http://elsewhere.example/page"),
+            "http://elsewhere.example/page",
+        );
+        assert_eq!(to("//cdn.example/x"), "//cdn.example/x");
+    }
+
+    #[test]
+    fn secure_upgrades_http_to_https() {
+        unsafe {
+            std::env::set_var("APP_URL", "http://example.test");
+        }
+        let url = secure("/login");
+        assert!(
+            url.starts_with("https://"),
+            "secure() must yield an https URL; got {url}",
+        );
+    }
+
+    #[test]
+    fn join_handles_missing_or_extra_slashes() {
+        assert_eq!(join_base_path("https://x", "/a"), "https://x/a");
+        assert_eq!(join_base_path("https://x", "a"), "https://x/a");
+        assert_eq!(join_base_path("https://x", ""), "https://x");
+    }
+
+    // ---- root_relative_or_none: shared by the session write-guard and
+    // the Inertia validation-redirect bridge ----
+
+    #[test]
+    fn root_relative_or_none_accepts_a_plain_same_origin_path() {
+        assert_eq!(
+            root_relative_or_none("/dashboard?tab=2"),
+            Some("/dashboard?tab=2".to_string())
+        );
+    }
+
+    #[test]
+    fn root_relative_or_none_rejects_protocol_relative_and_backslash_forms() {
+        // `//evil.test` - read as absolute by a browser.
+        assert_eq!(root_relative_or_none("//evil.test/x"), None);
+        // `/\evil.test` - the WHATWG URL parser folds `\` into `/` for
+        // special schemes, so this is `//evil.test` in disguise.
+        assert_eq!(root_relative_or_none("/\\evil.test"), None);
+    }
+
+    #[test]
+    fn root_relative_or_none_rejects_any_control_byte_anywhere() {
+        // The confirmed bypass: a byte-for-byte check on the char right
+        // after the leading `/` misses this, but the URL parser strips
+        // tab/newline from its whole input before comparing origins.
+        assert_eq!(root_relative_or_none("/\t/evil.test"), None);
+        assert_eq!(root_relative_or_none("/\n/evil.test"), None);
+        assert_eq!(root_relative_or_none("/\r/evil.test"), None);
+        // Not just right after the leading slash.
+        assert_eq!(root_relative_or_none("/register/step\x0b2"), None);
+        assert_eq!(root_relative_or_none(""), None);
+    }
+
+    // ---- same_origin_path: the public form of root_relative_or_none ----
+
+    /// The origin every accepted path is resolved against below.
+    const ORIGIN: &str = "https://app.test";
+
+    /// Where a browser on [`ORIGIN`] goes for `candidate`, by the WHATWG URL
+    /// parser the `url` crate implements: it strips tab and newline, reads
+    /// `\` as `/` and resolves a network-path reference to another host.
+    fn resolved_host(candidate: &str) -> Option<String> {
+        url::Url::parse(&format!("{ORIGIN}/base/page"))
+            .ok()?
+            .join(candidate)
+            .ok()?
+            .host_str()
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn agent_017_same_origin_path_refuses_other_hosts() {
+        for candidate in [
+            "//evil.test/x",
+            "/\\evil.test",
+            "https://evil.test/x",
+            "/\t/evil.test",
+            "/\n/evil.test",
+            "javascript:alert(1)",
+            "x",
+            "evil.test/x",
+            "",
+            "\\\\evil.test",
+            "/ok\x00",
+            "/ok\x7f",
+        ] {
+            assert_eq!(same_origin_path(candidate), None, "{candidate:?}");
+        }
+    }
+
+    #[test]
+    fn agent_017_same_origin_path_keeps_a_path_and_query() {
+        for candidate in [
+            "/",
+            "/dashboard",
+            "/oauth/authorize?client_id=a&redirect_uri=http%3A%2F%2F127.0.0.1%3A7777%2Fcb",
+            "/agent/claim?claim_attempt_token=cat_1",
+            "/a/b/../c?x=//y#z",
+            "/caf\u{e9}",
+        ] {
+            assert_eq!(
+                same_origin_path(candidate).as_deref(),
+                Some(candidate),
+                "{candidate:?}"
+            );
+            assert_eq!(resolved_host(candidate).as_deref(), Some("app.test"));
+        }
+    }
+
+    /// Every C0 control byte and DEL, at every position of every path
+    /// shape, is refused: the URL parser strips some of them from anywhere
+    /// in its input, so none may pass.
+    #[test]
+    fn agent_017_same_origin_path_refuses_a_control_byte_at_every_position() {
+        let controls = (0x00_u8..=0x1f).chain(std::iter::once(0x7f));
+        let shapes = ["/", "//evil.test", "/a/b?c=d", "/\\x", "/x#y"];
+        for control in controls {
+            for shape in shapes {
+                for at in 0..=shape.len() {
+                    let mut candidate = shape.to_owned();
+                    candidate.insert(at, char::from(control));
+                    assert_eq!(same_origin_path(&candidate), None, "{candidate:?}");
+                }
+            }
+        }
+    }
+
+    /// Generated candidates over an alphabet of the characters that decide
+    /// a URL's host: `same_origin_path` answers exactly as
+    /// `root_relative_or_none` does, and every path it accepts resolves on
+    /// the application's own host when a browser follows it.
+    #[test]
+    fn agent_017_same_origin_path_accepts_only_what_stays_on_the_origin() {
+        const ALPHABET: &[char] = &[
+            '/', '\\', ':', '.', '?', '#', '%', '@', 'a', 'e', '0', '\t', '\n', '\r', ' ', '\u{0}',
+            '\u{7f}', '\u{3000}',
+        ];
+        // A fixed linear congruential sequence: the same candidates on
+        // every run, with no dependency.
+        let mut state: u64 = 0x0005_eed0_fa6e_7017;
+        let mut next = |bound: usize| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(state >> 33).unwrap_or(0) % bound
+        };
+        let mut accepted = 0;
+        for _ in 0..50_000 {
+            let length = next(9);
+            // Half the candidates start with `/`, so the accepted side is
+            // reached as often as the refused one.
+            let rooted = next(2) == 0;
+            let candidate: String = (0..length)
+                .map(|at| {
+                    if at == 0 && rooted {
+                        '/'
+                    } else {
+                        ALPHABET[next(ALPHABET.len())]
+                    }
+                })
+                .collect();
+            let answer = same_origin_path(&candidate);
+            assert_eq!(answer, root_relative_or_none(&candidate), "{candidate:?}");
+            if let Some(path) = answer {
+                accepted += 1;
+                assert_eq!(path, candidate);
+                assert!(path.starts_with('/'), "{candidate:?}");
+                assert!(!path.starts_with("//") && !path.starts_with("/\\"));
+                assert!(!has_control_byte(&path), "{candidate:?}");
+                assert_eq!(
+                    resolved_host(&path).as_deref(),
+                    Some("app.test"),
+                    "{candidate:?} leaves the origin"
+                );
+            }
+        }
+        assert!(
+            accepted > 1_000,
+            "the alphabet reaches the accepted set: {accepted} accepted"
+        );
+    }
+
+    // ---- stored_destination_or_none: what an intended URL may be on read ----
+
+    #[test]
+    fn agent_017_a_stored_destination_is_a_same_origin_path_an_absolute_web_url_or_relative() {
+        for refused in [
+            "",
+            " //evil.test/x",
+            "//evil.test/x",
+            "/\\evil.test",
+            "\\evil.test",
+            "/\t/evil.test",
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "ftp://files.test/x",
+            "https://app.test\\@evil.test/",
+            " https://app.test/x",
+            "https://app.test/x ",
+            "https://app.test/\tx",
+            "mailto:x",
+            "x:y",
+            " x",
+            "x ",
+            "x\\y",
+            "?page=2\n",
+        ] {
+            assert_eq!(stored_destination_or_none(refused), None, "{refused:?}");
+        }
+        for kept in [
+            "/",
+            "/billing?tab=2",
+            "/agent/claim?claim_attempt_token=cat_1",
+            "https://app.test/root/billing?tab=2#x",
+            "https://app.test",
+            "https://APP.test/elsewhere",
+            // An application may send a user to another site after sign-in,
+            // as Laravel's `intended` does.
+            "https://evil.test/x",
+            "http://app.test/x",
+            "https://app.test:8443/x",
+            "https://app.test.evil.test/x",
+            "https://sso.example/x",
+            // A scheme-relative spelling is still an absolute https URL.
+            "https:evil.test",
+            // A relative reference resolves on the page's own origin, as
+            // Laravel follows one.
+            "x",
+            "?page=2",
+            "#top",
+            "page?x=1",
+            "./a",
+        ] {
+            assert_eq!(
+                stored_destination_or_none(kept).as_deref(),
+                Some(kept),
+                "{kept:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn has_control_byte_covers_c0_and_del_only() {
+        assert!(has_control_byte("a\tb"));
+        assert!(has_control_byte("a\x00b"));
+        assert!(has_control_byte("a\x7fb"));
+        assert!(!has_control_byte("/perfectly/safe/path?q=1"));
+    }
+
+    #[test]
+    #[serial_test::serial(crypt_install, route_registry)]
+    fn signed_route_then_url_verifier_round_trips() {
+        ensure_key();
+        crate::routing::clear_route_names_for_test();
+        crate::routing::register_route_name("url.test.signed", "/secret/{id}");
+        let signed = signed_route("url.test.signed", &[("id", "42")]).expect("sign");
+        assert!(signed.contains("signature="));
+
+        // Reach the verifier through a synthetic request to mirror how
+        // a real handler will use `has_valid_signature`.
+        // The URL on the signed string is `/secret/42?signature=...` -
+        // we feed exactly that path+query to the verifier.
+        let now = crate::clock::now().timestamp();
+        let verdict = crate::routing::signed::verify_signature(&signed, now).expect("verify");
+        assert_eq!(verdict, SignatureVerdict::Valid);
+    }
+
+    #[test]
+    #[serial_test::serial(crypt_install, route_registry)]
+    fn temporary_signed_route_expires() {
+        ensure_key();
+        crate::routing::clear_route_names_for_test();
+        crate::routing::register_route_name("url.test.temp", "/once/{id}");
+        let signed = temporary_signed_route("url.test.temp", &[("id", "1")], 1000).expect("sign");
+        let verdict = crate::routing::signed::verify_signature(&signed, 5000).expect("verify");
+        assert_eq!(verdict, SignatureVerdict::Expired);
+    }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-create-script-case",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}
