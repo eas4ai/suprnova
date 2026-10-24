@@ -1,6 +1,6 @@
 //! Build layout data without choosing the application's view engine.
 
-use crate::{Navigation, Page, Site, invalid, secure};
+use crate::{Navigation, Page, Site, content, invalid, public_url, secure};
 use suprnova::{CspNonce, FrameworkError, HttpResponse, Request};
 
 /// Supplies escaped chrome and sanitized prose to the application's own layout.
@@ -43,6 +43,7 @@ pub(super) async fn serve(
 ) -> Result<HttpResponse, FrameworkError> {
     let page = &site.pages[index];
     site.admit(req, page.private, &page.access).await?;
+    let address = public_url(address);
     let link = format!("<{address}.md>; rel=\"alternate\"; type=\"text/markdown\"");
     if twin || accepts_markdown(req) {
         return Ok(secure(
@@ -67,8 +68,8 @@ pub(super) async fn serve(
         title: page.title.clone(),
         version: page.access.version.clone(),
         language: page.access.language.clone(),
-        address: page.address.clone(),
-        html: page.rendered.html.clone(),
+        address: public_url(&page.address),
+        html: content::render_html(site, page)?,
         navigation_html: format!(
             "<nav aria-label=\"Documentation\">{}</nav>",
             navigation_html(navigation, &visible)
@@ -76,15 +77,15 @@ pub(super) async fn serve(
         versions_html: version_switch(site, req, page).await?,
         languages_html: language_switch(site, req, page).await?,
         search_html: search_html(
-            &format!(
+            &public_url(&format!(
                 "{}/search.json",
                 site.base(&page.access.version, &page.access.language)
-            ),
+            )),
             &nonce,
         ),
         alternate_html: format!(
             "<link rel=\"alternate\" type=\"text/markdown\" href=\"{}.md\">",
-            escape(address)
+            escape(&address)
         ),
         nonce: nonce.clone(),
     };
@@ -148,7 +149,7 @@ fn navigation_html(nodes: &[Navigation], visible: &[&Page]) -> String {
         if let Some(page) = page {
             html.push_str(&format!(
                 "<a href=\"{}\">{}</a>",
-                escape(&page.address),
+                escape(&public_url(&page.address)),
                 escape(&node.title)
             ));
         } else if node.path.is_none() {
@@ -237,7 +238,7 @@ async fn language_switch(
 fn switch_link(page: &Page, label: &str, active: bool) -> String {
     format!(
         "<a href=\"{}\"{}>{}</a> ",
-        escape(&page.address),
+        escape(&public_url(&page.address)),
         if active { " aria-current=\"true\"" } else { "" },
         escape(label)
     )

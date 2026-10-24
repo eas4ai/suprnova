@@ -44,6 +44,186 @@ fn guest() -> TestClient {
     client(&fixture("guide"), Arc::new(AtomicBool::new(false)))
 }
 
+fn public_root_client() -> TestClient {
+    let peer = std::net::IpAddr::from([127, 0, 0, 1]);
+    suprnova::Config::register(
+        suprnova::AppConfig::builder()
+            .url("https://example.org/billing")
+            .trusted_proxies(suprnova::http::TrustedProxiesConfig::with_ips([peer]))
+            .build(),
+    );
+    let config = DocsConfig::new(fixture("guide"), "/docs", |_, page| {
+        Ok(format!(
+            "<html><head>{}</head><body data-address=\"{}\">{}{}{}{}{}</body></html>",
+            page.alternate_html,
+            page.address,
+            page.navigation_html,
+            page.versions_html,
+            page.languages_html,
+            page.html,
+            page.search_html,
+        ))
+    })
+    .unwrap();
+    let router = DocsSite::mount(suprnova::Router::new(), config).unwrap();
+    TestClient::new(router, MiddlewareRegistry::new()).with_peer_address(peer)
+}
+
+#[tokio::test]
+async fn docs_001_public_root_applies_to_content_navigation_switches_and_assets() {
+    let client = public_root_client();
+    for (header, root) in [
+        (None, "/billing"),
+        (Some("/proxy"), "/proxy"),
+        (Some("/"), ""),
+    ] {
+        let reader = match header {
+            Some(prefix) => client.clone().with_header("X-Forwarded-Prefix", prefix),
+            None => client.clone(),
+        };
+        let page = reader.get("/docs/v2/en/index").send().await;
+        assert_eq!(page.status(), 200, "{}", page.body_text());
+        for fragment in [
+            format!("data-address=\"{root}/docs/v2/en/index\""),
+            format!("href=\"{root}/docs/v2/en/nested/setup\""),
+            format!("href=\"{root}/docs/v2/en/nested/setup#orbital-alignment\""),
+            format!("href=\"{root}/docs/v1/en/index\""),
+            format!("href=\"{root}/docs/v2/fr/index\""),
+            format!("src=\"{root}/docs/v2/_assets/orbit.svg\""),
+        ] {
+            assert!(
+                page.body_text().contains(&fragment),
+                "missing {fragment}: {}",
+                page.body_text()
+            );
+        }
+        let setup = reader.get("/docs/v2/en/nested/setup").send().await;
+        assert!(
+            setup
+                .body_text()
+                .contains(&format!("href=\"{root}/docs/v2/en/index?from=setup#top\""))
+        );
+        assert!(
+            setup
+                .body_text()
+                .contains(&format!("href=\"{root}/docs/v2/en/index\""))
+        );
+        assert!(
+            setup
+                .body_text()
+                .contains("href=\"https://example.com/guide.md\"")
+        );
+        assert_eq!(
+            reader
+                .get("/docs/v2/_assets/orbit.svg")
+                .send()
+                .await
+                .status(),
+            200
+        );
+    }
+}
+
+#[tokio::test]
+async fn docs_002_public_root_applies_to_markdown_discovery_and_corpus_links() {
+    let client = public_root_client();
+    let source = std::fs::read_to_string(fixture("guide/v2/en/index.md")).unwrap();
+    for (prefix, root) in [("/billing", "/billing"), ("/", "")] {
+        let reader = client.clone().with_header("X-Forwarded-Prefix", prefix);
+        for path in ["/docs/v2/en/index", "/docs/en/index", "/docs"] {
+            let page = reader.get(path).send().await;
+            let twin = format!("{root}{path}.md");
+            assert_eq!(
+                page.header("link"),
+                Some(format!("<{twin}>; rel=\"alternate\"; type=\"text/markdown\"").as_str())
+            );
+            assert!(page.body_text().contains(&format!("href=\"{twin}\"")));
+            for request in [
+                reader.get(format!("{path}.md")),
+                reader.get(path).header("Accept", "text/markdown"),
+            ] {
+                let markdown = request.send().await;
+                assert_eq!(markdown.status(), 200);
+                assert_eq!(markdown.body_text(), source);
+                assert_eq!(markdown.header("link"), page.header("link"));
+            }
+        }
+        for path in [
+            "/docs/llms.txt",
+            "/docs/v2/llms.txt",
+            "/docs/v2/en/llms.txt",
+        ] {
+            let listing = reader.get(path).send().await;
+            assert_eq!(listing.status(), 200);
+            assert!(
+                listing
+                    .body_text()
+                    .contains(&format!("]({root}/docs/v2/en/index.md)"))
+            );
+            assert!(
+                listing
+                    .body_text()
+                    .contains(&format!("]({root}/docs/v2/en/nested/setup.md)"))
+            );
+            assert!(!listing.body_text().contains("secret.md"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn docs_003_public_root_applies_to_search_and_tool_addresses() {
+    let client = public_root_client();
+    for (prefix, root) in [("/billing", "/billing"), ("/proxy", "/proxy"), ("/", "")] {
+        let reader = client.clone().with_header("X-Forwarded-Prefix", prefix);
+        let page = reader.get("/docs/v2/en/index").send().await;
+        assert!(
+            page.body_text()
+                .contains(&format!("data-index=\"{root}/docs/v2/en/search.json\""))
+        );
+        let index = reader.get("/docs/v2/en/search.json").send().await;
+        assert_eq!(index.status(), 200);
+        for entry in index.json().as_array().unwrap() {
+            assert!(
+                entry["address"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("{root}/docs/v2/en/"))
+            );
+            assert!(
+                entry["markdown_address"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("{root}/docs/v2/en/"))
+            );
+        }
+        for tool in [
+            "read_page?path=index",
+            "list_pages",
+            "search_docs?query=Welcome",
+        ] {
+            let response = reader.get(format!("/docs/_tools/{tool}")).send().await;
+            assert_eq!(response.status(), 200, "{}", response.body_text());
+            let result = response.json();
+            assert_eq!(
+                result["pages"][0]["address"],
+                format!("{root}/docs/v2/en/index")
+            );
+            assert_eq!(
+                result["pages"][0]["markdown_address"],
+                format!("{root}/docs/v2/en/index.md")
+            );
+            if tool == "list_pages" {
+                assert!(
+                    result["markdown"]
+                        .as_str()
+                        .unwrap()
+                        .contains(&format!("]({root}/docs/v2/en/index.md)"))
+                );
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn docs_001_navigation_pages_render_in_app_layout_and_links_stay_in_version() {
     let client = guest();

@@ -1,6 +1,6 @@
 //! Route real tool handlers through the same request-local set and gate.
 
-use crate::{Site, invalid, secure};
+use crate::{Site, invalid, public_url, secure};
 use std::sync::Arc;
 use suprnova::{
     FrameworkError, HttpResponse, Response, Router, handler, tool, tool_input, tool_output,
@@ -169,7 +169,7 @@ fn answer(input: &DocsQuery, mode: Mode) -> Result<HttpResponse, FrameworkError>
             let markdown = if matches!(mode, Mode::List) {
                 selected
                     .iter()
-                    .map(|p| format!("- [{}]({}.md)\n", p.title, p.address))
+                    .map(|p| format!("- [{}]({}.md)\n", p.title, public_url(&p.address)))
                     .collect()
             } else {
                 selected
@@ -184,8 +184,8 @@ fn answer(input: &DocsQuery, mode: Mode) -> Result<HttpResponse, FrameworkError>
                     .iter()
                     .map(|p| DocsAddress {
                         title: p.title.clone(),
-                        address: p.address.clone(),
-                        markdown_address: format!("{}.md", p.address),
+                        address: public_url(&p.address),
+                        markdown_address: format!("{}.md", public_url(&p.address)),
                     })
                     .collect(),
             };

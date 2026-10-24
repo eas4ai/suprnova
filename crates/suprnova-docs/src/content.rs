@@ -53,6 +53,7 @@ pub(super) fn load(config: DocsConfig) -> Result<Site, FrameworkError> {
                     &base,
                     path,
                     &format!("{}/{}", site.config.prefix, version.id),
+                    "",
                 )?;
                 let rendered = renderer.render(&linked).map_err(invalid)?;
                 site.pages.push(Page {
@@ -245,11 +246,33 @@ fn load_assets(
     Ok(())
 }
 
+pub(super) fn render_html(site: &Site, page: &Page) -> Result<String, FrameworkError> {
+    let public_root = suprnova::url::root();
+    if public_root.is_empty() {
+        return Ok(page.rendered.html.clone());
+    }
+    let linked = resolve_links(
+        &page.markdown,
+        &site.base(&page.access.version, &page.access.language),
+        page.access
+            .path
+            .as_deref()
+            .ok_or_else(|| invalid("page path missing"))?,
+        &format!("{}/{}", site.config.prefix, page.access.version),
+        &public_root,
+    )?;
+    MarkdownRenderer::new(MarkdownOptions::default())
+        .render(&linked)
+        .map(|rendered| rendered.html)
+        .map_err(invalid)
+}
+
 fn resolve_links(
     markdown: &str,
     base: &str,
     page: &str,
     version_base: &str,
+    public_root: &str,
 ) -> Result<String, FrameworkError> {
     let arena = Arena::new();
     let mut options = Options::default();
@@ -264,7 +287,7 @@ fn resolve_links(
     for node in root.descendants() {
         let mut data = node.data.borrow_mut();
         if let NodeValue::Link(link) | NodeValue::Image(link) = &mut data.value {
-            link.url = resolve_url(&link.url, base, page, version_base)?;
+            link.url = resolve_url(&link.url, base, page, version_base, public_root)?;
         }
     }
     let mut output = String::new();
@@ -277,6 +300,7 @@ fn resolve_url(
     base: &str,
     page: &str,
     version_base: &str,
+    public_root: &str,
 ) -> Result<String, FrameworkError> {
     if url.is_empty()
         || url.starts_with(['#', '?'])
@@ -319,5 +343,5 @@ fn resolve_url(
     } else {
         base
     };
-    Ok(format!("{base}/{path}{suffix}"))
+    Ok(format!("{public_root}{base}/{path}{suffix}"))
 }
