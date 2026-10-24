@@ -1,0 +1,5 @@
+error: transient state must be declared with #[model(transient)]
+ --> tests/ui/live/fail/transient_without_model.rs:6:5
+  |
+6 |     #[transient]
+  |     ^

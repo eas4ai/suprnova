@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-proc-macro-attr",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "evil.script-getter-call",
+  "files": [
+    "widget.html",
+    "widget.js"
+  ],
+  "elements": [
+    "evil-widget"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "evil.rust-mod-without-body",
+  "files": [
+    "widget.html",
+    "widget.rs"
+  ],
+  "register": [
+    "widget::Widget"
+  ]
+}
